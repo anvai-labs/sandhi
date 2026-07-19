@@ -1,0 +1,14 @@
+# Sandhi CODEOWNERS
+# https://docs.github.com/en/repositories/managing-your-repositories-settings-and-features/customizing-your-repository/about-code-owners
+
+# ── Default owner ───────────────────────────────────────────────────────────
+*                                         @vjsingh1984
+
+# ── Governance surfaces (protect the rules themselves) ──────────────────────
+/.github/                                 @vjsingh1984
+/.githooks/                               @vjsingh1984
+/scripts/check_no_agent_attribution.py    @vjsingh1984
+
+# ── The cross-repo wire contract + decisions ────────────────────────────────
+/schemas/                                 @vjsingh1984
+/docs/adr/                                @vjsingh1984

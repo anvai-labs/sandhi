@@ -36,3 +36,31 @@ jobs:
           python-version: "3.11"
       - run: pip install maturin
       - run: maturin build -m bindings/python/Cargo.toml
+
+  attribution:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: No AI-agent authorship attribution in commit messages
+        run: |
+          set -e
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            python3 scripts/check_no_agent_attribution.py \
+              --range "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+          elif echo "${{ github.event.before }}" | grep -qE '^0{40}$'; then
+            git log -1 --format=%B > "$RUNNER_TEMP/msg.txt"
+            python3 scripts/check_no_agent_attribution.py --message-file "$RUNNER_TEMP/msg.txt"
+          else
+            python3 scripts/check_no_agent_attribution.py \
+              --range "${{ github.event.before }}..${{ github.sha }}"
+          fi
+
+  # Single aggregate gate for branch protection (mirrors proximaDB's "CI Success").
+  ci-success:
+    name: CI Success
+    runs-on: ubuntu-latest
+    needs: [rust, schema, python-binding, attribution]
+    steps:
+      - run: echo "all required checks passed"

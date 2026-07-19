@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Fast pre-push gate (no compile), modeled on proximaDB's pre-push. Activate with:
+#   git config core.hooksPath .githooks
+# Enforces rustfmt — the most common avoidable CI red. (proximaDB's worktree
+# mandate is intentionally omitted for this repo; see .githooks/README.md.)
+# Bypass once with `git push --no-verify`.
+set -euo pipefail
+
+if command -v cargo >/dev/null 2>&1; then
+  if ! cargo fmt --all -- --check >/dev/null 2>&1; then
+    echo "pre-push: BLOCKED — rustfmt drift. Run: cargo fmt --all   (bypass: git push --no-verify)" >&2
+    exit 1
+  fi
+fi
+
+echo "pre-push: OK (fmt)"
