@@ -1057,7 +1057,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "sandhi-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1065,7 +1065,7 @@ dependencies = [
 
 [[package]]
 name = "sandhi-providers"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1081,7 +1081,7 @@ dependencies = [
 
 [[package]]
 name = "sandhi-proxy"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "async-stream",
  "axum",
@@ -1099,7 +1099,7 @@ dependencies = [
 
 [[package]]
 name = "sandhi-store"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "rusqlite",
  "sandhi-core",

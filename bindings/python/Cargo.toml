@@ -1,7 +1,7 @@
 [package]
 name = "sandhi-gateway-py"
 description = "PyO3 binding for Sandhi (published to PyPI as `sandhi-gateway`)."
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/anvai-labs/sandhi"

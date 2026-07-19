@@ -8,6 +8,6 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-sandhi-core = { path = "../sandhi-core", version = "0.0.0" }
+sandhi-core = { path = "../sandhi-core", version = "0.1.0" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
