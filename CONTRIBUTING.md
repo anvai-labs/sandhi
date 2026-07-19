@@ -17,6 +17,8 @@ cargo test --workspace
   emoji, no agent model signature. Enforced by the `commit-msg` hook **and** CI (server-side,
   not bypassable). Mentions of `CLAUDE.md`/`AGENTS.md` or the Anthropic/OpenAI APIs are fine.
 - `cargo fmt` and `cargo clippy --all-targets -- -D warnings` must pass — CI gates on both.
+- **Test-driven:** line coverage must stay **≥ 75%** (`cargo llvm-cov --workspace
+  --fail-under-lines 75`, a CI gate). New behavior lands with tests.
 - Decisions go in `docs/adr/NNNN-slug.md` (heading `# ADR-NNNN: …`).
 - **Branch workflow:** open PRs against `develop`. `develop` is protected — the aggregate
   **`CI Success`** check must be green (`enforce_admins` on; no force-push or deletion). `main`
