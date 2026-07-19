@@ -13,13 +13,14 @@
 // pyo3 + clippy combo that trips `useless_conversion` inside generated code (not our code).
 #![allow(clippy::useless_conversion)]
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use pyo3::exceptions::{PyKeyError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyAny, PyDict};
 
 use sandhi_core::{
     parse_anthropic_usage, parse_bedrock_usage, parse_cohere_usage, parse_gemini_usage,
@@ -60,6 +61,8 @@ struct Inner {
     ledger: BudgetLedger,
     events: Vec<UsageEvent>,
     jsonl_path: Option<PathBuf>,
+    /// Host-registered usage parsers, by provider slug (the escape hatch).
+    parsers: HashMap<String, Py<PyAny>>,
 }
 
 #[pymethods]
@@ -75,6 +78,7 @@ impl Gateway {
                 ledger: BudgetLedger::new(),
                 events: Vec::new(),
                 jsonl_path: sink_path.map(PathBuf::from),
+                parsers: HashMap::new(),
             }),
             counter: AtomicU64::new(0),
         }
@@ -117,9 +121,18 @@ impl Gateway {
         self.inner.lock().unwrap().ledger.spent(scope)
     }
 
-    /// Meter one completed call: parse usage from `response_json`, attribute it to
-    /// `virtual_key`, emit the neutral event + record the budget, and return the event dict.
-    /// Raises `KeyError` for an unknown virtual key, `ValueError` for bad JSON.
+    /// Register a host callback that parses a provider's response into a usage mapping with keys
+    /// `{tokens_in, tokens_out, cache_creation_tokens, cache_read_tokens}`. `meter()` then uses it
+    /// for that provider — the escape hatch for providers Sandhi doesn't natively parse (custom /
+    /// air-gapped / community). Overrides any built-in parser for that slug.
+    fn register_parser(&self, provider: String, parser: Py<PyAny>) {
+        self.inner.lock().unwrap().parsers.insert(provider, parser);
+    }
+
+    /// Meter one completed call: parse usage from `response_json` (a registered host parser wins,
+    /// else the built-in for `provider`), attribute it to `virtual_key`, emit the neutral event +
+    /// record the budget, and return the event dict. Raises `KeyError` for an unknown virtual key,
+    /// `ValueError` for bad JSON or a failing custom parser.
     #[pyo3(signature = (virtual_key, provider, model, response_json, session_id=None, route=None))]
     #[allow(clippy::too_many_arguments)]
     fn meter<'py>(
@@ -132,10 +145,88 @@ impl Gateway {
         session_id: Option<String>,
         route: Option<String>,
     ) -> PyResult<Bound<'py, PyDict>> {
-        let value: serde_json::Value = serde_json::from_str(response_json)
-            .map_err(|e| PyValueError::new_err(format!("response_json is not valid JSON: {e}")))?;
-        let parsed = parse_for(provider, &value);
+        // A registered host parser wins; call it *without* holding the lock (re-entrancy safety).
+        let custom = self
+            .inner
+            .lock()
+            .unwrap()
+            .parsers
+            .get(provider)
+            .map(|p| p.clone_ref(py));
+        let parsed = match custom {
+            Some(cb) => {
+                let out = cb.bind(py).call1((response_json,)).map_err(|e| {
+                    PyValueError::new_err(format!("custom parser for '{provider}' failed: {e}"))
+                })?;
+                parsed_from_pyobj(&out)
+            }
+            None => {
+                let value: serde_json::Value =
+                    serde_json::from_str(response_json).map_err(|e| {
+                        PyValueError::new_err(format!("response_json is not valid JSON: {e}"))
+                    })?;
+                parse_for(provider, &value)
+            }
+        };
+        self.record_and_build(py, virtual_key, provider, model, parsed, session_id, route)
+    }
 
+    /// Meter from token counts you supply directly (bypass parsing entirely) — the simplest escape
+    /// hatch for any provider. Same attribution + budget + emit as `meter()`.
+    #[pyo3(signature = (virtual_key, provider, model, tokens_in, tokens_out,
+        cache_creation_tokens=0, cache_read_tokens=0, session_id=None, route=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn meter_tokens<'py>(
+        &self,
+        py: Python<'py>,
+        virtual_key: &str,
+        provider: &str,
+        model: &str,
+        tokens_in: u64,
+        tokens_out: u64,
+        cache_creation_tokens: u64,
+        cache_read_tokens: u64,
+        session_id: Option<String>,
+        route: Option<String>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let parsed = ParsedUsage {
+            tokens_in,
+            tokens_out,
+            cache_creation_tokens,
+            cache_read_tokens,
+        };
+        self.record_and_build(py, virtual_key, provider, model, parsed, session_id, route)
+    }
+
+    /// All events emitted so far (in-memory), as dicts.
+    fn events<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let inner = self.inner.lock().unwrap();
+        inner.events.iter().map(|e| event_to_dict(py, e)).collect()
+    }
+}
+
+impl Gateway {
+    fn next_request_id(&self) -> String {
+        let n = self.counter.fetch_add(1, Ordering::Relaxed);
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        format!("req_{millis}_{n}")
+    }
+
+    /// Shared tail: resolve the key, build + emit the event, record the budget, return the dict.
+    #[allow(clippy::too_many_arguments)]
+    fn record_and_build<'py>(
+        &self,
+        py: Python<'py>,
+        virtual_key: &str,
+        provider: &str,
+        model: &str,
+        parsed: ParsedUsage,
+        session_id: Option<String>,
+        route: Option<String>,
+    ) -> PyResult<Bound<'py, PyDict>> {
         let mut inner = self.inner.lock().unwrap();
         let vk =
             inner.keys.resolve(virtual_key).cloned().ok_or_else(|| {
@@ -159,7 +250,6 @@ impl Gateway {
             .with_route(route),
         );
 
-        // Emit: append JSONL (best-effort) + in-memory buffer.
         if let Some(path) = &inner.jsonl_path {
             if let Ok(line) = serde_json::to_string(&event) {
                 use std::io::Write;
@@ -182,22 +272,22 @@ impl Gateway {
 
         event_to_dict(py, &event)
     }
-
-    /// All events emitted so far (in-memory), as dicts.
-    fn events<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
-        let inner = self.inner.lock().unwrap();
-        inner.events.iter().map(|e| event_to_dict(py, e)).collect()
-    }
 }
 
-impl Gateway {
-    fn next_request_id(&self) -> String {
-        let n = self.counter.fetch_add(1, Ordering::Relaxed);
-        let millis = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        format!("req_{millis}_{n}")
+/// Extract a `ParsedUsage` from a Python mapping returned by a host parser callback (missing keys
+/// default to 0).
+fn parsed_from_pyobj(obj: &Bound<'_, PyAny>) -> ParsedUsage {
+    let get = |k: &str| -> u64 {
+        obj.get_item(k)
+            .ok()
+            .and_then(|v| v.extract::<u64>().ok())
+            .unwrap_or(0)
+    };
+    ParsedUsage {
+        tokens_in: get("tokens_in"),
+        tokens_out: get("tokens_out"),
+        cache_creation_tokens: get("cache_creation_tokens"),
+        cache_read_tokens: get("cache_read_tokens"),
     }
 }
 

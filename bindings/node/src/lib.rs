@@ -137,9 +137,9 @@ impl Gateway {
         self.inner.lock().unwrap().ledger.spent(&scope) as u32
     }
 
-    /// Meter one completed call: parse usage from `responseJson`, attribute it to `virtualKey`,
-    /// emit the neutral event + record the budget, and return the event. Throws on an unknown
-    /// virtual key or bad JSON.
+    /// Meter one completed call: parse usage from `responseJson` (built-in parser for `provider`),
+    /// attribute it to `virtualKey`, emit the neutral event + record the budget, and return the
+    /// event. Throws on an unknown virtual key or bad JSON.
     #[napi]
     pub fn meter(
         &self,
@@ -153,11 +153,72 @@ impl Gateway {
         let value: serde_json::Value = serde_json::from_str(&response_json)
             .map_err(|e| Error::from_reason(format!("response_json is not valid JSON: {e}")))?;
         let parsed = parse_for(&provider, &value);
+        self.record_and_build(&virtual_key, &provider, &model, parsed, session_id, route)
+    }
 
+    /// Meter from token counts you supply directly (bypass parsing) — the escape hatch for any
+    /// provider Sandhi doesn't natively parse: do your own parsing and pass the counts. Same
+    /// attribution + budget + emit as `meter()`.
+    #[napi]
+    #[allow(clippy::too_many_arguments)]
+    pub fn meter_tokens(
+        &self,
+        virtual_key: String,
+        provider: String,
+        model: String,
+        tokens_in: u32,
+        tokens_out: u32,
+        cache_creation_tokens: Option<u32>,
+        cache_read_tokens: Option<u32>,
+        session_id: Option<String>,
+        route: Option<String>,
+    ) -> Result<Event> {
+        let parsed = ParsedUsage {
+            tokens_in: u64::from(tokens_in),
+            tokens_out: u64::from(tokens_out),
+            cache_creation_tokens: u64::from(cache_creation_tokens.unwrap_or(0)),
+            cache_read_tokens: u64::from(cache_read_tokens.unwrap_or(0)),
+        };
+        self.record_and_build(&virtual_key, &provider, &model, parsed, session_id, route)
+    }
+
+    /// All events emitted so far (in-memory).
+    #[napi]
+    pub fn events(&self) -> Vec<Event> {
+        self.inner
+            .lock()
+            .unwrap()
+            .events
+            .iter()
+            .map(event_to_napi)
+            .collect()
+    }
+}
+
+impl Gateway {
+    fn next_request_id(&self) -> String {
+        let n = self.counter.fetch_add(1, Ordering::Relaxed);
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        format!("req_{millis}_{n}")
+    }
+
+    /// Shared tail: resolve the key, build + emit the event, record the budget, return it.
+    fn record_and_build(
+        &self,
+        virtual_key: &str,
+        provider: &str,
+        model: &str,
+        parsed: ParsedUsage,
+        session_id: Option<String>,
+        route: Option<String>,
+    ) -> Result<Event> {
         let mut inner = self.inner.lock().unwrap();
         let vk = inner
             .keys
-            .resolve(&virtual_key)
+            .resolve(virtual_key)
             .cloned()
             .ok_or_else(|| Error::from_reason(format!("unknown virtual key: {virtual_key}")))?;
 
@@ -165,8 +226,8 @@ impl Gateway {
             UsageEvent::new(
                 self.next_request_id(),
                 now_rfc3339(),
-                &provider,
-                &model,
+                provider,
+                model,
                 Backend::External,
             )
             .with_attribution(
@@ -199,29 +260,6 @@ impl Gateway {
         drop(inner);
 
         Ok(event_to_napi(&event))
-    }
-
-    /// All events emitted so far (in-memory).
-    #[napi]
-    pub fn events(&self) -> Vec<Event> {
-        self.inner
-            .lock()
-            .unwrap()
-            .events
-            .iter()
-            .map(event_to_napi)
-            .collect()
-    }
-}
-
-impl Gateway {
-    fn next_request_id(&self) -> String {
-        let n = self.counter.fetch_add(1, Ordering::Relaxed);
-        let millis = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        format!("req_{millis}_{n}")
     }
 }
 

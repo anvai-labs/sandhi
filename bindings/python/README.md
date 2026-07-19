@@ -35,6 +35,18 @@ print(gw.check_budget("group:platform", 5000))     # True/False
 sg.parse_usage("openai", response_json)            # {tokens_in, tokens_out, cache_*}
 ```
 
+### Custom / unknown providers (host escape hatch)
+
+```python
+# (a) register a host parser callback for a provider Sandhi doesn't know:
+gw.register_parser("myprovider", lambda body: {"tokens_in": 30, "tokens_out": 12,
+                                               "cache_creation_tokens": 0, "cache_read_tokens": 0})
+gw.meter("vk_alice", "myprovider", "model", response_json)   # uses your callback
+
+# (b) or skip parsing and pass counts directly:
+gw.meter_tokens("vk_alice", "myprovider", "model", tokens_in=30, tokens_out=12)
+```
+
 `meter()` parses the usage **at the source** (the same cache-split logic as the reverse
 proxy), attributes it to the virtual key's subject/group, records the budget, emits the
 neutral usage event (matching [`usage-event.v1.schema.json`](https://github.com/anvai-labs/sandhi/blob/main/schemas/usage-event.v1.schema.json)),

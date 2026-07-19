@@ -92,6 +92,37 @@ def test_jsonl_sink_writes_events(tmp_path=None):
     assert all(line["schema_version"] == "1" for line in lines)
 
 
+def test_meter_tokens_bypasses_parsing():
+    gw = sg.Gateway()
+    gw.add_virtual_key("vk", subject="s", group="g", upstream="x")
+    ev = gw.meter_tokens("vk", "custom-provider", "m", 11, 7, 0, 2, "sess")
+    assert ev["tokens_in"] == 11
+    assert ev["tokens_out"] == 7
+    assert ev["cache_read_tokens"] == 2
+    assert ev["provider"] == "custom-provider"
+    assert ev["session_id"] == "sess"
+    assert gw.spent("group:g") == 18  # 11 + 7
+
+
+def test_register_parser_host_callback():
+    gw = sg.Gateway()
+    gw.add_virtual_key("vk", subject="s", group="g", upstream="x")
+    calls = []
+
+    def my_parser(response_json):
+        d = json.loads(response_json)
+        calls.append(d)
+        return {"tokens_in": d["in"], "tokens_out": d["out"],
+                "cache_creation_tokens": 0, "cache_read_tokens": 5}
+
+    gw.register_parser("weirdprovider", my_parser)
+    ev = gw.meter("vk", "weirdprovider", "m", json.dumps({"in": 30, "out": 12}))
+    assert ev["tokens_in"] == 30
+    assert ev["tokens_out"] == 12
+    assert ev["cache_read_tokens"] == 5
+    assert len(calls) == 1  # the host callback was invoked
+
+
 if __name__ == "__main__":
     for _name, _fn in list(globals().items()):
         if _name.startswith("test_") and callable(_fn):
