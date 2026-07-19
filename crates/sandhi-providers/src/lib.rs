@@ -18,14 +18,30 @@ use futures_core::Stream;
 use std::pin::Pin;
 
 // The usage parsers are metering primitives — they live in `sandhi-core` (no transport deps).
-pub use sandhi_core::usage::{parse_anthropic_usage, parse_openai_usage, ParsedUsage};
+pub use sandhi_core::usage::{
+    parse_anthropic_usage, parse_bedrock_usage, parse_cohere_usage, parse_gemini_usage,
+    parse_ollama_usage, parse_openai_usage, ParsedUsage,
+};
 
 pub mod anthropic;
+pub mod cohere;
+pub mod escape_hatch;
+pub mod gemini;
+pub mod local;
 pub mod openai;
 pub mod resilience;
 pub use anthropic::Anthropic;
+pub use cohere::Cohere;
+pub use escape_hatch::FnProvider;
+pub use gemini::Gemini;
+pub use local::Ollama;
 pub use openai::OpenAiCompat;
 pub use resilience::{CircuitBreaker, ResilientProvider, RetryConfig};
+
+/// AWS Bedrock — the usage parser is [`sandhi_core::usage::parse_bedrock_usage`]. Native
+/// transport needs AWS **SigV4** request signing (a dedicated follow-up); until then, front
+/// Bedrock with an OpenAI-compatible gateway and use [`OpenAiCompat`].
+pub mod bedrock {}
 
 /// A model request. `body` is the provider-native JSON, forwarded prefix-exact so prompt
 /// caches keep hitting (ADR-0047 D9). `session_id` is the conversation key for cache/KV
@@ -126,23 +142,43 @@ pub trait Provider: Send + Sync {
     async fn stream(&self, req: ProviderRequest) -> Result<ByteStream, ProviderError>;
 }
 
-/// Register a **host-language adapter** (a Python/TS callback) so a consumer's custom /
-/// air-gapped / community providers work without a Rust contribution (ADR-0047 D10).
-pub mod escape_hatch {
-    // TODO(sandhi-providers): a `Provider` impl that dispatches to a host-language callback,
-    // exposed through the bindings so victor's Python custom-provider path keeps working.
+/// Wrap a provider's byte stream in the metered pass-through: forward every upstream chunk
+/// verbatim (O(1) memory, ADR-0047 D9) while running `sniff` over each complete newline-delimited
+/// line to accumulate usage; the terminal item carries the finalized usage. `sniff(line, &mut
+/// usage)` updates the running accumulator (SSE `data:` lines, Anthropic events, or NDJSON — the
+/// per-adapter parser decides).
+pub(crate) fn metered_passthrough<S>(
+    mut upstream: S,
+    mut sniff: impl FnMut(&[u8], &mut ParsedUsage) + Send + 'static,
+) -> ByteStream
+where
+    S: Stream<Item = reqwest::Result<Bytes>> + Send + Unpin + 'static,
+{
+    use futures_util::StreamExt;
+    let s = async_stream::try_stream! {
+        let mut line_buf: Vec<u8> = Vec::new();
+        let mut usage = ParsedUsage::default();
+        while let Some(chunk) = upstream.next().await {
+            let chunk = chunk.map_err(|e| ProviderError::Transport(e.to_string()))?;
+            line_buf.extend_from_slice(&chunk);
+            while let Some(pos) = line_buf.iter().position(|&b| b == b'\n') {
+                let line: Vec<u8> = line_buf.drain(..=pos).collect();
+                sniff(&line, &mut usage);
+            }
+            yield StreamChunk { data: chunk, usage: None };
+        }
+        yield StreamChunk { data: Bytes::new(), usage: Some(usage) };
+    };
+    Box::pin(s)
 }
 
-// Remaining adapters — first-implementation follow-ups (OpenAI-compat + Anthropic are live).
-pub mod bedrock {
-    // TODO: AWS Bedrock.
-}
-pub mod cohere {
-    // TODO: Cohere.
-}
-pub mod gemini {
-    // TODO: Google Gemini.
-}
-pub mod local {
-    // TODO: local vLLM / Ollama (self-hosted backend; GPU-seconds cost basis).
+/// Extract the JSON payload from an SSE `data: {...}` line (skipping `[DONE]`), for the
+/// per-adapter sniffers.
+pub(crate) fn sse_data_json(line: &[u8]) -> Option<serde_json::Value> {
+    let s = std::str::from_utf8(line).ok()?.trim();
+    let payload = s.strip_prefix("data:")?.trim();
+    if payload == "[DONE]" {
+        return None;
+    }
+    serde_json::from_str(payload).ok()
 }
