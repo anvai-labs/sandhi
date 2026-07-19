@@ -5,6 +5,7 @@ resolver = "2"
 members = [
     "crates/sandhi-core",
     "crates/sandhi-providers",
+    "crates/sandhi-store",
     "crates/sandhi-proxy",
 ]
 

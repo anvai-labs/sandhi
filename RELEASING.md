@@ -11,7 +11,8 @@ tag at build time; you do not hand-edit versions.
 |---|---|---|
 | `crates/sandhi-core` | `sandhi-core` (Rust lib — the SDK/metering primitives) | crates.io |
 | `crates/sandhi-providers` | `sandhi-providers` (Rust lib — transport + resilience) | crates.io |
-| `crates/sandhi-proxy` | `sandhi-proxy` (Rust lib + **server** binary) | crates.io + GitHub Release binaries |
+| `crates/sandhi-store` | `sandhi-store` (Rust lib — durable SQLite sink + aggregates) | crates.io |
+| `crates/sandhi-proxy` | `sandhi-proxy` (Rust lib + **server** binary + dashboard) | crates.io + GitHub Release binaries |
 | `bindings/python` | `sandhi-gateway` (PyO3 wheel) | PyPI |
 | `bindings/node` | `@anvai-labs/sandhi` (napi addon) | npm |
 

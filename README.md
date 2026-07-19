@@ -80,11 +80,19 @@ AnvaiOps ADR-0047.
 ## Layout
 
 ```
-crates/{sandhi-core, sandhi-providers, sandhi-proxy}/   # the Rust core, transport, proxy binary
-bindings/python/                                        # PyO3 → PyPI `sandhi-gateway`
-schemas/usage-event.v1.schema.json                      # the wire contract
-docs/adr/                                                # architecture decisions
+crates/sandhi-core/         # metering engine (events, sinks, virtual keys, budgets, parsers)
+crates/sandhi-providers/    # unified provider transport + resilience decorator + escape hatch
+crates/sandhi-store/        # durable SQLite sink + usage aggregation queries
+crates/sandhi-proxy/        # the inline reverse-proxy server + self-hosted dashboard
+bindings/python/            # PyO3 → PyPI `sandhi-gateway`
+bindings/node/              # napi  → npm `@anvai-labs/sandhi`
+schemas/usage-event.v1.schema.json   # the wire contract
+docs/adr/                            # architecture decisions
 ```
+
+Run the proxy with `SANDHI_STORE=usage.db` to persist events to SQLite and serve a self-hosted
+usage **dashboard** at `/dashboard` (per-user / per-team / per-provider totals; neutral units, no
+pricing).
 
 ## Roadmap (first milestones)
 
