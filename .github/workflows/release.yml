@@ -96,6 +96,7 @@ jobs:
           cargo set-version "${GITHUB_REF_NAME#v}"
           cargo publish -p sandhi-core
           cargo publish -p sandhi-providers
+          cargo publish -p sandhi-store
           cargo publish -p sandhi-proxy
 
   # ── 4. npm (@anvai-labs/sandhi) — per-platform native builds + napi prepublish ─────────────

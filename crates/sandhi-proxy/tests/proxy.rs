@@ -37,6 +37,7 @@ fn state_with(
         ledger: Mutex::new(ledger),
         sink,
         providers,
+        store: None,
     })
 }
 
@@ -181,4 +182,62 @@ async fn streaming_passes_through_and_emits_usage() {
     assert_eq!(events[0].cache_read_tokens, 4);
     assert_eq!(events[0].billable_tokens(), 11);
     assert_eq!(state.ledger.lock().unwrap().spent("group:platform"), 11);
+}
+
+#[tokio::test]
+async fn dashboard_reports_aggregates_from_the_store() {
+    use sandhi_core::{Backend, Sink, UsageEvent};
+    use sandhi_store::SqliteStore;
+
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let ev = |subject: &str, tin: u64, tout: u64| {
+        UsageEvent::new("r", "t", "openai", "m", Backend::External)
+            .with_attribution(Some("vk".into()), Some(subject.into()), Some("team".into()))
+            .with_tokens(tin, tout)
+    };
+    store.emit(&ev("alice", 100, 20));
+    store.emit(&ev("bob", 50, 10));
+
+    let state = Arc::new(ProxyState {
+        keys: KeyStore::new(),
+        ledger: Mutex::new(BudgetLedger::new()),
+        sink: store.clone(),
+        providers: HashMap::new(),
+        store: Some(store.clone()),
+    });
+    let app = build_app(state);
+
+    // JSON API reflects the persisted events.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/dashboard/api/usage")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["total"]["calls"], 2);
+    assert_eq!(json["total"]["tokens_in"], 150);
+    assert_eq!(json["by_subject"][0]["key"], "alice"); // busiest first (120 > 60)
+
+    // The HTML page serves.
+    let html = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/dashboard")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(html.status(), StatusCode::OK);
 }

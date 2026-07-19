@@ -8,9 +8,10 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
-use sandhi_core::{BudgetLedger, InMemorySink, KeyStore, VirtualKey};
+use sandhi_core::{BudgetLedger, InMemorySink, KeyStore, Sink, VirtualKey};
 use sandhi_providers::{Anthropic, OpenAiCompat, Provider};
 use sandhi_proxy::{serve, ProxyState};
+use sandhi_store::SqliteStore;
 
 #[tokio::main]
 async fn main() {
@@ -50,11 +51,30 @@ async fn main() {
         );
     }
 
+    // Durable usage store (SQLite) + dashboard when SANDHI_STORE=<path> is set; else in-memory.
+    let store = std::env::var("SANDHI_STORE")
+        .ok()
+        .and_then(|p| match SqliteStore::open(&p) {
+            Ok(s) => {
+                eprintln!("sandhi-proxy: usage store at {p} — dashboard on /dashboard");
+                Some(Arc::new(s))
+            }
+            Err(e) => {
+                eprintln!("sandhi-proxy: could not open SANDHI_STORE={p}: {e}");
+                None
+            }
+        });
+    let sink: Arc<dyn Sink> = match &store {
+        Some(s) => s.clone(),
+        None => Arc::new(InMemorySink::new()),
+    };
+
     let state = Arc::new(ProxyState {
         keys,
         ledger: Mutex::new(BudgetLedger::new()),
-        sink: Arc::new(InMemorySink::new()),
+        sink,
         providers,
+        store,
     });
 
     let addr: SocketAddr = std::env::var("SANDHI_BIND")

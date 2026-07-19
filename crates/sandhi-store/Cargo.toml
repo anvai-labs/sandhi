@@ -1,0 +1,13 @@
+[package]
+name = "sandhi-store"
+description = "Durable SQLite sink + usage aggregation queries for Sandhi. Not depended on by the language bindings (keeps the wheels free of bundled SQLite)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sandhi-core = { path = "../sandhi-core", version = "0.0.0" }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
