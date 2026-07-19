@@ -14,3 +14,10 @@ __pycache__/
 
 # OS / editor
 .DS_Store
+
+# Node binding (napi build artifacts)
+bindings/node/node_modules/
+bindings/node/*.node
+bindings/node/index.js
+bindings/node/index.d.ts
+bindings/node/npm/
