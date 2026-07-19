@@ -13,8 +13,9 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use sandhi_core::{
-    parse_anthropic_usage, parse_openai_usage, Backend, Budget, BudgetLedger, KeyStore,
-    ParsedUsage, UsageEvent, VirtualKey,
+    parse_anthropic_usage, parse_bedrock_usage, parse_cohere_usage, parse_gemini_usage,
+    parse_ollama_usage, parse_openai_usage, Backend, Budget, BudgetLedger, KeyStore, ParsedUsage,
+    UsageEvent, VirtualKey,
 };
 
 /// The neutral token breakdown parsed from a provider response.
@@ -227,6 +228,10 @@ impl Gateway {
 fn parse_for(provider: &str, value: &serde_json::Value) -> ParsedUsage {
     match provider {
         "anthropic" => parse_anthropic_usage(value),
+        "gemini" => parse_gemini_usage(value),
+        "cohere" => parse_cohere_usage(value),
+        "ollama" => parse_ollama_usage(value),
+        "bedrock" => parse_bedrock_usage(value),
         _ => parse_openai_usage(value),
     }
     .unwrap_or_default()

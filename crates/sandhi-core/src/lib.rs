@@ -18,7 +18,10 @@ pub use budget::{Budget, BudgetExceeded, BudgetLedger};
 pub use event::{Backend, UsageEvent};
 pub use keys::{KeyStore, VirtualKey};
 pub use sink::{InMemorySink, JsonlSink, Sink};
-pub use usage::{parse_anthropic_usage, parse_openai_usage, ParsedUsage};
+pub use usage::{
+    parse_anthropic_usage, parse_bedrock_usage, parse_cohere_usage, parse_gemini_usage,
+    parse_ollama_usage, parse_openai_usage, ParsedUsage,
+};
 
 #[cfg(test)]
 mod flow_tests {
