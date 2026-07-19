@@ -14,6 +14,9 @@
 use async_trait::async_trait;
 use sandhi_core::UsageEvent;
 
+pub mod usage;
+pub use usage::{parse_anthropic_usage, parse_openai_usage, ParsedUsage};
+
 /// A model request, transport-neutral. `body` is the provider-native JSON, forwarded
 /// prefix-exact so prompt caches keep hitting (ADR-0047 D9).
 #[derive(Debug, Clone)]
