@@ -77,7 +77,7 @@ jobs:
           components: rustfmt, clippy
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
       - name: fmt + clippy (the node binding is its own workspace)
         run: |
           cargo fmt --manifest-path bindings/node/Cargo.toml --check
