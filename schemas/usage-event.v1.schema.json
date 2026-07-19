@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://anvai-labs.github.io/sandhi/schemas/usage-event.v1.schema.json",
+  "title": "Sandhi Usage Event (v1)",
+  "description": "The neutral, cross-repo boundary object emitted once per model call. Carries measured units only — NO dollars, NO tier/SKU names. Measurement lives here; pricing is a downstream commercial concern (AnvaiOps ADR-0047 D3). Superset of the AnvaiOps `llm_tokens` event and the ADR-0024 `anvai-plane-core` metering envelope.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "request_id",
+    "occurred_at",
+    "provider",
+    "model",
+    "backend",
+    "tokens_in",
+    "tokens_out"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1",
+      "description": "Wire-contract major version. Breaking changes bump this and coordinate across all consumers."
+    },
+    "request_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Unique id for the single model call this event meters."
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp of when the call completed (usage finalized)."
+    },
+    "provider": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Provider slug, neutral (e.g. anthropic, openai, gemini, bedrock, cohere, vllm, ollama, byo). Never a commercial tier/SKU name."
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Model identifier as sent to the provider."
+    },
+    "backend": {
+      "type": "string",
+      "enum": ["external", "self_hosted"],
+      "description": "external = provider API (billed in tokens); self_hosted = local vLLM/TGI (billed in GPU-hours downstream — token counts are for quota/usage display, not the cost basis)."
+    },
+    "virtual_key_id": {
+      "type": ["string", "null"],
+      "description": "The Sandhi virtual key that made the call (one shared upstream key fronts many virtual keys). Null for direct/unkeyed in-process use."
+    },
+    "subject_id": {
+      "type": ["string", "null"],
+      "description": "The user the call is attributed to. Opaque, operator-assigned."
+    },
+    "group_id": {
+      "type": ["string", "null"],
+      "description": "The team/group the call is attributed to. Opaque, operator-assigned; also the default prompt-cache namespace (ADR-0047 D9)."
+    },
+    "route": {
+      "type": ["string", "null"],
+      "description": "Optional caller-supplied route/label (e.g. the calling feature or endpoint)."
+    },
+    "session_id": {
+      "type": ["string", "null"],
+      "description": "Conversation/session key used for prompt-cache + KV affinity (ADR-0047 D9). Preserved end-to-end so hosted prompt caches keep hitting and self-hosted KV routing stays sticky. Never collapsed to a single value."
+    },
+    "tokens_in": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Fresh (non-cached) input tokens."
+    },
+    "tokens_out": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Completion tokens, finalized from the terminal usage block (never estimated mid-stream)."
+    },
+    "cache_creation_tokens": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0,
+      "description": "Prompt-cache write tokens (priced ~1.25x fresh input for Anthropic). Attributed per subject/session."
+    },
+    "cache_read_tokens": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0,
+      "description": "Prompt-cache read tokens (priced ~0.1x fresh input). If A warms a shared prefix and B reads it, B's event shows the cheap read."
+    },
+    "gpu_seconds": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "Self-hosted backends only: GPU-seconds of compute. The cost basis for self_hosted (token counts are display-only there)."
+    }
+  }
+}

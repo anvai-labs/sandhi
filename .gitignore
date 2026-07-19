@@ -1,0 +1,16 @@
+# Rust
+/target
+**/target
+**/*.rs.bk
+
+# Python / maturin
+__pycache__/
+*.py[cod]
+*.so
+/dist
+/wheels
+.venv/
+*.egg-info/
+
+# OS / editor
+.DS_Store

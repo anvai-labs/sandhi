@@ -1,0 +1,16 @@
+# Sandhi — Rust workspace. The Python/Node bindings live under bindings/ and build
+# separately (maturin / napi), so they are intentionally NOT workspace members.
+[workspace]
+resolver = "2"
+members = [
+    "crates/sandhi-core",
+    "crates/sandhi-providers",
+    "crates/sandhi-proxy",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/anvai-labs/sandhi"
+rust-version = "1.75"

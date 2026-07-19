@@ -1,0 +1,13 @@
+[package]
+name = "sandhi-providers"
+description = "Sandhi unified provider transport: adapter trait + Anthropic/OpenAI-compat/Gemini/Bedrock/Cohere/local adapters, with usage extracted at the source."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sandhi-core = { path = "../sandhi-core" }
+async-trait = "0.1"
+serde_json = "1"

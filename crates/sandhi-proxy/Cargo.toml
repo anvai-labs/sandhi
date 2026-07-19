@@ -1,0 +1,16 @@
+[package]
+name = "sandhi-proxy"
+description = "Sandhi reverse-proxy binary: sandhi-core + sandhi-providers + an HTTP listener. In-path (inline) egress gate with virtual keys + metering."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "sandhi-proxy"
+path = "src/main.rs"
+
+[dependencies]
+sandhi-core = { path = "../sandhi-core" }
+sandhi-providers = { path = "../sandhi-providers" }
