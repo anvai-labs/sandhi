@@ -222,6 +222,10 @@ fn provider_error(e: &ProviderError) -> Response {
         ProviderError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "upstream rate limited"),
         ProviderError::Upstream(_) => (StatusCode::BAD_GATEWAY, "upstream error"),
         ProviderError::Transport(_) => (StatusCode::BAD_GATEWAY, "upstream transport error"),
+        ProviderError::CircuitOpen => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "circuit open (upstream failing)",
+        ),
     };
     error(status, msg)
 }
