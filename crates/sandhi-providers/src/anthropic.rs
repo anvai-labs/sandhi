@@ -1,7 +1,7 @@
 //! Anthropic adapter — the Messages API. Validates the prompt-cache split
 //! (`cache_creation_input_tokens` / `cache_read_input_tokens`) the meter depends on.
 
-use crate::usage::{parse_anthropic_usage, u64_at};
+use crate::parse_anthropic_usage;
 use crate::{
     error_for_status, ByteStream, ParsedUsage, Provider, ProviderError, ProviderRequest,
     ProviderResponse, StreamChunk,
@@ -9,6 +9,7 @@ use crate::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::StreamExt;
+use sandhi_core::usage::u64_at;
 use serde_json::Value;
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";

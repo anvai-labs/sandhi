@@ -3,7 +3,7 @@
 //! (AnvaiOps ADR-0047 D10 / ADR-0020 D4). These are pure functions over the provider's real
 //! response JSON — never estimates.
 
-use sandhi_core::UsageEvent;
+use crate::event::UsageEvent;
 use serde_json::Value;
 
 /// The token breakdown parsed from a provider response.
@@ -29,7 +29,7 @@ impl ParsedUsage {
     }
 }
 
-pub(crate) fn u64_at(v: &Value, key: &str) -> u64 {
+pub fn u64_at(v: &Value, key: &str) -> u64 {
     v.get(key).and_then(Value::as_u64).unwrap_or(0)
 }
 
@@ -71,7 +71,7 @@ pub fn parse_anthropic_usage(response: &Value) -> Option<ParsedUsage> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sandhi_core::Backend;
+    use crate::event::Backend;
     use serde_json::json;
 
     #[test]

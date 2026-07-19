@@ -2,7 +2,7 @@
 //! Completions wire format (Groq, Together, Fireworks, DeepSeek, Mistral, Qwen, xAI,
 //! OpenRouter, vLLM, LM Studio, Ollama, Cerebras…). One adapter, many providers.
 
-use crate::usage::parse_openai_usage;
+use crate::parse_openai_usage;
 use crate::{
     error_for_status, ByteStream, ParsedUsage, Provider, ProviderError, ProviderRequest,
     ProviderResponse, StreamChunk,
