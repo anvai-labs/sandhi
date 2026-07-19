@@ -22,8 +22,10 @@ pub use sandhi_core::usage::{parse_anthropic_usage, parse_openai_usage, ParsedUs
 
 pub mod anthropic;
 pub mod openai;
+pub mod resilience;
 pub use anthropic::Anthropic;
 pub use openai::OpenAiCompat;
+pub use resilience::{CircuitBreaker, ResilientProvider, RetryConfig};
 
 /// A model request. `body` is the provider-native JSON, forwarded prefix-exact so prompt
 /// caches keep hitting (ADR-0047 D9). `session_id` is the conversation key for cache/KV
@@ -82,6 +84,8 @@ pub enum ProviderError {
     Upstream(u16),
     /// Network / TLS / decode failure before or during the response.
     Transport(String),
+    /// The circuit breaker is open (upstream failing) — the call was not attempted.
+    CircuitOpen,
 }
 
 impl std::fmt::Display for ProviderError {
@@ -91,6 +95,7 @@ impl std::fmt::Display for ProviderError {
             ProviderError::RateLimited => write!(f, "rate limited (429)"),
             ProviderError::Upstream(s) => write!(f, "upstream status {s}"),
             ProviderError::Transport(e) => write!(f, "transport error: {e}"),
+            ProviderError::CircuitOpen => write!(f, "circuit open (upstream failing)"),
         }
     }
 }
