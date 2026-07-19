@@ -68,6 +68,27 @@ jobs:
               --range "${{ github.event.before }}..${{ github.sha }}"
           fi
 
+  node-binding:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: fmt + clippy (the node binding is its own workspace)
+        run: |
+          cargo fmt --manifest-path bindings/node/Cargo.toml --check
+          cargo clippy --manifest-path bindings/node/Cargo.toml -- -D warnings
+      - name: build + test
+        working-directory: bindings/node
+        run: |
+          npm install
+          npx napi build --platform
+          npm test
+
   coverage:
     runs-on: ubuntu-latest
     steps:
@@ -83,6 +104,6 @@ jobs:
   ci-success:
     name: CI Success
     runs-on: ubuntu-latest
-    needs: [rust, schema, python-binding, attribution, coverage]
+    needs: [rust, schema, python-binding, node-binding, attribution, coverage]
     steps:
       - run: echo "all required checks passed"

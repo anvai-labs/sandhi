@@ -1,0 +1,28 @@
+[package]
+name = "sandhi-node"
+description = "napi binding for Sandhi (published to npm as @anvai-labs/sandhi)."
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/anvai-labs/sandhi"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "2", default-features = false, features = ["napi4"] }
+napi-derive = "2"
+sandhi-core = { path = "../../crates/sandhi-core" }
+serde_json = "1"
+time = { version = "0.3", features = ["formatting"] }
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+lto = true
+strip = "symbols"
+
+# Its OWN workspace root — built via napi, not the root `cargo build --workspace`.
+[workspace]
