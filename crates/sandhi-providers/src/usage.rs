@@ -29,7 +29,7 @@ impl ParsedUsage {
     }
 }
 
-fn u64_at(v: &Value, key: &str) -> u64 {
+pub(crate) fn u64_at(v: &Value, key: &str) -> u64 {
     v.get(key).and_then(Value::as_u64).unwrap_or(0)
 }
 
