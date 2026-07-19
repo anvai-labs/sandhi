@@ -58,8 +58,8 @@ pub trait Provider: Send + Sync {
 /// Register a **host-language adapter** (a Python/TS callback) so a consumer's custom /
 /// air-gapped / community providers work without a Rust contribution (ADR-0047 D10).
 pub mod escape_hatch {
-    //! TODO(sandhi-providers): a `Provider` impl that dispatches to a host-language callback,
-    //! exposed through the bindings so victor's Python custom-provider path keeps working.
+    // TODO(sandhi-providers): a `Provider` impl that dispatches to a host-language callback,
+    // exposed through the bindings so victor's Python custom-provider path keeps working.
 }
 
 // Adapter stubs — first implementation milestones (OpenAI-compat first, then Anthropic).

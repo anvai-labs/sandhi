@@ -15,6 +15,9 @@ fn main() {
         env!("CARGO_PKG_VERSION")
     );
     // Prove the core links: emit the wire-contract version this build targets.
-    eprintln!("usage-event wire contract: v{}", sandhi_core::UsageEvent::SCHEMA_VERSION);
+    eprintln!(
+        "usage-event wire contract: v{}",
+        sandhi_core::UsageEvent::SCHEMA_VERSION
+    );
     std::process::exit(1);
 }

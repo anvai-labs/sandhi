@@ -68,19 +68,19 @@ impl UsageEvent {
 /// Virtual keys — one shared upstream key fronts many per-user keys (attribution + revocation
 /// per person). Resolution + storage land here.
 pub mod keys {
-    //! TODO(sandhi-core): virtual-key issuance, resolution (`vk_…` → subject/group + upstream),
-    //! and revocation.
+    // TODO(sandhi-core): virtual-key issuance, resolution (`vk_…` → subject/group + upstream),
+    // and revocation.
 }
 
 /// Budgets + rate limits per virtual key / group. Enforcement mechanism only — no pricing.
 pub mod budget {
-    //! TODO(sandhi-core): per-key/per-group budget + rate-limit enforcement.
+    // TODO(sandhi-core): per-key/per-group budget + rate-limit enforcement.
 }
 
 /// Usage accounting + the neutral-event emitter (best-effort, off the critical path).
 pub mod accounting {
-    //! TODO(sandhi-core): finalize usage from a call, build a [`super::UsageEvent`], emit to
-    //! the configured sink (local SQLite/JSONL, or POST to a collector).
+    // TODO(sandhi-core): finalize usage from a call, build a `super::UsageEvent`, emit to
+    // the configured sink (local SQLite/JSONL, or POST to a collector).
 }
 
 #[cfg(test)]
