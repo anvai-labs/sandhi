@@ -31,11 +31,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
+      - name: fmt + clippy (the binding is its own workspace)
+        run: |
+          cargo fmt --manifest-path bindings/python/Cargo.toml --check
+          cargo clippy --manifest-path bindings/python/Cargo.toml --all-targets -- -D warnings
       - run: pip install maturin
-      - run: maturin build -m bindings/python/Cargo.toml
+      - name: build + install the wheel
+        run: |
+          maturin build -m bindings/python/Cargo.toml --out dist
+          pip install dist/*.whl
+      - name: run binding tests
+        run: python bindings/python/tests/test_gateway.py
 
   attribution:
     runs-on: ubuntu-latest

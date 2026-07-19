@@ -17,8 +17,8 @@ use bytes::Bytes;
 use futures_core::Stream;
 use std::pin::Pin;
 
-pub mod usage;
-pub use usage::{parse_anthropic_usage, parse_openai_usage, ParsedUsage};
+// The usage parsers are metering primitives — they live in `sandhi-core` (no transport deps).
+pub use sandhi_core::usage::{parse_anthropic_usage, parse_openai_usage, ParsedUsage};
 
 pub mod anthropic;
 pub mod openai;

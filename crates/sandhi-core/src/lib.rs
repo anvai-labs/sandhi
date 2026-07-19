@@ -12,11 +12,13 @@ pub mod budget;
 pub mod event;
 pub mod keys;
 pub mod sink;
+pub mod usage;
 
 pub use budget::{Budget, BudgetExceeded, BudgetLedger};
 pub use event::{Backend, UsageEvent};
 pub use keys::{KeyStore, VirtualKey};
 pub use sink::{InMemorySink, JsonlSink, Sink};
+pub use usage::{parse_anthropic_usage, parse_openai_usage, ParsedUsage};
 
 #[cfg(test)]
 mod flow_tests {
