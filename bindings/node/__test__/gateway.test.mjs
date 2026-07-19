@@ -63,3 +63,15 @@ test("unknown virtual key throws", () => {
   const gw = new Gateway();
   assert.throws(() => gw.meter("vk_nope", "openai", "m", JSON.stringify({ usage: {} })));
 });
+
+test("meterTokens bypasses parsing (escape hatch)", () => {
+  const gw = new Gateway();
+  gw.addVirtualKey("vk", "s", "g", "x");
+  const ev = gw.meterTokens("vk", "custom-provider", "m", 11, 7, 0, 2, "sess");
+  assert.equal(ev.tokensIn, 11);
+  assert.equal(ev.tokensOut, 7);
+  assert.equal(ev.cacheReadTokens, 2);
+  assert.equal(ev.provider, "custom-provider");
+  assert.equal(ev.sessionId, "sess");
+  assert.equal(gw.spent("group:g"), 18); // 11 + 7
+});

@@ -24,6 +24,16 @@ gw.checkBudget("group:platform", 5000);                // true/false
 parseUsage("openai", responseJson);                    // { tokensIn, tokensOut, cache* }
 ```
 
+### Custom / unknown providers (host escape hatch)
+
+For a provider Sandhi doesn't natively parse, do your own parsing and pass the counts:
+
+```js
+gw.meterTokens("vk_alice", "myprovider", "model", tokensIn, tokensOut);
+```
+
+(A stored `registerParser(provider, callback)` — like the Python binding — is a fast-follow.)
+
 `meter()` parses usage **at the source** (same Rust parsers as the proxy), attributes it to the
 virtual key's subject/group, records the budget, emits the neutral event, and returns it.
 Unknown key or bad JSON → throws.
