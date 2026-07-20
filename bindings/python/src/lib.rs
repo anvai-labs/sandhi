@@ -1,13 +1,18 @@
-//! Sandhi Python binding (PyO3) — the **in-process metering middleware** (AnvaiOps ADR-0047
-//! D2/D10). Published to PyPI as `sandhi-gateway`, imported as `sandhi_gateway`.
+//! Sandhi Python binding (PyO3) — **in-process metering middleware + provider transport** (AnvaiOps
+//! ADR-0047 D2/D10). Published to PyPI as `sandhi-gateway`, imported as `sandhi_gateway`.
 //!
-//! A caller (e.g. victor) keeps making its own provider calls, then hands the raw response to
-//! [`Gateway::meter`]: Sandhi parses the usage **at the source** (same Rust parsers as the
-//! proxy), attributes it to a virtual key's subject/group, enforces + records the budget, emits
-//! the neutral usage event, and returns it for local display. Zero network hop.
+//! Two surfaces:
+//! - **Metering** ([`Gateway`], [`parse_usage`]): a caller keeps making its own provider calls, then
+//!   hands the raw response over; Sandhi parses the usage **at the source** (same Rust parsers as the
+//!   proxy), attributes it to a virtual key, enforces + records the budget, and emits the neutral
+//!   usage event. Zero network hop.
+//! - **Transport** ([`complete`] / [`stream`], ADR-0047 D10 step 3): forward a provider call through
+//!   sandhi-providers' async transport **in-process** — `complete` returns an awaitable, `stream` an
+//!   async iterator (bytes forwarded verbatim, D9; usage finalized on the terminal item). This makes
+//!   Sandhi the shared network core the in-house apps can `import`.
 //!
-//! Depends only on `sandhi-core` — the HTTP transport (`sandhi-providers`) is not pulled into
-//! the wheel.
+//! Depends on `sandhi-core` (metering) + `sandhi-providers` (transport) — the latter pulls the
+//! async HTTP stack into the wheel to serve the transport surface.
 
 // pyo3's #[pyfunction]/#[pymethods] macros emit `.into()` on the PyErr return path; on this
 // pyo3 + clippy combo that trips `useless_conversion` inside generated code (not our code).
@@ -18,9 +23,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyStopAsyncIteration, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict};
+use pyo3::types::{PyAny, PyBytes, PyDict};
+use std::sync::Arc;
 
 use sandhi_core::{
     parse_anthropic_usage, parse_bedrock_usage, parse_cohere_usage, parse_gemini_usage,
@@ -29,6 +35,7 @@ use sandhi_core::{
 };
 use sandhi_providers::{
     Anthropic, Cohere, Gemini, Ollama, OpenAiCompat, Provider, ProviderError, ProviderRequest,
+    StreamChunk,
 };
 
 /// Build a provider adapter from its neutral slug + endpoint. OpenAI-compatible providers (OpenAI,
@@ -80,6 +87,99 @@ fn complete<'py>(
             d.set_item("usage", usage_to_dict(py, &resp.usage)?)?;
             Ok(d.into_any().unbind())
         })
+    })
+}
+
+/// One item yielded by [`ByteStreamIter`]: raw upstream bytes to forward verbatim, plus (on the
+/// terminal item only) the finalized usage.
+struct StreamItem {
+    data: Vec<u8>,
+    usage: Option<ParsedUsage>,
+}
+
+/// A Python **async iterator** over a streaming provider response (ADR-0047 D10 step 3b). A
+/// background tokio task drives the Rust `ByteStream` and pushes chunks into a bounded channel
+/// (backpressure ⇒ O(1) memory, D7); `__anext__` awaits the next chunk. Yields dicts
+/// `{"data": bytes, "usage": dict|None}` — `usage` is populated only on the terminal item.
+#[pyclass]
+struct ByteStreamIter {
+    rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Result<StreamItem, String>>>>,
+}
+
+#[pymethods]
+impl ByteStreamIter {
+    fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let rx = self.rx.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut guard = rx.lock().await;
+            match guard.recv().await {
+                Some(Ok(item)) => Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+                    let d = PyDict::new_bound(py);
+                    d.set_item("data", PyBytes::new_bound(py, &item.data))?;
+                    match &item.usage {
+                        Some(u) => d.set_item("usage", usage_to_dict(py, u)?)?,
+                        None => d.set_item("usage", py.None())?,
+                    }
+                    Ok(d.into_any().unbind())
+                }),
+                Some(Err(e)) => Err(PyRuntimeError::new_err(format!("sandhi stream: {e}"))),
+                None => Err(PyStopAsyncIteration::new_err(())),
+            }
+        })
+    }
+}
+
+/// Forward one **streaming** provider call through sandhi's in-process transport (ADR-0047 D10
+/// step 3b). Returns a Python **async iterator** (`async for chunk in ...`) yielding
+/// `{"data": bytes, "usage": dict|None}` — bytes are forwarded verbatim (prefix-exact, D9), usage
+/// finalized on the terminal item. `session_id` is preserved for prompt-cache / KV affinity.
+#[pyfunction]
+#[pyo3(signature = (provider, model, base_url, api_key, body_json, session_id=None))]
+fn stream(
+    provider: String,
+    model: String,
+    base_url: String,
+    api_key: String,
+    body_json: String,
+    session_id: Option<String>,
+) -> PyResult<ByteStreamIter> {
+    let body: serde_json::Value = serde_json::from_str(&body_json)
+        .map_err(|e| PyValueError::new_err(format!("body_json is not valid JSON: {e}")))?;
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<StreamItem, String>>(64);
+    pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+        use futures_util::StreamExt;
+        let adapter = build_provider(&provider, &base_url, &api_key);
+        let req = ProviderRequest::new(model, body).with_session(session_id);
+        match adapter.stream(req).await {
+            Ok(mut s) => {
+                while let Some(chunk) = s.next().await {
+                    let (msg, stop) = match chunk {
+                        Ok(StreamChunk { data, usage }) => (
+                            Ok(StreamItem {
+                                data: data.to_vec(),
+                                usage,
+                            }),
+                            false,
+                        ),
+                        Err(e) => (Err(e.to_string()), true), // forward the error, then stop
+                    };
+                    if tx.send(msg).await.is_err() || stop {
+                        break; // receiver dropped, or the terminal error was forwarded
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = tx.send(Err(e.to_string())).await;
+            }
+        }
+        // tx drops here → channel closes → __anext__ recv returns None → StopAsyncIteration
+    });
+    Ok(ByteStreamIter {
+        rx: Arc::new(tokio::sync::Mutex::new(rx)),
     })
 }
 
@@ -410,6 +510,8 @@ fn sandhi_gateway(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(wire_contract_version, m)?)?;
     m.add_function(wrap_pyfunction!(parse_usage, m)?)?;
     m.add_function(wrap_pyfunction!(complete, m)?)?;
+    m.add_function(wrap_pyfunction!(stream, m)?)?;
+    m.add_class::<ByteStreamIter>()?;
     m.add_class::<Gateway>()?;
     Ok(())
 }

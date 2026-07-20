@@ -896,6 +896,7 @@ dependencies = [
 name = "sandhi-gateway-py"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "pyo3",
  "pyo3-async-runtimes",
  "sandhi-core",

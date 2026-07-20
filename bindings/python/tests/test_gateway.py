@@ -89,6 +89,60 @@ def test_complete_async_transport():
         srv.shutdown()
 
 
+def test_stream_async_iterator():
+    """Step 3b (ADR-0047 D10): stream() yields {data, usage} chunks via an async iterator; bytes
+    are forwarded verbatim and usage is finalized on the terminal item. Local SSE server."""
+    import asyncio
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    sse = (
+        'data: {"choices":[{"delta":{"content":"he"}}]}\n\n'
+        'data: {"choices":[{"delta":{"content":"llo"}}]}\n\n'
+        'data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,'
+        '"prompt_tokens_details":{"cached_tokens":4}}}\n\n'
+        "data: [DONE]\n\n"
+    )
+
+    class _H(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            b = sse.encode()
+            self.send_response(200)
+            self.send_header("content-type", "text/event-stream")
+            self.send_header("content-length", str(len(b)))
+            self.end_headers()
+            self.wfile.write(b)
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), _H)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        req = json.dumps({"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]})
+
+        async def _collect():
+            forwarded = b""
+            usage = None
+            async for chunk in sg.stream(
+                "openai", "gpt-4o", f"http://127.0.0.1:{port}/v1", "sk", req, "s1"
+            ):
+                forwarded += chunk["data"]
+                if chunk["usage"] is not None:
+                    usage = chunk["usage"]
+            return forwarded, usage
+
+        forwarded, usage = asyncio.run(_collect())
+        assert b"he" in forwarded and b"llo" in forwarded and b"[DONE]" in forwarded
+        assert usage is not None
+        assert usage["tokens_in"] == 6  # 10 − 4 cached
+        assert usage["tokens_out"] == 5
+        assert usage["cache_read_tokens"] == 4
+    finally:
+        srv.shutdown()
+
+
 def test_gateway_meters_attributes_and_budgets():
     gw = sg.Gateway()
     gw.add_virtual_key("vk_alice", subject="alice", group="platform", upstream="anthropic")

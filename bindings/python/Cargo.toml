@@ -23,8 +23,9 @@ time = { version = "0.3", features = ["formatting"] }
 # Python so the in-house apps route provider calls through sandhi in-process. pyo3-async-runtimes
 # tracks pyo3's minor (0.22 → 0.22) and bridges the tokio future to a Python awaitable.
 sandhi-providers = { path = "../../crates/sandhi-providers" }
-tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 pyo3-async-runtimes = { version = "0.22", features = ["tokio-runtime"] }
+futures-util = "0.3"
 
 # Intentionally its OWN workspace root — this crate builds via maturin (bindings), not as a
 # member of the root `cargo build --workspace`. Without this, Cargo errors that the package
