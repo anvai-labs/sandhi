@@ -36,6 +36,59 @@ def test_parse_usage_anthropic_direct_split():
     }
 
 
+def test_complete_async_transport():
+    """Step 3a (ADR-0047 D10): complete() forwards through sandhi's in-process transport and
+    returns {status, body, usage} with usage parsed at the source. A local HTTP server stands in
+    for the provider so no network is needed."""
+    import asyncio
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    resp = {
+        "choices": [
+            {"index": 0, "message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}
+        ],
+        "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "prompt_tokens_details": {"cached_tokens": 60},
+        },
+    }
+
+    class _H(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            body = json.dumps(resp).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), _H)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        req = json.dumps({"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]})
+
+        async def _call():
+            return await sg.complete(
+                "openai", "gpt-4o", f"http://127.0.0.1:{port}/v1", "sk-test", req, "sess-1"
+            )
+
+        out = asyncio.run(_call())
+        assert out["status"] == 200
+        # usage parsed at the source → fresh-only tokens_in (100 − 60 cached).
+        assert out["usage"]["tokens_in"] == 40
+        assert out["usage"]["cache_read_tokens"] == 60
+        assert out["usage"]["tokens_out"] == 20
+        assert "hi" in json.loads(out["body"])["choices"][0]["message"]["content"]
+    finally:
+        srv.shutdown()
+
+
 def test_gateway_meters_attributes_and_budgets():
     gw = sg.Gateway()
     gw.add_virtual_key("vk_alice", subject="alice", group="platform", upstream="anthropic")

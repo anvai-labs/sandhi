@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use pyo3::exceptions::{PyKeyError, PyValueError};
+use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict};
 
@@ -27,6 +27,61 @@ use sandhi_core::{
     parse_ollama_usage, parse_openai_usage, Backend, Budget, BudgetLedger, KeyStore, ParsedUsage,
     UsageEvent, VirtualKey,
 };
+use sandhi_providers::{
+    Anthropic, Cohere, Gemini, Ollama, OpenAiCompat, Provider, ProviderError, ProviderRequest,
+};
+
+/// Build a provider adapter from its neutral slug + endpoint. OpenAI-compatible providers (OpenAI,
+/// Azure, Groq, vLLM, …) all use `OpenAiCompat` with the slug preserved for metering; Anthropic /
+/// Cohere / Gemini / Ollama have dedicated adapters. Transport step 3 (ADR-0047 D10).
+fn build_provider(provider: &str, base_url: &str, api_key: &str) -> Box<dyn Provider> {
+    match provider {
+        "anthropic" => Box::new(Anthropic::new(base_url, api_key)),
+        "cohere" => Box::new(Cohere::new(base_url, api_key)),
+        "gemini" => Box::new(Gemini::new(base_url, api_key)),
+        "ollama" => Box::new(Ollama::new(base_url)),
+        // openai + every OpenAI-compatible slug: one adapter, slug preserved.
+        _ => Box::new(OpenAiCompat::new(provider.to_string(), base_url, api_key)),
+    }
+}
+
+fn provider_err_to_py(e: ProviderError) -> PyErr {
+    PyRuntimeError::new_err(format!("sandhi transport: {e}"))
+}
+
+/// Forward one **non-streaming** provider call through sandhi's in-process transport (ADR-0047 D10
+/// step 3a). Returns a Python **awaitable** resolving to `{status, body, usage}` — `usage` is parsed
+/// at the source by sandhi (single-sourced metering trust). `provider` is the neutral slug; `body`
+/// is the provider-native request JSON, forwarded prefix-exact; `session_id` is preserved
+/// end-to-end for prompt-cache / KV affinity (ADR-0047 D9).
+#[pyfunction]
+#[pyo3(signature = (provider, model, base_url, api_key, body_json, session_id=None))]
+fn complete<'py>(
+    py: Python<'py>,
+    provider: String,
+    model: String,
+    base_url: String,
+    api_key: String,
+    body_json: String,
+    session_id: Option<String>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let body: serde_json::Value = serde_json::from_str(&body_json)
+        .map_err(|e| PyValueError::new_err(format!("body_json is not valid JSON: {e}")))?;
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let adapter = build_provider(&provider, &base_url, &api_key);
+        let req = ProviderRequest::new(model, body).with_session(session_id);
+        let resp = adapter.complete(req).await.map_err(provider_err_to_py)?;
+        Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+            let d = PyDict::new_bound(py);
+            d.set_item("status", resp.status)?;
+            let body_str = serde_json::to_string(&resp.body)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            d.set_item("body", body_str)?;
+            d.set_item("usage", usage_to_dict(py, &resp.usage)?)?;
+            Ok(d.into_any().unbind())
+        })
+    })
+}
 
 /// The usage-event wire-contract major version this build targets.
 #[pyfunction]
@@ -354,6 +409,7 @@ fn sandhi_gateway(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     m.add_function(wrap_pyfunction!(wire_contract_version, m)?)?;
     m.add_function(wrap_pyfunction!(parse_usage, m)?)?;
+    m.add_function(wrap_pyfunction!(complete, m)?)?;
     m.add_class::<Gateway>()?;
     Ok(())
 }
