@@ -7,7 +7,7 @@ import { createServer } from "node:http";
 
 import { Gateway, parseUsage, wireContractVersion } from "../index.js";
 // The transport surface is exercised through the sandhi.js entry so `for await` (Symbol.asyncIterator) works.
-import { complete, stream } from "../sandhi.js";
+import { complete, stream, registerProvider } from "../sandhi.js";
 
 // Start a throwaway localhost HTTP server that replies with `bodyStr` (+ content-type). Returns the
 // base URL and a close() — no network needed to exercise the transport.
@@ -94,6 +94,29 @@ test("parseUsage — anthropic direct split", () => {
     { i: u.tokensIn, o: u.tokensOut, cc: u.cacheCreationTokens, cr: u.cacheReadTokens },
     { i: 12, o: 5, cc: 3, cr: 7 },
   );
+});
+
+test("registerProvider — host-language escape hatch serves complete()", async () => {
+  // A custom provider that owns its own (here trivial) transport and self-reports usage — served
+  // through complete() without a Rust adapter. Parity with the Python binding's register_provider.
+  registerProvider("mycustom", async (model, bodyJson, sessionId) => {
+    const req = JSON.parse(bodyJson);
+    return {
+      status: 200,
+      body: JSON.stringify({ model, echoed: req, session: sessionId }),
+      usage: { tokensIn: 7, tokensOut: 3, cacheCreationTokens: 0, cacheReadTokens: 2 },
+    };
+  });
+
+  const body = JSON.stringify({ messages: [{ role: "user", content: "hi" }] });
+  const out = await complete("mycustom", "custom-model-x", "http://unused", "k", body, "s9");
+  assert.equal(out.status, 200);
+  assert.equal(out.usage.tokensIn, 7);
+  assert.equal(out.usage.tokensOut, 3);
+  assert.equal(out.usage.cacheReadTokens, 2);
+  const parsed = JSON.parse(out.body);
+  assert.equal(parsed.model, "custom-model-x");
+  assert.equal(parsed.session, "s9");
 });
 
 test("gateway meters, attributes, and budgets", () => {

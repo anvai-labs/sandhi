@@ -58,6 +58,22 @@ for await (const chunk of await stream("openai", "gpt-4o", BASE, KEY, bodyJson, 
 }
 ```
 
-Apache-2.0. The transport surface links `sandhi-providers` (async HTTP stack) into the addon; the
-host-language provider escape hatch (`registerProvider`, matching the Python binding) is a
-fast-follow.
+#### Custom providers through transport (`registerProvider`)
+
+For a provider Sandhi's built-in adapters don't cover, register a JS async handler that owns its own
+transport — it then rides `complete()` with the same usage metering (ADR-0047 D10 escape hatch,
+parity with the Python binding):
+
+```js
+import { registerProvider, complete } from "@anvai-labs/sandhi";
+
+registerProvider("myllm", async (model, bodyJson, sessionId) => {
+  const res = await myFetch(model, bodyJson);            // your own transport
+  return { status: 200, body: JSON.stringify(res), usage: { tokensIn, tokensOut } };
+});
+const out = await complete("myllm", "model", base, key, bodyJson, "sess-1");
+```
+
+(Streaming for custom providers is not supported — they run through `complete()`.)
+
+Apache-2.0. The transport surface links `sandhi-providers` (async HTTP stack) into the addon.

@@ -9,12 +9,17 @@
 //!   `stream()` returns a `Promise<ByteStream>` whose `read()` yields chunks (`{ data, usage }`,
 //!   `null` at end) — forward bytes verbatim (D9), usage finalized on the terminal chunk. A tiny
 //!   `Symbol.asyncIterator` shim in `sandhi.js` turns `ByteStream` into an `for await` iterable.
+//!   `registerProvider()` is the D10 escape hatch: a JS async handler registers as a custom
+//!   provider (via a threadsafe function → the underlying `FnProvider`), so a custom / air-gapped /
+//!   community provider rides `complete()` without a Rust adapter. Parity with the Python binding.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use napi::bindgen_prelude::*;
+use napi::threadsafe_function::{ErrorStrategy, ThreadSafeCallContext, ThreadsafeFunction};
 use napi_derive::napi;
 
 use sandhi_core::{
@@ -23,20 +28,127 @@ use sandhi_core::{
     UsageEvent, VirtualKey,
 };
 use sandhi_providers::{
-    Anthropic, Cohere, Gemini, Ollama, OpenAiCompat, Provider, ProviderError, ProviderRequest,
-    StreamChunk,
+    Anthropic, Cohere, FnProvider, Gemini, Ollama, OpenAiCompat, Provider, ProviderError,
+    ProviderRequest, ProviderResponse, StreamChunk,
 };
 
+/// Args marshaled to a host-registered JS provider (ADR-0047 D10 escape hatch). The ThreadSafe
+/// callback maps these to the JS handler's `(model, bodyJson, sessionId)` positional arguments.
+struct HandlerArgs {
+    model: String,
+    body_json: String,
+    session_id: Option<String>,
+}
+
+/// A host-registered provider is a JS async function invoked from any thread — stored as a
+/// (Fatal-strategy) threadsafe function so the transport task can call it off the JS thread.
+type HandlerTsfn = ThreadsafeFunction<HandlerArgs, ErrorStrategy::Fatal>;
+
+/// The value a host provider's JS handler resolves to: `{ status, body, usage? }` — `body` is a
+/// JSON string, `usage` the neutral breakdown (populate it since Sandhi can't parse a custom shape).
+#[napi(object)]
+pub struct HandlerResult {
+    pub status: u32,
+    pub body: String,
+    pub usage: Option<UsageBreakdown>,
+}
+
+/// Host-registered custom providers (ADR-0047 D10 escape hatch): slug → JS async handler. Consulted
+/// before the built-in adapters, so a custom / air-gapped / community provider works through
+/// `complete()` without a Rust contribution — parity with the Python binding's `register_provider`.
+static CUSTOM_PROVIDERS: OnceLock<Mutex<HashMap<String, HandlerTsfn>>> = OnceLock::new();
+
+fn custom_providers() -> &'static Mutex<HashMap<String, HandlerTsfn>> {
+    CUSTOM_PROVIDERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// Build a provider adapter from its neutral slug + endpoint (mirrors the Python binding's
-/// `build_provider`). OpenAI-compatible providers all use `OpenAiCompat` with the slug preserved;
+/// `build_provider`). A host-registered JS provider (D10 escape hatch) wins over the built-ins;
+/// otherwise OpenAI-compatible providers all use `OpenAiCompat` with the slug preserved, and
 /// Anthropic / Cohere / Gemini / Ollama have dedicated adapters. Transport step 3 (ADR-0047 D10).
 fn build_provider(provider: &str, base_url: &str, api_key: &str) -> Box<dyn Provider> {
+    // Escape hatch: a host-registered JS provider takes precedence (TSFN is Clone + Send).
+    let registered = custom_providers().lock().unwrap().get(provider).cloned();
+    if let Some(tsfn) = registered {
+        return Box::new(napi_fn_provider(provider.to_string(), tsfn));
+    }
     match provider {
         "anthropic" => Box::new(Anthropic::new(base_url, api_key)),
         "cohere" => Box::new(Cohere::new(base_url, api_key)),
         "gemini" => Box::new(Gemini::new(base_url, api_key)),
         "ollama" => Box::new(Ollama::new(base_url)),
         _ => Box::new(OpenAiCompat::new(provider.to_string(), base_url, api_key)),
+    }
+}
+
+/// Wrap a host-registered JS async handler as a [`Provider`] (ADR-0047 D10 escape hatch). The
+/// closure invokes the handler on the JS thread via the TSFN (`call_async` → the handler's returned
+/// `Promise`), awaits it, and parses the resolved `{status, body, usage}` into a [`ProviderResponse`].
+/// `stream()` is unsupported for custom providers (the underlying `FnProvider` returns 501),
+/// mirroring the Rust and Python escape hatches.
+fn napi_fn_provider(slug: String, tsfn: HandlerTsfn) -> FnProvider {
+    FnProvider::new(slug, move |req: ProviderRequest| {
+        let tsfn = tsfn.clone();
+        async move {
+            let body_json = serde_json::to_string(&req.body)
+                .map_err(|e| ProviderError::Transport(e.to_string()))?;
+            let args = HandlerArgs {
+                model: req.model.clone(),
+                body_json,
+                session_id: req.session_id.clone(),
+            };
+            // Call the JS handler off the JS thread → its returned Promise → await the result.
+            let promise: Promise<HandlerResult> = tsfn
+                .call_async(args)
+                .await
+                .map_err(|e| ProviderError::Transport(format!("custom provider dispatch: {e}")))?;
+            let res = promise
+                .await
+                .map_err(|e| ProviderError::Transport(format!("custom provider errored: {e}")))?;
+            let body: serde_json::Value = serde_json::from_str(&res.body).map_err(|e| {
+                ProviderError::Transport(format!("custom provider 'body' is not valid JSON: {e}"))
+            })?;
+            let usage = res.usage.map(parsed_from_breakdown).unwrap_or_default();
+            Ok(ProviderResponse {
+                status: res.status as u16,
+                body,
+                usage,
+            })
+        }
+    })
+}
+
+/// Register a JS async function as a custom provider under `slug` (ADR-0047 D10 escape hatch — the
+/// host-language adapter, parity with the Python binding). The handler is
+/// `async (model, bodyJson, sessionId) => ({ status, body, usage })`; it owns its own transport, so
+/// a custom / air-gapped / community provider works through `complete()` without a Rust adapter.
+/// Overrides a built-in slug of the same name. Streaming is not supported for custom providers.
+#[napi]
+pub fn register_provider(env: Env, slug: String, handler: JsFunction) -> Result<()> {
+    let mut tsfn: HandlerTsfn =
+        handler.create_threadsafe_function(0, |ctx: ThreadSafeCallContext<HandlerArgs>| {
+            let a = ctx.value;
+            let model = ctx.env.create_string(&a.model)?.into_unknown();
+            let body = ctx.env.create_string(&a.body_json)?.into_unknown();
+            let session = match &a.session_id {
+                Some(s) => ctx.env.create_string(s)?.into_unknown(),
+                None => ctx.env.get_null()?.into_unknown(),
+            };
+            Ok(vec![model, body, session])
+        })?;
+    // Don't let a registered provider keep the Node event loop alive — allow a clean process exit
+    // (an in-flight call() keeps its own work pending while it runs).
+    tsfn.unref(&env)?;
+    custom_providers().lock().unwrap().insert(slug, tsfn);
+    Ok(())
+}
+
+fn parsed_from_breakdown(u: UsageBreakdown) -> ParsedUsage {
+    ParsedUsage {
+        tokens_in: u64::from(u.tokens_in),
+        tokens_out: u64::from(u.tokens_out),
+        cache_creation_tokens: u64::from(u.cache_creation_tokens),
+        cache_read_tokens: u64::from(u.cache_read_tokens),
     }
 }
 
