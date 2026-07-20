@@ -30,4 +30,5 @@ module.exports.parseUsage = native.parseUsage;
 module.exports.Gateway = native.Gateway;
 module.exports.complete = native.complete;
 module.exports.stream = native.stream;
+module.exports.registerProvider = native.registerProvider;
 module.exports.ByteStream = native.ByteStream;
