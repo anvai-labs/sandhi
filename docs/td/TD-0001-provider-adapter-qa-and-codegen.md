@@ -51,13 +51,24 @@ synthetic bodies (`anthropic.rs`, `usage.rs`). This TD closes that gap.
 
 ### W2 — Differential test oracle (ADR-0003 §3)
 
-- [ ] Dev/CI-only: generate a deserializer for the usage/response shape from a **byte-pinned**
-      provider schema (`typify`), under `#[cfg(test)]` or a dev-dependency — never linked into
-      `sandhi-proxy`/bindings.
-- [ ] Assert the generated deserializer and the shipped `parse_*_usage` agree on the usage fields
-      over the W1 fixtures. Divergence = spec drift or extractor bug.
-- [ ] Pin the source schema by digest in-repo (OpenAI official spec; Anthropic community spec —
-      note the provenance explicitly, per ADR-0003 context).
+- [x] Dev/CI-only: `typify` generates the deserializer from a **byte-pinned** provider schema as a
+      **dev-dependency**, in the `tests/differential_oracle.rs` target only — verified **not** in the
+      `sandhi-proxy` / python-binding / normal-deps graph (`cargo tree` = 0), so it is never shipped.
+- [x] Assert the generated deserializer and the shipped `parse_*_usage` agree on the usage fields
+      over the W1 fixtures (OpenAI + Anthropic — the cache-split pair named in ADR-0003). Divergence
+      = spec drift or extractor bug — and it earned its keep immediately: the OpenAI oracle caught
+      that the fixture omitted the spec-**required** `total_tokens`, which was then fixed in the
+      fixtures (not by weakening the schema).
+- [x] Pin the source schema in-repo with explicit provenance (`tests/schemas/`): OpenAI is the
+      **real** `components/schemas/CompletionUsage` from `openai/openai-openapi` (sha256
+      `0bf136e5…`, fetched 2026-07-20); Anthropic is hand-authored from the documented Messages
+      `usage` object (no official spec exists; community spec was unreachable — see ADR-0003
+      context). Both carry a `$comment` provenance header.
+
+> **W2 status: COMPLETE** for the OpenAI + Anthropic pair (the ADR-0003 acceptance bar). Extending
+> the oracle to Gemini/Cohere/Ollama is straightforward (same harness) but lower value — those have
+> no cache split — and is left as a follow-up. typify stays a **dev-dependency**; the shipped crate
+> and bindings never link it.
 
 ### W3 — `typify` narrow-model pilot (ADR-0003 §2 + §4) — *optional, gated on W1/W2 signal*
 
