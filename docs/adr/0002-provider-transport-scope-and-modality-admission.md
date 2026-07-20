@@ -50,6 +50,14 @@ The crate owns the `Provider` (`complete`/`stream`) modality and the metering/re
 decorators wrapping it. A modality that does not enter that decorator stack is "just an HTTP
 client" and does not belong here — a consumer can write that itself in ~40 lines.
 
+> **Scope of this ADR — read before §2.** This ADR gates **adding a *new modality*** (a second
+> API family, e.g. embeddings) into `sandhi-providers`. It does **not** gate a consumer
+> **adopting the *existing* chat modality** — that is precisely what the crate exists for, and
+> AnvaiOps **ADR-0047 D10 / D10a** endorses it (phased, same-language first). So ProximaDB (Rust)
+> linking `sandhi-providers` for chat transport is *not* subject to the §2 ≥2-consumer bar; the
+> chat modality already has multiple intended consumers by design. §2's bar applies only to
+> *widening* the crate's surface with a new modality.
+
 ### 2. Admitting a new modality requires **all three** of:
 
 - **≥2 real consumers.** One consumer implements the transport locally instead (ADR-0047 D1 /
