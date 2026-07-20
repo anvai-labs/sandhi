@@ -9,7 +9,9 @@
 //! - **Transport** ([`complete`] / [`stream`], ADR-0047 D10 step 3): forward a provider call through
 //!   sandhi-providers' async transport **in-process** — `complete` returns an awaitable, `stream` an
 //!   async iterator (bytes forwarded verbatim, D9; usage finalized on the terminal item). This makes
-//!   Sandhi the shared network core the in-house apps can `import`.
+//!   Sandhi the shared network core the in-house apps can `import`. [`register_provider`] is the D10
+//!   escape hatch: a host-language (Python) async callable registers as a custom provider, so a
+//!   custom / air-gapped / community provider rides `complete()` without a Rust adapter.
 //!
 //! Depends on `sandhi-core` (metering) + `sandhi-providers` (transport) — the latter pulls the
 //! async HTTP stack into the wheel to serve the transport surface.
@@ -34,14 +36,35 @@ use sandhi_core::{
     UsageEvent, VirtualKey,
 };
 use sandhi_providers::{
-    Anthropic, Cohere, Gemini, Ollama, OpenAiCompat, Provider, ProviderError, ProviderRequest,
-    StreamChunk,
+    Anthropic, Cohere, FnProvider, Gemini, Ollama, OpenAiCompat, Provider, ProviderError,
+    ProviderRequest, ProviderResponse, StreamChunk,
 };
+use std::sync::OnceLock;
 
-/// Build a provider adapter from its neutral slug + endpoint. OpenAI-compatible providers (OpenAI,
-/// Azure, Groq, vLLM, …) all use `OpenAiCompat` with the slug preserved for metering; Anthropic /
-/// Cohere / Gemini / Ollama have dedicated adapters. Transport step 3 (ADR-0047 D10).
+/// Host-registered custom providers (ADR-0047 D10 escape hatch): slug → a Python async callable that
+/// owns its own transport. Consulted before the built-in adapters, so a custom / air-gapped /
+/// community provider works through `complete()` without a Rust contribution.
+static CUSTOM_PROVIDERS: OnceLock<Mutex<HashMap<String, Py<PyAny>>>> = OnceLock::new();
+
+fn custom_providers() -> &'static Mutex<HashMap<String, Py<PyAny>>> {
+    CUSTOM_PROVIDERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Build a provider adapter from its neutral slug + endpoint. A host-registered Python provider
+/// (D10 escape hatch) wins over the built-ins; otherwise OpenAI-compatible providers (OpenAI,
+/// Azure, Groq, vLLM, …) all use `OpenAiCompat` with the slug preserved for metering, and Anthropic
+/// / Cohere / Gemini / Ollama have dedicated adapters. Transport step 3 (ADR-0047 D10).
 fn build_provider(provider: &str, base_url: &str, api_key: &str) -> Box<dyn Provider> {
+    // Escape hatch: a host-registered Python provider takes precedence (clone the handle out from
+    // under the lock, then dispatch through `FnProvider`).
+    let registered = custom_providers()
+        .lock()
+        .unwrap()
+        .get(provider)
+        .map(|h| Python::with_gil(|py| h.clone_ref(py)));
+    if let Some(handler) = registered {
+        return Box::new(python_fn_provider(provider.to_string(), handler));
+    }
     match provider {
         "anthropic" => Box::new(Anthropic::new(base_url, api_key)),
         "cohere" => Box::new(Cohere::new(base_url, api_key)),
@@ -50,6 +73,74 @@ fn build_provider(provider: &str, base_url: &str, api_key: &str) -> Box<dyn Prov
         // openai + every OpenAI-compatible slug: one adapter, slug preserved.
         _ => Box::new(OpenAiCompat::new(provider.to_string(), base_url, api_key)),
     }
+}
+
+/// Wrap a host-registered Python async callable as a [`Provider`] (ADR-0047 D10 escape hatch). The
+/// closure calls the Python coroutine and bridges it back to a Rust future (the reverse of
+/// [`future_into_py`]: `pyo3_async_runtimes::tokio::into_future`), then parses its returned mapping
+/// into a [`ProviderResponse`]. `stream()` is unsupported for custom providers (the underlying
+/// `FnProvider` returns 501), mirroring the Rust escape hatch.
+fn python_fn_provider(slug: String, handler: Py<PyAny>) -> FnProvider {
+    FnProvider::new(slug, move |req: ProviderRequest| {
+        let handler = Python::with_gil(|py| handler.clone_ref(py));
+        async move {
+            // Call the Python handler → coroutine, then turn that awaitable into a Rust future.
+            let fut = Python::with_gil(|py| -> PyResult<_> {
+                let body_json = serde_json::to_string(&req.body)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                let coro = handler.bind(py).call1((
+                    req.model.clone(),
+                    body_json,
+                    req.session_id.clone(),
+                ))?;
+                pyo3_async_runtimes::tokio::into_future(coro)
+            })
+            .map_err(|e| ProviderError::Transport(format!("custom provider dispatch: {e}")))?;
+            let result = fut
+                .await
+                .map_err(|e| ProviderError::Transport(format!("custom provider errored: {e}")))?;
+            Python::with_gil(|py| py_obj_to_response(result.bind(py)))
+        }
+    })
+}
+
+/// Parse a custom provider's returned mapping into a [`ProviderResponse`]. Contract:
+/// `{"status": int, "body": <JSON string>, "usage": {tokens_in, tokens_out, …} | None}`.
+fn py_obj_to_response(obj: &Bound<'_, PyAny>) -> Result<ProviderResponse, ProviderError> {
+    let te = |m: String| ProviderError::Transport(m);
+    let status: u16 = obj
+        .get_item("status")
+        .map_err(|e| te(format!("custom provider result missing 'status': {e}")))?
+        .extract()
+        .map_err(|e| te(format!("custom provider 'status' not an int: {e}")))?;
+    let body_str: String = obj
+        .get_item("body")
+        .map_err(|e| te(format!("custom provider result missing 'body': {e}")))?
+        .extract()
+        .map_err(|e| te(format!("custom provider 'body' must be a JSON string: {e}")))?;
+    let body: serde_json::Value = serde_json::from_str(&body_str)
+        .map_err(|e| te(format!("custom provider 'body' is not valid JSON: {e}")))?;
+    let usage = match obj.get_item("usage") {
+        Ok(u) if !u.is_none() => parsed_from_pyobj(&u),
+        _ => ParsedUsage::default(),
+    };
+    Ok(ProviderResponse {
+        status,
+        body,
+        usage,
+    })
+}
+
+/// Register a Python async callable as a custom provider under `slug` (ADR-0047 D10 escape hatch —
+/// the host-language adapter). The handler is
+/// `async def handler(model: str, body_json: str, session_id: str | None) -> dict` returning
+/// `{"status": int, "body": <JSON string>, "usage": {tokens_in, tokens_out, cache_creation_tokens,
+/// cache_read_tokens} | None}`; it owns its own transport, so a custom / air-gapped / community
+/// provider works through `complete()` without a Rust adapter. Overrides a built-in slug of the same
+/// name. Streaming is not supported for custom providers (mirrors the Rust `FnProvider`).
+#[pyfunction]
+fn register_provider(slug: String, handler: Py<PyAny>) {
+    custom_providers().lock().unwrap().insert(slug, handler);
 }
 
 fn provider_err_to_py(e: ProviderError) -> PyErr {
@@ -511,6 +602,7 @@ fn sandhi_gateway(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parse_usage, m)?)?;
     m.add_function(wrap_pyfunction!(complete, m)?)?;
     m.add_function(wrap_pyfunction!(stream, m)?)?;
+    m.add_function(wrap_pyfunction!(register_provider, m)?)?;
     m.add_class::<ByteStreamIter>()?;
     m.add_class::<Gateway>()?;
     Ok(())

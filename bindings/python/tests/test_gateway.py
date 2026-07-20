@@ -143,6 +143,42 @@ def test_stream_async_iterator():
         srv.shutdown()
 
 
+def test_register_custom_provider_escape_hatch():
+    """Step 3d (ADR-0047 D10): a host-registered Python async provider serves complete() without a
+    Rust adapter — the escape hatch for custom / air-gapped / community providers. The handler owns
+    its own transport and reports usage; sandhi routes complete() to it and parses that usage."""
+    import asyncio
+
+    async def my_handler(model, body_json, session_id):
+        req = json.loads(body_json)
+        # A custom provider does its own 'transport'; here we just echo and self-report usage.
+        return {
+            "status": 200,
+            "body": json.dumps({"model": model, "echoed": req, "session": session_id}),
+            "usage": {
+                "tokens_in": 7,
+                "tokens_out": 3,
+                "cache_creation_tokens": 0,
+                "cache_read_tokens": 2,
+            },
+        }
+
+    sg.register_provider("mycustom", my_handler)
+
+    async def _call():
+        body = json.dumps({"messages": [{"role": "user", "content": "hi"}]})
+        return await sg.complete("mycustom", "custom-model-x", "http://unused", "k", body, "s9")
+
+    out = asyncio.run(_call())
+    assert out["status"] == 200
+    assert out["usage"]["tokens_in"] == 7
+    assert out["usage"]["tokens_out"] == 3
+    assert out["usage"]["cache_read_tokens"] == 2
+    body = json.loads(out["body"])
+    assert body["model"] == "custom-model-x"
+    assert body["session"] == "s9"
+
+
 def test_gateway_meters_attributes_and_budgets():
     gw = sg.Gateway()
     gw.add_virtual_key("vk_alice", subject="alice", group="platform", upstream="anthropic")
