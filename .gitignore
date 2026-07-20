@@ -3,6 +3,10 @@
 **/target
 **/*.rs.bk
 
+# Coverage instrumentation (cargo-llvm-cov / bindings glue coverage)
+*.profraw
+*.profdata
+
 # Python / maturin
 __pycache__/
 *.py[cod]
