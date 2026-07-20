@@ -1,0 +1,1 @@
+{"id":"cohere-corpus","message":{"role":"assistant","content":[{"type":"text","text":"Hello, world"}]},"finish_reason":"COMPLETE","usage":{"billed_units":{"input_tokens":300,"output_tokens":120},"tokens":{"input_tokens":310,"output_tokens":125}}}
