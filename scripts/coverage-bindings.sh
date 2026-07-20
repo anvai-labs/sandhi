@@ -24,7 +24,14 @@ IGNORE='(registry|rustc|/crates/|library/std)'
 case "$LANG_ARG" in
   python)
     DIR="$ROOT/bindings/python"
-    BUILD() { maturin develop; }
+    # `maturin build` + `pip install` (not `develop`): works with the active interpreter whether or
+    # not a virtualenv is active (CI uses system Python, so `develop` — which requires a venv —
+    # would fail). The instrumented .so still lands in target/ where llvm-cov finds it.
+    BUILD() {
+      rm -rf target/cov-dist
+      maturin build --out target/cov-dist
+      pip install --force-reinstall --no-deps target/cov-dist/*.whl
+    }
     RUN() { python tests/test_gateway.py; }
     ;;
   node)
