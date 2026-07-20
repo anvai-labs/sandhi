@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "Provenance: Anthropic Messages API `usage` object, hand-authored from the public API documentation. Anthropic publishes no official OpenAPI spec (ADR-0003 context; the community spec was unreachable 2026-07-20), so this is the documented-fields schema. Byte-pinned oracle input for TD-0001 W2 (ADR-0003 §3) — never shipped; test-only.",
+  "title": "AnthropicMessageUsage",
+  "type": "object",
+  "description": "Token usage for an Anthropic Messages response, including the prompt-cache split.",
+  "properties": {
+    "input_tokens": { "type": "integer", "description": "Fresh (non-cached) input tokens." },
+    "output_tokens": { "type": "integer", "description": "Output tokens." },
+    "cache_creation_input_tokens": { "type": "integer", "description": "Prompt-cache write tokens." },
+    "cache_read_input_tokens": { "type": "integer", "description": "Prompt-cache read tokens." }
+  },
+  "required": ["input_tokens", "output_tokens"]
+}

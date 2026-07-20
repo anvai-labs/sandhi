@@ -21,3 +21,7 @@ tokio = { version = "1", features = ["time"] }
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 wiremock = "0.6"
+# TD-0001 W2 differential oracle (ADR-0003 §3): typify generates an independent deserializer
+# from a byte-pinned provider schema; test-only, never linked into the shipped crate/bindings.
+typify = "0.7"
+serde = { version = "1", features = ["derive"] }
