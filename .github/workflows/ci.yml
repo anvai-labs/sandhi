@@ -87,7 +87,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt, clippy, llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -96,12 +97,16 @@ jobs:
           cargo fmt --manifest-path bindings/python/Cargo.toml --check
           cargo clippy --manifest-path bindings/python/Cargo.toml --all-targets -- -D warnings
       - run: pip install maturin
-      - name: build + install the wheel
+      - name: build + install the wheel (release packaging path)
         run: |
           maturin build -m bindings/python/Cargo.toml --out dist
           pip install dist/*.whl
       - name: run binding tests
         run: python bindings/python/tests/test_gateway.py
+      - name: binding glue coverage (fail under 85% lines)
+        # Instrumented rebuild + harness → llvm-cov over bindings/python/src/lib.rs only. The
+        # --workspace coverage job never sees the glue (separate cargo workspace, foreign runtime).
+        run: bash scripts/coverage-bindings.sh python
 
   attribution:
     runs-on: ubuntu-latest
@@ -131,7 +136,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt, clippy, llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
@@ -139,12 +145,16 @@ jobs:
         run: |
           cargo fmt --manifest-path bindings/node/Cargo.toml --check
           cargo clippy --manifest-path bindings/node/Cargo.toml -- -D warnings
-      - name: build + test
+      - name: build + test (release platform artifact)
         working-directory: bindings/node
         run: |
           npm install
           npx napi build --platform
           npm test
+      - name: binding glue coverage (fail under 85% lines)
+        # Instrumented rebuild + harness → llvm-cov over bindings/node/src/lib.rs only (needs the
+        # node_modules installed by the step above).
+        run: bash scripts/coverage-bindings.sh node
 
   coverage:
     needs: changes
