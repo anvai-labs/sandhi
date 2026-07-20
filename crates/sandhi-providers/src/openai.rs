@@ -2,6 +2,9 @@
 //! Completions wire format (Groq, Together, Fireworks, DeepSeek, Mistral, Qwen, xAI,
 //! OpenRouter, vLLM, LM Studio, Ollama, Cerebras…). One adapter, many providers.
 
+use crate::embed::{
+    parse_openai_embeddings, EmbedRequest, EmbedResponse, EmbedUsage, EmbeddingProvider,
+};
 use crate::parse_openai_usage;
 use crate::{
     error_for_status, ByteStream, ParsedUsage, Provider, ProviderError, ProviderRequest,
@@ -42,6 +45,47 @@ impl OpenAiCompat {
 
     fn chat_url(&self) -> String {
         format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
+    }
+
+    fn embeddings_url(&self) -> String {
+        format!("{}/embeddings", self.base_url.trim_end_matches('/'))
+    }
+}
+
+#[async_trait]
+impl EmbeddingProvider for OpenAiCompat {
+    fn slug(&self) -> &str {
+        &self.slug
+    }
+
+    async fn embed(&self, req: EmbedRequest) -> Result<EmbedResponse, ProviderError> {
+        let body = json!({ "model": req.model, "input": req.input });
+        let resp = self
+            .client
+            .post(self.embeddings_url())
+            .bearer_auth(&self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ProviderError::Transport(e.to_string()))?;
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            return Err(error_for_status(status));
+        }
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|e| ProviderError::Transport(e.to_string()))?;
+        let embeddings = parse_openai_embeddings(&body);
+        let usage = body.get("usage").map(|u| EmbedUsage {
+            input_tokens: u.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0),
+            total_tokens: u.get("total_tokens").and_then(Value::as_u64).unwrap_or(0),
+        });
+        Ok(EmbedResponse {
+            status,
+            embeddings,
+            usage,
+        })
     }
 }
 
@@ -199,6 +243,42 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err2, ProviderError::RateLimited));
+    }
+
+    #[tokio::test]
+    async fn embed_parses_vectors_and_usage() {
+        let server = MockServer::start().await;
+        let body = json!({
+            "object": "list",
+            "data": [
+                { "index": 0, "embedding": [0.1, 0.2, 0.3] },
+                { "index": 1, "embedding": [0.4, 0.5, 0.6] }
+            ],
+            "usage": { "prompt_tokens": 42, "total_tokens": 42 }
+        });
+        Mock::given(method("POST"))
+            .and(path("/embeddings"))
+            .and(header("authorization", "Bearer sk-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let p = OpenAiCompat::new("openai", server.uri(), "sk-test");
+        let out = p
+            .embed(EmbedRequest::new(
+                "text-embedding-3-small",
+                vec!["a".into(), "b".into()],
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(out.status, 200);
+        assert_eq!(out.embeddings.len(), 2);
+        assert_eq!(out.embeddings[0], vec![0.1, 0.2, 0.3]);
+        assert_eq!(out.embeddings[1], vec![0.4, 0.5, 0.6]);
+        let usage = out.usage.unwrap();
+        assert_eq!(usage.input_tokens, 42);
+        assert_eq!(usage.total_tokens, 42);
     }
 
     #[tokio::test]

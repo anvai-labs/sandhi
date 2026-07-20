@@ -25,6 +25,7 @@ pub use sandhi_core::usage::{
 
 pub mod anthropic;
 pub mod cohere;
+pub mod embed;
 pub mod escape_hatch;
 pub mod gemini;
 pub mod local;
@@ -32,6 +33,7 @@ pub mod openai;
 pub mod resilience;
 pub use anthropic::Anthropic;
 pub use cohere::Cohere;
+pub use embed::{EmbedRequest, EmbedResponse, EmbedUsage, EmbeddingProvider};
 pub use escape_hatch::FnProvider;
 pub use gemini::Gemini;
 pub use local::Ollama;
