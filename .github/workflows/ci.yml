@@ -22,6 +22,7 @@ jobs:
       python: ${{ steps.filter.outputs.python }}
       node: ${{ steps.filter.outputs.node }}
       schema: ${{ steps.filter.outputs.schema }}
+      codegen: ${{ steps.filter.outputs.codegen }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -47,6 +48,11 @@ jobs:
               - '.github/workflows/ci.yml'
             schema:
               - 'schemas/**'
+              - '.github/workflows/ci.yml'
+            codegen:
+              - 'crates/sandhi-core/schemas/**'
+              - 'crates/sandhi-core/src/generated/**'
+              - 'scripts/gen-provider-models.sh'
               - '.github/workflows/ci.yml'
 
   rust:
@@ -151,7 +157,25 @@ jobs:
           components: llvm-tools-preview
       - uses: taiki-e/install-action@cargo-llvm-cov
       - name: Line coverage must stay above 75%
-        run: cargo llvm-cov --workspace --fail-under-lines 75
+        # Exclude generated code (typify output) — you test the generator's schema, not the
+        # generated builder/error surface, so its coverage is meaningless (ADR-0003 §2/§4).
+        run: cargo llvm-cov --workspace --fail-under-lines 75 --ignore-filename-regex 'src/generated/'
+
+  # Drift check for the typify narrow models (ADR-0003 §2/§4 — TD-0001 W3): regenerate from the
+  # byte-pinned schemas and assert the committed output is unchanged. Guards the no-hand-edit rule.
+  codegen-drift:
+    needs: changes
+    if: ${{ needs.changes.outputs.codegen == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Regenerate models and assert no drift
+        run: |
+          bash scripts/gen-provider-models.sh
+          git diff --exit-code -- crates/sandhi-core/src/generated
 
   # Single aggregate gate for branch protection (mirrors proximaDB's "CI Success").
   # Always runs so the required check reports even when heavy jobs are skipped on
@@ -161,7 +185,7 @@ jobs:
     name: CI Success
     runs-on: ubuntu-latest
     if: ${{ always() }}
-    needs: [changes, rust, schema, python-binding, node-binding, attribution, coverage]
+    needs: [changes, rust, schema, python-binding, node-binding, attribution, coverage, codegen-drift]
     steps:
       - name: Verify no required job failed (skipped is OK for docs-only)
         env:
