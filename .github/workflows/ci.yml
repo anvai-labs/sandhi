@@ -5,8 +5,53 @@ on:
     branches: [main, develop]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
+  # Detect what changed so a docs-only change (docs/**, README, etc.) skips
+  # compilation / coverage / bindings and runs only the always-on audit
+  # (attribution) + the aggregate gate. Each heavy job is gated on these
+  # outputs; `CI Success` always runs (if: always()) so the required status
+  # check still reports on docs-only PRs. A change to this workflow itself
+  # re-runs everything (it is listed in every filter).
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      python: ${{ steps.filter.outputs.python }}
+      node: ${{ steps.filter.outputs.node }}
+      schema: ${{ steps.filter.outputs.schema }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+            python:
+              - 'crates/**'
+              - 'bindings/python/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+            node:
+              - 'crates/**'
+              - 'bindings/node/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+            schema:
+              - 'schemas/**'
+              - '.github/workflows/ci.yml'
+
   rust:
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,6 +64,8 @@ jobs:
       - run: cargo test --workspace
 
   schema:
+    needs: changes
+    if: ${{ needs.changes.outputs.schema == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,6 +74,8 @@ jobs:
           python3 -c "import json; json.load(open('schemas/usage-event.v1.schema.json')); print('schema OK')"
 
   python-binding:
+    needs: changes
+    if: ${{ needs.changes.outputs.python == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -69,6 +118,8 @@ jobs:
           fi
 
   node-binding:
+    needs: changes
+    if: ${{ needs.changes.outputs.node == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -90,6 +141,8 @@ jobs:
           npm test
 
   coverage:
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -101,9 +154,26 @@ jobs:
         run: cargo llvm-cov --workspace --fail-under-lines 75
 
   # Single aggregate gate for branch protection (mirrors proximaDB's "CI Success").
+  # Always runs so the required check reports even when heavy jobs are skipped on
+  # docs-only changes; passes unless a needed job actually failed/was cancelled
+  # (a `skipped` result is a pass).
   ci-success:
     name: CI Success
     runs-on: ubuntu-latest
-    needs: [rust, schema, python-binding, node-binding, attribution, coverage]
+    if: ${{ always() }}
+    needs: [changes, rust, schema, python-binding, node-binding, attribution, coverage]
     steps:
-      - run: echo "all required checks passed"
+      - name: Verify no required job failed (skipped is OK for docs-only)
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "job results: $RESULTS"
+          for r in $RESULTS; do
+            case "$r" in
+              failure|cancelled)
+                echo "A required job did not pass: result=$r"
+                exit 1
+                ;;
+            esac
+          done
+          echo "all required checks passed or were skipped"
