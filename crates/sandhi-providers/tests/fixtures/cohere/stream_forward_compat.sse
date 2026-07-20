@@ -1,0 +1,3 @@
+data: {"type":"some-future-event","delta":{"whatever":true}}
+
+data: {"type":"message-end","delta":{"finish_reason":"COMPLETE","usage":{"billed_units":{"input_tokens":300,"output_tokens":120,"search_units":0}},"new_field":1}}

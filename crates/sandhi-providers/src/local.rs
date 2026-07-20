@@ -3,8 +3,8 @@
 //! servers use [`crate::OpenAiCompat`] pointed at `http://localhost:.../v1`.)
 
 use crate::{
-    error_for_status, metered_passthrough, ByteStream, Provider, ProviderError, ProviderRequest,
-    ProviderResponse,
+    error_for_status, metered_passthrough, ByteStream, ParsedUsage, Provider, ProviderError,
+    ProviderRequest, ProviderResponse,
 };
 use async_trait::async_trait;
 use sandhi_core::parse_ollama_usage;
@@ -96,24 +96,70 @@ impl Provider for Ollama {
             return Err(error_for_status(resp.status().as_u16()));
         }
         // NDJSON: each line is a complete JSON object; the final one carries the eval counts.
-        Ok(metered_passthrough(resp.bytes_stream(), |line, usage| {
-            if let Some(v) = std::str::from_utf8(line)
-                .ok()
-                .and_then(|s| serde_json::from_str::<Value>(s.trim()).ok())
-            {
-                if let Some(u) = parse_ollama_usage(&v) {
-                    *usage = u;
-                }
-            }
-        }))
+        Ok(metered_passthrough(resp.bytes_stream(), sniff_usage_line))
+    }
+}
+
+/// Accumulate usage from an Ollama NDJSON line: the final object (`done: true`) carries
+/// `prompt_eval_count` / `eval_count`; last wins.
+fn sniff_usage_line(line: &[u8], usage: &mut ParsedUsage) {
+    if let Some(v) = std::str::from_utf8(line)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(s.trim()).ok())
+    {
+        if let Some(u) = parse_ollama_usage(&v) {
+            *usage = u;
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use serde_json::json;
     use wiremock::matchers::{method, path};
+
+    const EXPECTED: ParsedUsage = ParsedUsage {
+        tokens_in: 512,
+        tokens_out: 128,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
+    };
+
+    /// Chunk-boundary property (TD-0001 W1): finalized usage is invariant across every split
+    /// offset — the final NDJSON line's eval counts straddling two `Bytes` chunks still parse.
+    #[tokio::test]
+    async fn stream_usage_invariant_across_every_chunk_boundary() {
+        let body: &[u8] = include_bytes!("../tests/fixtures/ollama/stream.ndjson");
+        for k in 0..=body.len() {
+            let chunks = vec![
+                Bytes::copy_from_slice(&body[..k]),
+                Bytes::copy_from_slice(&body[k..]),
+            ];
+            assert_eq!(
+                crate::accumulate_usage(chunks, sniff_usage_line).await,
+                EXPECTED,
+                "split at offset {k}"
+            );
+        }
+        let one_byte: Vec<Bytes> = body.iter().map(|b| Bytes::copy_from_slice(&[*b])).collect();
+        assert_eq!(
+            crate::accumulate_usage(one_byte, sniff_usage_line).await,
+            EXPECTED,
+            "one byte per chunk"
+        );
+    }
+
+    /// Forward-compat property (TD-0001 W1): unknown fields leave the meter unperturbed.
+    #[tokio::test]
+    async fn stream_usage_ignores_unknown_fields() {
+        let body: &[u8] = include_bytes!("../tests/fixtures/ollama/stream_forward_compat.ndjson");
+        assert_eq!(
+            crate::accumulate_usage(vec![Bytes::copy_from_slice(body)], sniff_usage_line).await,
+            EXPECTED
+        );
+    }
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]

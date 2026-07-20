@@ -182,3 +182,30 @@ pub(crate) fn sse_data_json(line: &[u8]) -> Option<serde_json::Value> {
     }
     serde_json::from_str(payload).ok()
 }
+
+/// Test helper: drive `chunks` (a pre-split byte stream) through the production streaming
+/// primitive (`metered_passthrough` + the adapter's real `sniff`) and return the finalized usage
+/// from the terminal item. Shared by the per-provider chunk-boundary / forward-compat property
+/// tests (TD-0001 W1) so each exercises the exact production path.
+#[cfg(test)]
+pub(crate) async fn accumulate_usage(
+    chunks: Vec<Bytes>,
+    sniff: impl FnMut(&[u8], &mut ParsedUsage) + Send + 'static,
+) -> ParsedUsage {
+    use futures_util::StreamExt;
+    let upstream = futures_util::stream::iter(
+        chunks
+            .into_iter()
+            .map(Ok::<Bytes, reqwest::Error>)
+            .collect::<Vec<_>>(),
+    );
+    let mut out = metered_passthrough(Box::pin(upstream), sniff);
+    let mut final_usage = None;
+    while let Some(item) = out.next().await {
+        let c = item.unwrap();
+        if c.usage.is_some() {
+            final_usage = c.usage;
+        }
+    }
+    final_usage.expect("terminal item carries usage")
+}

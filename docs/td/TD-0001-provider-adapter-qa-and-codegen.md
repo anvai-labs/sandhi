@@ -39,10 +39,15 @@ synthetic bodies (`anthropic.rs`, `usage.rs`). This TD closes that gap.
       (`stream_forward_compat.sse`) leave the meter unaffected — no panic, same counts
       (`stream_usage_ignores_unknown_events_and_fields`). *(Anthropic; extend per provider.)*
 
-> **W1 status:** Anthropic slice complete (the highest cache-split risk). Remaining: replicate the
-> fixture + replay + chunk-boundary + forward-compat set for OpenAI / Gemini / Cohere / Ollama.
-> Fixtures are faithful representative captures of the documented shapes; a real recording drops in
-> unchanged (same test harness).
+> **W1 status: COMPLETE.** All shipped adapters now carry the fixture + replay + chunk-boundary +
+> forward-compat set — Anthropic (`anthropic_corpus.rs`), and OpenAI / Gemini / Cohere / Ollama
+> (`provider_corpus.rs` + per-module unit tests). As part of this, every adapter's streaming path
+> was unified on the shared `metered_passthrough` primitive with a named `sniff_usage_line` (OpenAI
+> was the last inline loop; Gemini/Cohere/Ollama had anonymous closures), and a shared
+> `#[cfg(test)] crate::accumulate_usage` helper drives the chunk-boundary property for every
+> provider against its exact production sniff. Fixtures are faithful representative captures of the
+> documented shapes; a real recording drops in unchanged (same harness). Next: **W2** (differential
+> test oracle) and optional **W3** (typify narrow-model pilot).
 
 ### W2 — Differential test oracle (ADR-0003 §3)
 
