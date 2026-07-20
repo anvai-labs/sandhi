@@ -11,11 +11,20 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-napi = { version = "2", default-features = false, features = ["napi4"] }
+# tokio_rt: lets `#[napi] async fn` bridge a Rust future to a JS Promise on napi's own tokio
+# runtime (the napi analogue of PyO3's pyo3-async-runtimes) — powers the transport surface.
+napi = { version = "2", default-features = false, features = ["napi4", "tokio_rt"] }
 napi-derive = "2"
 sandhi-core = { path = "../../crates/sandhi-core" }
 serde_json = "1"
 time = { version = "0.3", features = ["formatting"] }
+
+# Transport binding (ADR-0047 D10 step 3c — napi/TS parity): expose sandhi-providers' async provider
+# transport to Node. `tokio` (sync) supplies the mpsc channel that decouples the background stream
+# driver from the JS-side pull; `futures-util` drives the Rust `Stream`.
+sandhi-providers = { path = "../../crates/sandhi-providers" }
+tokio = { version = "1", features = ["sync"] }
+futures-util = "0.3"
 
 [build-dependencies]
 napi-build = "2"
