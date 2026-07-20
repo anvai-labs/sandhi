@@ -3,12 +3,10 @@
 
 use crate::parse_anthropic_usage;
 use crate::{
-    error_for_status, ByteStream, ParsedUsage, Provider, ProviderError, ProviderRequest,
-    ProviderResponse, StreamChunk,
+    error_for_status, metered_passthrough, ByteStream, ParsedUsage, Provider, ProviderError,
+    ProviderRequest, ProviderResponse,
 };
 use async_trait::async_trait;
-use bytes::Bytes;
-use futures_util::StreamExt;
 use sandhi_core::usage::u64_at;
 use serde_json::Value;
 
@@ -96,22 +94,13 @@ impl Provider for Anthropic {
         if !resp.status().is_success() {
             return Err(error_for_status(resp.status().as_u16()));
         }
-        let mut upstream = resp.bytes_stream();
-        let s = async_stream::try_stream! {
-            let mut line_buf: Vec<u8> = Vec::new();
-            let mut acc = ParsedUsage::default();
-            while let Some(chunk) = upstream.next().await {
-                let chunk = chunk.map_err(|e| ProviderError::Transport(e.to_string()))?;
-                line_buf.extend_from_slice(&chunk);
-                while let Some(pos) = line_buf.iter().position(|&b| b == b'\n') {
-                    let line: Vec<u8> = line_buf.drain(..=pos).collect();
-                    sniff_usage_line(&line, &mut acc);
-                }
-                yield StreamChunk { data: chunk, usage: None };
-            }
-            yield StreamChunk { data: Bytes::new(), usage: Some(acc) };
-        };
-        Ok(Box::pin(s))
+        // Forward every upstream chunk verbatim (O(1) memory, ADR-0047 D9) while sniffing each
+        // complete line for usage. `metered_passthrough` is the single shared streaming
+        // primitive — the chunk-boundary property test exercises this exact path.
+        Ok(metered_passthrough(
+            Box::pin(resp.bytes_stream()),
+            sniff_usage_line,
+        ))
     }
 }
 
@@ -147,10 +136,67 @@ fn sniff_usage_line(line: &[u8], acc: &mut ParsedUsage) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use futures_util::StreamExt;
     use serde_json::json;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const EXPECTED: ParsedUsage = ParsedUsage {
+        tokens_in: 1024,
+        tokens_out: 256,
+        cache_creation_tokens: 2048,
+        cache_read_tokens: 4096,
+    };
+
+    /// Drive an SSE byte-stream (pre-split into `chunks`) through the production streaming
+    /// primitive (`metered_passthrough` + the real `sniff_usage_line`) and return the finalized
+    /// usage from the terminal item.
+    async fn accumulate(chunks: Vec<Bytes>) -> ParsedUsage {
+        let upstream = futures_util::stream::iter(
+            chunks
+                .into_iter()
+                .map(Ok::<Bytes, reqwest::Error>)
+                .collect::<Vec<_>>(),
+        );
+        let mut out = metered_passthrough(Box::pin(upstream), sniff_usage_line);
+        let mut final_usage = None;
+        while let Some(item) = out.next().await {
+            let c = item.unwrap();
+            if c.usage.is_some() {
+                final_usage = c.usage;
+            }
+        }
+        final_usage.expect("terminal item carries usage")
+    }
+
+    /// Chunk-boundary property (ADR-0003 §5 / TD-0001 W1): the finalized usage must be invariant
+    /// no matter where the byte stream is split — a `usage` field straddling two `Bytes` chunks
+    /// must still parse. Covers every 2-way split offset plus the one-byte-per-chunk worst case.
+    #[tokio::test]
+    async fn stream_usage_invariant_across_every_chunk_boundary() {
+        let sse: &[u8] = include_bytes!("../tests/fixtures/anthropic/stream_cache_split.sse");
+        for k in 0..=sse.len() {
+            let chunks = vec![
+                Bytes::copy_from_slice(&sse[..k]),
+                Bytes::copy_from_slice(&sse[k..]),
+            ];
+            assert_eq!(accumulate(chunks).await, EXPECTED, "split at offset {k}");
+        }
+        let one_byte: Vec<Bytes> = sse.iter().map(|b| Bytes::copy_from_slice(&[*b])).collect();
+        assert_eq!(accumulate(one_byte).await, EXPECTED, "one byte per chunk");
+    }
+
+    /// Forward-compat property (ADR-0003 §5 / TD-0001 W1): unknown event types and unknown usage
+    /// fields must not fault or perturb the meter.
+    #[tokio::test]
+    async fn stream_usage_ignores_unknown_events_and_fields() {
+        let sse: &[u8] = include_bytes!("../tests/fixtures/anthropic/stream_forward_compat.sse");
+        assert_eq!(
+            accumulate(vec![Bytes::copy_from_slice(sse)]).await,
+            EXPECTED
+        );
+    }
 
     #[tokio::test]
     async fn complete_sends_headers_and_parses_cache_split() {

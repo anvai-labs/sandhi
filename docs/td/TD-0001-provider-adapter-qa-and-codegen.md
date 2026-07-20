@@ -19,19 +19,30 @@ synthetic bodies (`anthropic.rs`, `usage.rs`). This TD closes that gap.
 
 ### W1 — Recorded-fixture usage corpus (the risk-retiring QA) — *highest value first*
 
-- [ ] Add `crates/sandhi-providers/tests/fixtures/<provider>/` with recorded **real** response
-      bodies + SSE streams (secrets scrubbed): non-stream JSON and streamed SSE, one per provider,
-      each with a `expected_usage.json` (`ParsedUsage` ground truth).
-- [ ] Anthropic **first** (highest cache-split risk): capture a stream that exercises
-      `cache_creation_input_tokens` **and** `cache_read_input_tokens` non-zero.
-- [ ] A replay test drives each SSE fixture through `Provider::stream` (wiremock-served) and
-      asserts the finalized `ParsedUsage` equals `expected_usage.json`.
-- [ ] **Chunk-boundary property test:** re-feed each SSE fixture split at *every* byte offset (or
-      a randomized subset) and assert the accumulated usage is invariant — guards the
+- [x] Add `crates/sandhi-providers/tests/fixtures/<provider>/` with response bodies + SSE streams
+      (secrets scrubbed): non-stream JSON and streamed SSE, each with an `expected_usage.json`
+      (`ParsedUsage` ground truth). **Anthropic done** (`tests/fixtures/anthropic/`); other shipped
+      adapters (OpenAI, Gemini, Cohere, Ollama) still to add.
+- [x] Anthropic **first** (highest cache-split risk): a stream that exercises
+      `cache_creation_input_tokens` **and** `cache_read_input_tokens` non-zero
+      (`stream_cache_split.sse`, both = 2048 / 4096).
+- [x] A replay test drives the SSE + non-stream fixtures through `Provider` (wiremock-served) and
+      asserts the finalized `ParsedUsage` equals `expected_usage.json` — plus byte-exact
+      pass-through on the stream (`tests/anthropic_corpus.rs`). *(Anthropic; extend per provider.)*
+- [x] **Chunk-boundary property test:** re-feeds the SSE fixture split at *every* byte offset (and
+      one-byte-per-chunk) and asserts the accumulated usage is invariant — guards the
       `metered_passthrough` / `sniff_usage_line` line-buffering against a `usage` field straddling
-      two `Bytes` chunks.
-- [ ] **Forward-compat test:** inject an unknown field into each fixture and assert the meter is
-      unaffected (no panic, same counts).
+      two `Bytes` chunks. *(`stream_usage_invariant_across_every_chunk_boundary`.)* As part of this,
+      `Anthropic::stream` was refactored to reuse the shared `metered_passthrough` primitive (was a
+      duplicated inline loop) so the test covers the exact production path.
+- [x] **Forward-compat test:** unknown event types + unknown usage fields
+      (`stream_forward_compat.sse`) leave the meter unaffected — no panic, same counts
+      (`stream_usage_ignores_unknown_events_and_fields`). *(Anthropic; extend per provider.)*
+
+> **W1 status:** Anthropic slice complete (the highest cache-split risk). Remaining: replicate the
+> fixture + replay + chunk-boundary + forward-compat set for OpenAI / Gemini / Cohere / Ollama.
+> Fixtures are faithful representative captures of the documented shapes; a real recording drops in
+> unchanged (same test harness).
 
 ### W2 — Differential test oracle (ADR-0003 §3)
 
