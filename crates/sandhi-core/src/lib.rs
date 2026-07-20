@@ -10,6 +10,8 @@
 
 pub mod budget;
 pub mod event;
+// Generated typify narrow models (ADR-0003 §2/§4 pilot) — regenerated, never hand-edited.
+mod generated;
 pub mod keys;
 pub mod sink;
 pub mod usage;

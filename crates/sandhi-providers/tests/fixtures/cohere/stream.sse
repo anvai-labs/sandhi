@@ -1,0 +1,7 @@
+data: {"type":"message-start","id":"cohere-corpus","delta":{"message":{"role":"assistant"}}}
+
+data: {"type":"content-delta","index":0,"delta":{"message":{"content":{"text":"Hello"}}}}
+
+data: {"type":"content-delta","index":0,"delta":{"message":{"content":{"text":", world"}}}}
+
+data: {"type":"message-end","delta":{"finish_reason":"COMPLETE","usage":{"billed_units":{"input_tokens":300,"output_tokens":120},"tokens":{"input_tokens":310,"output_tokens":125}}}}

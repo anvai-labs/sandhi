@@ -5,8 +5,61 @@ on:
     branches: [main, develop]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
+  # Detect what changed so a docs-only change (docs/**, README, etc.) skips
+  # compilation / coverage / bindings and runs only the always-on audit
+  # (attribution) + the aggregate gate. Each heavy job is gated on these
+  # outputs; `CI Success` always runs (if: always()) so the required status
+  # check still reports on docs-only PRs. A change to this workflow itself
+  # re-runs everything (it is listed in every filter).
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      python: ${{ steps.filter.outputs.python }}
+      node: ${{ steps.filter.outputs.node }}
+      schema: ${{ steps.filter.outputs.schema }}
+      codegen: ${{ steps.filter.outputs.codegen }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+            python:
+              - 'crates/**'
+              - 'bindings/python/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'scripts/coverage-bindings.sh'
+              - '.github/workflows/ci.yml'
+            node:
+              - 'crates/**'
+              - 'bindings/node/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'scripts/coverage-bindings.sh'
+              - '.github/workflows/ci.yml'
+            schema:
+              - 'schemas/**'
+              - '.github/workflows/ci.yml'
+            codegen:
+              - 'crates/sandhi-core/schemas/**'
+              - 'crates/sandhi-core/src/generated/**'
+              - 'scripts/gen-provider-models.sh'
+              - '.github/workflows/ci.yml'
+
   rust:
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,6 +72,8 @@ jobs:
       - run: cargo test --workspace
 
   schema:
+    needs: changes
+    if: ${{ needs.changes.outputs.schema == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,12 +82,15 @@ jobs:
           python3 -c "import json; json.load(open('schemas/usage-event.v1.schema.json')); print('schema OK')"
 
   python-binding:
+    needs: changes
+    if: ${{ needs.changes.outputs.python == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt, clippy, llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -41,12 +99,16 @@ jobs:
           cargo fmt --manifest-path bindings/python/Cargo.toml --check
           cargo clippy --manifest-path bindings/python/Cargo.toml --all-targets -- -D warnings
       - run: pip install maturin
-      - name: build + install the wheel
+      - name: build + install the wheel (release packaging path)
         run: |
           maturin build -m bindings/python/Cargo.toml --out dist
           pip install dist/*.whl
       - name: run binding tests
         run: python bindings/python/tests/test_gateway.py
+      - name: binding glue coverage (fail under 85% lines)
+        # Instrumented rebuild + harness → llvm-cov over bindings/python/src/lib.rs only. The
+        # --workspace coverage job never sees the glue (separate cargo workspace, foreign runtime).
+        run: bash scripts/coverage-bindings.sh python
 
   attribution:
     runs-on: ubuntu-latest
@@ -69,12 +131,15 @@ jobs:
           fi
 
   node-binding:
+    needs: changes
+    if: ${{ needs.changes.outputs.node == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt, clippy, llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
@@ -82,14 +147,20 @@ jobs:
         run: |
           cargo fmt --manifest-path bindings/node/Cargo.toml --check
           cargo clippy --manifest-path bindings/node/Cargo.toml -- -D warnings
-      - name: build + test
+      - name: build + test (release platform artifact)
         working-directory: bindings/node
         run: |
           npm install
           npx napi build --platform
           npm test
+      - name: binding glue coverage (fail under 85% lines)
+        # Instrumented rebuild + harness → llvm-cov over bindings/node/src/lib.rs only (needs the
+        # node_modules installed by the step above).
+        run: bash scripts/coverage-bindings.sh node
 
   coverage:
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -98,12 +169,47 @@ jobs:
           components: llvm-tools-preview
       - uses: taiki-e/install-action@cargo-llvm-cov
       - name: Line coverage must stay above 75%
-        run: cargo llvm-cov --workspace --fail-under-lines 75
+        # Exclude generated code (typify output) — you test the generator's schema, not the
+        # generated builder/error surface, so its coverage is meaningless (ADR-0003 §2/§4).
+        run: cargo llvm-cov --workspace --fail-under-lines 75 --ignore-filename-regex 'src/generated/'
+
+  # Drift check for the typify narrow models (ADR-0003 §2/§4 — TD-0001 W3): regenerate from the
+  # byte-pinned schemas and assert the committed output is unchanged. Guards the no-hand-edit rule.
+  codegen-drift:
+    needs: changes
+    if: ${{ needs.changes.outputs.codegen == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Regenerate models and assert no drift
+        run: |
+          bash scripts/gen-provider-models.sh
+          git diff --exit-code -- crates/sandhi-core/src/generated
 
   # Single aggregate gate for branch protection (mirrors proximaDB's "CI Success").
+  # Always runs so the required check reports even when heavy jobs are skipped on
+  # docs-only changes; passes unless a needed job actually failed/was cancelled
+  # (a `skipped` result is a pass).
   ci-success:
     name: CI Success
     runs-on: ubuntu-latest
-    needs: [rust, schema, python-binding, node-binding, attribution, coverage]
+    if: ${{ always() }}
+    needs: [changes, rust, schema, python-binding, node-binding, attribution, coverage, codegen-drift]
     steps:
-      - run: echo "all required checks passed"
+      - name: Verify no required job failed (skipped is OK for docs-only)
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "job results: $RESULTS"
+          for r in $RESULTS; do
+            case "$r" in
+              failure|cancelled)
+                echo "A required job did not pass: result=$r"
+                exit 1
+                ;;
+            esac
+          done
+          echo "all required checks passed or were skipped"

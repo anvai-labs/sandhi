@@ -1,0 +1,14 @@
+event: message_start
+data: {"type":"message_start","message":{"usage":{"input_tokens":1024,"cache_creation_input_tokens":2048,"cache_read_input_tokens":4096,"output_tokens":1,"speculative_tokens":77}}}
+
+event: some_future_event
+data: {"type":"some_future_event","payload":{"whatever":true}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}
+
+event: message_delta
+data: {"type":"message_delta","usage":{"output_tokens":256,"another_new_field":"x"}}
+
+event: message_stop
+data: {"type":"message_stop"}

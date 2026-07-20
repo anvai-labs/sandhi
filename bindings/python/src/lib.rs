@@ -1,13 +1,20 @@
-//! Sandhi Python binding (PyO3) — the **in-process metering middleware** (AnvaiOps ADR-0047
-//! D2/D10). Published to PyPI as `sandhi-gateway`, imported as `sandhi_gateway`.
+//! Sandhi Python binding (PyO3) — **in-process metering middleware + provider transport** (AnvaiOps
+//! ADR-0047 D2/D10). Published to PyPI as `sandhi-gateway`, imported as `sandhi_gateway`.
 //!
-//! A caller (e.g. victor) keeps making its own provider calls, then hands the raw response to
-//! [`Gateway::meter`]: Sandhi parses the usage **at the source** (same Rust parsers as the
-//! proxy), attributes it to a virtual key's subject/group, enforces + records the budget, emits
-//! the neutral usage event, and returns it for local display. Zero network hop.
+//! Two surfaces:
+//! - **Metering** ([`Gateway`], [`parse_usage`]): a caller keeps making its own provider calls, then
+//!   hands the raw response over; Sandhi parses the usage **at the source** (same Rust parsers as the
+//!   proxy), attributes it to a virtual key, enforces + records the budget, and emits the neutral
+//!   usage event. Zero network hop.
+//! - **Transport** ([`complete`] / [`stream`], ADR-0047 D10 step 3): forward a provider call through
+//!   sandhi-providers' async transport **in-process** — `complete` returns an awaitable, `stream` an
+//!   async iterator (bytes forwarded verbatim, D9; usage finalized on the terminal item). This makes
+//!   Sandhi the shared network core the in-house apps can `import`. [`register_provider`] is the D10
+//!   escape hatch: a host-language (Python) async callable registers as a custom provider, so a
+//!   custom / air-gapped / community provider rides `complete()` without a Rust adapter.
 //!
-//! Depends only on `sandhi-core` — the HTTP transport (`sandhi-providers`) is not pulled into
-//! the wheel.
+//! Depends on `sandhi-core` (metering) + `sandhi-providers` (transport) — the latter pulls the
+//! async HTTP stack into the wheel to serve the transport surface.
 
 // pyo3's #[pyfunction]/#[pymethods] macros emit `.into()` on the PyErr return path; on this
 // pyo3 + clippy combo that trips `useless_conversion` inside generated code (not our code).
@@ -18,15 +25,254 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use pyo3::exceptions::{PyKeyError, PyValueError};
+use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyStopAsyncIteration, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict};
+use pyo3::types::{PyAny, PyBytes, PyDict};
+use std::sync::Arc;
 
 use sandhi_core::{
     parse_anthropic_usage, parse_bedrock_usage, parse_cohere_usage, parse_gemini_usage,
     parse_ollama_usage, parse_openai_usage, Backend, Budget, BudgetLedger, KeyStore, ParsedUsage,
     UsageEvent, VirtualKey,
 };
+use sandhi_providers::{
+    Anthropic, Cohere, FnProvider, Gemini, Ollama, OpenAiCompat, Provider, ProviderError,
+    ProviderRequest, ProviderResponse, StreamChunk,
+};
+use std::sync::OnceLock;
+
+/// Host-registered custom providers (ADR-0047 D10 escape hatch): slug → a Python async callable that
+/// owns its own transport. Consulted before the built-in adapters, so a custom / air-gapped /
+/// community provider works through `complete()` without a Rust contribution.
+static CUSTOM_PROVIDERS: OnceLock<Mutex<HashMap<String, Py<PyAny>>>> = OnceLock::new();
+
+fn custom_providers() -> &'static Mutex<HashMap<String, Py<PyAny>>> {
+    CUSTOM_PROVIDERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Build a provider adapter from its neutral slug + endpoint. A host-registered Python provider
+/// (D10 escape hatch) wins over the built-ins; otherwise OpenAI-compatible providers (OpenAI,
+/// Azure, Groq, vLLM, …) all use `OpenAiCompat` with the slug preserved for metering, and Anthropic
+/// / Cohere / Gemini / Ollama have dedicated adapters. Transport step 3 (ADR-0047 D10).
+fn build_provider(provider: &str, base_url: &str, api_key: &str) -> Box<dyn Provider> {
+    // Escape hatch: a host-registered Python provider takes precedence (clone the handle out from
+    // under the lock, then dispatch through `FnProvider`).
+    let registered = custom_providers()
+        .lock()
+        .unwrap()
+        .get(provider)
+        .map(|h| Python::with_gil(|py| h.clone_ref(py)));
+    if let Some(handler) = registered {
+        return Box::new(python_fn_provider(provider.to_string(), handler));
+    }
+    match provider {
+        "anthropic" => Box::new(Anthropic::new(base_url, api_key)),
+        "cohere" => Box::new(Cohere::new(base_url, api_key)),
+        "gemini" => Box::new(Gemini::new(base_url, api_key)),
+        "ollama" => Box::new(Ollama::new(base_url)),
+        // openai + every OpenAI-compatible slug: one adapter, slug preserved.
+        _ => Box::new(OpenAiCompat::new(provider.to_string(), base_url, api_key)),
+    }
+}
+
+/// Wrap a host-registered Python async callable as a [`Provider`] (ADR-0047 D10 escape hatch). The
+/// closure calls the Python coroutine and bridges it back to a Rust future (the reverse of
+/// [`future_into_py`]: `pyo3_async_runtimes::tokio::into_future`), then parses its returned mapping
+/// into a [`ProviderResponse`]. `stream()` is unsupported for custom providers (the underlying
+/// `FnProvider` returns 501), mirroring the Rust escape hatch.
+fn python_fn_provider(slug: String, handler: Py<PyAny>) -> FnProvider {
+    FnProvider::new(slug, move |req: ProviderRequest| {
+        let handler = Python::with_gil(|py| handler.clone_ref(py));
+        async move {
+            // Call the Python handler → coroutine, then turn that awaitable into a Rust future.
+            let fut = Python::with_gil(|py| -> PyResult<_> {
+                let body_json = serde_json::to_string(&req.body)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                let coro = handler.bind(py).call1((
+                    req.model.clone(),
+                    body_json,
+                    req.session_id.clone(),
+                ))?;
+                pyo3_async_runtimes::tokio::into_future(coro)
+            })
+            .map_err(|e| ProviderError::Transport(format!("custom provider dispatch: {e}")))?;
+            let result = fut
+                .await
+                .map_err(|e| ProviderError::Transport(format!("custom provider errored: {e}")))?;
+            Python::with_gil(|py| py_obj_to_response(result.bind(py)))
+        }
+    })
+}
+
+/// Parse a custom provider's returned mapping into a [`ProviderResponse`]. Contract:
+/// `{"status": int, "body": <JSON string>, "usage": {tokens_in, tokens_out, …} | None}`.
+fn py_obj_to_response(obj: &Bound<'_, PyAny>) -> Result<ProviderResponse, ProviderError> {
+    let te = |m: String| ProviderError::Transport(m);
+    let status: u16 = obj
+        .get_item("status")
+        .map_err(|e| te(format!("custom provider result missing 'status': {e}")))?
+        .extract()
+        .map_err(|e| te(format!("custom provider 'status' not an int: {e}")))?;
+    let body_str: String = obj
+        .get_item("body")
+        .map_err(|e| te(format!("custom provider result missing 'body': {e}")))?
+        .extract()
+        .map_err(|e| te(format!("custom provider 'body' must be a JSON string: {e}")))?;
+    let body: serde_json::Value = serde_json::from_str(&body_str)
+        .map_err(|e| te(format!("custom provider 'body' is not valid JSON: {e}")))?;
+    let usage = match obj.get_item("usage") {
+        Ok(u) if !u.is_none() => parsed_from_pyobj(&u),
+        _ => ParsedUsage::default(),
+    };
+    Ok(ProviderResponse {
+        status,
+        body,
+        usage,
+    })
+}
+
+/// Register a Python async callable as a custom provider under `slug` (ADR-0047 D10 escape hatch —
+/// the host-language adapter). The handler is
+/// `async def handler(model: str, body_json: str, session_id: str | None) -> dict` returning
+/// `{"status": int, "body": <JSON string>, "usage": {tokens_in, tokens_out, cache_creation_tokens,
+/// cache_read_tokens} | None}`; it owns its own transport, so a custom / air-gapped / community
+/// provider works through `complete()` without a Rust adapter. Overrides a built-in slug of the same
+/// name. Streaming is not supported for custom providers (mirrors the Rust `FnProvider`).
+#[pyfunction]
+fn register_provider(slug: String, handler: Py<PyAny>) {
+    custom_providers().lock().unwrap().insert(slug, handler);
+}
+
+fn provider_err_to_py(e: ProviderError) -> PyErr {
+    PyRuntimeError::new_err(format!("sandhi transport: {e}"))
+}
+
+/// Forward one **non-streaming** provider call through sandhi's in-process transport (ADR-0047 D10
+/// step 3a). Returns a Python **awaitable** resolving to `{status, body, usage}` — `usage` is parsed
+/// at the source by sandhi (single-sourced metering trust). `provider` is the neutral slug; `body`
+/// is the provider-native request JSON, forwarded prefix-exact; `session_id` is preserved
+/// end-to-end for prompt-cache / KV affinity (ADR-0047 D9).
+#[pyfunction]
+#[pyo3(signature = (provider, model, base_url, api_key, body_json, session_id=None))]
+fn complete<'py>(
+    py: Python<'py>,
+    provider: String,
+    model: String,
+    base_url: String,
+    api_key: String,
+    body_json: String,
+    session_id: Option<String>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let body: serde_json::Value = serde_json::from_str(&body_json)
+        .map_err(|e| PyValueError::new_err(format!("body_json is not valid JSON: {e}")))?;
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let adapter = build_provider(&provider, &base_url, &api_key);
+        let req = ProviderRequest::new(model, body).with_session(session_id);
+        let resp = adapter.complete(req).await.map_err(provider_err_to_py)?;
+        Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+            let d = PyDict::new_bound(py);
+            d.set_item("status", resp.status)?;
+            let body_str = serde_json::to_string(&resp.body)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            d.set_item("body", body_str)?;
+            d.set_item("usage", usage_to_dict(py, &resp.usage)?)?;
+            Ok(d.into_any().unbind())
+        })
+    })
+}
+
+/// One item yielded by [`ByteStreamIter`]: raw upstream bytes to forward verbatim, plus (on the
+/// terminal item only) the finalized usage.
+struct StreamItem {
+    data: Vec<u8>,
+    usage: Option<ParsedUsage>,
+}
+
+/// A Python **async iterator** over a streaming provider response (ADR-0047 D10 step 3b). A
+/// background tokio task drives the Rust `ByteStream` and pushes chunks into a bounded channel
+/// (backpressure ⇒ O(1) memory, D7); `__anext__` awaits the next chunk. Yields dicts
+/// `{"data": bytes, "usage": dict|None}` — `usage` is populated only on the terminal item.
+#[pyclass]
+struct ByteStreamIter {
+    rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Result<StreamItem, String>>>>,
+}
+
+#[pymethods]
+impl ByteStreamIter {
+    fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let rx = self.rx.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut guard = rx.lock().await;
+            match guard.recv().await {
+                Some(Ok(item)) => Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+                    let d = PyDict::new_bound(py);
+                    d.set_item("data", PyBytes::new_bound(py, &item.data))?;
+                    match &item.usage {
+                        Some(u) => d.set_item("usage", usage_to_dict(py, u)?)?,
+                        None => d.set_item("usage", py.None())?,
+                    }
+                    Ok(d.into_any().unbind())
+                }),
+                Some(Err(e)) => Err(PyRuntimeError::new_err(format!("sandhi stream: {e}"))),
+                None => Err(PyStopAsyncIteration::new_err(())),
+            }
+        })
+    }
+}
+
+/// Forward one **streaming** provider call through sandhi's in-process transport (ADR-0047 D10
+/// step 3b). Returns a Python **async iterator** (`async for chunk in ...`) yielding
+/// `{"data": bytes, "usage": dict|None}` — bytes are forwarded verbatim (prefix-exact, D9), usage
+/// finalized on the terminal item. `session_id` is preserved for prompt-cache / KV affinity.
+#[pyfunction]
+#[pyo3(signature = (provider, model, base_url, api_key, body_json, session_id=None))]
+fn stream(
+    provider: String,
+    model: String,
+    base_url: String,
+    api_key: String,
+    body_json: String,
+    session_id: Option<String>,
+) -> PyResult<ByteStreamIter> {
+    let body: serde_json::Value = serde_json::from_str(&body_json)
+        .map_err(|e| PyValueError::new_err(format!("body_json is not valid JSON: {e}")))?;
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<StreamItem, String>>(64);
+    pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+        use futures_util::StreamExt;
+        let adapter = build_provider(&provider, &base_url, &api_key);
+        let req = ProviderRequest::new(model, body).with_session(session_id);
+        match adapter.stream(req).await {
+            Ok(mut s) => {
+                while let Some(chunk) = s.next().await {
+                    let (msg, stop) = match chunk {
+                        Ok(StreamChunk { data, usage }) => (
+                            Ok(StreamItem {
+                                data: data.to_vec(),
+                                usage,
+                            }),
+                            false,
+                        ),
+                        Err(e) => (Err(e.to_string()), true), // forward the error, then stop
+                    };
+                    if tx.send(msg).await.is_err() || stop {
+                        break; // receiver dropped, or the terminal error was forwarded
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = tx.send(Err(e.to_string())).await;
+            }
+        }
+        // tx drops here → channel closes → __anext__ recv returns None → StopAsyncIteration
+    });
+    Ok(ByteStreamIter {
+        rx: Arc::new(tokio::sync::Mutex::new(rx)),
+    })
+}
 
 /// The usage-event wire-contract major version this build targets.
 #[pyfunction]
@@ -354,6 +600,10 @@ fn sandhi_gateway(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     m.add_function(wrap_pyfunction!(wire_contract_version, m)?)?;
     m.add_function(wrap_pyfunction!(parse_usage, m)?)?;
+    m.add_function(wrap_pyfunction!(complete, m)?)?;
+    m.add_function(wrap_pyfunction!(stream, m)?)?;
+    m.add_function(wrap_pyfunction!(register_provider, m)?)?;
+    m.add_class::<ByteStreamIter>()?;
     m.add_class::<Gateway>()?;
     Ok(())
 }
