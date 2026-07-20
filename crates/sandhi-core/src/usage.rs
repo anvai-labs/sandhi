@@ -58,13 +58,22 @@ pub fn parse_openai_usage(response: &Value) -> Option<ParsedUsage> {
 /// Parse an Anthropic Messages response `usage` object. Anthropic reports the cache split
 /// directly: `input_tokens` is already the fresh (non-cached) input; cache writes and reads are
 /// separate fields. Returns `None` if there is no `usage` object.
+///
+/// TD-0001 W3 pilot (ADR-0003 §2/§4): the `usage` shape is deserialized through the
+/// **typify-generated** narrow model [`crate::generated::anthropic_usage::AnthropicMessageUsage`]
+/// (regenerated from the byte-pinned schema by `scripts/gen-provider-models.sh`, never
+/// hand-edited); this function is the hand-written overlay that maps it onto [`ParsedUsage`]. All
+/// fields are optional in the schema, so a missing field defaults to `0` — the same lenient
+/// behavior as the prior `u64_at` extraction.
 pub fn parse_anthropic_usage(response: &Value) -> Option<ParsedUsage> {
     let usage = response.get("usage")?;
+    let u: crate::generated::anthropic_usage::AnthropicMessageUsage =
+        serde_json::from_value(usage.clone()).ok()?;
     Some(ParsedUsage {
-        tokens_in: u64_at(usage, "input_tokens"),
-        tokens_out: u64_at(usage, "output_tokens"),
-        cache_creation_tokens: u64_at(usage, "cache_creation_input_tokens"),
-        cache_read_tokens: u64_at(usage, "cache_read_input_tokens"),
+        tokens_in: u.input_tokens.unwrap_or(0).max(0) as u64,
+        tokens_out: u.output_tokens.unwrap_or(0).max(0) as u64,
+        cache_creation_tokens: u.cache_creation_input_tokens.unwrap_or(0).max(0) as u64,
+        cache_read_tokens: u.cache_read_input_tokens.unwrap_or(0).max(0) as u64,
     })
 }
 

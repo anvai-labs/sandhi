@@ -1,7 +1,8 @@
 # TD-0001: Provider-adapter QA corpus + codegen pilot
 
-Status: **Open** (tracker). Governed by [ADR-0003](../adr/0003-provider-adapter-authoring-and-codegen.md).
-Date opened: 2026-07-20.
+Status: **Complete** (W1 + W2 + W3 all landed). Governed by
+[ADR-0003](../adr/0003-provider-adapter-authoring-and-codegen.md).
+Date opened / closed: 2026-07-20.
 
 This tracks the concrete work that operationalizes ADR-0003. The ADR is the settled decision;
 this TD is the actionable checklist. Each item lands as its own `feat/*` or `test/*` PR against
@@ -72,13 +73,31 @@ synthetic bodies (`anthropic.rs`, `usage.rs`). This TD closes that gap.
 
 ### W3 — `typify` narrow-model pilot (ADR-0003 §2 + §4) — *optional, gated on W1/W2 signal*
 
-- [ ] Pilot on the **Anthropic** usage/cache-split shape only: `typify`-generate the narrow struct
-      under the no-hand-edit-generated + adjacent-overlay discipline; back `parse_anthropic_usage`
-      with it.
-- [ ] Add a `scripts/gen-provider-models.sh` (regenerate, don't patch) + a CI drift check
-      (regenerate → `git diff --exit-code`), mirroring AnvaiOps' `--check` codegen gates.
-- [ ] Decide from the pilot whether to extend to other providers or leave them on the hand-written
-      `u64_at` baseline (ADR-0003 §2 makes this per-provider and optional).
+- [x] Piloted on the **Anthropic** usage/cache-split shape: `parse_anthropic_usage` is now backed by
+      the typify-generated `crate::generated::anthropic_usage::AnthropicMessageUsage`
+      (`crates/sandhi-core/src/generated/`), regenerated from the byte-pinned schema
+      (`crates/sandhi-core/schemas/`) — the parser function is the hand-written **overlay** (ADR-0003
+      §4). Behavior-preserving: all schema fields optional ⇒ missing → 0, same as the prior `u64_at`.
+- [x] `scripts/gen-provider-models.sh` (regenerate, never patch) + CI **`codegen-drift`** job
+      (regenerate → `git diff --exit-code`, gated on the `codegen` path filter). typify runs as a
+      **standalone CLI**, never a cargo dependency — verified absent from the sandhi-core/proxy/
+      binding build graphs (`cargo tree` = 0); the committed output depends only on `serde`
+      (ADR-0003 §3). Generated code excluded from the coverage metric.
+- [x] **Decision — do NOT extend generation to the other providers; keep the hand-written `u64_at`
+      baseline.** Evidence from the pilot:
+      1. **Cost/benefit is upside-down for these shapes.** typify emits **~190 lines** of
+         builder/error/`TryFrom` machinery to represent a 4-field struct that the hand parser reads
+         in ~8; ~90 of those are dead (`#[allow(dead_code)]`) and 0%-covered.
+      2. **It collapses the W2 oracle for the generated provider.** Once `parse_anthropic_usage` is
+         itself typify-generated, the W2 Anthropic differential oracle becomes generated-vs-generated
+         (tautological). The oracle's independence — its whole value — survives only for the
+         **hand-written** providers (OpenAI et al.), so generating *more* providers would erode
+         *more* oracle coverage. The two techniques are complementary, not cumulative.
+      3. **No spec/complexity pressure exists** (ADR-0003 §2's admission bar): the usage objects are
+         flat and stable. Generation earns its keep only for large/nested/churning shapes — none here.
+      The pilot proves the machinery works end-to-end (schema → CLI → committed model → overlay →
+      drift check) and is available when a shape ever justifies it; the Anthropic pilot stays as the
+      reference implementation.
 
 ## Acceptance / exit criteria
 

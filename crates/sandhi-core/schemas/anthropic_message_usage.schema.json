@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "Provenance: Anthropic Messages API `usage` object, hand-authored from the public API documentation (Anthropic publishes no official OpenAPI spec — ADR-0003 context). Byte-pinned SHIPPED-codegen source for TD-0001 W3 (ADR-0003 §2/§4). Regenerate crates/sandhi-core/src/generated/anthropic_usage.rs via scripts/gen-provider-models.sh — never hand-edit the generated file. All fields optional so the parser stays lenient (missing → 0), matching the prior u64_at behavior.",
+  "title": "AnthropicMessageUsage",
+  "type": "object",
+  "description": "Token usage for an Anthropic Messages response, including the prompt-cache split.",
+  "properties": {
+    "input_tokens": { "type": "integer", "description": "Fresh (non-cached) input tokens." },
+    "output_tokens": { "type": "integer", "description": "Output tokens." },
+    "cache_creation_input_tokens": { "type": "integer", "description": "Prompt-cache write tokens." },
+    "cache_read_input_tokens": { "type": "integer", "description": "Prompt-cache read tokens." }
+  }
+}
