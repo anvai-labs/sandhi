@@ -7,8 +7,16 @@
 # own test harness (which loads the instrumented extension and emits .profraw), and reports coverage
 # for the glue file alone — then fails under a floor. Usage:
 #
-#     scripts/coverage-bindings.sh python   # needs maturin on PATH (or in a venv)
-#     scripts/coverage-bindings.sh node     # needs npm on PATH
+#     scripts/coverage-bindings.sh python   # run inside a pyo3-compatible venv (see below)
+#     scripts/coverage-bindings.sh node     # needs npm on PATH + cargo-llvm-cov
+#
+# Python interpreter: the pyo3 0.22 abi3-py311 build needs CPython **3.11–3.13** with `maturin`
+# installed. It uses the active interpreter (`python3`); override with `COV_PYTHON=/path/to/python`.
+# The build wheel is force-installed into that interpreter, so use a **virtual environment**, never
+# system Python — locally that is `~/code/.venv` (3.12): `source ~/code/.venv/bin/activate` first,
+# or `COV_PYTHON=~/code/.venv/bin/python scripts/coverage-bindings.sh python`. (Bare system Python
+# is often too new — e.g. 3.14 — and breaks the pyo3 build; the script guards the version.) In CI
+# the setup-python step provides an isolated 3.12 as `python3`.
 #
 # Requires: cargo-llvm-cov + the llvm-tools-preview component (same as the core coverage job).
 set -euo pipefail
@@ -24,18 +32,30 @@ IGNORE='(registry|rustc|/crates/|library/std)'
 case "$LANG_ARG" in
   python)
     DIR="$ROOT/bindings/python"
-    # `maturin build` + `pip install` (not `develop`): works with the active interpreter whether or
-    # not a virtualenv is active (CI uses system Python, so `develop` — which requires a venv —
-    # would fail). The instrumented .so still lands in target/ where llvm-cov finds it.
+    PY="${COV_PYTHON:-python3}"
+    # Fail fast if the interpreter can't build the pyo3 abi3-py311 extension (needs 3.11–3.13).
+    PREFLIGHT() {
+      command -v "$PY" >/dev/null || { echo "error: '$PY' not found (set COV_PYTHON)" >&2; exit 3; }
+      local v; v="$("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+      case "$v" in
+        3.11 | 3.12 | 3.13) ;;
+        *) echo "error: Python $v unsupported for the pyo3 build (need 3.11–3.13); activate a venv like ~/code/.venv or set COV_PYTHON" >&2; exit 3 ;;
+      esac
+      "$PY" -m maturin --version >/dev/null 2>&1 || { echo "error: maturin not installed for $PY — 'pip install maturin' in your venv" >&2; exit 3; }
+    }
+    # Build the instrumented wheel with the venv's interpreter + force-install it there (not
+    # `maturin develop`, which additionally requires the venv to be *activated*). Isolation comes
+    # from the caller's venv, so this never touches system Python.
     BUILD() {
       rm -rf target/cov-dist
-      maturin build --out target/cov-dist
-      pip install --force-reinstall --no-deps target/cov-dist/*.whl
+      "$PY" -m maturin build --out target/cov-dist
+      "$PY" -m pip install -q --force-reinstall --no-deps target/cov-dist/*.whl
     }
-    RUN() { python tests/test_gateway.py; }
+    RUN() { "$PY" tests/test_gateway.py; }
     ;;
   node)
     DIR="$ROOT/bindings/node"
+    PREFLIGHT() { :; }
     BUILD() { npm run build:debug; }
     RUN() { node --test __test__/gateway.test.mjs; }
     ;;
@@ -46,6 +66,7 @@ case "$LANG_ARG" in
 esac
 
 cd "$DIR"
+PREFLIGHT
 
 # Export instrumentation env (RUSTFLAGS=-C instrument-coverage, LLVM_PROFILE_FILE, …) into THIS shell
 # so the maturin/napi build (which shells out to cargo) produces an instrumented extension.

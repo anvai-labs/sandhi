@@ -100,14 +100,18 @@ pricing).
 cargo test --workspace                        # core crate tests
 cargo llvm-cov --workspace --fail-under-lines 75 \
   --ignore-filename-regex 'src/generated/'    # core line coverage (CI gate)
-scripts/coverage-bindings.sh python           # FFI glue coverage (needs maturin)
+source ~/code/.venv/bin/activate              # a pyo3-compatible venv (CPython 3.11–3.13)
+scripts/coverage-bindings.sh python           # FFI glue coverage (venv above, or COV_PYTHON=…)
 scripts/coverage-bindings.sh node             # FFI glue coverage (needs npm)
 ```
 
 The bindings are separate cargo workspaces built by maturin/napi and driven by a foreign
 runtime, so their glue (`bindings/*/src/lib.rs`) never appears in the `--workspace` number.
 `scripts/coverage-bindings.sh` instruments the cdylib, runs the binding's own test harness, and
-gates the glue file at **≥85% lines** (both bindings sit ~91–96%). CI runs all three.
+gates the glue file at **≥85% lines** (both bindings sit ~91–96%). CI runs all three. The Python
+run force-installs the built wheel, so run it inside a **virtual environment** (never system
+Python, which is often too new for pyo3 — the script guards the version); the base interpreter is
+`python3` or `$COV_PYTHON`.
 
 ## Roadmap (first milestones)
 
