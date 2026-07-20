@@ -5,8 +5,8 @@
   "license": "Apache-2.0",
   "repository": "https://github.com/anvai-labs/sandhi",
   "keywords": ["llm", "gateway", "usage", "metering", "attribution", "ai"],
-  "main": "index.js",
-  "types": "index.d.ts",
+  "main": "sandhi.js",
+  "types": "sandhi.d.ts",
   "napi": {
     "name": "sandhi",
     "triples": {

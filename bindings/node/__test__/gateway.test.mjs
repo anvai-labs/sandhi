@@ -3,7 +3,72 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { createServer } from "node:http";
+
 import { Gateway, parseUsage, wireContractVersion } from "../index.js";
+// The transport surface is exercised through the sandhi.js entry so `for await` (Symbol.asyncIterator) works.
+import { complete, stream } from "../sandhi.js";
+
+// Start a throwaway localhost HTTP server that replies with `bodyStr` (+ content-type). Returns the
+// base URL and a close() — no network needed to exercise the transport.
+function localServer(bodyStr, contentType) {
+  return new Promise((resolve) => {
+    const srv = createServer((req, res) => {
+      res.writeHead(200, { "content-type": contentType, "content-length": Buffer.byteLength(bodyStr) });
+      res.end(bodyStr);
+    });
+    srv.listen(0, "127.0.0.1", () => {
+      const { port } = srv.address();
+      resolve({ base: `http://127.0.0.1:${port}/v1`, close: () => new Promise((r) => srv.close(r)) });
+    });
+  });
+}
+
+test("complete — async transport parses usage at the source", async () => {
+  const resp = JSON.stringify({
+    choices: [{ index: 0, message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
+    usage: { prompt_tokens: 100, completion_tokens: 20, prompt_tokens_details: { cached_tokens: 60 } },
+  });
+  const srv = await localServer(resp, "application/json");
+  try {
+    const body = JSON.stringify({ model: "gpt-4o", messages: [{ role: "user", content: "hi" }] });
+    const out = await complete("openai", "gpt-4o", srv.base, "sk-test", body, "sess-1");
+    assert.equal(out.status, 200);
+    assert.equal(out.usage.tokensIn, 40); // 100 - 60 cached (fresh-only)
+    assert.equal(out.usage.cacheReadTokens, 60);
+    assert.equal(out.usage.tokensOut, 20);
+    assert.equal(JSON.parse(out.body).choices[0].message.content, "hi");
+  } finally {
+    await srv.close();
+  }
+});
+
+test("stream — async iterator forwards bytes verbatim + finalizes usage", async () => {
+  const sse =
+    'data: {"choices":[{"delta":{"content":"he"}}]}\n\n' +
+    'data: {"choices":[{"delta":{"content":"llo"}}]}\n\n' +
+    'data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":4}}}\n\n' +
+    "data: [DONE]\n\n";
+  const srv = await localServer(sse, "text/event-stream");
+  try {
+    const body = JSON.stringify({ model: "gpt-4o", messages: [{ role: "user", content: "hi" }] });
+    const s = await stream("openai", "gpt-4o", srv.base, "sk", body, "s1");
+    let forwarded = Buffer.alloc(0);
+    let usage = null;
+    for await (const chunk of s) {
+      forwarded = Buffer.concat([forwarded, chunk.data]);
+      if (chunk.usage != null) usage = chunk.usage;
+    }
+    const text = forwarded.toString("utf8");
+    assert.ok(text.includes("he") && text.includes("llo") && text.includes("[DONE]"));
+    assert.ok(usage != null);
+    assert.equal(usage.tokensIn, 6); // 10 - 4 cached
+    assert.equal(usage.tokensOut, 5);
+    assert.equal(usage.cacheReadTokens, 4);
+  } finally {
+    await srv.close();
+  }
+});
 
 test("wireContractVersion", () => {
   assert.equal(wireContractVersion(), "1");

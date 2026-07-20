@@ -1,13 +1,18 @@
-//! Sandhi Node binding (napi-rs) — the **in-process metering middleware** for
+//! Sandhi Node binding (napi-rs) — **in-process metering middleware + provider transport** for
 //! TypeScript/JavaScript, published to npm as `@anvai-labs/sandhi`. Mirrors the Python
-//! `sandhi_gateway` API; depends only on `sandhi-core` (no HTTP transport in the addon).
+//! `sandhi_gateway` API.
 //!
-//! JS API (napi camel-cases the Rust names): `wireContractVersion()`, `parseUsage()`, and a
-//! `Gateway` class with `addVirtualKey / setBudget / checkBudget / spent / meter / events`.
+//! Two surfaces (napi camel-cases the Rust names):
+//! - **Metering**: `wireContractVersion()`, `parseUsage()`, and a `Gateway` class
+//!   (`addVirtualKey / setBudget / checkBudget / spent / meter / meterTokens / events`).
+//! - **Transport** (ADR-0047 D10 step 3c): `complete()` returns a `Promise<CompleteResult>`;
+//!   `stream()` returns a `Promise<ByteStream>` whose `read()` yields chunks (`{ data, usage }`,
+//!   `null` at end) — forward bytes verbatim (D9), usage finalized on the terminal chunk. A tiny
+//!   `Symbol.asyncIterator` shim in `sandhi.js` turns `ByteStream` into an `for await` iterable.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -17,6 +22,153 @@ use sandhi_core::{
     parse_ollama_usage, parse_openai_usage, Backend, Budget, BudgetLedger, KeyStore, ParsedUsage,
     UsageEvent, VirtualKey,
 };
+use sandhi_providers::{
+    Anthropic, Cohere, Gemini, Ollama, OpenAiCompat, Provider, ProviderError, ProviderRequest,
+    StreamChunk,
+};
+
+/// Build a provider adapter from its neutral slug + endpoint (mirrors the Python binding's
+/// `build_provider`). OpenAI-compatible providers all use `OpenAiCompat` with the slug preserved;
+/// Anthropic / Cohere / Gemini / Ollama have dedicated adapters. Transport step 3 (ADR-0047 D10).
+fn build_provider(provider: &str, base_url: &str, api_key: &str) -> Box<dyn Provider> {
+    match provider {
+        "anthropic" => Box::new(Anthropic::new(base_url, api_key)),
+        "cohere" => Box::new(Cohere::new(base_url, api_key)),
+        "gemini" => Box::new(Gemini::new(base_url, api_key)),
+        "ollama" => Box::new(Ollama::new(base_url)),
+        _ => Box::new(OpenAiCompat::new(provider.to_string(), base_url, api_key)),
+    }
+}
+
+fn provider_err_to_napi(e: ProviderError) -> Error {
+    Error::from_reason(format!("sandhi transport: {e}"))
+}
+
+/// A completed (non-streaming) provider response: `body` is the provider-native JSON (as a string),
+/// `usage` is parsed at the source. Mirrors the Python `complete()` return.
+#[napi(object)]
+pub struct CompleteResult {
+    pub status: u32,
+    pub body: String,
+    pub usage: UsageBreakdown,
+}
+
+/// Forward one **non-streaming** provider call through sandhi's in-process transport (ADR-0047 D10
+/// step 3c). `provider` is the neutral slug; `bodyJson` is the provider-native request JSON,
+/// forwarded prefix-exact; `sessionId` is preserved for prompt-cache / KV affinity (D9).
+#[napi]
+pub async fn complete(
+    provider: String,
+    model: String,
+    base_url: String,
+    api_key: String,
+    body_json: String,
+    session_id: Option<String>,
+) -> Result<CompleteResult> {
+    let body: serde_json::Value = serde_json::from_str(&body_json)
+        .map_err(|e| Error::from_reason(format!("bodyJson is not valid JSON: {e}")))?;
+    let adapter = build_provider(&provider, &base_url, &api_key);
+    let req = ProviderRequest::new(model, body).with_session(session_id);
+    let resp = adapter.complete(req).await.map_err(provider_err_to_napi)?;
+    let body_str =
+        serde_json::to_string(&resp.body).map_err(|e| Error::from_reason(e.to_string()))?;
+    Ok(CompleteResult {
+        status: u32::from(resp.status),
+        body: body_str,
+        usage: usage_breakdown(&resp.usage),
+    })
+}
+
+/// One streaming chunk: `data` is raw upstream bytes to forward verbatim; `usage` is populated only
+/// on the terminal chunk (mirrors the Python `stream()` items).
+#[napi(object)]
+pub struct StreamChunkJs {
+    pub data: Buffer,
+    pub usage: Option<UsageBreakdown>,
+}
+
+/// One item pushed over the channel from the background stream driver to `ByteStream.read`.
+struct StreamItem {
+    data: Vec<u8>,
+    usage: Option<ParsedUsage>,
+}
+
+/// A streaming provider response (ADR-0047 D10 step 3c). A background task drives the Rust
+/// `ByteStream` and pushes chunks into a bounded channel (backpressure ⇒ O(1) memory, D7);
+/// `read()` awaits the next chunk and resolves to `null` when the stream is exhausted. The
+/// `sandhi.js` shim adds `Symbol.asyncIterator` so this is usable with `for await`.
+#[napi]
+pub struct ByteStream {
+    rx: Arc<
+        tokio::sync::Mutex<tokio::sync::mpsc::Receiver<std::result::Result<StreamItem, String>>>,
+    >,
+}
+
+#[napi]
+impl ByteStream {
+    /// Await the next chunk; resolves to `null` once the stream is exhausted.
+    #[napi]
+    pub async fn read(&self) -> Result<Option<StreamChunkJs>> {
+        let rx = self.rx.clone();
+        let mut guard = rx.lock().await;
+        match guard.recv().await {
+            Some(Ok(item)) => Ok(Some(StreamChunkJs {
+                data: item.data.into(),
+                usage: item.usage.as_ref().map(usage_breakdown),
+            })),
+            Some(Err(e)) => Err(Error::from_reason(format!("sandhi stream: {e}"))),
+            None => Ok(None),
+        }
+    }
+}
+
+/// Forward one **streaming** provider call through sandhi's in-process transport (ADR-0047 D10 step
+/// 3c). Resolves to a [`ByteStream`]; bytes are forwarded verbatim (prefix-exact, D9), usage is
+/// finalized on the terminal chunk, and `sessionId` is preserved for prompt-cache / KV affinity.
+#[napi]
+pub async fn stream(
+    provider: String,
+    model: String,
+    base_url: String,
+    api_key: String,
+    body_json: String,
+    session_id: Option<String>,
+) -> Result<ByteStream> {
+    let body: serde_json::Value = serde_json::from_str(&body_json)
+        .map_err(|e| Error::from_reason(format!("bodyJson is not valid JSON: {e}")))?;
+    let (tx, rx) = tokio::sync::mpsc::channel::<std::result::Result<StreamItem, String>>(64);
+    // Drive the stream on napi's tokio runtime; `read()` pulls from the channel independently.
+    tokio::spawn(async move {
+        use futures_util::StreamExt;
+        let adapter = build_provider(&provider, &base_url, &api_key);
+        let req = ProviderRequest::new(model, body).with_session(session_id);
+        match adapter.stream(req).await {
+            Ok(mut s) => {
+                while let Some(chunk) = s.next().await {
+                    let (msg, stop) = match chunk {
+                        Ok(StreamChunk { data, usage }) => (
+                            Ok(StreamItem {
+                                data: data.to_vec(),
+                                usage,
+                            }),
+                            false,
+                        ),
+                        Err(e) => (Err(e.to_string()), true),
+                    };
+                    if tx.send(msg).await.is_err() || stop {
+                        break;
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = tx.send(Err(e.to_string())).await;
+            }
+        }
+    });
+    Ok(ByteStream {
+        rx: Arc::new(tokio::sync::Mutex::new(rx)),
+    })
+}
 
 /// The neutral token breakdown parsed from a provider response.
 #[napi(object)]
