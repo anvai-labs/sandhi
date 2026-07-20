@@ -39,12 +39,14 @@ jobs:
               - 'bindings/python/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - 'scripts/coverage-bindings.sh'
               - '.github/workflows/ci.yml'
             node:
               - 'crates/**'
               - 'bindings/node/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - 'scripts/coverage-bindings.sh'
               - '.github/workflows/ci.yml'
             schema:
               - 'schemas/**'
