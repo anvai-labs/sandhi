@@ -91,6 +91,7 @@ pub struct StreamChunk {
 pub type ByteStream = Pin<Box<dyn Stream<Item = Result<StreamChunk, ProviderError>> + Send>>;
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ProviderError {
     /// 401 / 403 — bad or missing credential.
     Auth,
@@ -102,6 +103,9 @@ pub enum ProviderError {
     Transport(String),
     /// The circuit breaker is open (upstream failing) — the call was not attempted.
     CircuitOpen,
+    /// The call (or stream setup / idle gap) exceeded the configured bound. Carries the bound
+    /// for a self-describing message. Retryable — a timeout is a transient bet, like a 503.
+    Timeout(std::time::Duration),
 }
 
 impl std::fmt::Display for ProviderError {
@@ -112,6 +116,7 @@ impl std::fmt::Display for ProviderError {
             ProviderError::Upstream(s) => write!(f, "upstream status {s}"),
             ProviderError::Transport(e) => write!(f, "transport error: {e}"),
             ProviderError::CircuitOpen => write!(f, "circuit open (upstream failing)"),
+            ProviderError::Timeout(d) => write!(f, "timed out after {}s", d.as_secs_f32()),
         }
     }
 }

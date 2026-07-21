@@ -30,3 +30,4 @@ time = { version = "0.3", features = ["formatting"] }
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 wiremock = "0.6"
+async-trait = "0.1"

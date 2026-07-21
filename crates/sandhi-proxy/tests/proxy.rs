@@ -241,3 +241,64 @@ async fn dashboard_reports_aggregates_from_the_store() {
         .unwrap();
     assert_eq!(html.status(), StatusCode::OK);
 }
+
+/// A stub upstream that always times out — pins the `Timeout` → 504 mapping and that no
+/// usage event is emitted for a call with no measured usage.
+struct AlwaysTimeout;
+
+#[async_trait::async_trait]
+impl Provider for AlwaysTimeout {
+    fn slug(&self) -> &str {
+        "timeout"
+    }
+    async fn complete(
+        &self,
+        _req: sandhi_providers::ProviderRequest,
+    ) -> Result<sandhi_providers::ProviderResponse, sandhi_providers::ProviderError> {
+        Err(sandhi_providers::ProviderError::Timeout(
+            std::time::Duration::from_millis(50),
+        ))
+    }
+    async fn stream(
+        &self,
+        _req: sandhi_providers::ProviderRequest,
+    ) -> Result<sandhi_providers::ByteStream, sandhi_providers::ProviderError> {
+        Err(sandhi_providers::ProviderError::Timeout(
+            std::time::Duration::from_millis(50),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn upstream_timeout_maps_to_504() {
+    let sink = Arc::new(InMemorySink::new());
+    let mut keys = KeyStore::new();
+    keys.insert(VirtualKey {
+        id: "vk_demo".into(),
+        subject_id: Some("alice".into()),
+        group_id: Some("platform".into()),
+        upstream_ref: "up1".into(),
+    });
+    let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
+    providers.insert("up1".into(), Arc::new(AlwaysTimeout));
+    let state = Arc::new(ProxyState {
+        keys,
+        ledger: Mutex::new(BudgetLedger::new()),
+        sink: sink.clone(),
+        providers,
+        store: None,
+    });
+    let app = build_app(state);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("authorization", "Bearer vk_demo")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"model":"gpt-x","messages":[]}"#))
+        .unwrap();
+
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    assert_eq!(sink.events().len(), 0, "no measured usage => no event");
+}

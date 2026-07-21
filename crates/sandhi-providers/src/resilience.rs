@@ -123,7 +123,9 @@ impl ResilientProvider {
 /// 4xx client errors, and an open circuit are terminal.
 fn is_retryable(e: &ProviderError) -> bool {
     match e {
-        ProviderError::Transport(_) | ProviderError::RateLimited => true,
+        ProviderError::Transport(_) | ProviderError::RateLimited | ProviderError::Timeout(_) => {
+            true
+        }
         ProviderError::Upstream(status) => *status >= 500,
         ProviderError::Auth | ProviderError::CircuitOpen => false,
     }
@@ -250,6 +252,14 @@ mod tests {
 
     fn req() -> ProviderRequest {
         ProviderRequest::new("m", serde_json::json!({}))
+    }
+
+    #[test]
+    fn timeout_error_is_retryable() {
+        // A timeout is definitionally a transient bet — same class as a 503.
+        assert!(is_retryable(&ProviderError::Timeout(Duration::from_secs(
+            30
+        ))));
     }
 
     #[tokio::test]
