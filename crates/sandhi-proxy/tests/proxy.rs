@@ -302,3 +302,49 @@ async fn upstream_timeout_maps_to_504() {
     assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
     assert_eq!(sink.events().len(), 0, "no measured usage => no event");
 }
+
+#[tokio::test]
+async fn client_disconnect_mid_stream_still_meters() {
+    let upstream = MockServer::start().await;
+    let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n\
+data: {\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":20}}\n\n\
+data: [DONE]\n\n";
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse)
+                .insert_header("content-type", "text/event-stream"),
+        )
+        .mount(&upstream)
+        .await;
+
+    let sink = Arc::new(InMemorySink::new());
+    let state = state_with(upstream.uri(), sink.clone(), BudgetLedger::new());
+    let app = build_app(state);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("authorization", "Bearer vk_demo")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"model":"gpt-x","messages":[],"stream":true}"#))
+        .unwrap();
+
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Read ONE body frame, then drop the body — a client disconnect mid-stream.
+    let mut body_stream = response.into_body().into_data_stream();
+    use futures_util::StreamExt;
+    let first = body_stream.next().await;
+    assert!(first.is_some(), "expected at least one forwarded frame");
+    drop(body_stream);
+
+    // Metering must survive the disconnect: exactly one event, with whatever usage was seen.
+    assert_eq!(
+        sink.events().len(),
+        1,
+        "client disconnect must not lose the usage event"
+    );
+}
