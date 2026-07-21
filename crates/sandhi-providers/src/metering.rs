@@ -74,7 +74,7 @@ impl Provider for MeteredProvider {
         let base = self.event_base(&req);
         // On Err: no event — no trustworthy counts exist ("measured, never estimated").
         let resp = self.inner.complete(req).await?;
-        self.sink.emit(&resp.usage.clone().apply(base));
+        self.sink.emit(&resp.usage.apply(base));
         Ok(resp)
     }
 
@@ -122,7 +122,7 @@ impl Stream for MeteredStream {
         match self.inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(chunk))) => {
                 if let (Some(usage), Some(pending)) = (&chunk.usage, self.pending.as_mut()) {
-                    pending.usage = usage.clone();
+                    pending.usage = *usage;
                 }
                 Poll::Ready(Some(Ok(chunk)))
             }
