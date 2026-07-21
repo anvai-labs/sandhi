@@ -36,7 +36,17 @@ pub use escape_hatch::FnProvider;
 pub use gemini::Gemini;
 pub use local::Ollama;
 pub use openai::OpenAiCompat;
-pub use resilience::{CircuitBreaker, ResilientProvider, RetryConfig};
+pub use resilience::{CircuitBreaker, ResilientProvider, RetryConfig, TimeoutConfig};
+
+/// Shared HTTP client for the in-repo adapters: a 10s TCP/TLS connect bound as
+/// defense-in-depth under the decorator's per-attempt timeouts. Policy timeouts
+/// (whole-call / stream-setup / idle) live in [`TimeoutConfig`], not here.
+pub(crate) fn default_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
 
 /// AWS Bedrock — the usage parser is [`sandhi_core::usage::parse_bedrock_usage`]. Native
 /// transport needs AWS **SigV4** request signing (a dedicated follow-up); until then, front
@@ -91,6 +101,7 @@ pub struct StreamChunk {
 pub type ByteStream = Pin<Box<dyn Stream<Item = Result<StreamChunk, ProviderError>> + Send>>;
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ProviderError {
     /// 401 / 403 — bad or missing credential.
     Auth,
@@ -102,6 +113,9 @@ pub enum ProviderError {
     Transport(String),
     /// The circuit breaker is open (upstream failing) — the call was not attempted.
     CircuitOpen,
+    /// The call (or stream setup / idle gap) exceeded the configured bound. Carries the bound
+    /// for a self-describing message. Retryable — a timeout is a transient bet, like a 503.
+    Timeout(std::time::Duration),
 }
 
 impl std::fmt::Display for ProviderError {
@@ -112,6 +126,7 @@ impl std::fmt::Display for ProviderError {
             ProviderError::Upstream(s) => write!(f, "upstream status {s}"),
             ProviderError::Transport(e) => write!(f, "transport error: {e}"),
             ProviderError::CircuitOpen => write!(f, "circuit open (upstream failing)"),
+            ProviderError::Timeout(d) => write!(f, "timed out after {}s", d.as_secs_f32()),
         }
     }
 }

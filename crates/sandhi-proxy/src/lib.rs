@@ -307,6 +307,9 @@ fn provider_error(e: &ProviderError) -> Response {
             StatusCode::SERVICE_UNAVAILABLE,
             "circuit open (upstream failing)",
         ),
+        ProviderError::Timeout(_) => (StatusCode::GATEWAY_TIMEOUT, "upstream timed out"),
+        // ProviderError is #[non_exhaustive]; unknown future variants degrade to 502.
+        _ => (StatusCode::BAD_GATEWAY, "upstream error"),
     };
     error(status, msg)
 }
