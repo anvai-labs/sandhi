@@ -8,7 +8,6 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::body::{Body, Bytes};
@@ -20,8 +19,8 @@ use axum::Router;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 
-use sandhi_core::{Backend, BudgetLedger, KeyStore, Sink, UsageEvent, VirtualKey};
-use sandhi_providers::{ParsedUsage, Provider, ProviderError, ProviderRequest};
+use sandhi_core::{BudgetLedger, KeyStore, Sink, UsageEvent, VirtualKey};
+use sandhi_providers::{Attribution, MeteredProvider, Provider, ProviderError, ProviderRequest};
 use sandhi_store::SqliteStore;
 
 /// Shared server state: the virtual-key store, the budget ledger, the usage sink, and the
@@ -179,28 +178,54 @@ async fn handle(State(state): State<Arc<ProxyState>>, headers: HeaderMap, body: 
         }
     }
 
-    let req = ProviderRequest::new(model.clone(), body_json).with_session(session.clone());
+    // 5. Wrap the upstream in the metering decorator, per request: attribution rides on the
+    //    request (one provider instance serves many virtual keys), and the composite sink
+    //    emits + records the budget as a single observation point. The decorator's Drop guard
+    //    guarantees the event survives a client disconnect mid-stream.
+    let metered = MeteredProvider::new(
+        provider,
+        Arc::new(EmitAndRecord {
+            state: Arc::clone(&state),
+            scope,
+        }),
+    );
+    let req = ProviderRequest::new(model, body_json)
+        .with_session(session)
+        .with_attribution(Attribution {
+            virtual_key_id: Some(vk.id.clone()),
+            subject_id: vk.subject_id.clone(),
+            group_id: vk.group_id.clone(),
+            route: None,
+        });
 
     if wants_stream {
-        stream_response(state, provider, vk, model, session, scope, req).await
+        stream_response(&metered, req).await
     } else {
-        complete_response(&state, provider.as_ref(), &vk, &model, session, &scope, req).await
+        complete_response(&metered, req).await
     }
 }
 
-async fn complete_response(
-    state: &Arc<ProxyState>,
-    provider: &dyn Provider,
-    vk: &VirtualKey,
-    model: &str,
-    session: Option<String>,
-    scope: &str,
-    req: ProviderRequest,
-) -> Response {
-    match provider.complete(req).await {
+/// Proxy-local composite sink: emit to the configured sink AND record the budget ledger —
+/// sink emission stays the single observation point (budget policy is proxy concern, not the
+/// decorator's).
+struct EmitAndRecord {
+    state: Arc<ProxyState>,
+    scope: String,
+}
+
+impl Sink for EmitAndRecord {
+    fn emit(&self, event: &UsageEvent) {
+        self.state.sink.emit(event);
+        if let Ok(mut ledger) = self.state.ledger.lock() {
+            ledger.record(&self.scope, event.billable_tokens());
+        }
+    }
+}
+
+async fn complete_response(metered: &MeteredProvider, req: ProviderRequest) -> Response {
+    // Metering + budget recording happen inside the decorator (exactly one event; none on error).
+    match metered.complete(req).await {
         Ok(resp) => {
-            let event = build_event(vk, provider.slug(), model, session, resp.usage);
-            emit_and_record(state, scope, &event);
             let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK);
             (status, Json(resp.body)).into_response()
         }
@@ -208,40 +233,26 @@ async fn complete_response(
     }
 }
 
-async fn stream_response(
-    state: Arc<ProxyState>,
-    provider: Arc<dyn Provider>,
-    vk: VirtualKey,
-    model: String,
-    session: Option<String>,
-    scope: String,
-    req: ProviderRequest,
-) -> Response {
-    let mut upstream = match provider.stream(req).await {
+async fn stream_response(metered: &MeteredProvider, req: ProviderRequest) -> Response {
+    // The returned stream is the decorator's MeteredStream: it emits exactly one event on
+    // clean end, in-stream error, or drop (client disconnect) — pure forwarding here.
+    let mut upstream = match metered.stream(req).await {
         Ok(s) => s,
         Err(e) => return provider_error(&e),
     };
-    let slug = provider.slug().to_string();
 
     let body = async_stream::stream! {
-        let mut final_usage = ParsedUsage::default();
         while let Some(item) = upstream.next().await {
             match item {
                 Ok(chunk) => {
-                    if let Some(u) = chunk.usage {
-                        final_usage = u;
-                    }
                     if !chunk.data.is_empty() {
                         yield Ok::<Bytes, std::io::Error>(chunk.data);
                     }
                 }
-                // Upstream stream error: stop forwarding; whatever usage we saw is still metered.
+                // Upstream stream error: stop forwarding (the decorator already metered).
                 Err(_) => break,
             }
         }
-        // Best-effort emit + record once the stream completes (ADR-0047 D7 — off the hot path).
-        let event = build_event(&vk, &slug, &model, session, final_usage);
-        emit_and_record(&state, &scope, &event);
     };
 
     Response::builder()
@@ -249,36 +260,6 @@ async fn stream_response(
         .header("content-type", "text/event-stream")
         .body(Body::from_stream(body))
         .expect("valid streaming response")
-}
-
-fn emit_and_record(state: &Arc<ProxyState>, scope: &str, event: &UsageEvent) {
-    state.sink.emit(event);
-    if let Ok(mut ledger) = state.ledger.lock() {
-        ledger.record(scope, event.billable_tokens());
-    }
-}
-
-fn build_event(
-    vk: &VirtualKey,
-    provider: &str,
-    model: &str,
-    session: Option<String>,
-    usage: ParsedUsage,
-) -> UsageEvent {
-    let base = UsageEvent::new(
-        next_request_id(),
-        now_rfc3339(),
-        provider,
-        model,
-        Backend::External,
-    )
-    .with_attribution(
-        Some(vk.id.clone()),
-        vk.subject_id.clone(),
-        vk.group_id.clone(),
-    )
-    .with_session(session);
-    usage.apply(base)
 }
 
 fn budget_scope(vk: &VirtualKey) -> String {
@@ -316,21 +297,4 @@ fn provider_error(e: &ProviderError) -> Response {
 
 fn error(status: StatusCode, msg: &str) -> Response {
     (status, Json(json!({ "error": msg }))).into_response()
-}
-
-fn now_rfc3339() -> String {
-    use time::format_description::well_known::Rfc3339;
-    time::OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .unwrap_or_default()
-}
-
-fn next_request_id() -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let millis = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    format!("req_{millis}_{n}")
 }

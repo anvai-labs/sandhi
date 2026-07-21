@@ -501,3 +501,49 @@ if __name__ == "__main__":
             _fn()
             print(f"ok {_name}")
     print("ALL PASS")
+
+
+def test_complete_timeout_raises_timeout_error():
+    """The decorator's per-call bound surfaces as Python's builtin TimeoutError."""
+    import asyncio
+
+    import pytest
+
+    async def slow(model, body_json, session_id):
+        await asyncio.sleep(5)
+        return {"status": 200, "body": "{}"}
+
+    sg.register_provider("slowprov", slow)
+
+    async def _call():
+        return await sg.complete(
+            "slowprov", "m", "http://unused", "k", _REQ, None, timeout_secs=0.2
+        )
+
+    with pytest.raises(TimeoutError):
+        asyncio.run(_call())
+
+
+def test_complete_retries_transient_then_succeeds():
+    """The binding now carries the resilience decorator: a transient custom-provider failure
+    is retried and the call succeeds."""
+    import asyncio
+
+    calls = {"n": 0}
+
+    async def flaky(model, body_json, session_id):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient blip")
+        return {"status": 200, "body": json.dumps({"ok": True})}
+
+    sg.register_provider("flakyprov", flaky)
+
+    async def _call():
+        return await sg.complete(
+            "flakyprov", "m", "http://unused", "k", _REQ, None, max_retries=2
+        )
+
+    out = asyncio.run(_call())
+    assert out["status"] == 200
+    assert calls["n"] == 2

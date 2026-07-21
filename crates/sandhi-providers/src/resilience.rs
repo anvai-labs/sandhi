@@ -120,7 +120,7 @@ impl CircuitBreaker {
 pub struct ResilientProvider {
     inner: Arc<dyn Provider>,
     retry: RetryConfig,
-    breaker: CircuitBreaker,
+    breaker: Arc<CircuitBreaker>,
     timeouts: TimeoutConfig,
 }
 
@@ -131,7 +131,7 @@ impl ResilientProvider {
         Self {
             inner,
             retry: RetryConfig::default(),
-            breaker: CircuitBreaker::new(5, Duration::from_secs(30)),
+            breaker: Arc::new(CircuitBreaker::new(5, Duration::from_secs(30))),
             timeouts: TimeoutConfig::default(),
         }
     }
@@ -147,7 +147,15 @@ impl ResilientProvider {
 
     #[must_use]
     pub fn with_circuit(mut self, threshold: u32, cooldown: Duration) -> Self {
-        self.breaker = CircuitBreaker::new(threshold, cooldown);
+        self.breaker = Arc::new(CircuitBreaker::new(threshold, cooldown));
+        self
+    }
+
+    /// Share a breaker across provider instances (e.g. a binding that constructs a provider
+    /// per call: a per-call breaker is stateless theater — the shared one carries the state).
+    #[must_use]
+    pub fn with_shared_breaker(mut self, breaker: Arc<CircuitBreaker>) -> Self {
+        self.breaker = breaker;
         self
     }
 
