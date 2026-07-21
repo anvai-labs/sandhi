@@ -25,7 +25,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyStopAsyncIteration, PyValueError};
+use pyo3::exceptions::{
+    PyKeyError, PyRuntimeError, PyStopAsyncIteration, PyTimeoutError, PyValueError,
+};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict};
 use std::sync::Arc;
@@ -36,8 +38,9 @@ use sandhi_core::{
     UsageEvent, VirtualKey,
 };
 use sandhi_providers::{
-    Anthropic, Cohere, FnProvider, Gemini, Ollama, OpenAiCompat, Provider, ProviderError,
-    ProviderRequest, ProviderResponse, StreamChunk,
+    Anthropic, CircuitBreaker, Cohere, FnProvider, Gemini, Ollama, OpenAiCompat, Provider,
+    ProviderError, ProviderRequest, ProviderResponse, ResilientProvider, StreamChunk,
+    TimeoutConfig,
 };
 use std::sync::OnceLock;
 
@@ -54,7 +57,12 @@ fn custom_providers() -> &'static Mutex<HashMap<String, Py<PyAny>>> {
 /// (D10 escape hatch) wins over the built-ins; otherwise OpenAI-compatible providers (OpenAI,
 /// Azure, Groq, vLLM, …) all use `OpenAiCompat` with the slug preserved for metering, and Anthropic
 /// / Cohere / Gemini / Ollama have dedicated adapters. Transport step 3 (ADR-0047 D10).
-fn build_provider(provider: &str, base_url: &str, api_key: &str) -> Box<dyn Provider> {
+fn build_provider(
+    provider: &str,
+    base_url: &str,
+    api_key: &str,
+    opts: &TransportOpts,
+) -> Arc<dyn Provider> {
     // Escape hatch: a host-registered Python provider takes precedence (clone the handle out from
     // under the lock, then dispatch through `FnProvider`).
     let registered = custom_providers()
@@ -62,17 +70,55 @@ fn build_provider(provider: &str, base_url: &str, api_key: &str) -> Box<dyn Prov
         .unwrap()
         .get(provider)
         .map(|h| Python::with_gil(|py| h.clone_ref(py)));
-    if let Some(handler) = registered {
-        return Box::new(python_fn_provider(provider.to_string(), handler));
+    let bare: Arc<dyn Provider> = if let Some(handler) = registered {
+        Arc::new(python_fn_provider(provider.to_string(), handler))
+    } else {
+        match provider {
+            "anthropic" => Arc::new(Anthropic::new(base_url, api_key)),
+            "cohere" => Arc::new(Cohere::new(base_url, api_key)),
+            "gemini" => Arc::new(Gemini::new(base_url, api_key)),
+            "ollama" => Arc::new(Ollama::new(base_url)),
+            // openai + every OpenAI-compatible slug: one adapter, slug preserved.
+            _ => Arc::new(OpenAiCompat::new(provider.to_string(), base_url, api_key)),
+        }
+    };
+    // Uniform decorator wrap: retry + shared breaker + timeouts, for built-ins AND the escape
+    // hatch (a bare transport would carry fewer guarantees than a direct client — ADR-0002).
+    let mut resilient =
+        ResilientProvider::new(bare).with_shared_breaker(shared_breaker(provider, base_url));
+    if let Some(max_retries) = opts.max_retries {
+        resilient = resilient.with_retry(max_retries, std::time::Duration::from_millis(200));
     }
-    match provider {
-        "anthropic" => Box::new(Anthropic::new(base_url, api_key)),
-        "cohere" => Box::new(Cohere::new(base_url, api_key)),
-        "gemini" => Box::new(Gemini::new(base_url, api_key)),
-        "ollama" => Box::new(Ollama::new(base_url)),
-        // openai + every OpenAI-compatible slug: one adapter, slug preserved.
-        _ => Box::new(OpenAiCompat::new(provider.to_string(), base_url, api_key)),
+    let mut timeouts = TimeoutConfig::default();
+    if let Some(secs) = opts.timeout_secs {
+        timeouts.complete = std::time::Duration::from_secs_f64(secs.max(0.001));
     }
+    if let Some(secs) = opts.stream_idle_timeout_secs {
+        timeouts.idle = Some(std::time::Duration::from_secs_f64(secs.max(0.001)));
+    }
+    Arc::new(resilient.with_timeouts(timeouts))
+}
+
+/// Additive per-call transport knobs (`None` → the Rust defaults).
+#[derive(Default)]
+struct TransportOpts {
+    timeout_secs: Option<f64>,
+    stream_idle_timeout_secs: Option<f64>,
+    max_retries: Option<u32>,
+}
+
+/// One circuit breaker per `(provider, base_url)` upstream: `build_provider` constructs a
+/// provider per call, and a per-call breaker would be stateless theater.
+static BREAKERS: OnceLock<Mutex<HashMap<(String, String), Arc<CircuitBreaker>>>> = OnceLock::new();
+
+fn shared_breaker(provider: &str, base_url: &str) -> Arc<CircuitBreaker> {
+    let mut map = BREAKERS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap();
+    map.entry((provider.to_string(), base_url.to_string()))
+        .or_insert_with(|| Arc::new(CircuitBreaker::new(5, std::time::Duration::from_secs(30))))
+        .clone()
 }
 
 /// Wrap a host-registered Python async callable as a [`Provider`] (ADR-0047 D10 escape hatch). The
@@ -144,7 +190,10 @@ fn register_provider(slug: String, handler: Py<PyAny>) {
 }
 
 fn provider_err_to_py(e: ProviderError) -> PyErr {
-    PyRuntimeError::new_err(format!("sandhi transport: {e}"))
+    match e {
+        ProviderError::Timeout(_) => PyTimeoutError::new_err(format!("sandhi transport: {e}")),
+        _ => PyRuntimeError::new_err(format!("sandhi transport: {e}")),
+    }
 }
 
 /// Forward one **non-streaming** provider call through sandhi's in-process transport (ADR-0047 D10
@@ -153,7 +202,7 @@ fn provider_err_to_py(e: ProviderError) -> PyErr {
 /// is the provider-native request JSON, forwarded prefix-exact; `session_id` is preserved
 /// end-to-end for prompt-cache / KV affinity (ADR-0047 D9).
 #[pyfunction]
-#[pyo3(signature = (provider, model, base_url, api_key, body_json, session_id=None))]
+#[pyo3(signature = (provider, model, base_url, api_key, body_json, session_id=None, timeout_secs=None, stream_idle_timeout_secs=None, max_retries=None))]
 fn complete<'py>(
     py: Python<'py>,
     provider: String,
@@ -162,11 +211,19 @@ fn complete<'py>(
     api_key: String,
     body_json: String,
     session_id: Option<String>,
+    timeout_secs: Option<f64>,
+    stream_idle_timeout_secs: Option<f64>,
+    max_retries: Option<u32>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let body: serde_json::Value = serde_json::from_str(&body_json)
         .map_err(|e| PyValueError::new_err(format!("body_json is not valid JSON: {e}")))?;
+    let opts = TransportOpts {
+        timeout_secs,
+        stream_idle_timeout_secs,
+        max_retries,
+    };
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let adapter = build_provider(&provider, &base_url, &api_key);
+        let adapter = build_provider(&provider, &base_url, &api_key, &opts);
         let req = ProviderRequest::new(model, body).with_session(session_id);
         let resp = adapter.complete(req).await.map_err(provider_err_to_py)?;
         Python::with_gil(|py| -> PyResult<Py<PyAny>> {
@@ -229,7 +286,7 @@ impl ByteStreamIter {
 /// `{"data": bytes, "usage": dict|None}` — bytes are forwarded verbatim (prefix-exact, D9), usage
 /// finalized on the terminal item. `session_id` is preserved for prompt-cache / KV affinity.
 #[pyfunction]
-#[pyo3(signature = (provider, model, base_url, api_key, body_json, session_id=None))]
+#[pyo3(signature = (provider, model, base_url, api_key, body_json, session_id=None, timeout_secs=None, stream_idle_timeout_secs=None, max_retries=None))]
 fn stream(
     provider: String,
     model: String,
@@ -237,13 +294,21 @@ fn stream(
     api_key: String,
     body_json: String,
     session_id: Option<String>,
+    timeout_secs: Option<f64>,
+    stream_idle_timeout_secs: Option<f64>,
+    max_retries: Option<u32>,
 ) -> PyResult<ByteStreamIter> {
     let body: serde_json::Value = serde_json::from_str(&body_json)
         .map_err(|e| PyValueError::new_err(format!("body_json is not valid JSON: {e}")))?;
+    let opts = TransportOpts {
+        timeout_secs,
+        stream_idle_timeout_secs,
+        max_retries,
+    };
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<StreamItem, String>>(64);
     pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
         use futures_util::StreamExt;
-        let adapter = build_provider(&provider, &base_url, &api_key);
+        let adapter = build_provider(&provider, &base_url, &api_key, &opts);
         let req = ProviderRequest::new(model, body).with_session(session_id);
         match adapter.stream(req).await {
             Ok(mut s) => {

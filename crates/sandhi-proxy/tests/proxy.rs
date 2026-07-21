@@ -328,7 +328,9 @@ data: [DONE]\n\n";
         .uri("/v1/chat/completions")
         .header("authorization", "Bearer vk_demo")
         .header("content-type", "application/json")
-        .body(Body::from(r#"{"model":"gpt-x","messages":[],"stream":true}"#))
+        .body(Body::from(
+            r#"{"model":"gpt-x","messages":[],"stream":true}"#,
+        ))
         .unwrap();
 
     let response = app.oneshot(req).await.unwrap();

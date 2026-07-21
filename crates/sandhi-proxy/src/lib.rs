@@ -298,5 +298,3 @@ fn provider_error(e: &ProviderError) -> Response {
 fn error(status: StatusCode, msg: &str) -> Response {
     (status, Json(json!({ "error": msg }))).into_response()
 }
-
-
