@@ -109,7 +109,8 @@ struct TransportOpts {
 
 /// One circuit breaker per `(provider, base_url)` upstream: `build_provider` constructs a
 /// provider per call, and a per-call breaker would be stateless theater.
-static BREAKERS: OnceLock<Mutex<HashMap<(String, String), Arc<CircuitBreaker>>>> = OnceLock::new();
+type BreakerMap = HashMap<(String, String), Arc<CircuitBreaker>>;
+static BREAKERS: OnceLock<Mutex<BreakerMap>> = OnceLock::new();
 
 fn shared_breaker(provider: &str, base_url: &str) -> Arc<CircuitBreaker> {
     let mut map = BREAKERS
