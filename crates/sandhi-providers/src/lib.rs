@@ -36,7 +36,7 @@ pub use escape_hatch::FnProvider;
 pub use gemini::Gemini;
 pub use local::Ollama;
 pub use openai::OpenAiCompat;
-pub use resilience::{CircuitBreaker, ResilientProvider, RetryConfig};
+pub use resilience::{CircuitBreaker, ResilientProvider, RetryConfig, TimeoutConfig};
 
 /// AWS Bedrock — the usage parser is [`sandhi_core::usage::parse_bedrock_usage`]. Native
 /// transport needs AWS **SigV4** request signing (a dedicated follow-up); until then, front
