@@ -202,6 +202,7 @@ fn provider_err_to_py(e: ProviderError) -> PyErr {
 /// is the provider-native request JSON, forwarded prefix-exact; `session_id` is preserved
 /// end-to-end for prompt-cache / KV affinity (ADR-0047 D9).
 #[pyfunction]
+#[allow(clippy::too_many_arguments)] // pyo3 signature: flat kwargs are the FFI contract
 #[pyo3(signature = (provider, model, base_url, api_key, body_json, session_id=None, timeout_secs=None, stream_idle_timeout_secs=None, max_retries=None))]
 fn complete<'py>(
     py: Python<'py>,
@@ -286,6 +287,7 @@ impl ByteStreamIter {
 /// `{"data": bytes, "usage": dict|None}` — bytes are forwarded verbatim (prefix-exact, D9), usage
 /// finalized on the terminal item. `session_id` is preserved for prompt-cache / KV affinity.
 #[pyfunction]
+#[allow(clippy::too_many_arguments)] // pyo3 signature: flat kwargs are the FFI contract
 #[pyo3(signature = (provider, model, base_url, api_key, body_json, session_id=None, timeout_secs=None, stream_idle_timeout_secs=None, max_retries=None))]
 fn stream(
     provider: String,
