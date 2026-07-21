@@ -38,6 +38,16 @@ pub use local::Ollama;
 pub use openai::OpenAiCompat;
 pub use resilience::{CircuitBreaker, ResilientProvider, RetryConfig, TimeoutConfig};
 
+/// Shared HTTP client for the in-repo adapters: a 10s TCP/TLS connect bound as
+/// defense-in-depth under the decorator's per-attempt timeouts. Policy timeouts
+/// (whole-call / stream-setup / idle) live in [`TimeoutConfig`], not here.
+pub(crate) fn default_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
 /// AWS Bedrock — the usage parser is [`sandhi_core::usage::parse_bedrock_usage`]. Native
 /// transport needs AWS **SigV4** request signing (a dedicated follow-up); until then, front
 /// Bedrock with an OpenAI-compatible gateway and use [`OpenAiCompat`].
