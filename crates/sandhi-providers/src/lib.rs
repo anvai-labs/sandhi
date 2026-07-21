@@ -36,6 +36,8 @@ pub use escape_hatch::FnProvider;
 pub use gemini::Gemini;
 pub use local::Ollama;
 pub use openai::OpenAiCompat;
+pub mod metering;
+pub use metering::MeteredProvider;
 pub use resilience::{CircuitBreaker, ResilientProvider, RetryConfig, TimeoutConfig};
 
 /// Shared HTTP client for the in-repo adapters: a 10s TCP/TLS connect bound as
@@ -61,6 +63,19 @@ pub struct ProviderRequest {
     pub model: String,
     pub body: serde_json::Value,
     pub session_id: Option<String>,
+    /// Who this call is for (metering decorator input). Never enters the wire body —
+    /// attribution rides outside the cached prompt (ADR-0001 §4); adapters ignore it.
+    pub attribution: Attribution,
+}
+
+/// Per-call attribution consumed by the metering decorator. Carried on the request (not the
+/// decorator constructor) because one provider instance serves many virtual keys in the proxy.
+#[derive(Debug, Clone, Default)]
+pub struct Attribution {
+    pub virtual_key_id: Option<String>,
+    pub subject_id: Option<String>,
+    pub group_id: Option<String>,
+    pub route: Option<String>,
 }
 
 impl ProviderRequest {
@@ -69,12 +84,19 @@ impl ProviderRequest {
             model: model.into(),
             body,
             session_id: None,
+            attribution: Attribution::default(),
         }
     }
 
     #[must_use]
     pub fn with_session(mut self, session_id: Option<String>) -> Self {
         self.session_id = session_id;
+        self
+    }
+
+    #[must_use]
+    pub fn with_attribution(mut self, attribution: Attribution) -> Self {
+        self.attribution = attribution;
         self
     }
 }
