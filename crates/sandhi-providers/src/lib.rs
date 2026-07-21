@@ -36,7 +36,19 @@ pub use escape_hatch::FnProvider;
 pub use gemini::Gemini;
 pub use local::Ollama;
 pub use openai::OpenAiCompat;
-pub use resilience::{CircuitBreaker, ResilientProvider, RetryConfig};
+pub mod metering;
+pub use metering::MeteredProvider;
+pub use resilience::{CircuitBreaker, ResilientProvider, RetryConfig, TimeoutConfig};
+
+/// Shared HTTP client for the in-repo adapters: a 10s TCP/TLS connect bound as
+/// defense-in-depth under the decorator's per-attempt timeouts. Policy timeouts
+/// (whole-call / stream-setup / idle) live in [`TimeoutConfig`], not here.
+pub(crate) fn default_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
 
 /// AWS Bedrock — the usage parser is [`sandhi_core::usage::parse_bedrock_usage`]. Native
 /// transport needs AWS **SigV4** request signing (a dedicated follow-up); until then, front
@@ -51,6 +63,19 @@ pub struct ProviderRequest {
     pub model: String,
     pub body: serde_json::Value,
     pub session_id: Option<String>,
+    /// Who this call is for (metering decorator input). Never enters the wire body —
+    /// attribution rides outside the cached prompt (ADR-0001 §4); adapters ignore it.
+    pub attribution: Attribution,
+}
+
+/// Per-call attribution consumed by the metering decorator. Carried on the request (not the
+/// decorator constructor) because one provider instance serves many virtual keys in the proxy.
+#[derive(Debug, Clone, Default)]
+pub struct Attribution {
+    pub virtual_key_id: Option<String>,
+    pub subject_id: Option<String>,
+    pub group_id: Option<String>,
+    pub route: Option<String>,
 }
 
 impl ProviderRequest {
@@ -59,12 +84,19 @@ impl ProviderRequest {
             model: model.into(),
             body,
             session_id: None,
+            attribution: Attribution::default(),
         }
     }
 
     #[must_use]
     pub fn with_session(mut self, session_id: Option<String>) -> Self {
         self.session_id = session_id;
+        self
+    }
+
+    #[must_use]
+    pub fn with_attribution(mut self, attribution: Attribution) -> Self {
+        self.attribution = attribution;
         self
     }
 }
@@ -91,6 +123,7 @@ pub struct StreamChunk {
 pub type ByteStream = Pin<Box<dyn Stream<Item = Result<StreamChunk, ProviderError>> + Send>>;
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ProviderError {
     /// 401 / 403 — bad or missing credential.
     Auth,
@@ -102,6 +135,9 @@ pub enum ProviderError {
     Transport(String),
     /// The circuit breaker is open (upstream failing) — the call was not attempted.
     CircuitOpen,
+    /// The call (or stream setup / idle gap) exceeded the configured bound. Carries the bound
+    /// for a self-describing message. Retryable — a timeout is a transient bet, like a 503.
+    Timeout(std::time::Duration),
 }
 
 impl std::fmt::Display for ProviderError {
@@ -112,6 +148,7 @@ impl std::fmt::Display for ProviderError {
             ProviderError::Upstream(s) => write!(f, "upstream status {s}"),
             ProviderError::Transport(e) => write!(f, "transport error: {e}"),
             ProviderError::CircuitOpen => write!(f, "circuit open (upstream failing)"),
+            ProviderError::Timeout(d) => write!(f, "timed out after {}s", d.as_secs_f32()),
         }
     }
 }

@@ -26,7 +26,7 @@ impl OpenAiCompat {
         api_key: impl Into<String>,
     ) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: crate::default_client(),
             slug: slug.into(),
             base_url: base_url.into(),
             api_key: api_key.into(),

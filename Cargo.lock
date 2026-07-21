@@ -1121,6 +1121,7 @@ dependencies = [
  "sandhi-core",
  "serde",
  "serde_json",
+ "time",
  "tokio",
  "typify",
  "wiremock",
@@ -1131,6 +1132,7 @@ name = "sandhi-proxy"
 version = "0.1.0"
 dependencies = [
  "async-stream",
+ "async-trait",
  "axum",
  "bytes",
  "futures-util",

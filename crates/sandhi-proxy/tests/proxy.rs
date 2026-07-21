@@ -241,3 +241,112 @@ async fn dashboard_reports_aggregates_from_the_store() {
         .unwrap();
     assert_eq!(html.status(), StatusCode::OK);
 }
+
+/// A stub upstream that always times out — pins the `Timeout` → 504 mapping and that no
+/// usage event is emitted for a call with no measured usage.
+struct AlwaysTimeout;
+
+#[async_trait::async_trait]
+impl Provider for AlwaysTimeout {
+    fn slug(&self) -> &str {
+        "timeout"
+    }
+    async fn complete(
+        &self,
+        _req: sandhi_providers::ProviderRequest,
+    ) -> Result<sandhi_providers::ProviderResponse, sandhi_providers::ProviderError> {
+        Err(sandhi_providers::ProviderError::Timeout(
+            std::time::Duration::from_millis(50),
+        ))
+    }
+    async fn stream(
+        &self,
+        _req: sandhi_providers::ProviderRequest,
+    ) -> Result<sandhi_providers::ByteStream, sandhi_providers::ProviderError> {
+        Err(sandhi_providers::ProviderError::Timeout(
+            std::time::Duration::from_millis(50),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn upstream_timeout_maps_to_504() {
+    let sink = Arc::new(InMemorySink::new());
+    let mut keys = KeyStore::new();
+    keys.insert(VirtualKey {
+        id: "vk_demo".into(),
+        subject_id: Some("alice".into()),
+        group_id: Some("platform".into()),
+        upstream_ref: "up1".into(),
+    });
+    let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
+    providers.insert("up1".into(), Arc::new(AlwaysTimeout));
+    let state = Arc::new(ProxyState {
+        keys,
+        ledger: Mutex::new(BudgetLedger::new()),
+        sink: sink.clone(),
+        providers,
+        store: None,
+    });
+    let app = build_app(state);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("authorization", "Bearer vk_demo")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"model":"gpt-x","messages":[]}"#))
+        .unwrap();
+
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    assert_eq!(sink.events().len(), 0, "no measured usage => no event");
+}
+
+#[tokio::test]
+async fn client_disconnect_mid_stream_still_meters() {
+    let upstream = MockServer::start().await;
+    let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n\
+data: {\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":20}}\n\n\
+data: [DONE]\n\n";
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse)
+                .insert_header("content-type", "text/event-stream"),
+        )
+        .mount(&upstream)
+        .await;
+
+    let sink = Arc::new(InMemorySink::new());
+    let state = state_with(upstream.uri(), sink.clone(), BudgetLedger::new());
+    let app = build_app(state);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("authorization", "Bearer vk_demo")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"model":"gpt-x","messages":[],"stream":true}"#,
+        ))
+        .unwrap();
+
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Read ONE body frame, then drop the body — a client disconnect mid-stream.
+    let mut body_stream = response.into_body().into_data_stream();
+    use futures_util::StreamExt;
+    let first = body_stream.next().await;
+    assert!(first.is_some(), "expected at least one forwarded frame");
+    drop(body_stream);
+
+    // Metering must survive the disconnect: exactly one event, with whatever usage was seen.
+    assert_eq!(
+        sink.events().len(),
+        1,
+        "client disconnect must not lose the usage event"
+    );
+}

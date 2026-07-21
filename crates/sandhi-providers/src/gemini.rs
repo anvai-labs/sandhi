@@ -19,7 +19,7 @@ pub struct Gemini {
 impl Gemini {
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: crate::default_client(),
             base_url: base_url.into(),
             api_key: api_key.into(),
         }

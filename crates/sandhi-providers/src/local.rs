@@ -20,7 +20,7 @@ pub struct Ollama {
 impl Ollama {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: crate::default_client(),
             base_url: base_url.into(),
             api_key: None,
         }
