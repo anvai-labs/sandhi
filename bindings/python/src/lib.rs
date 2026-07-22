@@ -146,7 +146,9 @@ impl PyProviderRuntime {
     ) -> PyResult<TypedProvider> {
         let normalized = provider.trim().to_ascii_lowercase();
         let protocol = parse_openai_protocol(protocol.as_deref())?;
-        if auth_scheme.as_deref().is_some_and(|value| !value.trim().is_empty())
+        if auth_scheme
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
             && !matches!(normalized.as_str(), "anthropic" | "claude")
         {
             return Err(PyValueError::new_err(

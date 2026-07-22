@@ -154,7 +154,9 @@ impl JsProviderRuntime {
     ) -> Result<TypedProvider> {
         let normalized = provider.trim().to_ascii_lowercase();
         let protocol = parse_openai_protocol(protocol.as_deref())?;
-        if auth_scheme.as_deref().is_some_and(|value| !value.trim().is_empty())
+        if auth_scheme
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
             && !matches!(normalized.as_str(), "anthropic" | "claude")
         {
             return Err(Error::from_reason(
@@ -197,62 +199,63 @@ impl JsProviderRuntime {
             }
         } else {
             match normalized.as_str() {
-            "anthropic" | "claude" => self.inner.anthropic(
-                base_url.unwrap_or_else(|| "https://api.anthropic.com".into()),
-                api_key,
-                parse_anthropic_auth_scheme(auth_scheme.as_deref())?,
-                max_retries,
-                timeout_secs,
-                stream_idle_timeout_secs,
-            ),
-            "gemini" | "google" => self.inner.gemini(
-                base_url
-                    .unwrap_or_else(|| "https://generativelanguage.googleapis.com/v1beta".into()),
-                api_key,
-                max_retries,
-                timeout_secs,
-                stream_idle_timeout_secs,
-            ),
-            "cohere" => self.inner.cohere(
-                base_url.unwrap_or_else(|| "https://api.cohere.com".into()),
-                api_key,
-                max_retries,
-                timeout_secs,
-                stream_idle_timeout_secs,
-            ),
-            "ollama" => self.inner.ollama(
-                base_url.unwrap_or_else(|| "http://localhost:11434".into()),
-                api_key,
-                max_retries,
-                timeout_secs,
-                stream_idle_timeout_secs,
-            ),
-            _ => {
-                let headers = parse_headers_json(headers_json)?;
-                if let Some(base_url) = base_url {
-                    self.inner.openai_compat(
-                        normalized,
-                        base_url,
-                        api_key,
-                        headers,
-                        max_retries,
-                        timeout_secs,
-                        stream_idle_timeout_secs,
-                    )
-                } else {
-                    self.inner
-                        .known_openai_compat(
-                            &normalized,
-                            &model,
+                "anthropic" | "claude" => self.inner.anthropic(
+                    base_url.unwrap_or_else(|| "https://api.anthropic.com".into()),
+                    api_key,
+                    parse_anthropic_auth_scheme(auth_scheme.as_deref())?,
+                    max_retries,
+                    timeout_secs,
+                    stream_idle_timeout_secs,
+                ),
+                "gemini" | "google" => self.inner.gemini(
+                    base_url.unwrap_or_else(|| {
+                        "https://generativelanguage.googleapis.com/v1beta".into()
+                    }),
+                    api_key,
+                    max_retries,
+                    timeout_secs,
+                    stream_idle_timeout_secs,
+                ),
+                "cohere" => self.inner.cohere(
+                    base_url.unwrap_or_else(|| "https://api.cohere.com".into()),
+                    api_key,
+                    max_retries,
+                    timeout_secs,
+                    stream_idle_timeout_secs,
+                ),
+                "ollama" => self.inner.ollama(
+                    base_url.unwrap_or_else(|| "http://localhost:11434".into()),
+                    api_key,
+                    max_retries,
+                    timeout_secs,
+                    stream_idle_timeout_secs,
+                ),
+                _ => {
+                    let headers = parse_headers_json(headers_json)?;
+                    if let Some(base_url) = base_url {
+                        self.inner.openai_compat(
+                            normalized,
+                            base_url,
                             api_key,
                             headers,
                             max_retries,
                             timeout_secs,
                             stream_idle_timeout_secs,
                         )
-                        .map_err(|error| typed_provider_error(error, &normalized))?
+                    } else {
+                        self.inner
+                            .known_openai_compat(
+                                &normalized,
+                                &model,
+                                api_key,
+                                headers,
+                                max_retries,
+                                timeout_secs,
+                                stream_idle_timeout_secs,
+                            )
+                            .map_err(|error| typed_provider_error(error, &normalized))?
+                    }
                 }
-            }
             }
         };
         Ok(TypedProvider {
