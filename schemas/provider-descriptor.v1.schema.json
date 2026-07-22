@@ -1,0 +1,183 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ProviderDescriptorV1",
+  "type": "object",
+  "required": [
+    "base_url",
+    "endpoint_family",
+    "slug"
+  ],
+  "properties": {
+    "aliases": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "base_url": {
+      "type": "string"
+    },
+    "capabilities": {
+      "default": {
+        "audio_input": false,
+        "file_input": false,
+        "parallel_tool_calls": false,
+        "prompt_cache_usage": false,
+        "reasoning": false,
+        "streaming": false,
+        "structured_output": false,
+        "tools": false,
+        "vision": false
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/ProviderCapabilitiesV1"
+        }
+      ]
+    },
+    "endpoint_family": {
+      "$ref": "#/definitions/EndpointFamilyV1"
+    },
+    "extensions": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "models": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ModelDescriptorV1"
+      }
+    },
+    "schema_version": {
+      "default": "1",
+      "type": "string"
+    },
+    "slug": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "EndpointFamilyV1": {
+      "type": "string",
+      "enum": [
+        "openai_chat_completions",
+        "openai_responses",
+        "anthropic_messages",
+        "gemini_generate_content",
+        "cohere_chat",
+        "ollama_chat",
+        "bedrock_converse",
+        "host_callback"
+      ]
+    },
+    "ModelDescriptorV1": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "aliases": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "capabilities": {
+          "default": {
+            "audio_input": false,
+            "file_input": false,
+            "parallel_tool_calls": false,
+            "prompt_cache_usage": false,
+            "reasoning": false,
+            "streaming": false,
+            "structured_output": false,
+            "tools": false,
+            "vision": false
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/ProviderCapabilitiesV1"
+            }
+          ]
+        },
+        "default_temperature": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "endpoint_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "extensions": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "id": {
+          "type": "string"
+        },
+        "max_input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "max_output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ProviderCapabilitiesV1": {
+      "type": "object",
+      "properties": {
+        "audio_input": {
+          "default": false,
+          "type": "boolean"
+        },
+        "file_input": {
+          "default": false,
+          "type": "boolean"
+        },
+        "parallel_tool_calls": {
+          "default": false,
+          "type": "boolean"
+        },
+        "prompt_cache_usage": {
+          "default": false,
+          "type": "boolean"
+        },
+        "reasoning": {
+          "default": false,
+          "type": "boolean"
+        },
+        "streaming": {
+          "default": false,
+          "type": "boolean"
+        },
+        "structured_output": {
+          "default": false,
+          "type": "boolean"
+        },
+        "tools": {
+          "default": false,
+          "type": "boolean"
+        },
+        "vision": {
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

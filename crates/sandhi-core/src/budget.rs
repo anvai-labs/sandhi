@@ -35,6 +35,7 @@ pub struct BudgetExceeded {
 pub struct BudgetLedger {
     limits: HashMap<String, Budget>,
     spent: HashMap<String, u64>,
+    reserved: HashMap<String, u64>,
 }
 
 impl BudgetLedger {
@@ -50,12 +51,21 @@ impl BudgetLedger {
         self.spent.get(scope).copied().unwrap_or(0)
     }
 
+    /// Tokens held by in-flight requests for this scope.
+    pub fn reserved(&self, scope: &str) -> u64 {
+        self.reserved.get(scope).copied().unwrap_or(0)
+    }
+
     /// Would `add` billable tokens exceed the scope's cap? An unset/unlimited scope always
     /// passes. Enforcement only — no pricing.
     pub fn check(&self, scope: &str, add: u64) -> Result<(), BudgetExceeded> {
         if let Some(limit) = self.limits.get(scope).and_then(|b| b.token_limit) {
             let spent = self.spent(scope);
-            if spent + add > limit {
+            if spent
+                .saturating_add(self.reserved(scope))
+                .saturating_add(add)
+                > limit
+            {
                 return Err(BudgetExceeded {
                     scope: scope.to_string(),
                     limit,
@@ -65,6 +75,26 @@ impl BudgetLedger {
             }
         }
         Ok(())
+    }
+
+    /// Atomically check and reserve an upper bound for one in-flight request.
+    pub fn reserve(&mut self, scope: &str, tokens: u64) -> Result<(), BudgetExceeded> {
+        self.check(scope, tokens)?;
+        *self.reserved.entry(scope.to_string()).or_insert(0) += tokens;
+        Ok(())
+    }
+
+    /// Replace an in-flight reservation with the actual finalized billable usage.
+    pub fn reconcile(&mut self, scope: &str, reserved: u64, actual: u64) {
+        let held = self.reserved.entry(scope.to_string()).or_insert(0);
+        *held = held.saturating_sub(reserved);
+        self.record(scope, actual);
+    }
+
+    /// Release a reservation when a call fails before any billable usage is reported.
+    pub fn release(&mut self, scope: &str, reserved: u64) {
+        let held = self.reserved.entry(scope.to_string()).or_insert(0);
+        *held = held.saturating_sub(reserved);
     }
 
     /// Record actual usage after a call (call once the real token counts are known).
@@ -100,5 +130,21 @@ mod tests {
 
         // 60 + 40 == 100 is allowed (cap is inclusive).
         assert!(ledger.check("group:team", 40).is_ok());
+    }
+
+    #[test]
+    fn reservations_prevent_concurrent_oversubscription_and_reconcile() {
+        let mut ledger = BudgetLedger::new();
+        ledger.set_limit("group:team", Budget::tokens(100));
+        ledger.reserve("group:team", 60).unwrap();
+        assert_eq!(ledger.reserved("group:team"), 60);
+        assert!(ledger.reserve("group:team", 50).is_err());
+
+        ledger.reconcile("group:team", 60, 40);
+        assert_eq!(ledger.reserved("group:team"), 0);
+        assert_eq!(ledger.spent("group:team"), 40);
+        ledger.reserve("group:team", 60).unwrap();
+        ledger.release("group:team", 60);
+        assert_eq!(ledger.reserved("group:team"), 0);
     }
 }

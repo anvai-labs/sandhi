@@ -67,6 +67,7 @@ impl Provider for Cohere {
             status,
             body,
             usage,
+            attempts: 1,
         })
     }
 

@@ -11,6 +11,11 @@ implicit: **how provider adapters are *produced and maintained*** — hand-writt
 generated from each provider's OpenAPI description. Tracked implementation + QA doctrine
 live in [TD-0001](../td/TD-0001-provider-adapter-qa-and-codegen.md).
 
+**2026-07-21 clarification:** [TD-0002](../td/TD-0002-typed-provider-runtime.md) adds a
+small, provider-neutral, versioned chat contract. The statement below that Sandhi is "not a
+typed SDK" excludes generated/full vendor SDK surfaces; it does not prohibit Sandhi from shaping
+the narrow cross-provider contract needed to eliminate provider wire logic from its hosts.
+
 ## Context
 
 Providers publish (or imply) OpenAPI descriptions, and Rust has real OpenAPI→client tooling

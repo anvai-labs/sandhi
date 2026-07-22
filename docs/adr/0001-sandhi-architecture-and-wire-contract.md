@@ -40,11 +40,16 @@ Sandhi never emits dollars or tier/SKU names.
   / shared-key use. **In-path (inline)**, never a redirect (ADR-0047 D8): it holds the real
   upstream key server-side, issues virtual keys, meters every token.
 
-### 3. The usage-event wire contract is the versioned boundary object
+### 3. Wire contracts are versioned boundary objects
 
 `schemas/usage-event.v1.schema.json` (ADR-0047 D3) is the single artifact every consumer
 codes against. Neutral units only — no dollars, no tier/SKU names. Breaking changes bump the
 `schema_version` and coordinate across consumers (same discipline as `victor-codegraph`).
+
+[TD-0002](../td/TD-0002-typed-provider-runtime.md) additionally defines the narrow neutral chat
+contract consumed by bindings and proxy ingress codecs. This is not a second provider
+implementation: `sandhi-core` owns its types and `sandhi-providers::ProviderRuntime` owns the one
+codec/transport path used by every front door.
 
 ### 4. Session / prompt-cache / KV affinity is preserved, not flattened (ADR-0047 D9)
 

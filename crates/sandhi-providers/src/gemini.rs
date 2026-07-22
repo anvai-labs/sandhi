@@ -66,6 +66,7 @@ impl Provider for Gemini {
             status,
             body,
             usage,
+            attempts: 1,
         })
     }
 

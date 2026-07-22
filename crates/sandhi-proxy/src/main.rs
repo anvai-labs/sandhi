@@ -9,21 +9,22 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use sandhi_core::{BudgetLedger, InMemorySink, KeyStore, Sink, VirtualKey};
-use sandhi_providers::{Anthropic, OpenAiCompat, Provider};
+use sandhi_providers::{AnthropicAuthScheme, ProviderHandle, ProviderRuntime};
 use sandhi_proxy::{serve, ProxyState};
 use sandhi_store::SqliteStore;
 
 #[tokio::main]
 async fn main() {
     let mut keys = KeyStore::new();
-    let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
+    let mut providers: HashMap<String, ProviderHandle> = HashMap::new();
+    let runtime = ProviderRuntime::new();
 
     if let Ok(key) = std::env::var("SANDHI_OPENAI_KEY") {
         let base = std::env::var("SANDHI_OPENAI_BASE")
             .unwrap_or_else(|_| "https://api.openai.com/v1".into());
         providers.insert(
             "openai".into(),
-            Arc::new(OpenAiCompat::new("openai", base, key)),
+            runtime.openai_compat("openai", base, key, Default::default(), None, None, None),
         );
         keys.insert(VirtualKey {
             id: "vk_openai_demo".into(),
@@ -34,7 +35,17 @@ async fn main() {
         eprintln!("sandhi-proxy: registered openai upstream + vk_openai_demo");
     }
     if let Ok(key) = std::env::var("SANDHI_ANTHROPIC_KEY") {
-        providers.insert("anthropic".into(), Arc::new(Anthropic::hosted(key)));
+        providers.insert(
+            "anthropic".into(),
+            runtime.anthropic(
+                "https://api.anthropic.com",
+                key,
+                AnthropicAuthScheme::ApiKey,
+                None,
+                None,
+                None,
+            ),
+        );
         keys.insert(VirtualKey {
             id: "vk_anthropic_demo".into(),
             subject_id: Some("demo".into()),

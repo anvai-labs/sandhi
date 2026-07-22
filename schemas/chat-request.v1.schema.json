@@ -1,0 +1,472 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ChatRequestV1",
+  "type": "object",
+  "required": [
+    "messages",
+    "model"
+  ],
+  "properties": {
+    "extensions": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "max_output_tokens": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "messages": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ChatMessageV1"
+      }
+    },
+    "metadata": {
+      "default": {},
+      "allOf": [
+        {
+          "$ref": "#/definitions/RequestMetadataV1"
+        }
+      ]
+    },
+    "model": {
+      "type": "string"
+    },
+    "response_format": true,
+    "schema_version": {
+      "default": "1",
+      "type": "string"
+    },
+    "seed": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "stop": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "temperature": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
+    "tool_choice": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ToolChoiceV1"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "tools": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ToolDefinitionV1"
+      }
+    }
+  },
+  "definitions": {
+    "ChatMessageV1": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "content",
+            "role"
+          ],
+          "properties": {
+            "content": {
+              "$ref": "#/definitions/MessageContent"
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "role": {
+              "type": "string",
+              "enum": [
+                "developer"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "content",
+            "role"
+          ],
+          "properties": {
+            "content": {
+              "$ref": "#/definitions/MessageContent"
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "role": {
+              "type": "string",
+              "enum": [
+                "system"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "content",
+            "role"
+          ],
+          "properties": {
+            "content": {
+              "$ref": "#/definitions/MessageContent"
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "role": {
+              "type": "string",
+              "enum": [
+                "user"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "role"
+          ],
+          "properties": {
+            "content": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/MessageContent"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "refusal": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "role": {
+              "type": "string",
+              "enum": [
+                "assistant"
+              ]
+            },
+            "tool_calls": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/ToolCallV1"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "content",
+            "role",
+            "tool_call_id"
+          ],
+          "properties": {
+            "content": {
+              "$ref": "#/definitions/MessageContent"
+            },
+            "role": {
+              "type": "string",
+              "enum": [
+                "tool"
+              ]
+            },
+            "tool_call_id": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "description": "Legacy Chat Completions function result; retained for lossless compatibility.",
+          "type": "object",
+          "required": [
+            "content",
+            "name",
+            "role"
+          ],
+          "properties": {
+            "content": {
+              "$ref": "#/definitions/MessageContent"
+            },
+            "name": {
+              "type": "string"
+            },
+            "role": {
+              "type": "string",
+              "enum": [
+                "function"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "ContentPart": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "text",
+            "type"
+          ],
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "text"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "image_url",
+            "type"
+          ],
+          "properties": {
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "image_url": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "image_url"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "format",
+            "type"
+          ],
+          "properties": {
+            "data": {
+              "type": "string"
+            },
+            "format": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "input_audio"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "file_data": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "file_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "filename": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "file"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "MessageContent": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ContentPart"
+          }
+        }
+      ]
+    },
+    "RequestMetadataV1": {
+      "type": "object",
+      "properties": {
+        "group_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "route": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subject_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "virtual_key_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ToolCallV1": {
+      "type": "object",
+      "required": [
+        "arguments",
+        "id",
+        "name"
+      ],
+      "properties": {
+        "arguments": {
+          "description": "JSON object encoded as a string, retained incrementally and losslessly across streams.",
+          "type": "string"
+        },
+        "extensions": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      }
+    },
+    "ToolChoiceMode": {
+      "type": "string",
+      "enum": [
+        "none",
+        "auto",
+        "required"
+      ]
+    },
+    "ToolChoiceV1": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ToolChoiceMode"
+        },
+        {
+          "type": "object",
+          "required": [
+            "name"
+          ],
+          "properties": {
+            "name": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "ToolDefinitionV1": {
+      "type": "object",
+      "required": [
+        "name",
+        "parameters"
+      ],
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "parameters": true,
+        "strict": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

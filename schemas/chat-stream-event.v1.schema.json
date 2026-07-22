@@ -1,0 +1,371 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ChatStreamEventV1",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "event",
+        "model"
+      ],
+      "properties": {
+        "event": {
+          "type": "string",
+          "enum": [
+            "response_start"
+          ]
+        },
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "delta",
+        "event"
+      ],
+      "properties": {
+        "delta": {
+          "type": "string"
+        },
+        "event": {
+          "type": "string",
+          "enum": [
+            "text_delta"
+          ]
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "delta",
+        "event"
+      ],
+      "properties": {
+        "delta": {
+          "type": "string"
+        },
+        "event": {
+          "type": "string",
+          "enum": [
+            "reasoning_delta"
+          ]
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "delta",
+        "event"
+      ],
+      "properties": {
+        "delta": {
+          "type": "string"
+        },
+        "event": {
+          "type": "string",
+          "enum": [
+            "refusal_delta"
+          ]
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "event",
+        "id",
+        "index",
+        "name"
+      ],
+      "properties": {
+        "event": {
+          "type": "string",
+          "enum": [
+            "tool_call_start"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "index": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "name": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "delta",
+        "event",
+        "index"
+      ],
+      "properties": {
+        "delta": {
+          "type": "string"
+        },
+        "event": {
+          "type": "string",
+          "enum": [
+            "tool_call_arguments_delta"
+          ]
+        },
+        "index": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "event",
+        "index"
+      ],
+      "properties": {
+        "event": {
+          "type": "string",
+          "enum": [
+            "tool_call_end"
+          ]
+        },
+        "index": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "event",
+        "usage"
+      ],
+      "properties": {
+        "event": {
+          "type": "string",
+          "enum": [
+            "usage"
+          ]
+        },
+        "usage": {
+          "$ref": "#/definitions/UsageV2"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "event",
+        "reason"
+      ],
+      "properties": {
+        "event": {
+          "type": "string",
+          "enum": [
+            "finish"
+          ]
+        },
+        "reason": {
+          "$ref": "#/definitions/FinishReasonV1"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "error",
+        "event"
+      ],
+      "properties": {
+        "error": {
+          "$ref": "#/definitions/ProviderErrorV1"
+        },
+        "event": {
+          "type": "string",
+          "enum": [
+            "error"
+          ]
+        }
+      }
+    }
+  ],
+  "definitions": {
+    "FinishReasonV1": {
+      "type": "string",
+      "enum": [
+        "stop",
+        "length",
+        "tool_calls",
+        "content_filter",
+        "function_call",
+        "unknown"
+      ]
+    },
+    "ProviderErrorV1": {
+      "type": "object",
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "http_status": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "message": {
+          "type": "string"
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "request_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      }
+    },
+    "UsageCompleteness": {
+      "type": "string",
+      "enum": [
+        "final",
+        "partial",
+        "unavailable"
+      ]
+    },
+    "UsageV2": {
+      "type": "object",
+      "required": [
+        "cache_creation_tokens",
+        "cache_read_tokens",
+        "tokens_in",
+        "tokens_out"
+      ],
+      "properties": {
+        "accepted_prediction_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "attempts": {
+          "default": 1,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "audio_input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "audio_output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "cache_creation_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "cache_read_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "completeness": {
+          "default": "unavailable",
+          "allOf": [
+            {
+              "$ref": "#/definitions/UsageCompleteness"
+            }
+          ]
+        },
+        "outcome": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reasoning_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "rejected_prediction_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "tokens_in": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "tokens_out": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "upstream_request_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

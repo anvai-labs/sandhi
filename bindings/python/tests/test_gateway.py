@@ -1,549 +1,672 @@
-"""End-to-end tests for the `sandhi_gateway` in-process middleware.
+"""Python binding gates for the typed provider runtime and metering facade."""
 
-Runnable with pytest OR directly (`python tests/test_gateway.py`). Requires the wheel to be
-built/installed first (`maturin develop -m bindings/python/Cargo.toml`).
-"""
+from __future__ import annotations
 
+import asyncio
 import json
+import os
+import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
+import pytest
 import sandhi_gateway as sg
 
 
-def _serve(status=200, body="{}", content_type="application/json"):
-    """Start a throwaway localhost server replying with a fixed status + body. Returns
-    (base_url, shutdown). Used to drive transport error paths deterministically (no network)."""
-    import threading
-    from http.server import BaseHTTPRequestHandler, HTTPServer
+def _start_server(handler_cls):
+    """Start an HTTPServer on an ephemeral port with ``handler_cls`` (serves forever)."""
+    server = HTTPServer(("127.0.0.1", 0), handler_cls)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
 
-    payload = body.encode() if isinstance(body, str) else body
 
-    class _H(BaseHTTPRequestHandler):
+def test_contract_discovery_and_schemas():
+    assert sg.wire_contract_version() == "1"
+    assert (
+        sg.provider_spec("kimi", "kimi-k3")["base_url"] == "https://api.moonshot.ai/v1"
+    )
+    descriptor = json.loads(sg.provider_descriptor_json("claude"))
+    assert descriptor["slug"] == "anthropic"
+    assert descriptor["endpoint_family"] == "anthropic_messages"
+    schema = json.loads(sg.chat_contract_schema_json("chat-request.v1"))
+    assert schema["title"] == "ChatRequestV1"
+
+
+def test_parse_usage_keeps_cache_split_single_sourced():
+    openai = sg.parse_usage(
+        "openai",
+        json.dumps(
+            {
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 20,
+                    "prompt_tokens_details": {"cached_tokens": 60},
+                }
+            }
+        ),
+    )
+    assert openai == {
+        "tokens_in": 40,
+        "tokens_out": 20,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 60,
+    }
+
+
+def test_persistent_typed_provider_complete_and_stream():
+    complete_body = json.dumps(
+        {
+            "id": "r1",
+            "model": "gpt-test",
+            "choices": [{"message": {"content": "hello"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 3,
+                "prompt_tokens_details": {"cached_tokens": 4},
+            },
+        }
+    ).encode()
+    stream_body = (
+        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{"content":"he"},"finish_reason":null}]}\n\n'
+        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{},"finish_reason":"stop"}],'
+        '"usage":{"prompt_tokens":10,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":4}}}\n\n'
+        "data: [DONE]\n\n"
+    ).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        calls = 0
+
         def do_POST(self):  # noqa: N802
-            self.send_response(status)
+            Handler.calls += 1
+            body = complete_body if Handler.calls == 1 else stream_body
+            content_type = (
+                "application/json" if Handler.calls == 1 else "text/event-stream"
+            )
+            self.send_response(200)
             self.send_header("content-type", content_type)
-            self.send_header("content-length", str(len(payload)))
+            self.send_header("content-length", str(len(body)))
             self.end_headers()
-            self.wfile.write(payload)
+            self.wfile.write(body)
 
-        def log_message(self, *a):
+        def log_message(self, *_args):
             pass
 
-    srv = HTTPServer(("127.0.0.1", 0), _H)
-    port = srv.server_address[1]
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    return f"http://127.0.0.1:{port}/v1", srv.shutdown
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        runtime = sg.ProviderRuntime()
+        provider = runtime.openai_compat(
+            "openai", f"http://127.0.0.1:{server.server_port}/v1", "key", max_retries=0
+        )
+        request = json.dumps(
+            {
+                "schema_version": "1",
+                "model": "gpt-test",
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+        )
+
+        async def run():
+            response = json.loads(await provider.complete_json(request))
+            events = [
+                json.loads(event) async for event in provider.stream_json(request)
+            ]
+            return response, events
+
+        response, events = asyncio.run(run())
+        assert provider.provider == "openai"
+        assert response["output"]["content"] == "hello"
+        assert response["usage"]["tokens_in"] == 6
+        assert [event["event"] for event in events] == [
+            "response_start",
+            "text_delta",
+            "usage",
+            "finish",
+        ]
+        assert Handler.calls == 2
+    finally:
+        server.shutdown()
 
 
-def test_wire_contract_version():
-    assert sg.wire_contract_version() == "1"
-
-
-def test_parse_usage_openai_cache_split():
-    resp = json.dumps(
-        {"usage": {"prompt_tokens": 100, "completion_tokens": 20,
-                   "prompt_tokens_details": {"cached_tokens": 60}}}
+def test_typed_request_validation_fails_before_http():
+    provider = sg.ProviderRuntime().openai_compat(
+        "openai", "http://127.0.0.1:1/v1", "key"
     )
-    u = sg.parse_usage("openai", resp)
-    assert u["tokens_in"] == 40  # 100 total - 60 cached
-    assert u["cache_read_tokens"] == 60
-    assert u["tokens_out"] == 20
-    assert u["cache_creation_tokens"] == 0
+    with pytest.raises(ValueError, match="tool message requires"):
+        provider.complete_json(
+            json.dumps(
+                {
+                    "model": "m",
+                    "messages": [
+                        {"role": "tool", "content": "missing", "tool_call_id": ""}
+                    ],
+                }
+            )
+        )
 
 
-def test_parse_usage_anthropic_direct_split():
-    resp = json.dumps(
-        {"usage": {"input_tokens": 12, "output_tokens": 5,
-                   "cache_creation_input_tokens": 3, "cache_read_input_tokens": 7}}
-    )
-    assert sg.parse_usage("anthropic", resp) == {
-        "tokens_in": 12, "tokens_out": 5,
-        "cache_creation_tokens": 3, "cache_read_tokens": 7,
-    }
+def test_anthropic_bearer_auth_crosses_typed_ffi_without_api_key_header():
+    response_body = json.dumps(
+        {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-test",
+            "content": [{"type": "text", "text": "ok"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 2, "output_tokens": 1},
+        }
+    ).encode()
 
+    class Handler(BaseHTTPRequestHandler):
+        headers_seen = None
 
-def test_complete_async_transport():
-    """Step 3a (ADR-0047 D10): complete() forwards through sandhi's in-process transport and
-    returns {status, body, usage} with usage parsed at the source. A local HTTP server stands in
-    for the provider so no network is needed."""
-    import asyncio
-    import threading
-    from http.server import BaseHTTPRequestHandler, HTTPServer
-
-    resp = {
-        "choices": [
-            {"index": 0, "message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}
-        ],
-        "usage": {
-            "prompt_tokens": 100,
-            "completion_tokens": 20,
-            "prompt_tokens_details": {"cached_tokens": 60},
-        },
-    }
-
-    class _H(BaseHTTPRequestHandler):
         def do_POST(self):  # noqa: N802
-            body = json.dumps(resp).encode()
+            Handler.headers_seen = self.headers
             self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(response_body)))
+            self.end_headers()
+            self.wfile.write(response_body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        provider = sg.ProviderRuntime().provider(
+            "anthropic",
+            "claude-test",
+            "oauth-token",
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            max_retries=0,
+            auth_scheme="bearer",
+        )
+        request = json.dumps(
+            {
+                "model": "claude-test",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_output_tokens": 16,
+            }
+        )
+
+        async def complete():
+            return await provider.complete_json(request)
+
+        response = json.loads(asyncio.run(complete()))
+
+        assert response["output"]["content"] == "ok"
+        assert Handler.headers_seen["authorization"] == "Bearer oauth-token"
+        assert Handler.headers_seen.get("x-api-key") is None
+    finally:
+        server.shutdown()
+
+
+def test_responses_protocol_is_explicit_and_item_shaped_across_typed_ffi():
+    response_body = json.dumps(
+        {
+            "id": "resp_1",
+            "model": "gpt-test",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "ok"}],
+                }
+            ],
+            "usage": {
+                "input_tokens": 12,
+                "output_tokens": 3,
+                "input_tokens_details": {"cached_tokens": 2},
+                "output_tokens_details": {"reasoning_tokens": 1},
+            },
+        }
+    ).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        request_body = None
+        path_seen = None
+        headers_seen = None
+
+        def do_POST(self):  # noqa: N802
+            Handler.path_seen = self.path
+            Handler.headers_seen = self.headers
+            Handler.request_body = json.loads(
+                self.rfile.read(int(self.headers["content-length"]))
+            )
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(response_body)))
+            self.end_headers()
+            self.wfile.write(response_body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        provider = sg.ProviderRuntime().provider(
+            "openai",
+            "gpt-test",
+            "oauth-token",
+            base_url=f"http://127.0.0.1:{server.server_port}/v1",
+            protocol="responses",
+            headers_json=json.dumps({"originator": "victor"}),
+            max_retries=0,
+        )
+        request = json.dumps(
+            {
+                "model": "gpt-test",
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+        )
+
+        async def complete():
+            return await provider.complete_json(request)
+
+        response = json.loads(asyncio.run(complete()))
+        assert Handler.path_seen == "/v1/responses"
+        assert Handler.headers_seen["authorization"] == "Bearer oauth-token"
+        assert Handler.headers_seen["originator"] == "victor"
+        assert Handler.request_body["input"][0]["type"] == "message"
+        assert "messages" not in Handler.request_body
+        assert response["output"]["content"] == "ok"
+        assert response["usage"]["tokens_in"] == 10
+        assert response["usage"]["cache_read_tokens"] == 2
+        assert response["usage"]["reasoning_tokens"] == 1
+    finally:
+        server.shutdown()
+
+
+def test_chatgpt_responses_profile_aggregates_required_upstream_stream():
+    stream_body = (
+        'data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-test"}}\n\n'
+        'data: {"type":"response.output_text.delta","delta":"ok"}\n\n'
+        'data: {"type":"response.completed","response":{"status":"completed","output":[],"usage":{"input_tokens":4,"output_tokens":1}}}\n\n'
+    ).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        request_body = None
+
+        def do_POST(self):  # noqa: N802
+            Handler.request_body = json.loads(
+                self.rfile.read(int(self.headers["content-length"]))
+            )
+            self.send_response(200)
+            self.send_header("content-type", "text/event-stream")
+            self.send_header("content-length", str(len(stream_body)))
+            self.end_headers()
+            self.wfile.write(stream_body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        provider = sg.ProviderRuntime().provider(
+            "openai",
+            "gpt-test",
+            "oauth-token",
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            protocol="chatgpt_responses",
+            max_retries=0,
+        )
+        request = json.dumps(
+            {
+                "model": "gpt-test",
+                "messages": [
+                    {"role": "developer", "content": "be precise"},
+                    {"role": "user", "content": "hi"},
+                ],
+                "temperature": 0.5,
+                "max_output_tokens": 20,
+            }
+        )
+
+        async def complete():
+            return await provider.complete_json(request)
+
+        response = json.loads(asyncio.run(complete()))
+        assert response["output"]["content"] == "ok"
+        assert Handler.request_body["instructions"] == "be precise"
+        assert Handler.request_body["store"] is False
+        assert Handler.request_body["stream"] is True
+        assert "temperature" not in Handler.request_body
+        assert "max_output_tokens" not in Handler.request_body
+    finally:
+        server.shutdown()
+
+
+def test_raw_provider_transport_surface_is_not_exported():
+    for obsolete in ("complete", "stream", "register_provider", "ByteStreamIter"):
+        assert not hasattr(sg, obsolete)
+
+
+def test_gateway_attributes_enforces_and_records_budget():
+    gateway = sg.Gateway()
+    gateway.add_virtual_key(
+        "vk_alice", subject="alice", group="platform", upstream="anthropic"
+    )
+    gateway.set_budget("group:platform", 1000)
+    event = gateway.meter(
+        "vk_alice",
+        "anthropic",
+        "claude-x",
+        json.dumps(
+            {
+                "usage": {
+                    "input_tokens": 220,
+                    "output_tokens": 80,
+                    "cache_creation_input_tokens": 10,
+                    "cache_read_input_tokens": 40,
+                }
+            }
+        ),
+        session_id="conv_7",
+    )
+    assert event["subject_id"] == "alice"
+    assert event["group_id"] == "platform"
+    assert event["session_id"] == "conv_7"
+    assert gateway.spent("group:platform") == 300
+    assert gateway.check_budget("group:platform", 701) is False
+
+
+# ---------------------------------------------------------------------------
+# Provider dispatch + openai_responses factory + FFI-seam validation. Handle
+# construction is pure (no network), so these exercise every branch offline.
+# ---------------------------------------------------------------------------
+
+
+def test_provider_factory_dispatches_every_named_backend():
+    runtime = sg.ProviderRuntime()
+    for provider, model in [
+        ("anthropic", "claude-test"),
+        ("claude", "claude-test"),
+        ("gemini", "gemini-1.5-pro"),
+        ("google", "gemini-1.5-pro"),
+        ("cohere", "command-r"),
+        ("ollama", "llama3"),
+    ]:
+        handle = runtime.provider(provider, model, "key", max_retries=0)
+        assert isinstance(handle.provider, str)
+        assert len(handle.provider) > 0
+
+    # Default + explicit api_key auth scheme both valid for Anthropic.
+    assert runtime.provider("anthropic", "claude-test", "k", max_retries=0).provider
+    assert runtime.provider(
+        "anthropic", "claude-test", "k", max_retries=0, auth_scheme="api_key"
+    ).provider
+
+
+def test_provider_routes_openai_compat_and_responses_escape_hatches():
+    runtime = sg.ProviderRuntime()
+    # Unknown provider WITH a base_url → openai_compat escape hatch (slug echoed back verbatim).
+    custom = runtime.provider(
+        "acme", "m", "key", base_url="https://example.test/v1", max_retries=0
+    )
+    assert custom.provider == "acme"
+
+    # Known catalog provider WITHOUT a base_url → known_openai_compat resolves the spec.
+    known = runtime.provider("deepseek", "deepseek-chat", "key", max_retries=0)
+    assert known.provider == "deepseek"
+
+    # openai_responses() direct factory.
+    responses = runtime.openai_responses(
+        "openai", "https://example.test/v1", "token", max_retries=0
+    )
+    assert responses.provider == "openai"
+
+    # Responses protocol via provider() resolves a known catalog provider's base_url when omitted.
+    via_provider = runtime.provider(
+        "deepseek", "deepseek-chat", "key", max_retries=0, protocol="responses"
+    )
+    assert via_provider.provider == "deepseek"
+
+
+def test_provider_rejects_invalid_dispatch_inputs_at_the_ffi_seam():
+    runtime = sg.ProviderRuntime()
+    # Unsupported auth_scheme value.
+    with pytest.raises(ValueError, match="auth_scheme"):
+        runtime.provider("anthropic", "m", "k", max_retries=0, auth_scheme="bogus")
+    # auth_scheme supplied for a non-Anthropic provider.
+    with pytest.raises(ValueError, match="Anthropic"):
+        runtime.provider(
+            "openai",
+            "m",
+            "k",
+            base_url="https://e.test/v1",
+            max_retries=0,
+            auth_scheme="bearer",
+        )
+    # Unsupported protocol value.
+    with pytest.raises(ValueError, match="protocol"):
+        runtime.provider("openai", "m", "k", max_retries=0, protocol="bogus")
+    # Responses protocol + unknown provider + no base_url.
+    with pytest.raises(ValueError, match="base_url"):
+        runtime.provider("acme", "m", "k", max_retries=0, protocol="responses")
+    # Unknown catalog provider without a base_url under chat_completions.
+    with pytest.raises(ValueError, match="unknown catalog provider"):
+        runtime.provider("acme", "m", "k", max_retries=0)
+    # Malformed headers JSON.
+    with pytest.raises(ValueError, match="headers"):
+        runtime.openai_compat(
+            "openai", "https://e.test/v1", "k", headers_json="not-json"
+        )
+
+
+def test_contract_discovery_error_branches():
+    # provider_spec: KeyError on an unknown provider; None model returns the default base_url.
+    assert sg.provider_spec("kimi")["base_url"]  # None-model branch
+    with pytest.raises(KeyError):
+        sg.provider_spec("acme-unknown")
+    # provider_descriptor_json: KeyError on unknown provider.
+    with pytest.raises(KeyError):
+        sg.provider_descriptor_json("acme-unknown")
+    # chat_contract_schema_json: accepts the full filename and raises KeyError on unknown.
+    by_full_name = json.loads(
+        sg.chat_contract_schema_json("chat-request.v1.schema.json")
+    )
+    assert by_full_name["title"] == "ChatRequestV1"
+    with pytest.raises(KeyError):
+        sg.chat_contract_schema_json("nope.v1")
+
+
+def _complete_error_handler():
+    """A handler that always returns HTTP 500, capturing nothing."""
+    body = json.dumps({"error": "boom"}).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            self.send_response(500)
             self.send_header("content-type", "application/json")
             self.send_header("content-length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
 
-        def log_message(self, *a):
+        def log_message(self, *_args):
             pass
 
-    srv = HTTPServer(("127.0.0.1", 0), _H)
-    port = srv.server_address[1]
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return Handler
+
+
+def test_complete_json_surfaces_upstream_error_as_typed_descriptor():
+    server = _start_server(_complete_error_handler())
     try:
-        req = json.dumps({"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]})
+        provider = sg.ProviderRuntime().openai_compat(
+            "openai", f"http://127.0.0.1:{server.server_port}/v1", "key", max_retries=0
+        )
+        request = json.dumps(
+            {"model": "gpt-test", "messages": [{"role": "user", "content": "hi"}]}
+        )
 
-        async def _call():
-            return await sg.complete(
-                "openai", "gpt-4o", f"http://127.0.0.1:{port}/v1", "sk-test", req, "sess-1"
-            )
+        async def complete():
+            return await provider.complete_json(request)
 
-        out = asyncio.run(_call())
-        assert out["status"] == 200
-        # usage parsed at the source → fresh-only tokens_in (100 − 60 cached).
-        assert out["usage"]["tokens_in"] == 40
-        assert out["usage"]["cache_read_tokens"] == 60
-        assert out["usage"]["tokens_out"] == 20
-        assert "hi" in json.loads(out["body"])["choices"][0]["message"]["content"]
+        with pytest.raises(Exception):  # typed ProviderError → RuntimeError JSON
+            asyncio.run(complete())
     finally:
-        srv.shutdown()
+        server.shutdown()
 
 
-def test_stream_async_iterator():
-    """Step 3b (ADR-0047 D10): stream() yields {data, usage} chunks via an async iterator; bytes
-    are forwarded verbatim and usage is finalized on the terminal item. Local SSE server."""
-    import asyncio
-    import threading
-    from http.server import BaseHTTPRequestHandler, HTTPServer
-
-    sse = (
-        'data: {"choices":[{"delta":{"content":"he"}}]}\n\n'
-        'data: {"choices":[{"delta":{"content":"llo"}}]}\n\n'
-        'data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,'
-        '"prompt_tokens_details":{"cached_tokens":4}}}\n\n'
-        "data: [DONE]\n\n"
-    )
-
-    class _H(BaseHTTPRequestHandler):
-        def do_POST(self):  # noqa: N802
-            b = sse.encode()
-            self.send_response(200)
-            self.send_header("content-type", "text/event-stream")
-            self.send_header("content-length", str(len(b)))
-            self.end_headers()
-            self.wfile.write(b)
-
-        def log_message(self, *a):
-            pass
-
-    srv = HTTPServer(("127.0.0.1", 0), _H)
-    port = srv.server_address[1]
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+def test_stream_json_surfaces_upstream_error_via_async_iteration():
+    server = _start_server(_complete_error_handler())
     try:
-        req = json.dumps({"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]})
+        provider = sg.ProviderRuntime().openai_compat(
+            "openai", f"http://127.0.0.1:{server.server_port}/v1", "key", max_retries=0
+        )
+        request = json.dumps(
+            {"model": "gpt-test", "messages": [{"role": "user", "content": "hi"}]}
+        )
 
-        async def _collect():
-            forwarded = b""
-            usage = None
-            async for chunk in sg.stream(
-                "openai", "gpt-4o", f"http://127.0.0.1:{port}/v1", "sk", req, "s1"
-            ):
-                forwarded += chunk["data"]
-                if chunk["usage"] is not None:
-                    usage = chunk["usage"]
-            return forwarded, usage
+        async def stream():
+            return [json.loads(event) async for event in provider.stream_json(request)]
 
-        forwarded, usage = asyncio.run(_collect())
-        assert b"he" in forwarded and b"llo" in forwarded and b"[DONE]" in forwarded
-        assert usage is not None
-        assert usage["tokens_in"] == 6  # 10 − 4 cached
-        assert usage["tokens_out"] == 5
-        assert usage["cache_read_tokens"] == 4
+        with pytest.raises(Exception):
+            asyncio.run(stream())
     finally:
-        srv.shutdown()
+        server.shutdown()
 
 
-def test_register_custom_provider_escape_hatch():
-    """Step 3d (ADR-0047 D10): a host-registered Python async provider serves complete() without a
-    Rust adapter — the escape hatch for custom / air-gapped / community providers. The handler owns
-    its own transport and reports usage; sandhi routes complete() to it and parses that usage."""
-    import asyncio
-
-    async def my_handler(model, body_json, session_id):
-        req = json.loads(body_json)
-        # A custom provider does its own 'transport'; here we just echo and self-report usage.
-        return {
-            "status": 200,
-            "body": json.dumps({"model": model, "echoed": req, "session": session_id}),
-            "usage": {
-                "tokens_in": 7,
-                "tokens_out": 3,
-                "cache_creation_tokens": 0,
-                "cache_read_tokens": 2,
-            },
-        }
-
-    sg.register_provider("mycustom", my_handler)
-
-    async def _call():
-        body = json.dumps({"messages": [{"role": "user", "content": "hi"}]})
-        return await sg.complete("mycustom", "custom-model-x", "http://unused", "k", body, "s9")
-
-    out = asyncio.run(_call())
-    assert out["status"] == 200
-    assert out["usage"]["tokens_in"] == 7
-    assert out["usage"]["tokens_out"] == 3
-    assert out["usage"]["cache_read_tokens"] == 2
-    body = json.loads(out["body"])
-    assert body["model"] == "custom-model-x"
-    assert body["session"] == "s9"
+# ---------------------------------------------------------------------------
+# Gateway: meter() (parse-driven), check_budget, events(), custom host parser
+# (register_parser), meter_tokens, JSONL sink, group-less scope, and error paths.
+# ---------------------------------------------------------------------------
 
 
-def test_gateway_meters_attributes_and_budgets():
-    gw = sg.Gateway()
-    gw.add_virtual_key("vk_alice", subject="alice", group="platform", upstream="anthropic")
-    gw.set_budget("group:platform", 1000)
-
-    resp = json.dumps(
-        {"usage": {"input_tokens": 220, "output_tokens": 80,
-                   "cache_creation_input_tokens": 0, "cache_read_input_tokens": 40}}
+def test_gateway_meter_parses_attributes_records_and_lists_events():
+    gateway = sg.Gateway()
+    gateway.add_virtual_key(
+        "vk_alice", subject="alice", group="platform", upstream="anthropic"
     )
-    ev = gw.meter("vk_alice", "anthropic", "claude-x", resp, session_id="conv_7")
+    gateway.set_budget("group:platform", 1000)
 
-    assert ev["subject_id"] == "alice"
-    assert ev["group_id"] == "platform"
-    assert ev["virtual_key_id"] == "vk_alice"
-    assert ev["session_id"] == "conv_7"
-    assert ev["provider"] == "anthropic"
-    assert ev["backend"] == "external"
-    assert ev["schema_version"] == "1"
-    assert ev["tokens_in"] == 220
-    assert ev["cache_read_tokens"] == 40
-    assert ev["gpu_seconds"] is None
+    event = gateway.meter(
+        "vk_alice",
+        "anthropic",
+        "claude-x",
+        json.dumps(
+            {
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "cache_creation_input_tokens": 5,
+                    "cache_read_input_tokens": 10,
+                }
+            }
+        ),
+        session_id="conv_1",
+        route="router",
+    )
+    assert event["subject_id"] == "alice"
+    assert event["group_id"] == "platform"
+    assert event["session_id"] == "conv_1"
+    assert event["route"] == "router"
+    assert event["provider"] == "anthropic"
+    assert event["usage_completeness"] == "final"
+    assert event["backend"] == "external"
+    assert gateway.spent("group:platform") == 120  # 100 + 20 billable
 
-    # billable = 220 + 80 = 300, recorded on the group scope
-    assert gw.spent("group:platform") == 300
-    assert len(gw.events()) == 1
-    # a big next call is now over the 1000 budget (300 + 800 > 1000)
-    assert gw.check_budget("group:platform", 800) is False
-    assert gw.check_budget("group:platform", 700) is True
+    # Within/over budget (120 spent of 1000 → 880 remaining).
+    assert gateway.check_budget("group:platform", 879) is True
+    assert gateway.check_budget("group:platform", 881) is False
 
+    listed = gateway.events()
+    assert len(listed) == 1
+    assert listed[0]["request_id"] == event["request_id"]
 
-def test_unknown_virtual_key_raises_keyerror():
-    gw = sg.Gateway()
-    try:
-        gw.meter("vk_nope", "openai", "m", json.dumps({"usage": {}}))
-        raise AssertionError("expected KeyError")
-    except KeyError:
-        pass
-
-
-def test_jsonl_sink_writes_events(tmp_path=None):
-    import tempfile
-    import os
-
-    d = tempfile.mkdtemp()
-    path = os.path.join(d, "usage.jsonl")
-    gw = sg.Gateway(path)
-    gw.add_virtual_key("vk", subject="s", group="g", upstream="openai")
-    resp = json.dumps({"usage": {"prompt_tokens": 10, "completion_tokens": 5}})
-    gw.meter("vk", "openai", "gpt-x", resp)
-    gw.meter("vk", "openai", "gpt-x", resp)
-    with open(path) as fh:
-        lines = [json.loads(x) for x in fh if x.strip()]
-    assert len(lines) == 2
-    assert all(line["schema_version"] == "1" for line in lines)
+    # Unknown virtual key → KeyError; bad JSON → ValueError.
+    with pytest.raises(KeyError):
+        gateway.meter("ghost", "openai", "m", json.dumps({}))
+    with pytest.raises(ValueError):
+        gateway.meter("vk_alice", "openai", "m", "{not json")
 
 
-def test_meter_tokens_bypasses_parsing():
-    gw = sg.Gateway()
-    gw.add_virtual_key("vk", subject="s", group="g", upstream="x")
-    ev = gw.meter_tokens("vk", "custom-provider", "m", 11, 7, 0, 2, "sess")
-    assert ev["tokens_in"] == 11
-    assert ev["tokens_out"] == 7
-    assert ev["cache_read_tokens"] == 2
-    assert ev["provider"] == "custom-provider"
-    assert ev["session_id"] == "sess"
-    assert gw.spent("group:g") == 18  # 11 + 7
+def test_gateway_custom_parser_overrides_builtin_and_supports_partial_dicts():
+    gateway = sg.Gateway()
+    gateway.add_virtual_key("vk_custom", subject="custom")
 
-
-def test_register_parser_host_callback():
-    gw = sg.Gateway()
-    gw.add_virtual_key("vk", subject="s", group="g", upstream="x")
     calls = []
 
     def my_parser(response_json):
-        d = json.loads(response_json)
-        calls.append(d)
-        return {"tokens_in": d["in"], "tokens_out": d["out"],
-                "cache_creation_tokens": 0, "cache_read_tokens": 5}
+        calls.append(response_json)
+        # Missing keys → parsed_from_pyobj defaults them to 0.
+        return {"tokens_in": 50, "tokens_out": 7}
 
-    gw.register_parser("weirdprovider", my_parser)
-    ev = gw.meter("vk", "weirdprovider", "m", json.dumps({"in": 30, "out": 12}))
-    assert ev["tokens_in"] == 30
-    assert ev["tokens_out"] == 12
-    assert ev["cache_read_tokens"] == 5
-    assert len(calls) == 1  # the host callback was invoked
+    gateway.register_parser("exotic", my_parser)
+    event = gateway.meter("vk_custom", "exotic", "ex-1", json.dumps({"any": "shape"}))
+    assert calls and calls[0] == json.dumps({"any": "shape"})
+    assert event["tokens_in"] == 50
+    assert event["tokens_out"] == 7
+    assert event["cache_creation_tokens"] == 0  # missing-key default
+    # Group-less key records against the vk:* scope.
+    assert gateway.spent("vk:vk_custom") == 57
 
+    # A custom parser that raises → ValueError.
+    def bad_parser(_response_json):
+        raise RuntimeError("nope")
 
-# --------------------------------------------------------------------------------------------
-# Error paths (quality control). The transport surface must fail loudly + with the right Python
-# exception type: bad input → ValueError; provider/upstream/dispatch failure → RuntimeError.
-# --------------------------------------------------------------------------------------------
-
-_REQ = json.dumps({"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]})
-
-
-def _closed_port_base():
-    """Bind then immediately release a localhost port so a connect there is refused — a
-    deterministic transport (connection) failure with no network."""
-    import socket
-
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return f"http://127.0.0.1:{port}/v1"
+    gateway.register_parser("broken", bad_parser)
+    with pytest.raises(ValueError, match="custom parser"):
+        gateway.meter("vk_custom", "broken", "x", "{}")
 
 
-def _expect(exc_type, make_awaitable):
-    """Await `make_awaitable()` inside a running loop and assert it raises `exc_type`; return the
-    message. The factory is invoked *inside* the loop (like a real caller) — invoking a transport
-    coroutine before `asyncio.run` starts a loop would itself raise 'no running event loop'."""
-    import asyncio
-
-    async def _run():
-        return await make_awaitable()
-
-    try:
-        asyncio.run(_run())
-    except exc_type as e:
-        return str(e)
-    raise AssertionError(f"expected {exc_type.__name__}")
-
-
-def test_complete_bad_body_json_raises_value_error():
-    msg = _expect(
-        ValueError,
-        lambda: sg.complete("openai", "gpt-4o", "http://127.0.0.1:1/v1", "k", "not json", None),
+def test_gateway_meter_tokens_and_jsonl_sink_round_trip():
+    sink = tempfile.NamedTemporaryFile(
+        prefix="sandhi-sink-", suffix=".jsonl", delete=False
     )
-    assert "valid JSON" in msg
-
-
-def test_complete_upstream_5xx_raises_runtime_error():
-    base, shutdown = _serve(status=500, body='{"error": "boom"}')
+    sink.close()
+    os.unlink(sink.name)  # let the binding recreate it
     try:
-        msg = _expect(
-            RuntimeError, lambda: sg.complete("openai", "gpt-4o", base, "k", _REQ, "s1")
+        gateway = sg.Gateway(sink.name)
+        gateway.add_virtual_key("vk_solo", subject="solo", upstream="openai")
+        gateway.set_budget("vk:vk_solo", 1000)
+        event = gateway.meter_tokens(
+            "vk_solo", "openai", "gpt-test", 10, 5, session_id="s"
         )
-        assert "sandhi transport" in msg  # upstream status surfaced, not swallowed
+        assert event["subject_id"] == "solo"
+        assert event["group_id"] is None
+        assert gateway.check_budget("vk:vk_solo", 1) is True
+        assert gateway.check_budget("vk:vk_solo", 1000) is False
+
+        with open(sink.name) as fh:
+            lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+        assert len(lines) == 1
+        assert json.loads(lines[0])["subject_id"] == "solo"
     finally:
-        shutdown()
+        if os.path.exists(sink.name):
+            os.unlink(sink.name)
 
 
-def test_complete_upstream_401_raises_runtime_error():
-    base, shutdown = _serve(status=401, body='{"error": "unauthorized"}')
-    try:
-        _expect(RuntimeError, lambda: sg.complete("openai", "gpt-4o", base, "k", _REQ, "s1"))
-    finally:
-        shutdown()
-
-
-def test_complete_upstream_429_raises_runtime_error():
-    base, shutdown = _serve(status=429, body='{"error": "slow down"}')
-    try:
-        _expect(RuntimeError, lambda: sg.complete("openai", "gpt-4o", base, "k", _REQ, "s1"))
-    finally:
-        shutdown()
-
-
-def test_complete_connection_refused_raises_runtime_error():
-    msg = _expect(
-        RuntimeError,
-        lambda: sg.complete("openai", "gpt-4o", _closed_port_base(), "k", _REQ, "s1"),
+def test_parse_usage_exercises_every_builtin_provider_parser():
+    anthropic = sg.parse_usage(
+        "anthropic", json.dumps({"usage": {"input_tokens": 7, "output_tokens": 3}})
     )
-    assert "sandhi transport" in msg  # a Transport error, mapped to RuntimeError
-
-
-def test_stream_bad_body_json_raises_value_error():
-    # body_json is validated eagerly at the stream() call, before any iteration.
-    import asyncio
-
-    async def _call():
-        return sg.stream("openai", "gpt-4o", "http://127.0.0.1:1/v1", "k", "{bad", None)
-
-    try:
-        asyncio.run(_call())
-    except ValueError as e:
-        assert "valid JSON" in str(e)
-    else:
-        raise AssertionError("expected ValueError")
-
-
-def test_stream_upstream_5xx_raises_runtime_error_on_iteration():
-    # The upstream failure surfaces on the first __anext__, not at stream() call time.
-    base, shutdown = _serve(status=500, body='{"error": "boom"}')
-
-    async def _drain():
-        async for _ in sg.stream("openai", "gpt-4o", base, "k", _REQ, "s1"):
-            pass
-
-    try:
-        msg = _expect(RuntimeError, lambda: _drain())
-        assert "sandhi stream" in msg
-    finally:
-        shutdown()
-
-
-def test_register_provider_handler_raises_surfaces_runtime_error():
-    async def boom(model, body_json, session_id):
-        raise ValueError("handler blew up")
-
-    sg.register_provider("errprov", boom)
-    msg = _expect(
-        RuntimeError, lambda: sg.complete("errprov", "m", "http://unused", "k", _REQ, "s")
-    )
-    assert "custom provider" in msg
-
-
-def test_register_provider_missing_status_raises_runtime_error():
-    async def no_status(model, body_json, session_id):
-        return {"body": "{}"}  # missing "status"
-
-    sg.register_provider("nostatus", no_status)
-    _expect(RuntimeError, lambda: sg.complete("nostatus", "m", "http://unused", "k", _REQ, "s"))
-
-
-def test_register_provider_missing_body_raises_runtime_error():
-    async def no_body(model, body_json, session_id):
-        return {"status": 200}  # missing "body"
-
-    sg.register_provider("nobody", no_body)
-    _expect(RuntimeError, lambda: sg.complete("nobody", "m", "http://unused", "k", _REQ, "s"))
-
-
-def test_register_provider_non_json_body_raises_runtime_error():
-    async def bad_body(model, body_json, session_id):
-        return {"status": 200, "body": "this is not json"}
-
-    sg.register_provider("badbody", bad_body)
-    msg = _expect(
-        RuntimeError, lambda: sg.complete("badbody", "m", "http://unused", "k", _REQ, "s")
-    )
-    assert "not valid JSON" in msg
-
-
-def test_register_provider_non_string_body_raises_runtime_error():
-    async def obj_body(model, body_json, session_id):
-        return {"status": 200, "body": {"not": "a string"}}  # body must be a JSON string
-
-    sg.register_provider("objbody", obj_body)
-    _expect(RuntimeError, lambda: sg.complete("objbody", "m", "http://unused", "k", _REQ, "s"))
-
-
-def test_register_provider_missing_usage_defaults_to_zero():
-    # usage is optional: a handler that omits it meters as all-zero, not an error.
-    import asyncio
-
-    async def no_usage(model, body_json, session_id):
-        return {"status": 200, "body": json.dumps({"ok": True})}
-
-    sg.register_provider("nousage", no_usage)
-
-    async def _call():
-        return await sg.complete("nousage", "m", "http://unused", "k", _REQ, "s")
-
-    out = asyncio.run(_call())
-    assert out["status"] == 200
-    assert out["usage"] == {
-        "tokens_in": 0,
-        "tokens_out": 0,
+    assert anthropic == {
+        "tokens_in": 7,
+        "tokens_out": 3,
         "cache_creation_tokens": 0,
         "cache_read_tokens": 0,
     }
-
-
-def test_meter_bad_response_json_raises_value_error():
-    gw = sg.Gateway()
-    gw.add_virtual_key("vk", subject="s", group="g", upstream="openai")
-    try:
-        gw.meter("vk", "openai", "m", "not json at all")
-    except ValueError as e:
-        assert "valid JSON" in str(e)
-    else:
-        raise AssertionError("expected ValueError")
-
-
-def test_register_parser_callback_raising_surfaces_value_error():
-    gw = sg.Gateway()
-    gw.add_virtual_key("vk", subject="s", group="g", upstream="x")
-
-    def bad_parser(response_json):
-        raise KeyError("missing field")
-
-    gw.register_parser("weird", bad_parser)
-    try:
-        gw.meter("vk", "weird", "m", json.dumps({"anything": 1}))
-    except ValueError as e:
-        assert "custom parser" in str(e)
-    else:
-        raise AssertionError("expected ValueError")
-
-
-if __name__ == "__main__":
-    for _name, _fn in list(globals().items()):
-        if _name.startswith("test_") and callable(_fn):
-            _fn()
-            print(f"ok {_name}")
-    print("ALL PASS")
-
-
-def test_complete_timeout_raises_timeout_error():
-    """The decorator's per-call bound surfaces as Python's builtin TimeoutError."""
-    import asyncio
-
-    import pytest
-
-    async def slow(model, body_json, session_id):
-        await asyncio.sleep(5)
-        return {"status": 200, "body": "{}"}
-
-    sg.register_provider("slowprov", slow)
-
-    async def _call():
-        return await sg.complete(
-            "slowprov", "m", "http://unused", "k", _REQ, None, timeout_secs=0.2
-        )
-
-    with pytest.raises(TimeoutError):
-        asyncio.run(_call())
-
-
-def test_complete_retries_transient_then_succeeds():
-    """The binding now carries the resilience decorator: a transient custom-provider failure
-    is retried and the call succeeds."""
-    import asyncio
-
-    calls = {"n": 0}
-
-    async def flaky(model, body_json, session_id):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise RuntimeError("transient blip")
-        return {"status": 200, "body": json.dumps({"ok": True})}
-
-    sg.register_provider("flakyprov", flaky)
-
-    async def _call():
-        return await sg.complete(
-            "flakyprov", "m", "http://unused", "k", _REQ, None, max_retries=2
-        )
-
-    out = asyncio.run(_call())
-    assert out["status"] == 200
-    assert calls["n"] == 2
+    # Remaining parsers are selected by slug; missing fields default to zero via unwrap_or_default,
+    # so a minimal body still exercises each match arm.
+    for provider in [
+        "gemini",
+        "cohere",
+        "ollama",
+        "bedrock",
+        "openai_responses",
+        "responses",
+    ]:
+        got = sg.parse_usage(provider, json.dumps({}))
+        assert got == {
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 0,
+        }
+    with pytest.raises(ValueError):
+        sg.parse_usage("openai", "{nope")

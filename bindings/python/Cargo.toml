@@ -1,7 +1,7 @@
 [package]
 name = "sandhi-gateway-py"
 description = "PyO3 binding for Sandhi (published to PyPI as `sandhi-gateway`)."
-version = "0.1.0"
+version = "0.1.2"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/anvai-labs/sandhi"
@@ -26,6 +26,7 @@ sandhi-providers = { path = "../../crates/sandhi-providers" }
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 pyo3-async-runtimes = { version = "0.22", features = ["tokio-runtime"] }
 futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false }
 
 # Intentionally its OWN workspace root — this crate builds via maturin (bindings), not as a
 # member of the root `cargo build --workspace`. Without this, Cargo errors that the package

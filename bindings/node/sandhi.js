@@ -11,15 +11,15 @@
 
 const native = require("./index.js");
 
-if (native.ByteStream && !native.ByteStream.prototype[Symbol.asyncIterator]) {
-  native.ByteStream.prototype[Symbol.asyncIterator] = function asyncIterator() {
+if (native.TypedEventStream && !native.TypedEventStream.prototype[Symbol.asyncIterator]) {
+  native.TypedEventStream.prototype[Symbol.asyncIterator] = function asyncIterator() {
     const stream = this;
     return {
       async next() {
-        const chunk = await stream.read();
-        return chunk === null || chunk === undefined
+        const event = await stream.read();
+        return event === null || event === undefined
           ? { done: true, value: undefined }
-          : { done: false, value: chunk };
+          : { done: false, value: event };
       },
     };
   };
@@ -28,7 +28,6 @@ if (native.ByteStream && !native.ByteStream.prototype[Symbol.asyncIterator]) {
 module.exports.wireContractVersion = native.wireContractVersion;
 module.exports.parseUsage = native.parseUsage;
 module.exports.Gateway = native.Gateway;
-module.exports.complete = native.complete;
-module.exports.stream = native.stream;
-module.exports.registerProvider = native.registerProvider;
-module.exports.ByteStream = native.ByteStream;
+module.exports.ProviderRuntime = native.ProviderRuntime;
+module.exports.TypedProvider = native.TypedProvider;
+module.exports.TypedEventStream = native.TypedEventStream;

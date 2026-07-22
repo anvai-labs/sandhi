@@ -232,7 +232,9 @@ fn is_retryable(e: &ProviderError) -> bool {
             true
         }
         ProviderError::Upstream(status) => *status >= 500,
-        ProviderError::Auth | ProviderError::CircuitOpen => false,
+        ProviderError::InvalidRequest(_) | ProviderError::Auth | ProviderError::CircuitOpen => {
+            false
+        }
     }
 }
 
@@ -254,8 +256,9 @@ impl Provider for ResilientProvider {
         let mut attempt = 0u32;
         loop {
             match bounded(self.timeouts.complete, self.inner.complete(req.clone())).await {
-                Ok(resp) => {
+                Ok(mut resp) => {
                     self.breaker.record_success();
+                    resp.attempts = attempt.saturating_add(1);
                     return Ok(resp);
                 }
                 Err(e) => {
@@ -282,9 +285,13 @@ impl Provider for ResilientProvider {
             match bounded(self.timeouts.stream_setup, self.inner.stream(req.clone())).await {
                 Ok(stream) => {
                     self.breaker.record_success();
+                    let counted: ByteStream = Box::pin(AttemptCountStream {
+                        inner: stream,
+                        attempts: attempt.saturating_add(1),
+                    });
                     return Ok(match self.timeouts.idle {
-                        Some(idle) => Box::pin(IdleTimeout::new(stream, idle)),
-                        None => stream,
+                        Some(idle) => Box::pin(IdleTimeout::new(counted, idle)),
+                        None => counted,
                     });
                 }
                 Err(e) => {
@@ -297,6 +304,25 @@ impl Provider for ResilientProvider {
                     return Err(e);
                 }
             }
+        }
+    }
+}
+
+struct AttemptCountStream {
+    inner: ByteStream,
+    attempts: u32,
+}
+
+impl Stream for AttemptCountStream {
+    type Item = Result<StreamChunk, ProviderError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.inner.as_mut().poll_next(cx) {
+            Poll::Ready(Some(Ok(mut chunk))) => {
+                chunk.attempts = self.attempts;
+                Poll::Ready(Some(Ok(chunk)))
+            }
+            other => other,
         }
     }
 }
@@ -332,6 +358,7 @@ mod tests {
             status: 200,
             body: serde_json::json!({}),
             usage: ParsedUsage::default(),
+            attempts: 1,
         }
     }
 
@@ -405,7 +432,13 @@ mod tests {
             if n < self.hang_calls {
                 std::future::pending::<()>().await;
             }
-            Ok(Box::pin(stream::empty()))
+            Ok(Box::pin(stream::once(async {
+                Ok(StreamChunk {
+                    data: bytes::Bytes::new(),
+                    usage: Some(ParsedUsage::default()),
+                    attempts: 1,
+                })
+            })))
         }
     }
 
@@ -435,7 +468,8 @@ mod tests {
         let p = ResilientProvider::new(hang.clone())
             .with_retry(1, Duration::from_millis(1))
             .with_timeouts(tight_timeouts());
-        assert!(p.complete(req()).await.is_ok());
+        let response = p.complete(req()).await.unwrap();
+        assert_eq!(response.attempts, 2);
         assert_eq!(hang.calls(), 2);
     }
 
@@ -449,6 +483,21 @@ mod tests {
             p.stream(req()).await,
             Err(ProviderError::Timeout(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn retried_stream_setup_propagates_attempt_count_to_terminal_usage() {
+        use futures_util::StreamExt;
+
+        let hang = Hang::new(1);
+        let p = ResilientProvider::new(hang.clone())
+            .with_retry(1, Duration::from_millis(1))
+            .with_timeouts(tight_timeouts());
+        let mut stream = p.stream(req()).await.unwrap();
+        let terminal = stream.next().await.unwrap().unwrap();
+        assert_eq!(terminal.attempts, 2);
+        assert!(terminal.usage.is_some());
+        assert_eq!(hang.calls(), 2);
     }
 
     #[tokio::test]
@@ -471,6 +520,7 @@ mod tests {
         StreamChunk {
             data: bytes::Bytes::copy_from_slice(data.as_bytes()),
             usage: None,
+            attempts: 1,
         }
     }
 
@@ -482,6 +532,7 @@ mod tests {
                 tokens_out: 2,
                 ..Default::default()
             }),
+            attempts: 1,
         }
     }
 
@@ -658,8 +709,8 @@ mod tests {
             Ok(ok_resp()),
         ]);
         let p = ResilientProvider::new(flaky.clone()).with_retry(3, Duration::from_millis(1));
-        let out = p.complete(req()).await;
-        assert!(out.is_ok());
+        let out = p.complete(req()).await.unwrap();
+        assert_eq!(out.attempts, 3);
         assert_eq!(flaky.calls(), 3); // two failures + one success
     }
 
