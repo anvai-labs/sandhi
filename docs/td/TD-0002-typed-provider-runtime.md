@@ -141,7 +141,7 @@ OpenAI family.
   names out of Victor and into Sandhi descriptors.
 - [x] Delete the admitted OpenAI-compatible cloud providers' bypassed HTTP/SSE methods and
   rewrite their old direct-wire tests as typed boundary/policy tests.
-- [ ] Extract the remaining admitted native/local host policy, then delete their bypassed direct
+- [x] Extract the remaining admitted native/local host policy, then delete their bypassed direct
   transport methods and tests from Victor.
 - [x] Decide and enforce the 0.1.2 support boundary for Azure, Hugging Face, Vertex, Bedrock,
   Replicate, and MLX; do not publish with an ambiguous fallback.
