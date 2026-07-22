@@ -172,6 +172,96 @@ async fn anthropic_ingress_uses_the_same_typed_runtime_and_meter() {
 }
 
 #[tokio::test]
+async fn responses_ingress_normalizes_through_chat_request_v1() {
+    let upstream = MockServer::start().await;
+    // The resolved upstream is a Responses backend: the proxy decodes the caller's Responses
+    // ingress → ChatRequestV1, the typed provider re-encodes it and POSTs /responses upstream,
+    // then the proxy shapes the neutral response back into the Responses egress dialect.
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .and(header("authorization", "Bearer REAL-KEY"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id":"resp_1","model":"gpt-test","status":"completed",
+            "output":[
+                {"type":"message","content":[{"type":"output_text","text":"hello"}]},
+                {"type":"function_call","call_id":"call_1","name":"weather","arguments":"{\"city\":\"Austin\"}"}
+            ],
+            "usage":{"input_tokens":7,"output_tokens":3,
+                     "input_tokens_details":{"cached_tokens":2}}
+        })))
+        .mount(&upstream)
+        .await;
+
+    let mut keys = KeyStore::new();
+    keys.insert(VirtualKey {
+        id: "vk_demo".into(),
+        subject_id: Some("alice".into()),
+        group_id: Some("platform".into()),
+        upstream_ref: "up1".into(),
+    });
+    let mut providers: HashMap<String, ProviderHandle> = HashMap::new();
+    providers.insert(
+        "up1".into(),
+        ProviderRuntime::new().openai_responses(
+            "openai",
+            upstream.uri(),
+            "REAL-KEY",
+            Default::default(),
+            Some(0),
+            None,
+            None,
+        ),
+    );
+    let sink = Arc::new(InMemorySink::new());
+    let state = Arc::new(ProxyState {
+        keys,
+        ledger: Mutex::new(BudgetLedger::new()),
+        sink: sink.clone(),
+        providers,
+        store: None,
+    });
+
+    let response = build_app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("authorization", "Bearer vk_demo")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"model":"gpt-test","instructions":"be precise","stream":false,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"weather?"}]}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    // Egress is normalized back into the Responses shape.
+    assert_eq!(value["object"], "response");
+    assert_eq!(value["status"], "completed");
+    assert_eq!(value["output"][0]["type"], "message");
+    assert_eq!(value["output"][0]["content"][0]["type"], "output_text");
+    assert_eq!(value["output"][0]["content"][0]["text"], "hello");
+    assert_eq!(value["output"][1]["type"], "function_call");
+    assert_eq!(value["output"][1]["call_id"], "call_1");
+    assert_eq!(value["usage"]["input_tokens"], 5); // 7 - 2 cached
+    assert_eq!(value["usage"]["input_tokens_details"]["cached_tokens"], 2);
+
+    // One usage event, attributed to the virtual key, routed through /v1/responses.
+    let events = sink.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].provider, "openai");
+    assert_eq!(events[0].route.as_deref(), Some("/v1/responses"));
+    assert_eq!(events[0].tokens_in, 5);
+    assert_eq!(events[0].cache_read_tokens, 2);
+    assert_eq!(state.ledger.lock().unwrap().reserved("group:platform"), 0);
+}
+
+#[tokio::test]
 async fn unknown_virtual_key_is_401() {
     let sink = Arc::new(InMemorySink::new());
     let state = state_with(

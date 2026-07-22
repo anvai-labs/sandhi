@@ -16,6 +16,10 @@ use serde_json::{json, Map, Value};
 pub(crate) enum IngressDialect {
     OpenAi,
     Anthropic,
+    /// OpenAI Responses item/event protocol (`/v1/responses`). Normalized through the same
+    /// `ChatRequestV1` as the other dialects; the field mapping mirrors the typed Responses
+    /// codec in `sandhi-providers::openai_responses_typed`.
+    Responses,
 }
 
 pub(crate) fn decode_request(
@@ -26,6 +30,7 @@ pub(crate) fn decode_request(
     match dialect {
         IngressDialect::OpenAi => decode_openai_request(body, metadata),
         IngressDialect::Anthropic => decode_anthropic_request(body, metadata),
+        IngressDialect::Responses => decode_responses_request(body, metadata),
     }
 }
 
@@ -504,10 +509,245 @@ fn decode_anthropic_tool_choice(value: &Value) -> Result<ToolChoiceV1, String> {
     }
 }
 
+/// Decode an OpenAI Responses-API ingress body into the canonical `ChatRequestV1`.
+///
+/// This is the inverse of `openai_responses_typed::encode_responses_request`: the caller's
+/// `instructions` + typed `input` items (`message` / `function_call` / `function_call_output`)
+/// become the canonical message list, and `tools`/`tool_choice`/sampling fields map across. The
+/// raw body is retained under `extensions["openai_responses"]` so a Responses-backend upstream can
+/// re-read Responses-only fields (e.g. `reasoning.effort`) that have no canonical home.
+fn decode_responses_request(
+    body: Value,
+    metadata: RequestMetadataV1,
+) -> Result<(ChatRequestV1, bool), String> {
+    let object = body
+        .as_object()
+        .ok_or_else(|| "request body must be a JSON object".to_string())?;
+    let mut messages = Vec::new();
+    if let Some(instructions) = optional_string(object, "instructions")? {
+        messages.push(ChatMessageV1::System {
+            content: MessageContent::Text(instructions),
+            name: None,
+        });
+    }
+    match object.get("input") {
+        Some(Value::String(text)) => messages.push(ChatMessageV1::User {
+            content: MessageContent::Text(text.clone()),
+            name: None,
+        }),
+        Some(Value::Array(items)) => {
+            for item in items {
+                decode_responses_input_item(item, &mut messages)?;
+            }
+        }
+        Some(_) => return Err("Responses input must be a string or array".into()),
+        None => {}
+    }
+    let tools = object
+        .get("tools")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .map(|value| {
+                    let name = value
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .or_else(|| value.pointer("/function/name").and_then(Value::as_str))
+                        .ok_or_else(|| "Responses tool requires name".to_string())?;
+                    Ok(ToolDefinitionV1 {
+                        name: name.into(),
+                        description: value
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        parameters: value
+                            .get("parameters")
+                            .or_else(|| value.get("function").and_then(|f| f.get("parameters")))
+                            .cloned()
+                            .unwrap_or_else(|| json!({"type":"object"})),
+                        strict: value.get("strict").and_then(Value::as_bool),
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let request = ChatRequestV1 {
+        schema_version: CHAT_SCHEMA_VERSION_V1.into(),
+        model: required_string(object, "model")?,
+        messages,
+        tools,
+        tool_choice: object
+            .get("tool_choice")
+            .map(decode_responses_tool_choice)
+            .transpose()?,
+        temperature: object.get("temperature").and_then(Value::as_f64),
+        max_output_tokens: object.get("max_output_tokens").and_then(Value::as_u64),
+        stop: None,
+        response_format: object
+            .get("text")
+            .and_then(|text| text.get("format"))
+            .map(responses_response_format)
+            .transpose()?,
+        seed: None,
+        metadata,
+        extensions: BTreeMap::from([("openai_responses".into(), body.clone())]),
+    };
+    request.validate()?;
+    Ok((
+        request,
+        object
+            .get("stream")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    ))
+}
+
+fn decode_responses_input_item(
+    item: &Value,
+    messages: &mut Vec<ChatMessageV1>,
+) -> Result<(), String> {
+    let kind = item.get("type").and_then(Value::as_str).unwrap_or("");
+    match kind {
+        "message" => messages.push(decode_responses_message_item(item)?),
+        "function_call" => {
+            let id = item
+                .get("call_id")
+                .and_then(Value::as_str)
+                .or_else(|| item.get("id").and_then(Value::as_str))
+                .ok_or_else(|| "Responses function_call requires call_id".to_string())?;
+            let name = required_string(
+                item.as_object()
+                    .ok_or_else(|| "Responses item must be an object".to_string())?,
+                "name",
+            )?;
+            messages.push(ChatMessageV1::Assistant {
+                content: None,
+                name: None,
+                tool_calls: vec![ToolCallV1 {
+                    id: id.into(),
+                    name,
+                    arguments: item
+                        .get("arguments")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .into(),
+                    extensions: BTreeMap::new(),
+                }],
+                refusal: None,
+            });
+        }
+        "function_call_output" => {
+            let call_id = item
+                .get("call_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "Responses function_call_output requires call_id".to_string())?;
+            let output = item.get("output").cloned().unwrap_or(Value::Null);
+            let content = match &output {
+                Value::String(text) => MessageContent::Text(text.clone()),
+                other => MessageContent::Text(other.to_string()),
+            };
+            messages.push(ChatMessageV1::Tool {
+                content,
+                tool_call_id: call_id.into(),
+            });
+        }
+        // `reasoning` items carry encrypted/summary-only reasoning state that has no canonical
+        // representation; unknown item types are forward-compatible noise. Both are skipped.
+        _ => {}
+    }
+    Ok(())
+}
+
+fn decode_responses_message_item(item: &Value) -> Result<ChatMessageV1, String> {
+    let object = item
+        .as_object()
+        .ok_or_else(|| "Responses message item must be an object".to_string())?;
+    let role = required_string(object, "role")?;
+    let raw_content = object.get("content").unwrap_or(&Value::Null);
+    let parts = if let Some(text) = raw_content.as_str() {
+        vec![json!({"type":"input_text","text":text})]
+    } else {
+        raw_content
+            .as_array()
+            .cloned()
+            .ok_or_else(|| "Responses message content must be a string or array".to_string())?
+    };
+    let mut text = String::new();
+    let mut refusal = String::new();
+    for part in &parts {
+        match part.get("type").and_then(Value::as_str) {
+            Some("input_text") | Some("output_text") | Some("text") => {
+                text.push_str(part.get("text").and_then(Value::as_str).unwrap_or(""))
+            }
+            Some("refusal") => {
+                refusal.push_str(part.get("refusal").and_then(Value::as_str).unwrap_or(""))
+            }
+            _ => {}
+        }
+    }
+    match role.as_str() {
+        "developer" => Ok(ChatMessageV1::Developer {
+            content: MessageContent::Text(text),
+            name: None,
+        }),
+        "system" => Ok(ChatMessageV1::System {
+            content: MessageContent::Text(text),
+            name: None,
+        }),
+        "user" => Ok(ChatMessageV1::User {
+            content: MessageContent::Text(text),
+            name: None,
+        }),
+        "assistant" => Ok(ChatMessageV1::Assistant {
+            content: (!text.is_empty()).then_some(MessageContent::Text(text)),
+            name: None,
+            tool_calls: Vec::new(),
+            refusal: (!refusal.is_empty()).then_some(refusal),
+        }),
+        other => Err(format!("unsupported Responses message role: {other}")),
+    }
+}
+
+fn decode_responses_tool_choice(value: &Value) -> Result<ToolChoiceV1, String> {
+    if let Some(mode) = value.as_str() {
+        return Ok(ToolChoiceV1::Mode(match mode {
+            "none" => ToolChoiceMode::None,
+            "auto" => ToolChoiceMode::Auto,
+            "required" => ToolChoiceMode::Required,
+            other => return Err(format!("unsupported Responses tool_choice mode: {other}")),
+        }));
+    }
+    value
+        .get("name")
+        .and_then(Value::as_str)
+        .map(|name| ToolChoiceV1::Function { name: name.into() })
+        .ok_or_else(|| "Responses tool_choice must be a mode or {type:function,name}".into())
+}
+
+/// Inverse of `responses_text_format`: recover the Chat Completions `response_format` from the
+/// Responses `text.format` object.
+fn responses_response_format(format: &Value) -> Result<Value, String> {
+    if format.get("type").and_then(Value::as_str) == Some("json_schema") {
+        Ok(json!({
+            "type":"json_schema",
+            "json_schema":{
+                "name":format.get("name").cloned().unwrap_or(Value::Null),
+                "schema":format.get("schema").cloned().unwrap_or(Value::Null),
+                "strict":format.get("strict").cloned().unwrap_or(Value::Bool(false))
+            }
+        }))
+    } else {
+        Ok(format.clone())
+    }
+}
+
 pub(crate) fn encode_response(dialect: IngressDialect, response: &ChatResponseV1) -> Value {
     match dialect {
         IngressDialect::OpenAi => encode_openai_response(response),
         IngressDialect::Anthropic => encode_anthropic_response(response),
+        IngressDialect::Responses => encode_responses_response(response),
     }
 }
 
@@ -575,19 +815,96 @@ fn encode_anthropic_response(response: &ChatResponseV1) -> Value {
     })
 }
 
-/// One canonical stream event may expand to multiple protocol SSE events (for example a finish
-/// event also closes an Anthropic message).
-pub(crate) fn encode_stream_event(
-    dialect: IngressDialect,
-    event: &ChatStreamEventV1,
-) -> Vec<(Option<&'static str>, Value)> {
-    match dialect {
-        IngressDialect::OpenAi => encode_openai_stream_event(event),
-        IngressDialect::Anthropic => encode_anthropic_stream_event(event),
+/// Encode the canonical response as an OpenAI Responses document — the inverse of
+/// `openai_responses_typed::decode_responses_response`. The neutral assistant output becomes
+/// `output` items (a `message` with `output_text` content and/or `function_call` items), with
+/// `status` derived from the finish reason and a Responses-shaped `usage` block.
+fn encode_responses_response(response: &ChatResponseV1) -> Value {
+    let mut output = Vec::new();
+    let text = response.output.content.as_ref().map(content_text);
+    let has_text = text.as_deref().is_some_and(|text| !text.is_empty());
+    let has_refusal = response
+        .output
+        .refusal
+        .as_deref()
+        .is_some_and(|refusal| !refusal.is_empty());
+    if has_text || has_refusal {
+        let mut content = Vec::new();
+        if let Some(text) = text {
+            if !text.is_empty() {
+                content.push(json!({"type":"output_text","text":text}));
+            }
+        }
+        if let Some(refusal) = &response.output.refusal {
+            if !refusal.is_empty() {
+                content.push(json!({"type":"refusal","refusal":refusal}));
+            }
+        }
+        output.push(json!({"type":"message","role":"assistant","content":content}));
+    }
+    for call in &response.output.tool_calls {
+        output.push(json!({
+            "type":"function_call","call_id":call.id,"name":call.name,"arguments":call.arguments
+        }));
+    }
+    let status = responses_status(response.finish_reason);
+    let mut body = json!({
+        "id":response.id,
+        "object":"response",
+        "model":response.model,
+        "status":status,
+        "output":output,
+        "usage":responses_usage(&response.usage),
+    });
+    if matches!(response.finish_reason, Some(FinishReasonV1::Length)) {
+        body["incomplete_details"] = json!({"reason":"max_output_tokens"});
+    } else if matches!(response.finish_reason, Some(FinishReasonV1::ContentFilter)) {
+        body["incomplete_details"] = json!({"reason":"content_filter"});
+    }
+    body
+}
+
+fn responses_status(reason: Option<FinishReasonV1>) -> &'static str {
+    match reason {
+        Some(FinishReasonV1::Length) | Some(FinishReasonV1::ContentFilter) => "incomplete",
+        // Stop, ToolCalls, FunctionCall, Unknown, and None all surface as a completed run.
+        _ => "completed",
     }
 }
 
-fn encode_openai_stream_event(event: &ChatStreamEventV1) -> Vec<(Option<&'static str>, Value)> {
+fn responses_usage(usage: &UsageV2) -> Value {
+    json!({
+        "input_tokens":usage.tokens_in,
+        "output_tokens":usage.tokens_out,
+        "input_tokens_details":{"cached_tokens":usage.cache_read_tokens},
+        "output_tokens_details":{
+            "reasoning_tokens":usage.reasoning_tokens.unwrap_or(0)
+        }
+    })
+}
+
+/// One canonical stream event may expand to multiple protocol SSE events (for example a finish
+/// event also closes an Anthropic message).
+///
+/// `last_usage` carries the most recently observed terminal `Usage` event so the Responses
+/// egress can fold it into the terminal `response.completed` frame (in the canonical stream a
+/// `Usage` event always precedes `Finish`). The OpenAI/Anthropic encoders ignore it.
+pub(crate) fn encode_stream_event(
+    dialect: IngressDialect,
+    event: &ChatStreamEventV1,
+    last_usage: Option<&UsageV2>,
+) -> Vec<(Option<&'static str>, Value)> {
+    match dialect {
+        IngressDialect::OpenAi => encode_openai_stream_event(event, last_usage),
+        IngressDialect::Anthropic => encode_anthropic_stream_event(event, last_usage),
+        IngressDialect::Responses => encode_responses_stream_event(event, last_usage),
+    }
+}
+
+fn encode_openai_stream_event(
+    event: &ChatStreamEventV1,
+    _last_usage: Option<&UsageV2>,
+) -> Vec<(Option<&'static str>, Value)> {
     let value = match event {
         ChatStreamEventV1::ResponseStart { id, model } => json!({
             "id":id,"object":"chat.completion.chunk","model":model,
@@ -618,7 +935,10 @@ fn openai_delta(delta: Value) -> Value {
     json!({"object":"chat.completion.chunk","choices":[{"index":0,"delta":delta,"finish_reason":Value::Null}]})
 }
 
-fn encode_anthropic_stream_event(event: &ChatStreamEventV1) -> Vec<(Option<&'static str>, Value)> {
+fn encode_anthropic_stream_event(
+    event: &ChatStreamEventV1,
+    _last_usage: Option<&UsageV2>,
+) -> Vec<(Option<&'static str>, Value)> {
     match event {
         ChatStreamEventV1::ResponseStart { id, model } => vec![(
             Some("message_start"),
@@ -672,6 +992,78 @@ fn encode_anthropic_stream_event(event: &ChatStreamEventV1) -> Vec<(Option<&'sta
         ChatStreamEventV1::Error { error } => {
             vec![(Some("error"), json!({"type":"error","error":error}))]
         }
+    }
+}
+
+/// Encode the canonical stream as OpenAI Responses SSE events — the inverse of
+/// `openai_responses_typed::decode_responses_stream`. Each event mirrors a Responses event kind
+/// the typed decoder consumes; the terminal `response.completed` folds in the last-seen usage.
+fn encode_responses_stream_event(
+    event: &ChatStreamEventV1,
+    last_usage: Option<&UsageV2>,
+) -> Vec<(Option<&'static str>, Value)> {
+    match event {
+        ChatStreamEventV1::ResponseStart { id, model } => vec![(
+            Some("response.created"),
+            json!({
+                "type":"response.created",
+                "response":{
+                    "id":id,"object":"response","status":"in_progress","model":model,"output":[]
+                }
+            }),
+        )],
+        ChatStreamEventV1::TextDelta { delta } => vec![(
+            Some("response.output_text.delta"),
+            json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":delta}),
+        )],
+        ChatStreamEventV1::ReasoningDelta { delta } => vec![(
+            Some("response.reasoning_summary_text.delta"),
+            json!({"type":"response.reasoning_summary_text.delta","delta":delta}),
+        )],
+        ChatStreamEventV1::RefusalDelta { delta } => vec![(
+            Some("response.refusal.delta"),
+            json!({"type":"response.refusal.delta","delta":delta}),
+        )],
+        ChatStreamEventV1::ToolCallStart { index, id, name } => vec![(
+            Some("response.output_item.added"),
+            json!({
+                "type":"response.output_item.added","output_index":index,
+                "item":{
+                    "type":"function_call","id":id,"call_id":id,"name":name,
+                    "arguments":"","status":"in_progress"
+                }
+            }),
+        )],
+        ChatStreamEventV1::ToolCallArgumentsDelta { index, delta } => vec![(
+            Some("response.function_call_arguments.delta"),
+            json!({"type":"response.function_call_arguments.delta","output_index":index,"delta":delta}),
+        )],
+        ChatStreamEventV1::ToolCallEnd { index } => vec![(
+            Some("response.output_item.done"),
+            json!({"type":"response.output_item.done","output_index":index,
+                   "item":{"type":"function_call","status":"completed"}}),
+        )],
+        // Usage folds into the terminal `response.completed` emitted on Finish; nothing to stream.
+        ChatStreamEventV1::Usage { .. } => Vec::new(),
+        ChatStreamEventV1::Finish { reason } => {
+            let usage = last_usage
+                .map(responses_usage)
+                .unwrap_or_else(|| responses_usage(&UsageV2::default()));
+            vec![(
+                Some("response.completed"),
+                json!({
+                    "type":"response.completed",
+                    "response":{
+                        "object":"response","status":responses_status(Some(*reason)),
+                        "output":[],"usage":usage
+                    }
+                }),
+            )]
+        }
+        ChatStreamEventV1::Error { error } => vec![(
+            Some("error"),
+            json!({"type":"error","error":{"code":error.code,"message":error.message}}),
+        )],
     }
 }
 
@@ -864,5 +1256,203 @@ mod tests {
                 ["cache_read_input_tokens"],
             4
         );
+    }
+
+    #[test]
+    fn responses_ingress_maps_instructions_items_and_tools() {
+        let (request, stream) = decode_request(
+            IngressDialect::Responses,
+            json!({
+                "model":"gpt-test","stream":true,
+                "instructions":"be precise",
+                "input":[
+                    {"type":"message","role":"user","content":[{"type":"input_text","text":"weather?"}]},
+                    {"type":"function_call","call_id":"call_1","name":"weather","arguments":"{\"city\":\"Austin\"}"},
+                    {"type":"function_call_output","call_id":"call_1","output":"sunny"}
+                ],
+                "tools":[{"type":"function","name":"weather","parameters":{"type":"object"}}],
+                "tool_choice":{"type":"function","name":"weather"},
+                "temperature":0.5,
+                "max_output_tokens":100
+            }),
+            RequestMetadataV1::default(),
+        )
+        .unwrap();
+        assert!(stream);
+        // instructions → System, user message, assistant tool call, tool output.
+        assert_eq!(request.messages.len(), 4);
+        assert!(matches!(request.messages[0], ChatMessageV1::System { .. }));
+        assert!(matches!(request.messages[1], ChatMessageV1::User { .. }));
+        assert!(matches!(
+            request.messages[2],
+            ChatMessageV1::Assistant { ref tool_calls, .. } if tool_calls.len() == 1
+                && tool_calls[0].id == "call_1"
+                && tool_calls[0].name == "weather"
+        ));
+        assert!(matches!(
+            request.messages[3],
+            ChatMessageV1::Tool { ref tool_call_id, .. } if tool_call_id == "call_1"
+        ));
+        assert_eq!(request.tools.len(), 1);
+        assert_eq!(request.tools[0].name, "weather");
+        assert!(matches!(
+            request.tool_choice,
+            Some(ToolChoiceV1::Function { ref name }) if name == "weather"
+        ));
+        assert_eq!(request.temperature, Some(0.5));
+        assert_eq!(request.max_output_tokens, Some(100));
+        // The raw body is retained for a Responses-backend upstream.
+        assert!(request.extensions.contains_key("openai_responses"));
+        request.validate().unwrap();
+    }
+
+    #[test]
+    fn responses_ingress_rejects_missing_model() {
+        let err = decode_request(
+            IngressDialect::Responses,
+            json!({"input":"hi"}),
+            RequestMetadataV1::default(),
+        )
+        .unwrap_err();
+        assert!(err.contains("model"));
+    }
+
+    #[test]
+    fn responses_egress_shapes_message_function_call_and_usage() {
+        let response = ChatResponseV1 {
+            schema_version: CHAT_SCHEMA_VERSION_V1.into(),
+            id: Some("resp_1".into()),
+            model: "gpt-test".into(),
+            output: AssistantOutputV1 {
+                content: Some(MessageContent::Text("hi".into())),
+                tool_calls: vec![ToolCallV1 {
+                    id: "call_1".into(),
+                    name: "weather".into(),
+                    arguments: "{\"city\":\"Austin\"}".into(),
+                    extensions: BTreeMap::new(),
+                }],
+                refusal: None,
+            },
+            finish_reason: Some(FinishReasonV1::ToolCalls),
+            usage: UsageV2 {
+                tokens_in: 40,
+                tokens_out: 20,
+                cache_read_tokens: 60,
+                reasoning_tokens: Some(7),
+                ..UsageV2::default()
+            },
+            extensions: BTreeMap::new(),
+        };
+        let body = encode_response(IngressDialect::Responses, &response);
+        assert_eq!(body["object"], "response");
+        assert_eq!(body["id"], "resp_1");
+        assert_eq!(body["status"], "completed");
+        // First output item is the assistant message with output_text; second is the function_call.
+        assert_eq!(body["output"][0]["type"], "message");
+        assert_eq!(body["output"][0]["content"][0]["type"], "output_text");
+        assert_eq!(body["output"][0]["content"][0]["text"], "hi");
+        assert_eq!(body["output"][1]["type"], "function_call");
+        assert_eq!(body["output"][1]["call_id"], "call_1");
+        assert_eq!(body["output"][1]["name"], "weather");
+        assert_eq!(body["usage"]["input_tokens"], 40);
+        assert_eq!(body["usage"]["output_tokens"], 20);
+        assert_eq!(body["usage"]["input_tokens_details"]["cached_tokens"], 60);
+        assert_eq!(
+            body["usage"]["output_tokens_details"]["reasoning_tokens"],
+            7
+        );
+    }
+
+    #[test]
+    fn responses_egress_marks_length_as_incomplete() {
+        let response = ChatResponseV1 {
+            schema_version: CHAT_SCHEMA_VERSION_V1.into(),
+            id: None,
+            model: "m".into(),
+            output: AssistantOutputV1 {
+                content: Some(MessageContent::Text("...".into())),
+                tool_calls: Vec::new(),
+                refusal: None,
+            },
+            finish_reason: Some(FinishReasonV1::Length),
+            usage: UsageV2::default(),
+            extensions: BTreeMap::new(),
+        };
+        let body = encode_response(IngressDialect::Responses, &response);
+        assert_eq!(body["status"], "incomplete");
+        assert_eq!(body["incomplete_details"]["reason"], "max_output_tokens");
+    }
+
+    #[test]
+    fn responses_stream_events_fold_terminal_usage_into_completed() {
+        // Start → created; deltas → named delta events; usage folds into the completed frame.
+        let start = encode_responses_stream_event(
+            &ChatStreamEventV1::ResponseStart {
+                id: Some("resp_1".into()),
+                model: "gpt-test".into(),
+            },
+            None,
+        );
+        assert_eq!(start[0].0, Some("response.created"));
+        assert_eq!(start[0].1["response"]["model"], "gpt-test");
+
+        let delta = encode_responses_stream_event(
+            &ChatStreamEventV1::TextDelta { delta: "hi".into() },
+            None,
+        );
+        assert_eq!(delta[0].0, Some("response.output_text.delta"));
+        assert_eq!(delta[0].1["delta"], "hi");
+
+        let usage = UsageV2 {
+            tokens_in: 5,
+            tokens_out: 2,
+            ..UsageV2::default()
+        };
+        // Usage itself emits nothing; the terminal completed carries it.
+        assert!(encode_responses_stream_event(
+            &ChatStreamEventV1::Usage {
+                usage: usage.clone()
+            },
+            None,
+        )
+        .is_empty());
+
+        let finish = encode_responses_stream_event(
+            &ChatStreamEventV1::Finish {
+                reason: FinishReasonV1::Stop,
+            },
+            Some(&usage),
+        );
+        assert_eq!(finish[0].0, Some("response.completed"));
+        assert_eq!(finish[0].1["response"]["status"], "completed");
+        assert_eq!(finish[0].1["response"]["usage"]["input_tokens"], 5);
+        assert_eq!(finish[0].1["response"]["usage"]["output_tokens"], 2);
+    }
+
+    #[test]
+    fn responses_stream_events_shape_tool_call_lifecycle() {
+        let start = encode_responses_stream_event(
+            &ChatStreamEventV1::ToolCallStart {
+                index: 0,
+                id: "call_1".into(),
+                name: "weather".into(),
+            },
+            None,
+        );
+        assert_eq!(start[0].0, Some("response.output_item.added"));
+        assert_eq!(start[0].1["item"]["type"], "function_call");
+        assert_eq!(start[0].1["item"]["call_id"], "call_1");
+
+        let args = encode_responses_stream_event(
+            &ChatStreamEventV1::ToolCallArgumentsDelta {
+                index: 0,
+                delta: "{\"x\":".into(),
+            },
+            None,
+        );
+        assert_eq!(args[0].0, Some("response.function_call_arguments.delta"));
+
+        let end = encode_responses_stream_event(&ChatStreamEventV1::ToolCallEnd { index: 0 }, None);
+        assert_eq!(end[0].0, Some("response.output_item.done"));
     }
 }
