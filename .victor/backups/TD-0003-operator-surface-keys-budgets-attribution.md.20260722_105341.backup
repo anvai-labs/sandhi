@@ -1,4 +1,0 @@
-text
-operator -- CLI ----> admin API -------------------------------\
-teammate -- UI ------>  (gateway /admin/* or inlined FFI) -------> AccountingCore
-                                                             (sandhi-billing)

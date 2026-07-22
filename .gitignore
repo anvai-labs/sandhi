@@ -26,3 +26,6 @@ bindings/node/*.node
 bindings/node/index.js
 bindings/node/index.d.ts
 bindings/node/npm/
+
+# Victor project runtime artifacts (per-project state, never source)
+.victor/
