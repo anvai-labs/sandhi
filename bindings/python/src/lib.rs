@@ -159,7 +159,10 @@ impl PyProviderRuntime {
         if auth_scheme
             .as_deref()
             .is_some_and(|value| !value.trim().is_empty())
-            && !matches!(normalized.as_str(), "anthropic" | "claude" | "gemini" | "google")
+            && !matches!(
+                normalized.as_str(),
+                "anthropic" | "claude" | "gemini" | "google"
+            )
         {
             return Err(PyValueError::new_err(
                 "auth_scheme is only valid for the Anthropic or Gemini protocol",

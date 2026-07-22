@@ -168,7 +168,10 @@ impl JsProviderRuntime {
         if auth_scheme
             .as_deref()
             .is_some_and(|value| !value.trim().is_empty())
-            && !matches!(normalized.as_str(), "anthropic" | "claude" | "gemini" | "google")
+            && !matches!(
+                normalized.as_str(),
+                "anthropic" | "claude" | "gemini" | "google"
+            )
         {
             return Err(Error::from_reason(
                 "authScheme is only valid for the Anthropic or Gemini protocol",
