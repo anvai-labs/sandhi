@@ -43,8 +43,8 @@ pub struct ProxyState {
     pub store: Option<Arc<SqliteStore>>,
 }
 
-/// Build the axum app. Ingress paths mirror the provider wire formats (OpenAI + Anthropic);
-/// the presented virtual key selects the actual upstream.
+/// Build the axum app. Ingress paths mirror the provider wire formats (OpenAI Chat Completions,
+/// OpenAI Responses, Anthropic Messages); the presented virtual key selects the actual upstream.
 pub fn build_app(state: Arc<ProxyState>) -> Router {
     Router::new()
         .route("/healthz", get(health))
@@ -52,6 +52,7 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         .route("/dashboard/api/usage", get(dashboard_api))
         .route("/v1/chat/completions", post(handle_openai))
         .route("/v1/messages", post(handle_anthropic))
+        .route("/v1/responses", post(handle_responses))
         .with_state(state)
 }
 
@@ -156,6 +157,14 @@ async fn handle_anthropic(
     handle(state, headers, body, IngressDialect::Anthropic).await
 }
 
+async fn handle_responses(
+    State(state): State<Arc<ProxyState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    handle(state, headers, body, IngressDialect::Responses).await
+}
+
 async fn handle(
     state: Arc<ProxyState>,
     headers: HeaderMap,
@@ -189,6 +198,7 @@ async fn handle(
     let route = match dialect {
         IngressDialect::OpenAi => "/v1/chat/completions",
         IngressDialect::Anthropic => "/v1/messages",
+        IngressDialect::Responses => "/v1/responses",
     };
     let metadata = RequestMetadataV1 {
         session_id: session,
@@ -366,16 +376,20 @@ async fn stream_response(
     };
 
     let body = async_stream::stream! {
+        let mut last_usage: Option<UsageV2> = None;
         while let Some(item) = upstream.next().await {
             match item {
                 Ok(event) => {
                     if let sandhi_core::ChatStreamEventV1::Usage { usage } = &event {
                         accounting.observe(usage);
+                        last_usage = Some(usage.clone());
                     }
                     if matches!(event, sandhi_core::ChatStreamEventV1::Error { .. }) {
                         accounting.set_outcome("error");
                     }
-                    for (event_name, value) in encode_stream_event(dialect, &event) {
+                    for (event_name, value) in
+                        encode_stream_event(dialect, &event, last_usage.as_ref())
+                    {
                         yield Ok::<Bytes, std::io::Error>(Bytes::from(sse_frame(event_name, &value)));
                     }
                 }
@@ -384,7 +398,9 @@ async fn stream_response(
                     let typed = sandhi_core::ChatStreamEventV1::Error {
                         error: error.as_typed(Some(provider.slug())),
                     };
-                    for (event_name, value) in encode_stream_event(dialect, &typed) {
+                    for (event_name, value) in
+                        encode_stream_event(dialect, &typed, last_usage.as_ref())
+                    {
                         yield Ok::<Bytes, std::io::Error>(Bytes::from(sse_frame(event_name, &value)));
                     }
                     break;
@@ -518,7 +534,7 @@ fn provider_error(e: &ProviderError, dialect: IngressDialect, provider: &str) ->
     };
     let typed = e.as_typed(Some(provider));
     let body = match dialect {
-        IngressDialect::OpenAi => json!({"error":typed}),
+        IngressDialect::OpenAi | IngressDialect::Responses => json!({"error":typed}),
         IngressDialect::Anthropic => json!({"type":"error","error":typed}),
     };
     let _ = msg;
@@ -533,7 +549,7 @@ fn ingress_error(dialect: IngressDialect, status: StatusCode, msg: &str) -> Resp
         "http_status":status.as_u16(),
     });
     let body = match dialect {
-        IngressDialect::OpenAi => json!({"error":typed}),
+        IngressDialect::OpenAi | IngressDialect::Responses => json!({"error":typed}),
         IngressDialect::Anthropic => json!({"type":"error","error":typed}),
     };
     (status, Json(body)).into_response()
