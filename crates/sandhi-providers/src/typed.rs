@@ -1,9 +1,9 @@
 //! Typed provider runtime and OpenAI-compatible codec.
 
 use crate::{
-    Anthropic, AnthropicAuthScheme, Attribution, ByteStream, Cohere, Gemini, Ollama, OpenAiCompat,
-    OpenAiResponses, OpenAiResponsesProfile, ParsedUsage, Provider, ProviderError, ProviderRequest,
-    ResilientProvider, TimeoutConfig,
+    Anthropic, AnthropicAuthScheme, Attribution, ByteStream, Cohere, Gemini, GeminiAuthScheme,
+    Ollama, OpenAiCompat, OpenAiResponses, OpenAiResponsesProfile, ParsedUsage, Provider,
+    ProviderError, ProviderRequest, ResilientProvider, TimeoutConfig,
 };
 use async_trait::async_trait;
 use futures_core::Stream;
@@ -49,6 +49,7 @@ pub struct ProviderTransportConfig {
     pub timeout_secs: Option<f64>,
     pub stream_idle_timeout_secs: Option<f64>,
     pub anthropic_auth_scheme: AnthropicAuthScheme,
+    pub gemini_auth_scheme: GeminiAuthScheme,
     pub openai_responses_profile: OpenAiResponsesProfile,
 }
 
@@ -70,6 +71,7 @@ impl ProviderTransportConfig {
             timeout_secs: None,
             stream_idle_timeout_secs: None,
             anthropic_auth_scheme: AnthropicAuthScheme::ApiKey,
+            gemini_auth_scheme: GeminiAuthScheme::ApiKey,
             openai_responses_profile: OpenAiResponsesProfile::Standard,
         }
     }
@@ -152,9 +154,10 @@ impl ProviderRuntime {
             ProviderFamily::Cohere => {
                 Arc::new(Cohere::new(config.base_url.clone(), config.api_key.clone()))
             }
-            ProviderFamily::Gemini => {
-                Arc::new(Gemini::new(config.base_url.clone(), config.api_key.clone()))
-            }
+            ProviderFamily::Gemini => Arc::new(
+                Gemini::new(config.base_url.clone(), config.api_key.clone())
+                    .with_auth_scheme(config.gemini_auth_scheme),
+            ),
             ProviderFamily::Ollama => {
                 let provider = Ollama::new(config.base_url.clone());
                 if config.api_key.is_empty() {
@@ -332,12 +335,14 @@ impl ProviderRuntime {
         &self,
         base_url: impl Into<String>,
         api_key: impl Into<String>,
+        auth_scheme: GeminiAuthScheme,
         max_retries: Option<u32>,
         timeout_secs: Option<f64>,
         stream_idle_timeout_secs: Option<f64>,
     ) -> ProviderHandle {
         let mut config =
             ProviderTransportConfig::new(ProviderFamily::Gemini, "gemini", base_url, api_key);
+        config.gemini_auth_scheme = auth_scheme;
         config.max_retries = max_retries;
         config.timeout_secs = timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;

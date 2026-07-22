@@ -1,5 +1,7 @@
 //! Google Gemini adapter — `generateContent` / `streamGenerateContent`. The model rides in the
-//! URL path; auth is the `x-goog-api-key` header; usage is in `usageMetadata`.
+//! URL path; usage is in `usageMetadata`. Authentication is explicit: API keys use the
+//! `x-goog-api-key` header, while OAuth/ADC credentials use `Authorization: Bearer`. The two
+//! credential headers are never sent together.
 
 use crate::{
     error_for_status, metered_passthrough, sse_data_json, ByteStream, ParsedUsage, Provider,
@@ -9,11 +11,22 @@ use async_trait::async_trait;
 use sandhi_core::parse_gemini_usage;
 use serde_json::Value;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GeminiAuthScheme {
+    /// Send the API key via the `x-goog-api-key` header (the default, hosted-API credential).
+    #[default]
+    ApiKey,
+    /// Send the credential via `Authorization: Bearer <token>` (Google OAuth / Application-Default
+    /// Credentials). The `x-goog-api-key` header is omitted in this mode.
+    Bearer,
+}
+
 /// The Google Generative Language provider. POSTs to `{base_url}/models/{model}:{method}`.
 pub struct Gemini {
     client: reqwest::Client,
     base_url: String,
     api_key: String,
+    auth_scheme: GeminiAuthScheme,
 }
 
 impl Gemini {
@@ -22,6 +35,7 @@ impl Gemini {
             client: crate::default_client(),
             base_url: base_url.into(),
             api_key: api_key.into(),
+            auth_scheme: GeminiAuthScheme::ApiKey,
         }
     }
 
@@ -30,11 +44,24 @@ impl Gemini {
         Self::new("https://generativelanguage.googleapis.com/v1beta", api_key)
     }
 
+    #[must_use]
+    pub fn with_auth_scheme(mut self, auth_scheme: GeminiAuthScheme) -> Self {
+        self.auth_scheme = auth_scheme;
+        self
+    }
+
     fn url(&self, model: &str, method: &str) -> String {
         format!(
             "{}/models/{model}:{method}",
             self.base_url.trim_end_matches('/')
         )
+    }
+
+    fn authenticate(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match self.auth_scheme {
+            GeminiAuthScheme::ApiKey => request.header("x-goog-api-key", &self.api_key),
+            GeminiAuthScheme::Bearer => request.bearer_auth(&self.api_key),
+        }
     }
 }
 
@@ -45,11 +72,12 @@ impl Provider for Gemini {
     }
 
     async fn complete(&self, req: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
-        let resp = self
+        let request = self
             .client
             .post(self.url(&req.model, "generateContent"))
-            .header("x-goog-api-key", &self.api_key)
-            .json(&req.body)
+            .json(&req.body);
+        let resp = self
+            .authenticate(request)
             .send()
             .await
             .map_err(|e| ProviderError::Transport(e.to_string()))?;
@@ -72,11 +100,9 @@ impl Provider for Gemini {
 
     async fn stream(&self, req: ProviderRequest) -> Result<ByteStream, ProviderError> {
         let url = format!("{}?alt=sse", self.url(&req.model, "streamGenerateContent"));
+        let request = self.client.post(url).json(&req.body);
         let resp = self
-            .client
-            .post(url)
-            .header("x-goog-api-key", &self.api_key)
-            .json(&req.body)
+            .authenticate(request)
             .send()
             .await
             .map_err(|e| ProviderError::Transport(e.to_string()))?;
@@ -169,6 +195,30 @@ mod tests {
         assert_eq!(out.usage.tokens_in, 60); // 100 - 40 cached
         assert_eq!(out.usage.tokens_out, 30);
         assert_eq!(out.usage.cache_read_tokens, 40);
+    }
+
+    #[tokio::test]
+    async fn bearer_auth_never_leaks_into_x_goog_api_key() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/models/gemini-x:generateContent"))
+            .and(header("authorization", "Bearer adc-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "candidates": [{ "content": { "parts": [{ "text": "hi" }] } }],
+                "usageMetadata": { "promptTokenCount": 1, "candidatesTokenCount": 1 }
+            })))
+            .mount(&server)
+            .await;
+
+        Gemini::new(server.uri(), "adc-test")
+            .with_auth_scheme(GeminiAuthScheme::Bearer)
+            .complete(ProviderRequest::new("gemini-x", json!({ "contents": [] })))
+            .await
+            .unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(!requests[0].headers.contains_key("x-goog-api-key"));
     }
 
     #[tokio::test]

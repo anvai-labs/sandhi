@@ -203,6 +203,58 @@ def test_anthropic_bearer_auth_crosses_typed_ffi_without_api_key_header():
         server.shutdown()
 
 
+def test_gemini_bearer_auth_crosses_typed_ffi_without_api_key_header():
+    response_body = json.dumps(
+        {
+            "candidates": [{"content": {"parts": [{"text": "ok"}]}}],
+            "usageMetadata": {"promptTokenCount": 2, "candidatesTokenCount": 1},
+        }
+    ).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        headers_seen = None
+
+        def do_POST(self):  # noqa: N802
+            Handler.headers_seen = self.headers
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(response_body)))
+            self.end_headers()
+            self.wfile.write(response_body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        provider = sg.ProviderRuntime().provider(
+            "gemini",
+            "gemini-test",
+            "adc-token",
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            max_retries=0,
+            auth_scheme="bearer",
+        )
+        request = json.dumps(
+            {
+                "model": "gemini-test",
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+        )
+
+        async def complete():
+            return await provider.complete_json(request)
+
+        response = json.loads(asyncio.run(complete()))
+
+        assert response["output"]["content"] == "ok"
+        assert Handler.headers_seen["authorization"] == "Bearer adc-token"
+        assert Handler.headers_seen.get("x-goog-api-key") is None
+    finally:
+        server.shutdown()
+
+
 def test_responses_protocol_is_explicit_and_item_shaped_across_typed_ffi():
     response_body = json.dumps(
         {
@@ -432,7 +484,7 @@ def test_provider_rejects_invalid_dispatch_inputs_at_the_ffi_seam():
     # Unsupported auth_scheme value.
     with pytest.raises(ValueError, match="auth_scheme"):
         runtime.provider("anthropic", "m", "k", max_retries=0, auth_scheme="bogus")
-    # auth_scheme supplied for a non-Anthropic provider.
+    # auth_scheme supplied for a provider that does not support it.
     with pytest.raises(ValueError, match="Anthropic"):
         runtime.provider(
             "openai",
