@@ -88,6 +88,26 @@
       "default": 0,
       "description": "Prompt-cache read tokens (priced ~0.1x fresh input). If A warms a shared prefix and B reads it, B's event shows the cheap read."
     },
+    "usage_completeness": {
+      "type": "string",
+      "enum": ["final", "partial", "unavailable"],
+      "default": "unavailable",
+      "description": "Whether token counts are final, partial, or unavailable for this logical call."
+    },
+    "attempts": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1,
+      "description": "Number of upstream attempts made for this logical call."
+    },
+    "outcome": {
+      "type": ["string", "null"],
+      "description": "Stable terminal outcome such as success, error, or cancelled."
+    },
+    "upstream_request_id": {
+      "type": ["string", "null"],
+      "description": "Provider-supplied request identifier when one was returned."
+    },
     "gpu_seconds": {
       "type": ["number", "null"],
       "minimum": 0,

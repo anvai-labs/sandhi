@@ -1,0 +1,109 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "UsageV2",
+  "type": "object",
+  "required": [
+    "cache_creation_tokens",
+    "cache_read_tokens",
+    "tokens_in",
+    "tokens_out"
+  ],
+  "properties": {
+    "accepted_prediction_tokens": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "attempts": {
+      "default": 1,
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "audio_input_tokens": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "audio_output_tokens": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "cache_creation_tokens": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "cache_read_tokens": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "completeness": {
+      "default": "unavailable",
+      "allOf": [
+        {
+          "$ref": "#/definitions/UsageCompleteness"
+        }
+      ]
+    },
+    "outcome": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reasoning_tokens": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "rejected_prediction_tokens": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "tokens_in": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "tokens_out": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "upstream_request_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "definitions": {
+    "UsageCompleteness": {
+      "type": "string",
+      "enum": [
+        "final",
+        "partial",
+        "unavailable"
+      ]
+    }
+  }
+}

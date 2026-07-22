@@ -1,285 +1,366 @@
-//! Sandhi Node binding (napi-rs) — **in-process metering middleware + provider transport** for
-//! TypeScript/JavaScript, published to npm as `@anvai-labs/sandhi`. Mirrors the Python
-//! `sandhi_gateway` API.
+//! Sandhi Node binding (napi-rs), published as `@anvai-labs/sandhi`.
 //!
-//! Two surfaces (napi camel-cases the Rust names):
-//! - **Metering**: `wireContractVersion()`, `parseUsage()`, and a `Gateway` class
-//!   (`addVirtualKey / setBudget / checkBudget / spent / meter / meterTokens / events`).
-//! - **Transport** (ADR-0047 D10 step 3c): `complete()` returns a `Promise<CompleteResult>`;
-//!   `stream()` returns a `Promise<ByteStream>` whose `read()` yields chunks (`{ data, usage }`,
-//!   `null` at end) — forward bytes verbatim (D9), usage finalized on the terminal chunk. A tiny
-//!   `Symbol.asyncIterator` shim in `sandhi.js` turns `ByteStream` into an `for await` iterable.
-//!   `registerProvider()` is the D10 escape hatch: a JS async handler registers as a custom
-//!   provider (via a threadsafe function → the underlying `FnProvider`), so a custom / air-gapped /
-//!   community provider rides `complete()` without a Rust adapter. Parity with the Python binding.
+//! `ProviderRuntime` exposes persistent typed chat-contract handles; provider-native request and
+//! response JSON never crosses the binding. The same module exposes metering and budget APIs.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use napi::bindgen_prelude::*;
-use napi::threadsafe_function::{ErrorStrategy, ThreadSafeCallContext, ThreadsafeFunction};
 use napi_derive::napi;
 
 use sandhi_core::{
     parse_anthropic_usage, parse_bedrock_usage, parse_cohere_usage, parse_gemini_usage,
-    parse_ollama_usage, parse_openai_usage, Backend, Budget, BudgetLedger, KeyStore, ParsedUsage,
-    UsageEvent, VirtualKey,
+    parse_ollama_usage, parse_openai_responses_usage, parse_openai_usage, Backend, Budget,
+    BudgetLedger, KeyStore, ParsedUsage, UsageEvent, VirtualKey,
 };
 use sandhi_providers::{
-    Anthropic, Cohere, FnProvider, Gemini, Ollama, OpenAiCompat, Provider, ProviderError,
-    ProviderRequest, ProviderResponse, StreamChunk,
+    AnthropicAuthScheme, ProviderError, ProviderHandle, ProviderRuntime as RustProviderRuntime,
 };
 
-/// Args marshaled to a host-registered JS provider (ADR-0047 D10 escape hatch). The ThreadSafe
-/// callback maps these to the JS handler's `(model, bodyJson, sessionId)` positional arguments.
-struct HandlerArgs {
-    model: String,
-    body_json: String,
-    session_id: Option<String>,
-}
-
-/// A host-registered provider is a JS async function invoked from any thread — stored as a
-/// (Fatal-strategy) threadsafe function so the transport task can call it off the JS thread.
-type HandlerTsfn = ThreadsafeFunction<HandlerArgs, ErrorStrategy::Fatal>;
-
-/// The value a host provider's JS handler resolves to: `{ status, body, usage? }` — `body` is a
-/// JSON string, `usage` the neutral breakdown (populate it since Sandhi can't parse a custom shape).
-#[napi(object)]
-pub struct HandlerResult {
-    pub status: u32,
-    pub body: String,
-    pub usage: Option<UsageBreakdown>,
-}
-
-/// Host-registered custom providers (ADR-0047 D10 escape hatch): slug → JS async handler. Consulted
-/// before the built-in adapters, so a custom / air-gapped / community provider works through
-/// `complete()` without a Rust contribution — parity with the Python binding's `register_provider`.
-static CUSTOM_PROVIDERS: OnceLock<Mutex<HashMap<String, HandlerTsfn>>> = OnceLock::new();
-
-fn custom_providers() -> &'static Mutex<HashMap<String, HandlerTsfn>> {
-    CUSTOM_PROVIDERS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Build a provider adapter from its neutral slug + endpoint (mirrors the Python binding's
-/// `build_provider`). A host-registered JS provider (D10 escape hatch) wins over the built-ins;
-/// otherwise OpenAI-compatible providers all use `OpenAiCompat` with the slug preserved, and
-/// Anthropic / Cohere / Gemini / Ollama have dedicated adapters. Transport step 3 (ADR-0047 D10).
-fn build_provider(provider: &str, base_url: &str, api_key: &str) -> Box<dyn Provider> {
-    // Escape hatch: a host-registered JS provider takes precedence (TSFN is Clone + Send).
-    let registered = custom_providers().lock().unwrap().get(provider).cloned();
-    if let Some(tsfn) = registered {
-        return Box::new(napi_fn_provider(provider.to_string(), tsfn));
-    }
-    match provider {
-        "anthropic" => Box::new(Anthropic::new(base_url, api_key)),
-        "cohere" => Box::new(Cohere::new(base_url, api_key)),
-        "gemini" => Box::new(Gemini::new(base_url, api_key)),
-        "ollama" => Box::new(Ollama::new(base_url)),
-        _ => Box::new(OpenAiCompat::new(provider.to_string(), base_url, api_key)),
+fn parse_anthropic_auth_scheme(value: Option<&str>) -> Result<AnthropicAuthScheme> {
+    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        None | Some("") | Some("api_key") => Ok(AnthropicAuthScheme::ApiKey),
+        Some("bearer") => Ok(AnthropicAuthScheme::Bearer),
+        Some(other) => Err(Error::from_reason(format!(
+            "unsupported Anthropic auth_scheme {other:?}; expected 'api_key' or 'bearer'"
+        ))),
     }
 }
 
-/// Wrap a host-registered JS async handler as a [`Provider`] (ADR-0047 D10 escape hatch). The
-/// closure invokes the handler on the JS thread via the TSFN (`call_async` → the handler's returned
-/// `Promise`), awaits it, and parses the resolved `{status, body, usage}` into a [`ProviderResponse`].
-/// `stream()` is unsupported for custom providers (the underlying `FnProvider` returns 501),
-/// mirroring the Rust and Python escape hatches.
-fn napi_fn_provider(slug: String, tsfn: HandlerTsfn) -> FnProvider {
-    FnProvider::new(slug, move |req: ProviderRequest| {
-        let tsfn = tsfn.clone();
-        async move {
-            let body_json = serde_json::to_string(&req.body)
-                .map_err(|e| ProviderError::Transport(e.to_string()))?;
-            let args = HandlerArgs {
-                model: req.model.clone(),
-                body_json,
-                session_id: req.session_id.clone(),
-            };
-            // Call the JS handler off the JS thread → its returned Promise → await the result.
-            let promise: Promise<HandlerResult> = tsfn
-                .call_async(args)
-                .await
-                .map_err(|e| ProviderError::Transport(format!("custom provider dispatch: {e}")))?;
-            let res = promise
-                .await
-                .map_err(|e| ProviderError::Transport(format!("custom provider errored: {e}")))?;
-            let body: serde_json::Value = serde_json::from_str(&res.body).map_err(|e| {
-                ProviderError::Transport(format!("custom provider 'body' is not valid JSON: {e}"))
-            })?;
-            let usage = res.usage.map(parsed_from_breakdown).unwrap_or_default();
-            Ok(ProviderResponse {
-                status: res.status as u16,
-                body,
-                usage,
-            })
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OpenAiProtocol {
+    ChatCompletions,
+    Responses,
+    ChatGptResponses,
+}
+
+fn parse_openai_protocol(value: Option<&str>) -> Result<OpenAiProtocol> {
+    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        None | Some("") | Some("chat_completions") | Some("openai_chat_completions") => {
+            Ok(OpenAiProtocol::ChatCompletions)
         }
-    })
-}
-
-/// Register a JS async function as a custom provider under `slug` (ADR-0047 D10 escape hatch — the
-/// host-language adapter, parity with the Python binding). The handler is
-/// `async (model, bodyJson, sessionId) => ({ status, body, usage })`; it owns its own transport, so
-/// a custom / air-gapped / community provider works through `complete()` without a Rust adapter.
-/// Overrides a built-in slug of the same name. Streaming is not supported for custom providers.
-#[napi]
-pub fn register_provider(env: Env, slug: String, handler: JsFunction) -> Result<()> {
-    let mut tsfn: HandlerTsfn =
-        handler.create_threadsafe_function(0, |ctx: ThreadSafeCallContext<HandlerArgs>| {
-            let a = ctx.value;
-            let model = ctx.env.create_string(&a.model)?.into_unknown();
-            let body = ctx.env.create_string(&a.body_json)?.into_unknown();
-            let session = match &a.session_id {
-                Some(s) => ctx.env.create_string(s)?.into_unknown(),
-                None => ctx.env.get_null()?.into_unknown(),
-            };
-            Ok(vec![model, body, session])
-        })?;
-    // Don't let a registered provider keep the Node event loop alive — allow a clean process exit
-    // (an in-flight call() keeps its own work pending while it runs).
-    tsfn.unref(&env)?;
-    custom_providers().lock().unwrap().insert(slug, tsfn);
-    Ok(())
-}
-
-fn parsed_from_breakdown(u: UsageBreakdown) -> ParsedUsage {
-    ParsedUsage {
-        tokens_in: u64::from(u.tokens_in),
-        tokens_out: u64::from(u.tokens_out),
-        cache_creation_tokens: u64::from(u.cache_creation_tokens),
-        cache_read_tokens: u64::from(u.cache_read_tokens),
+        Some("responses") | Some("openai_responses") => Ok(OpenAiProtocol::Responses),
+        Some("chatgpt_responses") | Some("codex_responses") => {
+            Ok(OpenAiProtocol::ChatGptResponses)
+        }
+        Some(other) => Err(Error::from_reason(format!(
+            "unsupported protocol {other:?}; expected 'chat_completions', 'responses', or 'chatgpt_responses'"
+        ))),
     }
 }
 
-fn provider_err_to_napi(e: ProviderError) -> Error {
-    Error::from_reason(format!("sandhi transport: {e}"))
+fn parse_chat_request(request_json: &str) -> Result<sandhi_core::ChatRequestV1> {
+    let request: sandhi_core::ChatRequestV1 = serde_json::from_str(request_json)
+        .map_err(|e| Error::from_reason(format!("invalid ChatRequestV1 JSON: {e}")))?;
+    request
+        .validate()
+        .map_err(|e| Error::from_reason(format!("invalid ChatRequestV1: {e}")))?;
+    Ok(request)
 }
 
-/// A completed (non-streaming) provider response: `body` is the provider-native JSON (as a string),
-/// `usage` is parsed at the source. Mirrors the Python `complete()` return.
-#[napi(object)]
-pub struct CompleteResult {
-    pub status: u32,
-    pub body: String,
-    pub usage: UsageBreakdown,
+fn typed_provider_error(error: ProviderError, provider: &str) -> Error {
+    let typed = error.as_typed(Some(provider));
+    Error::from_reason(serde_json::to_string(&typed).unwrap_or_else(|_| error.to_string()))
 }
 
-/// Forward one **non-streaming** provider call through sandhi's in-process transport (ADR-0047 D10
-/// step 3c). `provider` is the neutral slug; `bodyJson` is the provider-native request JSON,
-/// forwarded prefix-exact; `sessionId` is preserved for prompt-cache / KV affinity (D9).
-#[napi]
-pub async fn complete(
-    provider: String,
-    model: String,
-    base_url: String,
-    api_key: String,
-    body_json: String,
-    session_id: Option<String>,
-) -> Result<CompleteResult> {
-    let body: serde_json::Value = serde_json::from_str(&body_json)
-        .map_err(|e| Error::from_reason(format!("bodyJson is not valid JSON: {e}")))?;
-    let adapter = build_provider(&provider, &base_url, &api_key);
-    let req = ProviderRequest::new(model, body).with_session(session_id);
-    let resp = adapter.complete(req).await.map_err(provider_err_to_napi)?;
-    let body_str =
-        serde_json::to_string(&resp.body).map_err(|e| Error::from_reason(e.to_string()))?;
-    Ok(CompleteResult {
-        status: u32::from(resp.status),
-        body: body_str,
-        usage: usage_breakdown(&resp.usage),
-    })
+/// Persistent factory for typed provider handles. The HTTP pool, retry policy, and circuit
+/// breaker belong to each returned handle rather than being rebuilt for every request.
+#[napi(js_name = "ProviderRuntime")]
+pub struct JsProviderRuntime {
+    inner: RustProviderRuntime,
 }
 
-/// One streaming chunk: `data` is raw upstream bytes to forward verbatim; `usage` is populated only
-/// on the terminal chunk (mirrors the Python `stream()` items).
-#[napi(object)]
-pub struct StreamChunkJs {
-    pub data: Buffer,
-    pub usage: Option<UsageBreakdown>,
-}
-
-/// One item pushed over the channel from the background stream driver to `ByteStream.read`.
-struct StreamItem {
-    data: Vec<u8>,
-    usage: Option<ParsedUsage>,
-}
-
-/// A streaming provider response (ADR-0047 D10 step 3c). A background task drives the Rust
-/// `ByteStream` and pushes chunks into a bounded channel (backpressure ⇒ O(1) memory, D7);
-/// `read()` awaits the next chunk and resolves to `null` when the stream is exhausted. The
-/// `sandhi.js` shim adds `Symbol.asyncIterator` so this is usable with `for await`.
-#[napi]
-pub struct ByteStream {
-    rx: Arc<
-        tokio::sync::Mutex<tokio::sync::mpsc::Receiver<std::result::Result<StreamItem, String>>>,
-    >,
+impl Default for JsProviderRuntime {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[napi]
-impl ByteStream {
-    /// Await the next chunk; resolves to `null` once the stream is exhausted.
+impl JsProviderRuntime {
+    #[napi(constructor)]
+    pub fn new() -> Self {
+        Self {
+            inner: RustProviderRuntime::new(),
+        }
+    }
+
     #[napi]
-    pub async fn read(&self) -> Result<Option<StreamChunkJs>> {
-        let rx = self.rx.clone();
-        let mut guard = rx.lock().await;
-        match guard.recv().await {
-            Some(Ok(item)) => Ok(Some(StreamChunkJs {
-                data: item.data.into(),
-                usage: item.usage.as_ref().map(usage_breakdown),
-            })),
-            Some(Err(e)) => Err(Error::from_reason(format!("sandhi stream: {e}"))),
+    #[allow(clippy::too_many_arguments)]
+    pub fn openai_compat(
+        &self,
+        provider: String,
+        base_url: String,
+        api_key: String,
+        headers_json: Option<String>,
+        max_retries: Option<u32>,
+        timeout_secs: Option<f64>,
+        stream_idle_timeout_secs: Option<f64>,
+    ) -> Result<TypedProvider> {
+        let headers = parse_headers_json(headers_json)?;
+        let handle = self.inner.openai_compat(
+            provider.clone(),
+            base_url,
+            api_key,
+            headers,
+            max_retries,
+            timeout_secs,
+            stream_idle_timeout_secs,
+        );
+        Ok(TypedProvider { provider, handle })
+    }
+
+    #[napi]
+    #[allow(clippy::too_many_arguments)]
+    pub fn openai_responses(
+        &self,
+        provider: String,
+        base_url: String,
+        bearer_token: String,
+        headers_json: Option<String>,
+        max_retries: Option<u32>,
+        timeout_secs: Option<f64>,
+        stream_idle_timeout_secs: Option<f64>,
+    ) -> Result<TypedProvider> {
+        let handle = self.inner.openai_responses(
+            provider.clone(),
+            base_url,
+            bearer_token,
+            parse_headers_json(headers_json)?,
+            max_retries,
+            timeout_secs,
+            stream_idle_timeout_secs,
+        );
+        Ok(TypedProvider { provider, handle })
+    }
+
+    #[napi]
+    #[allow(clippy::too_many_arguments)]
+    pub fn provider(
+        &self,
+        provider: String,
+        model: String,
+        api_key: String,
+        base_url: Option<String>,
+        headers_json: Option<String>,
+        max_retries: Option<u32>,
+        timeout_secs: Option<f64>,
+        stream_idle_timeout_secs: Option<f64>,
+        auth_scheme: Option<String>,
+        protocol: Option<String>,
+    ) -> Result<TypedProvider> {
+        let normalized = provider.trim().to_ascii_lowercase();
+        let protocol = parse_openai_protocol(protocol.as_deref())?;
+        if auth_scheme.as_deref().is_some_and(|value| !value.trim().is_empty())
+            && !matches!(normalized.as_str(), "anthropic" | "claude")
+        {
+            return Err(Error::from_reason(
+                "authScheme is only valid for the Anthropic Messages protocol",
+            ));
+        }
+        let handle = if protocol != OpenAiProtocol::ChatCompletions {
+            let resolved_base_url = if let Some(base_url) = base_url {
+                base_url
+            } else {
+                sandhi_providers::resolve_openai_compat_provider(&provider)
+                    .map(|spec| spec.base_url_for_model(&model).to_owned())
+                    .ok_or_else(|| {
+                        Error::from_reason(
+                            "Responses protocol requires baseUrl for an unknown provider",
+                        )
+                    })?
+            };
+            let headers = parse_headers_json(headers_json)?;
+            if protocol == OpenAiProtocol::ChatGptResponses {
+                self.inner.chatgpt_responses(
+                    provider.clone(),
+                    resolved_base_url,
+                    api_key,
+                    headers,
+                    max_retries,
+                    timeout_secs,
+                    stream_idle_timeout_secs,
+                )
+            } else {
+                self.inner.openai_responses(
+                    provider.clone(),
+                    resolved_base_url,
+                    api_key,
+                    headers,
+                    max_retries,
+                    timeout_secs,
+                    stream_idle_timeout_secs,
+                )
+            }
+        } else {
+            match normalized.as_str() {
+            "anthropic" | "claude" => self.inner.anthropic(
+                base_url.unwrap_or_else(|| "https://api.anthropic.com".into()),
+                api_key,
+                parse_anthropic_auth_scheme(auth_scheme.as_deref())?,
+                max_retries,
+                timeout_secs,
+                stream_idle_timeout_secs,
+            ),
+            "gemini" | "google" => self.inner.gemini(
+                base_url
+                    .unwrap_or_else(|| "https://generativelanguage.googleapis.com/v1beta".into()),
+                api_key,
+                max_retries,
+                timeout_secs,
+                stream_idle_timeout_secs,
+            ),
+            "cohere" => self.inner.cohere(
+                base_url.unwrap_or_else(|| "https://api.cohere.com".into()),
+                api_key,
+                max_retries,
+                timeout_secs,
+                stream_idle_timeout_secs,
+            ),
+            "ollama" => self.inner.ollama(
+                base_url.unwrap_or_else(|| "http://localhost:11434".into()),
+                api_key,
+                max_retries,
+                timeout_secs,
+                stream_idle_timeout_secs,
+            ),
+            _ => {
+                let headers = parse_headers_json(headers_json)?;
+                if let Some(base_url) = base_url {
+                    self.inner.openai_compat(
+                        normalized,
+                        base_url,
+                        api_key,
+                        headers,
+                        max_retries,
+                        timeout_secs,
+                        stream_idle_timeout_secs,
+                    )
+                } else {
+                    self.inner
+                        .known_openai_compat(
+                            &normalized,
+                            &model,
+                            api_key,
+                            headers,
+                            max_retries,
+                            timeout_secs,
+                            stream_idle_timeout_secs,
+                        )
+                        .map_err(|error| typed_provider_error(error, &normalized))?
+                }
+            }
+            }
+        };
+        Ok(TypedProvider {
+            provider: handle.slug().to_owned(),
+            handle,
+        })
+    }
+}
+
+fn parse_headers_json(value: Option<String>) -> Result<reqwest::header::HeaderMap> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    let Some(value) = value else {
+        return Ok(headers);
+    };
+    let values: HashMap<String, String> = serde_json::from_str(&value)
+        .map_err(|e| Error::from_reason(format!("headersJson is not a string map: {e}")))?;
+    for (name, value) in values {
+        let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+            .map_err(|e| Error::from_reason(format!("invalid header name: {e}")))?;
+        let value = reqwest::header::HeaderValue::from_str(&value)
+            .map_err(|e| Error::from_reason(format!("invalid header value: {e}")))?;
+        headers.insert(name, value);
+    }
+    Ok(headers)
+}
+
+/// A persistent provider handle accepting Sandhi chat-contract v1 JSON documents.
+#[napi]
+pub struct TypedProvider {
+    provider: String,
+    handle: ProviderHandle,
+}
+
+#[napi]
+impl TypedProvider {
+    #[napi(getter)]
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    #[napi]
+    pub async fn complete_json(&self, request_json: String) -> Result<String> {
+        let request = parse_chat_request(&request_json)?;
+        let response = self
+            .handle
+            .complete(request)
+            .await
+            .map_err(|e| typed_provider_error(e, &self.provider))?;
+        serde_json::to_string(&response).map_err(|e| Error::from_reason(e.to_string()))
+    }
+
+    #[napi]
+    pub fn stream_json(&self, request_json: String) -> Result<TypedEventStream> {
+        let request = parse_chat_request(&request_json)?;
+        let handle = self.handle.clone();
+        let provider = self.provider.clone();
+        let (tx, rx) = tokio::sync::mpsc::channel::<std::result::Result<String, String>>(64);
+        tokio::spawn(async move {
+            use futures_util::StreamExt;
+            match handle.stream(request).await {
+                Ok(mut stream) => {
+                    while let Some(event) = stream.next().await {
+                        let (item, stop) = match event {
+                            Ok(event) => (
+                                serde_json::to_string(&event).map_err(|e| e.to_string()),
+                                false,
+                            ),
+                            Err(error) => (
+                                Err(serde_json::to_string(&error.as_typed(Some(&provider)))
+                                    .unwrap_or_else(|_| error.to_string())),
+                                true,
+                            ),
+                        };
+                        if tx.send(item).await.is_err() || stop {
+                            break;
+                        }
+                    }
+                }
+                Err(error) => {
+                    let _ = tx
+                        .send(Err(serde_json::to_string(&error.as_typed(Some(&provider)))
+                            .unwrap_or_else(|_| error.to_string())))
+                        .await;
+                }
+            }
+        });
+        Ok(TypedEventStream {
+            rx: Arc::new(tokio::sync::Mutex::new(rx)),
+        })
+    }
+}
+
+/// Pull-based stream of serialized `ChatStreamEventV1` documents.
+#[napi]
+pub struct TypedEventStream {
+    rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<std::result::Result<String, String>>>>,
+}
+
+#[napi]
+impl TypedEventStream {
+    #[napi]
+    pub async fn read(&self) -> Result<Option<String>> {
+        match self.rx.lock().await.recv().await {
+            Some(Ok(item)) => Ok(Some(item)),
+            Some(Err(error)) => Err(Error::from_reason(error)),
             None => Ok(None),
         }
     }
-}
-
-/// Forward one **streaming** provider call through sandhi's in-process transport (ADR-0047 D10 step
-/// 3c). Resolves to a [`ByteStream`]; bytes are forwarded verbatim (prefix-exact, D9), usage is
-/// finalized on the terminal chunk, and `sessionId` is preserved for prompt-cache / KV affinity.
-#[napi]
-pub async fn stream(
-    provider: String,
-    model: String,
-    base_url: String,
-    api_key: String,
-    body_json: String,
-    session_id: Option<String>,
-) -> Result<ByteStream> {
-    let body: serde_json::Value = serde_json::from_str(&body_json)
-        .map_err(|e| Error::from_reason(format!("bodyJson is not valid JSON: {e}")))?;
-    let (tx, rx) = tokio::sync::mpsc::channel::<std::result::Result<StreamItem, String>>(64);
-    // Drive the stream on napi's tokio runtime; `read()` pulls from the channel independently.
-    tokio::spawn(async move {
-        use futures_util::StreamExt;
-        let adapter = build_provider(&provider, &base_url, &api_key);
-        let req = ProviderRequest::new(model, body).with_session(session_id);
-        match adapter.stream(req).await {
-            Ok(mut s) => {
-                while let Some(chunk) = s.next().await {
-                    let (msg, stop) = match chunk {
-                        Ok(StreamChunk { data, usage }) => (
-                            Ok(StreamItem {
-                                data: data.to_vec(),
-                                usage,
-                            }),
-                            false,
-                        ),
-                        Err(e) => (Err(e.to_string()), true),
-                    };
-                    if tx.send(msg).await.is_err() || stop {
-                        break;
-                    }
-                }
-            }
-            Err(e) => {
-                let _ = tx.send(Err(e.to_string())).await;
-            }
-        }
-    });
-    Ok(ByteStream {
-        rx: Arc::new(tokio::sync::Mutex::new(rx)),
-    })
 }
 
 /// The neutral token breakdown parsed from a provider response.
@@ -309,6 +390,10 @@ pub struct Event {
     pub tokens_out: u32,
     pub cache_creation_tokens: u32,
     pub cache_read_tokens: u32,
+    pub usage_completeness: String,
+    pub attempts: u32,
+    pub outcome: Option<String>,
+    pub upstream_request_id: Option<String>,
     pub gpu_seconds: Option<f64>,
 }
 
@@ -534,6 +619,7 @@ fn parse_for(provider: &str, value: &serde_json::Value) -> ParsedUsage {
         "cohere" => parse_cohere_usage(value),
         "ollama" => parse_ollama_usage(value),
         "bedrock" => parse_bedrock_usage(value),
+        "openai_responses" | "responses" => parse_openai_responses_usage(value),
         _ => parse_openai_usage(value),
     }
     .unwrap_or_default()
@@ -575,6 +661,15 @@ fn event_to_napi(e: &UsageEvent) -> Event {
         tokens_out: e.tokens_out as u32,
         cache_creation_tokens: e.cache_creation_tokens as u32,
         cache_read_tokens: e.cache_read_tokens as u32,
+        usage_completeness: match e.usage_completeness {
+            sandhi_core::UsageCompleteness::Final => "final",
+            sandhi_core::UsageCompleteness::Partial => "partial",
+            sandhi_core::UsageCompleteness::Unavailable => "unavailable",
+        }
+        .into(),
+        attempts: e.attempts,
+        outcome: e.outcome.clone(),
+        upstream_request_id: e.upstream_request_id.clone(),
         gpu_seconds: e.gpu_seconds,
     }
 }

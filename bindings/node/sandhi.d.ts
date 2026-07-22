@@ -3,10 +3,9 @@
 // step 3c), so `for await (const chunk of stream)` type-checks.
 
 export * from "./index";
-import type { StreamChunkJs } from "./index";
-
+export * from "./contracts";
 declare module "./index" {
-  interface ByteStream {
-    [Symbol.asyncIterator](): AsyncIterator<StreamChunkJs>;
+  interface TypedEventStream {
+    [Symbol.asyncIterator](): AsyncIterator<string>;
   }
 }

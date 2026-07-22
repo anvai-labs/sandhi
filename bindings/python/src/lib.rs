@@ -1,20 +1,7 @@
-//! Sandhi Python binding (PyO3) — **in-process metering middleware + provider transport** (AnvaiOps
-//! ADR-0047 D2/D10). Published to PyPI as `sandhi-gateway`, imported as `sandhi_gateway`.
+//! Sandhi Python binding (PyO3), published as `sandhi-gateway`.
 //!
-//! Two surfaces:
-//! - **Metering** ([`Gateway`], [`parse_usage`]): a caller keeps making its own provider calls, then
-//!   hands the raw response over; Sandhi parses the usage **at the source** (same Rust parsers as the
-//!   proxy), attributes it to a virtual key, enforces + records the budget, and emits the neutral
-//!   usage event. Zero network hop.
-//! - **Transport** ([`complete`] / [`stream`], ADR-0047 D10 step 3): forward a provider call through
-//!   sandhi-providers' async transport **in-process** — `complete` returns an awaitable, `stream` an
-//!   async iterator (bytes forwarded verbatim, D9; usage finalized on the terminal item). This makes
-//!   Sandhi the shared network core the in-house apps can `import`. [`register_provider`] is the D10
-//!   escape hatch: a host-language (Python) async callable registers as a custom provider, so a
-//!   custom / air-gapped / community provider rides `complete()` without a Rust adapter.
-//!
-//! Depends on `sandhi-core` (metering) + `sandhi-providers` (transport) — the latter pulls the
-//! async HTTP stack into the wheel to serve the transport surface.
+//! `ProviderRuntime` exposes persistent typed chat-contract handles; provider-native request and
+//! response JSON never crosses the binding. The same module exposes metering and budget APIs.
 
 // pyo3's #[pyfunction]/#[pymethods] macros emit `.into()` on the PyErr return path; on this
 // pyo3 + clippy combo that trips `useless_conversion` inside generated code (not our code).
@@ -25,239 +12,338 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use pyo3::exceptions::{
-    PyKeyError, PyRuntimeError, PyStopAsyncIteration, PyTimeoutError, PyValueError,
-};
+use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyStopAsyncIteration, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBytes, PyDict};
+use pyo3::types::{PyAny, PyDict};
 use std::sync::Arc;
 
 use sandhi_core::{
     parse_anthropic_usage, parse_bedrock_usage, parse_cohere_usage, parse_gemini_usage,
-    parse_ollama_usage, parse_openai_usage, Backend, Budget, BudgetLedger, KeyStore, ParsedUsage,
-    UsageEvent, VirtualKey,
+    parse_ollama_usage, parse_openai_responses_usage, parse_openai_usage, Backend, Budget,
+    BudgetLedger, KeyStore, ParsedUsage, UsageEvent, VirtualKey,
 };
 use sandhi_providers::{
-    Anthropic, CircuitBreaker, Cohere, FnProvider, Gemini, Ollama, OpenAiCompat, Provider,
-    ProviderError, ProviderRequest, ProviderResponse, ResilientProvider, StreamChunk,
-    TimeoutConfig,
+    resolve_openai_compat_provider, AnthropicAuthScheme, ProviderError, ProviderHandle,
+    ProviderRuntime as RustProviderRuntime,
 };
-use std::sync::OnceLock;
 
-/// Host-registered custom providers (ADR-0047 D10 escape hatch): slug → a Python async callable that
-/// owns its own transport. Consulted before the built-in adapters, so a custom / air-gapped /
-/// community provider works through `complete()` without a Rust contribution.
-static CUSTOM_PROVIDERS: OnceLock<Mutex<HashMap<String, Py<PyAny>>>> = OnceLock::new();
-
-fn custom_providers() -> &'static Mutex<HashMap<String, Py<PyAny>>> {
-    CUSTOM_PROVIDERS.get_or_init(|| Mutex::new(HashMap::new()))
+fn parse_anthropic_auth_scheme(value: Option<&str>) -> PyResult<AnthropicAuthScheme> {
+    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        None | Some("") | Some("api_key") => Ok(AnthropicAuthScheme::ApiKey),
+        Some("bearer") => Ok(AnthropicAuthScheme::Bearer),
+        Some(other) => Err(PyValueError::new_err(format!(
+            "unsupported Anthropic auth_scheme {other:?}; expected 'api_key' or 'bearer'"
+        ))),
+    }
 }
 
-/// Build a provider adapter from its neutral slug + endpoint. A host-registered Python provider
-/// (D10 escape hatch) wins over the built-ins; otherwise OpenAI-compatible providers (OpenAI,
-/// Azure, Groq, vLLM, …) all use `OpenAiCompat` with the slug preserved for metering, and Anthropic
-/// / Cohere / Gemini / Ollama have dedicated adapters. Transport step 3 (ADR-0047 D10).
-fn build_provider(
-    provider: &str,
-    base_url: &str,
-    api_key: &str,
-    opts: &TransportOpts,
-) -> Arc<dyn Provider> {
-    // Escape hatch: a host-registered Python provider takes precedence (clone the handle out from
-    // under the lock, then dispatch through `FnProvider`).
-    let registered = custom_providers()
-        .lock()
-        .unwrap()
-        .get(provider)
-        .map(|h| Python::with_gil(|py| h.clone_ref(py)));
-    let bare: Arc<dyn Provider> = if let Some(handler) = registered {
-        Arc::new(python_fn_provider(provider.to_string(), handler))
-    } else {
-        match provider {
-            "anthropic" => Arc::new(Anthropic::new(base_url, api_key)),
-            "cohere" => Arc::new(Cohere::new(base_url, api_key)),
-            "gemini" => Arc::new(Gemini::new(base_url, api_key)),
-            "ollama" => Arc::new(Ollama::new(base_url)),
-            // openai + every OpenAI-compatible slug: one adapter, slug preserved.
-            _ => Arc::new(OpenAiCompat::new(provider.to_string(), base_url, api_key)),
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OpenAiProtocol {
+    ChatCompletions,
+    Responses,
+    ChatGptResponses,
+}
+
+fn parse_openai_protocol(value: Option<&str>) -> PyResult<OpenAiProtocol> {
+    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        None | Some("") | Some("chat_completions") | Some("openai_chat_completions") => {
+            Ok(OpenAiProtocol::ChatCompletions)
         }
-    };
-    // Uniform decorator wrap: retry + shared breaker + timeouts, for built-ins AND the escape
-    // hatch (a bare transport would carry fewer guarantees than a direct client — ADR-0002).
-    let mut resilient =
-        ResilientProvider::new(bare).with_shared_breaker(shared_breaker(provider, base_url));
-    if let Some(max_retries) = opts.max_retries {
-        resilient = resilient.with_retry(max_retries, std::time::Duration::from_millis(200));
-    }
-    let mut timeouts = TimeoutConfig::default();
-    if let Some(secs) = opts.timeout_secs {
-        timeouts.complete = std::time::Duration::from_secs_f64(secs.max(0.001));
-    }
-    if let Some(secs) = opts.stream_idle_timeout_secs {
-        timeouts.idle = Some(std::time::Duration::from_secs_f64(secs.max(0.001)));
-    }
-    Arc::new(resilient.with_timeouts(timeouts))
-}
-
-/// Additive per-call transport knobs (`None` → the Rust defaults).
-#[derive(Default)]
-struct TransportOpts {
-    timeout_secs: Option<f64>,
-    stream_idle_timeout_secs: Option<f64>,
-    max_retries: Option<u32>,
-}
-
-/// One circuit breaker per `(provider, base_url)` upstream: `build_provider` constructs a
-/// provider per call, and a per-call breaker would be stateless theater.
-type BreakerMap = HashMap<(String, String), Arc<CircuitBreaker>>;
-static BREAKERS: OnceLock<Mutex<BreakerMap>> = OnceLock::new();
-
-fn shared_breaker(provider: &str, base_url: &str) -> Arc<CircuitBreaker> {
-    let mut map = BREAKERS
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .unwrap();
-    map.entry((provider.to_string(), base_url.to_string()))
-        .or_insert_with(|| Arc::new(CircuitBreaker::new(5, std::time::Duration::from_secs(30))))
-        .clone()
-}
-
-/// Wrap a host-registered Python async callable as a [`Provider`] (ADR-0047 D10 escape hatch). The
-/// closure calls the Python coroutine and bridges it back to a Rust future (the reverse of
-/// [`future_into_py`]: `pyo3_async_runtimes::tokio::into_future`), then parses its returned mapping
-/// into a [`ProviderResponse`]. `stream()` is unsupported for custom providers (the underlying
-/// `FnProvider` returns 501), mirroring the Rust escape hatch.
-fn python_fn_provider(slug: String, handler: Py<PyAny>) -> FnProvider {
-    FnProvider::new(slug, move |req: ProviderRequest| {
-        let handler = Python::with_gil(|py| handler.clone_ref(py));
-        async move {
-            // Call the Python handler → coroutine, then turn that awaitable into a Rust future.
-            let fut = Python::with_gil(|py| -> PyResult<_> {
-                let body_json = serde_json::to_string(&req.body)
-                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
-                let coro = handler.bind(py).call1((
-                    req.model.clone(),
-                    body_json,
-                    req.session_id.clone(),
-                ))?;
-                pyo3_async_runtimes::tokio::into_future(coro)
-            })
-            .map_err(|e| ProviderError::Transport(format!("custom provider dispatch: {e}")))?;
-            let result = fut
-                .await
-                .map_err(|e| ProviderError::Transport(format!("custom provider errored: {e}")))?;
-            Python::with_gil(|py| py_obj_to_response(result.bind(py)))
+        Some("responses") | Some("openai_responses") => Ok(OpenAiProtocol::Responses),
+        Some("chatgpt_responses") | Some("codex_responses") => {
+            Ok(OpenAiProtocol::ChatGptResponses)
         }
-    })
-}
-
-/// Parse a custom provider's returned mapping into a [`ProviderResponse`]. Contract:
-/// `{"status": int, "body": <JSON string>, "usage": {tokens_in, tokens_out, …} | None}`.
-fn py_obj_to_response(obj: &Bound<'_, PyAny>) -> Result<ProviderResponse, ProviderError> {
-    let te = |m: String| ProviderError::Transport(m);
-    let status: u16 = obj
-        .get_item("status")
-        .map_err(|e| te(format!("custom provider result missing 'status': {e}")))?
-        .extract()
-        .map_err(|e| te(format!("custom provider 'status' not an int: {e}")))?;
-    let body_str: String = obj
-        .get_item("body")
-        .map_err(|e| te(format!("custom provider result missing 'body': {e}")))?
-        .extract()
-        .map_err(|e| te(format!("custom provider 'body' must be a JSON string: {e}")))?;
-    let body: serde_json::Value = serde_json::from_str(&body_str)
-        .map_err(|e| te(format!("custom provider 'body' is not valid JSON: {e}")))?;
-    let usage = match obj.get_item("usage") {
-        Ok(u) if !u.is_none() => parsed_from_pyobj(&u),
-        _ => ParsedUsage::default(),
-    };
-    Ok(ProviderResponse {
-        status,
-        body,
-        usage,
-    })
-}
-
-/// Register a Python async callable as a custom provider under `slug` (ADR-0047 D10 escape hatch —
-/// the host-language adapter). The handler is
-/// `async def handler(model: str, body_json: str, session_id: str | None) -> dict` returning
-/// `{"status": int, "body": <JSON string>, "usage": {tokens_in, tokens_out, cache_creation_tokens,
-/// cache_read_tokens} | None}`; it owns its own transport, so a custom / air-gapped / community
-/// provider works through `complete()` without a Rust adapter. Overrides a built-in slug of the same
-/// name. Streaming is not supported for custom providers (mirrors the Rust `FnProvider`).
-#[pyfunction]
-fn register_provider(slug: String, handler: Py<PyAny>) {
-    custom_providers().lock().unwrap().insert(slug, handler);
-}
-
-fn provider_err_to_py(e: ProviderError) -> PyErr {
-    match e {
-        ProviderError::Timeout(_) => PyTimeoutError::new_err(format!("sandhi transport: {e}")),
-        _ => PyRuntimeError::new_err(format!("sandhi transport: {e}")),
+        Some(other) => Err(PyValueError::new_err(format!(
+            "unsupported protocol {other:?}; expected 'chat_completions', 'responses', or 'chatgpt_responses'"
+        ))),
     }
 }
 
-/// Forward one **non-streaming** provider call through sandhi's in-process transport (ADR-0047 D10
-/// step 3a). Returns a Python **awaitable** resolving to `{status, body, usage}` — `usage` is parsed
-/// at the source by sandhi (single-sourced metering trust). `provider` is the neutral slug; `body`
-/// is the provider-native request JSON, forwarded prefix-exact; `session_id` is preserved
-/// end-to-end for prompt-cache / KV affinity (ADR-0047 D9).
-#[pyfunction]
-#[allow(clippy::too_many_arguments)] // pyo3 signature: flat kwargs are the FFI contract
-#[pyo3(signature = (provider, model, base_url, api_key, body_json, session_id=None, timeout_secs=None, stream_idle_timeout_secs=None, max_retries=None))]
-fn complete<'py>(
-    py: Python<'py>,
-    provider: String,
-    model: String,
-    base_url: String,
-    api_key: String,
-    body_json: String,
-    session_id: Option<String>,
-    timeout_secs: Option<f64>,
-    stream_idle_timeout_secs: Option<f64>,
-    max_retries: Option<u32>,
-) -> PyResult<Bound<'py, PyAny>> {
-    let body: serde_json::Value = serde_json::from_str(&body_json)
-        .map_err(|e| PyValueError::new_err(format!("body_json is not valid JSON: {e}")))?;
-    let opts = TransportOpts {
-        timeout_secs,
-        stream_idle_timeout_secs,
-        max_retries,
-    };
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let adapter = build_provider(&provider, &base_url, &api_key, &opts);
-        let req = ProviderRequest::new(model, body).with_session(session_id);
-        let resp = adapter.complete(req).await.map_err(provider_err_to_py)?;
-        Python::with_gil(|py| -> PyResult<Py<PyAny>> {
-            let d = PyDict::new_bound(py);
-            d.set_item("status", resp.status)?;
-            let body_str = serde_json::to_string(&resp.body)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            d.set_item("body", body_str)?;
-            d.set_item("usage", usage_to_dict(py, &resp.usage)?)?;
-            Ok(d.into_any().unbind())
-        })
-    })
+fn typed_provider_err_to_py(e: ProviderError, provider: &str) -> PyErr {
+    let value = e.as_typed(Some(provider));
+    let json = serde_json::to_string(&value).unwrap_or_else(|_| e.to_string());
+    PyRuntimeError::new_err(json)
 }
 
-/// One item yielded by [`ByteStreamIter`]: raw upstream bytes to forward verbatim, plus (on the
-/// terminal item only) the finalized usage.
-struct StreamItem {
-    data: Vec<u8>,
-    usage: Option<ParsedUsage>,
-}
-
-/// A Python **async iterator** over a streaming provider response (ADR-0047 D10 step 3b). A
-/// background tokio task drives the Rust `ByteStream` and pushes chunks into a bounded channel
-/// (backpressure ⇒ O(1) memory, D7); `__anext__` awaits the next chunk. Yields dicts
-/// `{"data": bytes, "usage": dict|None}` — `usage` is populated only on the terminal item.
-#[pyclass]
-struct ByteStreamIter {
-    rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Result<StreamItem, String>>>>,
+/// Persistent typed provider factory. Provider handles created by this object retain their Rust
+/// HTTP pool and resilience state across calls.
+#[pyclass(name = "ProviderRuntime")]
+struct PyProviderRuntime {
+    inner: RustProviderRuntime,
 }
 
 #[pymethods]
-impl ByteStreamIter {
+impl PyProviderRuntime {
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: RustProviderRuntime::new(),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (provider, base_url, api_key, timeout_secs=None, stream_idle_timeout_secs=None, max_retries=None, headers_json=None))]
+    fn openai_compat(
+        &self,
+        provider: String,
+        base_url: String,
+        api_key: String,
+        timeout_secs: Option<f64>,
+        stream_idle_timeout_secs: Option<f64>,
+        max_retries: Option<u32>,
+        headers_json: Option<String>,
+    ) -> PyResult<TypedProvider> {
+        let handle = self.inner.openai_compat(
+            provider.clone(),
+            base_url,
+            api_key,
+            parse_headers_json(headers_json)?,
+            max_retries,
+            timeout_secs,
+            stream_idle_timeout_secs,
+        );
+        Ok(TypedProvider { provider, handle })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (provider, base_url, bearer_token, timeout_secs=None, stream_idle_timeout_secs=None, max_retries=None, headers_json=None))]
+    fn openai_responses(
+        &self,
+        provider: String,
+        base_url: String,
+        bearer_token: String,
+        timeout_secs: Option<f64>,
+        stream_idle_timeout_secs: Option<f64>,
+        max_retries: Option<u32>,
+        headers_json: Option<String>,
+    ) -> PyResult<TypedProvider> {
+        let handle = self.inner.openai_responses(
+            provider.clone(),
+            base_url,
+            bearer_token,
+            parse_headers_json(headers_json)?,
+            max_retries,
+            timeout_secs,
+            stream_idle_timeout_secs,
+        );
+        Ok(TypedProvider { provider, handle })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (provider, model, api_key, base_url=None, timeout_secs=None, stream_idle_timeout_secs=None, max_retries=None, headers_json=None, auth_scheme=None, protocol=None))]
+    fn provider(
+        &self,
+        provider: String,
+        model: String,
+        api_key: String,
+        base_url: Option<String>,
+        timeout_secs: Option<f64>,
+        stream_idle_timeout_secs: Option<f64>,
+        max_retries: Option<u32>,
+        headers_json: Option<String>,
+        auth_scheme: Option<String>,
+        protocol: Option<String>,
+    ) -> PyResult<TypedProvider> {
+        let normalized = provider.trim().to_ascii_lowercase();
+        let protocol = parse_openai_protocol(protocol.as_deref())?;
+        if auth_scheme.as_deref().is_some_and(|value| !value.trim().is_empty())
+            && !matches!(normalized.as_str(), "anthropic" | "claude")
+        {
+            return Err(PyValueError::new_err(
+                "auth_scheme is only valid for the Anthropic Messages protocol",
+            ));
+        }
+        let handle = if protocol != OpenAiProtocol::ChatCompletions {
+            let resolved_base_url = if let Some(base_url) = base_url {
+                base_url
+            } else {
+                resolve_openai_compat_provider(&provider)
+                    .map(|spec| spec.base_url_for_model(&model).to_owned())
+                    .ok_or_else(|| {
+                        PyValueError::new_err(
+                            "Responses protocol requires base_url for an unknown provider",
+                        )
+                    })?
+            };
+            let headers = parse_headers_json(headers_json)?;
+            if protocol == OpenAiProtocol::ChatGptResponses {
+                self.inner.chatgpt_responses(
+                    provider.clone(),
+                    resolved_base_url,
+                    api_key,
+                    headers,
+                    max_retries,
+                    timeout_secs,
+                    stream_idle_timeout_secs,
+                )
+            } else {
+                self.inner.openai_responses(
+                    provider.clone(),
+                    resolved_base_url,
+                    api_key,
+                    headers,
+                    max_retries,
+                    timeout_secs,
+                    stream_idle_timeout_secs,
+                )
+            }
+        } else if matches!(normalized.as_str(), "anthropic" | "claude") {
+            self.inner.anthropic(
+                base_url.unwrap_or_else(|| "https://api.anthropic.com".into()),
+                api_key,
+                parse_anthropic_auth_scheme(auth_scheme.as_deref())?,
+                max_retries,
+                timeout_secs,
+                stream_idle_timeout_secs,
+            )
+        } else if matches!(normalized.as_str(), "gemini" | "google") {
+            self.inner.gemini(
+                base_url
+                    .unwrap_or_else(|| "https://generativelanguage.googleapis.com/v1beta".into()),
+                api_key,
+                max_retries,
+                timeout_secs,
+                stream_idle_timeout_secs,
+            )
+        } else if normalized == "cohere" {
+            self.inner.cohere(
+                base_url.unwrap_or_else(|| "https://api.cohere.com".into()),
+                api_key,
+                max_retries,
+                timeout_secs,
+                stream_idle_timeout_secs,
+            )
+        } else if normalized == "ollama" {
+            self.inner.ollama(
+                base_url.unwrap_or_else(|| "http://localhost:11434".into()),
+                api_key,
+                max_retries,
+                timeout_secs,
+                stream_idle_timeout_secs,
+            )
+        } else if let Some(base_url) = base_url {
+            self.inner.openai_compat(
+                provider.clone(),
+                base_url,
+                api_key,
+                parse_headers_json(headers_json)?,
+                max_retries,
+                timeout_secs,
+                stream_idle_timeout_secs,
+            )
+        } else {
+            self.inner
+                .known_openai_compat(
+                    &provider,
+                    &model,
+                    api_key,
+                    parse_headers_json(headers_json)?,
+                    max_retries,
+                    timeout_secs,
+                    stream_idle_timeout_secs,
+                )
+                .map_err(|error| PyValueError::new_err(error.to_string()))?
+        };
+        Ok(TypedProvider {
+            provider: handle.slug().to_owned(),
+            handle,
+        })
+    }
+}
+
+/// A persistent provider handle accepting and returning Sandhi chat-contract v1 JSON documents.
+#[pyclass]
+struct TypedProvider {
+    provider: String,
+    handle: ProviderHandle,
+}
+
+#[pymethods]
+impl TypedProvider {
+    #[getter]
+    fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    fn complete_json<'py>(
+        &self,
+        py: Python<'py>,
+        request_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let request: sandhi_core::ChatRequestV1 = serde_json::from_str(&request_json)
+            .map_err(|e| PyValueError::new_err(format!("invalid ChatRequestV1 JSON: {e}")))?;
+        request
+            .validate()
+            .map_err(|e| PyValueError::new_err(format!("invalid ChatRequestV1: {e}")))?;
+        let handle = self.handle.clone();
+        let provider = self.provider.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let response = handle
+                .complete(request)
+                .await
+                .map_err(|e| typed_provider_err_to_py(e, &provider))?;
+            serde_json::to_string(&response)
+                .map_err(|e| PyRuntimeError::new_err(format!("serialize ChatResponseV1: {e}")))
+        })
+    }
+
+    fn stream_json(&self, request_json: String) -> PyResult<TypedEventStreamIter> {
+        let request: sandhi_core::ChatRequestV1 = serde_json::from_str(&request_json)
+            .map_err(|e| PyValueError::new_err(format!("invalid ChatRequestV1 JSON: {e}")))?;
+        request
+            .validate()
+            .map_err(|e| PyValueError::new_err(format!("invalid ChatRequestV1: {e}")))?;
+        let handle = self.handle.clone();
+        let provider = self.provider.clone();
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, String>>(64);
+        pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+            use futures_util::StreamExt;
+            match handle.stream(request).await {
+                Ok(mut stream) => {
+                    while let Some(event) = stream.next().await {
+                        let (item, stop) = match event {
+                            Ok(event) => (
+                                serde_json::to_string(&event)
+                                    .map_err(|e| format!("serialize ChatStreamEventV1: {e}")),
+                                false,
+                            ),
+                            Err(error) => {
+                                let typed = error.as_typed(Some(&provider));
+                                (
+                                    Err(serde_json::to_string(&typed)
+                                        .unwrap_or_else(|_| error.to_string())),
+                                    true,
+                                )
+                            }
+                        };
+                        if tx.send(item).await.is_err() || stop {
+                            break;
+                        }
+                    }
+                }
+                Err(error) => {
+                    let typed = error.as_typed(Some(&provider));
+                    let _ = tx
+                        .send(Err(
+                            serde_json::to_string(&typed).unwrap_or_else(|_| error.to_string())
+                        ))
+                        .await;
+                }
+            }
+        });
+        Ok(TypedEventStreamIter {
+            rx: Arc::new(tokio::sync::Mutex::new(rx)),
+        })
+    }
+}
+
+#[pyclass]
+struct TypedEventStreamIter {
+    rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Result<String, String>>>>,
+}
+
+#[pymethods]
+impl TypedEventStreamIter {
     fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }
@@ -267,79 +353,72 @@ impl ByteStreamIter {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut guard = rx.lock().await;
             match guard.recv().await {
-                Some(Ok(item)) => Python::with_gil(|py| -> PyResult<Py<PyAny>> {
-                    let d = PyDict::new_bound(py);
-                    d.set_item("data", PyBytes::new_bound(py, &item.data))?;
-                    match &item.usage {
-                        Some(u) => d.set_item("usage", usage_to_dict(py, u)?)?,
-                        None => d.set_item("usage", py.None())?,
-                    }
-                    Ok(d.into_any().unbind())
-                }),
-                Some(Err(e)) => Err(PyRuntimeError::new_err(format!("sandhi stream: {e}"))),
+                Some(Ok(event_json)) => Ok(event_json),
+                Some(Err(error_json)) => Err(PyRuntimeError::new_err(error_json)),
                 None => Err(PyStopAsyncIteration::new_err(())),
             }
         })
     }
 }
 
-/// Forward one **streaming** provider call through sandhi's in-process transport (ADR-0047 D10
-/// step 3b). Returns a Python **async iterator** (`async for chunk in ...`) yielding
-/// `{"data": bytes, "usage": dict|None}` — bytes are forwarded verbatim (prefix-exact, D9), usage
-/// finalized on the terminal item. `session_id` is preserved for prompt-cache / KV affinity.
-#[pyfunction]
-#[allow(clippy::too_many_arguments)] // pyo3 signature: flat kwargs are the FFI contract
-#[pyo3(signature = (provider, model, base_url, api_key, body_json, session_id=None, timeout_secs=None, stream_idle_timeout_secs=None, max_retries=None))]
-fn stream(
-    provider: String,
-    model: String,
-    base_url: String,
-    api_key: String,
-    body_json: String,
-    session_id: Option<String>,
-    timeout_secs: Option<f64>,
-    stream_idle_timeout_secs: Option<f64>,
-    max_retries: Option<u32>,
-) -> PyResult<ByteStreamIter> {
-    let body: serde_json::Value = serde_json::from_str(&body_json)
-        .map_err(|e| PyValueError::new_err(format!("body_json is not valid JSON: {e}")))?;
-    let opts = TransportOpts {
-        timeout_secs,
-        stream_idle_timeout_secs,
-        max_retries,
+fn parse_headers_json(value: Option<String>) -> PyResult<reqwest::header::HeaderMap> {
+    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+    let Some(value) = value else {
+        return Ok(HeaderMap::new());
     };
-    let (tx, rx) = tokio::sync::mpsc::channel::<Result<StreamItem, String>>(64);
-    pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
-        use futures_util::StreamExt;
-        let adapter = build_provider(&provider, &base_url, &api_key, &opts);
-        let req = ProviderRequest::new(model, body).with_session(session_id);
-        match adapter.stream(req).await {
-            Ok(mut s) => {
-                while let Some(chunk) = s.next().await {
-                    let (msg, stop) = match chunk {
-                        Ok(StreamChunk { data, usage }) => (
-                            Ok(StreamItem {
-                                data: data.to_vec(),
-                                usage,
-                            }),
-                            false,
-                        ),
-                        Err(e) => (Err(e.to_string()), true), // forward the error, then stop
-                    };
-                    if tx.send(msg).await.is_err() || stop {
-                        break; // receiver dropped, or the terminal error was forwarded
-                    }
-                }
-            }
-            Err(e) => {
-                let _ = tx.send(Err(e.to_string())).await;
-            }
-        }
-        // tx drops here → channel closes → __anext__ recv returns None → StopAsyncIteration
-    });
-    Ok(ByteStreamIter {
-        rx: Arc::new(tokio::sync::Mutex::new(rx)),
-    })
+    let entries: HashMap<String, String> = serde_json::from_str(&value)
+        .map_err(|e| PyValueError::new_err(format!("headers_json must be a string map: {e}")))?;
+    let mut headers = HeaderMap::new();
+    for (name, value) in entries {
+        let name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|e| PyValueError::new_err(format!("invalid header name: {e}")))?;
+        let value = HeaderValue::from_str(&value)
+            .map_err(|e| PyValueError::new_err(format!("invalid header value: {e}")))?;
+        headers.insert(name, value);
+    }
+    Ok(headers)
+}
+
+/// Return Sandhi-owned wire facts for a known OpenAI-compatible provider.
+#[pyfunction]
+#[pyo3(signature = (provider, model=None))]
+fn provider_spec<'py>(
+    py: Python<'py>,
+    provider: &str,
+    model: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let spec = resolve_openai_compat_provider(provider)
+        .ok_or_else(|| PyKeyError::new_err(format!("unknown provider: {provider}")))?;
+    let d = PyDict::new_bound(py);
+    d.set_item("slug", spec.slug)?;
+    d.set_item("aliases", spec.aliases)?;
+    d.set_item(
+        "base_url",
+        model.map_or(spec.base_url, |name| spec.base_url_for_model(name)),
+    )?;
+    Ok(d)
+}
+
+/// Return the versioned typed descriptor for a known provider as JSON.
+#[pyfunction]
+fn provider_descriptor_json(provider: &str) -> PyResult<String> {
+    let descriptor = sandhi_providers::provider_descriptor(provider)
+        .ok_or_else(|| PyKeyError::new_err(format!("unknown provider: {provider}")))?;
+    serde_json::to_string(&descriptor)
+        .map_err(|error| PyRuntimeError::new_err(format!("serialize provider descriptor: {error}")))
+}
+
+/// Return one checked chat-contract JSON Schema document.
+#[pyfunction]
+fn chat_contract_schema_json(name: &str) -> PyResult<String> {
+    let filename = if name.ends_with(".schema.json") {
+        name.to_owned()
+    } else {
+        format!("{name}.schema.json")
+    };
+    sandhi_core::contract_schema_documents()
+        .remove(filename.as_str())
+        .ok_or_else(|| PyKeyError::new_err(format!("unknown chat contract schema: {name}")))
 }
 
 /// The usage-event wire-contract major version this build targets.
@@ -612,6 +691,7 @@ fn parse_for(provider: &str, value: &serde_json::Value) -> ParsedUsage {
         "cohere" => parse_cohere_usage(value),
         "ollama" => parse_ollama_usage(value),
         "bedrock" => parse_bedrock_usage(value),
+        "openai_responses" | "responses" => parse_openai_responses_usage(value),
         _ => parse_openai_usage(value),
     }
     .unwrap_or_default()
@@ -656,6 +736,17 @@ fn event_to_dict<'py>(py: Python<'py>, e: &UsageEvent) -> PyResult<Bound<'py, Py
     d.set_item("tokens_out", e.tokens_out)?;
     d.set_item("cache_creation_tokens", e.cache_creation_tokens)?;
     d.set_item("cache_read_tokens", e.cache_read_tokens)?;
+    d.set_item(
+        "usage_completeness",
+        match e.usage_completeness {
+            sandhi_core::UsageCompleteness::Final => "final",
+            sandhi_core::UsageCompleteness::Partial => "partial",
+            sandhi_core::UsageCompleteness::Unavailable => "unavailable",
+        },
+    )?;
+    d.set_item("attempts", e.attempts)?;
+    d.set_item("outcome", e.outcome.clone())?;
+    d.set_item("upstream_request_id", e.upstream_request_id.clone())?;
     d.set_item("gpu_seconds", e.gpu_seconds)?;
     Ok(d)
 }
@@ -668,10 +759,12 @@ fn sandhi_gateway(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     m.add_function(wrap_pyfunction!(wire_contract_version, m)?)?;
     m.add_function(wrap_pyfunction!(parse_usage, m)?)?;
-    m.add_function(wrap_pyfunction!(complete, m)?)?;
-    m.add_function(wrap_pyfunction!(stream, m)?)?;
-    m.add_function(wrap_pyfunction!(register_provider, m)?)?;
-    m.add_class::<ByteStreamIter>()?;
+    m.add_function(wrap_pyfunction!(provider_spec, m)?)?;
+    m.add_function(wrap_pyfunction!(provider_descriptor_json, m)?)?;
+    m.add_function(wrap_pyfunction!(chat_contract_schema_json, m)?)?;
+    m.add_class::<PyProviderRuntime>()?;
+    m.add_class::<TypedProvider>()?;
+    m.add_class::<TypedEventStreamIter>()?;
     m.add_class::<Gateway>()?;
     Ok(())
 }

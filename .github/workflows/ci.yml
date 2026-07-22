@@ -54,7 +54,11 @@ jobs:
             codegen:
               - 'crates/sandhi-core/schemas/**'
               - 'crates/sandhi-core/src/generated/**'
+              - 'schemas/**'
+              - 'bindings/python/sandhi_gateway.pyi'
+              - 'bindings/node/contracts.d.ts'
               - 'scripts/gen-provider-models.sh'
+              - 'scripts/gen-binding-contract-facades.py'
               - '.github/workflows/ci.yml'
 
   rust:
@@ -187,7 +191,10 @@ jobs:
       - name: Regenerate models and assert no drift
         run: |
           bash scripts/gen-provider-models.sh
+          bash scripts/gen-chat-contract-schemas.sh
           git diff --exit-code -- crates/sandhi-core/src/generated
+          git diff --exit-code -- schemas
+          python3 scripts/gen-binding-contract-facades.py --check
 
   # Single aggregate gate for branch protection (mirrors proximaDB's "CI Success").
   # Always runs so the required check reports even when heavy jobs are skipped on

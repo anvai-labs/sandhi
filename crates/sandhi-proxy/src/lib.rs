@@ -2,12 +2,14 @@
 //!
 //! A client points its `base_url` at Sandhi and presents a **virtual key** (never the real
 //! upstream key). The gate resolves the key → subject/group + which upstream, budget-checks,
-//! forwards to the provider (holding the real key server-side), streams the response back
-//! **verbatim** (O(1) pass-through, ADR-0047 D9), then emits one neutral usage event and records
-//! the budget. It is *in-path*, not a redirect: a client cannot bypass the meter.
+//! normalizes the request through Sandhi's typed runtime, then emits one neutral usage event and
+//! reconciles the budget. It is *in-path*, not a redirect: a client cannot bypass the meter.
+
+mod codec;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::body::{Body, Bytes};
@@ -19,9 +21,14 @@ use axum::Router;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 
-use sandhi_core::{BudgetLedger, KeyStore, Sink, UsageEvent, VirtualKey};
-use sandhi_providers::{Attribution, MeteredProvider, Provider, ProviderError, ProviderRequest};
+use sandhi_core::{
+    Backend, BudgetLedger, ChatRequestV1, KeyStore, RequestMetadataV1, Sink, UsageCompleteness,
+    UsageEvent, UsageV2, VirtualKey,
+};
+use sandhi_providers::{ProviderError, ProviderHandle};
 use sandhi_store::SqliteStore;
+
+use codec::{decode_request, encode_response, encode_stream_event, IngressDialect};
 
 /// Shared server state: the virtual-key store, the budget ledger, the usage sink, and the
 /// registry of configured upstream providers (each already holding its real credential).
@@ -29,8 +36,8 @@ pub struct ProxyState {
     pub keys: KeyStore,
     pub ledger: Mutex<BudgetLedger>,
     pub sink: Arc<dyn Sink>,
-    /// `upstream_ref` → a ready provider (real key baked in).
-    pub providers: HashMap<String, Arc<dyn Provider>>,
+    /// `upstream_ref` → a persistent typed provider handle (real key baked in).
+    pub providers: HashMap<String, ProviderHandle>,
     /// The durable store backing the dashboard. When set, `/dashboard` serves usage aggregates;
     /// typically the same object is also used as `sink` so events persist.
     pub store: Option<Arc<SqliteStore>>,
@@ -43,8 +50,8 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         .route("/healthz", get(health))
         .route("/dashboard", get(dashboard_html))
         .route("/dashboard/api/usage", get(dashboard_api))
-        .route("/v1/chat/completions", post(handle))
-        .route("/v1/messages", post(handle))
+        .route("/v1/chat/completions", post(handle_openai))
+        .route("/v1/messages", post(handle_anthropic))
         .with_state(state)
 }
 
@@ -133,7 +140,28 @@ fetch("/dashboard/api/usage").then(r => r.json()).then(d => {
 </html>
 "####;
 
-async fn handle(State(state): State<Arc<ProxyState>>, headers: HeaderMap, body: Bytes) -> Response {
+async fn handle_openai(
+    State(state): State<Arc<ProxyState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    handle(state, headers, body, IngressDialect::OpenAi).await
+}
+
+async fn handle_anthropic(
+    State(state): State<Arc<ProxyState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    handle(state, headers, body, IngressDialect::Anthropic).await
+}
+
+async fn handle(
+    state: Arc<ProxyState>,
+    headers: HeaderMap,
+    body: Bytes,
+    dialect: IngressDialect,
+) -> Response {
     // 1. Virtual key from `Authorization: Bearer vk_…`.
     let Some(vk_id) = bearer(&headers) else {
         return error(StatusCode::UNAUTHORIZED, "missing bearer virtual key");
@@ -150,108 +178,225 @@ async fn handle(State(state): State<Arc<ProxyState>>, headers: HeaderMap, body: 
         );
     };
 
-    // 3. Parse the request body.
+    // 3. Decode the public ingress dialect into the one canonical runtime request.
     let Ok(body_json) = serde_json::from_slice::<Value>(&body) else {
-        return error(StatusCode::BAD_REQUEST, "body is not valid JSON");
+        return ingress_error(dialect, StatusCode::BAD_REQUEST, "body is not valid JSON");
     };
-    let model = body_json
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown")
-        .to_string();
-    let wants_stream = body_json
-        .get("stream")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
     let session = headers
         .get("x-sandhi-session")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
+    let route = match dialect {
+        IngressDialect::OpenAi => "/v1/chat/completions",
+        IngressDialect::Anthropic => "/v1/messages",
+    };
+    let metadata = RequestMetadataV1 {
+        session_id: session,
+        virtual_key_id: Some(vk.id.clone()),
+        subject_id: vk.subject_id.clone(),
+        group_id: vk.group_id.clone(),
+        route: Some(route.into()),
+    };
+    let (request, wants_stream) = match decode_request(dialect, body_json, metadata) {
+        Ok(decoded) => decoded,
+        Err(message) => return ingress_error(dialect, StatusCode::BAD_REQUEST, &message),
+    };
 
-    // 4. Budget pre-check. We don't know exact tokens yet, so probe with 1: this blocks a
-    //    scope that is already at or over its cap (spent + 1 > limit ⇔ spent >= limit). The
-    //    real usage is recorded after the call.
+    // 4. Atomically reserve the request's conservative token estimate. The measured UsageV2
+    //    replaces this reservation after completion; failed/unmeasured calls release it.
     let scope = budget_scope(&vk);
-    if let Ok(ledger) = state.ledger.lock() {
-        if ledger.check(&scope, 1).is_err() {
-            return error(StatusCode::TOO_MANY_REQUESTS, "budget exhausted");
+    let reserved = estimate_reservation(&request);
+    match reserve_budget(&state, &scope, reserved) {
+        Ok(()) => {}
+        Err(StatusCode::TOO_MANY_REQUESTS) => {
+            return ingress_error(dialect, StatusCode::TOO_MANY_REQUESTS, "budget exhausted")
+        }
+        Err(status) => {
+            return ingress_error(dialect, status, "budget ledger unavailable");
         }
     }
 
-    // 5. Wrap the upstream in the metering decorator, per request: attribution rides on the
-    //    request (one provider instance serves many virtual keys), and the composite sink
-    //    emits + records the budget as a single observation point. The decorator's Drop guard
-    //    guarantees the event survives a client disconnect mid-stream.
-    let metered = MeteredProvider::new(
-        provider,
-        Arc::new(EmitAndRecord {
-            state: Arc::clone(&state),
-            scope,
-        }),
+    let accounting = RequestAccounting::new(
+        Arc::clone(&state),
+        scope,
+        reserved,
+        provider.slug().into(),
+        &request,
     );
-    let req = ProviderRequest::new(model, body_json)
-        .with_session(session)
-        .with_attribution(Attribution {
-            virtual_key_id: Some(vk.id.clone()),
-            subject_id: vk.subject_id.clone(),
-            group_id: vk.group_id.clone(),
-            route: None,
-        });
 
     if wants_stream {
-        stream_response(&metered, req).await
+        stream_response(provider, request, dialect, accounting).await
     } else {
-        complete_response(&metered, req).await
+        complete_response(provider, request, dialect, accounting).await
     }
 }
 
-/// Proxy-local composite sink: emit to the configured sink AND record the budget ledger —
-/// sink emission stays the single observation point (budget policy is proxy concern, not the
-/// decorator's).
-struct EmitAndRecord {
+fn reserve_budget(state: &ProxyState, scope: &str, reserved: u64) -> Result<(), StatusCode> {
+    let mut ledger = state
+        .ledger
+        .lock()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    ledger
+        .reserve(scope, reserved)
+        .map_err(|_| StatusCode::TOO_MANY_REQUESTS)
+}
+
+/// Owns the reservation and guarantees one terminal usage observation even when an HTTP body is
+/// abandoned. Counts are always measured; an unavailable observation releases the reservation.
+struct RequestAccounting {
     state: Arc<ProxyState>,
     scope: String,
+    reserved: u64,
+    provider: String,
+    model: String,
+    metadata: RequestMetadataV1,
+    usage: Option<UsageV2>,
+    outcome: &'static str,
+    finalized: bool,
 }
 
-impl Sink for EmitAndRecord {
-    fn emit(&self, event: &UsageEvent) {
-        self.state.sink.emit(event);
+impl RequestAccounting {
+    fn new(
+        state: Arc<ProxyState>,
+        scope: String,
+        reserved: u64,
+        provider: String,
+        request: &ChatRequestV1,
+    ) -> Self {
+        Self {
+            state,
+            scope,
+            reserved,
+            provider,
+            model: request.model.clone(),
+            metadata: request.metadata.clone(),
+            usage: None,
+            outcome: "cancelled",
+            finalized: false,
+        }
+    }
+
+    fn observe(&mut self, usage: &UsageV2) {
+        self.usage = Some(usage.clone());
+    }
+
+    fn set_outcome(&mut self, outcome: &'static str) {
+        self.outcome = outcome;
+    }
+
+    fn finalize(&mut self) {
+        if self.finalized {
+            return;
+        }
+        self.finalized = true;
+        let mut usage = self.usage.take().unwrap_or_default();
+        if usage.outcome.is_none() {
+            usage.outcome = Some(self.outcome.into());
+        }
+        let measured = matches!(
+            usage.completeness,
+            UsageCompleteness::Final | UsageCompleteness::Partial
+        );
+        let actual = if measured {
+            usage.tokens_in.saturating_add(usage.tokens_out)
+        } else {
+            0
+        };
         if let Ok(mut ledger) = self.state.ledger.lock() {
-            ledger.record(&self.scope, event.billable_tokens());
+            if measured {
+                ledger.reconcile(&self.scope, self.reserved, actual);
+            } else {
+                ledger.release(&self.scope, self.reserved);
+            }
+        }
+        self.state.sink.emit(&usage_event(
+            &self.provider,
+            &self.model,
+            &self.metadata,
+            &usage,
+        ));
+    }
+}
+
+impl Drop for RequestAccounting {
+    fn drop(&mut self) {
+        self.finalize();
+    }
+}
+
+async fn complete_response(
+    provider: ProviderHandle,
+    request: ChatRequestV1,
+    dialect: IngressDialect,
+    mut accounting: RequestAccounting,
+) -> Response {
+    match provider.complete(request).await {
+        Ok(mut response) => {
+            response.usage.completeness = UsageCompleteness::Final;
+            response
+                .usage
+                .outcome
+                .get_or_insert_with(|| "success".into());
+            accounting.observe(&response.usage);
+            accounting.set_outcome("success");
+            accounting.finalize();
+            Json(encode_response(dialect, &response)).into_response()
+        }
+        Err(error) => {
+            accounting.set_outcome("error");
+            accounting.finalize();
+            provider_error(&error, dialect, provider.slug())
         }
     }
 }
 
-async fn complete_response(metered: &MeteredProvider, req: ProviderRequest) -> Response {
-    // Metering + budget recording happen inside the decorator (exactly one event; none on error).
-    match metered.complete(req).await {
-        Ok(resp) => {
-            let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK);
-            (status, Json(resp.body)).into_response()
-        }
-        Err(e) => provider_error(&e),
-    }
-}
-
-async fn stream_response(metered: &MeteredProvider, req: ProviderRequest) -> Response {
-    // The returned stream is the decorator's MeteredStream: it emits exactly one event on
-    // clean end, in-stream error, or drop (client disconnect) — pure forwarding here.
-    let mut upstream = match metered.stream(req).await {
+async fn stream_response(
+    provider: ProviderHandle,
+    request: ChatRequestV1,
+    dialect: IngressDialect,
+    mut accounting: RequestAccounting,
+) -> Response {
+    let mut upstream = match provider.stream(request).await {
         Ok(s) => s,
-        Err(e) => return provider_error(&e),
+        Err(error) => {
+            accounting.set_outcome("error");
+            accounting.finalize();
+            return provider_error(&error, dialect, provider.slug());
+        }
     };
 
     let body = async_stream::stream! {
         while let Some(item) = upstream.next().await {
             match item {
-                Ok(chunk) => {
-                    if !chunk.data.is_empty() {
-                        yield Ok::<Bytes, std::io::Error>(chunk.data);
+                Ok(event) => {
+                    if let sandhi_core::ChatStreamEventV1::Usage { usage } = &event {
+                        accounting.observe(usage);
+                    }
+                    if matches!(event, sandhi_core::ChatStreamEventV1::Error { .. }) {
+                        accounting.set_outcome("error");
+                    }
+                    for (event_name, value) in encode_stream_event(dialect, &event) {
+                        yield Ok::<Bytes, std::io::Error>(Bytes::from(sse_frame(event_name, &value)));
                     }
                 }
-                // Upstream stream error: stop forwarding (the decorator already metered).
-                Err(_) => break,
+                Err(error) => {
+                    accounting.set_outcome("error");
+                    let typed = sandhi_core::ChatStreamEventV1::Error {
+                        error: error.as_typed(Some(provider.slug())),
+                    };
+                    for (event_name, value) in encode_stream_event(dialect, &typed) {
+                        yield Ok::<Bytes, std::io::Error>(Bytes::from(sse_frame(event_name, &value)));
+                    }
+                    break;
+                }
             }
+        }
+        if accounting.outcome != "error" {
+            accounting.set_outcome("success");
+        }
+        accounting.finalize();
+        if dialect == IngressDialect::OpenAi {
+            yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data: [DONE]\n\n"));
         }
     };
 
@@ -260,6 +405,84 @@ async fn stream_response(metered: &MeteredProvider, req: ProviderRequest) -> Res
         .header("content-type", "text/event-stream")
         .body(Body::from_stream(body))
         .expect("valid streaming response")
+}
+
+fn estimate_reservation(request: &ChatRequestV1) -> u64 {
+    let bytes = serde_json::to_vec(&request.messages)
+        .map(|value| value.len() as u64)
+        .unwrap_or(0)
+        .saturating_add(
+            serde_json::to_vec(&request.tools)
+                .map(|value| value.len() as u64)
+                .unwrap_or(0),
+        );
+    let estimated_input = bytes.saturating_add(3) / 4;
+    estimated_input
+        .saturating_add(request.max_output_tokens.unwrap_or(1))
+        .max(1)
+}
+
+fn sse_frame(event: Option<&str>, value: &Value) -> String {
+    let mut frame = String::new();
+    if let Some(event) = event {
+        frame.push_str("event: ");
+        frame.push_str(event);
+        frame.push('\n');
+    }
+    frame.push_str("data: ");
+    frame.push_str(&serde_json::to_string(value).unwrap_or_else(|_| "{}".into()));
+    frame.push_str("\n\n");
+    frame
+}
+
+fn usage_event(
+    provider: &str,
+    model: &str,
+    metadata: &RequestMetadataV1,
+    usage: &UsageV2,
+) -> UsageEvent {
+    UsageEvent::new(
+        usage
+            .upstream_request_id
+            .clone()
+            .unwrap_or_else(next_request_id),
+        now_rfc3339(),
+        provider,
+        model,
+        Backend::External,
+    )
+    .with_attribution(
+        metadata.virtual_key_id.clone(),
+        metadata.subject_id.clone(),
+        metadata.group_id.clone(),
+    )
+    .with_route(metadata.route.clone())
+    .with_session(metadata.session_id.clone())
+    .with_tokens(usage.tokens_in, usage.tokens_out)
+    .with_cache(usage.cache_creation_tokens, usage.cache_read_tokens)
+    .with_measurement(
+        usage.completeness,
+        usage.attempts,
+        usage.outcome.clone(),
+        usage.upstream_request_id.clone(),
+    )
+}
+
+fn now_rfc3339() -> String {
+    use time::format_description::well_known::Rfc3339;
+    time::OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_default()
+}
+
+fn next_request_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    format!("req_{millis}_{n}")
 }
 
 fn budget_scope(vk: &VirtualKey) -> String {
@@ -278,8 +501,9 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
         .map(str::trim)
 }
 
-fn provider_error(e: &ProviderError) -> Response {
+fn provider_error(e: &ProviderError, dialect: IngressDialect, provider: &str) -> Response {
     let (status, msg) = match e {
+        ProviderError::InvalidRequest(_) => (StatusCode::BAD_REQUEST, "invalid provider request"),
         ProviderError::Auth => (StatusCode::BAD_GATEWAY, "upstream auth failed"),
         ProviderError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "upstream rate limited"),
         ProviderError::Upstream(_) => (StatusCode::BAD_GATEWAY, "upstream error"),
@@ -292,7 +516,27 @@ fn provider_error(e: &ProviderError) -> Response {
         // ProviderError is #[non_exhaustive]; unknown future variants degrade to 502.
         _ => (StatusCode::BAD_GATEWAY, "upstream error"),
     };
-    error(status, msg)
+    let typed = e.as_typed(Some(provider));
+    let body = match dialect {
+        IngressDialect::OpenAi => json!({"error":typed}),
+        IngressDialect::Anthropic => json!({"type":"error","error":typed}),
+    };
+    let _ = msg;
+    (status, Json(body)).into_response()
+}
+
+fn ingress_error(dialect: IngressDialect, status: StatusCode, msg: &str) -> Response {
+    let typed = json!({
+        "code":"invalid_request",
+        "message":msg,
+        "retryable":false,
+        "http_status":status.as_u16(),
+    });
+    let body = match dialect {
+        IngressDialect::OpenAi => json!({"error":typed}),
+        IngressDialect::Anthropic => json!({"type":"error","error":typed}),
+    };
+    (status, Json(body)).into_response()
 }
 
 fn error(status: StatusCode, msg: &str) -> Response {

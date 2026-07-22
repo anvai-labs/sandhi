@@ -1,0 +1,80 @@
+
+# 2026-07-22 10:50:18.347163
++Here's a consolidated handoff prompt covering the full Sandhi usage/operator vision — budget enforcement, API key management, key-sharing (without handing out raw provider keys), cost attribution, and a CLI-first surface with a UI as a follow-on.
++
++---
++
++## Handoff prompt: Sandhi operator surface — keys, sharing, budgets, cost attribution (CLI-first + UI)
++
++### Context (read first)
++Sandhi is a Rust typed-provider runtime (`/Users/vijaysingh/code/sandhi`) consumed by the Victor framework (`/Users/vijaysingh/code/codingagent`) via typed FFI and an HTTP gateway/proxy. An unreleased **0.1.2** is **uncommitted** in both repos on `develop` (HEAD `fb41893…` == `origin/develop`; nothing committed/published; last published 0.1.1). It delivered canonical v1 chat types, persistent `ProviderRuntime`/`ProviderHandle`, native-family codecs (OpenAI/Anthropic/Gemini/Cohere/Ollama), OpenAI Responses codec, typed Python+Node FFI, normalized proxy, and detailed `UsageV2` metering (cache/audio/reasoning/prediction/completeness/attempts/outcome/upstream_request_id). The proxy already has internal budget reservation/reconciliation. **Authoritative spec: `/Users/vijaysingh/code/sandhi/docs/td/TD-0002-typed-provider-runtime.md`.** There is **no operator UI/CLI today** — metering is emitted but unconsumed.
++
++### Where Sandhi is on its vision (honest state)
++- **Done (backend):** typed provider runtime, codecs, FFI, proxy ingress, metering facts, internal budget reserve/reconcile.
++- **Missing (product):** key management surface, key-sharing mechanism, budget *setting* (not just enforcement), cost attribution ledger/pricing catalog, and any operator-facing CLI or UI. The vision — "Sandhi as the shaped, billable, governable provider layer" — is ~half realized: the *shape* is there, the *governance/billing UX* is not.
++- **Remaining from 0.1.2 itself (pre-existing ledger, not this build):** extract remaining native/local host policy from Victor + delete bypassed transport; OpenAI Responses *proxy* ingress (FFI done); binding test runs; then publish 0.1.2 once.
++
++### Vision target
++A user/operator should be able to, from **one consistent surface** (CLI at minimum, UI nice-to-have):
++- **Set API keys** (provider keys: OpenAI, Anthropic, etc., incl. OAuth schemes already supported).
++- **Share access with other users *without* giving them raw provider API keys** — via virtual keys / scoped tokens with their own limits.
++- **Set and enforce budgets** (per-key, per-user, per-session, per-workspace).
++- **See cost attribution** — spend by key/user/session/model, with cache/reasoning splits.
++- Do this identically whether Sandhi runs as a **gateway** (multi-tenant) or **inlined** in Victor (single-user).
++
++### Core primitive to build: the Virtual Key
++The centerpiece is a **virtual key** abstraction (this is what enables "share without raw API keys"):
++- A virtual key is a Sandhi-issued token bound to: an upstream provider key (hidden), one or more upstream providers/models, a budget, optional rate limits, an owner/workspace, and an expiry.
++- Users/teammates get a virtual key + the gateway URL (or, inlined, a local profile) — they never see the real provider key.
++- Every call authenticates via virtual key; Sandhi resolves the real upstream key internally, attributes cost to the key's owner, and enforces that key's budget.
++- This already aligns with 0.1.2's existing virtual-key *selection* logic — productize it into full CRUD + scoping.
++
++### Scope — six pillars
++1. **Key store & management.** CRUD for provider keys (masked, encrypted at rest, never logged) + virtual keys (scoped, shareable). Reuse existing provider auth schemes (Anthropic ApiKey/Bearer; OpenAI api-key vs subscription-OAuth Responses/Codex).
++2. **Virtual-key sharing.** Issue/revoke/rotate virtual keys; scope to provider/model/budget/rate/expiry. Gateway mode = others hit your gateway with the virtual key; inlined mode = local profile referencing a virtual key. No raw provider keys ever leave Sandhi.
++3. **Pricing catalog + cost attribution.** Convert `UsageV2` → cost via a model pricing catalog (cache/audio/reasoning/prediction splits already metered); persist an **attribution ledger** keyed by payor dimension (key/user/workspace/session).
++4. **Budget setting + enforcement.** Budgets as first-class settable objects (not just internal caps); reserve-before-dispatch → reconcile-vs-measured-`UsageV2` → release-on-cancel; block-vs-warn policy; one metering observation per logical call across success/retry/cancel/drop/partial.
++5. **CLI surface (bare minimum — must exist).** Something like:
++   - `sandhi keys add/list/revoke/mask` (provider + virtual keys)
++   - `sandhi keys share --user X --budget N --models ...` → prints a virtual key + endpoint
++   - `sandhi budget set/list/usage`
++   - `sandhi usage --by key|user|session|model --since ...`
++   Inlined-in-Victor equivalents via `victor …` where appropriate.
++6. **UI (follow-on, recommended after CLI).** Gateway admin console (multi-tenant key/budget/usage management) + optionally a Victor panel. Decide web vs TUI; gate behind feature flag; never store plaintext keys client-side.
++
++### Ownership boundary (preserve)
++- **Sandhi owns:** key store, virtual-key issuance/resolution, pricing catalog, cost facts, attribution ledger, budget reserve/reconcile/enforce, metering. This is the billable, governable core.
++- **Victor owns:** orchestration, model policy, credential-acquisition *UX*, cost *display* surfacing. Victor must not re-own metering/enforcement.
++- One Rust accounting core (likely a new `sandhi-billing` crate or extension of `sandhi-store`), surfaced identically via gateway admin endpoints **and** FFI — no two implementations.
++
++### Decisions to confirm with the user before building
++- **Virtual-key model:** server-side virtual keys (recommended) vs signed bearer tokens vs pass-through profiles.
++- **CLI first then UI** (recommended) vs build both. Bare minimum = CLI; UI is the nice-to-have. Confirm.
++- **Pricing catalog source:** hardcoded seed catalog vs user-configurable vs live provider price API.
++- **Gateway multi-tenancy depth now:** single-owner-with-shared-keys (MVP) vs full multi-workspace.
++
++### Hard constraints
++- Fail-closed for unknown key/budget/auth state (matches 0.1.2 discipline).
++- No plaintext provider keys ever surfaced or logged; mask + encrypt.
++- Gate Victor-facing pieces behind `FeatureFlag`/settings; use `SessionConfig` (never mutate `Settings` directly from UI).
++- Build on top of uncommitted 0.1.2 — verify local binding version before wiring Victor; don't assume 0.1.2 published.
++- Git/worktree hygiene: branch from `develop`, worktree, rebase off `origin/develop` (not main), never force-push, never `git checkout/restore` uncommitted files, activate `/Users/vijaysingh/code/.venv`, no Claude attribution in commits, CLAUDE.md gitignored.
++- New TD (Sandhi) + FEP (Victor); don't fold into 0.1.2 cleanup.
++
++### Deliverables
++1. TD + FEP defining the virtual-key/budget/cost/attribution contract + ownership matrix.
++2. Rust accounting core: key store, virtual keys, pricing catalog, attribution ledger, budget set+enforce, one-observation-per-call metering.
++3. Gateway admin API + inlined FFI parity over the same core.
++4. **CLI (bare minimum, ships first):** keys, share, budget, usage commands.
++5. UI (follow-on): gateway admin console + optional Victor panel.
++6. Tests: pricing math, reserve/reconcile (incl. cancel/drop/partial), key masking, virtual-key scope enforcement, revocation, fail-closed, gateway↔FFI fixture parity.
++7. Acceptance gate: operator can set budgets, add/share keys without exposing raw provider keys, enforce limits, and see cost by key/user/session/model — from both CLI and (later) UI — with exactly one reconciled metering observation per call.
++
++### First step
++Read TD-0002 fully; verify on-disk 0.1.2 state (git status, `UsageV2` fields, proxy budget code in `sandhi-proxy/src/lib.rs`, existing virtual-key selection, `sandhi-store`); then design the virtual-key + budget + cost-attribution contract and confirm the CLI-first/decisions with the user before writing code.
++
++---
++
++**Yes — bare minimum a CLI must exist.** Key management, budget setting, sharing (virtual keys), and usage/cost viewing are all doable as CLI commands against the same Rust core; the UI is the follow-on that consumes the identical admin API. That gives you a usable, shippable operator surface before any web work.
++
++Want me to narrow this to gateway-first or inlined-first, or split it into phased milestones (MVP CLI → budgets → sharing → UI)?

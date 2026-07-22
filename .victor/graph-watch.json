@@ -1,0 +1,26 @@
+{
+  "build_now": false,
+  "debounce_seconds": 0.3,
+  "enable_ccg": true,
+  "last_refresh": {
+    "changed": 0,
+    "completed_at": 1784738241.990479,
+    "deleted": 0,
+    "duration_seconds": 28.33849000930786,
+    "errors": 0,
+    "unchanged": 46
+  },
+  "lock_file": "/Users/vijaysingh/code/sandhi/.victor/graph-watch.lock",
+  "min_refresh_interval": 30.0,
+  "owner": "chat",
+  "pid": 23252,
+  "pid_file": "/Users/vijaysingh/code/sandhi/.victor/graph-watch.pid",
+  "poll_interval": 1.0,
+  "project_root": "/Users/vijaysingh/code/sandhi",
+  "running": true,
+  "stale_pid_file": false,
+  "stale_pid_removed": false,
+  "started": false,
+  "stopped": false,
+  "updated_at": 1784738241.990725
+}

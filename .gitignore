@@ -13,6 +13,7 @@ __pycache__/
 *.so
 /dist
 /wheels
+bindings/python/dist/
 .venv/
 *.egg-info/
 

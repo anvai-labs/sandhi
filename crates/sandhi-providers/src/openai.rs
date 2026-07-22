@@ -2,12 +2,13 @@
 //! Completions wire format (Groq, Together, Fireworks, DeepSeek, Mistral, Qwen, xAI,
 //! OpenRouter, vLLM, LM Studio, Ollama, Cerebras…). One adapter, many providers.
 
-use crate::parse_openai_usage;
 use crate::{
     error_for_status, metered_passthrough, sse_data_json, ByteStream, ParsedUsage, Provider,
     ProviderError, ProviderRequest, ProviderResponse,
 };
+use crate::{parse_openai_usage, validate_openai_chat_messages};
 use async_trait::async_trait;
+use reqwest::header::{HeaderMap, AUTHORIZATION, CONTENT_TYPE, HOST};
 use serde_json::{json, Value};
 
 /// An OpenAI-compatible provider. `base_url` is the API base (e.g. `https://api.openai.com/v1`);
@@ -17,6 +18,7 @@ pub struct OpenAiCompat {
     slug: String,
     base_url: String,
     api_key: String,
+    headers: HeaderMap,
 }
 
 impl OpenAiCompat {
@@ -30,12 +32,24 @@ impl OpenAiCompat {
             slug: slug.into(),
             base_url: base_url.into(),
             api_key: api_key.into(),
+            headers: HeaderMap::new(),
         }
     }
 
     /// OpenAI proper (`https://api.openai.com/v1`), slug `openai`.
     pub fn openai(api_key: impl Into<String>) -> Self {
         Self::new("openai", "https://api.openai.com/v1", api_key)
+    }
+
+    /// Add caller-supplied provider headers while protecting transport-owned headers.
+    /// OpenRouter's `HTTP-Referer` / `X-Title` are the motivating case.
+    #[must_use]
+    pub fn with_headers(mut self, mut headers: HeaderMap) -> Self {
+        headers.remove(AUTHORIZATION);
+        headers.remove(CONTENT_TYPE);
+        headers.remove(HOST);
+        self.headers = headers;
+        self
     }
 
     fn chat_url(&self) -> String {
@@ -50,6 +64,7 @@ impl Provider for OpenAiCompat {
     }
 
     async fn complete(&self, req: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        validate_openai_chat_messages(&req.body)?;
         let mut body = req.body;
         if let Some(obj) = body.as_object_mut() {
             obj.insert("stream".into(), Value::Bool(false));
@@ -58,6 +73,7 @@ impl Provider for OpenAiCompat {
             .client
             .post(self.chat_url())
             .bearer_auth(&self.api_key)
+            .headers(self.headers.clone())
             .json(&body)
             .send()
             .await
@@ -75,10 +91,12 @@ impl Provider for OpenAiCompat {
             status,
             body,
             usage,
+            attempts: 1,
         })
     }
 
     async fn stream(&self, req: ProviderRequest) -> Result<ByteStream, ProviderError> {
+        validate_openai_chat_messages(&req.body)?;
         let mut body = req.body;
         if let Some(obj) = body.as_object_mut() {
             obj.insert("stream".into(), Value::Bool(true));
@@ -89,6 +107,7 @@ impl Provider for OpenAiCompat {
             .client
             .post(self.chat_url())
             .bearer_auth(&self.api_key)
+            .headers(self.headers.clone())
             .json(&body)
             .send()
             .await
@@ -195,6 +214,31 @@ mod tests {
         assert_eq!(out.usage.tokens_in, 40); // 100 total - 60 cached
         assert_eq!(out.usage.cache_read_tokens, 60);
         assert_eq!(out.usage.tokens_out, 20);
+    }
+
+    #[tokio::test]
+    async fn forwards_custom_headers_but_not_transport_owned_headers() {
+        use reqwest::header::{HeaderName, HeaderValue};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(header("authorization", "Bearer real-key"))
+            .and(header("http-referer", "https://victor.example"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "choices": [{"message": {"content": "ok"}}]
+            })))
+            .mount(&server)
+            .await;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("http-referer"),
+            HeaderValue::from_static("https://victor.example"),
+        );
+        headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer attacker"));
+        OpenAiCompat::new("openrouter", server.uri(), "real-key")
+            .with_headers(headers)
+            .complete(ProviderRequest::new("m", json!({})))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

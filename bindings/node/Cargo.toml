@@ -1,7 +1,7 @@
 [package]
 name = "sandhi-node"
 description = "napi binding for Sandhi (published to npm as @anvai-labs/sandhi)."
-version = "0.1.0"
+version = "0.1.2"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/anvai-labs/sandhi"
@@ -17,6 +17,7 @@ napi = { version = "2", default-features = false, features = ["napi4", "tokio_rt
 napi-derive = "2"
 sandhi-core = { path = "../../crates/sandhi-core" }
 serde_json = "1"
+reqwest = { version = "0.12", default-features = false }
 time = { version = "0.3", features = ["formatting"] }
 
 # Transport binding (ADR-0047 D10 step 3c — napi/TS parity): expose sandhi-providers' async provider
