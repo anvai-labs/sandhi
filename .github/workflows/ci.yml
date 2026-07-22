@@ -108,7 +108,9 @@ jobs:
           maturin build -m bindings/python/Cargo.toml --out dist
           pip install dist/*.whl
       - name: run binding tests
-        run: python bindings/python/tests/test_gateway.py
+        run: |
+          pip install pytest
+          python -m pytest bindings/python/tests/ -q
       - name: binding glue coverage (fail under 85% lines)
         # Instrumented rebuild + harness → llvm-cov over bindings/python/src/lib.rs only. The
         # --workspace coverage job never sees the glue (separate cargo workspace, foreign runtime).
