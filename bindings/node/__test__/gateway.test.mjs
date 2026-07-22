@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { test } from "node:test";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { readFileSync, rmSync } from "node:fs";
 
 import { Gateway, parseUsage, wireContractVersion } from "../index.js";
 import { ProviderRuntime } from "../sandhi.js";
@@ -254,4 +257,238 @@ test("usage parsing and metering retain cache attribution", () => {
   assert.equal(event.subjectId, "alice");
   assert.equal(event.sessionId, "s1");
   assert.equal(gateway.spent("group:platform"), 60);
+});
+
+// ---------------------------------------------------------------------------
+// ProviderRuntime.provider() dispatch + the direct openaiResponses factory.
+// Handle construction is pure (no network); this covers every provider branch
+// and the typed-provider getter.
+// ---------------------------------------------------------------------------
+
+test("provider() factory dispatches named backends and exposes the slug getter", () => {
+  const runtime = new ProviderRuntime();
+  for (const [name, provider, model] of [
+    ["anthropic", "anthropic", "claude-test"],
+    ["claude alias", "claude", "claude-test"],
+    ["gemini", "gemini", "gemini-1.5-pro"],
+    ["google alias", "google", "gemini-1.5-pro"],
+    ["cohere", "cohere", "command-r"],
+    ["ollama", "ollama", "llama3"],
+  ]) {
+    // Args: provider, model, api_key, base_url, headers_json, max_retries.
+    const handle = runtime.provider(provider, model, "key", undefined, undefined, 0);
+    assert.equal(typeof handle.provider, "string", `${name} exposed a slug`);
+    assert.ok(handle.provider.length > 0, `${name} slug non-empty`);
+  }
+
+  // api_key (default) auth scheme on Anthropic — explicit api_key spelling + default both ok.
+  assert.ok(
+    runtime.provider("anthropic", "claude-test", "k", undefined, undefined, 0, undefined, undefined, "api_key").provider,
+  );
+  assert.ok(runtime.provider("anthropic", "claude-test", "k", undefined, undefined, 0).provider);
+});
+
+test("provider() routes the openai-compat + responses escape hatches", () => {
+  const runtime = new ProviderRuntime();
+  // Unknown provider WITH a base_url → openai_compat escape hatch.
+  const custom = runtime.provider("acme", "m", "key", "https://example.test/v1", undefined, 0);
+  assert.equal(custom.provider, "acme");
+
+  // Known catalog provider WITHOUT a base_url → known_openai_compat resolves the spec.
+  const known = runtime.provider("deepseek", "deepseek-chat", "key", undefined, undefined, 0);
+  assert.equal(known.provider, "deepseek");
+
+  // openaiResponses() direct factory (Responses API bearer form).
+  const responses = runtime.openaiResponses("openai", "https://example.test/v1", "token", undefined, 0);
+  assert.equal(responses.provider, "openai");
+
+  // Responses protocol via provider() resolves a known catalog provider's base_url when omitted.
+  const viaProvider = runtime.provider(
+    "deepseek",
+    "deepseek-chat",
+    "key",
+    undefined,
+    undefined,
+    0,
+    undefined,
+    undefined,
+    undefined,
+    "responses",
+  );
+  assert.equal(viaProvider.provider, "deepseek");
+});
+
+test("provider() rejects invalid dispatch inputs at the FFI seam", () => {
+  const runtime = new ProviderRuntime();
+  // Unsupported auth_scheme value on Anthropic. Args: provider,model,key,base_url,headers,retries,,,auth_scheme.
+  assert.throws(
+    () => runtime.provider("anthropic", "m", "k", undefined, undefined, 0, undefined, undefined, "bogus"),
+    /auth_scheme/,
+  );
+  // auth_scheme supplied for a non-Anthropic provider.
+  assert.throws(
+    () => runtime.provider("openai", "m", "k", "https://e.test/v1", undefined, 0, undefined, undefined, "bearer"),
+    /Anthropic/,
+  );
+  // Unsupported protocol value.
+  assert.throws(
+    () => runtime.provider("openai", "m", "k", undefined, undefined, 0, undefined, undefined, undefined, "bogus"),
+    /protocol/,
+  );
+  // Responses protocol + unknown provider + no base_url.
+  assert.throws(
+    () => runtime.provider("acme", "m", "k", undefined, undefined, 0, undefined, undefined, undefined, "responses"),
+    /baseUrl/,
+  );
+  // Unknown catalog provider without a base_url under chat_completions → typed provider error.
+  assert.throws(() => runtime.provider("acme", "m", "k", undefined, undefined, 0), /unknown catalog provider|acme/);
+  // Malformed headers JSON.
+  assert.throws(() => runtime.openaiCompat("openai", "https://e.test/v1", "k", "not-json", 0), /headers/);
+});
+
+// ---------------------------------------------------------------------------
+// TypedEventStream.read() pull API + the upstream-error propagation path.
+// ---------------------------------------------------------------------------
+
+test("TypedEventStream.read() drains a healthy stream to exhaustion", async () => {
+  const server = await localServer([
+    {
+      contentType: "text/event-stream",
+      body:
+        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{"content":"he"},"finish_reason":null}]}\n\n' +
+        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}\n\n' +
+        "data: [DONE]\n\n",
+    },
+  ]);
+  try {
+    const provider = new ProviderRuntime().openaiCompat("openai", server.baseUrl, "key", undefined, 0);
+    const stream = provider.streamJson(
+      JSON.stringify({ model: "gpt-test", messages: [{ role: "user", content: "hi" }] }),
+    );
+    const events = [];
+    while (true) {
+      const chunk = await stream.read();
+      if (chunk === null || chunk === undefined) break;
+      events.push(JSON.parse(chunk));
+    }
+    assert.deepEqual(events.map((e) => e.event), ["response_start", "text_delta", "usage", "finish"]);
+  } finally {
+    await server.close();
+  }
+});
+
+test("streamJson surfaces an upstream error via read()", async () => {
+  const server = await localServer([
+    { status: 500, contentType: "application/json", body: JSON.stringify({ error: "boom" }) },
+  ]);
+  try {
+    const provider = new ProviderRuntime().openaiCompat("openai", server.baseUrl, "key", undefined, 0);
+    const stream = provider.streamJson(
+      JSON.stringify({ model: "gpt-test", messages: [{ role: "user", content: "hi" }] }),
+    );
+    await assert.rejects(() => stream.read(), /status|500|boom|error/i);
+  } finally {
+    await server.close();
+  }
+});
+
+test("completeJson surfaces an upstream HTTP error as a typed descriptor", async () => {
+  const server = await localServer([
+    { status: 500, contentType: "application/json", body: JSON.stringify({ error: "boom" }) },
+  ]);
+  try {
+    const provider = new ProviderRuntime().openaiCompat("openai", server.baseUrl, "key", undefined, 0);
+    await assert.rejects(
+      () => provider.completeJson(JSON.stringify({ model: "gpt-test", messages: [{ role: "user", content: "hi" }] })),
+      /status|500|boom|error/i,
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Gateway: meter() (parse-driven), events(), checkBudget(), the JSONL sink,
+// group-less scope, and every built-in usage parser via parseUsage.
+// ---------------------------------------------------------------------------
+
+test("Gateway.meter parses, attributes, records budget, and lists events", () => {
+  const gateway = new Gateway();
+  gateway.addVirtualKey("vk_alice", "alice", "platform", "anthropic");
+  gateway.setBudget("group:platform", 1000);
+
+  const event = gateway.meter(
+    "vk_alice",
+    "anthropic",
+    "claude-x",
+    JSON.stringify({
+      usage: {
+        input_tokens: 100,
+        output_tokens: 20,
+        cache_creation_input_tokens: 5,
+        cache_read_input_tokens: 10,
+      },
+    }),
+    "conv_1",
+    "router",
+  );
+  assert.equal(event.subjectId, "alice");
+  assert.equal(event.groupId, "platform");
+  assert.equal(event.sessionId, "conv_1");
+  assert.equal(event.route, "router");
+  assert.equal(event.provider, "anthropic");
+  assert.equal(event.usageCompleteness, "final");
+  assert.equal(gateway.spent("group:platform"), 120);
+
+  // Within budget → true; over budget → false. (120 spent of 1000 → 880 remaining.)
+  assert.equal(gateway.checkBudget("group:platform", 879), true);
+  assert.equal(gateway.checkBudget("group:platform", 881), false);
+
+  // events() returns the in-memory buffer.
+  const listed = gateway.events();
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].requestId, event.requestId);
+
+  // Unknown virtual key throws.
+  assert.throws(() => gateway.meter("ghost", "openai", "m", JSON.stringify({})), /unknown virtual key/);
+  // Bad JSON throws.
+  assert.throws(() => gateway.meter("vk_alice", "openai", "m", "{not json"), /valid JSON/);
+});
+
+test("Gateway meters a group-less virtual key against the vk:* scope and writes a JSONL sink", () => {
+  const sink = join(tmpdir(), `sandhi-sink-${process.pid}-${Date.now()}.jsonl`);
+  rmSync(sink, { force: true });
+  const gateway = new Gateway(sink);
+  gateway.addVirtualKey("vk_solo", "solo", undefined, "openai");
+  const event = gateway.meterTokens("vk_solo", "openai", "gpt-test", 10, 5, 0, 0, "s");
+  assert.ok(!event.groupId, "group-less key has no groupId");
+  assert.equal(event.subjectId, "solo");
+  // A group-less key records against the vk:* scope (no group budget set → no enforcement).
+  assert.equal(gateway.spent("vk:vk_solo"), 15);
+  // JSONL sink got exactly one line.
+  const lines = readFileSync(sink, "utf8").trim().split("\n");
+  assert.equal(lines.length, 1);
+  assert.equal(JSON.parse(lines[0]).subject_id, "solo");
+  rmSync(sink, { force: true });
+});
+
+test("parseUsage exercises every built-in provider parser", () => {
+  // Anthropic-style.
+  const anthropic = parseUsage(
+    "anthropic",
+    JSON.stringify({ usage: { input_tokens: 7, output_tokens: 3 } }),
+  );
+  assert.equal(anthropic.tokensIn, 7);
+  assert.equal(anthropic.tokensOut, 3);
+
+  // The remaining parsers are selected by slug; missing fields default to zero via unwrap_or_default,
+  // so a minimal body still exercises each match arm.
+  for (const provider of ["gemini", "cohere", "ollama", "bedrock", "openai_responses", "responses"]) {
+    const got = parseUsage(provider, JSON.stringify({}));
+    assert.equal(got.tokensIn, 0);
+    assert.equal(got.tokensOut, 0);
+  }
+
+  // Invalid JSON throws.
+  assert.throws(() => parseUsage("openai", "{nope"), /valid JSON/);
 });
