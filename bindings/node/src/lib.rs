@@ -17,7 +17,8 @@ use sandhi_core::{
     BudgetLedger, KeyStore, ParsedUsage, UsageEvent, VirtualKey,
 };
 use sandhi_providers::{
-    AnthropicAuthScheme, ProviderError, ProviderHandle, ProviderRuntime as RustProviderRuntime,
+    AnthropicAuthScheme, GeminiAuthScheme, ProviderError, ProviderHandle,
+    ProviderRuntime as RustProviderRuntime,
 };
 
 fn parse_anthropic_auth_scheme(value: Option<&str>) -> Result<AnthropicAuthScheme> {
@@ -26,6 +27,16 @@ fn parse_anthropic_auth_scheme(value: Option<&str>) -> Result<AnthropicAuthSchem
         Some("bearer") => Ok(AnthropicAuthScheme::Bearer),
         Some(other) => Err(Error::from_reason(format!(
             "unsupported Anthropic auth_scheme {other:?}; expected 'api_key' or 'bearer'"
+        ))),
+    }
+}
+
+fn parse_gemini_auth_scheme(value: Option<&str>) -> Result<GeminiAuthScheme> {
+    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        None | Some("") | Some("api_key") => Ok(GeminiAuthScheme::ApiKey),
+        Some("bearer") => Ok(GeminiAuthScheme::Bearer),
+        Some(other) => Err(Error::from_reason(format!(
+            "unsupported Gemini auth_scheme {other:?}; expected 'api_key' or 'bearer'"
         ))),
     }
 }
@@ -157,10 +168,13 @@ impl JsProviderRuntime {
         if auth_scheme
             .as_deref()
             .is_some_and(|value| !value.trim().is_empty())
-            && !matches!(normalized.as_str(), "anthropic" | "claude")
+            && !matches!(
+                normalized.as_str(),
+                "anthropic" | "claude" | "gemini" | "google"
+            )
         {
             return Err(Error::from_reason(
-                "authScheme is only valid for the Anthropic Messages protocol",
+                "authScheme is only valid for the Anthropic or Gemini protocol",
             ));
         }
         let handle = if protocol != OpenAiProtocol::ChatCompletions {
@@ -212,6 +226,7 @@ impl JsProviderRuntime {
                         "https://generativelanguage.googleapis.com/v1beta".into()
                     }),
                     api_key,
+                    parse_gemini_auth_scheme(auth_scheme.as_deref())?,
                     max_retries,
                     timeout_secs,
                     stream_idle_timeout_secs,

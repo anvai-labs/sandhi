@@ -23,8 +23,8 @@ use sandhi_core::{
     BudgetLedger, KeyStore, ParsedUsage, UsageEvent, VirtualKey,
 };
 use sandhi_providers::{
-    resolve_openai_compat_provider, AnthropicAuthScheme, ProviderError, ProviderHandle,
-    ProviderRuntime as RustProviderRuntime,
+    resolve_openai_compat_provider, AnthropicAuthScheme, GeminiAuthScheme, ProviderError,
+    ProviderHandle, ProviderRuntime as RustProviderRuntime,
 };
 
 fn parse_anthropic_auth_scheme(value: Option<&str>) -> PyResult<AnthropicAuthScheme> {
@@ -33,6 +33,16 @@ fn parse_anthropic_auth_scheme(value: Option<&str>) -> PyResult<AnthropicAuthSch
         Some("bearer") => Ok(AnthropicAuthScheme::Bearer),
         Some(other) => Err(PyValueError::new_err(format!(
             "unsupported Anthropic auth_scheme {other:?}; expected 'api_key' or 'bearer'"
+        ))),
+    }
+}
+
+fn parse_gemini_auth_scheme(value: Option<&str>) -> PyResult<GeminiAuthScheme> {
+    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        None | Some("") | Some("api_key") => Ok(GeminiAuthScheme::ApiKey),
+        Some("bearer") => Ok(GeminiAuthScheme::Bearer),
+        Some(other) => Err(PyValueError::new_err(format!(
+            "unsupported Gemini auth_scheme {other:?}; expected 'api_key' or 'bearer'"
         ))),
     }
 }
@@ -149,10 +159,13 @@ impl PyProviderRuntime {
         if auth_scheme
             .as_deref()
             .is_some_and(|value| !value.trim().is_empty())
-            && !matches!(normalized.as_str(), "anthropic" | "claude")
+            && !matches!(
+                normalized.as_str(),
+                "anthropic" | "claude" | "gemini" | "google"
+            )
         {
             return Err(PyValueError::new_err(
-                "auth_scheme is only valid for the Anthropic Messages protocol",
+                "auth_scheme is only valid for the Anthropic or Gemini protocol",
             ));
         }
         let handle = if protocol != OpenAiProtocol::ChatCompletions {
@@ -203,6 +216,7 @@ impl PyProviderRuntime {
                 base_url
                     .unwrap_or_else(|| "https://generativelanguage.googleapis.com/v1beta".into()),
                 api_key,
+                parse_gemini_auth_scheme(auth_scheme.as_deref())?,
                 max_retries,
                 timeout_secs,
                 stream_idle_timeout_secs,

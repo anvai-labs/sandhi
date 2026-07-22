@@ -46,7 +46,7 @@ pub use catalog::{
 };
 pub use cohere::Cohere;
 pub use escape_hatch::FnProvider;
-pub use gemini::Gemini;
+pub use gemini::{Gemini, GeminiAuthScheme};
 pub use local::Ollama;
 pub use openai::OpenAiCompat;
 pub use openai_responses::{OpenAiResponses, OpenAiResponsesProfile};
