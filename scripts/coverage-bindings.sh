@@ -51,7 +51,7 @@ case "$LANG_ARG" in
       "$PY" -m maturin build --out target/cov-dist
       "$PY" -m pip install -q --force-reinstall --no-deps target/cov-dist/*.whl
     }
-    RUN() { "$PY" tests/test_gateway.py; }
+    RUN() { "$PY" -m pytest tests/ -q; }
     ;;
   node)
     DIR="$ROOT/bindings/node"
