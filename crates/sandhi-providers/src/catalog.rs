@@ -1,8 +1,12 @@
-//! Stable wire facts for known OpenAI-compatible providers.
+//! Stable wire facts and curated model descriptors for known providers.
 //!
-//! This is deliberately not a model/capability catalog. Sandhi owns transport facts
-//! (canonical slug, aliases, endpoint routing); consumers such as Victor own model
-//! policy, tool selection, context budgeting, and user-facing discovery.
+//! Per TD-0004, Sandhi owns catalog **data** — curated, release-versioned model
+//! descriptors (id, context window, max output, wire capabilities; **no pricing** —
+//! the measure-vs-price line is held). Consumers such as Victor own catalog
+//! **policy** (which models to expose/select, discovery UX) on top of this data.
+//! Sandhi additionally owns transport facts (canonical slug, aliases, endpoint
+//! routing). Admitting a provider's model data here does not advertise pricing or
+//! dictate selection policy.
 
 use sandhi_core::{
     EndpointFamilyV1, ModelDescriptorV1, ProviderCapabilitiesV1, ProviderDescriptorV1,
@@ -247,6 +251,64 @@ pub fn openai_compat_descriptor(name: &str) -> Option<ProviderDescriptorV1> {
     })
 }
 
+/// Curated Anthropic (Claude) model descriptors — catalog **data** (TD-0004).
+///
+/// Sourced from Anthropic's Models overview (platform.claude.com), current as of 2026-07.
+/// Context windows and max output are stable facts; **no pricing** is carried (the
+/// measure-vs-price line is held). Selection/exposure policy is the consumer's job.
+#[must_use]
+pub fn anthropic_models() -> Vec<ModelDescriptorV1> {
+    let caps = ProviderCapabilitiesV1 {
+        streaming: true,
+        tools: true,
+        parallel_tool_calls: true,
+        vision: true,
+        reasoning: true,
+        prompt_cache_usage: true,
+        ..ProviderCapabilitiesV1::default()
+    };
+    [
+        ("claude-fable-5", "Claude Fable 5", 1_000_000u64, 131_072u64),
+        ("claude-opus-4-8", "Claude Opus 4.8", 1_000_000, 131_072),
+        ("claude-sonnet-5", "Claude Sonnet 5", 1_000_000, 131_072),
+        ("claude-sonnet-4-6", "Claude Sonnet 4.6", 1_000_000, 65_536),
+        (
+            "claude-haiku-4-5-20251001",
+            "Claude Haiku 4.5",
+            200_000,
+            65_536,
+        ),
+    ]
+    .into_iter()
+    .map(
+        |(id, display_name, max_input, max_output)| ModelDescriptorV1 {
+            id: id.into(),
+            aliases: if id == "claude-haiku-4-5-20251001" {
+                vec!["claude-haiku-4-5".into()]
+            } else {
+                Vec::new()
+            },
+            max_input_tokens: Some(max_input),
+            max_output_tokens: Some(max_output),
+            default_temperature: Some(1.0),
+            capabilities: caps.clone(),
+            endpoint_url: None,
+            extensions: BTreeMap::from([("display_name".into(), serde_json::json!(display_name))]),
+        },
+    )
+    .collect()
+}
+
+/// Curated model descriptors for a native (non-OpenAI-compat) provider slug.
+/// Admit new providers here; an unknown slug yields an empty list (no invented facts).
+#[must_use]
+pub fn native_models(slug: &str) -> Vec<ModelDescriptorV1> {
+    match slug {
+        "anthropic" => anthropic_models(),
+        _ => Vec::new(),
+    }
+}
+
 /// Resolve every provider family supported by the typed runtime. This is the single catalog
 /// surface used by bindings and gateway discovery; consumers must not duplicate endpoint facts.
 #[must_use]
@@ -327,7 +389,7 @@ pub fn provider_descriptor(name: &str) -> Option<ProviderDescriptorV1> {
         endpoint_family,
         base_url: base_url.into(),
         capabilities,
-        models: Vec::new(),
+        models: native_models(slug),
         extensions: BTreeMap::new(),
     })
 }
@@ -420,5 +482,26 @@ mod tests {
         let gemini = provider_descriptor("google").unwrap();
         assert_eq!(gemini.slug, "gemini");
         assert!(gemini.capabilities.audio_input);
+    }
+
+    #[test]
+    fn anthropic_catalog_admits_current_model_data() {
+        let descriptor = provider_descriptor("anthropic").unwrap();
+        let ids: Vec<&str> = descriptor.models.iter().map(|m| m.id.as_str()).collect();
+        assert!(ids.contains(&"claude-fable-5"));
+        assert!(ids.contains(&"claude-opus-4-8"));
+        assert!(ids.contains(&"claude-sonnet-5"));
+        assert!(ids.contains(&"claude-haiku-4-5-20251001"));
+        // Facts only — context window + max output; no pricing (measure-vs-price line held).
+        let fable = descriptor
+            .models
+            .iter()
+            .find(|m| m.id == "claude-fable-5")
+            .unwrap();
+        assert_eq!(fable.max_input_tokens, Some(1_000_000));
+        assert_eq!(fable.max_output_tokens, Some(131_072));
+        assert!(fable.extensions.get("display_name").is_some());
+        // Unknown providers resolve to an empty catalog — Sandhi never invents model facts.
+        assert!(native_models("unknown-provider").is_empty());
     }
 }
