@@ -27,14 +27,20 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 
 use sandhi_core::{
-    AlertRegistry, Backend, BudgetLedger, ChatRequestV1, KeyStore, RequestMetadataV1, Sink,
-    UsageCompleteness, UsageEvent, UsageV2, VirtualKey,
+    billable, AlertRegistry, Backend, BudgetLedger, ChatRequestV1, KeyStore, RequestMetadataV1,
+    Sink, UsageCompleteness, UsageEvent, UsageV2, VirtualKey,
 };
 use sandhi_providers::{ProviderError, ProviderHandle, ProviderRuntime};
 use sandhi_store::{hash_secret, AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
 
 use codec::{decode_request, encode_response, encode_stream_event, IngressDialect};
 pub use operator::BudgetSpec;
+
+/// Conservative output ceiling applied to a **budget-capped** scope when the client omits
+/// `max_output_tokens` (ADR-0005 D1). The reservation holds this as an upper bound and the value
+/// is set on the upstream request so the provider bounds output — otherwise an unbounded stream
+/// overshoots the cap (the 100× soft-cap bug). Unlimited scopes are never modified.
+const DEFAULT_OUTPUT_CEILING: u64 = 4096;
 
 /// Shared server state: the virtual-key store, the budget ledger, the usage sink, and the
 /// registry of configured upstream providers (each already holding its real credential).
@@ -536,10 +542,16 @@ async fn handle(
         subject_id: vk.subject_id.clone(),
         group_id: vk.group_id.clone(),
         route: Some(route.into()),
-        // ADR-0005 D7 identity fields flow in via the integration PR (header extraction).
-        ..RequestMetadataV1::default()
+        // ADR-0005 D7 neutral identity: `idempotency-key` for reconcile-once, run/step/parent for
+        // the agent cost-tree, W3C `traceparent` for external trace linkage. Optional metadata —
+        // never pricing, never inside the cached wire body.
+        idempotency_key: header_str(&headers, "idempotency-key"),
+        run_id: header_str(&headers, "x-sandhi-run-id"),
+        step_id: header_str(&headers, "x-sandhi-step-id"),
+        parent_id: header_str(&headers, "x-sandhi-parent-id"),
+        trace_context: header_str(&headers, "traceparent"),
     };
-    let (request, wants_stream) = match decode_request(dialect, body_json, metadata) {
+    let (mut request, wants_stream) = match decode_request(dialect, body_json, metadata) {
         Ok(decoded) => decoded,
         Err(message) => return ingress_error(dialect, StatusCode::BAD_REQUEST, &message),
     };
@@ -561,11 +573,24 @@ async fn handle(
         );
     }
 
-    // 5. Atomically reserve the request's conservative token estimate. The measured UsageV2
-    //    replaces this reservation after completion; failed/unmeasured calls release it.
+    // 5. Reserve a **ceiling** — a conservative upper bound (input estimate + the effective output
+    //    max), not a lower-bound estimate (ADR-0005 D1). A call whose worst case would breach the
+    //    cap is refused *before* dispatch, so a hard cap cannot be overshot. On a budget-capped
+    //    scope where the client left the output unbounded, we also set that bound on the upstream
+    //    request so the provider caps output — making the reservation enforceable. The measured
+    //    `billable()` (cache split included, D4) replaces the reservation after completion.
     let scope = budget_scope(&vk);
-    let reserved = estimate_reservation(&request);
-    match reserve_budget(&state, &scope, reserved) {
+    let capped = state
+        .ledger
+        .lock()
+        .ok()
+        .and_then(|ledger| ledger.limit_of(&scope))
+        .is_some();
+    let (ceiling, effective_max) = reservation_ceiling(&request);
+    if capped && request.max_output_tokens.is_none() {
+        request.max_output_tokens = Some(effective_max);
+    }
+    match reserve_budget(&state, &scope, ceiling) {
         Ok(()) => {}
         Err(StatusCode::TOO_MANY_REQUESTS) => {
             return ingress_error(dialect, StatusCode::TOO_MANY_REQUESTS, "budget exhausted")
@@ -578,7 +603,7 @@ async fn handle(
     let accounting = RequestAccounting::new(
         Arc::clone(&state),
         scope,
-        reserved,
+        ceiling,
         provider.slug().into(),
         &request,
     );
@@ -673,11 +698,9 @@ impl RequestAccounting {
             usage.completeness,
             UsageCompleteness::Final | UsageCompleteness::Partial
         );
-        let actual = if measured {
-            usage.tokens_in.saturating_add(usage.tokens_out)
-        } else {
-            0
-        };
+        // Settle against the single neutral `billable()` (cache split included, ADR-0005 D4) so the
+        // ledger and the emitted usage event count the same quantity.
+        let actual = if measured { billable(&usage) } else { 0 };
         // Reconcile the reservation against the measured terminal usage, and capture the
         // post-reconcile spent + limit so the alert subsystem can evaluate thresholds.
         let mut alert_input: Option<(u64, Option<u64>)> = None;
@@ -754,15 +777,34 @@ async fn stream_response(
 
     let body = async_stream::stream! {
         let mut last_usage: Option<UsageV2> = None;
+        let mut delta_out_bytes: u64 = 0;
         while let Some(item) = upstream.next().await {
             match item {
                 Ok(event) => {
-                    if let sandhi_core::ChatStreamEventV1::Usage { usage } = &event {
-                        accounting.observe(usage);
-                        last_usage = Some(usage.clone());
+                    match &event {
+                        sandhi_core::ChatStreamEventV1::Usage { usage } => {
+                            // Terminal, authoritative usage — replaces any running partial estimate.
+                            accounting.observe(usage);
+                            last_usage = Some(usage.clone());
+                        }
+                        sandhi_core::ChatStreamEventV1::TextDelta { delta }
+                        | sandhi_core::ChatStreamEventV1::ReasoningDelta { delta }
+                        | sandhi_core::ChatStreamEventV1::RefusalDelta { delta }
+                        | sandhi_core::ChatStreamEventV1::ToolCallArgumentsDelta { delta, .. } => {
+                            delta_out_bytes = delta_out_bytes.saturating_add(delta.len() as u64);
+                        }
+                        sandhi_core::ChatStreamEventV1::Error { .. } => {
+                            accounting.set_outcome("error");
+                        }
+                        _ => {}
                     }
-                    if matches!(event, sandhi_core::ChatStreamEventV1::Error { .. }) {
-                        accounting.set_outcome("error");
+                    // ADR-0005 D1: hold a running `Partial` estimate from the output deltas until the
+                    // terminal usage arrives, so a mid-stream disconnect (which fires the Drop
+                    // finalizer, not the code below) settles the accumulated spend instead of
+                    // releasing to zero — closing the open-stream / read-a-lot / disconnect
+                    // metering-evasion hole. Approximate (bytes/4); the terminal frame overrides it.
+                    if last_usage.is_none() {
+                        accounting.observe(&partial_usage(delta_out_bytes));
                     }
                     for (event_name, value) in
                         encode_stream_event(dialect, &event, last_usage.as_ref())
@@ -800,7 +842,10 @@ async fn stream_response(
         .expect("valid streaming response")
 }
 
-fn estimate_reservation(request: &ChatRequestV1) -> u64 {
+/// Coarse input-token estimate: bytes of the prompt payload / 4. A known lower-bound approximation
+/// (undercounts CJK, overcounts verbose tool schemas); a model-aware/tokenizer estimator is the
+/// follow-up (ADR-0005 D1). The *output* side, not this, is the load-bearing part of the ceiling.
+fn input_estimate(request: &ChatRequestV1) -> u64 {
     let bytes = serde_json::to_vec(&request.messages)
         .map(|value| value.len() as u64)
         .unwrap_or(0)
@@ -809,10 +854,33 @@ fn estimate_reservation(request: &ChatRequestV1) -> u64 {
                 .map(|value| value.len() as u64)
                 .unwrap_or(0),
         );
-    let estimated_input = bytes.saturating_add(3) / 4;
-    estimated_input
-        .saturating_add(request.max_output_tokens.unwrap_or(1))
-        .max(1)
+    bytes.saturating_add(3) / 4
+}
+
+/// The reservation **ceiling** (ADR-0005 D1): input estimate + the effective output max (the
+/// client's `max_output_tokens`, or [`DEFAULT_OUTPUT_CEILING`] when unbounded). Returns the ceiling
+/// and the effective max so the caller can bound a capped scope's upstream request. This is a
+/// conservative upper bound, not the old `+ 1` lower-bound estimate that let streams overshoot.
+fn reservation_ceiling(request: &ChatRequestV1) -> (u64, u64) {
+    let effective_max = request.max_output_tokens.unwrap_or(DEFAULT_OUTPUT_CEILING);
+    let ceiling = input_estimate(request).saturating_add(effective_max).max(1);
+    (ceiling, effective_max)
+}
+
+/// A trimmed header value as an owned `String`, or `None` when absent/non-UTF-8/empty.
+fn header_str(headers: &HeaderMap, name: &str) -> Option<String> {
+    let value = headers.get(name)?.to_str().ok()?.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+/// A best-effort `Partial` usage synthesized from accumulated output-delta bytes, used to settle an
+/// interrupted stream (ADR-0005 D1) rather than releasing the reservation to zero.
+fn partial_usage(delta_out_bytes: u64) -> UsageV2 {
+    UsageV2 {
+        tokens_out: delta_out_bytes.saturating_add(3) / 4,
+        completeness: UsageCompleteness::Partial,
+        ..UsageV2::default()
+    }
 }
 
 fn sse_frame(event: Option<&str>, value: &Value) -> String {
@@ -851,6 +919,13 @@ fn usage_event(
     )
     .with_route(metadata.route.clone())
     .with_session(metadata.session_id.clone())
+    .with_identity(
+        metadata.idempotency_key.clone(),
+        metadata.run_id.clone(),
+        metadata.step_id.clone(),
+        metadata.parent_id.clone(),
+        metadata.trace_context.clone(),
+    )
     .with_tokens(usage.tokens_in, usage.tokens_out)
     .with_cache(usage.cache_creation_tokens, usage.cache_read_tokens)
     .with_measurement(
