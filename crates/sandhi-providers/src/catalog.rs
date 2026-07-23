@@ -1,8 +1,12 @@
-//! Stable wire facts for known OpenAI-compatible providers.
+//! Stable wire facts and curated model descriptors for known providers.
 //!
-//! This is deliberately not a model/capability catalog. Sandhi owns transport facts
-//! (canonical slug, aliases, endpoint routing); consumers such as Victor own model
-//! policy, tool selection, context budgeting, and user-facing discovery.
+//! Per TD-0004, Sandhi owns catalog **data** — curated, release-versioned model
+//! descriptors (id, context window, max output, wire capabilities; **no pricing** —
+//! the measure-vs-price line is held). Consumers such as Victor own catalog
+//! **policy** (which models to expose/select, discovery UX) on top of this data.
+//! Sandhi additionally owns transport facts (canonical slug, aliases, endpoint
+//! routing). Admitting a provider's model data here does not advertise pricing or
+//! dictate selection policy.
 
 use sandhi_core::{
     EndpointFamilyV1, ModelDescriptorV1, ProviderCapabilitiesV1, ProviderDescriptorV1,
@@ -174,30 +178,7 @@ pub fn resolve_openai_compat_provider(name: &str) -> Option<&'static OpenAiCompa
 #[must_use]
 pub fn openai_compat_descriptor(name: &str) -> Option<ProviderDescriptorV1> {
     let spec = resolve_openai_compat_provider(name)?;
-    let models = if spec.slug == "moonshot" {
-        vec![ModelDescriptorV1 {
-            id: "kimi-k3".into(),
-            aliases: Vec::new(),
-            max_input_tokens: Some(1_048_576),
-            max_output_tokens: None,
-            default_temperature: Some(1.0),
-            capabilities: ProviderCapabilitiesV1 {
-                streaming: true,
-                tools: true,
-                parallel_tool_calls: true,
-                vision: true,
-                reasoning: true,
-                ..ProviderCapabilitiesV1::default()
-            },
-            endpoint_url: Some("https://api.moonshot.ai/v1".into()),
-            extensions: BTreeMap::from([(
-                "reasoning_effort_values".into(),
-                serde_json::json!(["low", "high", "max"]),
-            )]),
-        }]
-    } else {
-        Vec::new()
-    };
+    let models = compat_models(spec.slug);
     Some(ProviderDescriptorV1 {
         schema_version: sandhi_core::CHAT_SCHEMA_VERSION_V1.into(),
         slug: spec.slug.into(),
@@ -245,6 +226,164 @@ pub fn openai_compat_descriptor(name: &str) -> Option<ProviderDescriptorV1> {
             ),
         ]),
     })
+}
+
+/// Curated Anthropic (Claude) model descriptors — catalog **data** (TD-0004).
+///
+/// Sourced from Anthropic's Models overview (platform.claude.com), current as of 2026-07.
+/// Context windows and max output are stable facts; **no pricing** is carried (the
+/// measure-vs-price line is held). Selection/exposure policy is the consumer's job.
+#[must_use]
+pub fn anthropic_models() -> Vec<ModelDescriptorV1> {
+    let caps = ProviderCapabilitiesV1 {
+        streaming: true,
+        tools: true,
+        parallel_tool_calls: true,
+        vision: true,
+        reasoning: true,
+        prompt_cache_usage: true,
+        ..ProviderCapabilitiesV1::default()
+    };
+    [
+        ("claude-fable-5", "Claude Fable 5", 1_000_000u64, 131_072u64),
+        ("claude-opus-4-8", "Claude Opus 4.8", 1_000_000, 131_072),
+        ("claude-sonnet-5", "Claude Sonnet 5", 1_000_000, 131_072),
+        ("claude-sonnet-4-6", "Claude Sonnet 4.6", 1_000_000, 65_536),
+        (
+            "claude-haiku-4-5-20251001",
+            "Claude Haiku 4.5",
+            200_000,
+            65_536,
+        ),
+    ]
+    .into_iter()
+    .map(
+        |(id, display_name, max_input, max_output)| ModelDescriptorV1 {
+            id: id.into(),
+            aliases: if id == "claude-haiku-4-5-20251001" {
+                vec!["claude-haiku-4-5".into()]
+            } else {
+                Vec::new()
+            },
+            max_input_tokens: Some(max_input),
+            max_output_tokens: Some(max_output),
+            default_temperature: Some(1.0),
+            capabilities: caps.clone(),
+            endpoint_url: None,
+            extensions: BTreeMap::from([("display_name".into(), serde_json::json!(display_name))]),
+        },
+    )
+    .collect()
+}
+
+/// Curated Gemini model descriptors — catalog DATA (TD-0004). Sourced from Google's Gemini API
+/// Models reference (ai.google.dev), current as of 2026-07. No pricing.
+#[must_use]
+pub fn gemini_models() -> Vec<ModelDescriptorV1> {
+    let caps = ProviderCapabilitiesV1 {
+        streaming: true,
+        tools: true,
+        parallel_tool_calls: true,
+        vision: true,
+        audio_input: true,
+        file_input: true,
+        structured_output: true,
+        reasoning: true,
+        prompt_cache_usage: true,
+    };
+    [
+        ("gemini-3-pro", "Gemini 3 Pro", 1_048_576u64, 65_536u64),
+        ("gemini-3-flash", "Gemini 3 Flash", 1_048_576, 65_536),
+    ]
+    .into_iter()
+    .map(
+        |(id, display_name, max_input, max_output)| ModelDescriptorV1 {
+            id: id.into(),
+            aliases: Vec::new(),
+            max_input_tokens: Some(max_input),
+            max_output_tokens: Some(max_output),
+            default_temperature: Some(1.0),
+            capabilities: caps.clone(),
+            endpoint_url: None,
+            extensions: BTreeMap::from([("display_name".into(), serde_json::json!(display_name))]),
+        },
+    )
+    .collect()
+}
+
+/// Curated OpenAI model descriptors — catalog DATA (TD-0004). Sourced from OpenAI's API Models
+/// reference (developers.openai.com), current as of 2026-07. No pricing.
+#[must_use]
+pub fn openai_models() -> Vec<ModelDescriptorV1> {
+    let caps = ProviderCapabilitiesV1 {
+        streaming: true,
+        tools: true,
+        parallel_tool_calls: true,
+        vision: true,
+        reasoning: true,
+        prompt_cache_usage: true,
+        structured_output: true,
+        ..ProviderCapabilitiesV1::default()
+    };
+    [
+        ("gpt-5", "GPT-5", 400_000u64, 128_000u64),
+        ("gpt-5-chat-latest", "GPT-5 Chat", 128_000, 16_384),
+    ]
+    .into_iter()
+    .map(
+        |(id, display_name, max_input, max_output)| ModelDescriptorV1 {
+            id: id.into(),
+            aliases: Vec::new(),
+            max_input_tokens: Some(max_input),
+            max_output_tokens: Some(max_output),
+            default_temperature: Some(1.0),
+            capabilities: caps.clone(),
+            endpoint_url: None,
+            extensions: BTreeMap::from([("display_name".into(), serde_json::json!(display_name))]),
+        },
+    )
+    .collect()
+}
+
+/// Curated model descriptors for a native (non-OpenAI-compat) provider slug.
+/// Admit new providers here; an unknown slug yields an empty list (no invented facts).
+#[must_use]
+pub fn native_models(slug: &str) -> Vec<ModelDescriptorV1> {
+    match slug {
+        "anthropic" => anthropic_models(),
+        "gemini" => gemini_models(),
+        _ => Vec::new(),
+    }
+}
+
+/// Curated model descriptors for an OpenAI-compatible provider slug (TD-0004). Moonshot keeps its
+/// explicit admission (reasoning-effort extension); OpenAI gets the curated GPT-5 lineup. An unknown
+/// slug yields an empty list.
+fn compat_models(slug: &str) -> Vec<ModelDescriptorV1> {
+    match slug {
+        "moonshot" => vec![ModelDescriptorV1 {
+            id: "kimi-k3".into(),
+            aliases: Vec::new(),
+            max_input_tokens: Some(1_048_576),
+            max_output_tokens: None,
+            default_temperature: Some(1.0),
+            capabilities: ProviderCapabilitiesV1 {
+                streaming: true,
+                tools: true,
+                parallel_tool_calls: true,
+                vision: true,
+                reasoning: true,
+                ..ProviderCapabilitiesV1::default()
+            },
+            endpoint_url: Some("https://api.moonshot.ai/v1".into()),
+            extensions: BTreeMap::from([(
+                "reasoning_effort_values".into(),
+                serde_json::json!(["low", "high", "max"]),
+            )]),
+        }],
+        "openai" => openai_models(),
+        _ => Vec::new(),
+    }
 }
 
 /// Resolve every provider family supported by the typed runtime. This is the single catalog
@@ -327,7 +466,7 @@ pub fn provider_descriptor(name: &str) -> Option<ProviderDescriptorV1> {
         endpoint_family,
         base_url: base_url.into(),
         capabilities,
-        models: Vec::new(),
+        models: native_models(slug),
         extensions: BTreeMap::new(),
     })
 }
@@ -420,5 +559,52 @@ mod tests {
         let gemini = provider_descriptor("google").unwrap();
         assert_eq!(gemini.slug, "gemini");
         assert!(gemini.capabilities.audio_input);
+    }
+
+    #[test]
+    fn anthropic_catalog_admits_current_model_data() {
+        let descriptor = provider_descriptor("anthropic").unwrap();
+        let ids: Vec<&str> = descriptor.models.iter().map(|m| m.id.as_str()).collect();
+        assert!(ids.contains(&"claude-fable-5"));
+        assert!(ids.contains(&"claude-opus-4-8"));
+        assert!(ids.contains(&"claude-sonnet-5"));
+        assert!(ids.contains(&"claude-haiku-4-5-20251001"));
+        // Facts only — context window + max output; no pricing (measure-vs-price line held).
+        let fable = descriptor
+            .models
+            .iter()
+            .find(|m| m.id == "claude-fable-5")
+            .unwrap();
+        assert_eq!(fable.max_input_tokens, Some(1_000_000));
+        assert_eq!(fable.max_output_tokens, Some(131_072));
+        assert!(fable.extensions.contains_key("display_name"));
+        // Unknown providers resolve to an empty catalog — Sandhi never invents model facts.
+        assert!(native_models("unknown-provider").is_empty());
+    }
+
+    #[test]
+    fn gemini_and_openai_catalogs_admit_current_model_data() {
+        let gemini = provider_descriptor("google").unwrap();
+        let g_ids: Vec<&str> = gemini.models.iter().map(|m| m.id.as_str()).collect();
+        assert!(g_ids.contains(&"gemini-3-pro"));
+        assert!(g_ids.contains(&"gemini-3-flash"));
+        let g_pro = gemini
+            .models
+            .iter()
+            .find(|m| m.id == "gemini-3-pro")
+            .unwrap();
+        assert_eq!(g_pro.max_input_tokens, Some(1_048_576));
+        assert_eq!(g_pro.max_output_tokens, Some(65_536));
+
+        let openai = provider_descriptor("openai").unwrap();
+        let o_ids: Vec<&str> = openai.models.iter().map(|m| m.id.as_str()).collect();
+        assert!(o_ids.contains(&"gpt-5"));
+        assert!(o_ids.contains(&"gpt-5-chat-latest"));
+        let gpt5 = openai.models.iter().find(|m| m.id == "gpt-5").unwrap();
+        assert_eq!(gpt5.max_input_tokens, Some(400_000));
+        assert_eq!(gpt5.max_output_tokens, Some(128_000));
+
+        // An unseeded compat provider still resolves to an empty catalog (no invented facts).
+        assert!(provider_descriptor("grok").unwrap().models.is_empty());
     }
 }

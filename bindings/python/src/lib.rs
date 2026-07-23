@@ -424,6 +424,16 @@ fn provider_descriptor_json(provider: &str) -> PyResult<String> {
         .map_err(|error| PyRuntimeError::new_err(format!("serialize provider descriptor: {error}")))
 }
 
+/// Return the curated model descriptors for a known provider as a JSON list (TD-0004 catalog DATA).
+/// Carries facts only (id, context window, max output, capabilities); no pricing.
+#[pyfunction]
+fn provider_models_json(provider: &str) -> PyResult<String> {
+    let descriptor = sandhi_providers::provider_descriptor(provider)
+        .ok_or_else(|| PyKeyError::new_err(format!("unknown provider: {provider}")))?;
+    serde_json::to_string(&descriptor.models)
+        .map_err(|error| PyRuntimeError::new_err(format!("serialize provider models: {error}")))
+}
+
 /// Return one checked chat-contract JSON Schema document.
 #[pyfunction]
 fn chat_contract_schema_json(name: &str) -> PyResult<String> {
@@ -778,6 +788,7 @@ fn sandhi_gateway(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parse_usage, m)?)?;
     m.add_function(wrap_pyfunction!(provider_spec, m)?)?;
     m.add_function(wrap_pyfunction!(provider_descriptor_json, m)?)?;
+    m.add_function(wrap_pyfunction!(provider_models_json, m)?)?;
     m.add_function(wrap_pyfunction!(chat_contract_schema_json, m)?)?;
     m.add_class::<PyProviderRuntime>()?;
     m.add_class::<TypedProvider>()?;

@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::body::{Body, Bytes};
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{delete, get, post};
@@ -105,6 +105,7 @@ impl ProxyState {
 pub fn build_app(state: Arc<ProxyState>) -> Router {
     Router::new()
         .route("/healthz", get(health))
+        .route("/catalog/models", get(catalog_models))
         .route("/dashboard", get(dashboard_html))
         .route("/dashboard/api/usage", get(dashboard_api))
         .route("/v1/chat/completions", post(handle_openai))
@@ -143,6 +144,30 @@ pub async fn serve(state: Arc<ProxyState>, addr: SocketAddr) -> std::io::Result<
 
 async fn health() -> &'static str {
     "ok"
+}
+
+#[derive(serde::Deserialize)]
+struct CatalogQuery {
+    provider: Option<String>,
+}
+
+/// Public catalog discovery (TD-0004): curated model descriptors for a provider, facts only
+/// (no pricing). Unauthed -- stable public facts, like OpenAI/OpenRouter list-models endpoints.
+/// Usage: `GET /catalog/models?provider=anthropic`.
+async fn catalog_models(Query(query): Query<CatalogQuery>) -> Response {
+    let Some(provider) = query.provider else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "missing 'provider' query parameter",
+        );
+    };
+    match sandhi_providers::provider_descriptor(&provider) {
+        Some(descriptor) => Json(descriptor.models).into_response(),
+        None => error(
+            StatusCode::NOT_FOUND,
+            &format!("unknown provider: {provider}"),
+        ),
+    }
 }
 
 /// Usage aggregates for the dashboard (JSON). 404 when no durable store is configured.
