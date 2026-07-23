@@ -10,6 +10,18 @@ Accepted (founding decision for this repo). Originates from **AnvaiOps ADR-0047*
 architecture of `sandhi` itself; ADR-0047 remains authoritative for the OSS↔commercial
 boundary.
 
+> **Amended 2026-07-22 by [ADR-0004](0004-two-plane-proxy-and-enforcement-boundary.md).**
+> Three claims below were written as design intent and have since drifted from the
+> implementation; ADR-0004 supersedes them and records the corrected boundary:
+> - **§1 crate table** lists three crates; a fourth, **`sandhi-store`** (durable SQLite sink +
+>   the TD-0003 vault/vkeys tables), is now load-bearing. Bedrock is listed as a transport
+>   adapter but is **parser-only** until SigV4 lands.
+> - **§4 "Forward the cacheable prefix byte-exact"** describes a goal the proxy does **not**
+>   currently meet — it decodes every request to `ChatRequestV1` and re-encodes. ADR-0004
+>   re-draws this as a two-plane design (transparent metering vs. opt-in translation).
+> - **Consequences → Status "pre-alpha / design-complete … first milestones"** is stale:
+>   TD-0001/0002/0003 have landed the adapters, typed runtime, and operator surface.
+
 ## Context
 
 Sandhi is an Apache-2.0 OSS **AI usage gateway**: the junction every model call passes
