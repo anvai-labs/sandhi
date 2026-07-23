@@ -212,9 +212,17 @@ The gateway serves the artifact; nobody is forced to use it:
 
 ## Phasing
 
+> **Converged-plan mapping (2026-07-23, see TD-0004 §Phasing):** this TD **owns** P1–P4 below.
+> In the cross-TD execution plan: P1 = workstream **W1b** (preceded by W1a's parity primitives in
+> `sandhi-core` — shared secret resolution, `permits_model` in both modes, windowed binding
+> budgets, one `UsageEvent` builder — which are this engine's inputs); P2 = workstream **W2**;
+> P3/P4 = workstream **W4**. TD-0004's original "Phase D policy-as-data" is subsumed by this TD
+> and no longer separately specified.
+
 - **P1** — `PolicyDocumentV1` + schema/codegen + `PolicyEngine::evaluate` (pure, unit-tested with
   table-driven fixtures) + proxy wired to it (folds the allowlist/expiry/budget/warn checks that
-  P2/P4 wired separately into one evaluation).
+  P2/P4 wired separately into one evaluation). **Both front doors:** the binding `Gateway` calls
+  the same evaluate pre-flight (Tier 0/1), not just the proxy.
 - **P2** — durable + shared ledger (ADR-0004 D3) so budgets survive restart and hold across
   replicas; real per-minute rate limits. (Windows/warn/alerts already landed in TD-0003 P2.)
 - **P3** — `GET /policy/bundle` + Ed25519 signing + SDK `with_policy` pull/cache/poll (headless
