@@ -103,7 +103,7 @@ impl Provider for Ollama {
 
 /// Accumulate usage from an Ollama NDJSON line: the final object (`done: true`) carries
 /// `prompt_eval_count` / `eval_count`; last wins.
-fn sniff_usage_line(line: &[u8], usage: &mut ParsedUsage) {
+pub(crate) fn sniff_usage_line(line: &[u8], usage: &mut ParsedUsage) {
     if let Some(v) = std::str::from_utf8(line)
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(s.trim()).ok())

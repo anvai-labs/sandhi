@@ -132,7 +132,7 @@ impl Provider for Anthropic {
 
 /// Accumulate usage from Anthropic SSE lines: input + cache from `message_start`, output from
 /// `message_delta` (cumulative).
-fn sniff_usage_line(line: &[u8], acc: &mut ParsedUsage) {
+pub(crate) fn sniff_usage_line(line: &[u8], acc: &mut ParsedUsage) {
     let Ok(s) = std::str::from_utf8(line) else {
         return;
     };

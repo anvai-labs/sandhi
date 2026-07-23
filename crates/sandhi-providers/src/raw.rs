@@ -146,6 +146,46 @@ impl RawForwarder {
         Ok(Box::pin(stream))
     }
 
+    /// Non-streaming forward **that also meters**: forwards the body verbatim and parses the
+    /// family's usage from the response, so the proxy gets both the raw response and a `UsageV2`
+    /// from one call. Usage parsing is single-sourced in `sandhi-core` (the public per-family
+    /// parsers) — the transparent plane meters exactly as the typed adapter would.
+    pub async fn forward_metered(
+        &self,
+        path: &str,
+        body: Bytes,
+    ) -> Result<(RawResponse, sandhi_core::UsageV2), ProviderError> {
+        let raw = self.forward(path, body).await?;
+        let usage = serde_json::from_slice::<Value>(&raw.body)
+            .ok()
+            .and_then(|value| parse_usage_for_family(self.family, &value))
+            .unwrap_or_default()
+            .into();
+        Ok((raw, usage))
+    }
+
+    /// Streaming forward **that also meters**: yields the upstream bytes verbatim (O(1)
+    /// pass-through) while the shared [`metered_passthrough`][crate::metered_passthrough] primitive
+    /// accumulates usage with the family's own sniffer (so Anthropic's split input/output usage,
+    /// etc. are handled identically to the typed path); the terminal
+    /// [`StreamChunk`][crate::StreamChunk] carries the finalized [`ParsedUsage`][crate::ParsedUsage].
+    pub async fn forward_stream_metered(
+        &self,
+        path: &str,
+        body: Bytes,
+    ) -> Result<crate::ByteStream, ProviderError> {
+        let url = self.url(path);
+        let out_body = normalize_envelope(self.family, &body, true);
+        let resp = self.send(&url, out_body).await?;
+        if !resp.status().is_success() {
+            return Err(error_for_status(resp.status().as_u16()));
+        }
+        Ok(crate::metered_passthrough(
+            resp.bytes_stream(),
+            sniff_for_family(self.family),
+        ))
+    }
+
     fn url(&self, path: &str) -> String {
         if path.starts_with("http://") || path.starts_with("https://") {
             // Absolute URL — use as-is (callers may bypass base_url for provider-specific URLs).
@@ -227,6 +267,31 @@ impl RawForwarder {
 ///
 /// If the body is not a valid JSON object, it is forwarded as-is (defensive — never block a
 /// request on a parse failure).
+/// The family's streaming usage sniffer, single-sourced with each typed adapter — so the
+/// transparent plane accumulates usage exactly as the translated path does.
+fn sniff_for_family(family: ProviderFamily) -> fn(&[u8], &mut crate::ParsedUsage) {
+    match family {
+        ProviderFamily::OpenAiCompat => crate::openai::sniff_usage_line,
+        ProviderFamily::OpenAiResponses => crate::openai_responses::sniff_responses_usage_line,
+        ProviderFamily::Anthropic => crate::anthropic::sniff_usage_line,
+        ProviderFamily::Cohere => crate::cohere::sniff_usage_line,
+        ProviderFamily::Gemini => crate::gemini::sniff_usage_line,
+        ProviderFamily::Ollama => crate::local::sniff_usage_line,
+    }
+}
+
+/// The family's non-streaming usage parser (the public `sandhi-core` per-family parsers).
+fn parse_usage_for_family(family: ProviderFamily, value: &Value) -> Option<crate::ParsedUsage> {
+    match family {
+        ProviderFamily::OpenAiCompat => crate::parse_openai_usage(value),
+        ProviderFamily::OpenAiResponses => crate::parse_openai_responses_usage(value),
+        ProviderFamily::Anthropic => crate::parse_anthropic_usage(value),
+        ProviderFamily::Cohere => crate::parse_cohere_usage(value),
+        ProviderFamily::Gemini => crate::parse_gemini_usage(value),
+        ProviderFamily::Ollama => crate::parse_ollama_usage(value),
+    }
+}
+
 pub fn normalize_envelope(family: ProviderFamily, body: &Bytes, streaming: bool) -> Bytes {
     if !streaming || family != ProviderFamily::OpenAiCompat {
         return body.clone();
@@ -677,5 +742,67 @@ mod tests {
             .forward("/v1/chat/completions", Bytes::from_static(b"{}"))
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn forward_metered_parses_family_usage() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "choices": [{"message": {"content": "4"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 1,
+                          "prompt_tokens_details": {"cached_tokens": 2}}
+            })))
+            .mount(&server)
+            .await;
+        let forwarder = RawForwarder::new(ProviderFamily::OpenAiCompat, server.uri(), "k");
+        let (resp, usage) = forwarder
+            .forward_metered("/v1/chat/completions", Bytes::from_static(b"{}"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status, 200);
+        // Fresh input = 12 total − 2 cached; cache_read = 2; output = 1.
+        assert_eq!(usage.tokens_in, 10);
+        assert_eq!(usage.cache_read_tokens, 2);
+        assert_eq!(usage.tokens_out, 1);
+    }
+
+    #[tokio::test]
+    async fn forward_stream_metered_forwards_bytes_and_finalizes_usage() {
+        use futures_util::StreamExt;
+        let server = MockServer::start().await;
+        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n\
+data: {\"choices\":[],\"usage\":{\"prompt_tokens\":6,\"completion_tokens\":5,\"prompt_tokens_details\":{\"cached_tokens\":2}}}\n\n\
+data: [DONE]\n\n";
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse),
+            )
+            .mount(&server)
+            .await;
+        let forwarder = RawForwarder::new(ProviderFamily::OpenAiCompat, server.uri(), "k");
+        let mut stream = forwarder
+            .forward_stream_metered("/v1/chat/completions", Bytes::from_static(b"{}"))
+            .await
+            .unwrap();
+        let mut forwarded = Vec::new();
+        let mut final_usage = None;
+        while let Some(item) = stream.next().await {
+            let chunk = item.unwrap();
+            forwarded.extend_from_slice(&chunk.data);
+            if chunk.usage.is_some() {
+                final_usage = chunk.usage;
+            }
+        }
+        // Client-visible bytes are the upstream SSE, verbatim.
+        assert!(String::from_utf8_lossy(&forwarded).contains("\"content\":\"hi\""));
+        let usage = final_usage.expect("terminal chunk carries the finalized usage");
+        assert_eq!(usage.tokens_in, 4); // 6 − 2 cached
+        assert_eq!(usage.cache_read_tokens, 2);
+        assert_eq!(usage.tokens_out, 5);
     }
 }
