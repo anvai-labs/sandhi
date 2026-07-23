@@ -30,7 +30,7 @@ use sandhi_core::{
     billable, AlertRegistry, Backend, BudgetLedger, ChatRequestV1, KeyStore, RequestMetadataV1,
     Sink, UsageCompleteness, UsageEvent, UsageV2, VirtualKey,
 };
-use sandhi_providers::{ProviderError, ProviderHandle, ProviderRuntime};
+use sandhi_providers::{ProviderError, ProviderFamily, ProviderHandle, ProviderRuntime};
 use sandhi_store::{hash_secret, AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
 
 use codec::{decode_request, encode_response, encode_stream_event, IngressDialect};
@@ -608,11 +608,161 @@ async fn handle(
         &request,
     );
 
-    if wants_stream {
-        stream_response(provider, request, dialect, accounting).await
-    } else {
-        complete_response(provider, request, dialect, accounting).await
+    // Plane selection (ADR-0004 D1 / TD-0006): when the client's ingress dialect and the resolved
+    // upstream are the SAME family, forward the client's bytes verbatim (transparent metering) —
+    // no `ChatRequestV1` re-encode, so prompt-cache prefixes and provider-specific fields survive,
+    // and usage is metered at the source. Cross-family (or a handle with no raw forwarder) falls
+    // back to the typed translation path. Enforcement (reserve/settle via `accounting`) wraps both.
+    let transparent =
+        ingress_family(dialect) == provider.family() && provider.raw_forwarder().is_some();
+    match (transparent, wants_stream) {
+        (true, true) => transparent_stream_response(provider, body, dialect, accounting).await,
+        (true, false) => transparent_complete_response(provider, body, dialect, accounting).await,
+        (false, true) => stream_response(provider, request, dialect, accounting).await,
+        (false, false) => complete_response(provider, request, dialect, accounting).await,
     }
+}
+
+/// Ingress dialect → the upstream family it maps to, for plane selection (TD-0006 Step 2).
+fn ingress_family(dialect: IngressDialect) -> ProviderFamily {
+    match dialect {
+        IngressDialect::OpenAi => ProviderFamily::OpenAiCompat,
+        IngressDialect::Anthropic => ProviderFamily::Anthropic,
+        IngressDialect::Responses => ProviderFamily::OpenAiResponses,
+    }
+}
+
+/// The upstream path suffix for a same-family transparent forward — mirrors each typed adapter's
+/// endpoint. Only the three ingress families above ever reach the transparent plane.
+fn upstream_path(family: ProviderFamily) -> &'static str {
+    match family {
+        ProviderFamily::OpenAiCompat => "/chat/completions",
+        ProviderFamily::OpenAiResponses => "/responses",
+        ProviderFamily::Anthropic => "/v1/messages",
+        _ => "/",
+    }
+}
+
+/// Rebuild an axum response from a raw upstream response: status + curated header allowlist + body
+/// bytes, forwarded verbatim (the transparent plane never re-serializes the response).
+fn raw_response_to_axum(raw: sandhi_providers::raw::RawResponse) -> Response {
+    let mut builder = Response::builder().status(raw.status);
+    for (name, value) in raw.headers.iter() {
+        builder = builder.header(name, value);
+    }
+    builder
+        .body(Body::from(raw.body))
+        .unwrap_or_else(|_| error(StatusCode::BAD_GATEWAY, "invalid upstream response"))
+}
+
+/// Transparent same-family non-streaming plane: forward the client's bytes verbatim, meter usage
+/// at the source, and return the upstream response unchanged (ADR-0004 D1). Enforcement rides on
+/// `accounting` exactly as on the typed path.
+async fn transparent_complete_response(
+    provider: ProviderHandle,
+    body: Bytes,
+    dialect: IngressDialect,
+    mut accounting: RequestAccounting,
+) -> Response {
+    let Some(forwarder) = provider.raw_forwarder() else {
+        accounting.set_outcome("error");
+        accounting.finalize();
+        return error(
+            StatusCode::BAD_GATEWAY,
+            "transparent plane requires a raw forwarder",
+        );
+    };
+    match forwarder
+        .forward_metered(upstream_path(provider.family()), body)
+        .await
+    {
+        Ok((raw, mut usage)) => {
+            usage.completeness = UsageCompleteness::Final;
+            usage.outcome.get_or_insert_with(|| "success".into());
+            accounting.observe(&usage);
+            accounting.set_outcome("success");
+            accounting.finalize();
+            raw_response_to_axum(raw)
+        }
+        Err(err) => {
+            accounting.set_outcome("error");
+            accounting.finalize();
+            provider_error(&err, dialect, provider.slug())
+        }
+    }
+}
+
+/// Transparent same-family streaming plane: forward the upstream SSE bytes verbatim while the
+/// metered stream accumulates usage at the source; the terminal frame finalizes the reservation. A
+/// mid-stream disconnect settles the accrued (byte-approximate) partial via the `Drop` finalizer
+/// rather than releasing to zero (ADR-0005 D1), as on the typed streaming path.
+async fn transparent_stream_response(
+    provider: ProviderHandle,
+    body: Bytes,
+    dialect: IngressDialect,
+    mut accounting: RequestAccounting,
+) -> Response {
+    let Some(forwarder) = provider.raw_forwarder() else {
+        accounting.set_outcome("error");
+        accounting.finalize();
+        return error(
+            StatusCode::BAD_GATEWAY,
+            "transparent plane requires a raw forwarder",
+        );
+    };
+    let mut upstream = match forwarder
+        .forward_stream_metered(upstream_path(provider.family()), body)
+        .await
+    {
+        Ok(stream) => stream,
+        Err(err) => {
+            accounting.set_outcome("error");
+            accounting.finalize();
+            return provider_error(&err, dialect, provider.slug());
+        }
+    };
+
+    let body_stream = async_stream::stream! {
+        let mut seen_usage = false;
+        let mut delta_bytes: u64 = 0;
+        while let Some(item) = upstream.next().await {
+            match item {
+                Ok(chunk) => {
+                    if let Some(parsed) = chunk.usage {
+                        // Terminal frame: the finalized, source-measured usage.
+                        let mut usage: UsageV2 = parsed.into();
+                        usage.completeness = UsageCompleteness::Final;
+                        usage.outcome.get_or_insert_with(|| "success".into());
+                        accounting.observe(&usage);
+                        seen_usage = true;
+                    } else if !chunk.data.is_empty() {
+                        // Running byte-approximate Partial so a disconnect settles accrued spend.
+                        delta_bytes = delta_bytes.saturating_add(chunk.data.len() as u64);
+                        if !seen_usage {
+                            accounting.observe(&partial_usage(delta_bytes));
+                        }
+                    }
+                    if !chunk.data.is_empty() {
+                        yield Ok::<Bytes, std::io::Error>(chunk.data);
+                    }
+                }
+                Err(_) => {
+                    accounting.set_outcome("error");
+                    break;
+                }
+            }
+        }
+        if accounting.outcome != "error" {
+            accounting.set_outcome("success");
+        }
+        accounting.finalize();
+    };
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/event-stream")
+        .body(Body::from_stream(body_stream))
+        .expect("valid streaming response")
 }
 
 fn reserve_budget(state: &ProxyState, scope: &str, reserved: u64) -> Result<(), StatusCode> {
