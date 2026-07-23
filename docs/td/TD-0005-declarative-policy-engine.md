@@ -6,6 +6,14 @@ Depends on: [ADR-0004](../adr/0004-two-plane-proxy-and-enforcement-boundary.md) 
 [TD-0003](TD-0003-operator-surface-keys-budgets-attribution.md) (vault, vkeys, budgets),
 [TD-0002](TD-0002-typed-provider-runtime.md) (versioned wire-contract discipline)
 
+> **Update 2026-07-23 — TD-0003 P2/P4 landed.** The imperative `BudgetLedger` now has
+> daily/monthly/total **windows**, a block/**warn** policy, reservation, and **threshold alerts**
+> (P2), and the **model allowlist is enforced** in the request path (P4). This engine therefore
+> layers a declarative, distributable, in-process decision *over an existing windowed ledger* —
+> it no longer needs to introduce windows/warn itself. The still-missing substrate it depends on
+> is durability + a shared ledger + real per-minute rate limits (ADR-0004 D3). Phasing below is
+> updated accordingly.
+
 ## Motivation
 
 Today policy is **imperative Rust mutating an in-memory `HashMap`**: an operator calls
@@ -156,8 +164,9 @@ This is the **PDP**, and it is the single enforcement brain. Both callers use it
 - **SDK (Tier 0/1, headless):** the bindings expose `runtime.with_policy(doc)` so an in-process
   call evaluates locally before dispatch, against a local (or attesting) ledger. No network hop.
 
-`permits_model` and the budget check stop being separate, half-wired code paths — they are two
-rules inside one evaluation. (Fixes ADR-0004 D4's "model allowlist stored but not enforced.")
+`permits_model` (enforced imperatively since P4) and the budget check stop being two separate
+code paths — the engine folds both into one evaluation, so the allowlist, expiry, budget, and
+rate limit are decided together instead of by scattered checks.
 
 ### 3. Distribution (the PAP) — optional, signed, pull-and-cache
 
@@ -198,14 +207,16 @@ The gateway serves the artifact; nobody is forced to use it:
 - `set_limit`/`check`/`reserve`/`reconcile` on the ledger stay — the engine calls them; it does
   not replace the accounting mechanic, only the *policy* over it.
 - The vkey fields already present (`models`, `budget_scope`, `rate_limit_per_min`, `expires_at`)
-  become inputs the operator API compiles into rules — so they finally get enforced.
+  become inputs the operator API compiles into rules. `models`/`expires_at` are already enforced;
+  `rate_limit_per_min` is still stored-but-dead and gets enforced when the shared ledger lands.
 
 ## Phasing
 
 - **P1** — `PolicyDocumentV1` + schema/codegen + `PolicyEngine::evaluate` (pure, unit-tested with
-  table-driven fixtures) + proxy wired to it (replaces the ad-hoc block). Ships the model-allowlist
-  enforcement fix for free.
-- **P2** — durable + windowed + shared ledger (ADR-0004 D3); real rate limits; warn/alerts.
+  table-driven fixtures) + proxy wired to it (folds the allowlist/expiry/budget/warn checks that
+  P2/P4 wired separately into one evaluation).
+- **P2** — durable + shared ledger (ADR-0004 D3) so budgets survive restart and hold across
+  replicas; real per-minute rate limits. (Windows/warn/alerts already landed in TD-0003 P2.)
 - **P3** — `GET /policy/bundle` + Ed25519 signing + SDK `with_policy` pull/cache/poll (headless
   Tier 0/1).
 - **P4** — guest/freemium default policy + opt-in unkeyed proxy front door.

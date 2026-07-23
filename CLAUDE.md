@@ -47,7 +47,7 @@ Data-flow invariant: **attribution rides outside the cached prompt** — `subjec
 
 Two proxy-path caveats that contradict older prose — see [ADR-0004](docs/adr/0004-two-plane-proxy-and-enforcement-boundary.md):
 - The proxy does **not** currently forward byte-exact. `metered_passthrough` (`sandhi-providers/src/lib.rs`) is the O(1) byte-passthrough primitive at the *adapter* layer; the proxy's typed ingress pipeline re-encodes instead. ADR-0004 re-draws this as a two-plane design (transparent metering for same-dialect, opt-in translation for cross-family). There is **no Gemini/Cohere ingress dialect** yet — only `/v1/chat/completions`, `/v1/messages`, `/v1/responses`.
-- Enforcement is **proxy-only, in-memory, cumulative-token-only**. No durability (restart zeroes caps + spend), no windows, no rate limits, and the per-key **model allowlist is stored but not enforced** (`permits_model` is unused in the request path). Declarative policy is TD-0005.
+- Enforcement is **proxy-only and in-memory**. Token caps now honor daily/monthly/total **windows** + a block/**warn** policy + threshold **alerts** (TD-0003 P2), and the per-key **model allowlist is enforced** (`vk.permits_model` in `lib.rs`, TD-0003 P4). Still open: the ledger is **in-memory** (a restart resets accrued spend; no shared/durable ledger), **per-minute rate limits** are stored but not enforced, the admin-token compare is not constant-time, and budget bills `tokens_in + tokens_out` (excludes the cache split the event meters). The P4 dashboard read endpoints are **unauthed by design** (masked-only, self-hosted trust). Declarative policy over this substrate is TD-0005.
 
 ## Codegen — never hand-edit generated files
 

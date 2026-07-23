@@ -15,9 +15,11 @@ key, and set per-user budgets — without hand-rolling provider APIs.
 - **License:** Apache-2.0
 - **Status:** pre-alpha, unreleased. Core metering, the provider adapters (TD-0001), the typed
   runtime (TD-0002), and the operator surface — key vault, virtual keys, admin API, `sandhi`
-  CLI (TD-0003 P1) — have landed. In flight: durable/windowed budgets + rate limits, the
-  two-plane proxy ([ADR-0004](docs/adr/0004-two-plane-proxy-and-enforcement-boundary.md)), and
-  the declarative policy engine ([TD-0005](docs/td/TD-0005-declarative-policy-engine.md)).
+  CLI, windowed budgets + warn policy + threshold alerts, model-allowlist enforcement, and the
+  dashboard (TD-0003 P1–P4) — have landed. In flight: a durable/shared budget ledger +
+  per-minute rate limits, the two-plane proxy
+  ([ADR-0004](docs/adr/0004-two-plane-proxy-and-enforcement-boundary.md)), and the declarative
+  policy engine ([TD-0005](docs/td/TD-0005-declarative-policy-engine.md)).
 - **Packages:** crate `sandhi` · PyPI `sandhi-gateway` · npm `@anvai-labs/sandhi`
 
 ## Why
@@ -32,8 +34,10 @@ wrong. Sandhi is the single, fast, neutral implementation of both.
 - **Virtual keys** — one shared upstream key fronts many per-user keys; attribution and
   revocation are per person, not per shared secret.
 - **Per-user / per-team attribution** — every call tagged with `subject_id` / `group_id`.
-- **Budgets** — per-virtual-key / per-team **token** caps (reserve-then-reconcile). Windowed
-  budgets and per-minute rate limits are specified but not yet enforced (TD-0003 P2).
+- **Budgets** — per-virtual-key / per-team **token** caps (reserve-then-reconcile), with
+  daily/monthly/total **windows**, a block-or-**warn** policy, and threshold **alerts**. A
+  durable/shared ledger and per-minute rate limits are still in flight — the ledger is in-memory
+  today, so a restart resets accrued spend.
 - **Unified provider transport** — Anthropic, OpenAI-compatible (covers ~20 providers),
   Gemini, Cohere, local vLLM/Ollama, OpenAI Responses — streaming, pooling, retry,
   circuit-breaker, with **usage + cache-split extracted at the source**. (Bedrock is
