@@ -68,6 +68,12 @@ pub struct ProxyState {
     pub alerts: Option<Arc<Mutex<AlertRegistry>>>,
     /// Durable alert-rule store (rules + last_fired_at + ack), backs `/admin/alerts`.
     pub alert_store: Option<Arc<AlertStore>>,
+    /// ADR-0004 D4: when `false` (default) and an admin token is configured, the
+    /// `/dashboard/api/*` read endpoints require the admin bearer — they serve subject/group
+    /// usage aggregates. `SANDHI_DASHBOARD_PUBLIC=1` restores the previous open, masked-only
+    /// behavior for trusted single-node deployments. With no admin token configured the
+    /// endpoints stay open (there is no credential to present).
+    pub dashboard_public: bool,
 }
 
 impl ProxyState {
@@ -95,6 +101,7 @@ impl ProxyState {
             public_url: "http://localhost:8787".into(),
             alerts: None,
             alert_store: None,
+            dashboard_public: false,
         }
     }
 }
@@ -108,7 +115,8 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         .route("/catalog/models", get(catalog_models))
         .route("/dashboard", get(dashboard_html))
         .route("/dashboard/api/usage", get(dashboard_api))
-        // TD-0003 P4 dashboard read-only endpoints (masked, unauthed — self-hosted trust).
+        // TD-0003 P4 dashboard read-only endpoints (masked; admin-bearer-gated when an admin
+        // token is configured, unless SANDHI_DASHBOARD_PUBLIC=1 — ADR-0004 D4).
         .route("/dashboard/api/keys", get(dashboard_keys))
         .route("/dashboard/api/budgets", get(dashboard_budgets))
         .route("/dashboard/api/alerts", get(dashboard_alerts))
@@ -174,8 +182,23 @@ async fn catalog_models(Query(query): Query<CatalogQuery>) -> Response {
     }
 }
 
+/// ADR-0004 D4 dashboard gate: the read endpoints serve subject/group usage aggregates, so
+/// when an admin token is configured they require it (same bearer as `/admin/*`) unless the
+/// operator explicitly opted back into the open, masked-only model (`dashboard_public`).
+/// No admin token configured → open (nothing to present; single-node dev trust).
+#[allow(clippy::result_large_err)] // axum::Response is intentionally large; idiomatic shape.
+fn require_dashboard_access(state: &ProxyState, headers: &HeaderMap) -> Result<(), Response> {
+    if state.dashboard_public || state.admin_token.is_none() {
+        return Ok(());
+    }
+    operator::require_admin(state, headers)
+}
+
 /// Usage aggregates for the dashboard (JSON). 404 when no durable store is configured.
-async fn dashboard_api(State(state): State<Arc<ProxyState>>) -> Response {
+async fn dashboard_api(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -> Response {
+    if let Err(denied) = require_dashboard_access(&state, &headers) {
+        return denied;
+    }
     let Some(store) = state.store.clone() else {
         return error(
             StatusCode::NOT_FOUND,
@@ -203,7 +226,10 @@ async fn dashboard_api(State(state): State<Arc<ProxyState>>) -> Response {
 
 /// `GET /dashboard/api/keys` — masked virtual keys + masked vault entries (no secrets, no hashes).
 /// 404 when neither the vault nor the virtual-key store is configured.
-async fn dashboard_keys(State(state): State<Arc<ProxyState>>) -> Response {
+async fn dashboard_keys(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -> Response {
+    if let Err(denied) = require_dashboard_access(&state, &headers) {
+        return denied;
+    }
     let (vault, vkeys) = (state.vault.clone(), state.vkeys.clone());
     if vault.is_none() && vkeys.is_none() {
         return error(
@@ -230,7 +256,10 @@ async fn dashboard_keys(State(state): State<Arc<ProxyState>>) -> Response {
 
 /// `GET /dashboard/api/budgets` — every configured scope with limit / window / policy + live spent
 /// (from the budget ledger). Neutral tokens; no pricing.
-async fn dashboard_budgets(State(state): State<Arc<ProxyState>>) -> Response {
+async fn dashboard_budgets(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -> Response {
+    if let Err(denied) = require_dashboard_access(&state, &headers) {
+        return denied;
+    }
     let mut ledger = state.ledger.lock().expect("ledger poisoned");
     let scopes: Vec<Value> = state
         .budgets
@@ -255,7 +284,10 @@ async fn dashboard_budgets(State(state): State<Arc<ProxyState>>) -> Response {
 
 /// `GET /dashboard/api/alerts` — recent fired alerts (rules whose threshold has tripped) plus all
 /// configured rules. 404 when the alert store is not configured.
-async fn dashboard_alerts(State(state): State<Arc<ProxyState>>) -> Response {
+async fn dashboard_alerts(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -> Response {
+    if let Err(denied) = require_dashboard_access(&state, &headers) {
+        return denied;
+    }
     let Some(store) = state.alert_store.clone() else {
         return error(
             StatusCode::NOT_FOUND,
@@ -504,6 +536,8 @@ async fn handle(
         subject_id: vk.subject_id.clone(),
         group_id: vk.group_id.clone(),
         route: Some(route.into()),
+        // ADR-0005 D7 identity fields flow in via the integration PR (header extraction).
+        ..RequestMetadataV1::default()
     };
     let (request, wants_stream) = match decode_request(dialect, body_json, metadata) {
         Ok(decoded) => decoded,

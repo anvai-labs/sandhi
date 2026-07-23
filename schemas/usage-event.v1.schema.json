@@ -66,6 +66,26 @@
       "type": ["string", "null"],
       "description": "Conversation/session key used for prompt-cache + KV affinity (ADR-0047 D9). Preserved end-to-end so hosted prompt caches keep hitting and self-hosted KV routing stays sticky. Never collapsed to a single value."
     },
+    "idempotency_key": {
+      "type": ["string", "null"],
+      "description": "Caller-supplied key for at-most-once semantics across retries of one logical call (ADR-0005 D7). Attribution metadata, never pricing."
+    },
+    "run_id": {
+      "type": ["string", "null"],
+      "description": "Agent-run identifier; groups every call one run makes (cost-tree root). ADR-0005 D7."
+    },
+    "step_id": {
+      "type": ["string", "null"],
+      "description": "Step within a run; child dimension under run_id. ADR-0005 D7."
+    },
+    "parent_id": {
+      "type": ["string", "null"],
+      "description": "Parent step/run for nested agents, so an agent's cost tree is reconstructable. ADR-0005 D7."
+    },
+    "trace_context": {
+      "type": ["string", "null"],
+      "description": "W3C traceparent value, linking the event into distributed traces. ADR-0005 D7."
+    },
     "tokens_in": {
       "type": "integer",
       "minimum": 0,
