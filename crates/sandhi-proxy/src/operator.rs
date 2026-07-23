@@ -235,7 +235,7 @@ fn parse_scheme(s: Option<&str>) -> CredentialScheme {
     }
 }
 
-fn vault_entry_response(e: &VaultEntry) -> Value {
+pub(crate) fn vault_entry_response(e: &VaultEntry) -> Value {
     json!({
         "provider": e.provider,
         "label": e.label,
@@ -244,10 +244,11 @@ fn vault_entry_response(e: &VaultEntry) -> Value {
         "created_at": e.created_at,
         "status": e.status,
         "credential_id": e.credential_id(),
+        // NB: the raw secret lives only in the Vault backend — never serialized here.
     })
 }
 
-fn vkey_record_response(r: &VirtualKeyRecord) -> Value {
+pub(crate) fn vkey_record_response(r: &VirtualKeyRecord) -> Value {
     json!({
         "id": r.id,
         "subject": r.subject_id,
@@ -259,7 +260,8 @@ fn vkey_record_response(r: &VirtualKeyRecord) -> Value {
         "rate_limit_per_min": r.rate_limit_per_min,
         "created_at": r.created_at,
         "revoked_at": r.revoked_at,
-        // NB: secret_hash is intentionally NOT exposed over the API.
+        "status": if r.revoked_at.is_some() { "revoked" } else { "active" },
+        // NB: secret_hash is intentionally NOT exposed over the API (nor the plaintext secret).
     })
 }
 
@@ -662,7 +664,7 @@ fn apply_budget(
         .insert(spec.scope.clone(), spec.clone());
 }
 
-fn alert_rule_response(rec: &AlertRuleRecord) -> Value {
+pub(crate) fn alert_rule_response(rec: &AlertRuleRecord) -> Value {
     json!({
         "id": rec.id,
         "scope": rec.scope,

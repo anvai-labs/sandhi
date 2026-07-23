@@ -365,10 +365,62 @@ async fn expired_virtual_key_is_rejected() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
+// --- P4: model-allowlist enforcement on ingress --------------------------------
+
+/// A `/v1/chat/completions` request whose body model is `model` (the allowlist is evaluated against
+/// this). The default `v1_request` helper sends `claude-x` (the minted allowlist); this lets a test
+/// send an arbitrary model.
+async fn v1_request_model(
+    app: &axum::Router,
+    virtual_key: &str,
+    model: &str,
+) -> (StatusCode, Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("authorization", format!("Bearer {virtual_key}"))
+                .header("content-type", "application/json")
+                .header("x-sandhi-session", "conv_1")
+                .body(Body::from(format!(
+                    r#"{{"model":"{model}","messages":[]}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    (status, body_json(response).await)
+}
+
+/// Mint a virtual key with an explicit `models` allowlist (the default `mint_key` helper hardcodes
+/// `["claude-x"]`; this lets a test choose the allowlist, including empty).
+async fn mint_key_with_models(app: &axum::Router, upstream: &str, models: Vec<String>) -> String {
+    let body = json!({
+        "upstream": upstream,
+        "subject": "alice",
+        "group": "platform",
+        "models": models,
+        "budget_scope": "group:platform",
+    });
+    let r = app
+        .clone()
+        .oneshot(req("POST", "/admin/keys/share", Some(TOKEN), Some(body)))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK, "share must succeed");
+    body_json(r).await["virtual_key"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
 #[tokio::test]
-async fn model_outside_allowlist_is_still_admitted_p1() {
-    // P1 stores the model allowlist but does not enforce it on ingress (enforcement is a follow-up;
-    // this test pins the current, permissive behavior so a future change is intentional).
+async fn model_allowlist_enforced_on_ingress() {
+    // P4 (TD-0003 §2): a non-empty models[] allowlist is enforced on ingress — a request whose
+    // model is NOT on the list is rejected with 403 *before* the budget reservation / dispatch.
     let upstream = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -381,13 +433,52 @@ async fn model_outside_allowlist_is_still_admitted_p1() {
     let state = admin_state();
     let app = build_app(state.clone());
     add_upstream(&app, "openai", &upstream.uri(), "REAL-KEY").await;
-    let (secret, _) = mint_key(&app, "openai:default", None).await;
+    // Allowlist: claude-x only.
+    let secret = mint_key_with_models(&app, "openai:default", vec!["claude-x".into()]).await;
 
-    let (status, _) = v1_request(&app, &secret).await;
+    // Allowed model (exact) → forwarded to the upstream.
+    let (ok_status, _) = v1_request_model(&app, &secret, "claude-x").await;
+    assert_eq!(ok_status, StatusCode::OK);
+
+    // Allowed model (case-insensitive match) → forwarded.
+    let (ci_status, _) = v1_request_model(&app, &secret, "CLAUDE-X").await;
+    assert_eq!(ci_status, StatusCode::OK);
+
+    // Disallowed model → 403, never reaches the upstream.
+    let (denied_status, denied_body) = v1_request_model(&app, &secret, "gpt-4").await;
+    assert_eq!(denied_status, StatusCode::FORBIDDEN);
+    let msg = denied_body.to_string();
+    assert!(
+        msg.contains("not permitted") && msg.contains("gpt-4"),
+        "403 body should name the disallowed model: {msg}"
+    );
+    // The disallowed request never records spend (enforced before the budget reservation): only the
+    // two admitted calls (claude-x + CLAUDE-X, 15 tokens each) land on the ledger.
+    assert_eq!(state.ledger.lock().unwrap().spent("group:platform"), 30);
+}
+
+#[tokio::test]
+async fn empty_model_allowlist_admits_any_model() {
+    // An empty/absent allowlist is unscoped — any model is admitted (the default/legacy behavior).
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{ "message": { "content": "hi" } }],
+            "usage": { "prompt_tokens": 4, "completion_tokens": 2 }
+        })))
+        .mount(&upstream)
+        .await;
+    let state = admin_state();
+    let app = build_app(state.clone());
+    add_upstream(&app, "openai", &upstream.uri(), "REAL-KEY").await;
+    let secret = mint_key_with_models(&app, "openai:default", vec![]).await;
+
+    let (status, _) = v1_request_model(&app, &secret, "literally-any-model").await;
     assert_eq!(
         status,
         StatusCode::OK,
-        "P1 does not enforce the model allowlist yet"
+        "an empty allowlist must admit any model"
     );
 }
 
@@ -757,6 +848,205 @@ async fn alerts_list_create_ack_delete_endpoints() {
         .await
         .unwrap();
     assert_eq!(body_json(r).await["deleted"], true);
+}
+
+// --- P4: dashboard read-only endpoints (masked, unauthed) ----------------------
+
+/// The dashboard endpoints are unauthed (self-hosted trust); a request carries no admin token.
+fn dash_req(uri: &str) -> Request<Body> {
+    req("GET", uri, None, None)
+}
+
+#[tokio::test]
+async fn dashboard_keys_returns_masked_keys_and_vault_entries() {
+    let app = build_app(admin_state());
+    // Add a provider credential with a known real secret + mint a virtual key with a known-once
+    // secret. Neither must ever appear in the masked dashboard response.
+    add_upstream(
+        &app,
+        "anthropic",
+        "https://api.anthropic.com",
+        "sk-real-secret-xyz",
+    )
+    .await;
+    let (vk_secret, id) = mint_key(&app, "anthropic:default", None).await;
+
+    let r = app
+        .clone()
+        .oneshot(dash_req("/dashboard/api/keys"))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let body = body_json(r).await;
+    let serialized = body.to_string();
+
+    // Masked virtual keys + vault entries are present…
+    assert!(serialized.contains(&id));
+    assert!(serialized.contains("anthropic:default"));
+    assert_eq!(body["virtual_keys"][0]["status"], "active");
+    // …but NO secret material: not the plaintext virtual key, not the real provider key, not the
+    // stored virtual-key hash.
+    assert!(
+        !serialized.contains(&vk_secret),
+        "vk plaintext must not leak"
+    );
+    assert!(
+        !serialized.contains("sk-real-secret-xyz"),
+        "provider secret must not leak"
+    );
+    assert!(
+        !serialized.contains("secret_hash"),
+        "secret_hash must not be exposed on the dashboard"
+    );
+}
+
+#[tokio::test]
+async fn dashboard_budgets_reports_spent_vs_limit() {
+    let state = admin_state();
+    let app = build_app(state.clone());
+    // Set a 1000-token budget on group:platform, then record some spend directly.
+    let r = app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/admin/budget",
+            Some(TOKEN),
+            Some(json!({ "scope": "group:platform", "limit_tokens": 1000, "window": "total", "policy": "block" })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    state.ledger.lock().unwrap().record("group:platform", 250);
+
+    let r = app
+        .oneshot(dash_req("/dashboard/api/budgets"))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let body = body_json(r).await;
+    let b = &body["budgets"][0];
+    assert_eq!(b["scope"], "group:platform");
+    assert_eq!(b["limit_tokens"], 1000);
+    assert_eq!(b["spent"], 250);
+    assert_eq!(b["remaining"], 750);
+    assert_eq!(b["window"], "total");
+    assert_eq!(b["policy"], "block");
+}
+
+#[tokio::test]
+async fn dashboard_alerts_reports_rules_and_fired() {
+    let app = build_app(admin_state());
+    // Create a rule.
+    let r = app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/admin/alerts",
+            Some(TOKEN),
+            Some(json!({ "scope": "group:x", "threshold_pct": 80, "channel": "log" })),
+        ))
+        .await
+        .unwrap();
+    let id = body_json(r).await["id"].as_str().unwrap().to_string();
+
+    let r = app
+        .oneshot(dash_req("/dashboard/api/alerts"))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let body = body_json(r).await;
+    // The rule appears in `rules`; nothing has fired yet so `fired` is empty.
+    assert_eq!(body["rules"].as_array().unwrap().len(), 1);
+    assert_eq!(body["rules"][0]["id"], id);
+    assert!(body["fired"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn dashboard_usage_endpoint_now_includes_by_model() {
+    // P4 extends the existing usage JSON with a per-model breakdown.
+    let state = admin_state();
+    let store = state.store.clone().unwrap();
+    store.emit(
+        &UsageEvent::new(
+            "r",
+            "2026-07-01T00:00:00Z",
+            "openai",
+            "gpt-4",
+            sandhi_core::Backend::External,
+        )
+        .with_attribution(
+            Some("vk".into()),
+            Some("alice".into()),
+            Some("platform".into()),
+        )
+        .with_tokens(10, 5),
+    );
+    let app = build_app(state);
+    let r = app.oneshot(dash_req("/dashboard/api/usage")).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let body = body_json(r).await;
+    let models: Vec<&str> = body["by_model"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["key"].as_str().unwrap())
+        .collect();
+    assert!(models.contains(&"gpt-4"));
+}
+
+#[tokio::test]
+async fn dashboard_endpoints_404_when_store_unconfigured() {
+    // A bare ProxyState (no vault/vkeys/alerts/store) mirrors a proxy started without SANDHI_STORE.
+    let state = ProxyState::new(
+        KeyStore::new(),
+        BudgetLedger::new(),
+        Arc::new(InMemorySink::new()) as Arc<dyn Sink>,
+        HashMap::new(),
+        None,
+    );
+    let app = build_app(Arc::new(state));
+
+    let k = app
+        .clone()
+        .oneshot(dash_req("/dashboard/api/keys"))
+        .await
+        .unwrap();
+    assert_eq!(k.status(), StatusCode::NOT_FOUND);
+    let a = app
+        .clone()
+        .oneshot(dash_req("/dashboard/api/alerts"))
+        .await
+        .unwrap();
+    assert_eq!(a.status(), StatusCode::NOT_FOUND);
+    let u = app
+        .clone()
+        .oneshot(dash_req("/dashboard/api/usage"))
+        .await
+        .unwrap();
+    assert_eq!(u.status(), StatusCode::NOT_FOUND);
+    // Budgets are in-process (no optional store), so the endpoint stays 200 with an empty list
+    // rather than 404.
+    let b = app
+        .oneshot(dash_req("/dashboard/api/budgets"))
+        .await
+        .unwrap();
+    assert_eq!(b.status(), StatusCode::OK);
+    assert!(body_json(b).await["budgets"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn dashboard_endpoints_require_no_admin_token() {
+    // The dashboard is unauthed (self-hosted trust) — a request with no Authorization header works.
+    let app = build_app(admin_state());
+    for uri in [
+        "/dashboard/api/usage",
+        "/dashboard/api/keys",
+        "/dashboard/api/budgets",
+        "/dashboard/api/alerts",
+    ] {
+        let r = app.clone().oneshot(dash_req(uri)).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "{uri} should be unauthed");
+    }
 }
 
 // Silence unused import when an upstream body is unused.
