@@ -240,18 +240,25 @@ surface is the interface; the modes differ only in which implementations are wir
     one decision; proxy `handle()` and binding `Gateway` both call it (two front doors, one
     brain). The W1a primitives are its inputs (`LedgerView`, resolved key).
 
-- **Workstream W2 — Durable/shared substrate (owner: TD-0005 P2 ≡ ADR-0004 D3).** The
-  `budgets` table in `sandhi-store` (persist `BudgetSpec`, rehydrate window spend from
-  `usage_events` on startup — the re-derivation `budget.rs` promises but does not implement);
-  **enforce** `rate_limit_per_min` (closes asymmetry #4) as a windowed counter consulted by the
-  engine; ADR-0004 D4 remnants (constant-time admin-token compare, one `billable()` definition
-  shared by ledger + event, dashboard access gating). Single-node SQLite is sufficient;
-  multi-replica HA stays an explicit non-goal until a real deployment needs it.
+- **Workstream W2 — Enforcement-correct substrate (owner: ADR-0005, which supersedes
+  ADR-0004 D3; durable pieces = TD-0005 P2).** Build order per ADR-0005: **semantics first on
+  the in-memory ledger** — reservation **ceilings** (not estimates), mid-stream cutoff, settle
+  `Partial` on disconnect, TTL-lease reservations + idempotent settle-by-id, one `billable()`
+  with the cache split preserved — **then** move behind the `LedgerView`/`Reservation` trait to
+  SQLite (the `budgets` table; rehydrate window spend from `usage_events` — the re-derivation
+  `budget.rs` promises but does not implement). Durabilizing the current model unchanged is
+  *less* correct than today's Mutex (crash-leak, non-idempotent reconcile, TOCTOU). Also here:
+  **enforce** `rate_limit_per_min` (closes asymmetry #4), constant-time admin-token compare,
+  dashboard access gating. Single-node SQLite is sufficient; multi-replica HA stays an explicit
+  non-goal until a real deployment needs it.
 
-- **Workstream W3 — Two-plane proxy (owner: TD-0006).** Raw `ProviderHandle` + plane selector +
-  golden byte-identity tests (Steps 1–2), Gemini/Cohere ingress (Step 3), first-class
-  `cache_control` (Step 4). Orthogonal to W1/W2 except Step 5 (billable), which is folded into
-  W2 above and dropped from TD-0006's scope.
+- **Workstream W3 — Two-plane proxy (owner: TD-0006, as revised by its ADR-0005 banner).** A
+  **dedicated raw forwarder** (the typed adapters cannot be byte-exact) + plane selector from
+  the vault-declared `ProviderFamily`, with the promise stated as **content-faithful /
+  envelope-normalized** (not byte-identical — usage metering requires documented envelope
+  normalizations); Gemini/Cohere ingress (Step 3); first-class `cache_control` (Step 4).
+  Orthogonal to W1/W2 except Step 5 (billable), which is folded into W2 above and dropped from
+  TD-0006's scope.
 
 - **Workstream W4 — In-process governance surface + distribution (owner: this TD for the
   store/CLI seam; TD-0005 P3/P4 for policy distribution + guest).** The injected-store option
@@ -262,8 +269,10 @@ surface is the interface; the modes differ only in which implementations are wir
 
 **Sequencing:** W1a → W1b → W2 → W3 (W3 may run parallel to W2) → W4. Each lands as its own
 non-breaking PR train into develop; the release after W1–W3 is the meaningful minor
-("byte-exact two-plane proxy, curated catalog, one policy brain in both modes, durable
-budgets").
+("content-faithful two-plane proxy, curated catalog, one policy brain in both modes,
+enforcement-correct durable budgets"). ADR-0005 is the pre-code correctness gate for
+W1b/W2/W3 — its falsifications (soft-cap reservation, durabilize-first, byte-identity,
+`guest:<ip>`) are binding on implementation.
 
 ## Acceptance criteria
 
