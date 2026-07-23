@@ -171,11 +171,12 @@ async fn anthropic_ingress_uses_the_same_typed_runtime_and_meter() {
 }
 
 #[tokio::test]
-async fn responses_ingress_normalizes_through_chat_request_v1() {
+async fn responses_ingress_same_family_forwards_transparently() {
     let upstream = MockServer::start().await;
-    // The resolved upstream is a Responses backend: the proxy decodes the caller's Responses
-    // ingress → ChatRequestV1, the typed provider re-encodes it and POSTs /responses upstream,
-    // then the proxy shapes the neutral response back into the Responses egress dialect.
+    // Responses ingress → a Responses upstream is SAME-FAMILY, so the transparent plane forwards
+    // the client's bytes verbatim and meters usage at the source (ADR-0004 D1 / TD-0006). The
+    // client receives the upstream's own body (not a re-encoded one); the metering event still
+    // carries the correct fresh-input split parsed at the source.
     Mock::given(method("POST"))
         .and(path("/responses"))
         .and(header("authorization", "Bearer REAL-KEY"))
@@ -240,16 +241,13 @@ async fn responses_ingress_normalizes_through_chat_request_v1() {
         .await
         .unwrap();
     let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    // Egress is normalized back into the Responses shape.
-    assert_eq!(value["object"], "response");
+    // The upstream's body is forwarded verbatim (transparent) — raw upstream counts, not a
+    // re-encoded fresh split.
     assert_eq!(value["status"], "completed");
     assert_eq!(value["output"][0]["type"], "message");
-    assert_eq!(value["output"][0]["content"][0]["type"], "output_text");
     assert_eq!(value["output"][0]["content"][0]["text"], "hello");
     assert_eq!(value["output"][1]["type"], "function_call");
-    assert_eq!(value["output"][1]["call_id"], "call_1");
-    assert_eq!(value["usage"]["input_tokens"], 5); // 7 - 2 cached
-    assert_eq!(value["usage"]["input_tokens_details"]["cached_tokens"], 2);
+    assert_eq!(value["usage"]["input_tokens"], 7); // verbatim upstream body
 
     // One usage event, attributed to the virtual key, routed through /v1/responses.
     let events = sink.events();
@@ -632,4 +630,81 @@ async fn neutral_identity_headers_flow_onto_the_usage_event() {
     assert_eq!(events[0].idempotency_key.as_deref(), Some("idem-123"));
     assert_eq!(events[0].trace_context.as_deref(), Some("00-abcabc-def-01"));
     assert_eq!(events[0].run_id.as_deref(), Some("run-9"));
+}
+
+#[tokio::test]
+async fn cross_family_ingress_routes_through_the_typed_translation_plane() {
+    // OpenAI ingress → an Anthropic upstream is CROSS-family, so the transparent plane does not
+    // apply: the proxy decodes to ChatRequestV1, the typed Anthropic provider re-encodes and POSTs
+    // /v1/messages, and the neutral response is re-encoded back into the OpenAI egress shape. This
+    // keeps the typed translation path covered now that same-family ingress goes transparent.
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(header("x-api-key", "REAL-KEY"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id":"msg_1","type":"message","role":"assistant","model":"claude-test",
+            "content":[{"type":"text","text":"translated"}],"stop_reason":"end_turn",
+            "usage":{"input_tokens":9,"output_tokens":4}
+        })))
+        .mount(&upstream)
+        .await;
+
+    let keys = KeyStore::new();
+    keys.insert(VirtualKey {
+        id: "vk_demo".into(),
+        subject_id: Some("alice".into()),
+        group_id: Some("platform".into()),
+        upstream_ref: "up1".into(),
+        ..Default::default()
+    });
+    let mut providers: HashMap<String, ProviderHandle> = HashMap::new();
+    providers.insert(
+        "up1".into(),
+        ProviderRuntime::new().anthropic(
+            upstream.uri(),
+            "REAL-KEY",
+            sandhi_providers::AnthropicAuthScheme::ApiKey,
+            Some(0),
+            None,
+            None,
+        ),
+    );
+    let sink = Arc::new(InMemorySink::new());
+    let state = Arc::new(ProxyState::new(
+        keys,
+        BudgetLedger::new(),
+        sink.clone(),
+        providers,
+        None,
+    ));
+
+    // The client speaks OpenAI Chat Completions; the resolved upstream is Anthropic.
+    let response = build_app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("authorization", "Bearer vk_demo")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"model":"claude-test","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    // Egress is TRANSLATED into the OpenAI shape — proof the typed plane ran, not passthrough.
+    assert_eq!(value["choices"][0]["message"]["content"], "translated");
+    // Metering still lands: one event, attributed, with the source counts.
+    let events = sink.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].provider, "anthropic");
+    assert_eq!(events[0].tokens_in, 9);
+    assert_eq!(events[0].tokens_out, 4);
 }
