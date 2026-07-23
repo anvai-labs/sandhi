@@ -143,6 +143,8 @@ async fn main() {
     state.alerts = alerts;
     state.admin_token = admin_token;
     state.public_url = public_url;
+    // ADR-0004 D4: dashboard read endpoints follow the admin token unless explicitly re-opened.
+    state.dashboard_public = std::env::var("SANDHI_DASHBOARD_PUBLIC").as_deref() == Ok("1");
     let state = Arc::new(state);
 
     let addr: SocketAddr = std::env::var("SANDHI_BIND")

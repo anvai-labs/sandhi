@@ -367,7 +367,28 @@
             "null"
           ]
         },
+        "idempotency_key": {
+          "description": "Caller-supplied key for at-most-once semantics across retries of one logical call.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parent_id": {
+          "description": "Parent step/run for nested agents, so an agent's cost tree is reconstructable.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "route": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run_id": {
+          "description": "Agent-run identifier; groups every call one run makes (cost-tree root).",
           "type": [
             "string",
             "null"
@@ -379,7 +400,21 @@
             "null"
           ]
         },
+        "step_id": {
+          "description": "Step within a run (plan/act/verify…); child dimension under `run_id`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "subject_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "trace_context": {
+          "description": "W3C `traceparent` value, linking the call into distributed traces.",
           "type": [
             "string",
             "null"

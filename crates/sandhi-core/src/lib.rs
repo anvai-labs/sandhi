@@ -25,7 +25,7 @@ pub use alerts::{
 };
 pub use budget::{Budget, BudgetExceeded, BudgetLedger, Policy, Window};
 pub use chat::*;
-pub use event::{Backend, UsageEvent};
+pub use event::{billable, Backend, UsageEvent};
 pub use keys::{KeyStore, VirtualKey};
 pub use sink::{InMemorySink, JsonlSink, Sink};
 pub use usage::{

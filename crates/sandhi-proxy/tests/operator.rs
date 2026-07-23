@@ -854,7 +854,8 @@ async fn alerts_list_create_ack_delete_endpoints() {
 
 /// The dashboard endpoints are unauthed (self-hosted trust); a request carries no admin token.
 fn dash_req(uri: &str) -> Request<Body> {
-    req("GET", uri, None, None)
+    // ADR-0004 D4: the dashboard read endpoints follow the admin bearer when a token is set.
+    req("GET", uri, Some(TOKEN), None)
 }
 
 #[tokio::test]
@@ -1034,19 +1035,86 @@ async fn dashboard_endpoints_404_when_store_unconfigured() {
     assert!(body_json(b).await["budgets"].as_array().unwrap().is_empty());
 }
 
+const DASHBOARD_URIS: [&str; 4] = [
+    "/dashboard/api/usage",
+    "/dashboard/api/keys",
+    "/dashboard/api/budgets",
+    "/dashboard/api/alerts",
+];
+
 #[tokio::test]
-async fn dashboard_endpoints_require_no_admin_token() {
-    // The dashboard is unauthed (self-hosted trust) — a request with no Authorization header works.
+async fn dashboard_endpoints_require_admin_token_when_configured() {
+    // ADR-0004 D4: with an admin token configured, the read endpoints serve subject/group
+    // aggregates only to the admin bearer — 401 without it, 401 with a wrong one.
     let app = build_app(admin_state());
-    for uri in [
-        "/dashboard/api/usage",
-        "/dashboard/api/keys",
-        "/dashboard/api/budgets",
-        "/dashboard/api/alerts",
-    ] {
+    for uri in DASHBOARD_URIS {
+        let r = app
+            .clone()
+            .oneshot(req("GET", uri, None, None))
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            StatusCode::UNAUTHORIZED,
+            "{uri} should 401 without token"
+        );
+        let r = app
+            .clone()
+            .oneshot(req("GET", uri, Some("wrong-token"), None))
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            StatusCode::UNAUTHORIZED,
+            "{uri} should 401 on bad token"
+        );
         let r = app.clone().oneshot(dash_req(uri)).await.unwrap();
-        assert_eq!(r.status(), StatusCode::OK, "{uri} should be unauthed");
+        assert_eq!(
+            r.status(),
+            StatusCode::OK,
+            "{uri} should serve the admin bearer"
+        );
     }
+}
+
+#[tokio::test]
+async fn dashboard_public_flag_restores_open_access() {
+    // SANDHI_DASHBOARD_PUBLIC=1 → the previous open, masked-only model (operator opt-in).
+    let mut state = Arc::into_inner(admin_state()).unwrap();
+    state.dashboard_public = true;
+    let app = build_app(Arc::new(state));
+    for uri in DASHBOARD_URIS {
+        let r = app
+            .clone()
+            .oneshot(req("GET", uri, None, None))
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            StatusCode::OK,
+            "{uri} should be open when public"
+        );
+    }
+}
+
+#[tokio::test]
+async fn dashboard_stays_open_without_admin_token() {
+    // No admin token configured → nothing to present; single-node dev trust (unchanged).
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let sink: Arc<dyn Sink> = store.clone();
+    let state = ProxyState::new(
+        KeyStore::new(),
+        BudgetLedger::new(),
+        sink,
+        HashMap::new(),
+        Some(store),
+    );
+    let app = build_app(Arc::new(state));
+    let r = app
+        .oneshot(req("GET", "/dashboard/api/budgets", None, None))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
 }
 
 // Silence unused import when an upstream body is unused.

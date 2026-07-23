@@ -153,9 +153,23 @@ pub(crate) fn require_admin(state: &ProxyState, headers: &HeaderMap) -> Result<(
         .and_then(|s| s.strip_prefix("Bearer "))
         .map(str::trim);
     match presented {
-        Some(t) if t == expected => Ok(()),
+        Some(t) if constant_time_eq(t.as_bytes(), expected.as_bytes()) => Ok(()),
         _ => Err(err(StatusCode::UNAUTHORIZED, "invalid admin token")),
     }
+}
+
+/// Constant-time byte comparison for the admin token (ADR-0004 D4): the accumulator visits
+/// every byte regardless of where the first mismatch is, so response timing does not leak a
+/// prefix-match oracle. Length is compared by folding it into the accumulator (token length
+/// is not a secret, but this keeps the shape branch-free).
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    let mut acc = u8::from(a.len() != b.len());
+    let max = a.len().max(b.len());
+    for i in 0..max {
+        // Out-of-range indexes fold in a constant; both slices are always walked to `max`.
+        acc |= a.get(i).copied().unwrap_or(0) ^ b.get(i).copied().unwrap_or(0);
+    }
+    acc == 0
 }
 
 fn err(status: StatusCode, msg: &str) -> Response {
@@ -884,4 +898,23 @@ pub fn rehydrate_alerts(store: &AlertStore) -> AlertRegistry {
         }
     }
     registry
+}
+
+#[cfg(test)]
+mod ct_tests {
+    use super::constant_time_eq;
+
+    #[test]
+    fn constant_time_eq_matches_equality_semantics() {
+        assert!(constant_time_eq(b"admin-secret", b"admin-secret"));
+        assert!(constant_time_eq(b"", b""));
+        // Same length, differing at the first / middle / last byte.
+        assert!(!constant_time_eq(b"admin-secret", b"bdmin-secret"));
+        assert!(!constant_time_eq(b"admin-secret", b"admin+secret"));
+        assert!(!constant_time_eq(b"admin-secret", b"admin-secreT"));
+        // Length mismatches, including prefix relationships.
+        assert!(!constant_time_eq(b"admin", b"admin-secret"));
+        assert!(!constant_time_eq(b"admin-secret", b"admin"));
+        assert!(!constant_time_eq(b"", b"x"));
+    }
 }
