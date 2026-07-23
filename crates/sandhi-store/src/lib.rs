@@ -15,7 +15,7 @@ use sandhi_core::{Backend, Sink, UsageEvent};
 use serde::Serialize;
 
 pub use alerts::{AlertRuleRecord, AlertStore, CreateAlertRequest};
-pub use ledger::{ReserveOutcome, SqliteLedger};
+pub use ledger::{BudgetRow, ReserveOutcome, SqliteLedger};
 pub use vault::{
     hash_secret, CredentialScheme, InMemoryVault, KeyringVault, SentinelPassVault, Vault,
     VaultEntry, VaultError, VaultStore,

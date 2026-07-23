@@ -31,6 +31,17 @@ pub enum ReserveOutcome {
     Denied(Denied),
 }
 
+/// A configured budget row — the durable cap + window + policy for a scope. Read back on startup so
+/// the operator's in-memory budget metadata (policy lookup, dashboard, alert thresholds) is
+/// rehydrated from the durable ledger rather than lost on restart (ADR-0005 D3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BudgetRow {
+    pub scope: String,
+    pub limit: Option<u64>,
+    pub window: Window,
+    pub policy: Policy,
+}
+
 /// A durable enforcement ledger backed by a SQLite connection. `&mut self` on the mutating methods
 /// gives exclusive access (the proxy shares one behind a `Mutex`), so no interior lock is needed.
 pub struct SqliteLedger {
@@ -154,15 +165,15 @@ impl SqliteLedger {
             params![scope, now_ts],
         )?;
 
-        let budget: Option<(Option<i64>, String)> = tx
+        let budget: Option<(Option<i64>, String, String)> = tx
             .query_row(
-                "SELECT limit_tokens, window FROM budget_limit WHERE scope = ?1",
+                "SELECT limit_tokens, window, policy FROM budget_limit WHERE scope = ?1",
                 [scope],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
 
-        if let Some((Some(limit), window)) = budget {
+        if let Some((Some(limit), window, policy)) = budget {
             // Spend is measured over the scope's current window (calendar-aligned); in-flight
             // reservations (unsettled ceilings) are always counted.
             let start = Self::window_start_ts(now, Window::parse(&window));
@@ -177,7 +188,11 @@ impl SqliteLedger {
                 "SELECT COALESCE(SUM(ceiling), 0) FROM budget_reservation WHERE scope = ?1 AND settled = 0",
                 scope,
             )?;
-            if spent + reserved + ceiling as i64 > limit {
+            // `Warn` is a **soft cap** (ADR-0005 D6): it never denies admission — the lease is still
+            // created below so spend keeps accruing for threshold alerts and the dashboard. Only
+            // `Block` hard-refuses a ceiling that would breach the cap.
+            if Policy::parse(&policy) == Policy::Block && spent + reserved + ceiling as i64 > limit
+            {
                 // Transaction rolls back on drop — nothing reserved.
                 return Ok(ReserveOutcome::Denied(Denied {
                     scope: scope.to_string(),
@@ -261,6 +276,28 @@ impl SqliteLedger {
             scope,
         )?
         .max(0) as u64)
+    }
+
+    /// Every configured budget (cap + window + policy), for rehydrating the operator's in-memory
+    /// budget metadata on startup (ADR-0005 D3). The durable spend/caps already survive a restart;
+    /// this recovers the policy/window/limit the dashboard + alert subsystem read.
+    pub fn list_budgets_durable(&self) -> rusqlite::Result<Vec<BudgetRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT scope, limit_tokens, window, policy FROM budget_limit ORDER BY scope",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let scope: String = row.get(0)?;
+            let limit: Option<i64> = row.get(1)?;
+            let window: String = row.get(2)?;
+            let policy: String = row.get(3)?;
+            Ok(BudgetRow {
+                scope,
+                limit: limit.map(|v| v.max(0) as u64),
+                window: Window::parse(&window),
+                policy: Policy::parse(&policy),
+            })
+        })?;
+        rows.collect()
     }
 }
 
@@ -466,6 +503,68 @@ mod tests {
         assert_eq!(view.spent("g"), 40);
         assert_eq!(view.available("g"), 60);
     }
+    #[test]
+    fn warn_policy_admits_over_cap_but_still_tracks_spend() {
+        // ADR-0005 D6: a `Warn` scope is a soft cap — reserve never denies (the lease is created so
+        // spend accrues for alerts), even past the configured limit. A `Block` scope with the same
+        // numbers would refuse.
+        let mut l = mem();
+        l.set_limit_durable("w", Some(100), Window::Total, Policy::Warn)
+            .unwrap();
+        let a = admit(&mut l, "w", 80);
+        l.settle_durable(a.id, 80).unwrap();
+        // 80 spent, cap 100 — a 60-ceiling call would breach it, but Warn admits anyway.
+        let b = match l.reserve_durable("w", 60, t0(), ttl()).unwrap() {
+            ReserveOutcome::Admitted(r) => r,
+            ReserveOutcome::Denied(d) => panic!("warn must not deny over cap: {d:?}"),
+        };
+        l.settle_durable(b.id, 60).unwrap();
+        assert_eq!(
+            l.spent_durable("w").unwrap(),
+            140,
+            "spend accrues past a warn cap"
+        );
+
+        // The same shape under Block hard-denies.
+        l.set_limit_durable("b", Some(100), Window::Total, Policy::Block)
+            .unwrap();
+        let c = admit(&mut l, "b", 80);
+        l.settle_durable(c.id, 80).unwrap();
+        assert!(
+            denied(&mut l, "b", 60),
+            "block refuses a ceiling over the cap"
+        );
+    }
+
+    #[test]
+    fn list_budgets_durable_round_trips_for_rehydration() {
+        let mut l = mem();
+        l.set_limit_durable("a", Some(1000), Window::Daily, Policy::Block)
+            .unwrap();
+        l.set_limit_durable("b", Some(500), Window::Total, Policy::Warn)
+            .unwrap();
+        let rows = l.list_budgets_durable().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0],
+            BudgetRow {
+                scope: "a".into(),
+                limit: Some(1000),
+                window: Window::Daily,
+                policy: Policy::Block,
+            }
+        );
+        assert_eq!(
+            rows[1],
+            BudgetRow {
+                scope: "b".into(),
+                limit: Some(500),
+                window: Window::Total,
+                policy: Policy::Warn,
+            }
+        );
+    }
+
     #[test]
     fn daily_window_excludes_prior_window_spend() {
         // Spend is measured over the current calendar window; an old settled reservation (before

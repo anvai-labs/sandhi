@@ -11,16 +11,16 @@ use tower::ServiceExt; // oneshot
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use sandhi_core::{Budget, BudgetLedger, InMemorySink, KeyStore, VirtualKey};
+use sandhi_core::{InMemorySink, KeyStore, Policy, VirtualKey, Window};
 use sandhi_providers::{
     ChatEventStream, ChatProvider, ProviderError, ProviderHandle, ProviderRuntime,
 };
-use sandhi_proxy::{build_app, ProxyState};
+use sandhi_proxy::{build_app, ProxyLedger, ProxyState};
 
 fn state_with(
     upstream_uri: String,
     sink: Arc<InMemorySink>,
-    ledger: BudgetLedger,
+    ledger: ProxyLedger,
 ) -> Arc<ProxyState> {
     let keys = KeyStore::new();
     keys.insert(VirtualKey {
@@ -63,7 +63,7 @@ async fn complete_attributes_meters_and_records_budget() {
         .await;
 
     let sink = Arc::new(InMemorySink::new());
-    let state = state_with(upstream.uri(), sink.clone(), BudgetLedger::new());
+    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
     let app = build_app(state.clone());
 
     let req = Request::builder()
@@ -136,7 +136,7 @@ async fn anthropic_ingress_uses_the_same_typed_runtime_and_meter() {
     let sink = Arc::new(InMemorySink::new());
     let state = Arc::new(ProxyState::new(
         keys,
-        BudgetLedger::new(),
+        ProxyLedger::in_memory(),
         sink.clone(),
         providers,
         None,
@@ -216,7 +216,7 @@ async fn responses_ingress_same_family_forwards_transparently() {
     let sink = Arc::new(InMemorySink::new());
     let state = Arc::new(ProxyState::new(
         keys,
-        BudgetLedger::new(),
+        ProxyLedger::in_memory(),
         sink.clone(),
         providers,
         None,
@@ -265,7 +265,7 @@ async fn unknown_virtual_key_is_401() {
     let state = state_with(
         "http://127.0.0.1:1".into(),
         sink.clone(),
-        BudgetLedger::new(),
+        ProxyLedger::in_memory(),
     );
     let app = build_app(state);
 
@@ -284,9 +284,11 @@ async fn unknown_virtual_key_is_401() {
 #[tokio::test]
 async fn exhausted_budget_is_429_before_calling_upstream() {
     let sink = Arc::new(InMemorySink::new());
-    let mut ledger = BudgetLedger::new();
-    ledger.set_limit("group:platform", Budget::tokens(10));
-    ledger.record("group:platform", 10); // already at the cap
+    let mut ledger = ProxyLedger::in_memory();
+    // A tiny hard cap: the conservative ceiling of any real request (input estimate + the default
+    // output ceiling) can't fit, so admission is refused before the upstream is ever called
+    // (ADR-0005 D1 — the ceiling is the gate, not a lower-bound estimate).
+    ledger.set_budget("group:platform", Some(10), Window::Total, Policy::Block);
 
     // An upstream with no mounts — reaching it would 404; asserting 429 proves we never do.
     let upstream = MockServer::start().await;
@@ -325,7 +327,7 @@ async fn streaming_passes_through_and_emits_usage() {
         .await;
 
     let sink = Arc::new(InMemorySink::new());
-    let state = state_with(upstream.uri(), sink.clone(), BudgetLedger::new());
+    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
     let app = build_app(state.clone());
 
     let req = Request::builder()
@@ -372,7 +374,7 @@ async fn dashboard_reports_aggregates_from_the_store() {
 
     let state = Arc::new(ProxyState::new(
         KeyStore::new(),
-        BudgetLedger::new(),
+        ProxyLedger::in_memory(),
         store.clone(),
         HashMap::new(),
         Some(store.clone()),
@@ -452,7 +454,7 @@ async fn upstream_timeout_maps_to_504() {
     providers.insert("up1".into(), ProviderHandle::new(Arc::new(AlwaysTimeout)));
     let state = Arc::new(ProxyState::new(
         keys,
-        BudgetLedger::new(),
+        ProxyLedger::in_memory(),
         sink.clone(),
         providers,
         None,
@@ -499,7 +501,7 @@ data: [DONE]\n\n";
         .await;
 
     let sink = Arc::new(InMemorySink::new());
-    let state = state_with(upstream.uri(), sink.clone(), BudgetLedger::new());
+    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
     let app = build_app(state);
 
     let req = Request::builder()
@@ -548,8 +550,8 @@ async fn ceiling_reservation_rejects_unbounded_but_admits_bounded_output() {
         .mount(&upstream)
         .await;
 
-    let mut ledger = BudgetLedger::new();
-    ledger.set_limit("group:platform", Budget::tokens(100));
+    let mut ledger = ProxyLedger::in_memory();
+    ledger.set_budget("group:platform", Some(100), Window::Total, Policy::Block);
     let sink = Arc::new(InMemorySink::new());
     let state = state_with(upstream.uri(), sink.clone(), ledger);
     let app = build_app(state);
@@ -609,7 +611,7 @@ async fn neutral_identity_headers_flow_onto_the_usage_event() {
         .await;
 
     let sink = Arc::new(InMemorySink::new());
-    let state = state_with(upstream.uri(), sink.clone(), BudgetLedger::new());
+    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
     let app = build_app(state);
 
     let req = Request::builder()
@@ -673,7 +675,7 @@ async fn cross_family_ingress_routes_through_the_typed_translation_plane() {
     let sink = Arc::new(InMemorySink::new());
     let state = Arc::new(ProxyState::new(
         keys,
-        BudgetLedger::new(),
+        ProxyLedger::in_memory(),
         sink.clone(),
         providers,
         None,
