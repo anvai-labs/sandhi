@@ -115,13 +115,12 @@ the binding facades (the `codegen-drift` gate enforces this). The Anthropic enco
 message-level breakpoints the way it already does for system/tool blocks
 (`anthropic_typed.rs:113-125,148-159`). Other families ignore the field.
 
-### Step 5 — (optional, from ADR-0004 D4) tighten the estimate and the billable definition
+### Step 5 — MOVED to workstream W2 (TD-0004 §Phasing converged plan, 2026-07-23)
 
-Independent of planes but adjacent: the reservation estimate is `bytes/4`
-(`lib.rs:505-518`), and the budget bills `tokens_in + tokens_out` while the event meters the
-cache split. Pick one `billable()` definition in `sandhi-core` and use it in both the ledger and
-the event; optionally swap the byte heuristic for a model-aware token count on the reserve path.
-Not required for the plane split, but cheap to land alongside.
+The single-`billable()` definition and reserve-estimate tightening are metering-semantics
+changes that belong with the durable-ledger work (ADR-0004 D4 remnants), not the plane split.
+They are owned by workstream **W2** in TD-0004's converged execution plan and dropped from this
+TD's scope; this TD owns Steps 1–4 only (= workstream **W3**).
 
 ## Testing
 

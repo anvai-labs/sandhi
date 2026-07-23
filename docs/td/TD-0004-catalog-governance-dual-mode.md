@@ -178,6 +178,11 @@ the catalog is the primary source.
 
 ### Threading dual mode — typed-interface unification (the core mechanism)
 
+> **Amended 2026-07-23 (see §Phasing):** the 2026-07-23 code audit revised this sketch. The
+> unification seam is the shared *request-path pipeline* in `sandhi-core` (W1), not five store
+> traits; traits are admitted only where impls genuinely differ (the existing `Sink`, plus a
+> durable-store seam in W2/W4). The sketch below is kept for the record of the original idea.
+
 One trait set in `sandhi-core`, two implementations each. Victor's delegation code is
 **mode-agnostic** — it calls the same interface whether wired to FFI (in-process subset) or the
 proxy (full set):
@@ -201,20 +206,64 @@ pub trait MeterSink { fn emit(&self, ev: UsageEvent); }   // callback/no-op | SQ
 This is the answer to "how do catalog + governance + billing thread through the dual usage": **the
 surface is the interface; the modes differ only in which implementations are wired.**
 
-## Phasing (each default-off / non-breaking; ships behind the next Sandhi minor)
+## Phasing — CONVERGED EXECUTION PLAN (revised 2026-07-23, supersedes the original B–D sketch)
 
-- **Phase A — Catalog data (the reversal, smallest + highest clarity):** add `MODEL_CATALOG` +
-  `ModelSpecV1` to `sandhi-core`; expose `provider_models_json` in both bindings + `GET /catalog/models`
-  in the proxy; seed with the current Anthropic/OpenAI/Gemini lineups; amend `catalog.rs`, Victor
-  ADR-018 (L52-53), FEP-0020 (L247-249). Victor `list_models` consumes it (#632 SDK path → fallback).
-- **Phase B — Typed-interface unification (no behavior change):** define the trait contracts above;
-  refactor the existing `KeyStore`/`BudgetLedger`/`MeterSink`/`MeteredProvider` behind them; wire the
-  in-memory (FFI) and SQLite (proxy) impls; converge the two metering paths into one.
-- **Phase C — Close the dual-mode gaps:** durable budgets (the unimplemented TD-0003 `budget` table);
-  hash-capable in-process vkey resolution; **enforce** rate limits; the in-process governance surface
-  via an **injected-store** option; align CLI vs binding transports.
-- **Phase D — Policy-as-data:** declarative stateless policy evaluation (model allowlists, deterministic
-  guardrails) running identically in both modes; stateful/LLM-judge enforcement stays proxy-side.
+> **Reconciliation note.** The original Phase B–D sketch overlapped TD-0005 (declarative policy
+> engine) and TD-0006 (two-plane transparent metering), both drafted after this TD: Phase D *is*
+> TD-0005; Phase C's durable budgets *are* ADR-0004 D3 / TD-0005 P2; Phase B's metering
+> convergence overlaps TD-0006 Step 5. A code audit (2026-07-23, post TD-0003 P1/P2/P4) also
+> showed the five-trait sketch above misdiagnoses the seam: the asymmetries do not come from
+> missing *store* abstractions — they come from the **request-path pipeline (resolve key → gate →
+> reserve → dispatch → reconcile → alert → emit) being written twice** (proxy
+> `RequestAccounting` vs binding `Gateway.record_and_build`) with drift, plus a third dormant
+> path (`MeteredProvider`). The revised plan unifies the *pipeline logic in `sandhi-core`* and
+> admits traits only where implementations genuinely differ (durable store presence). Each item
+> below names its **single owning doc** — no item is specified twice.
+
+- **Phase A — Catalog data: DONE** (#44 data + surface, #49 compat seeding + Node parity;
+  consumed by Victor #634/#635/#636). Owner: this TD.
+
+- **Workstream W1 — Shared governance core (owner: this TD).** Move the decision/accounting
+  logic both modes must share into `sandhi-core`, then point both call sites at it:
+  - **W1a — parity primitives (no new concepts):** secret resolution (`exact → SHA-256 hash →
+    expiry`) moves from `sandhi-proxy::resolve_virtual_key` into `sandhi-core::keys` so the
+    bindings stop being exact-string-only (closes asymmetry #6); the bindings gain the
+    `permits_model` gate (closes the #47 proxy-only gap), windowed/warn budgets
+    (`set_budget` currently exposes total/block only), and reservation; `UsageEvent`
+    construction converges on one core builder used by proxy `usage_event()` and binding
+    `record_and_build` (closes the live half of asymmetry #5); binding emission goes through
+    the existing `Sink` trait (`InMemorySink` + a `JsonlSink`) instead of a bespoke
+    `Vec`+JSONL. `MeteredProvider` stays the adapter-layer decorator for raw-`Provider`
+    hosts — documented as such, not a third request path.
+  - **W1b — the policy brain:** `PolicyDocumentV1` + pure `PolicyEngine::evaluate` per
+    **TD-0005 P1 (owner: TD-0005)** — the engine folds allowlist/expiry/budget/rate-limit into
+    one decision; proxy `handle()` and binding `Gateway` both call it (two front doors, one
+    brain). The W1a primitives are its inputs (`LedgerView`, resolved key).
+
+- **Workstream W2 — Durable/shared substrate (owner: TD-0005 P2 ≡ ADR-0004 D3).** The
+  `budgets` table in `sandhi-store` (persist `BudgetSpec`, rehydrate window spend from
+  `usage_events` on startup — the re-derivation `budget.rs` promises but does not implement);
+  **enforce** `rate_limit_per_min` (closes asymmetry #4) as a windowed counter consulted by the
+  engine; ADR-0004 D4 remnants (constant-time admin-token compare, one `billable()` definition
+  shared by ledger + event, dashboard access gating). Single-node SQLite is sufficient;
+  multi-replica HA stays an explicit non-goal until a real deployment needs it.
+
+- **Workstream W3 — Two-plane proxy (owner: TD-0006).** Raw `ProviderHandle` + plane selector +
+  golden byte-identity tests (Steps 1–2), Gemini/Cohere ingress (Step 3), first-class
+  `cache_control` (Step 4). Orthogonal to W1/W2 except Step 5 (billable), which is folded into
+  W2 above and dropped from TD-0006's scope.
+
+- **Workstream W4 — In-process governance surface + distribution (owner: this TD for the
+  store/CLI seam; TD-0005 P3/P4 for policy distribution + guest).** The injected-store option
+  for FFI hosts (an off-by-default `durable` cargo feature or host-supplied SQLite path —
+  resolves asymmetry #1 without bloating default wheels), `sandhi` CLI `--db` direct mode
+  (closes asymmetry #8), then `GET /policy/bundle` + signing + SDK pull/cache and the guest
+  policy per TD-0005.
+
+**Sequencing:** W1a → W1b → W2 → W3 (W3 may run parallel to W2) → W4. Each lands as its own
+non-breaking PR train into develop; the release after W1–W3 is the meaningful minor
+("byte-exact two-plane proxy, curated catalog, one policy brain in both modes, durable
+budgets").
 
 ## Acceptance criteria
 
