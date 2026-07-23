@@ -4,6 +4,7 @@
 //! so the language bindings' wheels never pull in bundled SQLite.
 
 pub mod alerts;
+pub mod ledger;
 pub mod vault;
 pub mod vkeys;
 
@@ -14,6 +15,7 @@ use sandhi_core::{Backend, Sink, UsageEvent};
 use serde::Serialize;
 
 pub use alerts::{AlertRuleRecord, AlertStore, CreateAlertRequest};
+pub use ledger::{ReserveOutcome, SqliteLedger};
 pub use vault::{
     hash_secret, CredentialScheme, InMemoryVault, KeyringVault, SentinelPassVault, Vault,
     VaultEntry, VaultError, VaultStore,
