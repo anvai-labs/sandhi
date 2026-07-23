@@ -508,6 +508,7 @@ impl Gateway {
             subject_id: subject,
             group_id: group,
             upstream_ref: upstream,
+            ..Default::default()
         });
     }
 
@@ -637,10 +638,10 @@ impl Gateway {
         route: Option<String>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let mut inner = self.inner.lock().unwrap();
-        let vk =
-            inner.keys.resolve(virtual_key).cloned().ok_or_else(|| {
-                PyKeyError::new_err(format!("unknown virtual key: {virtual_key}"))
-            })?;
+        let vk = inner
+            .keys
+            .resolve(virtual_key)
+            .ok_or_else(|| PyKeyError::new_err(format!("unknown virtual key: {virtual_key}")))?;
 
         let event = parsed.apply(
             UsageEvent::new(

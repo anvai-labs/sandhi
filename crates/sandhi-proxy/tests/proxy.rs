@@ -3,7 +3,7 @@
 //! response back, and emits a usage event. No live API keys.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -22,12 +22,13 @@ fn state_with(
     sink: Arc<InMemorySink>,
     ledger: BudgetLedger,
 ) -> Arc<ProxyState> {
-    let mut keys = KeyStore::new();
+    let keys = KeyStore::new();
     keys.insert(VirtualKey {
         id: "vk_demo".into(),
         subject_id: Some("alice".into()),
         group_id: Some("platform".into()),
         upstream_ref: "up1".into(),
+        ..Default::default()
     });
     let mut providers: HashMap<String, ProviderHandle> = HashMap::new();
     providers.insert(
@@ -42,13 +43,7 @@ fn state_with(
             None,
         ),
     );
-    Arc::new(ProxyState {
-        keys,
-        ledger: Mutex::new(ledger),
-        sink,
-        providers,
-        store: None,
-    })
+    Arc::new(ProxyState::new(keys, ledger, sink, providers, None))
 }
 
 #[tokio::test]
@@ -115,12 +110,13 @@ async fn anthropic_ingress_uses_the_same_typed_runtime_and_meter() {
         .mount(&upstream)
         .await;
 
-    let mut keys = KeyStore::new();
+    let keys = KeyStore::new();
     keys.insert(VirtualKey {
         id: "vk_demo".into(),
         subject_id: Some("alice".into()),
         group_id: Some("platform".into()),
         upstream_ref: "up1".into(),
+        ..Default::default()
     });
     let mut providers = HashMap::new();
     providers.insert(
@@ -135,13 +131,13 @@ async fn anthropic_ingress_uses_the_same_typed_runtime_and_meter() {
         ),
     );
     let sink = Arc::new(InMemorySink::new());
-    let state = Arc::new(ProxyState {
+    let state = Arc::new(ProxyState::new(
         keys,
-        ledger: Mutex::new(BudgetLedger::new()),
-        sink: sink.clone(),
+        BudgetLedger::new(),
+        sink.clone(),
         providers,
-        store: None,
-    });
+        None,
+    ));
 
     let response = build_app(state.clone())
         .oneshot(
@@ -192,12 +188,13 @@ async fn responses_ingress_normalizes_through_chat_request_v1() {
         .mount(&upstream)
         .await;
 
-    let mut keys = KeyStore::new();
+    let keys = KeyStore::new();
     keys.insert(VirtualKey {
         id: "vk_demo".into(),
         subject_id: Some("alice".into()),
         group_id: Some("platform".into()),
         upstream_ref: "up1".into(),
+        ..Default::default()
     });
     let mut providers: HashMap<String, ProviderHandle> = HashMap::new();
     providers.insert(
@@ -213,13 +210,13 @@ async fn responses_ingress_normalizes_through_chat_request_v1() {
         ),
     );
     let sink = Arc::new(InMemorySink::new());
-    let state = Arc::new(ProxyState {
+    let state = Arc::new(ProxyState::new(
         keys,
-        ledger: Mutex::new(BudgetLedger::new()),
-        sink: sink.clone(),
+        BudgetLedger::new(),
+        sink.clone(),
         providers,
-        store: None,
-    });
+        None,
+    ));
 
     let response = build_app(state.clone())
         .oneshot(
@@ -371,13 +368,13 @@ async fn dashboard_reports_aggregates_from_the_store() {
     store.emit(&ev("alice", 100, 20));
     store.emit(&ev("bob", 50, 10));
 
-    let state = Arc::new(ProxyState {
-        keys: KeyStore::new(),
-        ledger: Mutex::new(BudgetLedger::new()),
-        sink: store.clone(),
-        providers: HashMap::new(),
-        store: Some(store.clone()),
-    });
+    let state = Arc::new(ProxyState::new(
+        KeyStore::new(),
+        BudgetLedger::new(),
+        store.clone(),
+        HashMap::new(),
+        Some(store.clone()),
+    ));
     let app = build_app(state);
 
     // JSON API reflects the persisted events.
@@ -441,22 +438,23 @@ impl ChatProvider for AlwaysTimeout {
 #[tokio::test]
 async fn upstream_timeout_maps_to_504() {
     let sink = Arc::new(InMemorySink::new());
-    let mut keys = KeyStore::new();
+    let keys = KeyStore::new();
     keys.insert(VirtualKey {
         id: "vk_demo".into(),
         subject_id: Some("alice".into()),
         group_id: Some("platform".into()),
         upstream_ref: "up1".into(),
+        ..Default::default()
     });
     let mut providers: HashMap<String, ProviderHandle> = HashMap::new();
     providers.insert("up1".into(), ProviderHandle::new(Arc::new(AlwaysTimeout)));
-    let state = Arc::new(ProxyState {
+    let state = Arc::new(ProxyState::new(
         keys,
-        ledger: Mutex::new(BudgetLedger::new()),
-        sink: sink.clone(),
+        BudgetLedger::new(),
+        sink.clone(),
         providers,
-        store: None,
-    });
+        None,
+    ));
     let app = build_app(state);
 
     let req = Request::builder()

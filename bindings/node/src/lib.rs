@@ -474,6 +474,7 @@ impl Gateway {
             subject_id: subject,
             group_id: group,
             upstream_ref: upstream.unwrap_or_default(),
+            ..Default::default()
         });
     }
 
@@ -586,7 +587,6 @@ impl Gateway {
         let vk = inner
             .keys
             .resolve(virtual_key)
-            .cloned()
             .ok_or_else(|| Error::from_reason(format!("unknown virtual key: {virtual_key}")))?;
 
         let event = parsed.apply(

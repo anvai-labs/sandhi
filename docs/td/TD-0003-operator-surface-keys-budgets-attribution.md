@@ -30,7 +30,16 @@ What is **missing** is the *operator surface*: there is no CLI, no key vault, no
 ## Components to add
 
 ### 1. Key vault (provider credentials)
-Sandhi stores real upstream provider credentials (API key, or OAuth refresh token) **encrypted at rest**. `sandhi keys add` provisions them; raw provider keys never leave Sandhi — clients only ever receive virtual keys. The vault resolves *provider → real credential* for the proxy's upstream calls. Storage: extend `sandhi-store` (a `vault` table: provider, label, scheme, secret_blob) with an encryption key from env/file.
+Sandhi stores real upstream provider credentials (API key, or OAuth refresh token) in a **proper secret store**, never as plaintext in the SQLite database. `sandhi keys add` provisions them; raw provider keys never leave Sandhi — clients only ever receive virtual keys. The vault resolves *provider → real credential* for the proxy's upstream calls.
+
+The concern is split:
+- **Metadata** (provider, label, scheme, base_url, created_at, status) is durably indexed in the `sandhi-store` `vault` SQLite table, so `list()` returns masked metadata without touching the secret backend.
+- **Secrets** are held by a pluggable `Vault` backend:
+  - `KeyringVault` (default) — the OS keychain via the Rust `keyring` crate (macOS Keychain / Linux Secret Service / Windows Credential Manager), service `sandhi`, account `<provider>:<label>`.
+  - `SentinelPassVault` — reads from the SentinelPass password manager over its CLI (`sentinelpass secret get …`), keeping the coupling loose (no `sentinelpass-core` path dependency). Read-only for now (the CLI exposes no write); native daemon IPC is a follow-up.
+  - `InMemoryVault` — process-local, for tests/demos.
+
+Selection is via `SANDHI_VAULT_BACKEND=keyring|sentinelpass` (default `keyring`). (An earlier draft proposed an AES/GCM `secret_blob` + `SANDHI_VAULT_KEY`; that was replaced by the OS keychain model — secrets belong in a real secret store, not a hand-rolled encrypted column.)
 
 ### 2. Virtual keys (sharing + scoping)
 `sandhi keys share` mints a virtual key (`vk_…`) bound to: a **subject** (user), a **group**, an upstream **provider/model allowlist**, a **budget scope**, an **expiry**, and an optional **rate limit**. The key is printed **once** and only a hash is stored (lookup, like the bearer-vk auth today) — never the plaintext. A vk presented to the proxy selects the real upstream credential (from the vault) and is the unit of attribution and budget enforcement.
@@ -71,7 +80,7 @@ Extend `/dashboard` to surface: virtual keys (list / masked), budgets (scopes, s
 
 ## Data model (additions)
 
-- `vault(provider, label, scheme, secret_blob, created_at)`
+- `vault(provider, label, scheme, base_url, created_at, status)` — **non-secret metadata only**; the secret lives in the active `Vault` backend (keychain / SentinelPass), keyed `service=sandhi, account=<provider>:<label>`.
 - `virtual_key(id, subject, group, upstream, models[], budget_scope, expires_at, rate_limit, secret_hash, created_at, revoked_at)`
 - `budget(scope, limit_tokens, window, policy, window_spent, window_reset_at)`
 - `alert(rule_id, scope, threshold_pct, channel, last_fired_at)`
@@ -79,7 +88,7 @@ Extend `/dashboard` to surface: virtual keys (list / masked), budgets (scopes, s
 
 ## Security
 
-- Provider keys encrypted at rest; vault encryption key from env file (KMS integration is a follow-up).
+- Provider keys held in the OS keychain (`keyring`) by default, or SentinelPass; only non-secret metadata is in SQLite. KMS / hosted-secret-manager integration is a follow-up at the commercial layer (AnvaiOps).
 - Virtual keys: store only a hash for lookup; print once; revoke by id; expire.
 - Admin API: separate admin token (never a virtual key); require TLS in deployments.
 - Append-only audit log for all key / budget / alert mutations.
@@ -101,7 +110,8 @@ Extend `/dashboard` to surface: virtual keys (list / masked), budgets (scopes, s
 
 ## Open questions
 
-- **CLI host:** Rust binary (in `sandhi-proxy/main.rs`) vs Python console script in the binding — recommend one Rust `sandhi` artifact + thin Python shim.
-- **Vault encryption:** local key file now, KMS (AnvaiOps) later?
+- **CLI host:** resolved — a single Rust `sandhi` binary (`crates/sandhi-proxy/src/cli.rs`) is a thin HTTP client to the admin API; no direct DB access, so it drives any running proxy. A thin Python console-script shim can wrap it later.
+- **Vault encryption:** resolved — secrets live in the OS keychain (`keyring`) by default, or SentinelPass; no hand-rolled encrypted blob. KMS / hosted-secret-manager is a follow-up at the commercial layer (AnvaiOps).
+- **SentinelPass IPC:** P1 shells out to the `sentinelpass secret get` CLI (loose coupling, no `sentinelpass-core` path dep); native daemon IPC (socket + `IpcMessage`) is a follow-up once a narrow contract is promoted.
 - **Alert channels:** webhook + log first; Slack/email later?
 - **Tenancy:** is one Sandhi deployment one tenant, or does it need tenant scoping (likely an AnvaiOps concern)?

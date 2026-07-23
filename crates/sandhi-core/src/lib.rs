@@ -38,12 +38,13 @@ mod flow_tests {
     #[test]
     fn shared_key_call_is_attributed_metered_and_budgeted() {
         // One shared upstream key fronts a per-user virtual key.
-        let mut keys = KeyStore::new();
+        let keys = KeyStore::new();
         keys.insert(VirtualKey {
             id: "vk_alice".into(),
             subject_id: Some("alice".into()),
             group_id: Some("platform".into()),
             upstream_ref: "anthropic:default".into(),
+            ..Default::default()
         });
 
         let mut ledger = BudgetLedger::new();
