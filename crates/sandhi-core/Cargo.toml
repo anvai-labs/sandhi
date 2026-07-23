@@ -11,3 +11,6 @@ rust-version.workspace = true
 schemars = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# TD-0003 P2: budget window boundaries + alert fire timestamps use wall-clock time
+# (formatting for emitting RFC 3339, parsing for cooldown comparisons).
+time = { version = "0.3", features = ["formatting", "parsing"] }

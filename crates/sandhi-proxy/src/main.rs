@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use sandhi_core::{BudgetLedger, InMemorySink, KeyStore, Sink, VirtualKey};
 use sandhi_providers::{AnthropicAuthScheme, ProviderHandle, ProviderRuntime};
-use sandhi_proxy::{serve, ProxyState};
-use sandhi_store::{SqliteStore, VaultStore, VirtualKeyStore};
+use sandhi_proxy::{rehydrate_alerts, serve, ProxyState};
+use sandhi_store::{AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
 
 #[tokio::main]
 async fn main() {
@@ -107,6 +107,23 @@ async fn main() {
             }
         });
 
+    // TD-0003 P2 alert rules: durable store + live registry (rehydrated from the store; webhook
+    // transport injected from this tokio runtime).
+    let (alert_store, alerts) = std::env::var("SANDHI_STORE")
+        .ok()
+        .and_then(|p| match AlertStore::open(&p) {
+            Ok(store) => {
+                eprintln!("sandhi-proxy: alert-rule store at {p}");
+                let registry = rehydrate_alerts(&store);
+                Some((Arc::new(store), Arc::new(std::sync::Mutex::new(registry))))
+            }
+            Err(e) => {
+                eprintln!("sandhi-proxy: could not open alert store at {p}: {e}");
+                None
+            }
+        })
+        .unzip();
+
     let sink: Arc<dyn Sink> = match &store {
         Some(s) => s.clone(),
         None => Arc::new(InMemorySink::new()),
@@ -122,6 +139,8 @@ async fn main() {
     let mut state = ProxyState::new(keys, BudgetLedger::new(), sink, providers, store);
     state.vault = vault;
     state.vkeys = vkeys;
+    state.alert_store = alert_store;
+    state.alerts = alerts;
     state.admin_token = admin_token;
     state.public_url = public_url;
     let state = Arc::new(state);

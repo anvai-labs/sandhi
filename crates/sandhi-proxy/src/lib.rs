@@ -10,7 +10,7 @@ pub mod operator;
 
 // Re-export the admin API request/response types for the `sandhi` CLI client + the startup
 // rehydration helpers used by the `sandhi-proxy` binary.
-pub use operator::{admin, build_provider_handle, rehydrate_live_keys};
+pub use operator::{admin, build_provider_handle, rehydrate_alerts, rehydrate_live_keys};
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -27,11 +27,11 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 
 use sandhi_core::{
-    Backend, BudgetLedger, ChatRequestV1, KeyStore, RequestMetadataV1, Sink, UsageCompleteness,
-    UsageEvent, UsageV2, VirtualKey,
+    AlertRegistry, Backend, BudgetLedger, ChatRequestV1, KeyStore, RequestMetadataV1, Sink,
+    UsageCompleteness, UsageEvent, UsageV2, VirtualKey,
 };
 use sandhi_providers::{ProviderError, ProviderHandle, ProviderRuntime};
-use sandhi_store::{hash_secret, SqliteStore, VaultStore, VirtualKeyStore};
+use sandhi_store::{hash_secret, AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
 
 use codec::{decode_request, encode_response, encode_stream_event, IngressDialect};
 pub use operator::BudgetSpec;
@@ -63,6 +63,11 @@ pub struct ProxyState {
     /// The externally-reachable base URL shared with minted-key callers (e.g.
     /// `http://localhost:8787`).
     pub public_url: String,
+    // --- TD-0003 P2 budget depth + alerts ---
+    /// Live alert-rule registry + dedup (the evaluation engine). `None` when alerts are off.
+    pub alerts: Option<Arc<Mutex<AlertRegistry>>>,
+    /// Durable alert-rule store (rules + last_fired_at + ack), backs `/admin/alerts`.
+    pub alert_store: Option<Arc<AlertStore>>,
 }
 
 impl ProxyState {
@@ -88,6 +93,8 @@ impl ProxyState {
             admin_token: None,
             budgets: Mutex::new(HashMap::new()),
             public_url: "http://localhost:8787".into(),
+            alerts: None,
+            alert_store: None,
         }
     }
 }
@@ -118,6 +125,13 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         )
         .route("/admin/budget/usage", get(operator::budget_usage))
         .route("/admin/usage", get(operator::usage))
+        // TD-0003 P2 alert rules.
+        .route(
+            "/admin/alerts",
+            post(operator::create_alert).get(operator::list_alerts),
+        )
+        .route("/admin/alerts/:id/ack", post(operator::ack_alert))
+        .route("/admin/alerts/:id", delete(operator::delete_alert))
         .with_state(state)
 }
 
@@ -373,6 +387,23 @@ impl RequestAccounting {
         self.outcome = outcome;
     }
 
+    /// Evaluate threshold alerts against the reconciled spend. Best-effort: any failure (registry
+    /// poisoned, store unavailable) is logged and dropped — never propagated to the caller.
+    fn fire_alerts(&self, spent: u64, limit: Option<u64>) {
+        let Some(registry) = &self.state.alerts else {
+            return;
+        };
+        let fired = match registry.lock() {
+            Ok(mut reg) => reg.evaluate(&self.scope, spent, limit),
+            Err(_) => return,
+        };
+        if let Some(store) = &self.state.alert_store {
+            for alert in &fired {
+                let _ = store.mark_fired(&alert.rule_id);
+            }
+        }
+    }
+
     fn finalize(&mut self) {
         if self.finalized {
             return;
@@ -391,12 +422,23 @@ impl RequestAccounting {
         } else {
             0
         };
+        // Reconcile the reservation against the measured terminal usage, and capture the
+        // post-reconcile spent + limit so the alert subsystem can evaluate thresholds.
+        let mut alert_input: Option<(u64, Option<u64>)> = None;
         if let Ok(mut ledger) = self.state.ledger.lock() {
             if measured {
                 ledger.reconcile(&self.scope, self.reserved, actual);
+                let spent = ledger.spent(&self.scope);
+                let limit = ledger.limit_of(&self.scope);
+                alert_input = Some((spent, limit));
             } else {
                 ledger.release(&self.scope, self.reserved);
             }
+        }
+        // P2: evaluate threshold alerts against the reconciled spend (best-effort — never breaks
+        // the request). Persists last_fired_at for restart-surviving dedup.
+        if let Some((spent, limit)) = alert_input {
+            self.fire_alerts(spent, limit);
         }
         self.state.sink.emit(&usage_event(
             &self.provider,

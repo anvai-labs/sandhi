@@ -1,4 +1,4 @@
-//! TD-0003 P1 operator surface — the admin REST API.
+//! TD-0003 operator surface — the admin REST API (P1 + P2).
 //!
 //! Routes (authed by an **admin token** distinct from virtual keys):
 //! - `POST /admin/keys` / `GET /admin/keys` / `DELETE /admin/keys/{provider}/{label}` — provider
@@ -6,13 +6,17 @@
 //! - `POST /admin/keys/share` / `GET /admin/keys/virtual` / `DELETE /admin/vkeys/{id}` — mint /
 //!   list / revoke scoped virtual keys (secret printed once, hash stored).
 //! - `POST /admin/budget` / `GET /admin/budget` / `GET /admin/budget/usage?scope=` — neutral-token
-//!   budgets over the existing [`BudgetLedger`].
+//!   budgets (P2: window + policy + optional alert thresholds) over the [`BudgetLedger`].
+//! - `GET /admin/alerts` / `POST /admin/alerts` / `POST /admin/alerts/{id}/ack` /
+//!   `DELETE /admin/alerts/{id}` — threshold alert rules (P2).
 //! - `GET /admin/usage?by=…&since=…` — attribution (wraps [`SqliteStore`] aggregates).
 //!
-//! Measure-vs-price boundary: budgets are neutral tokens; no dollars/SKU/tier anywhere.
+//! Measure-vs-price boundary: budgets + alerts are neutral tokens / percentages; no dollars /
+//! SKU / tier anywhere.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -20,11 +24,17 @@ use axum::response::{IntoResponse, Json, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use sandhi_core::{Budget, BudgetLedger, KeyStore, VirtualKey};
+use sandhi_core::{
+    Alert, AlertChannel, AlertRegistry, Budget, BudgetLedger, KeyStore, Policy, VirtualKey,
+    WebhookSender, Window,
+};
 use sandhi_providers::{
     AnthropicAuthScheme, GeminiAuthScheme, ProviderFamily, ProviderHandle, ProviderRuntime,
 };
-use sandhi_store::{CredentialScheme, VaultEntry, VaultError, VirtualKeyRecord, VirtualKeyStore};
+use sandhi_store::{
+    AlertRuleRecord, AlertStore, CreateAlertRequest, CredentialScheme, VaultEntry, VaultError,
+    VirtualKeyRecord, VirtualKeyStore,
+};
 
 use crate::ProxyState;
 
@@ -59,10 +69,26 @@ pub mod admin {
     pub struct SetBudgetRequest {
         pub scope: String,
         pub limit_tokens: u64,
-        /// `daily` / `monthly` / `total` (window refinement is P2; P1 stores + enforces `total`).
+        /// `daily` / `monthly` / `total` (P2). Defaults to `total`.
         pub window: Option<String>,
-        /// `block` / `warn` (warn policy is P2; P1 enforces block).
+        /// `block` / `warn` (P2). Defaults to `block`.
         pub policy: Option<String>,
+        /// Optional threshold percentages (0–100) that create alert rules for this scope (P2).
+        /// Each value creates a `log`-channel rule; a webhook URL may be configured separately via
+        /// `/admin/alerts`.
+        pub alert_thresholds: Option<Vec<u8>>,
+    }
+
+    /// `POST /admin/alerts` — create a threshold alert rule (P2).
+    #[derive(Debug, Clone, Deserialize)]
+    pub struct CreateAlertRequest {
+        pub scope: String,
+        pub threshold_pct: u8,
+        /// `log` (default) or `webhook:<url>`.
+        #[allow(clippy::option_option)]
+        pub channel: Option<Option<String>>,
+        /// Convenience: when set, builds a `webhook:<this_url>` channel.
+        pub webhook_url: Option<String>,
     }
 
     /// CLI-side: which dimension to aggregate usage by.
@@ -467,7 +493,7 @@ pub(crate) async fn revoke_virtual_key(
     Json(json!({ "revoked": revoked })).into_response()
 }
 
-/// `POST /admin/budget` — set a neutral-token budget on a scope.
+/// `POST /admin/budget` — set a neutral-token budget on a scope (P2: window + policy + alerts).
 pub(crate) async fn set_budget(
     State(state): State<Arc<ProxyState>>,
     headers: HeaderMap,
@@ -483,11 +509,24 @@ pub(crate) async fn set_budget(
         policy: req.policy.unwrap_or_else(|| "block".into()),
     };
     apply_budget(&state.ledger, &state.budgets, &spec);
+
+    // P2: optional threshold percentages create alert rules for this scope.
+    let mut created_alerts: Vec<Value> = Vec::new();
+    if let Some(thresholds) = &req.alert_thresholds {
+        for &pct in thresholds {
+            if let Some(alert) = create_alert_for_scope(&state, &req.scope, pct, AlertChannel::Log)
+            {
+                created_alerts.push(alert_rule_response(&alert));
+            }
+        }
+    }
+
     Json(json!({
         "scope": spec.scope,
         "limit_tokens": spec.limit_tokens,
         "window": spec.window,
         "policy": spec.policy,
+        "alerts_created": created_alerts,
     }))
     .into_response()
 }
@@ -610,15 +649,200 @@ fn apply_budget(
     budgets: &Mutex<HashMap<String, BudgetSpec>>,
     spec: &BudgetSpec,
 ) {
-    // P1 enforces the `block` policy over the existing ledger (window + warn are P2).
-    ledger
-        .lock()
-        .expect("ledger poisoned")
-        .set_limit(spec.scope.clone(), Budget::tokens(spec.limit_tokens));
+    // P2: carry the window + policy into the live ledger's Budget.
+    let window = Window::parse(&spec.window);
+    let policy = Policy::parse(&spec.policy);
+    ledger.lock().expect("ledger poisoned").set_limit(
+        spec.scope.clone(),
+        Budget::with(spec.limit_tokens, window, policy),
+    );
     budgets
         .lock()
         .expect("budgets poisoned")
         .insert(spec.scope.clone(), spec.clone());
+}
+
+fn alert_rule_response(rec: &AlertRuleRecord) -> Value {
+    json!({
+        "id": rec.id,
+        "scope": rec.scope,
+        "threshold_pct": rec.threshold_pct,
+        "channel": rec.channel,
+        "created_at": rec.created_at,
+        "last_fired_at": rec.last_fired_at,
+        "acked_at": rec.acked_at,
+    })
+}
+
+/// Persist a new alert rule + mirror it into the live registry. Returns the record on success.
+fn create_alert_for_scope(
+    state: &ProxyState,
+    scope: &str,
+    threshold_pct: u8,
+    channel: AlertChannel,
+) -> Option<AlertRuleRecord> {
+    let store = state.alert_store.clone()?;
+    let record = store
+        .create(CreateAlertRequest {
+            scope: scope.into(),
+            threshold_pct,
+            channel: channel.clone(),
+        })
+        .ok()?;
+    if let Some(registry) = &state.alerts {
+        if let Ok(mut reg) = registry.lock() {
+            reg.add_rule(record.to_rule());
+        }
+    }
+    Some(record)
+}
+
+// --- Alerts (P2) ------------------------------------------------------------
+
+/// `GET /admin/alerts?scope=…` — list alert rules (optionally filtered by scope).
+pub(crate) async fn list_alerts(
+    State(state): State<Arc<ProxyState>>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    if let Err(r) = require_admin(&state, &headers) {
+        return r;
+    }
+    let Some(store) = state.alert_store.clone() else {
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "alert store not configured (set SANDHI_STORE)",
+        );
+    };
+    let records = match params.get("scope") {
+        Some(scope) => store.list_by_scope(scope).unwrap_or_default(),
+        None => store.list().unwrap_or_default(),
+    };
+    Json(json!({ "alerts": records.iter().map(alert_rule_response).collect::<Vec<_>>() }))
+        .into_response()
+}
+
+/// `POST /admin/alerts` — create a threshold alert rule.
+pub(crate) async fn create_alert(
+    State(state): State<Arc<ProxyState>>,
+    headers: HeaderMap,
+    Json(req): Json<admin::CreateAlertRequest>,
+) -> Response {
+    if let Err(r) = require_admin(&state, &headers) {
+        return r;
+    }
+    let channel = if let Some(url) = req.webhook_url.as_deref() {
+        AlertChannel::Webhook {
+            url: url.to_string(),
+        }
+    } else {
+        req.channel
+            .flatten()
+            .as_deref()
+            .map(AlertChannel::parse)
+            .unwrap_or(AlertChannel::Log)
+    };
+    match create_alert_for_scope(&state, &req.scope, req.threshold_pct, channel) {
+        Some(rec) => (StatusCode::CREATED, Json(alert_rule_response(&rec))).into_response(),
+        None => err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "alert store not configured (set SANDHI_STORE)",
+        ),
+    }
+}
+
+/// `POST /admin/alerts/{id}/ack` — acknowledge a fired alert.
+pub(crate) async fn ack_alert(
+    State(state): State<Arc<ProxyState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if let Err(r) = require_admin(&state, &headers) {
+        return r;
+    }
+    let Some(store) = state.alert_store.clone() else {
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "alert store not configured",
+        );
+    };
+    match store.ack(&id) {
+        Ok(acked) => Json(json!({ "acked": acked })).into_response(),
+        Err(e) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("ack failed: {e}"),
+        ),
+    }
+}
+
+/// `DELETE /admin/alerts/{id}` — delete an alert rule.
+pub(crate) async fn delete_alert(
+    State(state): State<Arc<ProxyState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if let Err(r) = require_admin(&state, &headers) {
+        return r;
+    }
+    let Some(store) = state.alert_store.clone() else {
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "alert store not configured",
+        );
+    };
+    let deleted = store.delete(&id).unwrap_or(false);
+    if deleted {
+        if let Some(registry) = &state.alerts {
+            if let Ok(mut reg) = registry.lock() {
+                reg.remove_rule(&id);
+            }
+        }
+    }
+    Json(json!({ "deleted": deleted })).into_response()
+}
+
+/// A best-effort, non-blocking webhook transport: spawns the POST onto the tokio runtime so a slow
+/// or failing endpoint can never block a request. Falls back to `None` when no runtime is active
+/// (the registry then degrades webhook rules to log-only).
+pub(crate) struct TokioWebhookSender {
+    client: reqwest::Client,
+    handle: tokio::runtime::Handle,
+}
+
+impl TokioWebhookSender {
+    /// Capture the current tokio runtime handle. `None` when called outside a runtime.
+    pub(crate) fn new() -> Option<Self> {
+        let handle = tokio::runtime::Handle::try_current().ok()?;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .ok()?;
+        Some(Self { client, handle })
+    }
+}
+
+impl WebhookSender for TokioWebhookSender {
+    fn send(&self, url: &str, alert: &Alert) {
+        // A webhook failure must never break the request (TD-0003 P2, best-effort contract).
+        let url = match url.parse::<reqwest::Url>() {
+            Ok(u) => u,
+            Err(e) => {
+                eprintln!("sandhi-proxy: bad webhook url {url}: {e}");
+                return;
+            }
+        };
+        let client = self.client.clone();
+        let payload = serde_json::to_value(alert).unwrap_or_else(|_| json!({}));
+        self.handle.spawn(async move {
+            match client.post(url).json(&payload).send().await {
+                Ok(r) if !r.status().is_success() => {
+                    eprintln!("sandhi-proxy: webhook returned {}", r.status());
+                }
+                Err(e) => eprintln!("sandhi-proxy: webhook failed: {e}"),
+                _ => {}
+            }
+        });
+    }
 }
 
 /// Rehydrate the live [`KeyStore`] from a durable [`VirtualKeyStore`] (called on startup).
@@ -639,4 +863,23 @@ pub fn rehydrate_live_keys(keys: &KeyStore, vkeys: &VirtualKeyStore) {
         };
         keys.insert_keyed(rec.secret_hash, vk);
     }
+}
+
+/// Build the live [`AlertRegistry`] from a durable [`AlertStore`] (called on startup). Loads every
+/// persisted rule + its `last_fired_at` so dedup survives restarts, and injects the tokio-backed
+/// webhook transport when a runtime is active.
+pub fn rehydrate_alerts(store: &AlertStore) -> AlertRegistry {
+    use sandhi_core::{NoopWebhookSender, DEFAULT_COOLDOWN_SECS};
+    let sender: Box<dyn WebhookSender> = match TokioWebhookSender::new() {
+        Some(s) => Box::new(s),
+        None => Box::new(NoopWebhookSender),
+    };
+    let mut registry = AlertRegistry::new(DEFAULT_COOLDOWN_SECS, sender);
+    if let Ok(records) = store.list() {
+        for rec in records {
+            registry.set_last_fired_at(&rec.scope, &rec.id, rec.last_fired_at.as_deref());
+            registry.add_rule(rec.to_rule());
+        }
+    }
+    registry
 }
