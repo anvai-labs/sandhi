@@ -32,6 +32,31 @@ def test_contract_discovery_and_schemas():
     assert schema["title"] == "ChatRequestV1"
 
 
+def test_catalog_serves_curated_model_data():
+    """TD-0004: curated model facts for native + seeded compat vendors; no pricing."""
+    anthropic = json.loads(sg.provider_models_json("anthropic"))
+    fable = next(m for m in anthropic if m["id"] == "claude-fable-5")
+    assert fable["max_input_tokens"] == 1_000_000
+    assert "price" not in fable
+    # Seeded compat vendors resolve through aliases too.
+    grok = json.loads(sg.provider_models_json("grok"))
+    assert any(m["id"] == "grok-4" for m in grok)
+    for slug, expected in [
+        ("deepseek", "deepseek-chat"),
+        ("mistral", "mistral-large-latest"),
+        ("zai", "glm-4.6"),
+        ("qwen", "qwen3-max"),
+        ("groq", "llama-3.3-70b-versatile"),
+        ("cerebras", "llama-3.3-70b"),
+    ]:
+        models = json.loads(sg.provider_models_json(slug))
+        assert any(m["id"] == expected for m in models), slug
+    # Aggregators stay empty (dynamic hosting catalogs -- live discovery).
+    assert json.loads(sg.provider_models_json("openrouter")) == []
+    with pytest.raises(KeyError):
+        sg.provider_models_json("acme-unknown")
+
+
 def test_parse_usage_keeps_cache_split_single_sourced():
     openai = sg.parse_usage(
         "openai",

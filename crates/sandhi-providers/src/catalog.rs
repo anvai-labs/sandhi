@@ -356,10 +356,51 @@ pub fn native_models(slug: &str) -> Vec<ModelDescriptorV1> {
     }
 }
 
-/// Curated model descriptors for an OpenAI-compatible provider slug (TD-0004). Moonshot keeps its
-/// explicit admission (reasoning-effort extension); OpenAI gets the curated GPT-5 lineup. An unknown
-/// slug yields an empty list.
+/// Shared builder for a curated OpenAI-compat model entry. `max_output_tokens` is
+/// `None` where the vendor does not document a stable cap — no invented facts.
+fn compat_entry(
+    id: &str,
+    display_name: &str,
+    max_input: u64,
+    max_output: Option<u64>,
+    capabilities: ProviderCapabilitiesV1,
+) -> ModelDescriptorV1 {
+    ModelDescriptorV1 {
+        id: id.into(),
+        aliases: Vec::new(),
+        max_input_tokens: Some(max_input),
+        max_output_tokens: max_output,
+        default_temperature: Some(1.0),
+        capabilities,
+        endpoint_url: None,
+        extensions: BTreeMap::from([("display_name".into(), serde_json::json!(display_name))]),
+    }
+}
+
+/// Baseline capabilities every seeded compat lineup shares (chat + streaming + tools).
+fn compat_base_caps() -> ProviderCapabilitiesV1 {
+    ProviderCapabilitiesV1 {
+        streaming: true,
+        tools: true,
+        parallel_tool_calls: true,
+        ..ProviderCapabilitiesV1::default()
+    }
+}
+
+/// Curated model descriptors for an OpenAI-compatible provider slug (TD-0004).
+///
+/// Seeding policy: **first-party model vendors** (openai, moonshot, xai, deepseek,
+/// mistral, zai, qwen) plus the stable flagship rows of hosting providers
+/// (groq, cerebras) carry curated lineups; **aggregators** (together, fireworks,
+/// openrouter) deliberately stay empty — their hosting catalogs are dynamic, so
+/// consumers use live `GET /models` discovery there. Facts current as of 2026-07;
+/// no pricing (measure-vs-price line held). An unknown slug yields an empty list.
 fn compat_models(slug: &str) -> Vec<ModelDescriptorV1> {
+    let base = compat_base_caps();
+    let reasoning = ProviderCapabilitiesV1 {
+        reasoning: true,
+        ..compat_base_caps()
+    };
     match slug {
         "moonshot" => vec![ModelDescriptorV1 {
             id: "kimi-k3".into(),
@@ -382,6 +423,106 @@ fn compat_models(slug: &str) -> Vec<ModelDescriptorV1> {
             )]),
         }],
         "openai" => openai_models(),
+        "xai" => vec![
+            compat_entry(
+                "grok-4-1-fast",
+                "Grok 4.1 Fast",
+                2_000_000,
+                None,
+                ProviderCapabilitiesV1 {
+                    vision: true,
+                    ..reasoning.clone()
+                },
+            ),
+            compat_entry(
+                "grok-4",
+                "Grok 4",
+                256_000,
+                None,
+                ProviderCapabilitiesV1 {
+                    vision: true,
+                    ..reasoning.clone()
+                },
+            ),
+        ],
+        "deepseek" => vec![
+            compat_entry(
+                "deepseek-chat",
+                "DeepSeek Chat",
+                131_072,
+                Some(8_192),
+                ProviderCapabilitiesV1 {
+                    prompt_cache_usage: true,
+                    ..base.clone()
+                },
+            ),
+            compat_entry(
+                "deepseek-reasoner",
+                "DeepSeek Reasoner",
+                131_072,
+                Some(65_536),
+                ProviderCapabilitiesV1 {
+                    // Function calling is not supported on the reasoner endpoint.
+                    tools: false,
+                    parallel_tool_calls: false,
+                    prompt_cache_usage: true,
+                    ..reasoning.clone()
+                },
+            ),
+        ],
+        "mistral" => vec![
+            compat_entry(
+                "mistral-large-latest",
+                "Mistral Large",
+                131_072,
+                None,
+                ProviderCapabilitiesV1 {
+                    structured_output: true,
+                    ..base.clone()
+                },
+            ),
+            compat_entry("codestral-latest", "Codestral", 262_144, None, base.clone()),
+        ],
+        "zai" => vec![
+            compat_entry(
+                "glm-4.6",
+                "GLM-4.6",
+                204_800,
+                Some(131_072),
+                reasoning.clone(),
+            ),
+            compat_entry("glm-4.5-air", "GLM-4.5 Air", 131_072, None, reasoning),
+        ],
+        "qwen" => vec![
+            compat_entry(
+                "qwen3-max",
+                "Qwen3 Max",
+                262_144,
+                Some(65_536),
+                base.clone(),
+            ),
+            compat_entry(
+                "qwen3-coder-plus",
+                "Qwen3 Coder Plus",
+                1_048_576,
+                Some(65_536),
+                base.clone(),
+            ),
+        ],
+        "groq" => vec![compat_entry(
+            "llama-3.3-70b-versatile",
+            "Llama 3.3 70B Versatile",
+            131_072,
+            Some(32_768),
+            base.clone(),
+        )],
+        "cerebras" => vec![compat_entry(
+            "llama-3.3-70b",
+            "Llama 3.3 70B",
+            131_072,
+            None,
+            base,
+        )],
         _ => Vec::new(),
     }
 }
@@ -515,7 +656,11 @@ mod tests {
             EndpointFamilyV1::OpenaiChatCompletions
         );
         assert!(descriptor.capabilities.streaming);
-        assert!(descriptor.models.is_empty());
+        // Aggregators carry no curated models (dynamic hosting catalogs — no invented facts).
+        assert!(openai_compat_descriptor("together")
+            .unwrap()
+            .models
+            .is_empty());
     }
 
     #[test]
@@ -604,7 +749,47 @@ mod tests {
         assert_eq!(gpt5.max_input_tokens, Some(400_000));
         assert_eq!(gpt5.max_output_tokens, Some(128_000));
 
-        // An unseeded compat provider still resolves to an empty catalog (no invented facts).
-        assert!(provider_descriptor("grok").unwrap().models.is_empty());
+        // Aggregators stay deliberately empty (dynamic hosting catalogs — live discovery).
+        assert!(provider_descriptor("openrouter").unwrap().models.is_empty());
+        assert!(provider_descriptor("together").unwrap().models.is_empty());
+        assert!(provider_descriptor("fireworks").unwrap().models.is_empty());
+    }
+
+    #[test]
+    fn compat_vendor_catalogs_admit_curated_lineups() {
+        // First-party vendors (and stable hosting flagships) carry curated model facts.
+        for (slug, expected_id) in [
+            ("xai", "grok-4-1-fast"),
+            ("deepseek", "deepseek-chat"),
+            ("mistral", "mistral-large-latest"),
+            ("zai", "glm-4.6"),
+            ("qwen", "qwen3-max"),
+            ("groq", "llama-3.3-70b-versatile"),
+            ("cerebras", "llama-3.3-70b"),
+        ] {
+            let descriptor = provider_descriptor(slug).unwrap();
+            let ids: Vec<&str> = descriptor.models.iter().map(|m| m.id.as_str()).collect();
+            assert!(ids.contains(&expected_id), "{slug} missing {expected_id}");
+            for model in &descriptor.models {
+                assert!(
+                    model.extensions.contains_key("display_name"),
+                    "{slug}/{} lacks display_name",
+                    model.id
+                );
+                assert!(model.max_input_tokens.is_some());
+            }
+        }
+        // Alias resolution reaches the same lineup.
+        let grok = provider_descriptor("grok").unwrap();
+        assert!(grok.models.iter().any(|m| m.id == "grok-4"));
+        // The reasoner endpoint does not admit function calling (fact, not policy).
+        let deepseek = provider_descriptor("deepseek").unwrap();
+        let reasoner = deepseek
+            .models
+            .iter()
+            .find(|m| m.id == "deepseek-reasoner")
+            .unwrap();
+        assert!(!reasoner.capabilities.tools);
+        assert!(reasoner.capabilities.reasoning);
     }
 }
