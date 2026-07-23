@@ -1,13 +1,15 @@
 //! Sandhi core — the metering engine.
 //!
 //! Neutral **units only**: usage accounting (incl. the prompt-cache split), virtual-key
-//! resolution ([`keys`]), budget/rate-limit enforcement ([`budget`]), and the [`UsageEvent`]
-//! wire type emitted through a [`Sink`]. This crate has **no transport opinion** — the
-//! provider adapters live in `sandhi-providers` and the reverse-proxy in `sandhi-proxy`.
+//! resolution ([`keys`]), budget/rate-limit enforcement ([`budget`]), threshold
+//! [`alerts`], and the [`UsageEvent`] wire type emitted through a [`Sink`]. This crate has
+//! **no transport opinion** — the provider adapters live in `sandhi-providers` and the
+//! reverse-proxy in `sandhi-proxy`.
 //!
 //! Sandhi *measures*; the commercial layer *prices* (AnvaiOps ADR-0047 D3). Nothing here
 //! emits dollars or tier/SKU names.
 
+pub mod alerts;
 pub mod budget;
 pub mod chat;
 pub mod event;
@@ -17,7 +19,11 @@ pub mod keys;
 pub mod sink;
 pub mod usage;
 
-pub use budget::{Budget, BudgetExceeded, BudgetLedger};
+pub use alerts::{
+    Alert, AlertChannel, AlertRegistry, AlertRule, NoopWebhookSender, SharedAlertRegistry,
+    WebhookSender, DEFAULT_COOLDOWN_SECS,
+};
+pub use budget::{Budget, BudgetExceeded, BudgetLedger, Policy, Window};
 pub use chat::*;
 pub use event::{Backend, UsageEvent};
 pub use keys::{KeyStore, VirtualKey};
