@@ -22,7 +22,7 @@
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use time::{Duration, OffsetDateTime};
 
-use sandhi_core::{Denied, EnforcementLedger, LedgerView, Reservation};
+use sandhi_core::{Denied, EnforcementLedger, LedgerView, Policy, Reservation, Window};
 
 /// Result of an atomic reserve: admitted (with the lease) or denied (over cap).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,7 +49,9 @@ impl SqliteLedger {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS budget_limit (
                  scope        TEXT PRIMARY KEY,
-                 limit_tokens INTEGER
+                 limit_tokens INTEGER,
+                 window       TEXT NOT NULL DEFAULT 'total',
+                 policy       TEXT NOT NULL DEFAULT 'block'
              );
              CREATE TABLE IF NOT EXISTS budget_reservation (
                  id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,6 +59,7 @@ impl SqliteLedger {
                  ceiling    INTEGER NOT NULL,
                  actual     INTEGER NOT NULL DEFAULT 0,
                  settled    INTEGER NOT NULL DEFAULT 0,
+                 settled_at INTEGER,
                  expires_at INTEGER NOT NULL
              );
              CREATE INDEX IF NOT EXISTS idx_reservation_scope
@@ -64,14 +67,68 @@ impl SqliteLedger {
         )
     }
 
-    /// Set (or clear, with `None`) the durable cap for a scope.
-    pub fn set_limit_durable(&mut self, scope: &str, limit: Option<u64>) -> rusqlite::Result<()> {
+    /// The inclusive start (unix seconds) of the current window for `window`, calendar-aligned in
+    /// UTC (the store is the clock authority, ADR-0005 D5). `Total` returns 0 (all-time).
+    fn window_start_ts(now: OffsetDateTime, window: Window) -> i64 {
+        match window {
+            Window::Total => 0,
+            Window::Daily => now.replace_time(time::Time::MIDNIGHT).unix_timestamp(),
+            Window::Monthly => now
+                .replace_day(1)
+                .unwrap_or(now)
+                .replace_time(time::Time::MIDNIGHT)
+                .unix_timestamp(),
+        }
+    }
+
+    /// Set (or clear the cap with `limit = None`) a scope's durable budget: cap + window + policy.
+    pub fn set_limit_durable(
+        &mut self,
+        scope: &str,
+        limit: Option<u64>,
+        window: Window,
+        policy: Policy,
+    ) -> rusqlite::Result<()> {
         self.conn.execute(
-            "INSERT INTO budget_limit (scope, limit_tokens) VALUES (?1, ?2)
-             ON CONFLICT(scope) DO UPDATE SET limit_tokens = excluded.limit_tokens",
-            params![scope, limit.map(|v| v as i64)],
+            "INSERT INTO budget_limit (scope, limit_tokens, window, policy) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(scope) DO UPDATE SET
+                 limit_tokens = excluded.limit_tokens,
+                 window = excluded.window,
+                 policy = excluded.policy",
+            params![
+                scope,
+                limit.map(|v| v as i64),
+                window.as_str(),
+                policy.as_str()
+            ],
         )?;
         Ok(())
+    }
+
+    /// The configured window for a scope (defaults to `Total` when unset).
+    pub fn window_of_durable(&self, scope: &str) -> rusqlite::Result<Window> {
+        let w: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT window FROM budget_limit WHERE scope = ?1",
+                [scope],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(w.map(|s| Window::parse(&s)).unwrap_or_default())
+    }
+
+    /// The configured policy for a scope (defaults to `Block` when unset).
+    pub fn policy_of_durable(&self, scope: &str) -> rusqlite::Result<Policy> {
+        let p: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT policy FROM budget_limit WHERE scope = ?1",
+                [scope],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(p.map(|s| Policy::parse(&s)).unwrap_or_default())
     }
 
     /// Atomically admit a call by holding `ceiling` tokens as a lease expiring at `now + ttl`, or
@@ -97,20 +154,23 @@ impl SqliteLedger {
             params![scope, now_ts],
         )?;
 
-        let limit: Option<i64> = tx
+        let budget: Option<(Option<i64>, String)> = tx
             .query_row(
-                "SELECT limit_tokens FROM budget_limit WHERE scope = ?1",
+                "SELECT limit_tokens, window FROM budget_limit WHERE scope = ?1",
                 [scope],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .optional()?
-            .flatten();
+            .optional()?;
 
-        if let Some(limit) = limit {
-            let spent = sum_i64(
-                &tx,
-                "SELECT COALESCE(SUM(actual), 0) FROM budget_reservation WHERE scope = ?1 AND settled = 1",
-                scope,
+        if let Some((Some(limit), window)) = budget {
+            // Spend is measured over the scope's current window (calendar-aligned); in-flight
+            // reservations (unsettled ceilings) are always counted.
+            let start = Self::window_start_ts(now, Window::parse(&window));
+            let spent: i64 = tx.query_row(
+                "SELECT COALESCE(SUM(actual), 0) FROM budget_reservation
+                 WHERE scope = ?1 AND settled = 1 AND COALESCE(settled_at, 0) >= ?2",
+                params![scope, start],
+                |row| row.get(0),
             )?;
             let reserved = sum_i64(
                 &tx,
@@ -147,7 +207,8 @@ impl SqliteLedger {
     /// a retried or replayed settle updates zero rows and changes nothing (ADR-0005 D2/C2).
     pub fn settle_durable(&mut self, reservation_id: u64, actual: u64) -> rusqlite::Result<()> {
         self.conn.execute(
-            "UPDATE budget_reservation SET actual = ?2, settled = 1
+            "UPDATE budget_reservation
+             SET actual = ?2, settled = 1, settled_at = CAST(strftime('%s','now') AS INTEGER)
              WHERE id = ?1 AND settled = 0",
             params![reservation_id as i64, actual as i64],
         )?;
@@ -177,13 +238,18 @@ impl SqliteLedger {
         Ok(limit.map(|v| v.max(0) as u64))
     }
 
+    /// Settled spend in the scope's **current window** (calendar-aligned). Uses the store as the
+    /// clock authority (ADR-0005 D5/D6); a restart re-derives the window from the durable rows.
     pub fn spent_durable(&self, scope: &str) -> rusqlite::Result<u64> {
-        Ok(sum_i64_conn(
-            &self.conn,
-            "SELECT COALESCE(SUM(actual), 0) FROM budget_reservation WHERE scope = ?1 AND settled = 1",
-            scope,
-        )?
-        .max(0) as u64)
+        let start =
+            Self::window_start_ts(OffsetDateTime::now_utc(), self.window_of_durable(scope)?);
+        let spent: i64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(actual), 0) FROM budget_reservation
+             WHERE scope = ?1 AND settled = 1 AND COALESCE(settled_at, 0) >= ?2",
+            params![scope, start],
+            |row| row.get(0),
+        )?;
+        Ok(spent.max(0) as u64)
     }
 
     /// Held (unsettled) ceilings. May transiently include not-yet-reclaimed expired leases — a
@@ -220,7 +286,7 @@ impl LedgerView for SqliteLedger {
 
 impl EnforcementLedger for SqliteLedger {
     fn set_limit(&mut self, scope: &str, limit: Option<u64>) {
-        let _ = self.set_limit_durable(scope, limit);
+        let _ = self.set_limit_durable(scope, limit, Window::Total, Policy::Block);
     }
 
     fn reserve(
@@ -258,6 +324,7 @@ impl EnforcementLedger for SqliteLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sandhi_core::{Policy, Window};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     fn t0() -> OffsetDateTime {
@@ -285,7 +352,8 @@ mod tests {
     #[test]
     fn ceiling_reservation_prevents_overshoot() {
         let mut l = mem();
-        l.set_limit_durable("g", Some(100)).unwrap();
+        l.set_limit_durable("g", Some(100), Window::Total, Policy::Block)
+            .unwrap();
         let r = admit(&mut l, "g", 100);
         assert!(
             denied(&mut l, "g", 1),
@@ -300,7 +368,8 @@ mod tests {
     #[test]
     fn settle_is_idempotent_under_repeat() {
         let mut l = mem();
-        l.set_limit_durable("g", Some(100)).unwrap();
+        l.set_limit_durable("g", Some(100), Window::Total, Policy::Block)
+            .unwrap();
         let r = admit(&mut l, "g", 50);
         l.settle_durable(r.id, 40).unwrap();
         l.settle_durable(r.id, 40).unwrap();
@@ -312,7 +381,8 @@ mod tests {
     #[test]
     fn expired_lease_is_reclaimed_no_capacity_leak() {
         let mut l = mem();
-        l.set_limit_durable("g", Some(100)).unwrap();
+        l.set_limit_durable("g", Some(100), Window::Total, Policy::Block)
+            .unwrap();
         let _crashed = admit(&mut l, "g", 80);
         assert_eq!(l.reserved_durable("g").unwrap(), 80);
         // Explicit sweep past the TTL frees it.
@@ -335,7 +405,8 @@ mod tests {
     #[test]
     fn concurrent_reservations_cannot_oversubscribe() {
         let mut l = mem();
-        l.set_limit_durable("g", Some(100)).unwrap();
+        l.set_limit_durable("g", Some(100), Window::Total, Policy::Block)
+            .unwrap();
         let a = admit(&mut l, "g", 60);
         assert!(denied(&mut l, "g", 60), "60 + 60 > 100 must be refused");
         l.settle_durable(a.id, 40).unwrap();
@@ -364,7 +435,8 @@ mod tests {
         let path = path.to_str().unwrap();
         {
             let mut l = SqliteLedger::open(path).unwrap();
-            l.set_limit_durable("g", Some(100)).unwrap();
+            l.set_limit_durable("g", Some(100), Window::Total, Policy::Block)
+                .unwrap();
             let r = admit(&mut l, "g", 50);
             l.settle_durable(r.id, 40).unwrap();
         } // connection dropped — simulate a proxy restart
@@ -393,5 +465,42 @@ mod tests {
         let view: &dyn LedgerView = &l;
         assert_eq!(view.spent("g"), 40);
         assert_eq!(view.available("g"), 60);
+    }
+    #[test]
+    fn daily_window_excludes_prior_window_spend() {
+        // Spend is measured over the current calendar window; an old settled reservation (before
+        // today's UTC midnight) does not count against a `daily` cap. Survives restart because the
+        // window is re-derived from durable rows (ADR-0005 D3/D6).
+        let mut l = mem();
+        l.set_limit_durable("d", Some(1000), Window::Daily, Policy::Block)
+            .unwrap();
+        assert_eq!(l.window_of_durable("d").unwrap(), Window::Daily);
+        assert_eq!(l.policy_of_durable("d").unwrap(), Policy::Block);
+
+        // A settled reservation stamped two days ago (outside today's window).
+        l.conn
+            .execute(
+                "INSERT INTO budget_reservation (scope, ceiling, actual, settled, settled_at, expires_at)
+                 VALUES ('d', 800, 800, 1, CAST(strftime('%s','now','-2 days') AS INTEGER), 0)",
+                [],
+            )
+            .unwrap();
+        // Today's spend is 0 → a fresh 900-token call fits under the 1000 daily cap.
+        assert_eq!(l.spent_durable("d").unwrap(), 0);
+        let r = match l
+            .reserve_durable("d", 900, OffsetDateTime::now_utc(), ttl())
+            .unwrap()
+        {
+            ReserveOutcome::Admitted(r) => r,
+            ReserveOutcome::Denied(dn) => panic!("prior-window spend must not block today: {dn:?}"),
+        };
+        l.settle_durable(r.id, 900).unwrap();
+        assert_eq!(l.spent_durable("d").unwrap(), 900);
+        // Now the daily window is nearly full: a second 200 would exceed 1000.
+        assert!(matches!(
+            l.reserve_durable("d", 200, OffsetDateTime::now_utc(), ttl())
+                .unwrap(),
+            ReserveOutcome::Denied(_)
+        ));
     }
 }
