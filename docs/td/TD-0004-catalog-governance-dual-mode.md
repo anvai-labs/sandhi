@@ -1,6 +1,9 @@
 # TD-0004: Model catalog + unified governance core (dual-mode)
 
-- **Status:** Proposed (draft for review)
+- **Status:** Phase A **implemented** (#44 catalog data + binding/proxy surface; #49 compat vendor
+  seeding + Node parity; consumed by Victor #634/#635/#636). Phases B–D remain proposed.
+  Implementation note: Phase A reused the existing `ProviderDescriptorV1.models` /
+  `ModelDescriptorV1` contract rather than the `ModelSpecV1` sketched below.
 - **Contract owner:** `sandhi-core`
 - **Catalog/runtime owner:** `sandhi-providers` (+ `sandhi-store` for stateful services)
 - **First consumer:** Victor

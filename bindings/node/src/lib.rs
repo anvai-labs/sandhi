@@ -421,6 +421,25 @@ pub fn wire_contract_version() -> String {
     UsageEvent::SCHEMA_VERSION.to_string()
 }
 
+/// Return the versioned typed descriptor for a known provider as JSON.
+#[napi]
+pub fn provider_descriptor_json(provider: String) -> Result<String> {
+    let descriptor = sandhi_providers::provider_descriptor(&provider)
+        .ok_or_else(|| Error::from_reason(format!("unknown provider: {provider}")))?;
+    serde_json::to_string(&descriptor)
+        .map_err(|error| Error::from_reason(format!("serialize provider descriptor: {error}")))
+}
+
+/// Return the curated model descriptors for a known provider as a JSON list (TD-0004 catalog DATA).
+/// Carries facts only (id, context window, max output, capabilities); no pricing.
+#[napi]
+pub fn provider_models_json(provider: String) -> Result<String> {
+    let descriptor = sandhi_providers::provider_descriptor(&provider)
+        .ok_or_else(|| Error::from_reason(format!("unknown provider: {provider}")))?;
+    serde_json::to_string(&descriptor.models)
+        .map_err(|error| Error::from_reason(format!("serialize provider models: {error}")))
+}
+
 /// Parse a provider response body (JSON string) into the neutral token breakdown. `provider`
 /// selects the parser: `anthropic` → the Anthropic Messages shape; anything else → OpenAI-compat.
 #[napi]
