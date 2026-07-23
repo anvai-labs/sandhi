@@ -14,6 +14,33 @@ Depends on: [ADR-0004](../adr/0004-two-plane-proxy-and-enforcement-boundary.md) 
 > is durability + a shared ledger + real per-minute rate limits (ADR-0004 D3). Phasing below is
 > updated accordingly.
 
+> **Refined 2026-07-23 by [ADR-0005](../adr/0005-enforcement-correctness-reservation-ledger-observe-enforce-split.md)
+> (pressure-test).** The enforcement *substrate* this engine sits on is specified there
+> (reservation ceilings, TTL leases, idempotent settle, atomic in-store decrement, observe/enforce
+> split). Two things this engine must adopt from that review:
+> - **The pure `PolicyEngine` decides eligibility, but the budget commit is an atomic store
+>   operation that re-checks and can still return `Denied`** — snapshot-decide-then-write is a
+>   TOCTOU that overruns caps across replicas. `PolicyDecision::Allow` carries the **cap** to
+>   enforce (D1), not just an amount to record.
+> Policy-schema hardening (details in ADR-0005 rationale), to fold in before implementation:
+> - **Structural deny-by-default:** replace `allow: bool` (defaults `false` → a budget-only rule
+>   silently *denies*) with an explicit `Allow{…} | Deny{reason}` effect; deny unless a rule
+>   *explicitly* allows; reject an all-permissive `default` unless an explicit flag is set.
+> - **Explicit exact-vs-prefix match kinds**, preserving **exact** as the default when compiling
+>   legacy vkey `models` — a prefix matcher silently broadens authorization (`claude-*` would admit
+>   `claude-*-experimental`, contradicting `keys.rs`'s deliberate no-wildcard test).
+> - **Signed bundles need freshness:** `issued_at` + `valid_until` *inside* the signature and a
+>   **persisted** revision floor (an in-memory floor starting at zero lets an old, more-permissive
+>   signed bundle replay against a fresh client); the **signing key custody must be separate from
+>   the admin API** (one non-constant-time admin-token compare must not be able to mint signed
+>   fleet-wide policy); the served bundle is **caller-scoped and confidential** (never leak other
+>   subjects' identities/quotas).
+> - **Freemium is a minted guest credential + a global guest ceiling + a hard rate limit**, never
+>   `guest:<ip>` (sybil via IPv6 /64; NAT collateral-deny; XFF spoof).
+> - **Add decision logs, a `shadow`/`enforce` mode, and an append-only policy-mutation audit**
+>   (table stakes vs OPA/Cedar/Ranger). `require_attribution` guarantees *presence*, not
+>   *authenticity*, off the proxy plane.
+
 ## Motivation
 
 Today policy is **imperative Rust mutating an in-memory `HashMap`**: an operator calls
