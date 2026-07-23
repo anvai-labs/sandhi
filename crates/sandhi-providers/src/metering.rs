@@ -74,7 +74,12 @@ impl Provider for MeteredProvider {
         let base = self.event_base(&req);
         // On Err: no event — no trustworthy counts exist ("measured, never estimated").
         let resp = self.inner.complete(req).await?;
-        self.sink.emit(&resp.usage.apply(base));
+        self.sink.emit(&resp.usage.apply(base).with_measurement(
+            sandhi_core::UsageCompleteness::Final,
+            resp.attempts,
+            Some("success".into()),
+            None,
+        ));
         Ok(resp)
     }
 
@@ -86,6 +91,8 @@ impl Provider for MeteredProvider {
             pending: Some(PendingEvent {
                 base,
                 usage: ParsedUsage::default(),
+                usage_seen: false,
+                attempts: 1,
             }),
             sink: Arc::clone(&self.sink),
         }))
@@ -95,6 +102,8 @@ impl Provider for MeteredProvider {
 struct PendingEvent {
     base: UsageEvent,
     usage: ParsedUsage,
+    usage_seen: bool,
+    attempts: u32,
 }
 
 /// Passes items through verbatim while capturing the (terminal) usage; emits exactly once via
@@ -108,9 +117,22 @@ struct MeteredStream {
 }
 
 impl MeteredStream {
-    fn emit_once(&mut self) {
+    fn emit_once(&mut self, outcome: &str) {
         if let Some(pending) = self.pending.take() {
-            self.sink.emit(&pending.usage.apply(pending.base));
+            let completeness = if pending.usage_seen && outcome == "success" {
+                sandhi_core::UsageCompleteness::Final
+            } else if pending.usage_seen {
+                sandhi_core::UsageCompleteness::Partial
+            } else {
+                sandhi_core::UsageCompleteness::Unavailable
+            };
+            self.sink
+                .emit(&pending.usage.apply(pending.base).with_measurement(
+                    completeness,
+                    pending.attempts,
+                    Some(outcome.into()),
+                    None,
+                ));
         }
     }
 }
@@ -121,19 +143,23 @@ impl Stream for MeteredStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match self.inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(chunk))) => {
-                if let (Some(usage), Some(pending)) = (&chunk.usage, self.pending.as_mut()) {
-                    pending.usage = *usage;
+                if let Some(pending) = self.pending.as_mut() {
+                    pending.attempts = chunk.attempts;
+                    if let Some(usage) = &chunk.usage {
+                        pending.usage = *usage;
+                        pending.usage_seen = true;
+                    }
                 }
                 Poll::Ready(Some(Ok(chunk)))
             }
             Poll::Ready(Some(Err(e))) => {
                 // Mid-stream failure: whatever usage we saw is still metered (partial counts
                 // are measured counts — e.g. Anthropic's tokens_in arrives on message_start).
-                self.emit_once();
+                self.emit_once("error");
                 Poll::Ready(Some(Err(e)))
             }
             Poll::Ready(None) => {
-                self.emit_once();
+                self.emit_once("success");
                 Poll::Ready(None)
             }
             Poll::Pending => Poll::Pending,
@@ -144,7 +170,7 @@ impl Stream for MeteredStream {
 impl Drop for MeteredStream {
     fn drop(&mut self) {
         // Caller abandonment (client disconnect) or never-polled drop: still exactly one event.
-        self.emit_once();
+        self.emit_once("cancelled");
     }
 }
 
@@ -197,6 +223,7 @@ mod tests {
                 cache_creation_tokens: 5,
                 cache_read_tokens: 60,
             },
+            attempts: 1,
         }
     }
 
@@ -248,6 +275,7 @@ mod tests {
         StreamChunk {
             data: bytes::Bytes::copy_from_slice(data.as_bytes()),
             usage,
+            attempts: 1,
         }
     }
 
@@ -297,6 +325,7 @@ mod tests {
         let p = MeteredProvider::new(resilient, sink.clone());
         assert!(p.complete(attributed_req()).await.is_ok());
         assert_eq!(sink.len(), 1);
+        assert_eq!(sink.events()[0].attempts, 2);
     }
 
     #[tokio::test]

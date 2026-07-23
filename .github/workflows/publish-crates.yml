@@ -1,0 +1,38 @@
+name: publish-crates
+
+# Manual re-run of ONLY the crates.io publish for an existing tag — used when the unified
+# release succeeded except the crates job (the workflow definition is frozen at the tag, so a
+# fixed release.yml cannot be re-run against it without moving the tag, which we never do).
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (an existing tag vX.Y.Z, without the leading v)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  crates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ inputs.version }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::error::CARGO_REGISTRY_TOKEN not set"
+            exit 1
+          fi
+          cargo install cargo-edit --locked || true
+          cargo set-version "${{ inputs.version }}"
+          # --allow-dirty: the only working-tree change is the intentional set-version rewrite
+          cargo publish -p sandhi-core --allow-dirty
+          cargo publish -p sandhi-providers --allow-dirty
+          cargo publish -p sandhi-store --allow-dirty
+          cargo publish -p sandhi-proxy --allow-dirty

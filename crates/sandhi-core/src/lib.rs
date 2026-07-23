@@ -1,14 +1,17 @@
 //! Sandhi core — the metering engine.
 //!
 //! Neutral **units only**: usage accounting (incl. the prompt-cache split), virtual-key
-//! resolution ([`keys`]), budget/rate-limit enforcement ([`budget`]), and the [`UsageEvent`]
-//! wire type emitted through a [`Sink`]. This crate has **no transport opinion** — the
-//! provider adapters live in `sandhi-providers` and the reverse-proxy in `sandhi-proxy`.
+//! resolution ([`keys`]), budget/rate-limit enforcement ([`budget`]), threshold
+//! [`alerts`], and the [`UsageEvent`] wire type emitted through a [`Sink`]. This crate has
+//! **no transport opinion** — the provider adapters live in `sandhi-providers` and the
+//! reverse-proxy in `sandhi-proxy`.
 //!
 //! Sandhi *measures*; the commercial layer *prices* (AnvaiOps ADR-0047 D3). Nothing here
 //! emits dollars or tier/SKU names.
 
+pub mod alerts;
 pub mod budget;
+pub mod chat;
 pub mod event;
 // Generated typify narrow models (ADR-0003 §2/§4 pilot) — regenerated, never hand-edited.
 mod generated;
@@ -16,13 +19,18 @@ pub mod keys;
 pub mod sink;
 pub mod usage;
 
-pub use budget::{Budget, BudgetExceeded, BudgetLedger};
+pub use alerts::{
+    Alert, AlertChannel, AlertRegistry, AlertRule, NoopWebhookSender, SharedAlertRegistry,
+    WebhookSender, DEFAULT_COOLDOWN_SECS,
+};
+pub use budget::{Budget, BudgetExceeded, BudgetLedger, Policy, Window};
+pub use chat::*;
 pub use event::{Backend, UsageEvent};
 pub use keys::{KeyStore, VirtualKey};
 pub use sink::{InMemorySink, JsonlSink, Sink};
 pub use usage::{
     parse_anthropic_usage, parse_bedrock_usage, parse_cohere_usage, parse_gemini_usage,
-    parse_ollama_usage, parse_openai_usage, ParsedUsage,
+    parse_ollama_usage, parse_openai_responses_usage, parse_openai_usage, ParsedUsage,
 };
 
 #[cfg(test)]
@@ -36,12 +44,13 @@ mod flow_tests {
     #[test]
     fn shared_key_call_is_attributed_metered_and_budgeted() {
         // One shared upstream key fronts a per-user virtual key.
-        let mut keys = KeyStore::new();
+        let keys = KeyStore::new();
         keys.insert(VirtualKey {
             id: "vk_alice".into(),
             subject_id: Some("alice".into()),
             group_id: Some("platform".into()),
             upstream_ref: "anthropic:default".into(),
+            ..Default::default()
         });
 
         let mut ledger = BudgetLedger::new();

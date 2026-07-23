@@ -1,14 +1,24 @@
-//! Durable SQLite usage store — a [`sandhi_core::Sink`] that persists every usage event, plus
-//! aggregation queries for the dashboard (per-subject / per-team / per-provider totals).
-//!
-//! Kept in its own crate (not `sandhi-core`) so the language bindings' wheels never pull in
-//! bundled SQLite. The reverse-proxy and standalone tools depend on it.
+//! Durable SQLite store for Sandhi — the usage-event sink + aggregation queries, plus the
+//! operator tables introduced by TD-0003 (the [`vault`] credential index, [`vkeys`]
+//! virtual-key store, and [`alerts`] threshold rules). Kept in its own crate (not `sandhi-core`)
+//! so the language bindings' wheels never pull in bundled SQLite.
+
+pub mod alerts;
+pub mod vault;
+pub mod vkeys;
 
 use std::sync::Mutex;
 
 use rusqlite::{params, Connection};
 use sandhi_core::{Backend, Sink, UsageEvent};
 use serde::Serialize;
+
+pub use alerts::{AlertRuleRecord, AlertStore, CreateAlertRequest};
+pub use vault::{
+    hash_secret, CredentialScheme, InMemoryVault, KeyringVault, SentinelPassVault, Vault,
+    VaultEntry, VaultError, VaultStore,
+};
+pub use vkeys::{MintRequest, MintedKey, VirtualKeyRecord, VirtualKeyStore};
 
 /// One aggregation row (or the grand total).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -62,7 +72,11 @@ impl SqliteStore {
             );
             CREATE INDEX IF NOT EXISTS idx_usage_subject ON usage_events(subject_id);
             CREATE INDEX IF NOT EXISTS idx_usage_group ON usage_events(group_id);
-            CREATE INDEX IF NOT EXISTS idx_usage_provider ON usage_events(provider);",
+            CREATE INDEX IF NOT EXISTS idx_usage_provider ON usage_events(provider);
+            CREATE INDEX IF NOT EXISTS idx_usage_model ON usage_events(model);
+            CREATE INDEX IF NOT EXISTS idx_usage_vkey ON usage_events(virtual_key_id);
+            CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_events(session_id);
+            CREATE INDEX IF NOT EXISTS idx_usage_occurred ON usage_events(occurred_at);",
         )
     }
 
@@ -99,17 +113,31 @@ impl SqliteStore {
         Ok(())
     }
 
-    /// Totals grouped by a fixed column (`subject_id` / `group_id` / `provider`), busiest first.
-    fn totals_grouped(&self, col: &str) -> rusqlite::Result<Vec<Bucket>> {
+    /// Totals grouped by a fixed column (`subject_id` / `group_id` / `provider` / `model` /
+    /// `virtual_key_id` / `session_id`), busiest first. An optional RFC 3339 `since` lower-bounds
+    /// `occurred_at`.
+    fn totals_grouped_since(
+        &self,
+        col: &str,
+        since: Option<&str>,
+    ) -> rusqlite::Result<Vec<Bucket>> {
         let conn = self.conn.lock().unwrap();
+        let (where_clause, params): (String, Vec<Box<dyn rusqlite::ToSql>>) = match since {
+            Some(s) => (
+                "WHERE occurred_at >= ?1".into(),
+                vec![Box::new(s.to_string())],
+            ),
+            None => ("WHERE 1=1".into(), vec![]),
+        };
         let sql = format!(
             "SELECT COALESCE({col}, '(none)') AS k, COUNT(*), \
                 COALESCE(SUM(tokens_in),0), COALESCE(SUM(tokens_out),0), COALESCE(SUM(cache_read_tokens),0) \
-             FROM usage_events GROUP BY k \
+             FROM usage_events {where_clause} GROUP BY k \
              ORDER BY (COALESCE(SUM(tokens_in),0)+COALESCE(SUM(tokens_out),0)) DESC"
         );
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map([], |r| {
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt.query_map(param_refs.as_slice(), |r| {
             Ok(Bucket {
                 key: r.get(0)?,
                 calls: r.get::<_, i64>(1)? as u64,
@@ -119,6 +147,11 @@ impl SqliteStore {
             })
         })?;
         rows.collect()
+    }
+
+    /// Totals grouped by a fixed column, busiest first (no time window).
+    fn totals_grouped(&self, col: &str) -> rusqlite::Result<Vec<Bucket>> {
+        self.totals_grouped_since(col, None)
     }
 
     pub fn totals_by_subject(&self) -> rusqlite::Result<Vec<Bucket>> {
@@ -131,6 +164,41 @@ impl SqliteStore {
 
     pub fn totals_by_provider(&self) -> rusqlite::Result<Vec<Bucket>> {
         self.totals_grouped("provider")
+    }
+
+    /// TD-0003 P1 attribution: per-model totals.
+    pub fn totals_by_model(&self) -> rusqlite::Result<Vec<Bucket>> {
+        self.totals_grouped("model")
+    }
+
+    /// TD-0003 P1 attribution: per-virtual-key totals.
+    pub fn totals_by_virtual_key(&self) -> rusqlite::Result<Vec<Bucket>> {
+        self.totals_grouped("virtual_key_id")
+    }
+
+    /// TD-0003 P1 attribution: per-session totals.
+    pub fn totals_by_session(&self) -> rusqlite::Result<Vec<Bucket>> {
+        self.totals_grouped("session_id")
+    }
+
+    /// Windowed variant: totals since an RFC 3339 timestamp, grouped by `dimension`
+    /// (`subject` | `group` | `provider` | `model` | `key` | `session`). Returns `None` for an
+    /// unknown dimension (the caller maps the short name).
+    pub fn totals_since(
+        &self,
+        dimension: &str,
+        since: &str,
+    ) -> rusqlite::Result<Option<Vec<Bucket>>> {
+        let col = match dimension {
+            "subject" | "user" => "subject_id",
+            "group" => "group_id",
+            "provider" => "provider",
+            "model" => "model",
+            "key" | "virtual_key" => "virtual_key_id",
+            "session" => "session_id",
+            _ => return Ok(None),
+        };
+        Ok(Some(self.totals_grouped_since(col, Some(since))?))
     }
 
     /// The grand total across every event.

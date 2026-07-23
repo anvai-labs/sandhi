@@ -111,10 +111,11 @@ jobs:
           fi
           cargo install cargo-edit --locked || true
           cargo set-version "${GITHUB_REF_NAME#v}"
-          cargo publish -p sandhi-core
-          cargo publish -p sandhi-providers
-          cargo publish -p sandhi-store
-          cargo publish -p sandhi-proxy
+          # --allow-dirty: the only working-tree change is the intentional set-version rewrite
+          cargo publish -p sandhi-core --allow-dirty
+          cargo publish -p sandhi-providers --allow-dirty
+          cargo publish -p sandhi-store --allow-dirty
+          cargo publish -p sandhi-proxy --allow-dirty
 
   # ── 4. npm (@anvai-labs/sandhi) — per-platform native builds + napi prepublish ─────────────
   npm-build:

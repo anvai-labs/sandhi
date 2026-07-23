@@ -12,13 +12,22 @@ use serde_json::Value;
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
-/// The Anthropic Messages provider. POSTs to `{base_url}/v1/messages` with `x-api-key` +
-/// `anthropic-version` headers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AnthropicAuthScheme {
+    #[default]
+    ApiKey,
+    Bearer,
+}
+
+/// The Anthropic Messages provider. Authentication is explicit: API keys use `x-api-key`, while
+/// subscription OAuth uses `Authorization: Bearer`. The two credential headers are never sent
+/// together.
 pub struct Anthropic {
     client: reqwest::Client,
     base_url: String,
     api_key: String,
     version: String,
+    auth_scheme: AnthropicAuthScheme,
 }
 
 impl Anthropic {
@@ -28,6 +37,7 @@ impl Anthropic {
             base_url: base_url.into(),
             api_key: api_key.into(),
             version: ANTHROPIC_VERSION.to_string(),
+            auth_scheme: AnthropicAuthScheme::ApiKey,
         }
     }
 
@@ -36,8 +46,21 @@ impl Anthropic {
         Self::new("https://api.anthropic.com", api_key)
     }
 
+    #[must_use]
+    pub fn with_auth_scheme(mut self, auth_scheme: AnthropicAuthScheme) -> Self {
+        self.auth_scheme = auth_scheme;
+        self
+    }
+
     fn messages_url(&self) -> String {
         format!("{}/v1/messages", self.base_url.trim_end_matches('/'))
+    }
+
+    fn authenticate(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match self.auth_scheme {
+            AnthropicAuthScheme::ApiKey => request.header("x-api-key", &self.api_key),
+            AnthropicAuthScheme::Bearer => request.bearer_auth(&self.api_key),
+        }
     }
 }
 
@@ -52,12 +75,13 @@ impl Provider for Anthropic {
         if let Some(obj) = body.as_object_mut() {
             obj.insert("stream".into(), Value::Bool(false));
         }
-        let resp = self
+        let request = self
             .client
             .post(self.messages_url())
-            .header("x-api-key", &self.api_key)
             .header("anthropic-version", &self.version)
-            .json(&body)
+            .json(&body);
+        let resp = self
+            .authenticate(request)
             .send()
             .await
             .map_err(|e| ProviderError::Transport(e.to_string()))?;
@@ -74,6 +98,7 @@ impl Provider for Anthropic {
             status,
             body,
             usage,
+            attempts: 1,
         })
     }
 
@@ -82,12 +107,13 @@ impl Provider for Anthropic {
         if let Some(obj) = body.as_object_mut() {
             obj.insert("stream".into(), Value::Bool(true));
         }
-        let resp = self
+        let request = self
             .client
             .post(self.messages_url())
-            .header("x-api-key", &self.api_key)
             .header("anthropic-version", &self.version)
-            .json(&body)
+            .json(&body);
+        let resp = self
+            .authenticate(request)
             .send()
             .await
             .map_err(|e| ProviderError::Transport(e.to_string()))?;
@@ -226,6 +252,31 @@ mod tests {
         assert_eq!(out.usage.tokens_out, 45);
         assert_eq!(out.usage.cache_creation_tokens, 300);
         assert_eq!(out.usage.cache_read_tokens, 900);
+    }
+
+    #[tokio::test]
+    async fn bearer_auth_never_leaks_into_x_api_key() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(header("authorization", "Bearer oauth-test"))
+            .and(header("anthropic-version", "2023-06-01"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "content": [{ "type": "text", "text": "hi" }],
+                "usage": { "input_tokens": 1, "output_tokens": 1 }
+            })))
+            .mount(&server)
+            .await;
+
+        Anthropic::new(server.uri(), "oauth-test")
+            .with_auth_scheme(AnthropicAuthScheme::Bearer)
+            .complete(ProviderRequest::new("claude-x", json!({ "messages": [] })))
+            .await
+            .unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(!requests[0].headers.contains_key("x-api-key"));
     }
 
     #[tokio::test]

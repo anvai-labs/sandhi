@@ -20,25 +20,44 @@ use std::pin::Pin;
 // The usage parsers are metering primitives — they live in `sandhi-core` (no transport deps).
 pub use sandhi_core::usage::{
     parse_anthropic_usage, parse_bedrock_usage, parse_cohere_usage, parse_gemini_usage,
-    parse_ollama_usage, parse_openai_usage, ParsedUsage,
+    parse_ollama_usage, parse_openai_responses_usage, parse_openai_usage, ParsedUsage,
 };
 
 pub mod anthropic;
+mod anthropic_typed;
+pub mod catalog;
 pub mod cohere;
+mod cohere_typed;
 pub mod escape_hatch;
 pub mod gemini;
+mod gemini_typed;
 pub mod local;
+mod ollama_typed;
 pub mod openai;
+pub mod openai_responses;
+mod openai_responses_typed;
+pub mod openai_roles;
 pub mod resilience;
-pub use anthropic::Anthropic;
+pub mod typed;
+pub use anthropic::{Anthropic, AnthropicAuthScheme};
+pub use catalog::{
+    openai_compat_descriptor, provider_descriptor, resolve_openai_compat_provider,
+    ModelEndpointRoute, OpenAiCompatProviderSpec, OPENAI_COMPAT_PROVIDER_SPECS,
+};
 pub use cohere::Cohere;
 pub use escape_hatch::FnProvider;
-pub use gemini::Gemini;
+pub use gemini::{Gemini, GeminiAuthScheme};
 pub use local::Ollama;
 pub use openai::OpenAiCompat;
+pub use openai_responses::{OpenAiResponses, OpenAiResponsesProfile};
+pub use openai_roles::{validate_openai_chat_messages, OpenAiChatRole};
 pub mod metering;
 pub use metering::MeteredProvider;
 pub use resilience::{CircuitBreaker, ResilientProvider, RetryConfig, TimeoutConfig};
+pub use typed::{
+    ChatEventStream, ChatProvider, ProviderFamily, ProviderHandle, ProviderRuntime,
+    ProviderTransportConfig,
+};
 
 /// Shared HTTP client for the in-repo adapters: a 10s TCP/TLS connect bound as
 /// defense-in-depth under the decorator's per-attempt timeouts. Policy timeouts
@@ -107,6 +126,8 @@ pub struct ProviderResponse {
     pub status: u16,
     pub body: serde_json::Value,
     pub usage: ParsedUsage,
+    /// Upstream attempts made for this logical call, including the successful attempt.
+    pub attempts: u32,
 }
 
 /// One item of a streaming response: raw bytes to forward verbatim, plus (on the terminal
@@ -117,6 +138,8 @@ pub struct StreamChunk {
     pub data: Bytes,
     /// Present only on the terminal item: the finalized usage counts.
     pub usage: Option<ParsedUsage>,
+    /// Upstream stream-setup attempts made for this logical call.
+    pub attempts: u32,
 }
 
 /// A streaming response: a stream of [`StreamChunk`]s ending with a usage-bearing terminal item.
@@ -125,6 +148,8 @@ pub type ByteStream = Pin<Box<dyn Stream<Item = Result<StreamChunk, ProviderErro
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ProviderError {
+    /// The caller supplied a malformed provider-native request. Never retry.
+    InvalidRequest(String),
     /// 401 / 403 — bad or missing credential.
     Auth,
     /// 429 — provider rate limit.
@@ -143,6 +168,7 @@ pub enum ProviderError {
 impl std::fmt::Display for ProviderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            ProviderError::InvalidRequest(e) => write!(f, "invalid request: {e}"),
             ProviderError::Auth => write!(f, "auth failed (401/403)"),
             ProviderError::RateLimited => write!(f, "rate limited (429)"),
             ProviderError::Upstream(s) => write!(f, "upstream status {s}"),
@@ -202,9 +228,9 @@ where
                 let line: Vec<u8> = line_buf.drain(..=pos).collect();
                 sniff(&line, &mut usage);
             }
-            yield StreamChunk { data: chunk, usage: None };
+            yield StreamChunk { data: chunk, usage: None, attempts: 1 };
         }
-        yield StreamChunk { data: Bytes::new(), usage: Some(usage) };
+        yield StreamChunk { data: Bytes::new(), usage: Some(usage), attempts: 1 };
     };
     Box::pin(s)
 }

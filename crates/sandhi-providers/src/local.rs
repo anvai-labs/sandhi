@@ -79,6 +79,7 @@ impl Provider for Ollama {
             status,
             body,
             usage,
+            attempts: 1,
         })
     }
 

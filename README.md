@@ -13,7 +13,11 @@ key, and set per-user budgets — without hand-rolling provider APIs.
 > concern. See [ADR-0001](docs/adr/0001-sandhi-architecture-and-wire-contract.md).
 
 - **License:** Apache-2.0
-- **Status:** pre-alpha (design-complete; bootstrap = layout + wire schema + ADRs)
+- **Status:** pre-alpha, unreleased. Core metering, the provider adapters (TD-0001), the typed
+  runtime (TD-0002), and the operator surface — key vault, virtual keys, admin API, `sandhi`
+  CLI (TD-0003 P1) — have landed. In flight: durable/windowed budgets + rate limits, the
+  two-plane proxy ([ADR-0004](docs/adr/0004-two-plane-proxy-and-enforcement-boundary.md)), and
+  the declarative policy engine ([TD-0005](docs/td/TD-0005-declarative-policy-engine.md)).
 - **Packages:** crate `sandhi` · PyPI `sandhi-gateway` · npm `@anvai-labs/sandhi`
 
 ## Why
@@ -28,10 +32,13 @@ wrong. Sandhi is the single, fast, neutral implementation of both.
 - **Virtual keys** — one shared upstream key fronts many per-user keys; attribution and
   revocation are per person, not per shared secret.
 - **Per-user / per-team attribution** — every call tagged with `subject_id` / `group_id`.
-- **Budgets + rate limits** — per virtual key / team.
+- **Budgets** — per-virtual-key / per-team **token** caps (reserve-then-reconcile). Windowed
+  budgets and per-minute rate limits are specified but not yet enforced (TD-0003 P2).
 - **Unified provider transport** — Anthropic, OpenAI-compatible (covers ~20 providers),
-  Gemini, Bedrock, Cohere, local vLLM/Ollama — streaming, pooling, retry, circuit-breaker,
-  with **usage + cache-split extracted at the source**.
+  Gemini, Cohere, local vLLM/Ollama, OpenAI Responses — streaming, pooling, retry,
+  circuit-breaker, with **usage + cache-split extracted at the source**. (Bedrock is
+  parser-only until SigV4 request signing lands; front it with an OpenAI-compatible gateway
+  meanwhile.)
 - **Local cost display** — from a community price table (visibility, not billing).
 - **One neutral usage event** — [`schemas/usage-event.v1.schema.json`](schemas/usage-event.v1.schema.json),
   the boundary object every consumer codes against.
@@ -48,10 +55,15 @@ Sandhi is a Rust core (`sandhi-core` + `sandhi-providers`) exposed two ways:
    virtual key and never see the real key. The only shape that serves cross-process /
    cross-host / polyglot / shared-key setups.
 
-> **Prompt-cache safe.** Sandhi preserves per-conversation cache affinity — it forwards the
-> cacheable prefix byte-exact and never collapses users to a single session, so hosted
-> prompt caches keep hitting and self-hosted KV routing stays sticky. It multiplexes
-> transport; it never mixes sessions.
+> **Prompt-cache safe (by design).** Sandhi preserves per-conversation cache affinity — it
+> never collapses users to a single session and carries attribution *outside* the cached
+> prompt, so hosted prompt caches keep hitting and self-hosted KV routing stays sticky. The
+> byte-exact forwarding that guarantees this on the proxy path is being implemented as the
+> transparent-metering plane in
+> [ADR-0004](docs/adr/0004-two-plane-proxy-and-enforcement-boundary.md); today the proxy
+> re-encodes through the neutral contract, which is faithful for standard fields but can drop
+> provider-specific extras (e.g. message-level Anthropic `cache_control` breakpoints). The
+> in-process bindings, which do not re-encode, are unaffected.
 
 ## The usage event
 

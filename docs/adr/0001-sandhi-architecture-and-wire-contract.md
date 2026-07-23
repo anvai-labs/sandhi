@@ -10,6 +10,18 @@ Accepted (founding decision for this repo). Originates from **AnvaiOps ADR-0047*
 architecture of `sandhi` itself; ADR-0047 remains authoritative for the OSS↔commercial
 boundary.
 
+> **Amended 2026-07-22 by [ADR-0004](0004-two-plane-proxy-and-enforcement-boundary.md).**
+> Three claims below were written as design intent and have since drifted from the
+> implementation; ADR-0004 supersedes them and records the corrected boundary:
+> - **§1 crate table** lists three crates; a fourth, **`sandhi-store`** (durable SQLite sink +
+>   the TD-0003 vault/vkeys tables), is now load-bearing. Bedrock is listed as a transport
+>   adapter but is **parser-only** until SigV4 lands.
+> - **§4 "Forward the cacheable prefix byte-exact"** describes a goal the proxy does **not**
+>   currently meet — it decodes every request to `ChatRequestV1` and re-encodes. ADR-0004
+>   re-draws this as a two-plane design (transparent metering vs. opt-in translation).
+> - **Consequences → Status "pre-alpha / design-complete … first milestones"** is stale:
+>   TD-0001/0002/0003 have landed the adapters, typed runtime, and operator surface.
+
 ## Context
 
 Sandhi is an Apache-2.0 OSS **AI usage gateway**: the junction every model call passes
@@ -40,11 +52,16 @@ Sandhi never emits dollars or tier/SKU names.
   / shared-key use. **In-path (inline)**, never a redirect (ADR-0047 D8): it holds the real
   upstream key server-side, issues virtual keys, meters every token.
 
-### 3. The usage-event wire contract is the versioned boundary object
+### 3. Wire contracts are versioned boundary objects
 
 `schemas/usage-event.v1.schema.json` (ADR-0047 D3) is the single artifact every consumer
 codes against. Neutral units only — no dollars, no tier/SKU names. Breaking changes bump the
 `schema_version` and coordinate across consumers (same discipline as `victor-codegraph`).
+
+[TD-0002](../td/TD-0002-typed-provider-runtime.md) additionally defines the narrow neutral chat
+contract consumed by bindings and proxy ingress codecs. This is not a second provider
+implementation: `sandhi-core` owns its types and `sandhi-providers::ProviderRuntime` owns the one
+codec/transport path used by every front door.
 
 ### 4. Session / prompt-cache / KV affinity is preserved, not flattened (ADR-0047 D9)
 

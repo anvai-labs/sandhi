@@ -4,10 +4,11 @@
 //! response JSON — never estimates.
 
 use crate::event::UsageEvent;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// The token breakdown parsed from a provider response.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ParsedUsage {
     /// Fresh (non-cached) input tokens.
     pub tokens_in: u64,
@@ -19,6 +20,19 @@ pub struct ParsedUsage {
     pub cache_read_tokens: u64,
 }
 
+impl From<ParsedUsage> for crate::chat::UsageV2 {
+    fn from(value: ParsedUsage) -> Self {
+        Self {
+            tokens_in: value.tokens_in,
+            tokens_out: value.tokens_out,
+            cache_creation_tokens: value.cache_creation_tokens,
+            cache_read_tokens: value.cache_read_tokens,
+            completeness: crate::chat::UsageCompleteness::Final,
+            ..Self::default()
+        }
+    }
+}
+
 impl ParsedUsage {
     /// Stamp these counts onto an event (leaves attribution/metadata untouched).
     #[must_use]
@@ -26,6 +40,12 @@ impl ParsedUsage {
         event
             .with_tokens(self.tokens_in, self.tokens_out)
             .with_cache(self.cache_creation_tokens, self.cache_read_tokens)
+            .with_measurement(
+                crate::chat::UsageCompleteness::Final,
+                1,
+                Some("success".into()),
+                None,
+            )
     }
 }
 
@@ -50,6 +70,27 @@ pub fn parse_openai_usage(response: &Value) -> Option<ParsedUsage> {
     Some(ParsedUsage {
         tokens_in: prompt.saturating_sub(cached),
         tokens_out: completion,
+        cache_creation_tokens: 0,
+        cache_read_tokens: cached,
+    })
+}
+
+/// Parse an OpenAI Responses API `usage` object.
+///
+/// Responses uses `input_tokens` / `output_tokens` rather than the Chat Completions
+/// `prompt_tokens` / `completion_tokens` names. `input_tokens` includes cached input, so the
+/// neutral fresh-input count subtracts `input_tokens_details.cached_tokens` exactly once.
+pub fn parse_openai_responses_usage(response: &Value) -> Option<ParsedUsage> {
+    let usage = response.get("usage")?;
+    let input = u64_at(usage, "input_tokens");
+    let output = u64_at(usage, "output_tokens");
+    let cached = usage
+        .get("input_tokens_details")
+        .map(|details| u64_at(details, "cached_tokens"))
+        .unwrap_or(0);
+    Some(ParsedUsage {
+        tokens_in: input.saturating_sub(cached),
+        tokens_out: output,
         cache_creation_tokens: 0,
         cache_read_tokens: cached,
     })
@@ -182,6 +223,22 @@ mod tests {
         let u = parse_openai_usage(&resp).unwrap();
         assert_eq!(u.tokens_in, 50);
         assert_eq!(u.cache_read_tokens, 0);
+    }
+
+    #[test]
+    fn openai_responses_uses_distinct_names_and_splits_cached_input() {
+        let response = json!({
+            "usage": {
+                "input_tokens": 1000,
+                "output_tokens": 200,
+                "input_tokens_details": {"cached_tokens": 800}
+            }
+        });
+        let usage = parse_openai_responses_usage(&response).unwrap();
+        assert_eq!(usage.tokens_in, 200);
+        assert_eq!(usage.tokens_out, 200);
+        assert_eq!(usage.cache_read_tokens, 800);
+        assert_eq!(usage.cache_creation_tokens, 0);
     }
 
     #[test]

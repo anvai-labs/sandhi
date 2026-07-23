@@ -3,7 +3,7 @@
 //! response back, and emits a usage event. No live API keys.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -12,7 +12,9 @@ use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use sandhi_core::{Budget, BudgetLedger, InMemorySink, KeyStore, VirtualKey};
-use sandhi_providers::{OpenAiCompat, Provider};
+use sandhi_providers::{
+    ChatEventStream, ChatProvider, ProviderError, ProviderHandle, ProviderRuntime,
+};
 use sandhi_proxy::{build_app, ProxyState};
 
 fn state_with(
@@ -20,25 +22,28 @@ fn state_with(
     sink: Arc<InMemorySink>,
     ledger: BudgetLedger,
 ) -> Arc<ProxyState> {
-    let mut keys = KeyStore::new();
+    let keys = KeyStore::new();
     keys.insert(VirtualKey {
         id: "vk_demo".into(),
         subject_id: Some("alice".into()),
         group_id: Some("platform".into()),
         upstream_ref: "up1".into(),
+        ..Default::default()
     });
-    let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
+    let mut providers: HashMap<String, ProviderHandle> = HashMap::new();
     providers.insert(
         "up1".into(),
-        Arc::new(OpenAiCompat::new("openai", upstream_uri, "REAL-KEY")),
+        ProviderRuntime::new().openai_compat(
+            "openai",
+            upstream_uri,
+            "REAL-KEY",
+            Default::default(),
+            Some(0),
+            None,
+            None,
+        ),
     );
-    Arc::new(ProxyState {
-        keys,
-        ledger: Mutex::new(ledger),
-        sink,
-        providers,
-        store: None,
-    })
+    Arc::new(ProxyState::new(keys, ledger, sink, providers, None))
 }
 
 #[tokio::test]
@@ -84,8 +89,173 @@ async fn complete_attributes_meters_and_records_budget() {
     assert_eq!(ev.tokens_in, 40); // 100 - 60 cached
     assert_eq!(ev.cache_read_tokens, 60);
     assert_eq!(ev.billable_tokens(), 60);
+    assert_eq!(ev.usage_completeness, sandhi_core::UsageCompleteness::Final);
+    assert_eq!(ev.outcome.as_deref(), Some("success"));
 
     assert_eq!(state.ledger.lock().unwrap().spent("group:platform"), 60);
+    assert_eq!(state.ledger.lock().unwrap().reserved("group:platform"), 0);
+}
+
+#[tokio::test]
+async fn anthropic_ingress_uses_the_same_typed_runtime_and_meter() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(header("x-api-key", "REAL-KEY"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id":"msg_1","type":"message","role":"assistant","model":"claude-test",
+            "content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn",
+            "usage":{"input_tokens":7,"output_tokens":3,"cache_read_input_tokens":2}
+        })))
+        .mount(&upstream)
+        .await;
+
+    let keys = KeyStore::new();
+    keys.insert(VirtualKey {
+        id: "vk_demo".into(),
+        subject_id: Some("alice".into()),
+        group_id: Some("platform".into()),
+        upstream_ref: "up1".into(),
+        ..Default::default()
+    });
+    let mut providers = HashMap::new();
+    providers.insert(
+        "up1".into(),
+        ProviderRuntime::new().anthropic(
+            upstream.uri(),
+            "REAL-KEY",
+            sandhi_providers::AnthropicAuthScheme::ApiKey,
+            Some(0),
+            None,
+            None,
+        ),
+    );
+    let sink = Arc::new(InMemorySink::new());
+    let state = Arc::new(ProxyState::new(
+        keys,
+        BudgetLedger::new(),
+        sink.clone(),
+        providers,
+        None,
+    ));
+
+    let response = build_app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("authorization", "Bearer vk_demo")
+                .body(Body::from(
+                    r#"{"model":"claude-test","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["type"], "message");
+    assert_eq!(value["content"][0]["text"], "hello");
+    assert_eq!(value["usage"]["cache_read_input_tokens"], 2);
+    assert_eq!(sink.events().len(), 1);
+    assert_eq!(sink.events()[0].provider, "anthropic");
+    assert_eq!(sink.events()[0].tokens_in, 7);
+    assert_eq!(sink.events()[0].cache_read_tokens, 2);
+    assert_eq!(state.ledger.lock().unwrap().reserved("group:platform"), 0);
+}
+
+#[tokio::test]
+async fn responses_ingress_normalizes_through_chat_request_v1() {
+    let upstream = MockServer::start().await;
+    // The resolved upstream is a Responses backend: the proxy decodes the caller's Responses
+    // ingress → ChatRequestV1, the typed provider re-encodes it and POSTs /responses upstream,
+    // then the proxy shapes the neutral response back into the Responses egress dialect.
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .and(header("authorization", "Bearer REAL-KEY"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id":"resp_1","model":"gpt-test","status":"completed",
+            "output":[
+                {"type":"message","content":[{"type":"output_text","text":"hello"}]},
+                {"type":"function_call","call_id":"call_1","name":"weather","arguments":"{\"city\":\"Austin\"}"}
+            ],
+            "usage":{"input_tokens":7,"output_tokens":3,
+                     "input_tokens_details":{"cached_tokens":2}}
+        })))
+        .mount(&upstream)
+        .await;
+
+    let keys = KeyStore::new();
+    keys.insert(VirtualKey {
+        id: "vk_demo".into(),
+        subject_id: Some("alice".into()),
+        group_id: Some("platform".into()),
+        upstream_ref: "up1".into(),
+        ..Default::default()
+    });
+    let mut providers: HashMap<String, ProviderHandle> = HashMap::new();
+    providers.insert(
+        "up1".into(),
+        ProviderRuntime::new().openai_responses(
+            "openai",
+            upstream.uri(),
+            "REAL-KEY",
+            Default::default(),
+            Some(0),
+            None,
+            None,
+        ),
+    );
+    let sink = Arc::new(InMemorySink::new());
+    let state = Arc::new(ProxyState::new(
+        keys,
+        BudgetLedger::new(),
+        sink.clone(),
+        providers,
+        None,
+    ));
+
+    let response = build_app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("authorization", "Bearer vk_demo")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"model":"gpt-test","instructions":"be precise","stream":false,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"weather?"}]}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    // Egress is normalized back into the Responses shape.
+    assert_eq!(value["object"], "response");
+    assert_eq!(value["status"], "completed");
+    assert_eq!(value["output"][0]["type"], "message");
+    assert_eq!(value["output"][0]["content"][0]["type"], "output_text");
+    assert_eq!(value["output"][0]["content"][0]["text"], "hello");
+    assert_eq!(value["output"][1]["type"], "function_call");
+    assert_eq!(value["output"][1]["call_id"], "call_1");
+    assert_eq!(value["usage"]["input_tokens"], 5); // 7 - 2 cached
+    assert_eq!(value["usage"]["input_tokens_details"]["cached_tokens"], 2);
+
+    // One usage event, attributed to the virtual key, routed through /v1/responses.
+    let events = sink.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].provider, "openai");
+    assert_eq!(events[0].route.as_deref(), Some("/v1/responses"));
+    assert_eq!(events[0].tokens_in, 5);
+    assert_eq!(events[0].cache_read_tokens, 2);
+    assert_eq!(state.ledger.lock().unwrap().reserved("group:platform"), 0);
 }
 
 #[tokio::test]
@@ -198,13 +368,13 @@ async fn dashboard_reports_aggregates_from_the_store() {
     store.emit(&ev("alice", 100, 20));
     store.emit(&ev("bob", 50, 10));
 
-    let state = Arc::new(ProxyState {
-        keys: KeyStore::new(),
-        ledger: Mutex::new(BudgetLedger::new()),
-        sink: store.clone(),
-        providers: HashMap::new(),
-        store: Some(store.clone()),
-    });
+    let state = Arc::new(ProxyState::new(
+        KeyStore::new(),
+        BudgetLedger::new(),
+        store.clone(),
+        HashMap::new(),
+        Some(store.clone()),
+    ));
     let app = build_app(state);
 
     // JSON API reflects the persisted events.
@@ -247,47 +417,44 @@ async fn dashboard_reports_aggregates_from_the_store() {
 struct AlwaysTimeout;
 
 #[async_trait::async_trait]
-impl Provider for AlwaysTimeout {
+impl ChatProvider for AlwaysTimeout {
     fn slug(&self) -> &str {
         "timeout"
     }
     async fn complete(
         &self,
-        _req: sandhi_providers::ProviderRequest,
-    ) -> Result<sandhi_providers::ProviderResponse, sandhi_providers::ProviderError> {
-        Err(sandhi_providers::ProviderError::Timeout(
-            std::time::Duration::from_millis(50),
-        ))
+        _req: sandhi_core::ChatRequestV1,
+    ) -> Result<sandhi_core::ChatResponseV1, ProviderError> {
+        Err(ProviderError::Timeout(std::time::Duration::from_millis(50)))
     }
     async fn stream(
         &self,
-        _req: sandhi_providers::ProviderRequest,
-    ) -> Result<sandhi_providers::ByteStream, sandhi_providers::ProviderError> {
-        Err(sandhi_providers::ProviderError::Timeout(
-            std::time::Duration::from_millis(50),
-        ))
+        _req: sandhi_core::ChatRequestV1,
+    ) -> Result<ChatEventStream, ProviderError> {
+        Err(ProviderError::Timeout(std::time::Duration::from_millis(50)))
     }
 }
 
 #[tokio::test]
 async fn upstream_timeout_maps_to_504() {
     let sink = Arc::new(InMemorySink::new());
-    let mut keys = KeyStore::new();
+    let keys = KeyStore::new();
     keys.insert(VirtualKey {
         id: "vk_demo".into(),
         subject_id: Some("alice".into()),
         group_id: Some("platform".into()),
         upstream_ref: "up1".into(),
+        ..Default::default()
     });
-    let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
-    providers.insert("up1".into(), Arc::new(AlwaysTimeout));
-    let state = Arc::new(ProxyState {
+    let mut providers: HashMap<String, ProviderHandle> = HashMap::new();
+    providers.insert("up1".into(), ProviderHandle::new(Arc::new(AlwaysTimeout)));
+    let state = Arc::new(ProxyState::new(
         keys,
-        ledger: Mutex::new(BudgetLedger::new()),
-        sink: sink.clone(),
+        BudgetLedger::new(),
+        sink.clone(),
         providers,
-        store: None,
-    });
+        None,
+    ));
     let app = build_app(state);
 
     let req = Request::builder()
@@ -300,7 +467,17 @@ async fn upstream_timeout_maps_to_504() {
 
     let response = app.oneshot(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
-    assert_eq!(sink.events().len(), 0, "no measured usage => no event");
+    assert_eq!(
+        sink.events().len(),
+        1,
+        "failed calls retain an outcome observation"
+    );
+    assert_eq!(sink.events()[0].billable_tokens(), 0);
+    assert_eq!(
+        sink.events()[0].usage_completeness,
+        sandhi_core::UsageCompleteness::Unavailable
+    );
+    assert_eq!(sink.events()[0].outcome.as_deref(), Some("error"));
 }
 
 #[tokio::test]

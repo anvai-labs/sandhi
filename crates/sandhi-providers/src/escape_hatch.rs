@@ -69,6 +69,7 @@ mod tests {
                     tokens_out: 4,
                     ..Default::default()
                 },
+                attempts: 1,
             })
         });
 

@@ -1,0 +1,327 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ChatResponseV1",
+  "type": "object",
+  "required": [
+    "model",
+    "output",
+    "usage"
+  ],
+  "properties": {
+    "extensions": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "finish_reason": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/FinishReasonV1"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "model": {
+      "type": "string"
+    },
+    "output": {
+      "$ref": "#/definitions/AssistantOutputV1"
+    },
+    "schema_version": {
+      "default": "1",
+      "type": "string"
+    },
+    "usage": {
+      "$ref": "#/definitions/UsageV2"
+    }
+  },
+  "definitions": {
+    "AssistantOutputV1": {
+      "type": "object",
+      "properties": {
+        "content": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MessageContent"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "refusal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool_calls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ToolCallV1"
+          }
+        }
+      }
+    },
+    "ContentPart": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "text",
+            "type"
+          ],
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "text"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "image_url",
+            "type"
+          ],
+          "properties": {
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "image_url": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "image_url"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "data",
+            "format",
+            "type"
+          ],
+          "properties": {
+            "data": {
+              "type": "string"
+            },
+            "format": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "input_audio"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "file_data": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "file_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "filename": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "file"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "FinishReasonV1": {
+      "type": "string",
+      "enum": [
+        "stop",
+        "length",
+        "tool_calls",
+        "content_filter",
+        "function_call",
+        "unknown"
+      ]
+    },
+    "MessageContent": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ContentPart"
+          }
+        }
+      ]
+    },
+    "ToolCallV1": {
+      "type": "object",
+      "required": [
+        "arguments",
+        "id",
+        "name"
+      ],
+      "properties": {
+        "arguments": {
+          "description": "JSON object encoded as a string, retained incrementally and losslessly across streams.",
+          "type": "string"
+        },
+        "extensions": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      }
+    },
+    "UsageCompleteness": {
+      "type": "string",
+      "enum": [
+        "final",
+        "partial",
+        "unavailable"
+      ]
+    },
+    "UsageV2": {
+      "type": "object",
+      "required": [
+        "cache_creation_tokens",
+        "cache_read_tokens",
+        "tokens_in",
+        "tokens_out"
+      ],
+      "properties": {
+        "accepted_prediction_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "attempts": {
+          "default": 1,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "audio_input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "audio_output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "cache_creation_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "cache_read_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "completeness": {
+          "default": "unavailable",
+          "allOf": [
+            {
+              "$ref": "#/definitions/UsageCompleteness"
+            }
+          ]
+        },
+        "outcome": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reasoning_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "rejected_prediction_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "tokens_in": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "tokens_out": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "upstream_request_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

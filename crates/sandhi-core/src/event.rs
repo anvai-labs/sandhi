@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::chat::UsageCompleteness;
+
 /// The cost basis of a call's backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -47,6 +49,18 @@ pub struct UsageEvent {
     pub cache_creation_tokens: u64,
     #[serde(default)]
     pub cache_read_tokens: u64,
+    /// Whether token counts are final, partial, or unavailable for this logical call.
+    #[serde(default)]
+    pub usage_completeness: UsageCompleteness,
+    /// Number of upstream attempts made by the runtime for this logical call.
+    #[serde(default = "one")]
+    pub attempts: u32,
+    /// Stable terminal outcome such as `success`, `error`, or `cancelled`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    /// Provider-supplied request identifier when one was returned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_request_id: Option<String>,
     /// Self-hosted backends only: GPU-seconds (the cost basis there).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_seconds: Option<f64>,
@@ -80,6 +94,10 @@ impl UsageEvent {
             tokens_out: 0,
             cache_creation_tokens: 0,
             cache_read_tokens: 0,
+            usage_completeness: UsageCompleteness::Unavailable,
+            attempts: 1,
+            outcome: None,
+            upstream_request_id: None,
             gpu_seconds: None,
         }
     }
@@ -129,10 +147,29 @@ impl UsageEvent {
     }
 
     #[must_use]
+    pub fn with_measurement(
+        mut self,
+        completeness: UsageCompleteness,
+        attempts: u32,
+        outcome: Option<String>,
+        upstream_request_id: Option<String>,
+    ) -> Self {
+        self.usage_completeness = completeness;
+        self.attempts = attempts.max(1);
+        self.outcome = outcome;
+        self.upstream_request_id = upstream_request_id;
+        self
+    }
+
+    #[must_use]
     pub fn with_gpu_seconds(mut self, gpu_seconds: Option<f64>) -> Self {
         self.gpu_seconds = gpu_seconds;
         self
     }
+}
+
+const fn one() -> u32 {
+    1
 }
 
 #[cfg(test)]
