@@ -92,7 +92,10 @@ async fn complete_attributes_meters_and_records_budget() {
     assert_eq!(ev.usage_completeness, sandhi_core::UsageCompleteness::Final);
     assert_eq!(ev.outcome.as_deref(), Some("success"));
 
-    assert_eq!(state.ledger.lock().unwrap().spent("group:platform"), 60);
+    // ADR-0005 D4: the ledger settles via `billable()`, which counts the cache split — 40 fresh
+    // in + 60 cache-read + 20 out = 120. (`billable_tokens()` above is the narrower in+out display
+    // helper; unifying the display helpers onto `billable()` is a tracked follow-up.)
+    assert_eq!(state.ledger.lock().unwrap().spent("group:platform"), 120);
     assert_eq!(state.ledger.lock().unwrap().reserved("group:platform"), 0);
 }
 
@@ -351,7 +354,8 @@ async fn streaming_passes_through_and_emits_usage() {
     assert_eq!(events[0].tokens_out, 5);
     assert_eq!(events[0].cache_read_tokens, 4);
     assert_eq!(events[0].billable_tokens(), 11);
-    assert_eq!(state.ledger.lock().unwrap().spent("group:platform"), 11);
+    // ADR-0005 D4: ledger settles via billable() incl. the cache split — 6 in + 4 cache-read + 5 out = 15.
+    assert_eq!(state.ledger.lock().unwrap().spent("group:platform"), 15);
 }
 
 #[tokio::test]
@@ -526,4 +530,106 @@ data: [DONE]\n\n";
         1,
         "client disconnect must not lose the usage event"
     );
+}
+
+#[tokio::test]
+async fn ceiling_reservation_rejects_unbounded_but_admits_bounded_output() {
+    // ADR-0005 D1: the reservation is a CEILING (input estimate + effective output max), not a
+    // `+1` lower bound. On a tight budget an unbounded request (no max → the conservative default
+    // ceiling) is refused before dispatch, while the same budget admits a request that bounds its
+    // own output — proving the ceiling tracks the effective max, not a blanket reject.
+    let upstream = MockServer::start().await;
+    let resp = serde_json::json!({
+        "id":"c","object":"chat.completion","model":"gpt-x",
+        "choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],
+        "usage":{"prompt_tokens":1,"completion_tokens":1}
+    });
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(resp))
+        .mount(&upstream)
+        .await;
+
+    let mut ledger = BudgetLedger::new();
+    ledger.set_limit("group:platform", Budget::tokens(100));
+    let sink = Arc::new(InMemorySink::new());
+    let state = state_with(upstream.uri(), sink.clone(), ledger);
+    let app = build_app(state);
+
+    // Unbounded output → ceiling (default) far exceeds the 100-token cap → 429, upstream untouched.
+    let unbounded = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("authorization", "Bearer vk_demo")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"model":"gpt-x","messages":[]}"#))
+        .unwrap();
+    let r1 = app.clone().oneshot(unbounded).await.unwrap();
+    assert_eq!(
+        r1.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "an unbounded output must not fit a tight cap"
+    );
+    assert_eq!(
+        sink.events().len(),
+        0,
+        "a rejected request never dispatches or meters"
+    );
+
+    // Same budget, but the client bounds output to 50 → ceiling fits → admitted.
+    let bounded = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("authorization", "Bearer vk_demo")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"model":"gpt-x","messages":[],"max_tokens":50}"#,
+        ))
+        .unwrap();
+    let r2 = app.oneshot(bounded).await.unwrap();
+    assert_eq!(
+        r2.status(),
+        StatusCode::OK,
+        "a request that bounds its own output fits the cap and is admitted"
+    );
+    assert_eq!(sink.events().len(), 1);
+}
+
+#[tokio::test]
+async fn neutral_identity_headers_flow_onto_the_usage_event() {
+    // ADR-0005 D7: idempotency + agent cost-tree + trace linkage ride as neutral metadata.
+    let upstream = MockServer::start().await;
+    let resp = serde_json::json!({
+        "id":"c","object":"chat.completion","model":"gpt-x",
+        "choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],
+        "usage":{"prompt_tokens":5,"completion_tokens":3}
+    });
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(resp))
+        .mount(&upstream)
+        .await;
+
+    let sink = Arc::new(InMemorySink::new());
+    let state = state_with(upstream.uri(), sink.clone(), BudgetLedger::new());
+    let app = build_app(state);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("authorization", "Bearer vk_demo")
+        .header("content-type", "application/json")
+        .header("idempotency-key", "idem-123")
+        .header("traceparent", "00-abcabc-def-01")
+        .header("x-sandhi-run-id", "run-9")
+        .body(Body::from(r#"{"model":"gpt-x","messages":[]}"#))
+        .unwrap();
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let events = sink.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].idempotency_key.as_deref(), Some("idem-123"));
+    assert_eq!(events[0].trace_context.as_deref(), Some("00-abcabc-def-01"));
+    assert_eq!(events[0].run_id.as_deref(), Some("run-9"));
 }
