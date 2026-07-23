@@ -577,7 +577,7 @@ mod tests {
             .unwrap();
         assert_eq!(fable.max_input_tokens, Some(1_000_000));
         assert_eq!(fable.max_output_tokens, Some(131_072));
-        assert!(fable.extensions.get("display_name").is_some());
+        assert!(fable.extensions.contains_key("display_name"));
         // Unknown providers resolve to an empty catalog — Sandhi never invents model facts.
         assert!(native_models("unknown-provider").is_empty());
     }
