@@ -125,7 +125,7 @@ impl Provider for OpenAiCompat {
 /// Accumulate usage from an OpenAI Chat Completions SSE line. With `stream_options.include_usage`
 /// the terminal chunk carries the `usage` object while earlier chunks send `"usage": null` — the
 /// null guard prevents a non-final chunk from zeroing the counts; last usage-bearing line wins.
-fn sniff_usage_line(line: &[u8], usage: &mut ParsedUsage) {
+pub(crate) fn sniff_usage_line(line: &[u8], usage: &mut ParsedUsage) {
     let Some(v) = sse_data_json(line) else {
         return;
     };
