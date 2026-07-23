@@ -50,12 +50,20 @@ impl VirtualKey {
             .is_some_and(|exp| exp <= now_rfc3339)
     }
 
-    /// Whether `model` is permitted by the optional model allowlist. No allowlist = any model.
+    /// Whether `model` is permitted by the optional model allowlist. No allowlist (or an empty one)
+    /// = any model is admitted.
+    ///
+    /// **Matching rule:** case-insensitive *exact* equality against an entry in `models[]`
+    /// (provider model-id casing is inconsistent on the wire, e.g. `Claude-3-5-Sonnet` vs
+    /// `claude-3-5-sonnet`). There is deliberately **no prefix/wildcard matching** — an allowlist
+    /// entry must match the full model id, so a rule for `claude-3-5-sonnet` does not silently
+    /// admit `claude-3-5-sonnet-latest` (version aliases are explicit).
     pub fn permits_model(&self, model: &str) -> bool {
-        self.models
-            .as_deref()
-            .map(|allowed| allowed.iter().any(|m| m == model))
-            .unwrap_or(true)
+        match self.models.as_deref() {
+            // Absent or empty allowlist = unscoped; any model is admitted.
+            None | Some([]) => true,
+            Some(allowed) => allowed.iter().any(|m| m.eq_ignore_ascii_case(model)),
+        }
     }
 }
 
@@ -163,5 +171,12 @@ mod tests {
         key.models = Some(vec!["claude-x".into(), "claude-y".into()]);
         assert!(key.permits_model("claude-x"));
         assert!(!key.permits_model("gpt-x"));
+        // Case-insensitive exact match (documented matching rule); no prefix/wildcard.
+        assert!(key.permits_model("CLAUDE-X"));
+        assert!(key.permits_model("Claude-Y"));
+        assert!(!key.permits_model("claude-x-latest"));
+        // An empty allowlist admits any model (treated as unscoped).
+        key.models = Some(vec![]);
+        assert!(key.permits_model("anything"));
     }
 }

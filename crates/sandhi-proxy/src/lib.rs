@@ -107,6 +107,10 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         .route("/healthz", get(health))
         .route("/dashboard", get(dashboard_html))
         .route("/dashboard/api/usage", get(dashboard_api))
+        // TD-0003 P4 dashboard read-only endpoints (masked, unauthed — self-hosted trust).
+        .route("/dashboard/api/keys", get(dashboard_keys))
+        .route("/dashboard/api/budgets", get(dashboard_budgets))
+        .route("/dashboard/api/alerts", get(dashboard_alerts))
         .route("/v1/chat/completions", post(handle_openai))
         .route("/v1/messages", post(handle_anthropic))
         .route("/v1/responses", post(handle_responses))
@@ -158,8 +162,89 @@ async fn dashboard_api(State(state): State<Arc<ProxyState>>) -> Response {
         "by_subject": store.totals_by_subject().unwrap_or_default(),
         "by_group": store.totals_by_group().unwrap_or_default(),
         "by_provider": store.totals_by_provider().unwrap_or_default(),
+        "by_model": store.totals_by_model().unwrap_or_default(),
     });
     Json(payload).into_response()
+}
+
+// --- TD-0003 P4 dashboard read-only endpoints ----------------------------------
+//
+// Auth model: these mirror the self-hosted single-node trust of the existing `/dashboard` HTML and
+// `/dashboard/api/usage` — they are **unauthed**, and rely on **masked-only** output as the security
+// boundary. The operator binds the proxy to a trusted network / localhost and controls access; no
+// secret (raw provider key, virtual-key plaintext, or virtual-key hash) is ever serialized here.
+// Programmatic/automated access that needs gating uses the admin-token-protected `/admin/*` routes.
+// Units are neutral tokens throughout — no dollars / SKU / tier (the measure-vs-price boundary).
+
+/// `GET /dashboard/api/keys` — masked virtual keys + masked vault entries (no secrets, no hashes).
+/// 404 when neither the vault nor the virtual-key store is configured.
+async fn dashboard_keys(State(state): State<Arc<ProxyState>>) -> Response {
+    let (vault, vkeys) = (state.vault.clone(), state.vkeys.clone());
+    if vault.is_none() && vkeys.is_none() {
+        return error(
+            StatusCode::NOT_FOUND,
+            "keys dashboard not configured (set SANDHI_STORE)",
+        );
+    }
+    let vkey_records = vkeys
+        .as_ref()
+        .and_then(|s| s.list().ok())
+        .unwrap_or_default()
+        .iter()
+        .map(operator::vkey_record_response)
+        .collect::<Vec<_>>();
+    let vault_entries = vault
+        .as_ref()
+        .and_then(|s| s.list().ok())
+        .unwrap_or_default()
+        .iter()
+        .map(operator::vault_entry_response)
+        .collect::<Vec<_>>();
+    Json(json!({ "virtual_keys": vkey_records, "vault": vault_entries })).into_response()
+}
+
+/// `GET /dashboard/api/budgets` — every configured scope with limit / window / policy + live spent
+/// (from the budget ledger). Neutral tokens; no pricing.
+async fn dashboard_budgets(State(state): State<Arc<ProxyState>>) -> Response {
+    let mut ledger = state.ledger.lock().expect("ledger poisoned");
+    let scopes: Vec<Value> = state
+        .budgets
+        .lock()
+        .expect("budgets poisoned")
+        .values()
+        .map(|spec| {
+            let spent = ledger.spent(&spec.scope);
+            let limit = spec.limit_tokens;
+            json!({
+                "scope": spec.scope,
+                "limit_tokens": limit,
+                "spent": spent,
+                "remaining": limit.saturating_sub(spent),
+                "window": spec.window,
+                "policy": spec.policy,
+            })
+        })
+        .collect();
+    Json(json!({ "budgets": scopes })).into_response()
+}
+
+/// `GET /dashboard/api/alerts` — recent fired alerts (rules whose threshold has tripped) plus all
+/// configured rules. 404 when the alert store is not configured.
+async fn dashboard_alerts(State(state): State<Arc<ProxyState>>) -> Response {
+    let Some(store) = state.alert_store.clone() else {
+        return error(
+            StatusCode::NOT_FOUND,
+            "alerts dashboard not configured (set SANDHI_STORE)",
+        );
+    };
+    let rules = store.list().unwrap_or_default();
+    let all: Vec<Value> = rules.iter().map(operator::alert_rule_response).collect();
+    let fired: Vec<Value> = rules
+        .iter()
+        .filter(|r| r.last_fired_at.is_some())
+        .map(operator::alert_rule_response)
+        .collect();
+    Json(json!({ "rules": all, "fired": fired })).into_response()
 }
 
 /// The self-hosted single-node dashboard (static HTML; fetches `/dashboard/api/usage`).
@@ -171,40 +256,71 @@ const DASHBOARD_HTML: &str = r####"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sandhi — usage</title>
+<title>Sandhi — operator dashboard</title>
 <style>
   :root { color-scheme: light dark; }
   body { font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; margin: 0; padding: 2rem;
-         max-width: 900px; margin-inline: auto; }
+         max-width: 1000px; margin-inline: auto; }
   h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
   .sub { color: #6b7280; margin-bottom: 1.5rem; }
   .cards { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.5rem; }
   .card { border: 1px solid #8883; border-radius: 10px; padding: 1rem 1.25rem; min-width: 8rem; }
   .card .n { font-size: 1.6rem; font-weight: 700; }
   .card .l { color: #6b7280; font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
-  h2 { font-size: 1rem; margin: 1.5rem 0 .5rem; }
+  h2 { font-size: 1rem; margin: 1.75rem 0 .5rem; border-top: 1px solid #8882; padding-top: 1.25rem; }
+  h2:first-of-type { border-top: none; padding-top: 0; }
   table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: .4rem .5rem; border-bottom: 1px solid #8882; }
+  th, td { text-align: left; padding: .4rem .5rem; border-bottom: 1px solid #8882; vertical-align: top; }
   th { color: #6b7280; font-weight: 600; font-size: .8rem; }
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   .amber { color: #b45309; }
+  .muted { color: #6b7280; }
+  .badge { display: inline-block; padding: .05rem .4rem; border-radius: 6px; font-size: .72rem;
+           border: 1px solid #8883; }
+  .badge.active { color: #047857; border-color: #04785755; }
+  .badge.revoked { color: #b45309; border-color: #b4530955; }
+  .bar { background: #8882; border-radius: 6px; height: 8px; overflow: hidden; min-width: 6rem; }
+  .bar > span { display: block; height: 100%; background: #2563eb; }
+  .bar.warn > span { background: #b45309; }
+  .bar.over > span { background: #b91c1c; }
+  .json-link { float: right; font-weight: 400; font-size: .8rem; }
+  .fired { background: #b4530910; }
+  code { font-size: .85em; }
 </style>
 </head>
 <body>
 <h1>Sandhi <span class="amber">— the metering layer for AI agents</span></h1>
-<div class="sub">Self-hosted usage dashboard · neutral units (no pricing) · <a href="/dashboard/api/usage">JSON</a></div>
+<div class="sub">Self-hosted operator dashboard · neutral token units (no pricing) ·
+  <a href="/dashboard/api/usage">usage</a> · <a href="/dashboard/api/keys">keys</a> ·
+  <a href="/dashboard/api/budgets">budgets</a> · <a href="/dashboard/api/alerts">alerts</a></div>
+
 <div class="cards" id="cards"></div>
 <div id="tables"></div>
+
+<h2>Keys <span class="json-link"><a href="/dashboard/api/keys">JSON</a></span></h2>
+<div id="keys"></div>
+
+<h2>Budgets <span class="json-link"><a href="/dashboard/api/budgets">JSON</a></span></h2>
+<div id="budgets"></div>
+
+<h2>Alerts <span class="json-link"><a href="/dashboard/api/alerts">JSON</a></span></h2>
+<div id="alerts"></div>
+
 <script>
 const fmt = n => (n ?? 0).toLocaleString();
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c =>
+  ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
+const orDash = s => (s === null || s === undefined || s === "") ? "—" : esc(s);
+
 function tbl(title, rows) {
-  const body = rows.map(r => `<tr><td>${r.key}</td><td class="num">${fmt(r.calls)}</td>`
+  const body = rows.map(r => `<tr><td>${esc(r.key)}</td><td class="num">${fmt(r.calls)}</td>`
     + `<td class="num">${fmt(r.tokens_in)}</td><td class="num">${fmt(r.tokens_out)}</td>`
     + `<td class="num">${fmt(r.cache_read_tokens)}</td></tr>`).join("");
   return `<h2>${title}</h2><table><thead><tr><th>key</th><th class="num">calls</th>`
     + `<th class="num">in</th><th class="num">out</th><th class="num">cache read</th></tr></thead>`
     + `<tbody>${body || '<tr><td colspan=5>no data yet</td></tr>'}</tbody></table>`;
 }
+
 fetch("/dashboard/api/usage").then(r => r.json()).then(d => {
   const t = d.total || { calls: 0, tokens_in: 0, tokens_out: 0, cache_read_tokens: 0 };
   document.getElementById("cards").innerHTML =
@@ -212,9 +328,73 @@ fetch("/dashboard/api/usage").then(r => r.json()).then(d => {
      ["cache read", t.cache_read_tokens]]
     .map(([l, n]) => `<div class="card"><div class="n">${fmt(n)}</div><div class="l">${l}</div></div>`).join("");
   document.getElementById("tables").innerHTML =
-    tbl("By user (subject)", d.by_subject || []) + tbl("By team (group)", d.by_group || [])
-    + tbl("By provider", d.by_provider || []);
-}).catch(e => { document.getElementById("tables").textContent = "failed to load: " + e; });
+    tbl("Attribution — by user (subject)", d.by_subject || [])
+    + tbl("Attribution — by team (group)", d.by_group || [])
+    + tbl("Attribution — by provider", d.by_provider || [])
+    + tbl("Attribution — by model", d.by_model || []);
+}).catch(() => { document.getElementById("tables").innerHTML =
+  '<p class="muted">usage store not configured (set SANDHI_STORE).</p>'; });
+
+// Keys: masked virtual keys + vault entries. Never a secret.
+function keysView(d) {
+  const vkeys = (d.virtual_keys || []).map(k => {
+    const status = k.revoked_at ? "revoked" : "active";
+    return `<tr><td><code>${esc(k.id)}</code></td><td>${orDash(k.subject)}</td><td>${orDash(k.group)}</td>`
+      + `<td><code>${esc(k.upstream_ref)}</code></td><td>${(k.models||[]).map(esc).join(", ")||'<span class="muted">any</span>'}</td>`
+      + `<td><span class="badge ${status}">${status}</span></td><td>${orDash(k.expires_at)}</td></tr>`;
+  }).join("");
+  const vault = (d.vault || []).map(e => `<tr><td><code>${esc(e.credential_id)}</code></td>`
+    + `<td>${esc(e.scheme)}</td><td>${orDash(e.base_url)}</td>`
+    + `<td><span class="badge ${e.status}">${esc(e.status)}</span></td></tr>`).join("");
+  return `<h3 class="muted" style="font-size:.8rem;text-transform:uppercase;letter-spacing:.04em;margin-bottom:.25rem">Virtual keys (masked — secrets are never stored)</h3>`
+    + `<table><thead><tr><th>id</th><th>subject</th><th>group</th><th>upstream</th><th>models</th><th>status</th><th>expires</th></tr></thead>`
+    + `<tbody>${vkeys || '<tr><td colspan=7>no virtual keys</td></tr>'}</tbody></table>`
+    + `<h3 class="muted" style="font-size:.8rem;text-transform:uppercase;letter-spacing:.04em;margin:1rem 0 .25rem">Provider credentials (vault metadata)</h3>`
+    + `<table><thead><tr><th>credential</th><th>scheme</th><th>base url</th><th>status</th></tr></thead>`
+    + `<tbody>${vault || '<tr><td colspan=4>no provider credentials</td></tr>'}</tbody></table>`;
+}
+fetch("/dashboard/api/keys").then(r => r.ok ? r.json() : null).then(d => {
+  document.getElementById("keys").innerHTML = d ? keysView(d) : "";
+}).catch(() => {});
+
+// Budgets: spent-vs-limit bar + window + policy. Neutral tokens.
+function budgetsView(d) {
+  const rows = (d.budgets || []).map(b => {
+    const limit = b.limit_tokens || 0, spent = b.spent || 0;
+    const pct = limit > 0 ? Math.min(100, Math.round(spent * 100 / limit)) : 0;
+    const cls = pct >= 100 ? "over" : (pct >= 80 ? "warn" : "");
+    return `<tr><td><code>${esc(b.scope)}</code></td>`
+      + `<td>${fmt(spent)} <span class="muted">/ ${fmt(limit)}</span></td>`
+      + `<td style="min-width:8rem"><div class="bar ${cls}"><span style="width:${pct}%"></span></div></td>`
+      + `<td>${esc(b.window)}</td><td>${esc(b.policy)}</td></tr>`;
+  }).join("");
+  return `<table><thead><tr><th>scope</th><th class="num">spent / limit (tokens)</th><th>utilization</th><th>window</th><th>policy</th></tr></thead>`
+    + `<tbody>${rows || '<tr><td colspan=5">no budgets configured</td></tr>'}</tbody></table>`;
+}
+fetch("/dashboard/api/budgets").then(r => r.ok ? r.json() : { budgets: [] }).then(d => {
+  document.getElementById("budgets").innerHTML = budgetsView(d);
+}).catch(() => { document.getElementById("budgets").innerHTML = ""; });
+
+// Alerts: fired first, then all configured rules.
+function alertRow(a) {
+  const fired = a.last_fired_at ? `<span class="badge active">fired</span> ${esc(a.last_fired_at)}` : '<span class="muted">—</span>';
+  return `<tr ${a.last_fired_at ? 'class="fired"' : ''}><td><code>${esc(a.id)}</code></td>`
+    + `<td><code>${esc(a.scope)}</code></td><td class="num">${esc(a.threshold_pct)}%</td>`
+    + `<td>${esc(a.channel)}</td><td>${fired}</td></tr>`;
+}
+function alertsView(d) {
+  const fired = (d.fired || []).map(alertRow).join("");
+  const rules = (d.rules || []).map(alertRow).join("");
+  return `<h3 class="muted" style="font-size:.8rem;text-transform:uppercase;letter-spacing:.04em;margin-bottom:.25rem">Recently fired</h3>`
+    + `<table><thead><tr><th>id</th><th>scope</th><th class="num">threshold</th><th>channel</th><th>last fired</th></tr></thead>`
+    + `<tbody>${fired || '<tr><td colspan=5">none fired</td></tr>'}</tbody></table>`
+    + `<h3 class="muted" style="font-size:.8rem;text-transform:uppercase;letter-spacing:.04em;margin:1rem 0 .25rem">All configured rules</h3>`
+    + `<table><thead><tr><th>id</th><th>scope</th><th class="num">threshold</th><th>channel</th><th>last fired</th></tr></thead>`
+    + `<tbody>${rules || '<tr><td colspan=5">no rules configured</td></tr>'}</tbody></table>`;
+}
+fetch("/dashboard/api/alerts").then(r => r.ok ? r.json() : null).then(d => {
+  document.getElementById("alerts").innerHTML = d ? alertsView(d) : "";
+}).catch(() => {});
 </script>
 </body>
 </html>
@@ -305,7 +485,24 @@ async fn handle(
         Err(message) => return ingress_error(dialect, StatusCode::BAD_REQUEST, &message),
     };
 
-    // 4. Atomically reserve the request's conservative token estimate. The measured UsageV2
+    // 4. Model allowlist (TD-0003 P4): if the resolved key carries a non-empty `models[]`, admit
+    //    only a model on that list. Empty/absent allowlist = any model (unchanged). Enforced after
+    //    vk auth + decode (so the request model is known) and before the budget reservation, so the
+    //    ordering is vk auth → allowlist → budget → dispatch (a disallowed model never reserves).
+    if !vk.permits_model(&request.model) {
+        let allowed = vk.models.as_deref().unwrap_or(&[]);
+        return ingress_error(
+            dialect,
+            StatusCode::FORBIDDEN,
+            &format!(
+                "model '{}' is not permitted for this virtual key (allowed models: {})",
+                request.model,
+                allowed.join(", ")
+            ),
+        );
+    }
+
+    // 5. Atomically reserve the request's conservative token estimate. The measured UsageV2
     //    replaces this reservation after completion; failed/unmeasured calls release it.
     let scope = budget_scope(&vk);
     let reserved = estimate_reservation(&request);
