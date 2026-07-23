@@ -67,6 +67,11 @@ enum Command {
         #[arg(long, default_value = "table")]
         format: Format,
     },
+    /// Threshold alert rules (P2).
+    Alerts {
+        #[command(subcommand)]
+        action: AlertsAction,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -132,11 +137,26 @@ enum BudgetAction {
         window: String,
         #[arg(long, default_value = "block")]
         policy: String,
+        /// Threshold percentages (0–100) that each create a log-channel alert rule (P2). Repeatable.
+        #[arg(long)]
+        alert: Vec<u8>,
     },
     /// List configured budgets.
     List,
     /// Spent-vs-limit for a scope.
     Usage { scope: String },
+}
+
+#[derive(Subcommand, Debug)]
+enum AlertsAction {
+    /// List threshold alert rules.
+    List {
+        /// Filter to a scope.
+        #[arg(long)]
+        scope: Option<String>,
+    },
+    /// Acknowledge a fired alert by id.
+    Ack { id: String },
 }
 
 #[derive(clap::ValueEnum, Clone, Debug)]
@@ -217,6 +237,7 @@ pub(crate) fn admin_request(base_url: &str, command: &Command) -> AdminRequest {
                     limit_tokens,
                     window,
                     policy,
+                    alert,
                 },
         } => {
             let body = json!({
@@ -224,6 +245,7 @@ pub(crate) fn admin_request(base_url: &str, command: &Command) -> AdminRequest {
                 "limit_tokens": limit_tokens,
                 "window": window,
                 "policy": policy,
+                "alert_thresholds": if alert.is_empty() { None } else { Some(alert) },
             });
             ("POST", "/admin/budget".into(), Some(body))
         }
@@ -244,6 +266,18 @@ pub(crate) fn admin_request(base_url: &str, command: &Command) -> AdminRequest {
             }
             ("GET", path, None)
         }
+        Command::Alerts {
+            action: AlertsAction::List { scope },
+        } => {
+            let path = match scope {
+                Some(s) => format!("/admin/alerts?scope={s}"),
+                None => "/admin/alerts".into(),
+            };
+            ("GET", path, None)
+        }
+        Command::Alerts {
+            action: AlertsAction::Ack { id },
+        } => ("POST", format!("/admin/alerts/{id}/ack"), None),
     };
     AdminRequest {
         method,
@@ -337,6 +371,12 @@ fn render(command: &Command, response: &Value, _base_url: &str) {
         } => render_rows(
             response.get("budgets").cloned().unwrap_or(Value::Null),
             &["scope", "limit_tokens", "window", "policy"],
+        ),
+        Command::Alerts {
+            action: AlertsAction::List { .. },
+        } => render_rows(
+            response.get("alerts").cloned().unwrap_or(Value::Null),
+            &["id", "scope", "threshold_pct", "channel"],
         ),
         _ => print_json(response),
     }
@@ -461,11 +501,16 @@ mod tests {
                 limit_tokens: 1000,
                 window: "total".into(),
                 policy: "block".into(),
+                alert: Vec::new(),
             },
         };
         let req = admin_request(url(), &set_cmd);
         assert_eq!(req.method, "POST");
         assert_eq!(req.path, "http://localhost:8787/admin/budget");
+        // With no --alert, alert_thresholds is omitted.
+        let body: Value = serde_json::from_str(req.body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["scope"], "group:platform");
+        assert!(body.get("alert_thresholds").unwrap().is_null());
 
         let usage_cmd = Command::Usage {
             by: "model".into(),
@@ -476,6 +521,52 @@ mod tests {
         assert_eq!(req.method, "GET");
         assert!(req.path.contains("/admin/usage?by=model"));
         assert!(req.path.contains("since=2026-01-01"));
+    }
+
+    #[test]
+    fn budget_set_with_alert_flag_emits_thresholds() {
+        let set_cmd = Command::Budget {
+            action: BudgetAction::Set {
+                scope: "group:platform".into(),
+                limit_tokens: 1000,
+                window: "daily".into(),
+                policy: "warn".into(),
+                alert: vec![80, 100],
+            },
+        };
+        let req = admin_request(url(), &set_cmd);
+        let body: Value = serde_json::from_str(req.body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["window"], "daily");
+        assert_eq!(body["policy"], "warn");
+        assert_eq!(body["alert_thresholds"], json!([80, 100]));
+    }
+
+    #[test]
+    fn alerts_list_and_ack_paths() {
+        let list_cmd = Command::Alerts {
+            action: AlertsAction::List {
+                scope: Some("group:platform".into()),
+            },
+        };
+        let req = admin_request(url(), &list_cmd);
+        assert_eq!(req.method, "GET");
+        assert!(req.path.contains("/admin/alerts"));
+        assert!(req.path.contains("scope=group:platform"));
+
+        let list_all = Command::Alerts {
+            action: AlertsAction::List { scope: None },
+        };
+        let req = admin_request(url(), &list_all);
+        assert_eq!(req.path, "http://localhost:8787/admin/alerts");
+
+        let ack_cmd = Command::Alerts {
+            action: AlertsAction::Ack {
+                id: "alert_abc".into(),
+            },
+        };
+        let req = admin_request(url(), &ack_cmd);
+        assert_eq!(req.method, "POST");
+        assert_eq!(req.path, "http://localhost:8787/admin/alerts/alert_abc/ack");
     }
 
     #[test]

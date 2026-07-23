@@ -1,8 +1,9 @@
 //! Durable SQLite store for Sandhi — the usage-event sink + aggregation queries, plus the
-//! operator tables introduced by TD-0003 (the [`vault`] credential index and [`vkeys`]
-//! virtual-key store). Kept in its own crate (not `sandhi-core`) so the language bindings' wheels
-//! never pull in bundled SQLite.
+//! operator tables introduced by TD-0003 (the [`vault`] credential index, [`vkeys`]
+//! virtual-key store, and [`alerts`] threshold rules). Kept in its own crate (not `sandhi-core`)
+//! so the language bindings' wheels never pull in bundled SQLite.
 
+pub mod alerts;
 pub mod vault;
 pub mod vkeys;
 
@@ -12,6 +13,7 @@ use rusqlite::{params, Connection};
 use sandhi_core::{Backend, Sink, UsageEvent};
 use serde::Serialize;
 
+pub use alerts::{AlertRuleRecord, AlertStore, CreateAlertRequest};
 pub use vault::{
     hash_secret, CredentialScheme, InMemoryVault, KeyringVault, SentinelPassVault, Vault,
     VaultEntry, VaultError, VaultStore,

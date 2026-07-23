@@ -16,8 +16,8 @@ use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use sandhi_core::{BudgetLedger, InMemorySink, KeyStore, Sink, UsageEvent};
-use sandhi_proxy::{build_app, ProxyState};
-use sandhi_store::{SqliteStore, VaultStore, VirtualKeyStore};
+use sandhi_proxy::{build_app, rehydrate_alerts, ProxyState};
+use sandhi_store::{AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
 
 const TOKEN: &str = "admin-secret";
 
@@ -37,6 +37,12 @@ fn admin_state() -> Arc<ProxyState> {
     );
     state.vault = Some(vault);
     state.vkeys = Some(vkeys);
+    // P2: wire the alert store + a live registry (rehydrated; the tokio test runtime backs the
+    // webhook transport so best-effort webhook rules can be exercised end-to-end).
+    let alert_store = Arc::new(AlertStore::in_memory().unwrap());
+    let registry = rehydrate_alerts(&alert_store);
+    state.alert_store = Some(alert_store);
+    state.alerts = Some(Arc::new(std::sync::Mutex::new(registry)));
     state.admin_token = Some(TOKEN.into());
     state.public_url = "http://test.local".into();
     Arc::new(state)
@@ -503,6 +509,254 @@ async fn unknown_usage_dimension_returns_empty_not_500() {
     assert_eq!(r.status(), StatusCode::OK);
     let v = body_json(r).await;
     assert!(v["buckets"].as_array().unwrap().is_empty());
+}
+
+// --- P2: budget windows, warn policy, alerts --------------------------------
+
+/// Mount a wiremock upstream that returns the given token usage.
+async fn mount_usage_upstream(server: &MockServer, prompt: u64, completion: u64) {
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{ "message": { "content": "hi" } }],
+            "usage": { "prompt_tokens": prompt, "completion_tokens": completion }
+        })))
+        .mount(server)
+        .await;
+}
+
+/// Set up an upstream + a minted key (budget scope `group:platform`) + a budget on that scope.
+async fn scoped_setup(
+    _state: &Arc<ProxyState>,
+    app: &axum::Router,
+    upstream_uri: &str,
+    limit_tokens: u64,
+    window: &str,
+    policy: &str,
+    alert: Option<u8>,
+) -> String {
+    add_upstream(app, "openai", upstream_uri, "REAL-KEY").await;
+    let (secret, _id) = mint_key(app, "openai:default", None).await;
+    let mut body = json!({
+        "scope": "group:platform",
+        "limit_tokens": limit_tokens,
+        "window": window,
+        "policy": policy,
+    });
+    if let Some(pct) = alert {
+        body["alert_thresholds"] = json!([pct]);
+    }
+    let r = app
+        .clone()
+        .oneshot(req("POST", "/admin/budget", Some(TOKEN), Some(body)))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK, "budget set must succeed");
+    secret
+}
+
+#[tokio::test]
+async fn warn_policy_allows_over_limit_and_block_rejects() {
+    // Warn: a request whose projected spend exceeds the cap is still forwarded.
+    let upstream = MockServer::start().await;
+    mount_usage_upstream(&upstream, 3, 2).await; // 5 tokens
+    let state = admin_state();
+    let app = build_app(state.clone());
+    let secret = scoped_setup(&state, &app, &upstream.uri(), 10, "total", "warn", None).await;
+
+    // Pre-record near the cap so the reservation tips over (10 + reservation > 10).
+    state.ledger.lock().unwrap().record("group:platform", 10);
+    let (status, _body) = v1_request(&app, &secret).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "warn policy must allow an over-cap request"
+    );
+    // The measured usage was recorded despite the over-cap reservation.
+    assert!(state.ledger.lock().unwrap().spent("group:platform") > 10);
+
+    // Block: same setup, same pre-exhaust → 429.
+    let upstream2 = MockServer::start().await;
+    let state2 = admin_state();
+    let app2 = build_app(state2.clone());
+    let secret2 = scoped_setup(&state2, &app2, &upstream2.uri(), 10, "total", "block", None).await;
+    state2.ledger.lock().unwrap().record("group:platform", 10);
+    let (status2, _) = v1_request(&app2, &secret2).await;
+    assert_eq!(status2, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn budget_set_with_window_policy_and_alert_thresholds_creates_rules() {
+    let state = admin_state();
+    let app = build_app(state.clone());
+
+    let r = app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/admin/budget",
+            Some(TOKEN),
+            Some(json!({
+                "scope": "group:platform",
+                "limit_tokens": 1000,
+                "window": "daily",
+                "policy": "warn",
+                "alert_thresholds": [80, 100],
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let v = body_json(r).await;
+    assert_eq!(v["window"], "daily");
+    assert_eq!(v["policy"], "warn");
+    let created = v["alerts_created"].as_array().unwrap();
+    assert_eq!(created.len(), 2);
+
+    // The ledger carries the window + policy.
+    assert_eq!(
+        state.ledger.lock().unwrap().window_of("group:platform"),
+        sandhi_core::Window::Daily
+    );
+    assert_eq!(
+        state.ledger.lock().unwrap().policy_of("group:platform"),
+        sandhi_core::Policy::Warn
+    );
+
+    // Rules appear in /admin/alerts.
+    let r = app
+        .oneshot(req("GET", "/admin/alerts", Some(TOKEN), None))
+        .await
+        .unwrap();
+    let list = body_json(r).await;
+    assert_eq!(list["alerts"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn alert_fires_when_threshold_crossed_and_marks_last_fired_at() {
+    let upstream = MockServer::start().await;
+    mount_usage_upstream(&upstream, 50, 35).await; // 85 tokens
+    let state = admin_state();
+    let app = build_app(state.clone());
+    // limit 100, warn policy (so the call is admitted), alert at 80%.
+    let secret = scoped_setup(
+        &state,
+        &app,
+        &upstream.uri(),
+        100,
+        "total",
+        "warn",
+        Some(80),
+    )
+    .await;
+
+    let (status, _) = v1_request(&app, &secret).await;
+    assert_eq!(status, StatusCode::OK);
+    // 85 spent >= 80% of 100 → the rule fired.
+    let r = app
+        .clone()
+        .oneshot(req("GET", "/admin/alerts", Some(TOKEN), None))
+        .await
+        .unwrap();
+    let list = body_json(r).await;
+    let rule = &list["alerts"][0];
+    assert_eq!(rule["threshold_pct"], 80);
+    assert!(
+        rule["last_fired_at"].as_str().is_some(),
+        "alert must have fired (last_fired_at set)"
+    );
+}
+
+#[tokio::test]
+async fn webhook_alert_failure_does_not_break_the_request() {
+    // A webhook pointed at a non-listening endpoint: the POST fails, but best-effort delivery
+    // must never break the request.
+    let upstream = MockServer::start().await;
+    mount_usage_upstream(&upstream, 50, 35).await; // 85 tokens
+    let state = admin_state();
+    let app = build_app(state.clone());
+    let secret = scoped_setup(&state, &app, &upstream.uri(), 100, "total", "warn", None).await;
+
+    // Create a webhook-channel rule pointing at an unreachable URL.
+    let r = app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/admin/alerts",
+            Some(TOKEN),
+            Some(json!({
+                "scope": "group:platform",
+                "threshold_pct": 50,
+                "webhook_url": "http://127.0.0.1:1/nonexistent-endpoint",
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+
+    // The request crosses the 50% threshold → webhook fires (and fails) → request still 200.
+    let (status, _) = v1_request(&app, &secret).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a webhook failure must never break the request"
+    );
+}
+
+#[tokio::test]
+async fn alerts_list_create_ack_delete_endpoints() {
+    let app = build_app(admin_state());
+
+    // Create.
+    let r = app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/admin/alerts",
+            Some(TOKEN),
+            Some(json!({ "scope": "group:x", "threshold_pct": 90, "channel": "log" })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    let created = body_json(r).await;
+    let id = created["id"].as_str().unwrap().to_string();
+    assert!(id.starts_with("alert_"));
+
+    // List (filtered).
+    let r = app
+        .clone()
+        .oneshot(req("GET", "/admin/alerts?scope=group:x", Some(TOKEN), None))
+        .await
+        .unwrap();
+    let list = body_json(r).await;
+    assert_eq!(list["alerts"].as_array().unwrap().len(), 1);
+
+    // Ack.
+    let r = app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/admin/alerts/{id}/ack"),
+            Some(TOKEN),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(body_json(r).await["acked"], true);
+
+    // Delete.
+    let r = app
+        .oneshot(req(
+            "DELETE",
+            &format!("/admin/alerts/{id}"),
+            Some(TOKEN),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(body_json(r).await["deleted"], true);
 }
 
 // Silence unused import when an upstream body is unused.
