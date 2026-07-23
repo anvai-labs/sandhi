@@ -21,6 +21,22 @@ transparent-metering plane). Does not touch the measure-vs-price boundary — st
 > compare is not constant-time, budget bills `tokens_in + tokens_out` (excludes cache), and the
 > P4 dashboard endpoints are unauthed-by-design (masked-only) rather than access-controlled.
 
+> **Refined 2026-07-23 by [ADR-0005](0005-enforcement-correctness-reservation-ledger-observe-enforce-split.md)
+> (four-lens pressure-test).** The two decisions here stand, but two mechanisms under them were
+> falsified and are superseded by ADR-0005:
+> - **D1 (two-plane):** the transparent plane **cannot** be byte-exact by "surfacing the existing
+>   adapters" — they parse to `Value`, inject `stream`/`stream_options`, and drop response headers;
+>   byte-exact also conflicts with OpenAI usage-metering and compression. It needs a **dedicated raw
+>   forwarder**, and the promise is **"content-faithful, envelope-normalized," not byte-identical**
+>   (see TD-0006, revised).
+> - **D3 (durable ledger):** reserve-then-reconcile is a *soft* cap (the reservation is an estimate,
+>   not a ceiling; it releases to zero on stream interruption), and durabilizing it unchanged is
+>   *less* correct than today's Mutex. ADR-0005 replaces it with reservation **ceilings**, TTL
+>   **leases**, **idempotent settle**, an **atomic in-store** decrement, and an **observe/enforce
+>   split** — and mandates "do not durabilize first."
+> - **D2 (trust tiers):** Tier-1 "attested" is renamed **"self-reported"** (no remote attestation
+>   with the credential in-process).
+
 ## Context
 
 An audit of the shipped code against the docs (2026-07-22) surfaced a structural mismatch and
