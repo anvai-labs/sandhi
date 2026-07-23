@@ -15,11 +15,21 @@ use tower::ServiceExt;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use sandhi_core::{BudgetLedger, InMemorySink, KeyStore, Sink, UsageEvent};
-use sandhi_proxy::{build_app, rehydrate_alerts, ProxyState};
+use sandhi_core::{InMemorySink, KeyStore, Policy, Sink, UsageEvent};
+use sandhi_proxy::{build_app, rehydrate_alerts, Admission, ProxyLedger, ProxyState};
 use sandhi_store::{AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
 
 const TOKEN: &str = "admin-secret";
+
+/// Pre-load `n` tokens of settled spend against `scope` via the ADR-0005 lease API (reserve →
+/// settle) — the durable-ledger equivalent of the retired `BudgetLedger::record`. Reserves under a
+/// `Warn` policy so the helper never trips a `Block` cap while seeding state for a read/alert test.
+fn record_spend(ledger: &mut ProxyLedger, scope: &str, n: u64) {
+    match ledger.reserve(scope, n, time::OffsetDateTime::UNIX_EPOCH, Policy::Warn) {
+        Admission::Leased(reservation) => ledger.settle(&reservation, n),
+        _ => panic!("record_spend: reserve of {n} against {scope} was not admitted"),
+    }
+}
 
 fn admin_state() -> Arc<ProxyState> {
     let store = Arc::new(SqliteStore::in_memory().unwrap());
@@ -30,7 +40,7 @@ fn admin_state() -> Arc<ProxyState> {
     let sink: Arc<dyn Sink> = store.clone();
     let mut state = ProxyState::new(
         KeyStore::new(),
-        BudgetLedger::new(),
+        ProxyLedger::in_memory(),
         sink,
         HashMap::new(),
         Some(store),
@@ -100,7 +110,7 @@ async fn admin_disabled_when_no_token_configured() {
     let store = Arc::new(SqliteStore::in_memory().unwrap());
     let state = ProxyState::new(
         KeyStore::new(),
-        BudgetLedger::new(),
+        ProxyLedger::in_memory(),
         Arc::new(InMemorySink::new()) as Arc<dyn Sink>,
         HashMap::new(),
         Some(store),
@@ -513,7 +523,7 @@ async fn budget_set_list_usage_and_enforcement() {
     assert_eq!(list["budgets"][0]["limit_tokens"], 50);
 
     // Record some spend directly via the ledger, then read usage.
-    state.ledger.lock().unwrap().record("group:platform", 30);
+    record_spend(&mut state.ledger.lock().unwrap(), "group:platform", 30);
     let r = app
         .clone()
         .oneshot(req(
@@ -656,7 +666,7 @@ async fn warn_policy_allows_over_limit_and_block_rejects() {
     let secret = scoped_setup(&state, &app, &upstream.uri(), 10, "total", "warn", None).await;
 
     // Pre-record near the cap so the reservation tips over (10 + reservation > 10).
-    state.ledger.lock().unwrap().record("group:platform", 10);
+    record_spend(&mut state.ledger.lock().unwrap(), "group:platform", 10);
     let (status, _body) = v1_request(&app, &secret).await;
     assert_eq!(
         status,
@@ -671,7 +681,7 @@ async fn warn_policy_allows_over_limit_and_block_rejects() {
     let state2 = admin_state();
     let app2 = build_app(state2.clone());
     let secret2 = scoped_setup(&state2, &app2, &upstream2.uri(), 10, "total", "block", None).await;
-    state2.ledger.lock().unwrap().record("group:platform", 10);
+    record_spend(&mut state2.ledger.lock().unwrap(), "group:platform", 10);
     let (status2, _) = v1_request(&app2, &secret2).await;
     assert_eq!(status2, StatusCode::TOO_MANY_REQUESTS);
 }
@@ -704,15 +714,14 @@ async fn budget_set_with_window_policy_and_alert_thresholds_creates_rules() {
     let created = v["alerts_created"].as_array().unwrap();
     assert_eq!(created.len(), 2);
 
-    // The ledger carries the window + policy.
-    assert_eq!(
-        state.ledger.lock().unwrap().window_of("group:platform"),
-        sandhi_core::Window::Daily
-    );
-    assert_eq!(
-        state.ledger.lock().unwrap().policy_of("group:platform"),
-        sandhi_core::Policy::Warn
-    );
+    // The operator budgets map carries the window + policy (the metadata surface the durable ledger
+    // is rehydrated from; the live ledger enforces them).
+    {
+        let budgets = state.budgets.lock().unwrap();
+        let spec = budgets.get("group:platform").expect("budget recorded");
+        assert_eq!(spec.window, "daily");
+        assert_eq!(spec.policy, "warn");
+    }
 
     // Rules appear in /admin/alerts.
     let r = app
@@ -917,7 +926,7 @@ async fn dashboard_budgets_reports_spent_vs_limit() {
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
-    state.ledger.lock().unwrap().record("group:platform", 250);
+    record_spend(&mut state.ledger.lock().unwrap(), "group:platform", 250);
 
     let r = app
         .oneshot(dash_req("/dashboard/api/budgets"))
@@ -1000,7 +1009,7 @@ async fn dashboard_endpoints_404_when_store_unconfigured() {
     // A bare ProxyState (no vault/vkeys/alerts/store) mirrors a proxy started without SANDHI_STORE.
     let state = ProxyState::new(
         KeyStore::new(),
-        BudgetLedger::new(),
+        ProxyLedger::in_memory(),
         Arc::new(InMemorySink::new()) as Arc<dyn Sink>,
         HashMap::new(),
         None,
@@ -1104,7 +1113,7 @@ async fn dashboard_stays_open_without_admin_token() {
     let sink: Arc<dyn Sink> = store.clone();
     let state = ProxyState::new(
         KeyStore::new(),
-        BudgetLedger::new(),
+        ProxyLedger::in_memory(),
         sink,
         HashMap::new(),
         Some(store),

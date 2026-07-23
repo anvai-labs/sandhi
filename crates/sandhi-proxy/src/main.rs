@@ -11,9 +11,9 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use sandhi_core::{BudgetLedger, InMemorySink, KeyStore, Sink, VirtualKey};
+use sandhi_core::{InMemorySink, KeyStore, Sink, VirtualKey};
 use sandhi_providers::{AnthropicAuthScheme, ProviderHandle, ProviderRuntime};
-use sandhi_proxy::{rehydrate_alerts, serve, ProxyState};
+use sandhi_proxy::{rehydrate_alerts, rehydrate_budgets, serve, ProxyLedger, ProxyState};
 use sandhi_store::{AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
 
 #[tokio::main]
@@ -129,6 +129,25 @@ async fn main() {
         None => Arc::new(InMemorySink::new()),
     };
 
+    // ADR-0005 step 2: the enforcement ledger is durable (crash-safe leases, calendar windows,
+    // restart-surviving spend) when SANDHI_STORE is set — sharing that SQLite file, its tables are
+    // disjoint from the usage store's — and volatile in-memory otherwise.
+    let ledger = match std::env::var("SANDHI_STORE") {
+        Ok(path) => match ProxyLedger::durable(&path) {
+            Ok(l) => {
+                eprintln!("sandhi-proxy: durable enforcement ledger at {path}");
+                l
+            }
+            Err(e) => {
+                eprintln!(
+                    "sandhi-proxy: durable ledger unavailable ({e}); falling back to in-memory"
+                );
+                ProxyLedger::in_memory()
+            }
+        },
+        Err(_) => ProxyLedger::in_memory(),
+    };
+
     let admin_token = std::env::var("SANDHI_ADMIN_TOKEN").ok();
     let public_url =
         std::env::var("SANDHI_PUBLIC_URL").unwrap_or_else(|_| "http://localhost:8787".into());
@@ -136,7 +155,7 @@ async fn main() {
         eprintln!("sandhi-proxy: admin API enabled on /admin/*");
     }
 
-    let mut state = ProxyState::new(keys, BudgetLedger::new(), sink, providers, store);
+    let mut state = ProxyState::new(keys, ledger, sink, providers, store);
     state.vault = vault;
     state.vkeys = vkeys;
     state.alert_store = alert_store;
@@ -145,6 +164,12 @@ async fn main() {
     state.public_url = public_url;
     // ADR-0004 D4: dashboard read endpoints follow the admin token unless explicitly re-opened.
     state.dashboard_public = std::env::var("SANDHI_DASHBOARD_PUBLIC").as_deref() == Ok("1");
+    // Recover the operator budget metadata (policy / window / limit) persisted in the durable
+    // ledger, so caps set before a restart keep their policy lookup + dashboard + alert thresholds.
+    {
+        let ledger = state.ledger.lock().expect("ledger poisoned");
+        rehydrate_budgets(&ledger, &state.budgets);
+    }
     let state = Arc::new(state);
 
     let addr: SocketAddr = std::env::var("SANDHI_BIND")

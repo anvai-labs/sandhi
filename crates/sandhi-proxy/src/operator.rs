@@ -25,8 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use sandhi_core::{
-    Alert, AlertChannel, AlertRegistry, Budget, BudgetLedger, KeyStore, Policy, VirtualKey,
-    WebhookSender, Window,
+    Alert, AlertChannel, AlertRegistry, KeyStore, Policy, VirtualKey, WebhookSender, Window,
 };
 use sandhi_providers::{
     AnthropicAuthScheme, GeminiAuthScheme, ProviderFamily, ProviderHandle, ProviderRuntime,
@@ -36,7 +35,7 @@ use sandhi_store::{
     VirtualKeyRecord, VirtualKeyStore,
 };
 
-use crate::ProxyState;
+use crate::{ProxyLedger, ProxyState};
 
 /// Public request/response types — shared with the `sandhi` CLI client.
 pub mod admin {
@@ -661,16 +660,19 @@ fn dimension_buckets(
 }
 
 fn apply_budget(
-    ledger: &Mutex<BudgetLedger>,
+    ledger: &Mutex<ProxyLedger>,
     budgets: &Mutex<HashMap<String, BudgetSpec>>,
     spec: &BudgetSpec,
 ) {
-    // P2: carry the window + policy into the live ledger's Budget.
+    // Carry the cap + window + policy into the live lease ledger (ADR-0005). A `Warn` scope stays a
+    // soft cap (the ledger admits over it and tracks spend for alerts); `Block` hard-enforces.
     let window = Window::parse(&spec.window);
     let policy = Policy::parse(&spec.policy);
-    ledger.lock().expect("ledger poisoned").set_limit(
-        spec.scope.clone(),
-        Budget::with(spec.limit_tokens, window, policy),
+    ledger.lock().expect("ledger poisoned").set_budget(
+        &spec.scope,
+        Some(spec.limit_tokens),
+        window,
+        policy,
     );
     budgets
         .lock()
@@ -878,6 +880,23 @@ pub fn rehydrate_live_keys(keys: &KeyStore, vkeys: &VirtualKeyStore) {
             rate_limit_per_min: rec.rate_limit_per_min,
         };
         keys.insert_keyed(rec.secret_hash, vk);
+    }
+}
+
+/// Rehydrate the operator's in-memory budget metadata from the durable ledger (called on startup).
+/// The durable ledger already carries the enforced caps + spend across a restart (ADR-0005 D3); this
+/// recovers the [`BudgetSpec`] map the policy lookup, dashboard, and alert thresholds read. A no-op
+/// for the volatile in-memory ledger (it has nothing persisted).
+pub fn rehydrate_budgets(ledger: &ProxyLedger, budgets: &Mutex<HashMap<String, BudgetSpec>>) {
+    let mut map = budgets.lock().expect("budgets poisoned");
+    for row in ledger.budgets() {
+        let spec = BudgetSpec {
+            scope: row.scope.clone(),
+            limit_tokens: row.limit.unwrap_or(0),
+            window: row.window.as_str().to_string(),
+            policy: row.policy.as_str().to_string(),
+        };
+        map.insert(row.scope, spec);
     }
 }
 

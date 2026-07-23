@@ -6,11 +6,15 @@
 //! reconciles the budget. It is *in-path*, not a redirect: a client cannot bypass the meter.
 
 mod codec;
+pub mod ledger;
 pub mod operator;
 
 // Re-export the admin API request/response types for the `sandhi` CLI client + the startup
 // rehydration helpers used by the `sandhi-proxy` binary.
-pub use operator::{admin, build_provider_handle, rehydrate_alerts, rehydrate_live_keys};
+pub use ledger::{Admission, ProxyLedger};
+pub use operator::{
+    admin, build_provider_handle, rehydrate_alerts, rehydrate_budgets, rehydrate_live_keys,
+};
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -26,9 +30,11 @@ use axum::Router;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 
+use time::OffsetDateTime;
+
 use sandhi_core::{
-    billable, AlertRegistry, Backend, BudgetLedger, ChatRequestV1, KeyStore, RequestMetadataV1,
-    Sink, UsageCompleteness, UsageEvent, UsageV2, VirtualKey,
+    billable, AlertRegistry, Backend, ChatRequestV1, KeyStore, Policy, RequestMetadataV1,
+    Reservation, Sink, UsageCompleteness, UsageEvent, UsageV2, VirtualKey,
 };
 use sandhi_providers::{ProviderError, ProviderFamily, ProviderHandle, ProviderRuntime};
 use sandhi_store::{hash_secret, AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
@@ -46,7 +52,9 @@ const DEFAULT_OUTPUT_CEILING: u64 = 4096;
 /// registry of configured upstream providers (each already holding its real credential).
 pub struct ProxyState {
     pub keys: KeyStore,
-    pub ledger: Mutex<BudgetLedger>,
+    /// The enforcement ledger (ADR-0005 lease model): durable [`SqliteLedger`](sandhi_store::SqliteLedger)
+    /// when `SANDHI_STORE` is set, else volatile in-memory. See [`ProxyLedger`].
+    pub ledger: Mutex<ProxyLedger>,
     pub sink: Arc<dyn Sink>,
     /// `upstream_ref` → a persistent typed provider handle (real key baked in). Interior-mutable:
     /// the admin API registers handles here at runtime; the demo path seeds it at startup.
@@ -64,7 +72,9 @@ pub struct ProxyState {
     pub runtime: ProviderRuntime,
     /// Admin-API bearer token (distinct from virtual keys). `None` disables the admin API.
     pub admin_token: Option<String>,
-    /// Operator-set budgets (scope → spec). The live [`BudgetLedger`] enforces them.
+    /// Operator-set budgets (scope → spec). The live [`ProxyLedger`] enforces them; this map is the
+    /// metadata surface (policy lookup, dashboard, alert thresholds) and is rehydrated from the
+    /// durable ledger on startup.
     pub budgets: Mutex<HashMap<String, BudgetSpec>>,
     /// The externally-reachable base URL shared with minted-key callers (e.g.
     /// `http://localhost:8787`).
@@ -88,7 +98,7 @@ impl ProxyState {
     #[must_use]
     pub fn new(
         keys: KeyStore,
-        ledger: BudgetLedger,
+        ledger: ProxyLedger,
         sink: Arc<dyn Sink>,
         providers: HashMap<String, ProviderHandle>,
         store: Option<Arc<SqliteStore>>,
@@ -266,7 +276,7 @@ async fn dashboard_budgets(State(state): State<Arc<ProxyState>>, headers: Header
     if let Err(denied) = require_dashboard_access(&state, &headers) {
         return denied;
     }
-    let mut ledger = state.ledger.lock().expect("ledger poisoned");
+    let ledger = state.ledger.lock().expect("ledger poisoned");
     let scopes: Vec<Value> = state
         .budgets
         .lock()
@@ -580,30 +590,34 @@ async fn handle(
     //    request so the provider caps output — making the reservation enforceable. The measured
     //    `billable()` (cache split included, D4) replaces the reservation after completion.
     let scope = budget_scope(&vk);
-    let capped = state
-        .ledger
-        .lock()
-        .ok()
-        .and_then(|ledger| ledger.limit_of(&scope))
-        .is_some();
+    let policy = scope_policy(&state, &scope);
+    // A scope is "capped" (for output-bounding) only under a hard `Block` cap: a `Warn` soft cap
+    // never rejects, so we do not shrink the client's request. Bounding output makes the ceiling
+    // reservation enforceable when the client left `max_output_tokens` unset (ADR-0005 D1).
+    let capped = policy == Policy::Block
+        && state
+            .ledger
+            .lock()
+            .ok()
+            .and_then(|ledger| ledger.limit(&scope))
+            .is_some();
     let (ceiling, effective_max) = reservation_ceiling(&request);
     if capped && request.max_output_tokens.is_none() {
         request.max_output_tokens = Some(effective_max);
     }
-    match reserve_budget(&state, &scope, ceiling) {
-        Ok(()) => {}
-        Err(StatusCode::TOO_MANY_REQUESTS) => {
-            return ingress_error(dialect, StatusCode::TOO_MANY_REQUESTS, "budget exhausted")
+    let reservation = match reserve_budget(&state, &scope, ceiling, policy) {
+        Admission::Leased(reservation) => Some(reservation),
+        // Fail-open (Warn on a backend error): admit without a lease; the usage event still emits.
+        Admission::Unmetered => None,
+        Admission::Denied => {
+            return ingress_error(dialect, StatusCode::TOO_MANY_REQUESTS, "budget exhausted");
         }
-        Err(status) => {
-            return ingress_error(dialect, status, "budget ledger unavailable");
-        }
-    }
+    };
 
     let accounting = RequestAccounting::new(
         Arc::clone(&state),
         scope,
-        ceiling,
+        reservation,
         provider.slug().into(),
         &request,
     );
@@ -765,14 +779,28 @@ async fn transparent_stream_response(
         .expect("valid streaming response")
 }
 
-fn reserve_budget(state: &ProxyState, scope: &str, reserved: u64) -> Result<(), StatusCode> {
-    let mut ledger = state
-        .ledger
+/// The enforcement policy configured for a scope (from the operator budgets map). Drives D6
+/// fail-open/closed and whether the scope is a hard `Block` cap. Unset → `Block` (the safe default).
+fn scope_policy(state: &ProxyState, scope: &str) -> Policy {
+    state
+        .budgets
         .lock()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    ledger
-        .reserve(scope, reserved)
-        .map_err(|_| StatusCode::TOO_MANY_REQUESTS)
+        .ok()
+        .and_then(|budgets| budgets.get(scope).map(|spec| Policy::parse(&spec.policy)))
+        .unwrap_or(Policy::Block)
+}
+
+/// Reserve a ceiling lease for one in-flight call (ADR-0005 D1). A poisoned ledger lock is treated
+/// as a backend failure and resolved by D6: `Warn` fails open (unmetered admit), `Block` fails
+/// closed (deny).
+fn reserve_budget(state: &ProxyState, scope: &str, ceiling: u64, policy: Policy) -> Admission {
+    match state.ledger.lock() {
+        Ok(mut ledger) => ledger.reserve(scope, ceiling, OffsetDateTime::now_utc(), policy),
+        Err(_) => match policy {
+            Policy::Warn => Admission::Unmetered,
+            Policy::Block => Admission::Denied,
+        },
+    }
 }
 
 /// Owns the reservation and guarantees one terminal usage observation even when an HTTP body is
@@ -780,7 +808,9 @@ fn reserve_budget(state: &ProxyState, scope: &str, reserved: u64) -> Result<(), 
 struct RequestAccounting {
     state: Arc<ProxyState>,
     scope: String,
-    reserved: u64,
+    /// The held lease to settle by id (ADR-0005 D2). `None` when the scope admitted fail-open with
+    /// no durable lease (D6) — nothing to settle.
+    reservation: Option<Reservation>,
     provider: String,
     model: String,
     metadata: RequestMetadataV1,
@@ -793,14 +823,14 @@ impl RequestAccounting {
     fn new(
         state: Arc<ProxyState>,
         scope: String,
-        reserved: u64,
+        reservation: Option<Reservation>,
         provider: String,
         request: &ChatRequestV1,
     ) -> Self {
         Self {
             state,
             scope,
-            reserved,
+            reservation,
             provider,
             model: request.model.clone(),
             metadata: request.metadata.clone(),
@@ -849,24 +879,30 @@ impl RequestAccounting {
             UsageCompleteness::Final | UsageCompleteness::Partial
         );
         // Settle against the single neutral `billable()` (cache split included, ADR-0005 D4) so the
-        // ledger and the emitted usage event count the same quantity.
+        // ledger and the emitted usage event count the same quantity. An unmeasured (failed /
+        // cancelled) call settles `0`, which releases the lease without recording spend.
         let actual = if measured { billable(&usage) } else { 0 };
-        // Reconcile the reservation against the measured terminal usage, and capture the
-        // post-reconcile spent + limit so the alert subsystem can evaluate thresholds.
-        let mut alert_input: Option<(u64, Option<u64>)> = None;
+        // Settle the lease by id (idempotent, ADR-0005 D2), then capture the post-settle spent for
+        // the alert subsystem. Alerts evaluate only on a measured call.
+        let mut spent_after: Option<u64> = None;
         if let Ok(mut ledger) = self.state.ledger.lock() {
+            if let Some(reservation) = &self.reservation {
+                ledger.settle(reservation, actual);
+            }
             if measured {
-                ledger.reconcile(&self.scope, self.reserved, actual);
-                let spent = ledger.spent(&self.scope);
-                let limit = ledger.limit_of(&self.scope);
-                alert_input = Some((spent, limit));
-            } else {
-                ledger.release(&self.scope, self.reserved);
+                spent_after = Some(ledger.spent(&self.scope));
             }
         }
-        // P2: evaluate threshold alerts against the reconciled spend (best-effort — never breaks
-        // the request). Persists last_fired_at for restart-surviving dedup.
-        if let Some((spent, limit)) = alert_input {
+        // P2: evaluate threshold alerts against the settled spend (best-effort — never breaks the
+        // request). The configured limit comes from the budgets metadata map so a `Warn` scope (no
+        // hard cap in the in-memory ledger) still has a threshold to measure against.
+        if let Some(spent) = spent_after {
+            let limit = self
+                .state
+                .budgets
+                .lock()
+                .ok()
+                .and_then(|budgets| budgets.get(&self.scope).map(|spec| spec.limit_tokens));
             self.fire_alerts(spent, limit);
         }
         self.state.sink.emit(&usage_event(
