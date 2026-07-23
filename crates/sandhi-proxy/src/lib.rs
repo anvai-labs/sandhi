@@ -6,6 +6,11 @@
 //! reconciles the budget. It is *in-path*, not a redirect: a client cannot bypass the meter.
 
 mod codec;
+pub mod operator;
+
+// Re-export the admin API request/response types for the `sandhi` CLI client + the startup
+// rehydration helpers used by the `sandhi-proxy` binary.
+pub use operator::{admin, build_provider_handle, rehydrate_live_keys};
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -16,7 +21,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::Router;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -25,10 +30,11 @@ use sandhi_core::{
     Backend, BudgetLedger, ChatRequestV1, KeyStore, RequestMetadataV1, Sink, UsageCompleteness,
     UsageEvent, UsageV2, VirtualKey,
 };
-use sandhi_providers::{ProviderError, ProviderHandle};
-use sandhi_store::SqliteStore;
+use sandhi_providers::{ProviderError, ProviderHandle, ProviderRuntime};
+use sandhi_store::{hash_secret, SqliteStore, VaultStore, VirtualKeyStore};
 
 use codec::{decode_request, encode_response, encode_stream_event, IngressDialect};
+pub use operator::BudgetSpec;
 
 /// Shared server state: the virtual-key store, the budget ledger, the usage sink, and the
 /// registry of configured upstream providers (each already holding its real credential).
@@ -36,15 +42,59 @@ pub struct ProxyState {
     pub keys: KeyStore,
     pub ledger: Mutex<BudgetLedger>,
     pub sink: Arc<dyn Sink>,
-    /// `upstream_ref` → a persistent typed provider handle (real key baked in).
-    pub providers: HashMap<String, ProviderHandle>,
+    /// `upstream_ref` → a persistent typed provider handle (real key baked in). Interior-mutable:
+    /// the admin API registers handles here at runtime; the demo path seeds it at startup.
+    pub providers: Mutex<HashMap<String, ProviderHandle>>,
     /// The durable store backing the dashboard. When set, `/dashboard` serves usage aggregates;
     /// typically the same object is also used as `sink` so events persist.
     pub store: Option<Arc<SqliteStore>>,
+
+    // --- TD-0003 P1 operator surface ---
+    /// Durable provider-credential vault (metadata in SQLite, secret in the active backend).
+    pub vault: Option<Arc<VaultStore>>,
+    /// Durable virtual-key store (hashes + scope), rehydrates `keys` on startup.
+    pub vkeys: Option<Arc<VirtualKeyStore>>,
+    /// Builds typed upstream handles from vault-resolved credentials.
+    pub runtime: ProviderRuntime,
+    /// Admin-API bearer token (distinct from virtual keys). `None` disables the admin API.
+    pub admin_token: Option<String>,
+    /// Operator-set budgets (scope → spec). The live [`BudgetLedger`] enforces them.
+    pub budgets: Mutex<HashMap<String, BudgetSpec>>,
+    /// The externally-reachable base URL shared with minted-key callers (e.g.
+    /// `http://localhost:8787`).
+    pub public_url: String,
+}
+
+impl ProxyState {
+    /// Build a state with the operator surface defaulted off (no vault, no admin token). The
+    /// existing demo + request-handling path is unchanged.
+    #[must_use]
+    pub fn new(
+        keys: KeyStore,
+        ledger: BudgetLedger,
+        sink: Arc<dyn Sink>,
+        providers: HashMap<String, ProviderHandle>,
+        store: Option<Arc<SqliteStore>>,
+    ) -> Self {
+        Self {
+            keys,
+            ledger: Mutex::new(ledger),
+            sink,
+            providers: Mutex::new(providers),
+            store,
+            vault: None,
+            vkeys: None,
+            runtime: ProviderRuntime::new(),
+            admin_token: None,
+            budgets: Mutex::new(HashMap::new()),
+            public_url: "http://localhost:8787".into(),
+        }
+    }
 }
 
 /// Build the axum app. Ingress paths mirror the provider wire formats (OpenAI Chat Completions,
 /// OpenAI Responses, Anthropic Messages); the presented virtual key selects the actual upstream.
+/// The `/admin/*` routes are the TD-0003 operator surface (authed by an admin token).
 pub fn build_app(state: Arc<ProxyState>) -> Router {
     Router::new()
         .route("/healthz", get(health))
@@ -53,6 +103,21 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         .route("/v1/chat/completions", post(handle_openai))
         .route("/v1/messages", post(handle_anthropic))
         .route("/v1/responses", post(handle_responses))
+        // TD-0003 P1 operator (admin) API.
+        .route(
+            "/admin/keys",
+            post(operator::add_key).get(operator::list_keys),
+        )
+        .route("/admin/keys/share", post(operator::share_key))
+        .route("/admin/keys/virtual", get(operator::list_virtual_keys))
+        .route("/admin/keys/:provider/:label", delete(operator::revoke_key))
+        .route("/admin/vkeys/:id", delete(operator::revoke_virtual_key))
+        .route(
+            "/admin/budget",
+            post(operator::set_budget).get(operator::list_budgets),
+        )
+        .route("/admin/budget/usage", get(operator::budget_usage))
+        .route("/admin/usage", get(operator::usage))
         .with_state(state)
 }
 
@@ -171,16 +236,30 @@ async fn handle(
     body: Bytes,
     dialect: IngressDialect,
 ) -> Response {
-    // 1. Virtual key from `Authorization: Bearer vk_…`.
-    let Some(vk_id) = bearer(&headers) else {
+    // 1. Virtual key from `Authorization: Bearer vk_…`. Resolve the live key store by exact token
+    //    (legacy/demo path, where the id doubles as the token) then by its hash (operator-minted
+    //    path, where only the hash is the lookup key — the plaintext is never retained).
+    let Some(vk_token) = bearer(&headers) else {
         return error(StatusCode::UNAUTHORIZED, "missing bearer virtual key");
     };
-    let Some(vk) = state.keys.resolve(vk_id).cloned() else {
-        return error(StatusCode::UNAUTHORIZED, "unknown virtual key");
+    let vk = match resolve_virtual_key(&state, vk_token) {
+        VirtualKeyResolution::Found(vk) => vk,
+        VirtualKeyResolution::Expired => {
+            return error(StatusCode::UNAUTHORIZED, "virtual key expired");
+        }
+        VirtualKeyResolution::NotFound => {
+            return error(StatusCode::UNAUTHORIZED, "unknown virtual key");
+        }
     };
 
     // 2. The upstream this key is bound to.
-    let Some(provider) = state.providers.get(&vk.upstream_ref).cloned() else {
+    let Some(provider) = state
+        .providers
+        .lock()
+        .expect("providers poisoned")
+        .get(&vk.upstream_ref)
+        .cloned()
+    else {
         return error(
             StatusCode::BAD_GATEWAY,
             "no upstream registered for this key",
@@ -502,9 +581,39 @@ fn next_request_id() -> String {
 }
 
 fn budget_scope(vk: &VirtualKey) -> String {
+    // An operator-set explicit scope wins; otherwise derive from the group (the default
+    // prompt-cache namespace) or fall back to the key itself.
+    if let Some(scope) = vk.budget_scope.as_deref() {
+        return scope.to_string();
+    }
     match &vk.group_id {
         Some(g) => format!("group:{g}"),
         None => format!("vk:{}", vk.id),
+    }
+}
+
+enum VirtualKeyResolution {
+    Found(VirtualKey),
+    NotFound,
+    Expired,
+}
+
+/// Resolve a presented virtual-key token: exact (legacy demo) then by hash (operator-minted).
+/// Filters out expired keys.
+fn resolve_virtual_key(state: &ProxyState, token: &str) -> VirtualKeyResolution {
+    let vk = state
+        .keys
+        .resolve(token)
+        .or_else(|| state.keys.resolve(&hash_secret(token)));
+    match vk {
+        Some(vk) => {
+            if vk.is_expired(&now_rfc3339()) {
+                VirtualKeyResolution::Expired
+            } else {
+                VirtualKeyResolution::Found(vk)
+            }
+        }
+        None => VirtualKeyResolution::NotFound,
     }
 }
 
