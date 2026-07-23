@@ -90,6 +90,12 @@ pub trait ChatProvider: Send + Sync {
 #[derive(Clone)]
 pub struct ProviderHandle {
     inner: Arc<dyn ChatProvider>,
+    /// The vault-declared / config-declared family (TD-0006 / ADR-0004 D1). This is what the
+    /// proxy's plane-selection will use to decide transparent-forward vs. cross-family
+    /// translation. It is set from the factory constructor (config-driven), **not** from
+    /// [`ProviderFamily::for_slug`] (which defaults unknown slugs to OpenAI-compat and would
+    /// byte-forward an OpenAI body to an Anthropic upstream).
+    family: ProviderFamily,
 }
 
 impl ProviderHandle {
@@ -97,9 +103,36 @@ impl ProviderHandle {
     ///
     /// This is the typed extension seam used by gateway tests and host-owned providers. Raw
     /// provider-native request/response transports intentionally do not cross this boundary.
+    /// The family defaults to [`ProviderFamily::OpenAiCompat`]; use [`with_family`] to override
+    /// for non-OpenAI providers constructed via this escape hatch.
+    ///
+    /// [`with_family`]: Self::with_family
     #[must_use]
     pub fn new(inner: Arc<dyn ChatProvider>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            family: ProviderFamily::OpenAiCompat,
+        }
+    }
+
+    /// Declare the provider family on a handle constructed via [`new`]. For handles created
+    /// through the [`ProviderRuntime`] factory methods, the family is already set from config.
+    ///
+    /// [`new`]: Self::new
+    #[must_use]
+    pub fn with_family(mut self, family: ProviderFamily) -> Self {
+        self.family = family;
+        self
+    }
+
+    /// The vault-declared / config-declared family — **not** slug-derived. Proxy
+    /// plane-selection (TD-0006 Step 2) uses this to decide whether to forward raw bytes
+    /// (same-family transparent plane) or route through `ChatRequestV1` translation
+    /// (cross-family plane). A custom-slug row must resolve by CONFIG, not by
+    /// [`ProviderFamily::for_slug`].
+    #[must_use]
+    pub fn family(&self) -> ProviderFamily {
+        self.family
     }
 
     pub fn slug(&self) -> &str {
@@ -216,6 +249,7 @@ impl ProviderRuntime {
         let raw = self.transport(config);
         ProviderHandle {
             inner: Arc::new(TypedOpenAiCompat { slug, raw }),
+            family: ProviderFamily::OpenAiCompat,
         }
     }
 
@@ -250,6 +284,7 @@ impl ProviderRuntime {
                 raw,
                 OpenAiResponsesProfile::Standard,
             )),
+            family: ProviderFamily::OpenAiResponses,
         }
     }
 
@@ -285,6 +320,7 @@ impl ProviderRuntime {
                 raw,
                 OpenAiResponsesProfile::ChatGptCodex,
             )),
+            family: ProviderFamily::OpenAiResponses,
         }
     }
 
@@ -307,6 +343,7 @@ impl ProviderRuntime {
         let raw = self.transport(config);
         ProviderHandle {
             inner: Arc::new(crate::anthropic_typed::TypedAnthropic::new(raw)),
+            family: ProviderFamily::Anthropic,
         }
     }
 
@@ -327,6 +364,7 @@ impl ProviderRuntime {
         let raw = self.transport(config);
         ProviderHandle {
             inner: Arc::new(crate::ollama_typed::TypedOllama::new(raw)),
+            family: ProviderFamily::Ollama,
         }
     }
 
@@ -349,6 +387,7 @@ impl ProviderRuntime {
         let raw = self.transport(config);
         ProviderHandle {
             inner: Arc::new(crate::gemini_typed::TypedGemini::new(raw)),
+            family: ProviderFamily::Gemini,
         }
     }
 
@@ -369,6 +408,7 @@ impl ProviderRuntime {
         let raw = self.transport(config);
         ProviderHandle {
             inner: Arc::new(crate::cohere_typed::TypedCohere::new(raw)),
+            family: ProviderFamily::Cohere,
         }
     }
 
@@ -981,4 +1021,100 @@ mod tests {
             )));
         }
     }
+
+    // -----------------------------------------------------------------------------------------
+    // ProviderFamily accessor (TD-0006 / ADR-0004 D1)
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn family_accessor_returns_config_declared_family_from_factory() {
+        let runtime = ProviderRuntime::new();
+        // Each factory constructor stamps the family from config, not from slug.
+        let openai = runtime.openai_compat(
+            "openai",
+            "https://api.openai.com/v1",
+            "k",
+            HeaderMap::new(),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(openai.family(), ProviderFamily::OpenAiCompat);
+
+        let anthropic = runtime.anthropic(
+            "https://api.anthropic.com",
+            "k",
+            crate::AnthropicAuthScheme::ApiKey,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(anthropic.family(), ProviderFamily::Anthropic);
+
+        let gemini = runtime.gemini(
+            "https://generativelanguage.googleapis.com",
+            "k",
+            crate::GeminiAuthScheme::ApiKey,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(gemini.family(), ProviderFamily::Gemini);
+
+        let cohere = runtime.cohere("https://api.cohere.ai", "k", None, None, None);
+        assert_eq!(cohere.family(), ProviderFamily::Cohere);
+    }
+
+    #[test]
+    fn custom_slug_resolves_family_by_config_not_slug_heuristic() {
+        // A custom-slug endpoint configured as Anthropic must resolve as Anthropic — NOT
+        // as OpenAiCompat (which for_slug would return for an unknown slug).
+        let runtime = ProviderRuntime::new();
+        let custom = runtime.anthropic(
+            "https://internal-llm.corp.example",
+            "k",
+            crate::AnthropicAuthScheme::ApiKey,
+            None,
+            None,
+            None,
+        );
+        // The factory sets family from the constructor (config), not from the slug.
+        assert_eq!(custom.family(), ProviderFamily::Anthropic);
+        // for_slug would default to OpenAiCompat — wrong for a custom Anthropic endpoint.
+        assert_eq!(
+            ProviderFamily::for_slug("internal-llm"),
+            ProviderFamily::OpenAiCompat
+        );
+        // The config-declared family is the authoritative answer.
+        assert_ne!(custom.family(), ProviderFamily::for_slug("internal-llm"));
+    }
+
+    #[test]
+    fn handle_new_defaults_and_with_family_overrides() {
+        let bare: Arc<dyn ChatProvider> = Arc::new(NoOpProvider);
+        // new() defaults to OpenAiCompat for backward-compat extension seam.
+        let default = ProviderHandle::new(bare.clone());
+        assert_eq!(default.family(), ProviderFamily::OpenAiCompat);
+        // with_family overrides for non-OpenAI providers constructed via the escape hatch.
+        let gemini = ProviderHandle::new(bare).with_family(ProviderFamily::Gemini);
+        assert_eq!(gemini.family(), ProviderFamily::Gemini);
+    }
+
+    /// Minimal ChatProvider mock for handle tests (never actually completes a call).
+    struct NoOpProvider;
+    #[async_trait]
+    impl ChatProvider for NoOpProvider {
+        fn slug(&self) -> &str {
+            "noop"
+        }
+        async fn complete(&self, _: ChatRequestV1) -> Result<ChatResponseV1, ProviderError> {
+            unreachable!()
+        }
+        async fn stream(&self, _: ChatRequestV1) -> Result<ChatEventStream, ProviderError> {
+            unreachable!()
+        }
+    }
+
+    /// Minimal local import so the test compiles without adding a top-level `use`.
+    use reqwest::header::HeaderMap;
 }
