@@ -392,18 +392,23 @@ const fmt = n => (n ?? 0).toLocaleString();
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c =>
   ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
 const orDash = s => (s === null || s === undefined || s === "") ? "—" : esc(s);
+// No latency is "—", never "0 ms": a call that never reported a duration is unknown, not fast.
+const lat = l => (!l || !l.samples) ? "—"
+  : `${fmt(l.p50_ms)} / ${fmt(l.p95_ms)} ms <span class="sub">(n=${fmt(l.samples)})</span>`;
 
 function tbl(title, rows) {
   const body = rows.map(r => `<tr><td>${esc(r.key)}</td><td class="num">${fmt(r.calls)}</td>`
     + `<td class="num">${fmt(r.tokens_in)}</td><td class="num">${fmt(r.tokens_out)}</td>`
     + `<td class="num">${fmt(r.cache_creation_tokens)}</td><td class="num">${fmt(r.cache_read_tokens)}</td>`
-    + `<td class="num">${fmt(r.billable_tokens)}</td></tr>`).join("");
+    + `<td class="num">${fmt(r.billable_tokens)}</td>`
+    + `<td class="num">${lat(r.latency)}</td></tr>`).join("");
   return `<h2>${title}</h2><table><thead><tr><th>key</th><th class="num">calls</th>`
     + `<th class="num">in</th><th class="num">out</th><th class="num">cache write</th>`
     + `<th class="num">cache read</th><th class="num" title="ADR-0005 D4: the quantity budgets `
     + `are enforced on — fresh input + cache split + output (+ unfolded reasoning)">billable`
-    + `</th></tr></thead>`
-    + `<tbody>${body || '<tr><td colspan=7>no data yet</td></tr>'}</tbody></table>`;
+    + `</th><th class="num" title="p50 / p95 milliseconds over the sampled calls that reported a `
+    + `duration — approximate by design; tokens above are exact">latency</th></tr></thead>`
+    + `<tbody>${body || '<tr><td colspan=8>no data yet</td></tr>'}</tbody></table>`;
 }
 
 fetch("/dashboard/api/usage").then(r => r.json()).then(d => {

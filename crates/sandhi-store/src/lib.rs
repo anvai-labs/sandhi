@@ -8,11 +8,11 @@ pub mod ledger;
 pub mod vault;
 pub mod vkeys;
 
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use rusqlite::{params, Connection};
-use sandhi_core::{Backend, Sink, UsageEvent};
-use serde::Serialize;
+use sandhi_core::{Backend, LatencySummary, Sink, UsageAggregateV1, UsageEvent};
 
 pub use alerts::{AlertRuleRecord, AlertStore, CreateAlertRequest};
 pub use ledger::{BudgetRow, ReserveOutcome, SqliteLedger};
@@ -26,27 +26,25 @@ pub use vkeys::{MintRequest, MintedKey, VirtualKeyRecord, VirtualKeyStore};
 /// D4 reasoning fold **per call**, which is exactly why this cannot be written as
 /// `SUM(reasoning) > SUM(tokens_out)`. `store_matches_core_billable` pins this expression against
 /// the Rust one so the two cannot drift.
+/// Raw latency samples for one group key: `(duration_ms, time_to_first_token_ms)`.
+/// TTFT is shorter than duration whenever a call was non-streaming.
+type LatencySamples = (Vec<u64>, Vec<u64>);
+
+/// Most-recent calls sampled per query when summarising latency (TD-0009 D3).
+const LATENCY_SAMPLE_LIMIT: usize = 10_000;
+
 const BILLABLE_SQL: &str = "COALESCE(SUM(tokens_in + cache_creation_tokens + cache_read_tokens \
      + tokens_out + CASE WHEN COALESCE(reasoning_tokens,0) > tokens_out \
      THEN COALESCE(reasoning_tokens,0) ELSE 0 END),0)";
 
 /// One aggregation row (or the grand total).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Bucket {
-    /// The group key (a subject/group/provider, or `"total"` / `"(none)"`).
-    pub key: String,
-    pub calls: u64,
-    pub tokens_in: u64,
-    pub tokens_out: u64,
-    pub cache_creation_tokens: u64,
-    pub cache_read_tokens: u64,
-    pub reasoning_tokens: u64,
-    /// The ADR-0005 D4 billable total — summed **per row** in SQL, mirroring
-    /// [`sandhi_core::billable_parts`], so what an operator reads equals what the ledger
-    /// charged. Not derivable from the columns above: the reasoning fold is a per-call
-    /// decision, so comparing summed reasoning against summed output gives a different answer.
-    pub billable_tokens: u64,
-}
+///
+/// **This is the contract type, not a store-private struct** (TD-0009 D1): the aggregate crosses
+/// into the dashboard, the `sandhi` CLI, both language bindings, and later the control plane, so
+/// it is defined and schema'd once in `sandhi-core` and merely *computed* here. The SQL below is
+/// an index over [`sandhi_core::UsageAggregator`]'s fold — an optimization for large histories,
+/// never a second definition. `store_matches_core_fold` proves the two agree.
+pub type Bucket = UsageAggregateV1;
 
 /// A SQLite-backed usage store.
 pub struct SqliteStore {
@@ -179,9 +177,62 @@ impl SqliteStore {
                 cache_read_tokens: r.get::<_, i64>(5)? as u64,
                 reasoning_tokens: r.get::<_, i64>(6)? as u64,
                 billable_tokens: r.get::<_, i64>(7)? as u64,
+                latency: None,
             })
         })?;
-        rows.collect()
+        let mut buckets: Vec<Bucket> = rows.collect::<rusqlite::Result<_>>()?;
+        let samples = Self::latency_samples(&conn, col, since)?;
+        for b in &mut buckets {
+            if let Some((d, t)) = samples.get(&b.key) {
+                b.latency = LatencySummary::from_samples(d, t);
+            }
+        }
+        Ok(buckets)
+    }
+
+    /// Latency samples per group key, most recent first and bounded.
+    ///
+    /// SQLite has no percentile function, so the percentile itself is computed by
+    /// [`LatencySummary::from_samples`] — the same code the in-process aggregator uses, because a
+    /// second percentile implementation is a second definition (TD-0009 D6). The bound is what
+    /// makes this affordable on a large history and is why the summary carries `samples`: a
+    /// consumer can see the weight behind the number instead of assuming a full scan.
+    fn latency_samples(
+        conn: &Connection,
+        col: &str,
+        since: Option<&str>,
+    ) -> rusqlite::Result<BTreeMap<String, LatencySamples>> {
+        let (where_clause, params): (String, Vec<Box<dyn rusqlite::ToSql>>) = match since {
+            Some(s) => (
+                "WHERE occurred_at >= ?1 AND duration_ms IS NOT NULL".into(),
+                vec![Box::new(s.to_string())],
+            ),
+            None => ("WHERE duration_ms IS NOT NULL".into(), vec![]),
+        };
+        let sql = format!(
+            "SELECT COALESCE({col}, '(none)') AS k, duration_ms, time_to_first_token_ms \
+             FROM usage_events {where_clause} \
+             ORDER BY occurred_at DESC LIMIT {LATENCY_SAMPLE_LIMIT}"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let mut out: BTreeMap<String, LatencySamples> = BTreeMap::new();
+        let rows = stmt.query_map(param_refs.as_slice(), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)? as u64,
+                r.get::<_, Option<i64>>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (k, d, t) = row?;
+            let entry = out.entry(k).or_default();
+            entry.0.push(d);
+            if let Some(t) = t {
+                entry.1.push(t as u64);
+            }
+        }
+        Ok(out)
     }
 
     /// Totals grouped by a fixed column, busiest first (no time window).
@@ -239,6 +290,12 @@ impl SqliteStore {
     /// The grand total across every event.
     pub fn grand_total(&self) -> rusqlite::Result<Bucket> {
         let conn = self.conn.lock().unwrap();
+        // `'total'` as the grouping expression funnels every row into one key, so the same
+        // sampling path serves the grand total — no second latency query to keep in step.
+        let samples = Self::latency_samples(&conn, "'total'", None)?;
+        let latency = samples
+            .get("total")
+            .and_then(|(d, t)| LatencySummary::from_samples(d, t));
         conn.query_row(
             &format!(
                 "SELECT COUNT(*), COALESCE(SUM(tokens_in),0), COALESCE(SUM(tokens_out),0), \
@@ -256,6 +313,7 @@ impl SqliteStore {
                     cache_read_tokens: r.get::<_, i64>(4)? as u64,
                     reasoning_tokens: r.get::<_, i64>(5)? as u64,
                     billable_tokens: r.get::<_, i64>(6)? as u64,
+                    latency: latency.clone(),
                 })
             },
         )
@@ -363,6 +421,64 @@ mod tests {
         let event = ev("openai", "alice", "team-a", 1, 2).with_latency(Some(5), None);
         store.emit(&event);
         assert_eq!(store.grand_total().unwrap().calls, 1);
+    }
+
+    #[test]
+    fn store_matches_core_fold() {
+        // TD-0009 D6: the core fold is the definition and SQL is an index over it, so the two
+        // must agree row for row — including the per-call reasoning fold and the ranking.
+        use sandhi_core::{Dimension, UsageAggregator};
+
+        let store = SqliteStore::in_memory().unwrap();
+        let mut agg = UsageAggregator::new(Dimension::Subject);
+        let corpus = [
+            ev("openai", "alice", "team-a", 100, 20),
+            ev("openai", "alice", "team-a", 50, 10),
+            ev("anthropic", "bob", "team-b", 200, 40),
+            ev("openai", "bob", "team-b", 10, 10).with_reasoning(Some(4)), // folded
+            ev("openai", "carol", "team-b", 10, 3).with_reasoning(Some(8)), // unfolded
+        ];
+        for e in &corpus {
+            store.emit(e);
+            agg.add(e);
+        }
+
+        let sql_rows = store.totals_by_subject().unwrap();
+        let fold_rows = agg.rows();
+        assert_eq!(sql_rows.len(), fold_rows.len());
+        for (sql, fold) in sql_rows.iter().zip(fold_rows.iter()) {
+            assert_eq!(sql, fold, "SQL row must equal the core fold row");
+        }
+        assert_eq!(store.grand_total().unwrap(), agg.total());
+    }
+
+    #[test]
+    fn store_reads_back_latency_it_records() {
+        // #68 added duration/TTFT and nothing ever read them. Prove the round trip.
+        let store = SqliteStore::in_memory().unwrap();
+        for ms in [10_u64, 20, 30, 40, 100] {
+            store
+                .emit(&ev("openai", "alice", "team-a", 10, 5).with_latency(Some(ms), Some(ms / 2)));
+        }
+        let l = store
+            .grand_total()
+            .unwrap()
+            .latency
+            .expect("durations were recorded");
+        assert_eq!(l.samples, 5);
+        assert_eq!(l.p50_ms, 30);
+        assert_eq!(l.p95_ms, 100);
+        assert_eq!(l.ttft_p50_ms, Some(15));
+        // Same values through the grouped path.
+        let by_subject = store.totals_by_subject().unwrap();
+        assert_eq!(by_subject[0].latency.as_ref().unwrap().p50_ms, 30);
+    }
+
+    #[test]
+    fn latency_is_absent_when_nothing_reported_it() {
+        let store = SqliteStore::in_memory().unwrap();
+        store.emit(&ev("openai", "alice", "team-a", 10, 5));
+        assert!(store.grand_total().unwrap().latency.is_none());
     }
 
     #[test]

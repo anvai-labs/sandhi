@@ -529,6 +529,10 @@ pub fn contract_schema_documents() -> BTreeMap<&'static str, String> {
             render(&schemars::schema_for!(ChatStreamEventV1)),
         ),
         (
+            "usage-aggregate.v1.schema.json",
+            render(&schemars::schema_for!(crate::stats::UsageAggregateV1)),
+        ),
+        (
             "provider-descriptor.v1.schema.json",
             render(&schemars::schema_for!(ProviderDescriptorV1)),
         ),

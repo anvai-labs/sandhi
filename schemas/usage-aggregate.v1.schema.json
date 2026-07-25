@@ -1,0 +1,107 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "UsageAggregateV1",
+  "description": "One folded row: neutral units only, no dollars (ADR-0001).",
+  "type": "object",
+  "required": [
+    "billable_tokens",
+    "cache_creation_tokens",
+    "cache_read_tokens",
+    "calls",
+    "key",
+    "reasoning_tokens",
+    "tokens_in",
+    "tokens_out"
+  ],
+  "properties": {
+    "billable_tokens": {
+      "description": "The ADR-0005 D4 quantity budgets are enforced on, summed **per call**. Not derivable from the fields above: the reasoning fold is a per-call decision, so comparing summed reasoning against summed output gives a different — wrong — answer.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "cache_creation_tokens": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "cache_read_tokens": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "calls": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "key": {
+      "description": "The group key — a subject/group/provider/model/virtual key/session, or one of [`TOTAL_KEY`] / [`NONE_KEY`] / [`OVERFLOW_KEY`].",
+      "type": "string"
+    },
+    "latency": {
+      "description": "Absent when no call in this row reported a duration.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/LatencySummary"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "reasoning_tokens": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "tokens_in": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "tokens_out": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "LatencySummary": {
+      "description": "Latency over the calls in an aggregate.\n\n**Percentiles are approximate** — computed over the sampled calls counted by `samples`, which is carried precisely so a consumer can see the approximation's weight instead of inferring a confidence it does not have. Tokens are exact because budgets enforce on them; latency informs (TD-0009 D3: approximate what informs, never what enforces).",
+      "type": "object",
+      "required": [
+        "p50_ms",
+        "p95_ms",
+        "samples"
+      ],
+      "properties": {
+        "p50_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "p95_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "samples": {
+          "description": "Calls that reported a duration. Zero means the rest of this struct is meaningless.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "ttft_p50_ms": {
+          "description": "Time to first token, streams only; `samples` for it may be lower than `samples` above.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    }
+  }
+}

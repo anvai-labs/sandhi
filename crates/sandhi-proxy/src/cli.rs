@@ -382,6 +382,19 @@ fn render(command: &Command, response: &Value, _base_url: &str) {
     }
 }
 
+/// `p50/p95 ms` over the calls that reported a duration, or `—`. Absent latency is unknown, not
+/// zero — printing `0 ms` would read as "instant" for a provider that never reported timing.
+fn latency_cell(b: &Value) -> String {
+    match b.get("latency") {
+        Some(l) if l.get("samples").and_then(Value::as_u64).unwrap_or(0) > 0 => format!(
+            "{}/{} ms",
+            l.get("p50_ms").and_then(Value::as_u64).unwrap_or(0),
+            l.get("p95_ms").and_then(Value::as_u64).unwrap_or(0),
+        ),
+        _ => "—".to_string(),
+    }
+}
+
 fn render_usage(response: &Value, format: &Format) {
     if matches!(format, Format::Json) {
         print_json(response);
@@ -408,12 +421,13 @@ fn render_usage(response: &Value, format: &Format) {
         println!();
         for b in buckets {
             println!(
-                "{:<28} {:>6} calls  {:>8} in  {:>8} out  {:>10} billable",
+                "{:<28} {:>6} calls  {:>8} in  {:>8} out  {:>10} billable  {:>16}",
                 b.get("key").and_then(Value::as_str).unwrap_or("?"),
                 u64_at(b, "calls"),
                 u64_at(b, "tokens_in"),
                 u64_at(b, "tokens_out"),
                 u64_at(b, "billable_tokens"),
+                latency_cell(b),
             );
         }
     }
