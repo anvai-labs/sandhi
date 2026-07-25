@@ -137,6 +137,14 @@ Python, which is often too new for pyo3 — the script guards the version); the 
 3. `bindings/python` (`sandhi-gateway`) + the in-process middleware.
 4. `sandhi-proxy`: the inline reverse-proxy with virtual keys + budgets.
 
+## Community & contributing
+
+- **Contributing** — see [CONTRIBUTING.md](CONTRIBUTING.md) (setup, the `develop` → `main`
+  branch flow, the test/coverage gates).
+- **Releases** — see [CHANGELOG.md](CHANGELOG.md) and [RELEASING.md](RELEASING.md).
+- **Security** — report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
+- **Code of conduct** — [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+
 ## License
 
 Apache-2.0 — see [LICENSE](LICENSE).
