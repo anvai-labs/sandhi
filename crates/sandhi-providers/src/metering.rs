@@ -305,7 +305,10 @@ mod tests {
     async fn failed_complete_emits_no_event() {
         let sink = Arc::new(InMemorySink::new());
         let p = MeteredProvider::new(
-            Scripted::new(vec![Err(ProviderError::Upstream(500))]),
+            Scripted::new(vec![Err(ProviderError::Upstream {
+                status: 500,
+                body: None,
+            })]),
             sink.clone(),
         );
         assert!(p.complete(attributed_req()).await.is_err());

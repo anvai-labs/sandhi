@@ -47,7 +47,10 @@ impl Provider for FnProvider {
     async fn stream(&self, _req: ProviderRequest) -> Result<ByteStream, ProviderError> {
         // Custom providers implement the non-streaming path; a streaming closure variant can be
         // added later. Callers should route custom providers through `complete`.
-        Err(ProviderError::Upstream(501))
+        Err(ProviderError::Upstream {
+            status: 501,
+            body: None,
+        })
     }
 }
 

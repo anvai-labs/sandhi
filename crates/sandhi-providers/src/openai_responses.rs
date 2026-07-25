@@ -4,8 +4,8 @@
 //! protocol at `/responses`, not the Chat Completions message/chunk protocol.
 
 use crate::{
-    error_for_status, metered_passthrough, parse_openai_responses_usage, sse_data_json, ByteStream,
-    ParsedUsage, Provider, ProviderError, ProviderRequest, ProviderResponse,
+    error_for_response, metered_passthrough, parse_openai_responses_usage, sse_data_json,
+    ByteStream, ParsedUsage, Provider, ProviderError, ProviderRequest, ProviderResponse,
 };
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, AUTHORIZATION, CONTENT_TYPE, HOST};
@@ -105,10 +105,10 @@ impl Provider for OpenAiResponses {
             .send()
             .await
             .map_err(|error| ProviderError::Transport(error.to_string()))?;
-        let status = response.status().as_u16();
         if !response.status().is_success() {
-            return Err(error_for_status(status));
+            return Err(error_for_response(response).await);
         }
+        let status = response.status().as_u16();
         let body: Value = response
             .json()
             .await
@@ -136,7 +136,7 @@ impl Provider for OpenAiResponses {
             .await
             .map_err(|error| ProviderError::Transport(error.to_string()))?;
         if !response.status().is_success() {
-            return Err(error_for_status(response.status().as_u16()));
+            return Err(error_for_response(response).await);
         }
         Ok(metered_passthrough(
             response.bytes_stream(),

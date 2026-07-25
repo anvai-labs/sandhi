@@ -3,7 +3,7 @@
 //! servers use [`crate::OpenAiCompat`] pointed at `http://localhost:.../v1`.)
 
 use crate::{
-    error_for_status, metered_passthrough, ByteStream, ParsedUsage, Provider, ProviderError,
+    error_for_response, metered_passthrough, ByteStream, ParsedUsage, Provider, ProviderError,
     ProviderRequest, ProviderResponse,
 };
 use async_trait::async_trait;
@@ -68,7 +68,7 @@ impl Provider for Ollama {
             .map_err(|e| ProviderError::Transport(e.to_string()))?;
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
-            return Err(error_for_status(status));
+            return Err(error_for_response(resp).await);
         }
         let body: Value = resp
             .json()
@@ -94,7 +94,7 @@ impl Provider for Ollama {
             .await
             .map_err(|e| ProviderError::Transport(e.to_string()))?;
         if !resp.status().is_success() {
-            return Err(error_for_status(resp.status().as_u16()));
+            return Err(error_for_response(resp).await);
         }
         // NDJSON: each line is a complete JSON object; the final one carries the eval counts.
         Ok(metered_passthrough(resp.bytes_stream(), sniff_usage_line))

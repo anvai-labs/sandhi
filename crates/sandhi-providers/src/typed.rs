@@ -893,11 +893,17 @@ fn decode_openai_stream(mut raw: ByteStream, requested_model: String) -> ChatEve
 
 impl ProviderError {
     pub fn as_typed(&self, provider: Option<&str>) -> ProviderErrorV1 {
+        let mut details = BTreeMap::new();
         let (code, retryable, http_status) = match self {
             Self::InvalidRequest(_) => ("invalid_request", false, Some(400)),
             Self::Auth => ("authentication_error", false, Some(401)),
             Self::RateLimited => ("rate_limited", true, Some(429)),
-            Self::Upstream(status) => ("upstream_error", *status >= 500, Some(*status)),
+            Self::Upstream { status, body } => {
+                if let Some(body) = body {
+                    details.insert("upstream_body".to_owned(), Value::String(body.clone()));
+                }
+                ("upstream_error", *status >= 500, Some(*status))
+            }
             Self::Transport(_) => ("transport_error", true, None),
             Self::CircuitOpen => ("circuit_open", true, Some(503)),
             Self::Timeout(_) => ("timeout", true, Some(504)),
@@ -909,7 +915,7 @@ impl ProviderError {
             http_status,
             provider: provider.map(str::to_owned),
             request_id: None,
-            details: BTreeMap::new(),
+            details,
         }
     }
 }
@@ -1179,6 +1185,53 @@ mod tests {
         async fn stream(&self, _: ChatRequestV1) -> Result<ChatEventStream, ProviderError> {
             unreachable!()
         }
+    }
+
+    #[test]
+    fn upstream_error_body_reaches_typed_details_and_message() {
+        let body = r#"{"error":{"message":"tool call id call_9 not found in messages"}}"#;
+        let err = ProviderError::Upstream {
+            status: 400,
+            body: Some(body.to_owned()),
+        };
+        let typed = err.as_typed(Some("moonshot"));
+        assert_eq!(typed.code, "upstream_error");
+        assert_eq!(typed.http_status, Some(400));
+        assert!(!typed.retryable);
+        assert_eq!(
+            typed.details.get("upstream_body"),
+            Some(&Value::String(body.to_owned()))
+        );
+        // Display carries a single-line snippet so consumer logs are self-explaining.
+        assert!(typed.message.contains("tool call id call_9"));
+    }
+
+    #[test]
+    fn upstream_error_without_body_keeps_prior_shape() {
+        let err = ProviderError::Upstream {
+            status: 502,
+            body: None,
+        };
+        let typed = err.as_typed(None);
+        assert_eq!(typed.message, "upstream status 502");
+        assert!(typed.retryable);
+        assert!(typed.details.is_empty());
+    }
+
+    #[test]
+    fn display_snippet_is_bounded_and_single_line() {
+        let long = format!("line1\nline2 {}", "x".repeat(500));
+        let err = ProviderError::Upstream {
+            status: 422,
+            body: Some(long),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.len() < 260,
+            "display snippet must stay bounded: {}",
+            msg.len()
+        );
+        assert!(!msg.contains('\n'));
     }
 
     /// Minimal local import so the test compiles without adding a top-level `use`.

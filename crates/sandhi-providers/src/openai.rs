@@ -3,7 +3,7 @@
 //! OpenRouter, vLLM, LM Studio, Ollama, Cerebras…). One adapter, many providers.
 
 use crate::{
-    error_for_status, metered_passthrough, sse_data_json, ByteStream, ParsedUsage, Provider,
+    error_for_response, metered_passthrough, sse_data_json, ByteStream, ParsedUsage, Provider,
     ProviderError, ProviderRequest, ProviderResponse,
 };
 use crate::{parse_openai_usage, validate_openai_chat_messages};
@@ -80,7 +80,7 @@ impl Provider for OpenAiCompat {
             .map_err(|e| ProviderError::Transport(e.to_string()))?;
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
-            return Err(error_for_status(status));
+            return Err(error_for_response(resp).await);
         }
         let body: Value = resp
             .json()
@@ -113,7 +113,7 @@ impl Provider for OpenAiCompat {
             .await
             .map_err(|e| ProviderError::Transport(e.to_string()))?;
         if !resp.status().is_success() {
-            return Err(error_for_status(resp.status().as_u16()));
+            return Err(error_for_response(resp).await);
         }
         // Forward every upstream chunk verbatim (O(1) pass-through) while sniffing each complete
         // line for the terminal usage object; `metered_passthrough` is the shared streaming
