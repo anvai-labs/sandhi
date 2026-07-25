@@ -48,12 +48,12 @@ neutral contract.
 | Neutral event vocabulary (reasoning/refusal/usage/finish) | Schema'd, generated facades, drift-pinned tests | **Right** |
 | Upstream error diagnostics | Body was structurally dropped → opaque 4xx | **Fixed** — sandhi#65 + victor#652 |
 | Contract-version handshake | `wire_contract_version()` existed, Victor never called it | **Fixed** — victor#652 |
-| Event consumption completeness | `reasoning_delta` ignored until victor#647; `refusal_delta` still unconsumed | **Gap** (P1) |
-| Error transit shape | `ProviderErrorV1` as JSON-in-a-string inside `PyRuntimeError`, re-parsed by regexp on the consumer | **Gap** (P2) |
-| Streaming FFI hot path | Per-event Rust serialize + Python parse (typed layer; transport itself is O(1) pass-through) | **Measure first** (P3) |
-| Node binding parity | Missing `provider_descriptor_json` / `provider_spec` / `chat_contract_schema_json` | **Gap** (P4) |
+| Event consumption completeness | Every variant has a consumer decision; refusal consumed; drift alarm + conformance suite | **Fixed** — victor#647/#654 (P1) |
+| Error transit shape | Typed `SandhiProviderError` (Python); payload unchanged, consumers can branch on class. Node parity pending (follow-up C) | **Fixed** — sandhi#69 (P2) |
+| Streaming FFI hot path | Measured 2.23 µs/event conservative; 0.01–0.04 % of wall clock at chat rates | **Closed** — not dominant (P3) |
+| Node binding parity | `provider_spec_json` + `chat_contract_schema_json` exported; typed-error class still pending (follow-up C) | **Fixed** — sandhi#70 (P4) |
 | Anthropic/Google full typed-handle migration | Verified complete: SDK wire deleted, residual SDK use is discovery/credentials (Victor-owned by design) | **Closed** (P5) |
-| Cross-repo conformance | One-directional (schema pinning + generated facades); no test that a consumer *consumes* every event kind | **Gap** (P1) |
+| Cross-repo conformance | Victor conformance suite drives every variant; sandhi-side census guard (exhaustive-match + schema pin) forces the consumer-decision rule at compile time | **Fixed** — victor#654 + census guard (P1) |
 
 ## Hardening plan
 
@@ -94,6 +94,20 @@ what the boundary statement assigns to Victor: `AsyncAnthropic` for **model disc
 only** (victor#632, catalog policy tier) and `google-genai` for **credential acquisition**
 (victor#631, OAuth/ADC resolved Victor-side and passed as a bearer to the typed Gemini
 handle). "Sandhi owns transport" is unconditional for both families.
+
+## Remaining follow-ups (post-review, pre-release)
+
+- **A. Contract-governance guards** — `chat_contract_version()` exported from both
+  bindings; sandhi-core pins chat/usage version equality and the stream-event census
+  (this change).
+- **B. `request_id` capture** — populate `ProviderErrorV1.request_id` from upstream
+  response headers (`x-request-id`, `anthropic-request-id`, `request-id`) in the
+  adapter error paths; completes the sandhi#65 diagnosability story.
+- **C. Node typed error** — surface `SandhiProviderError` (or equivalent) from the
+  Node binding so Node consumers stop string-sniffing (parity with sandhi#69).
+- **D. Proxy-plane error bodies** — `sandhi-proxy` still maps `Upstream {{ .. }}` to a
+  static `BAD_GATEWAY "upstream error"`; forwarding bounded bodies/request ids to
+  proxy CLIENTS needs a multi-tenant disclosure decision first (deliberately parked).
 
 ## Operating rules going forward
 

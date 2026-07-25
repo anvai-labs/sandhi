@@ -486,6 +486,29 @@ pub fn model_id_is_path_safe(model: &str) -> bool {
 
 /// Render the checked JSON Schema documents from the Rust source of truth.
 #[must_use]
+
+/// Serde tag census of [`ChatStreamEventV1`]. Deliberately an exhaustive `match`:
+/// adding a variant fails compilation HERE, forcing the author through the
+/// TD-0008 operating rule — every new event variant ships with a
+/// consumer-decision row (consumed / surfaced / explicitly ignored) in
+/// `docs/td/TD-0008-victor-codesign-boundary.md` and a consumer notification,
+/// because producer-side capability with no consumer decision is how silent
+/// gaps form (reasoning_delta, refusal_delta).
+pub fn stream_event_variant_tag(event: &ChatStreamEventV1) -> &'static str {
+    match event {
+        ChatStreamEventV1::ResponseStart { .. } => "response_start",
+        ChatStreamEventV1::TextDelta { .. } => "text_delta",
+        ChatStreamEventV1::ReasoningDelta { .. } => "reasoning_delta",
+        ChatStreamEventV1::RefusalDelta { .. } => "refusal_delta",
+        ChatStreamEventV1::ToolCallStart { .. } => "tool_call_start",
+        ChatStreamEventV1::ToolCallArgumentsDelta { .. } => "tool_call_arguments_delta",
+        ChatStreamEventV1::ToolCallEnd { .. } => "tool_call_end",
+        ChatStreamEventV1::Usage { .. } => "usage",
+        ChatStreamEventV1::Finish { .. } => "finish",
+        ChatStreamEventV1::Error { .. } => "error",
+    }
+}
+
 pub fn contract_schema_documents() -> BTreeMap<&'static str, String> {
     fn render(schema: &schemars::schema::RootSchema) -> String {
         let mut json = serde_json::to_string_pretty(schema).expect("RootSchema serializes");
@@ -671,5 +694,51 @@ mod tests {
         ] {
             assert!(!model_id_is_path_safe(bad), "{bad:?} should be rejected");
         }
+    }
+
+    #[test]
+    fn stream_event_census_matches_schema() {
+        // The census list a consumer conformance suite mirrors (victor
+        // tests/unit/providers/test_sandhi_event_conformance.py). If this
+        // fails, a variant was added/renamed: update TD-0008's
+        // consumer-decision table and the consumer suites in the same change.
+        let expected = [
+            "response_start",
+            "text_delta",
+            "reasoning_delta",
+            "refusal_delta",
+            "tool_call_start",
+            "tool_call_arguments_delta",
+            "tool_call_end",
+            "usage",
+            "finish",
+            "error",
+        ];
+        let schema = contract_schema_documents()
+            .remove("chat-stream-event.v1.schema.json")
+            .expect("stream event schema present");
+        for tag in expected {
+            assert!(
+                schema.contains(&format!("\"{tag}\"")),
+                "census tag {tag:?} missing from the checked schema"
+            );
+        }
+        assert_eq!(
+            stream_event_variant_tag(&ChatStreamEventV1::TextDelta {
+                delta: String::new()
+            }),
+            "text_delta"
+        );
+    }
+
+    #[test]
+    fn chat_and_usage_wire_versions_bump_together() {
+        // The bindings' `wire_contract_version()` returns the usage-event
+        // version, and consumers (victor `_verify_wire_contract`) validate
+        // their CHAT expectation against it. That is only sound while the two
+        // versions are equal. If this fails you are splitting them: export a
+        // dedicated chat_contract_version from the bindings first and
+        // coordinate consumers (TD-0008 operating rule 1).
+        assert_eq!(CHAT_SCHEMA_VERSION_V1, crate::UsageEvent::SCHEMA_VERSION);
     }
 }
