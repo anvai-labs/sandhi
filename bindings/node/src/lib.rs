@@ -565,6 +565,7 @@ impl Gateway {
             tokens_out: u64::from(tokens_out),
             cache_creation_tokens: u64::from(cache_creation_tokens.unwrap_or(0)),
             cache_read_tokens: u64::from(cache_read_tokens.unwrap_or(0)),
+            reasoning_tokens: 0,
         };
         self.record_and_build(&virtual_key, &provider, &model, parsed, session_id, route)
     }
