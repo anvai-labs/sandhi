@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 
+use axum::http::HeaderMap;
 use sandhi_core::{
     ChatMessageV1, ChatRequestV1, ChatResponseV1, ChatStreamEventV1, ContentPart, FinishReasonV1,
     MessageContent, RequestMetadataV1, ToolCallV1, ToolChoiceMode, ToolChoiceV1, ToolDefinitionV1,
@@ -20,6 +21,65 @@ pub(crate) enum IngressDialect {
     /// `ChatRequestV1` as the other dialects; the field mapping mirrors the typed Responses
     /// codec in `sandhi-providers::openai_responses_typed`.
     Responses,
+}
+
+/// One way a client may present its virtual key on the wire.
+///
+/// Kept as data rather than as branches in a handler so that a dialect declares its credential
+/// contract in one place (TD-0010 D1) — adding a dialect means listing its schemes, not editing
+/// the auth path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CredentialScheme {
+    /// `Authorization: Bearer <vk>` — the OpenAI-family presentation.
+    AuthorizationBearer,
+    /// A header whose entire value is the credential, e.g. Anthropic's `x-api-key: <vk>`.
+    RawHeader(&'static str),
+}
+
+impl CredentialScheme {
+    fn extract(self, headers: &HeaderMap) -> Option<&str> {
+        let raw = match self {
+            CredentialScheme::AuthorizationBearer => headers
+                .get("authorization")?
+                .to_str()
+                .ok()?
+                .strip_prefix("Bearer ")?,
+            CredentialScheme::RawHeader(name) => headers.get(name)?.to_str().ok()?,
+        };
+        let token = raw.trim();
+        (!token.is_empty()).then_some(token)
+    }
+}
+
+impl IngressDialect {
+    /// The credential presentations this dialect accepts, **most-native first**.
+    ///
+    /// A dialect is the whole client-facing contract, not just a body schema: a stock SDK
+    /// authenticates the way its vendor documents. The Anthropic SDK sends `x-api-key`, so a
+    /// gateway that only reads `Authorization: Bearer` 401s an unmodified client. `Bearer` is
+    /// accepted everywhere as a secondary form — it costs nothing and it keeps curl users and
+    /// header-stripping intermediaries working.
+    fn credential_schemes(self) -> &'static [CredentialScheme] {
+        match self {
+            // No `x-api-key` here on purpose: the OpenAI SDKs never send it, so accepting it
+            // would invent a cross-vendor auth scheme no client asked for.
+            IngressDialect::OpenAi | IngressDialect::Responses => {
+                &[CredentialScheme::AuthorizationBearer]
+            }
+            IngressDialect::Anthropic => &[
+                CredentialScheme::RawHeader("x-api-key"),
+                CredentialScheme::AuthorizationBearer,
+            ],
+        }
+    }
+
+    /// The client's virtual key, read in whichever presentation this dialect accepts.
+    /// The dialect-native scheme wins when a request carries more than one.
+    pub(crate) fn extract_credential(self, headers: &HeaderMap) -> Option<&str> {
+        self.credential_schemes()
+            .iter()
+            .find_map(|scheme| scheme.extract(headers))
+    }
 }
 
 pub(crate) fn decode_request(
@@ -1182,6 +1242,84 @@ fn optional_string(object: &Map<String, Value>, key: &str) -> Result<Option<Stri
 mod tests {
     use super::*;
     use sandhi_core::AssistantOutputV1;
+
+    fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(
+                axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                value.parse().unwrap(),
+            );
+        }
+        map
+    }
+
+    #[test]
+    fn anthropic_dialect_accepts_the_sdks_x_api_key_header() {
+        // The stock Anthropic SDK authenticates with `x-api-key` and nothing else.
+        assert_eq!(
+            IngressDialect::Anthropic.extract_credential(&headers(&[("x-api-key", "vk_demo")])),
+            Some("vk_demo")
+        );
+    }
+
+    #[test]
+    fn anthropic_dialect_still_accepts_bearer_and_prefers_the_native_header() {
+        assert_eq!(
+            IngressDialect::Anthropic
+                .extract_credential(&headers(&[("authorization", "Bearer vk_bearer")])),
+            Some("vk_bearer")
+        );
+        assert_eq!(
+            IngressDialect::Anthropic.extract_credential(&headers(&[
+                ("authorization", "Bearer vk_bearer"),
+                ("x-api-key", "vk_native"),
+            ])),
+            Some("vk_native")
+        );
+    }
+
+    #[test]
+    fn openai_dialects_accept_bearer_only() {
+        for dialect in [IngressDialect::OpenAi, IngressDialect::Responses] {
+            assert_eq!(
+                dialect.extract_credential(&headers(&[("authorization", "Bearer vk_demo")])),
+                Some("vk_demo")
+            );
+            // `x-api-key` is not an OpenAI credential scheme — accepting it would invent one.
+            assert_eq!(
+                dialect.extract_credential(&headers(&[("x-api-key", "vk_demo")])),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn missing_or_malformed_credentials_extract_to_none() {
+        for dialect in [
+            IngressDialect::OpenAi,
+            IngressDialect::Responses,
+            IngressDialect::Anthropic,
+        ] {
+            assert_eq!(dialect.extract_credential(&HeaderMap::new()), None);
+            // Wrong scheme, empty token, and an empty native header all fail closed.
+            assert_eq!(
+                dialect.extract_credential(&headers(&[("authorization", "Basic vk_demo")])),
+                None
+            );
+            assert_eq!(
+                dialect.extract_credential(&headers(&[("authorization", "Bearer   ")])),
+                None
+            );
+            assert_eq!(
+                dialect.extract_credential(&headers(&[
+                    ("x-api-key", "   "),
+                    ("authorization", "Bearer vk_demo"),
+                ])),
+                Some("vk_demo")
+            );
+        }
+    }
 
     #[test]
     fn openai_ingress_covers_all_roles_and_tool_linkage() {

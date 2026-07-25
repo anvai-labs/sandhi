@@ -100,9 +100,8 @@ async fn complete_attributes_meters_and_records_budget() {
     assert_eq!(state.ledger.lock().unwrap().reserved("group:platform"), 0);
 }
 
-#[tokio::test]
-async fn anthropic_ingress_uses_the_same_typed_runtime_and_meter() {
-    let upstream = MockServer::start().await;
+/// A proxy fronting a mocked **Anthropic** upstream that answers `/v1/messages` once.
+async fn anthropic_state(upstream: &MockServer, sink: Arc<InMemorySink>) -> Arc<ProxyState> {
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
         .and(header("x-api-key", "REAL-KEY"))
@@ -111,7 +110,7 @@ async fn anthropic_ingress_uses_the_same_typed_runtime_and_meter() {
             "content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn",
             "usage":{"input_tokens":7,"output_tokens":3,"cache_read_input_tokens":2}
         })))
-        .mount(&upstream)
+        .mount(upstream)
         .await;
 
     let keys = KeyStore::new();
@@ -134,14 +133,23 @@ async fn anthropic_ingress_uses_the_same_typed_runtime_and_meter() {
             None,
         ),
     );
-    let sink = Arc::new(InMemorySink::new());
-    let state = Arc::new(ProxyState::new(
+    Arc::new(ProxyState::new(
         keys,
         ProxyLedger::in_memory(),
-        sink.clone(),
+        sink,
         providers,
         None,
-    ));
+    ))
+}
+
+const ANTHROPIC_BODY: &str =
+    r#"{"model":"claude-test","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}"#;
+
+#[tokio::test]
+async fn anthropic_ingress_uses_the_same_typed_runtime_and_meter() {
+    let upstream = MockServer::start().await;
+    let sink = Arc::new(InMemorySink::new());
+    let state = anthropic_state(&upstream, sink.clone()).await;
 
     let response = build_app(state.clone())
         .oneshot(
@@ -149,9 +157,7 @@ async fn anthropic_ingress_uses_the_same_typed_runtime_and_meter() {
                 .method("POST")
                 .uri("/v1/messages")
                 .header("authorization", "Bearer vk_demo")
-                .body(Body::from(
-                    r#"{"model":"claude-test","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}"#,
-                ))
+                .body(Body::from(ANTHROPIC_BODY))
                 .unwrap(),
         )
         .await
@@ -169,6 +175,106 @@ async fn anthropic_ingress_uses_the_same_typed_runtime_and_meter() {
     assert_eq!(sink.events()[0].tokens_in, 7);
     assert_eq!(sink.events()[0].cache_read_tokens, 2);
     assert_eq!(state.ledger.lock().unwrap().reserved("group:platform"), 0);
+}
+
+/// TD-0010 D1 — the regression this fixes: the stock Anthropic SDK authenticates with
+/// `x-api-key` and nothing else, so `anthropic.Anthropic(base_url=…, api_key="vk_…")` used to
+/// get a flat 401 from the proxy's single `Authorization: Bearer` credential path. Nothing in
+/// the request below is Sandhi-specific — it is exactly what the vendor SDK puts on the wire.
+#[tokio::test]
+async fn anthropic_ingress_accepts_the_sdk_x_api_key_header() {
+    let upstream = MockServer::start().await;
+    let sink = Arc::new(InMemorySink::new());
+    let state = anthropic_state(&upstream, sink.clone()).await;
+
+    let response = build_app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("x-api-key", "vk_demo")
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .body(Body::from(ANTHROPIC_BODY))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["content"][0]["text"], "hello");
+    // The call was attributed and metered like any other — the credential form is presentation,
+    // not policy.
+    assert_eq!(sink.events().len(), 1);
+    assert_eq!(sink.events()[0].virtual_key_id.as_deref(), Some("vk_demo"));
+    assert_eq!(sink.events()[0].subject_id.as_deref(), Some("alice"));
+}
+
+/// `x-api-key` is Anthropic's scheme, not OpenAI's. Accepting it on `/v1/chat/completions` would
+/// invent a cross-vendor auth form no client sends and no vendor documents.
+#[tokio::test]
+async fn openai_ingress_rejects_x_api_key() {
+    let sink = Arc::new(InMemorySink::new());
+    let state = state_with(
+        "http://127.0.0.1:1".into(),
+        sink.clone(),
+        ProxyLedger::in_memory(),
+    );
+
+    let response = build_app(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("x-api-key", "vk_demo")
+                .body(Body::from(r#"{"model":"gpt-x","messages":[]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(sink.len(), 0);
+}
+
+/// Absent or malformed credentials still fail closed on every ingress path, with the same
+/// error body shape as before.
+#[tokio::test]
+async fn missing_or_malformed_credential_is_401_on_every_ingress_path() {
+    for (uri, body) in [
+        ("/v1/chat/completions", r#"{"model":"gpt-x","messages":[]}"#),
+        ("/v1/messages", ANTHROPIC_BODY),
+        ("/v1/responses", r#"{"model":"gpt-x","input":[]}"#),
+    ] {
+        for credential in [None, Some(("authorization", "Basic vk_demo"))] {
+            let sink = Arc::new(InMemorySink::new());
+            let state = state_with(
+                "http://127.0.0.1:1".into(),
+                sink.clone(),
+                ProxyLedger::in_memory(),
+            );
+            let mut request = Request::builder().method("POST").uri(uri);
+            if let Some((name, value)) = credential {
+                request = request.header(name, value);
+            }
+            let response = build_app(state)
+                .oneshot(request.body(Body::from(body)).unwrap())
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+            let payload = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+            assert_eq!(value["error"], "missing bearer virtual key", "{uri}");
+            assert_eq!(sink.len(), 0);
+        }
+    }
 }
 
 #[tokio::test]
