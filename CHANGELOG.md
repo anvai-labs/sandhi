@@ -50,6 +50,16 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 
 ### Fixed
 
+- **The Anthropic SDK works unmodified against `/v1/messages`** (TD-0010 D1). The proxy read the
+  client's virtual key from exactly one place — `Authorization: Bearer` — while the official
+  Anthropic SDK authenticates with `x-api-key`, so `anthropic.Anthropic(base_url=…,
+  api_key="vk_…")` got a **401** and the drop-in promise held only for OpenAI clients. Credential
+  extraction now belongs to the **ingress dialect**, which owns the whole client-facing contract
+  rather than just the body schema: `/v1/messages` accepts `x-api-key` (preferred) **and**
+  `Authorization: Bearer`; `/v1/chat/completions` and `/v1/responses` stay Bearer-only, so no
+  cross-vendor auth scheme is invented. Existing Bearer clients are unaffected, and missing or
+  malformed credentials still fail closed with a 401.
+
 - **One billable definition everywhere.** ADR-0005 D4 defines the billable quantity as fresh
   input + the cache split + output (+ unfolded reasoning), and the proxy settled on it — but two
   other paths still used a narrower `tokens_in + tokens_out`, so the same call was counted

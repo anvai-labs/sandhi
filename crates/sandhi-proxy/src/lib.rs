@@ -515,10 +515,12 @@ async fn handle(
     body: Bytes,
     dialect: IngressDialect,
 ) -> Response {
-    // 1. Virtual key from `Authorization: Bearer vk_…`. Resolve the live key store by exact token
-    //    (legacy/demo path, where the id doubles as the token) then by its hash (operator-minted
-    //    path, where only the hash is the lookup key — the plaintext is never retained).
-    let Some(vk_token) = bearer(&headers) else {
+    // 1. Virtual key, presented the way this dialect's own SDK presents a credential
+    //    (TD-0010 D1 — `x-api-key` on `/v1/messages`, `Authorization: Bearer` on the OpenAI
+    //    paths). Resolve the live key store by exact token (legacy/demo path, where the id
+    //    doubles as the token) then by its hash (operator-minted path, where only the hash is
+    //    the lookup key — the plaintext is never retained).
+    let Some(vk_token) = dialect.extract_credential(&headers) else {
         return error(StatusCode::UNAUTHORIZED, "missing bearer virtual key");
     };
     let vk = match resolve_virtual_key(&state, vk_token) {
@@ -1201,15 +1203,6 @@ fn resolve_virtual_key(state: &ProxyState, token: &str) -> VirtualKeyResolution 
         }
         None => VirtualKeyResolution::NotFound,
     }
-}
-
-fn bearer(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get("authorization")?
-        .to_str()
-        .ok()?
-        .strip_prefix("Bearer ")
-        .map(str::trim)
 }
 
 fn provider_error(
