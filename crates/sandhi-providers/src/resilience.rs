@@ -708,6 +708,7 @@ mod tests {
             Err(ProviderError::Upstream {
                 status: 503,
                 body: None,
+                request_id: None,
             }),
             Ok(ok_resp()),
         ]);
