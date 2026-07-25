@@ -126,6 +126,7 @@ mod tests {
         tokens_out: 128,
         cache_creation_tokens: 0,
         cache_read_tokens: 0,
+        reasoning_tokens: 0,
     };
 
     /// Chunk-boundary property (TD-0001 W1): finalized usage is invariant across every split

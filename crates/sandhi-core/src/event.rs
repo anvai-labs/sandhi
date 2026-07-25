@@ -105,6 +105,18 @@ pub struct UsageEvent {
     /// Self-hosted backends only: GPU-seconds (the cost basis there).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_seconds: Option<f64>,
+    /// Wall-clock duration of the logical call in milliseconds, measured at the adapter
+    /// boundary (includes retries; excludes host-side queueing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// Streams only: milliseconds from request start to the first delivered item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_to_first_token_ms: Option<u64>,
+    /// Reasoning tokens when the provider reports them separately (OpenAI o-series
+    /// `reasoning_tokens`, Gemini `thoughtsTokenCount`). Absent when folded into
+    /// `tokens_out` (Anthropic) or not reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u64>,
 }
 
 impl UsageEvent {
@@ -145,6 +157,9 @@ impl UsageEvent {
             outcome: None,
             upstream_request_id: None,
             gpu_seconds: None,
+            duration_ms: None,
+            time_to_first_token_ms: None,
+            reasoning_tokens: None,
         }
     }
 
@@ -172,6 +187,25 @@ impl UsageEvent {
     #[must_use]
     pub fn with_session(mut self, session_id: Option<String>) -> Self {
         self.session_id = session_id;
+        self
+    }
+
+    /// Latency measured at the adapter boundary: total duration and, for streams, TTFT.
+    #[must_use]
+    pub fn with_latency(
+        mut self,
+        duration_ms: Option<u64>,
+        time_to_first_token_ms: Option<u64>,
+    ) -> Self {
+        self.duration_ms = duration_ms;
+        self.time_to_first_token_ms = time_to_first_token_ms;
+        self
+    }
+
+    /// Separately-reported reasoning tokens (None when folded or not reported).
+    #[must_use]
+    pub fn with_reasoning(mut self, reasoning_tokens: Option<u64>) -> Self {
+        self.reasoning_tokens = reasoning_tokens;
         self
     }
 

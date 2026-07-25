@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://anvai-labs.github.io/sandhi/schemas/usage-event.v1.schema.json",
   "title": "Sandhi Usage Event (v1)",
-  "description": "The neutral, cross-repo boundary object emitted once per model call. Carries measured units only — NO dollars, NO tier/SKU names. Measurement lives here; pricing is a downstream commercial concern (AnvaiOps ADR-0047 D3). Superset of the AnvaiOps `llm_tokens` event and the ADR-0024 `anvai-plane-core` metering envelope.",
+  "description": "The neutral, cross-repo boundary object emitted once per model call. Carries measured units only \u2014 NO dollars, NO tier/SKU names. Measurement lives here; pricing is a downstream commercial concern (AnvaiOps ADR-0047 D3). Superset of the AnvaiOps `llm_tokens` event and the ADR-0024 `anvai-plane-core` metering envelope.",
   "type": "object",
   "required": [
     "schema_version",
@@ -43,47 +43,80 @@
     },
     "backend": {
       "type": "string",
-      "enum": ["external", "self_hosted"],
-      "description": "external = provider API (billed in tokens); self_hosted = local vLLM/TGI (billed in GPU-hours downstream — token counts are for quota/usage display, not the cost basis)."
+      "enum": [
+        "external",
+        "self_hosted"
+      ],
+      "description": "external = provider API (billed in tokens); self_hosted = local vLLM/TGI (billed in GPU-hours downstream \u2014 token counts are for quota/usage display, not the cost basis)."
     },
     "virtual_key_id": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "The Sandhi virtual key that made the call (one shared upstream key fronts many virtual keys). Null for direct/unkeyed in-process use."
     },
     "subject_id": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "The user the call is attributed to. Opaque, operator-assigned."
     },
     "group_id": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "The team/group the call is attributed to. Opaque, operator-assigned; also the default prompt-cache namespace (ADR-0047 D9)."
     },
     "route": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "Optional caller-supplied route/label (e.g. the calling feature or endpoint)."
     },
     "session_id": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "Conversation/session key used for prompt-cache + KV affinity (ADR-0047 D9). Preserved end-to-end so hosted prompt caches keep hitting and self-hosted KV routing stays sticky. Never collapsed to a single value."
     },
     "idempotency_key": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "Caller-supplied key for at-most-once semantics across retries of one logical call (ADR-0005 D7). Attribution metadata, never pricing."
     },
     "run_id": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "Agent-run identifier; groups every call one run makes (cost-tree root). ADR-0005 D7."
     },
     "step_id": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "Step within a run; child dimension under run_id. ADR-0005 D7."
     },
     "parent_id": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "Parent step/run for nested agents, so an agent's cost tree is reconstructable. ADR-0005 D7."
     },
     "trace_context": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "W3C traceparent value, linking the event into distributed traces. ADR-0005 D7."
     },
     "tokens_in": {
@@ -110,7 +143,11 @@
     },
     "usage_completeness": {
       "type": "string",
-      "enum": ["final", "partial", "unavailable"],
+      "enum": [
+        "final",
+        "partial",
+        "unavailable"
+      ],
       "default": "unavailable",
       "description": "Whether token counts are final, partial, or unavailable for this logical call."
     },
@@ -121,17 +158,50 @@
       "description": "Number of upstream attempts made for this logical call."
     },
     "outcome": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "Stable terminal outcome such as success, error, or cancelled."
     },
     "upstream_request_id": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "Provider-supplied request identifier when one was returned."
     },
     "gpu_seconds": {
-      "type": ["number", "null"],
+      "type": [
+        "number",
+        "null"
+      ],
       "minimum": 0,
       "description": "Self-hosted backends only: GPU-seconds of compute. The cost basis for self_hosted (token counts are display-only there)."
+    },
+    "duration_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Wall-clock duration of the logical call in milliseconds, measured at the adapter boundary (includes retries; excludes host-side queueing). Null when the emitting path predates latency metering."
+    },
+    "time_to_first_token_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Streams only: milliseconds from request start to the first delivered item. Null for non-streaming calls."
+    },
+    "reasoning_tokens": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Reasoning tokens when the provider reports them separately (OpenAI reasoning_tokens, Gemini thoughtsTokenCount). Null/absent when folded into tokens_out (Anthropic) or not reported. Neutral units \u2014 pricing weights are a downstream concern."
     }
   }
 }

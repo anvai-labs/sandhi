@@ -614,6 +614,7 @@ impl Gateway {
             tokens_out,
             cache_creation_tokens,
             cache_read_tokens,
+            reasoning_tokens: 0,
         };
         self.record_and_build(py, virtual_key, provider, model, parsed, session_id, route)
     }
@@ -708,6 +709,7 @@ fn parsed_from_pyobj(obj: &Bound<'_, PyAny>) -> ParsedUsage {
         tokens_out: get("tokens_out"),
         cache_creation_tokens: get("cache_creation_tokens"),
         cache_read_tokens: get("cache_read_tokens"),
+        reasoning_tokens: get("reasoning_tokens"),
     }
 }
 

@@ -70,7 +70,8 @@ impl SqliteStore {
                 request_id TEXT, occurred_at TEXT, provider TEXT, model TEXT, backend TEXT,
                 virtual_key_id TEXT, subject_id TEXT, group_id TEXT, route TEXT, session_id TEXT,
                 tokens_in INTEGER, tokens_out INTEGER,
-                cache_creation_tokens INTEGER, cache_read_tokens INTEGER, gpu_seconds REAL
+                cache_creation_tokens INTEGER, cache_read_tokens INTEGER, gpu_seconds REAL,
+                duration_ms INTEGER, time_to_first_token_ms INTEGER, reasoning_tokens INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_usage_subject ON usage_events(subject_id);
             CREATE INDEX IF NOT EXISTS idx_usage_group ON usage_events(group_id);
@@ -79,7 +80,22 @@ impl SqliteStore {
             CREATE INDEX IF NOT EXISTS idx_usage_vkey ON usage_events(virtual_key_id);
             CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_events(session_id);
             CREATE INDEX IF NOT EXISTS idx_usage_occurred ON usage_events(occurred_at);",
-        )
+        )?;
+        // Additive columns for databases created before the latency/reasoning fields
+        // existed. SQLite has no ADD COLUMN IF NOT EXISTS — attempt and ignore the
+        // duplicate-column error so init stays idempotent.
+        for ddl in [
+            "ALTER TABLE usage_events ADD COLUMN duration_ms INTEGER",
+            "ALTER TABLE usage_events ADD COLUMN time_to_first_token_ms INTEGER",
+            "ALTER TABLE usage_events ADD COLUMN reasoning_tokens INTEGER",
+        ] {
+            match conn.execute(ddl, []) {
+                Ok(_) => {}
+                Err(e) if e.to_string().contains("duplicate column name") => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
     }
 
     fn insert(&self, e: &UsageEvent) -> rusqlite::Result<()> {
@@ -92,8 +108,9 @@ impl SqliteStore {
             "INSERT INTO usage_events (
                 request_id, occurred_at, provider, model, backend,
                 virtual_key_id, subject_id, group_id, route, session_id,
-                tokens_in, tokens_out, cache_creation_tokens, cache_read_tokens, gpu_seconds
-            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+                tokens_in, tokens_out, cache_creation_tokens, cache_read_tokens, gpu_seconds,
+                duration_ms, time_to_first_token_ms, reasoning_tokens
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
             params![
                 e.request_id,
                 e.occurred_at,
@@ -110,6 +127,9 @@ impl SqliteStore {
                 e.cache_creation_tokens as i64,
                 e.cache_read_tokens as i64,
                 e.gpu_seconds,
+                e.duration_ms.map(|v| v as i64),
+                e.time_to_first_token_ms.map(|v| v as i64),
+                e.reasoning_tokens.map(|v| v as i64),
             ],
         )?;
         Ok(())
@@ -273,6 +293,53 @@ mod tests {
         assert_eq!(by_provider.len(), 2);
         let openai = by_provider.iter().find(|b| b.key == "openai").unwrap();
         assert_eq!(openai.calls, 2);
+    }
+
+    #[test]
+    fn persists_latency_and_reasoning_columns() {
+        let store = SqliteStore::in_memory().unwrap();
+        let event = ev("openai", "alice", "team-a", 100, 20)
+            .with_latency(Some(1234), Some(210))
+            .with_reasoning(Some(33));
+        store.emit(&event);
+
+        let conn = store.conn.lock().unwrap();
+        let (duration, ttft, reasoning): (Option<i64>, Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT duration_ms, time_to_first_token_ms, reasoning_tokens FROM usage_events",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(duration, Some(1234));
+        assert_eq!(ttft, Some(210));
+        assert_eq!(reasoning, Some(33));
+    }
+
+    #[test]
+    fn init_migrates_pre_latency_databases() {
+        // Simulate a database created before the latency/reasoning columns existed.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE usage_events (
+                request_id TEXT, occurred_at TEXT, provider TEXT, model TEXT, backend TEXT,
+                virtual_key_id TEXT, subject_id TEXT, group_id TEXT, route TEXT, session_id TEXT,
+                tokens_in INTEGER, tokens_out INTEGER,
+                cache_creation_tokens INTEGER, cache_read_tokens INTEGER, gpu_seconds REAL
+            );",
+        )
+        .unwrap();
+
+        SqliteStore::init(&conn).unwrap();
+        // Idempotent: a second init must not fail on the now-present columns.
+        SqliteStore::init(&conn).unwrap();
+
+        let store = SqliteStore {
+            conn: Mutex::new(conn),
+        };
+        let event = ev("openai", "alice", "team-a", 1, 2).with_latency(Some(5), None);
+        store.emit(&event);
+        assert_eq!(store.grand_total().unwrap().calls, 1);
     }
 
     #[test]

@@ -18,6 +18,9 @@ pub struct ParsedUsage {
     pub cache_creation_tokens: u64,
     /// Prompt-cache read tokens (priced ~0.1x fresh input).
     pub cache_read_tokens: u64,
+    /// Reasoning tokens when reported separately (0 when folded into `tokens_out`
+    /// or not reported).
+    pub reasoning_tokens: u64,
 }
 
 impl From<ParsedUsage> for crate::chat::UsageV2 {
@@ -27,6 +30,7 @@ impl From<ParsedUsage> for crate::chat::UsageV2 {
             tokens_out: value.tokens_out,
             cache_creation_tokens: value.cache_creation_tokens,
             cache_read_tokens: value.cache_read_tokens,
+            reasoning_tokens: (value.reasoning_tokens > 0).then_some(value.reasoning_tokens),
             completeness: crate::chat::UsageCompleteness::Final,
             ..Self::default()
         }
@@ -40,6 +44,7 @@ impl ParsedUsage {
         event
             .with_tokens(self.tokens_in, self.tokens_out)
             .with_cache(self.cache_creation_tokens, self.cache_read_tokens)
+            .with_reasoning((self.reasoning_tokens > 0).then_some(self.reasoning_tokens))
             .with_measurement(
                 crate::chat::UsageCompleteness::Final,
                 1,
@@ -67,11 +72,16 @@ pub fn parse_openai_usage(response: &Value) -> Option<ParsedUsage> {
         .get("prompt_tokens_details")
         .map(|d| u64_at(d, "cached_tokens"))
         .unwrap_or(0);
+    let reasoning = usage
+        .get("completion_tokens_details")
+        .map(|d| u64_at(d, "reasoning_tokens"))
+        .unwrap_or(0);
     Some(ParsedUsage {
         tokens_in: prompt.saturating_sub(cached),
         tokens_out: completion,
         cache_creation_tokens: 0,
         cache_read_tokens: cached,
+        reasoning_tokens: reasoning,
     })
 }
 
@@ -88,11 +98,16 @@ pub fn parse_openai_responses_usage(response: &Value) -> Option<ParsedUsage> {
         .get("input_tokens_details")
         .map(|details| u64_at(details, "cached_tokens"))
         .unwrap_or(0);
+    let reasoning = usage
+        .get("output_tokens_details")
+        .map(|details| u64_at(details, "reasoning_tokens"))
+        .unwrap_or(0);
     Some(ParsedUsage {
         tokens_in: input.saturating_sub(cached),
         tokens_out: output,
         cache_creation_tokens: 0,
         cache_read_tokens: cached,
+        reasoning_tokens: reasoning,
     })
 }
 
@@ -115,6 +130,7 @@ pub fn parse_anthropic_usage(response: &Value) -> Option<ParsedUsage> {
         tokens_out: u.output_tokens.unwrap_or(0).max(0) as u64,
         cache_creation_tokens: u.cache_creation_input_tokens.unwrap_or(0).max(0) as u64,
         cache_read_tokens: u.cache_read_input_tokens.unwrap_or(0).max(0) as u64,
+        reasoning_tokens: 0, // Anthropic folds thinking tokens into output_tokens
     })
 }
 
@@ -130,6 +146,7 @@ pub fn parse_gemini_usage(response: &Value) -> Option<ParsedUsage> {
         tokens_out: u64_at(usage, "candidatesTokenCount"),
         cache_creation_tokens: 0,
         cache_read_tokens: cached,
+        reasoning_tokens: u64_at(usage, "thoughtsTokenCount"),
     })
 }
 
@@ -147,6 +164,7 @@ pub fn parse_cohere_usage(response: &Value) -> Option<ParsedUsage> {
         tokens_out: u64_at(units, "output_tokens"),
         cache_creation_tokens: 0,
         cache_read_tokens: 0,
+        reasoning_tokens: 0,
     })
 }
 
@@ -162,6 +180,7 @@ pub fn parse_ollama_usage(response: &Value) -> Option<ParsedUsage> {
         tokens_out: u64_at(response, "eval_count"),
         cache_creation_tokens: 0,
         cache_read_tokens: 0,
+        reasoning_tokens: 0,
     })
 }
 
@@ -177,6 +196,7 @@ pub fn parse_bedrock_usage(response: &Value) -> Option<ParsedUsage> {
             tokens_out: u64_at(usage, "output_tokens"),
             cache_creation_tokens: u64_at(usage, "cache_creation_input_tokens"),
             cache_read_tokens: u64_at(usage, "cache_read_input_tokens"),
+            reasoning_tokens: 0,
         });
     }
     if response.get("inputTextTokenCount").is_some() {
@@ -190,6 +210,7 @@ pub fn parse_bedrock_usage(response: &Value) -> Option<ParsedUsage> {
             tokens_out: out,
             cache_creation_tokens: 0,
             cache_read_tokens: 0,
+            reasoning_tokens: 0,
         });
     }
     None
@@ -200,6 +221,74 @@ mod tests {
     use super::*;
     use crate::event::Backend;
     use serde_json::json;
+
+    #[test]
+    fn openai_parses_separately_reported_reasoning_tokens() {
+        let resp = json!({
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "completion_tokens_details": { "reasoning_tokens": 30 }
+            }
+        });
+        assert_eq!(parse_openai_usage(&resp).unwrap().reasoning_tokens, 30);
+    }
+
+    #[test]
+    fn openai_responses_parses_reasoning_tokens() {
+        let resp = json!({
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "output_tokens_details": { "reasoning_tokens": 12 }
+            }
+        });
+        assert_eq!(
+            parse_openai_responses_usage(&resp)
+                .unwrap()
+                .reasoning_tokens,
+            12
+        );
+    }
+
+    #[test]
+    fn gemini_parses_thoughts_token_count_as_reasoning() {
+        let resp = json!({
+            "usageMetadata": {
+                "promptTokenCount": 100,
+                "candidatesTokenCount": 40,
+                "thoughtsTokenCount": 25
+            }
+        });
+        assert_eq!(parse_gemini_usage(&resp).unwrap().reasoning_tokens, 25);
+    }
+
+    #[test]
+    fn apply_carries_reasoning_onto_event_and_zero_stays_none() {
+        let base = UsageEvent::new(
+            "r1",
+            "2026-01-01T00:00:00Z",
+            "openai",
+            "o4",
+            Backend::External,
+        );
+        let with = ParsedUsage {
+            tokens_in: 1,
+            tokens_out: 2,
+            reasoning_tokens: 9,
+            ..Default::default()
+        }
+        .apply(base.clone());
+        assert_eq!(with.reasoning_tokens, Some(9));
+
+        let without = ParsedUsage {
+            tokens_in: 1,
+            tokens_out: 2,
+            ..Default::default()
+        }
+        .apply(base);
+        assert_eq!(without.reasoning_tokens, None);
+    }
 
     #[test]
     fn openai_splits_cached_from_fresh_input() {

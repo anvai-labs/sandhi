@@ -425,6 +425,7 @@ mod tests {
                 tokens_out: 3,
                 cache_creation_tokens: 4,
                 cache_read_tokens: 5,
+                reasoning_tokens: 0,
             },
             "fallback",
         )
@@ -468,6 +469,7 @@ mod tests {
                         tokens_out: 3,
                         cache_creation_tokens: 4,
                         cache_read_tokens: 5,
+                        reasoning_tokens: 0,
                     }),
                     attempts: 1,
                 }),
