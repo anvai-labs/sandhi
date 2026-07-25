@@ -17,6 +17,21 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
+### Added
+
+- **SDK-conformance suite** (TD-0010 D5) — `tests/sdk-conformance/` starts the real `sandhi-proxy`
+  binary against a mock upstream and drives it with the **vendors' own clients**
+  (`openai-python`, `anthropic-python`), asserting that pointing `base_url` at Sandhi with a
+  virtual key needs no other client change. It also asserts the virtual key never reaches the
+  provider and that the real upstream credential is substituted server-side. Every other test in
+  this repo hand-rolls the request, which is how an Anthropic ingress that no stock SDK could
+  authenticate against shipped unnoticed; this suite is verified to catch that defect by reverting
+  the fix and watching it fail. Gated in CI as a required check, and the README's compatibility
+  matrix is now backed by it.
+- **`SANDHI_ANTHROPIC_BASE`** — base-URL override for the Anthropic upstream, symmetric with the
+  long-standing `SANDHI_OPENAI_BASE`. Without it the Anthropic upstream could only ever be the
+  public API: no Anthropic-compatible gateway, no local mock, and no way to test that path.
+
 ### Security
 
 - **Dashboard reads are gated by default** (ADR-0004 D4). When an admin token is configured,
