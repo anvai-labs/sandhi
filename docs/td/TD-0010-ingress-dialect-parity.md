@@ -1,6 +1,7 @@
 # TD-0010: Ingress dialect parity — drop-in compatibility as a release gate
 
-- **Status:** Proposed (2026-07-25). **D1 implemented in #84**; this document was corrected
+- **Status:** Proposed (2026-07-25). **P1 complete — D1 in #84, D5 in the SDK-conformance
+  suite**; this document was corrected
   during that implementation — see the error-shape bullet and D2.
 - **Relates to:** ADR-0004 (two-plane proxy), TD-0006 (transparent metering), TD-0002 (typed
   runtime), ADR-0001 (wire contract), TD-0003 (operator surface: the model allowlist)
@@ -112,7 +113,7 @@ advertised as one — no aspirational rows.
 
 | Phase | Scope | Acceptance |
 |---|---|---|
-| **P1** | D1 credential extraction per dialect + the real-SDK conformance suite for OpenAI and Anthropic | `anthropic.Anthropic(base_url=…, api_key=vk)` completes a call unmodified; OpenAI SDK unchanged; both asserted by SDK-driven tests |
+| **P1** ✅ | D1 credential extraction per dialect + the real-SDK conformance suite for OpenAI and Anthropic | **Met.** `tests/sdk-conformance/` starts the real proxy against a mock upstream and drives `openai-python` + `anthropic-python` unmodified; verified to fail (`401 missing bearer virtual key`) when Anthropic's scheme list is reverted to Bearer-only |
 | **P2** | D2 dialect-shaped errors | An SDK-raised error exposes `message`/`type`/`status` natively per vendor; redaction behaviour from #77 unchanged, proven by a test that asserts an upstream body is still absent by default |
 | **P3** | D3 discovery endpoints, allowlist-filtered | `client.models.list()` returns exactly the key's permitted models on both dialects |
 | **P4** | D4 Gemini ingress dialect | google-genai SDK completes streaming + non-streaming calls unmodified |

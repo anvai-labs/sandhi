@@ -69,6 +69,25 @@ Sandhi is a Rust core (`sandhi-core` + `sandhi-providers`) exposed two ways:
    virtual key and never see the real key. The only shape that serves cross-process /
    cross-host / polyglot / shared-key setups.
 
+### Client compatibility
+
+Point the vendor's own SDK at Sandhi — change the `base_url` and the key, nothing else:
+
+| client | ingress | drop-in | proven by |
+|---|---|---|---|
+| **OpenAI SDK** | `/v1/chat/completions`, `/v1/responses` | ✅ | `tests/sdk-conformance/` drives `openai-python` in CI |
+| **Anthropic SDK** | `/v1/messages` | ✅ | same suite drives `anthropic-python`, authenticating with `x-api-key` as the SDK does |
+| **Gemini SDK** | — | ❌ not yet | no ingress dialect; Gemini is reachable as an *upstream* only ([TD-0010](docs/td/TD-0010-ingress-dialect-parity.md) D4) |
+
+```python
+client = anthropic.Anthropic(base_url="http://sandhi:8787", api_key="vk_…")   # unmodified
+client = openai.OpenAI(base_url="http://sandhi:8787/v1", api_key="vk_…")      # unmodified
+```
+
+That table is a CI gate, not a claim: the suite starts the real proxy against a mock upstream and
+drives it with the vendors' clients, so a dialect that stops being drop-in fails the build. Rows
+are added when they pass, never in advance.
+
 > **Prompt-cache safe (by design).** Sandhi preserves per-conversation cache affinity — it
 > never collapses users to a single session and carries attribution *outside* the cached
 > prompt, so hosted prompt caches keep hitting and self-hosted KV routing stays sticky. The

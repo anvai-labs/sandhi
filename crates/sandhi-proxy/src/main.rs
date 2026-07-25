@@ -40,16 +40,14 @@ async fn main() {
         eprintln!("sandhi-proxy: registered openai upstream + vk_openai_demo");
     }
     if let Ok(key) = std::env::var("SANDHI_ANTHROPIC_KEY") {
+        // Symmetric with SANDHI_OPENAI_BASE. Without an override the Anthropic upstream could
+        // only ever be the public API — no Anthropic-compatible gateway, no local mock, and no
+        // way for the SDK-conformance suite to exercise this path at all.
+        let base = std::env::var("SANDHI_ANTHROPIC_BASE")
+            .unwrap_or_else(|_| "https://api.anthropic.com".into());
         providers.insert(
             "anthropic".into(),
-            runtime.anthropic(
-                "https://api.anthropic.com",
-                key,
-                AnthropicAuthScheme::ApiKey,
-                None,
-                None,
-                None,
-            ),
+            runtime.anthropic(base, key, AnthropicAuthScheme::ApiKey, None, None, None),
         );
         keys.insert(VirtualKey {
             id: "vk_anthropic_demo".into(),
