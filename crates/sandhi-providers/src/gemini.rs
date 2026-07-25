@@ -134,6 +134,7 @@ mod tests {
         tokens_out: 250,
         cache_creation_tokens: 0,
         cache_read_tokens: 800,
+        reasoning_tokens: 0,
     };
 
     /// Chunk-boundary property (TD-0001 W1): finalized usage is invariant across every split
@@ -161,12 +162,17 @@ mod tests {
     }
 
     /// Forward-compat property (TD-0001 W1): unknown fields leave the meter unperturbed.
+    /// `thoughtsTokenCount` graduated from an ignored-unknown to a parsed field — the
+    /// fixture's value is now expected, proving both properties at once.
     #[tokio::test]
     async fn stream_usage_ignores_unknown_fields() {
         let body: &[u8] = include_bytes!("../tests/fixtures/gemini/stream_forward_compat.sse");
         assert_eq!(
             crate::accumulate_usage(vec![Bytes::copy_from_slice(body)], sniff_usage_line).await,
-            EXPECTED
+            ParsedUsage {
+                reasoning_tokens: 5,
+                ..EXPECTED
+            }
         );
     }
     use serde_json::json;

@@ -1025,6 +1025,7 @@ mod tests {
                         tokens_out: 5,
                         cache_creation_tokens: 0,
                         cache_read_tokens: 4,
+                        reasoning_tokens: 0,
                     }),
                     attempts: 3,
                 }),

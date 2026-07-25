@@ -25,6 +25,7 @@ fn expected() -> ParsedUsage {
         tokens_out: v["tokens_out"].as_u64().unwrap(),
         cache_creation_tokens: v["cache_creation_tokens"].as_u64().unwrap(),
         cache_read_tokens: v["cache_read_tokens"].as_u64().unwrap(),
+        reasoning_tokens: 0,
     }
 }
 

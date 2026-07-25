@@ -173,6 +173,7 @@ mod tests {
         tokens_out: 256,
         cache_creation_tokens: 2048,
         cache_read_tokens: 4096,
+        reasoning_tokens: 0,
     };
 
     /// Drive an SSE byte-stream (pre-split into `chunks`) through the production streaming
