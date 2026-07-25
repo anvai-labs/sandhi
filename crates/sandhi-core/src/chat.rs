@@ -484,9 +484,6 @@ pub fn model_id_is_path_safe(model: &str) -> bool {
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '@'))
 }
 
-/// Render the checked JSON Schema documents from the Rust source of truth.
-#[must_use]
-
 /// Serde tag census of [`ChatStreamEventV1`]. Deliberately an exhaustive `match`:
 /// adding a variant fails compilation HERE, forcing the author through the
 /// TD-0008 operating rule — every new event variant ships with a
@@ -509,6 +506,8 @@ pub fn stream_event_variant_tag(event: &ChatStreamEventV1) -> &'static str {
     }
 }
 
+/// Render the checked JSON Schema documents from the Rust source of truth.
+#[must_use]
 pub fn contract_schema_documents() -> BTreeMap<&'static str, String> {
     fn render(schema: &schemars::schema::RootSchema) -> String {
         let mut json = serde_json::to_string_pretty(schema).expect("RootSchema serializes");
