@@ -147,6 +147,10 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         .route("/v1/chat/completions", post(handle_openai))
         .route("/v1/messages", post(handle_anthropic))
         .route("/v1/responses", post(handle_responses))
+        // Gemini's path carries the model AND the method, colon-separated
+        // (`/v1beta/models/gemini-2.5-flash:generateContent`), so it matches as ONE segment and
+        // is split below — axum has no pattern for a colon-suffixed verb.
+        .route("/v1beta/models/:model_method", post(handle_gemini))
         // TD-0003 P1 operator (admin) API.
         .route(
             "/admin/keys",
@@ -495,7 +499,7 @@ async fn handle_openai(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    handle(state, headers, body, IngressDialect::OpenAi).await
+    handle(state, headers, body, IngressDialect::OpenAi, None).await
 }
 
 async fn handle_anthropic(
@@ -503,7 +507,7 @@ async fn handle_anthropic(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    handle(state, headers, body, IngressDialect::Anthropic).await
+    handle(state, headers, body, IngressDialect::Anthropic, None).await
 }
 
 async fn handle_responses(
@@ -511,7 +515,50 @@ async fn handle_responses(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    handle(state, headers, body, IngressDialect::Responses).await
+    handle(state, headers, body, IngressDialect::Responses, None).await
+}
+
+/// `POST /v1beta/models/{model}:{generateContent|streamGenerateContent}` (TD-0010 D4a).
+async fn handle_gemini(
+    State(state): State<Arc<ProxyState>>,
+    axum::extract::Path(model_method): axum::extract::Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    // Split on the LAST colon: a model id may legitimately contain one (tuned models are
+    // `tunedModels/x`), the method never does.
+    let Some((model, method)) = model_method.rsplit_once(':') else {
+        return ingress_error(
+            IngressDialect::Gemini,
+            StatusCode::NOT_FOUND,
+            "expected /v1beta/models/{model}:generateContent",
+        );
+    };
+    let stream = match method {
+        "generateContent" => false,
+        "streamGenerateContent" => true,
+        // countTokens, embedContent and the rest are not metered surfaces yet; say so in Gemini's
+        // own error shape rather than 404-ing with an empty body.
+        other => {
+            return ingress_error(
+                IngressDialect::Gemini,
+                StatusCode::NOT_IMPLEMENTED,
+                &format!("method '{other}' is not supported by this gateway"),
+            );
+        }
+    };
+    if model.is_empty() {
+        return ingress_error(
+            IngressDialect::Gemini,
+            StatusCode::BAD_REQUEST,
+            "model is empty",
+        );
+    }
+    let route = GeminiRoute {
+        model: model.to_string(),
+        stream,
+    };
+    handle(state, headers, body, IngressDialect::Gemini, Some(route)).await
 }
 
 async fn handle(
@@ -519,6 +566,7 @@ async fn handle(
     headers: HeaderMap,
     body: Bytes,
     dialect: IngressDialect,
+    gemini_route: Option<GeminiRoute>,
 ) -> Response {
     // 1. Virtual key, presented the way this dialect's own SDK presents a credential
     //    (TD-0010 D1 — `x-api-key` on `/v1/messages`, `Authorization: Bearer` on the OpenAI
@@ -526,15 +574,27 @@ async fn handle(
     //    doubles as the token) then by its hash (operator-minted path, where only the hash is
     //    the lookup key — the plaintext is never retained).
     let Some(vk_token) = dialect.extract_credential(&headers) else {
-        return error(StatusCode::UNAUTHORIZED, "missing bearer virtual key");
+        // TD-0010 D2 (auth slice): render in the caller's dialect and NAME ITS OWN SCHEME. The
+        // flat `{"error":"missing bearer virtual key"}` this used to return was unparseable by
+        // two of the three SDKs and told an Anthropic or Gemini client to send a header its
+        // vendor never documents. The dialect is already known here — it is a parameter — so
+        // there is no ordering problem to solve at these call sites.
+        return ingress_error(
+            dialect,
+            StatusCode::UNAUTHORIZED,
+            &format!(
+                "missing virtual key: send it as {}",
+                dialect.credential_hint()
+            ),
+        );
     };
     let vk = match resolve_virtual_key(&state, vk_token) {
         VirtualKeyResolution::Found(vk) => vk,
         VirtualKeyResolution::Expired => {
-            return error(StatusCode::UNAUTHORIZED, "virtual key expired");
+            return ingress_error(dialect, StatusCode::UNAUTHORIZED, "virtual key expired");
         }
         VirtualKeyResolution::NotFound => {
-            return error(StatusCode::UNAUTHORIZED, "unknown virtual key");
+            return ingress_error(dialect, StatusCode::UNAUTHORIZED, "unknown virtual key");
         }
     };
 
@@ -564,6 +624,7 @@ async fn handle(
         IngressDialect::OpenAi => "/v1/chat/completions",
         IngressDialect::Anthropic => "/v1/messages",
         IngressDialect::Responses => "/v1/responses",
+        IngressDialect::Gemini => "/v1beta/models/:generateContent",
     };
     let metadata = RequestMetadataV1 {
         session_id: session,
@@ -580,10 +641,32 @@ async fn handle(
         parent_id: header_str(&headers, "x-sandhi-parent-id"),
         trace_context: header_str(&headers, "traceparent"),
     };
-    let (mut request, wants_stream) = match decode_request(dialect, body_json, metadata) {
+    let (mut request, mut wants_stream) = match decode_request(dialect, body_json, metadata) {
         Ok(decoded) => decoded,
         Err(message) => return ingress_error(dialect, StatusCode::BAD_REQUEST, &message),
     };
+
+    // Gemini carries the model and the streaming choice in the PATH, so stamp them onto the
+    // decoded request before anything downstream reads them — the allowlist check and the
+    // reservation both do.
+    if let Some(route) = &gemini_route {
+        request.model = route.model.clone();
+        wants_stream = route.stream;
+    }
+
+    // TD-0010 D4a admits Gemini on the transparent plane only. Its decode is accounting-grade,
+    // not a faithful codec, so re-encoding it for a different upstream family would silently
+    // change the caller's request — tools, inline media and safety settings would vanish. Refuse
+    // instead, in Gemini's own error shape (D4b lifts this).
+    if dialect == IngressDialect::Gemini
+        && !(ingress_family(dialect) == provider.family() && provider.raw_forwarder().is_some())
+    {
+        return ingress_error(
+            dialect,
+            StatusCode::NOT_IMPLEMENTED,
+            "Gemini ingress currently requires a Gemini upstream; cross-family translation is not implemented (TD-0010 D4b)",
+        );
+    }
 
     // 4. Model allowlist (TD-0003 P4): if the resolved key carries a non-empty `models[]`, admit
     //    only a model on that list. Empty/absent allowlist = any model (unchanged). Enforced after
@@ -651,12 +734,26 @@ async fn handle(
     let full_error_detail = state.error_detail_full;
     match (transparent, wants_stream) {
         (true, true) => {
-            transparent_stream_response(provider, body, dialect, accounting, full_error_detail)
-                .await
+            transparent_stream_response(
+                provider,
+                body,
+                dialect,
+                accounting,
+                full_error_detail,
+                gemini_route,
+            )
+            .await
         }
         (true, false) => {
-            transparent_complete_response(provider, body, dialect, accounting, full_error_detail)
-                .await
+            transparent_complete_response(
+                provider,
+                body,
+                dialect,
+                accounting,
+                full_error_detail,
+                gemini_route,
+            )
+            .await
         }
         (false, true) => {
             stream_response(provider, request, dialect, accounting, full_error_detail).await
@@ -673,18 +770,43 @@ fn ingress_family(dialect: IngressDialect) -> ProviderFamily {
         IngressDialect::OpenAi => ProviderFamily::OpenAiCompat,
         IngressDialect::Anthropic => ProviderFamily::Anthropic,
         IngressDialect::Responses => ProviderFamily::OpenAiResponses,
+        IngressDialect::Gemini => ProviderFamily::Gemini,
     }
 }
 
 /// The upstream path suffix for a same-family transparent forward — mirrors each typed adapter's
 /// endpoint. Only the three ingress families above ever reach the transparent plane.
-fn upstream_path(family: ProviderFamily) -> &'static str {
+fn upstream_path(family: ProviderFamily, gemini: Option<&GeminiRoute>) -> String {
     match family {
-        ProviderFamily::OpenAiCompat => "/chat/completions",
-        ProviderFamily::OpenAiResponses => "/responses",
-        ProviderFamily::Anthropic => "/v1/messages",
-        _ => "/",
+        ProviderFamily::OpenAiCompat => "/chat/completions".to_string(),
+        ProviderFamily::OpenAiResponses => "/responses".to_string(),
+        ProviderFamily::Anthropic => "/v1/messages".to_string(),
+        // Gemini is the first dialect whose upstream path is not a constant: the model and the
+        // streaming choice are path segments, so the route the client asked for determines the
+        // route we forward to. `?alt=sse` is what makes the stream SSE rather than a chunked
+        // JSON array — the framing the adapter's usage sniffer expects.
+        ProviderFamily::Gemini => match gemini {
+            Some(route) if route.stream => format!(
+                "/v1beta/models/{}:streamGenerateContent?alt=sse",
+                route.model
+            ),
+            Some(route) => format!("/v1beta/models/{}:generateContent", route.model),
+            None => "/".to_string(),
+        },
+        _ => "/".to_string(),
     }
+}
+
+/// What a Gemini ingress request carries in its PATH rather than its body.
+///
+/// The other three dialects read the model from a body field and the streaming choice from a
+/// `stream` flag; Gemini puts both in the URL (`/v1beta/models/{model}:generateContent`). That
+/// difference reaches the allowlist check, the reservation, and the upstream URL, so it is
+/// carried explicitly instead of being re-parsed at each site.
+#[derive(Debug, Clone)]
+struct GeminiRoute {
+    model: String,
+    stream: bool,
 }
 
 /// Rebuild an axum response from a raw upstream response: status + curated header allowlist + body
@@ -708,6 +830,7 @@ async fn transparent_complete_response(
     dialect: IngressDialect,
     mut accounting: RequestAccounting,
     full_error_detail: bool,
+    gemini: Option<GeminiRoute>,
 ) -> Response {
     let Some(forwarder) = provider.raw_forwarder() else {
         accounting.set_outcome("error");
@@ -718,7 +841,7 @@ async fn transparent_complete_response(
         );
     };
     match forwarder
-        .forward_metered(upstream_path(provider.family()), body)
+        .forward_metered(&upstream_path(provider.family(), gemini.as_ref()), body)
         .await
     {
         Ok((raw, mut usage)) => {
@@ -747,6 +870,7 @@ async fn transparent_stream_response(
     dialect: IngressDialect,
     mut accounting: RequestAccounting,
     full_error_detail: bool,
+    gemini: Option<GeminiRoute>,
 ) -> Response {
     let Some(forwarder) = provider.raw_forwarder() else {
         accounting.set_outcome("error");
@@ -757,7 +881,7 @@ async fn transparent_stream_response(
         );
     };
     let mut upstream = match forwarder
-        .forward_stream_metered(upstream_path(provider.family()), body)
+        .forward_stream_metered(&upstream_path(provider.family(), gemini.as_ref()), body)
         .await
     {
         Ok(stream) => stream,
@@ -1241,8 +1365,30 @@ fn provider_error(
     let body = match dialect {
         IngressDialect::OpenAi | IngressDialect::Responses => json!({"error":typed}),
         IngressDialect::Anthropic => json!({"type":"error","error":typed}),
+        // Google's shape: `error.code` is the HTTP status as a NUMBER and `error.status` is the
+        // canonical enum name — that is what a google-genai client reads to classify a failure.
+        IngressDialect::Gemini => json!({"error":{
+            "code": status.as_u16(),
+            "message": typed.message,
+            "status": google_status(status),
+        }}),
     };
     (status, Json(body)).into_response()
+}
+
+/// HTTP status → the canonical google.rpc status name a Gemini client expects in `error.status`.
+fn google_status(status: StatusCode) -> &'static str {
+    match status {
+        StatusCode::BAD_REQUEST => "INVALID_ARGUMENT",
+        StatusCode::UNAUTHORIZED => "UNAUTHENTICATED",
+        StatusCode::FORBIDDEN => "PERMISSION_DENIED",
+        StatusCode::NOT_FOUND => "NOT_FOUND",
+        StatusCode::TOO_MANY_REQUESTS => "RESOURCE_EXHAUSTED",
+        StatusCode::NOT_IMPLEMENTED => "UNIMPLEMENTED",
+        StatusCode::SERVICE_UNAVAILABLE => "UNAVAILABLE",
+        StatusCode::GATEWAY_TIMEOUT => "DEADLINE_EXCEEDED",
+        _ => "INTERNAL",
+    }
 }
 
 fn ingress_error(dialect: IngressDialect, status: StatusCode, msg: &str) -> Response {
@@ -1255,6 +1401,11 @@ fn ingress_error(dialect: IngressDialect, status: StatusCode, msg: &str) -> Resp
     let body = match dialect {
         IngressDialect::OpenAi | IngressDialect::Responses => json!({"error":typed}),
         IngressDialect::Anthropic => json!({"type":"error","error":typed}),
+        IngressDialect::Gemini => json!({"error":{
+            "code": status.as_u16(),
+            "message": msg,
+            "status": google_status(status),
+        }}),
     };
     (status, Json(body)).into_response()
 }

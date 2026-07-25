@@ -19,6 +19,19 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 
 ### Added
 
+- **Gemini ingress dialect** (TD-0010 D4a) — `POST /v1beta/models/{model}:generateContent` and
+  `:streamGenerateContent`, authenticated with the `x-goog-api-key` header. A `google-genai`
+  client now points its `base_url` at Sandhi unmodified. Gemini is the first dialect whose model
+  and streaming choice live in the **path** rather than the body, which reaches the model
+  allowlist, the reservation, and the upstream URL.
+  - Admitted on the **transparent plane only**: a Gemini client must resolve to a Gemini upstream,
+    where the body is forwarded byte-for-byte and metered in flight. Cross-family is **refused**
+    (501, Google's error shape) rather than translated from an accounting-grade decode that would
+    silently drop tools, inline media and safety settings (D4b will lift this).
+  - The documented `?key=` query form is **not** accepted — it would put a live virtual key into
+    URLs, access logs and crash reports. Stated as a gap in the README matrix instead.
+  - `SANDHI_GEMINI_KEY` / `SANDHI_GEMINI_BASE` register a Gemini upstream.
+
 - **SDK-conformance suite** (TD-0010 D5) — `tests/sdk-conformance/` starts the real `sandhi-proxy`
   binary against a mock upstream and drives it with the **vendors' own clients**
   (`openai-python`, `anthropic-python`), asserting that pointing `base_url` at Sandhi with a
@@ -31,6 +44,14 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 - **`SANDHI_ANTHROPIC_BASE`** — base-URL override for the Anthropic upstream, symmetric with the
   long-standing `SANDHI_OPENAI_BASE`. Without it the Anthropic upstream could only ever be the
   public API: no Anthropic-compatible gateway, no local mock, and no way to test that path.
+
+### Fixed
+
+- **Auth failures are rendered in the caller's dialect** (TD-0010 D2, auth slice). A missing,
+  expired or unknown virtual key returned a flat `{"error": "<string>"}` that two of the three
+  SDKs cannot parse, and its text told every client to send `Authorization: Bearer` — advice that
+  is wrong for Anthropic (`x-api-key`) and Gemini (`x-goog-api-key`). The 401 now uses each
+  dialect's envelope and names that vendor's own scheme.
 
 ### Security
 

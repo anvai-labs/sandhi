@@ -38,10 +38,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # never appears here — that substitution is the proxy's entire reason to exist.
 REAL_OPENAI_KEY = "sk-real-upstream-openai"
 REAL_ANTHROPIC_KEY = "sk-ant-real-upstream"
+REAL_GEMINI_KEY = "gk-real-upstream-gemini"
 
 # Virtual keys the proxy's demo path mints from the env vars below.
 VK_OPENAI = "vk_openai_demo"
 VK_ANTHROPIC = "vk_anthropic_demo"
+VK_GEMINI = "vk_gemini_demo"
 
 
 @dataclass
@@ -190,6 +192,29 @@ def _anthropic_messages_body(streaming: bool) -> str:
     return "".join(f"event: {name}\ndata: {json.dumps(payload)}\n\n" for name, payload in events)
 
 
+def _gemini_generate_body(streaming: bool) -> str:
+    payload = {
+        "candidates": [
+            {
+                "content": {"role": "model", "parts": [{"text": "pong"}]},
+                "finishReason": "STOP",
+                "index": 0,
+            }
+        ],
+        "usageMetadata": {
+            "promptTokenCount": 11,
+            "candidatesTokenCount": 3,
+            "totalTokenCount": 14,
+            "cachedContentTokenCount": 4,
+        },
+        "modelVersion": "gemini-mock",
+    }
+    if not streaming:
+        return json.dumps(payload)
+    # `?alt=sse` framing — the form the adapter's usage sniffer reads.
+    return f"data: {json.dumps(payload)}\r\n\r\n"
+
+
 def _make_handler(upstream: MockUpstream):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args):  # keep pytest output readable
@@ -209,10 +234,16 @@ def _make_handler(upstream: MockUpstream):
                     body=body,
                 )
             )
-            streaming = bool(body.get("stream"))
-            if "/messages" in self.path:
+            # Gemini puts the method in the path; the others use a body flag.
+            if ":streamGenerateContent" in self.path:
+                streaming, payload = True, _gemini_generate_body(True)
+            elif ":generateContent" in self.path:
+                streaming, payload = False, _gemini_generate_body(False)
+            elif "/messages" in self.path:
+                streaming = bool(body.get("stream"))
                 payload = _anthropic_messages_body(streaming)
             else:
+                streaming = bool(body.get("stream"))
                 payload = _openai_chat_body(streaming)
             data = payload.encode()
             self.send_response(200)
@@ -266,6 +297,8 @@ def proxy(proxy_binary: Path, upstream: MockUpstream):
         "SANDHI_OPENAI_BASE": upstream.base_url,
         "SANDHI_ANTHROPIC_KEY": REAL_ANTHROPIC_KEY,
         "SANDHI_ANTHROPIC_BASE": upstream.base_url,
+        "SANDHI_GEMINI_KEY": REAL_GEMINI_KEY,
+        "SANDHI_GEMINI_BASE": upstream.base_url,
     }
     proc = subprocess.Popen(
         [str(proxy_binary)],
