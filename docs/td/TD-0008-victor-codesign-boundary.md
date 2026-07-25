@@ -71,12 +71,15 @@ error: either a dedicated Python exception type carrying the `ProviderErrorV1` d
 `error` terminal event on the stream (already in the schema) with the iterator raising only
 on binding failures. Removes the brittle string round-trip without changing retry ownership.
 
-**P3 — Hot-path batching (measure first, per co-design discipline).** The per-event
-serialize/parse pair is bounded by delta granularity (~KB/s scale for chat), and the
-transport layer itself forwards bytes O(1); do NOT redesign without a trace. Action: one
-profiled run (events/sec, per-event µs at the binding) filed before any batching/typed-object
-work is considered. Exit criteria: either a measured justification or a documented
-"not the dominant cost term" close-out.
+**P3 — Hot-path batching. CLOSED (2026-07-25): not the dominant cost term.** Measured
+(Python 3.12, M-series): consumer-side `json.loads` on representative `ChatStreamEventV1`
+payloads (text/reasoning/tool-args/usage) averages **1.11 µs/event**; bounding the full
+serialize+parse round trip conservatively at 2× gives **2.23 µs/event**. At a realistic
+chat stream rate of 50–200 events/s that is **0.01–0.04 %** of wall clock; even at an
+implausible 1,000 events/s it is 0.22 %. Model/network latency dominates by 4–5 orders of
+magnitude, and the transport layer under the typed binding is already O(1) byte
+pass-through. **Decision: no batching or typed-object redesign; re-open only if a
+non-chat modality pushes event rates ≥100× current.**
 
 **P4 — Node parity.** Export `provider_descriptor_json`, `provider_spec`,
 `chat_contract_schema_json` from the Node binding; parity is what keeps the contract
