@@ -17,6 +17,37 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
+### Security
+
+- **Dashboard reads are gated by default** (ADR-0004 D4). When an admin token is configured,
+  `/dashboard` and `/dashboard/api/*` now require the admin bearer; `SANDHI_DASHBOARD_PUBLIC=1`
+  restores the previous open, masked-only behaviour, and endpoints stay open when no admin token
+  exists (there is no credential to present).
+  ([#77](https://github.com/anvai-labs/sandhi/pull/77))
+- **Client-facing provider errors are redacted by default** — code, HTTP status, request id, and a
+  canonical short message. An upstream body can echo prompt fragments or infrastructure detail, so
+  it is no longer returned to the client unless `SANDHI_ERROR_DETAIL=full` opts a single-tenant
+  deployment in. Server-side logs always carry the full error.
+  ([#77](https://github.com/anvai-labs/sandhi/pull/77))
+
+### Added
+
+- **Contract governance guards** (TD-0008 A) — `chat_contract_version()` exported from both
+  bindings, a `stream_event_variant_tag()` exhaustive match so adding a `ChatStreamEventV1`
+  variant fails compilation until a consumer decision is recorded, a census test cross-checking
+  the tag list against the checked-in schema, and a test pinning the chat/usage version equality
+  that consumer handshakes rely on. ([#73](https://github.com/anvai-labs/sandhi/pull/73))
+- **Upstream request id on provider errors** — `ProviderErrorV1.request_id` was permanently
+  `None`, dropping the identifier provider escalations are keyed on. It is now extracted from
+  `x-request-id` / `request-id` / `anthropic-request-id` and appended to `Display`, so existing
+  consumer logs quote it with no consumer change.
+  ([#75](https://github.com/anvai-labs/sandhi/pull/75))
+- **`SandhiProviderError` for Node** — Node consumers had to string-sniff `Error` messages to tell
+  a provider error from a binding failure (the gap #69 closed for Python). The shim now raises a
+  typed class carrying the parsed `ProviderErrorV1` at both provider-error surfaces, while
+  binding-internal errors pass through untouched. Shim re-exports resynced with the addon.
+  ([#76](https://github.com/anvai-labs/sandhi/pull/76))
+
 ### Fixed
 
 - **One billable definition everywhere.** ADR-0005 D4 defines the billable quantity as fresh
