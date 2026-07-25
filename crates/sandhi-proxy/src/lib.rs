@@ -90,6 +90,13 @@ pub struct ProxyState {
     /// behavior for trusted single-node deployments. With no admin token configured the
     /// endpoints stay open (there is no credential to present).
     pub dashboard_public: bool,
+    /// TD-0008 D: when `false` (default), client-facing provider errors are REDACTED to
+    /// code + http_status + request_id + a canonical short message — upstream bodies and
+    /// transport internals can echo prompt fragments or infra detail, which must not leak
+    /// to a different tenant's client. `SANDHI_ERROR_DETAIL=full` opts single-tenant /
+    /// self-hosted deployments into the full ProviderErrorV1 (bounded upstream body in
+    /// `details.upstream_body`). Server-side logs always carry the full error either way.
+    pub error_detail_full: bool,
 }
 
 impl ProxyState {
@@ -118,6 +125,7 @@ impl ProxyState {
             alerts: None,
             alert_store: None,
             dashboard_public: false,
+            error_detail_full: false,
         }
     }
 }
@@ -629,11 +637,22 @@ async fn handle(
     // back to the typed translation path. Enforcement (reserve/settle via `accounting`) wraps both.
     let transparent =
         ingress_family(dialect) == provider.family() && provider.raw_forwarder().is_some();
+    let full_error_detail = state.error_detail_full;
     match (transparent, wants_stream) {
-        (true, true) => transparent_stream_response(provider, body, dialect, accounting).await,
-        (true, false) => transparent_complete_response(provider, body, dialect, accounting).await,
-        (false, true) => stream_response(provider, request, dialect, accounting).await,
-        (false, false) => complete_response(provider, request, dialect, accounting).await,
+        (true, true) => {
+            transparent_stream_response(provider, body, dialect, accounting, full_error_detail)
+                .await
+        }
+        (true, false) => {
+            transparent_complete_response(provider, body, dialect, accounting, full_error_detail)
+                .await
+        }
+        (false, true) => {
+            stream_response(provider, request, dialect, accounting, full_error_detail).await
+        }
+        (false, false) => {
+            complete_response(provider, request, dialect, accounting, full_error_detail).await
+        }
     }
 }
 
@@ -677,6 +696,7 @@ async fn transparent_complete_response(
     body: Bytes,
     dialect: IngressDialect,
     mut accounting: RequestAccounting,
+    full_error_detail: bool,
 ) -> Response {
     let Some(forwarder) = provider.raw_forwarder() else {
         accounting.set_outcome("error");
@@ -701,7 +721,7 @@ async fn transparent_complete_response(
         Err(err) => {
             accounting.set_outcome("error");
             accounting.finalize();
-            provider_error(&err, dialect, provider.slug())
+            provider_error(&err, dialect, provider.slug(), full_error_detail)
         }
     }
 }
@@ -715,6 +735,7 @@ async fn transparent_stream_response(
     body: Bytes,
     dialect: IngressDialect,
     mut accounting: RequestAccounting,
+    full_error_detail: bool,
 ) -> Response {
     let Some(forwarder) = provider.raw_forwarder() else {
         accounting.set_outcome("error");
@@ -732,7 +753,7 @@ async fn transparent_stream_response(
         Err(err) => {
             accounting.set_outcome("error");
             accounting.finalize();
-            return provider_error(&err, dialect, provider.slug());
+            return provider_error(&err, dialect, provider.slug(), full_error_detail);
         }
     };
 
@@ -925,6 +946,7 @@ async fn complete_response(
     request: ChatRequestV1,
     dialect: IngressDialect,
     mut accounting: RequestAccounting,
+    full_error_detail: bool,
 ) -> Response {
     match provider.complete(request).await {
         Ok(mut response) => {
@@ -941,7 +963,7 @@ async fn complete_response(
         Err(error) => {
             accounting.set_outcome("error");
             accounting.finalize();
-            provider_error(&error, dialect, provider.slug())
+            provider_error(&error, dialect, provider.slug(), full_error_detail)
         }
     }
 }
@@ -951,13 +973,14 @@ async fn stream_response(
     request: ChatRequestV1,
     dialect: IngressDialect,
     mut accounting: RequestAccounting,
+    full_error_detail: bool,
 ) -> Response {
     let mut upstream = match provider.stream(request).await {
         Ok(s) => s,
         Err(error) => {
             accounting.set_outcome("error");
             accounting.finalize();
-            return provider_error(&error, dialect, provider.slug());
+            return provider_error(&error, dialect, provider.slug(), full_error_detail);
         }
     };
 
@@ -1185,8 +1208,13 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
         .map(str::trim)
 }
 
-fn provider_error(e: &ProviderError, dialect: IngressDialect, provider: &str) -> Response {
-    let (status, msg) = match e {
+fn provider_error(
+    e: &ProviderError,
+    dialect: IngressDialect,
+    provider: &str,
+    full_detail: bool,
+) -> Response {
+    let (status, redacted_msg) = match e {
         ProviderError::InvalidRequest(_) => (StatusCode::BAD_REQUEST, "invalid provider request"),
         ProviderError::Auth => (StatusCode::BAD_GATEWAY, "upstream auth failed"),
         ProviderError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "upstream rate limited"),
@@ -1200,12 +1228,18 @@ fn provider_error(e: &ProviderError, dialect: IngressDialect, provider: &str) ->
         // ProviderError is #[non_exhaustive]; unknown future variants degrade to 502.
         _ => (StatusCode::BAD_GATEWAY, "upstream error"),
     };
-    let typed = e.as_typed(Some(provider));
+    let mut typed = e.as_typed(Some(provider));
+    if !full_detail {
+        // Multi-tenant-safe default (TD-0008 D): keep the support-escalation
+        // currency (code / http_status / request_id), drop upstream bodies and
+        // transport internals. SANDHI_ERROR_DETAIL=full restores everything.
+        typed.message = redacted_msg.to_owned();
+        typed.details.clear();
+    }
     let body = match dialect {
         IngressDialect::OpenAi | IngressDialect::Responses => json!({"error":typed}),
         IngressDialect::Anthropic => json!({"type":"error","error":typed}),
     };
-    let _ = msg;
     (status, Json(body)).into_response()
 }
 
@@ -1225,4 +1259,55 @@ fn ingress_error(dialect: IngressDialect, status: StatusCode, msg: &str) -> Resp
 
 fn error(status: StatusCode, msg: &str) -> Response {
     (status, Json(json!({ "error": msg }))).into_response()
+}
+
+#[cfg(test)]
+mod error_detail_tests {
+    use super::*;
+
+    fn upstream_error() -> ProviderError {
+        ProviderError::Upstream {
+            status: 400,
+            body: Some(r#"{"error":{"message":"tool call id call_9 not found"}}"#.to_owned()),
+            request_id: Some("req_abc".to_owned()),
+        }
+    }
+
+    #[tokio::test]
+    async fn redacted_by_default_keeps_code_status_drops_body() {
+        let response = provider_error(&upstream_error(), IngressDialect::OpenAi, "moonshot", false);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let error = &value["error"];
+        assert_eq!(error["code"], "upstream_error");
+        assert_eq!(error["http_status"], 400);
+        assert_eq!(error["message"], "upstream error");
+        assert!(
+            error["details"]
+                .as_object()
+                .map(|d| d.is_empty())
+                .unwrap_or(true),
+            "redacted mode must not leak details: {error}"
+        );
+        assert!(!bytes.windows(9).any(|w| w == b"tool call"), "body leaked");
+    }
+
+    #[tokio::test]
+    async fn full_detail_forwards_bounded_body() {
+        let response = provider_error(&upstream_error(), IngressDialect::OpenAi, "moonshot", true);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let details = &value["error"]["details"];
+        assert!(
+            details["upstream_body"]
+                .as_str()
+                .unwrap_or("")
+                .contains("call_9"),
+            "full mode must forward the bounded body: {value}"
+        );
+    }
 }
