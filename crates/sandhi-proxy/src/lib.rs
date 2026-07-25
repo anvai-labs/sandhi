@@ -396,10 +396,14 @@ const orDash = s => (s === null || s === undefined || s === "") ? "—" : esc(s)
 function tbl(title, rows) {
   const body = rows.map(r => `<tr><td>${esc(r.key)}</td><td class="num">${fmt(r.calls)}</td>`
     + `<td class="num">${fmt(r.tokens_in)}</td><td class="num">${fmt(r.tokens_out)}</td>`
-    + `<td class="num">${fmt(r.cache_read_tokens)}</td></tr>`).join("");
+    + `<td class="num">${fmt(r.cache_creation_tokens)}</td><td class="num">${fmt(r.cache_read_tokens)}</td>`
+    + `<td class="num">${fmt(r.billable_tokens)}</td></tr>`).join("");
   return `<h2>${title}</h2><table><thead><tr><th>key</th><th class="num">calls</th>`
-    + `<th class="num">in</th><th class="num">out</th><th class="num">cache read</th></tr></thead>`
-    + `<tbody>${body || '<tr><td colspan=5>no data yet</td></tr>'}</tbody></table>`;
+    + `<th class="num">in</th><th class="num">out</th><th class="num">cache write</th>`
+    + `<th class="num">cache read</th><th class="num" title="ADR-0005 D4: the quantity budgets `
+    + `are enforced on — fresh input + cache split + output (+ unfolded reasoning)">billable`
+    + `</th></tr></thead>`
+    + `<tbody>${body || '<tr><td colspan=7>no data yet</td></tr>'}</tbody></table>`;
 }
 
 fetch("/dashboard/api/usage").then(r => r.json()).then(d => {

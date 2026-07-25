@@ -19,13 +19,40 @@ use crate::chat::{UsageCompleteness, UsageV2};
 /// assumed folded and not double-counted.
 #[must_use]
 pub fn billable(u: &UsageV2) -> u64 {
-    let reasoning = u.reasoning_tokens.unwrap_or(0);
-    let unfolded_reasoning = if reasoning > u.tokens_out {
-        reasoning
+    billable_parts(
+        u.tokens_in,
+        u.cache_creation_tokens,
+        u.cache_read_tokens,
+        u.tokens_out,
+        u.reasoning_tokens.unwrap_or(0),
+    )
+}
+
+/// The D4 quantity from raw components — the ONE formula every path shares.
+///
+/// [`billable`] takes a [`UsageV2`], but the same number has to be produced from a flat
+/// [`UsageEvent`] and from SQL columns in the aggregate store. Each of those re-deriving the
+/// arithmetic is how a dashboard ends up disagreeing with what the ledger charged, so they all
+/// route through here (SQL mirrors this expression per row and is pinned by a test).
+///
+/// **Order of operations matters at the aggregate level.** The reasoning fold is a
+/// *per-call* decision, so a total must sum this function per event — summing the columns first
+/// and comparing the sums gives a different (wrong) answer whenever some calls fold reasoning
+/// and others do not.
+#[must_use]
+pub fn billable_parts(
+    tokens_in: u64,
+    cache_creation_tokens: u64,
+    cache_read_tokens: u64,
+    tokens_out: u64,
+    reasoning_tokens: u64,
+) -> u64 {
+    let unfolded_reasoning = if reasoning_tokens > tokens_out {
+        reasoning_tokens
     } else {
         0
     };
-    u.tokens_in + u.cache_creation_tokens + u.cache_read_tokens + u.tokens_out + unfolded_reasoning
+    tokens_in + cache_creation_tokens + cache_read_tokens + tokens_out + unfolded_reasoning
 }
 
 /// The cost basis of a call's backend.
@@ -163,12 +190,22 @@ impl UsageEvent {
         }
     }
 
-    /// Legacy narrow quantity (fresh input + output only). Superseded by the crate-level
-    /// [`billable`] (ADR-0005 D4), which counts the cache split + reasoning; the request-path
-    /// integration migrates budget recording onto that definition. Kept unchanged here so
-    /// existing callers' accounting is not silently altered (Phase-0 zero-behavior rule).
+    /// The event's billable quantity — the same ADR-0005 D4 number the ledger settles on.
+    ///
+    /// This used to be a narrower `tokens_in + tokens_out`, deliberately left alone during
+    /// ADR-0005 Phase 0 so accounting would not shift under existing callers while the proxy
+    /// migrated to [`billable`]. That left two meters in the tree: the proxy charged the cache
+    /// split, and every caller of this helper (both language bindings record spend with it, and
+    /// the dashboard ranked by it) charged less for the same call — a 2× under-count on
+    /// cache-heavy traffic. Phase 0 is over; there is one definition, [`billable_parts`].
     pub fn billable_tokens(&self) -> u64 {
-        self.tokens_in + self.tokens_out
+        billable_parts(
+            self.tokens_in,
+            self.cache_creation_tokens,
+            self.cache_read_tokens,
+            self.tokens_out,
+            self.reasoning_tokens.unwrap_or(0),
+        )
     }
 
     #[must_use]
@@ -295,7 +332,8 @@ mod tests {
         .with_tokens(10, 5)
         .with_cache(0, 3);
 
-        assert_eq!(ev.billable_tokens(), 15);
+        // 10 fresh in + 3 cache-read + 5 out (D4); the old narrow helper read 15.
+        assert_eq!(ev.billable_tokens(), 18);
         let json = serde_json::to_string(&ev).unwrap();
         assert!(!json.contains("\"route\""), "null optionals are omitted");
         assert!(!json.contains("gpu_seconds"));

@@ -88,13 +88,14 @@ async fn complete_attributes_meters_and_records_budget() {
     assert_eq!(ev.provider, "openai");
     assert_eq!(ev.tokens_in, 40); // 100 - 60 cached
     assert_eq!(ev.cache_read_tokens, 60);
-    assert_eq!(ev.billable_tokens(), 60);
+    // Display and enforcement now report the same number: 40 fresh in + 60 cache-read + 20 out.
+    assert_eq!(ev.billable_tokens(), 120);
     assert_eq!(ev.usage_completeness, sandhi_core::UsageCompleteness::Final);
     assert_eq!(ev.outcome.as_deref(), Some("success"));
 
-    // ADR-0005 D4: the ledger settles via `billable()`, which counts the cache split — 40 fresh
-    // in + 60 cache-read + 20 out = 120. (`billable_tokens()` above is the narrower in+out display
-    // helper; unifying the display helpers onto `billable()` is a tracked follow-up.)
+    // ADR-0005 D4: the ledger settles via `billable()`, which counts the cache split — and the
+    // event helper above agrees with it exactly, so an operator reading usage sees what was
+    // charged. (Unifying those two was the tracked follow-up this closes.)
     assert_eq!(state.ledger.lock().unwrap().spent("group:platform"), 120);
     assert_eq!(state.ledger.lock().unwrap().reserved("group:platform"), 0);
 }
@@ -353,7 +354,8 @@ async fn streaming_passes_through_and_emits_usage() {
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].tokens_out, 5);
     assert_eq!(events[0].cache_read_tokens, 4);
-    assert_eq!(events[0].billable_tokens(), 11);
+    // 6 fresh in + 4 cache-read + 5 out = 15 — identical to what the ledger settled below.
+    assert_eq!(events[0].billable_tokens(), 15);
     // ADR-0005 D4: ledger settles via billable() incl. the cache split — 6 in + 4 cache-read + 5 out = 15.
     assert_eq!(state.ledger.lock().unwrap().spent("group:platform"), 15);
 }

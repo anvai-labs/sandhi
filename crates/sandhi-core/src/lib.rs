@@ -94,10 +94,15 @@ mod flow_tests {
         assert_eq!(got.virtual_key_id.as_deref(), Some("vk_alice"));
         assert_eq!(got.session_id.as_deref(), Some("conv_7"));
         assert_eq!(got.cache_read_tokens, 40);
-        assert_eq!(got.billable_tokens(), 300);
-        assert_eq!(ledger.spent("group:platform"), 300);
+        // D4 billable counts the cache split: 220 fresh in + 40 cache-read + 80 out.
+        // The narrow in+out reading was 300 — less than the proxy charges for the same call.
+        assert_eq!(got.billable_tokens(), 340);
+        // The in-process ledger records the SAME quantity the proxy settles. Before the helpers
+        // were unified this read 300 while the proxy charged 340 for an identical call — the
+        // in-process path under-counted every cache read.
+        assert_eq!(ledger.spent("group:platform"), 340);
 
-        // A second big call is now blocked by the group budget (300 + 800 > 1000).
+        // A second big call is now blocked by the group budget (340 + 800 > 1000).
         assert!(ledger.check("group:platform", 800).is_err());
     }
 }

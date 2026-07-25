@@ -274,7 +274,8 @@ test("usage parsing and metering retain cache attribution", () => {
   const event = gateway.meterTokens("vk", "openai", "m", 40, 20, 0, 60, "s1");
   assert.equal(event.subjectId, "alice");
   assert.equal(event.sessionId, "s1");
-  assert.equal(gateway.spent("group:platform"), 60);
+  // D4 billable counts the cache split: 40 fresh in + 60 cache-read + 20 out = 120.
+  assert.equal(gateway.spent("group:platform"), 120);
 });
 
 // ---------------------------------------------------------------------------
@@ -456,11 +457,12 @@ test("Gateway.meter parses, attributes, records budget, and lists events", () =>
   assert.equal(event.route, "router");
   assert.equal(event.provider, "anthropic");
   assert.equal(event.usageCompleteness, "final");
-  assert.equal(gateway.spent("group:platform"), 120);
+  // 100 fresh in + 5 cache-write + 10 cache-read + 20 out (D4); narrow read 120.
+  assert.equal(gateway.spent("group:platform"), 135);
 
-  // Within budget → true; over budget → false. (120 spent of 1000 → 880 remaining.)
-  assert.equal(gateway.checkBudget("group:platform", 879), true);
-  assert.equal(gateway.checkBudget("group:platform", 881), false);
+  // Within budget → true; over budget → false. (135 spent of 1000 → 865 remaining.)
+  assert.equal(gateway.checkBudget("group:platform", 864), true);
+  assert.equal(gateway.checkBudget("group:platform", 866), false);
 
   // events() returns the in-memory buffer.
   const listed = gateway.events();
