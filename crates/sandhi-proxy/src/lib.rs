@@ -6,11 +6,15 @@
 //! reconciles the budget. It is *in-path*, not a redirect: a client cannot bypass the meter.
 
 mod codec;
+pub mod ledger;
 pub mod operator;
 
 // Re-export the admin API request/response types for the `sandhi` CLI client + the startup
 // rehydration helpers used by the `sandhi-proxy` binary.
-pub use operator::{admin, build_provider_handle, rehydrate_alerts, rehydrate_live_keys};
+pub use ledger::{Admission, ProxyLedger};
+pub use operator::{
+    admin, build_provider_handle, rehydrate_alerts, rehydrate_budgets, rehydrate_live_keys,
+};
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -26,21 +30,31 @@ use axum::Router;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 
+use time::OffsetDateTime;
+
 use sandhi_core::{
-    AlertRegistry, Backend, BudgetLedger, ChatRequestV1, KeyStore, RequestMetadataV1, Sink,
-    UsageCompleteness, UsageEvent, UsageV2, VirtualKey,
+    billable, AlertRegistry, Backend, ChatRequestV1, KeyStore, Policy, RequestMetadataV1,
+    Reservation, Sink, UsageCompleteness, UsageEvent, UsageV2, VirtualKey,
 };
-use sandhi_providers::{ProviderError, ProviderHandle, ProviderRuntime};
+use sandhi_providers::{ProviderError, ProviderFamily, ProviderHandle, ProviderRuntime};
 use sandhi_store::{hash_secret, AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
 
 use codec::{decode_request, encode_response, encode_stream_event, IngressDialect};
 pub use operator::BudgetSpec;
 
+/// Conservative output ceiling applied to a **budget-capped** scope when the client omits
+/// `max_output_tokens` (ADR-0005 D1). The reservation holds this as an upper bound and the value
+/// is set on the upstream request so the provider bounds output — otherwise an unbounded stream
+/// overshoots the cap (the 100× soft-cap bug). Unlimited scopes are never modified.
+const DEFAULT_OUTPUT_CEILING: u64 = 4096;
+
 /// Shared server state: the virtual-key store, the budget ledger, the usage sink, and the
 /// registry of configured upstream providers (each already holding its real credential).
 pub struct ProxyState {
     pub keys: KeyStore,
-    pub ledger: Mutex<BudgetLedger>,
+    /// The enforcement ledger (ADR-0005 lease model): durable [`SqliteLedger`](sandhi_store::SqliteLedger)
+    /// when `SANDHI_STORE` is set, else volatile in-memory. See [`ProxyLedger`].
+    pub ledger: Mutex<ProxyLedger>,
     pub sink: Arc<dyn Sink>,
     /// `upstream_ref` → a persistent typed provider handle (real key baked in). Interior-mutable:
     /// the admin API registers handles here at runtime; the demo path seeds it at startup.
@@ -58,7 +72,9 @@ pub struct ProxyState {
     pub runtime: ProviderRuntime,
     /// Admin-API bearer token (distinct from virtual keys). `None` disables the admin API.
     pub admin_token: Option<String>,
-    /// Operator-set budgets (scope → spec). The live [`BudgetLedger`] enforces them.
+    /// Operator-set budgets (scope → spec). The live [`ProxyLedger`] enforces them; this map is the
+    /// metadata surface (policy lookup, dashboard, alert thresholds) and is rehydrated from the
+    /// durable ledger on startup.
     pub budgets: Mutex<HashMap<String, BudgetSpec>>,
     /// The externally-reachable base URL shared with minted-key callers (e.g.
     /// `http://localhost:8787`).
@@ -68,6 +84,12 @@ pub struct ProxyState {
     pub alerts: Option<Arc<Mutex<AlertRegistry>>>,
     /// Durable alert-rule store (rules + last_fired_at + ack), backs `/admin/alerts`.
     pub alert_store: Option<Arc<AlertStore>>,
+    /// ADR-0004 D4: when `false` (default) and an admin token is configured, the
+    /// `/dashboard/api/*` read endpoints require the admin bearer — they serve subject/group
+    /// usage aggregates. `SANDHI_DASHBOARD_PUBLIC=1` restores the previous open, masked-only
+    /// behavior for trusted single-node deployments. With no admin token configured the
+    /// endpoints stay open (there is no credential to present).
+    pub dashboard_public: bool,
 }
 
 impl ProxyState {
@@ -76,7 +98,7 @@ impl ProxyState {
     #[must_use]
     pub fn new(
         keys: KeyStore,
-        ledger: BudgetLedger,
+        ledger: ProxyLedger,
         sink: Arc<dyn Sink>,
         providers: HashMap<String, ProviderHandle>,
         store: Option<Arc<SqliteStore>>,
@@ -95,6 +117,7 @@ impl ProxyState {
             public_url: "http://localhost:8787".into(),
             alerts: None,
             alert_store: None,
+            dashboard_public: false,
         }
     }
 }
@@ -108,7 +131,8 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         .route("/catalog/models", get(catalog_models))
         .route("/dashboard", get(dashboard_html))
         .route("/dashboard/api/usage", get(dashboard_api))
-        // TD-0003 P4 dashboard read-only endpoints (masked, unauthed — self-hosted trust).
+        // TD-0003 P4 dashboard read-only endpoints (masked; admin-bearer-gated when an admin
+        // token is configured, unless SANDHI_DASHBOARD_PUBLIC=1 — ADR-0004 D4).
         .route("/dashboard/api/keys", get(dashboard_keys))
         .route("/dashboard/api/budgets", get(dashboard_budgets))
         .route("/dashboard/api/alerts", get(dashboard_alerts))
@@ -174,8 +198,23 @@ async fn catalog_models(Query(query): Query<CatalogQuery>) -> Response {
     }
 }
 
+/// ADR-0004 D4 dashboard gate: the read endpoints serve subject/group usage aggregates, so
+/// when an admin token is configured they require it (same bearer as `/admin/*`) unless the
+/// operator explicitly opted back into the open, masked-only model (`dashboard_public`).
+/// No admin token configured → open (nothing to present; single-node dev trust).
+#[allow(clippy::result_large_err)] // axum::Response is intentionally large; idiomatic shape.
+fn require_dashboard_access(state: &ProxyState, headers: &HeaderMap) -> Result<(), Response> {
+    if state.dashboard_public || state.admin_token.is_none() {
+        return Ok(());
+    }
+    operator::require_admin(state, headers)
+}
+
 /// Usage aggregates for the dashboard (JSON). 404 when no durable store is configured.
-async fn dashboard_api(State(state): State<Arc<ProxyState>>) -> Response {
+async fn dashboard_api(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -> Response {
+    if let Err(denied) = require_dashboard_access(&state, &headers) {
+        return denied;
+    }
     let Some(store) = state.store.clone() else {
         return error(
             StatusCode::NOT_FOUND,
@@ -203,7 +242,10 @@ async fn dashboard_api(State(state): State<Arc<ProxyState>>) -> Response {
 
 /// `GET /dashboard/api/keys` — masked virtual keys + masked vault entries (no secrets, no hashes).
 /// 404 when neither the vault nor the virtual-key store is configured.
-async fn dashboard_keys(State(state): State<Arc<ProxyState>>) -> Response {
+async fn dashboard_keys(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -> Response {
+    if let Err(denied) = require_dashboard_access(&state, &headers) {
+        return denied;
+    }
     let (vault, vkeys) = (state.vault.clone(), state.vkeys.clone());
     if vault.is_none() && vkeys.is_none() {
         return error(
@@ -230,8 +272,11 @@ async fn dashboard_keys(State(state): State<Arc<ProxyState>>) -> Response {
 
 /// `GET /dashboard/api/budgets` — every configured scope with limit / window / policy + live spent
 /// (from the budget ledger). Neutral tokens; no pricing.
-async fn dashboard_budgets(State(state): State<Arc<ProxyState>>) -> Response {
-    let mut ledger = state.ledger.lock().expect("ledger poisoned");
+async fn dashboard_budgets(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -> Response {
+    if let Err(denied) = require_dashboard_access(&state, &headers) {
+        return denied;
+    }
+    let ledger = state.ledger.lock().expect("ledger poisoned");
     let scopes: Vec<Value> = state
         .budgets
         .lock()
@@ -255,7 +300,10 @@ async fn dashboard_budgets(State(state): State<Arc<ProxyState>>) -> Response {
 
 /// `GET /dashboard/api/alerts` — recent fired alerts (rules whose threshold has tripped) plus all
 /// configured rules. 404 when the alert store is not configured.
-async fn dashboard_alerts(State(state): State<Arc<ProxyState>>) -> Response {
+async fn dashboard_alerts(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -> Response {
+    if let Err(denied) = require_dashboard_access(&state, &headers) {
+        return denied;
+    }
     let Some(store) = state.alert_store.clone() else {
         return error(
             StatusCode::NOT_FOUND,
@@ -504,8 +552,16 @@ async fn handle(
         subject_id: vk.subject_id.clone(),
         group_id: vk.group_id.clone(),
         route: Some(route.into()),
+        // ADR-0005 D7 neutral identity: `idempotency-key` for reconcile-once, run/step/parent for
+        // the agent cost-tree, W3C `traceparent` for external trace linkage. Optional metadata —
+        // never pricing, never inside the cached wire body.
+        idempotency_key: header_str(&headers, "idempotency-key"),
+        run_id: header_str(&headers, "x-sandhi-run-id"),
+        step_id: header_str(&headers, "x-sandhi-step-id"),
+        parent_id: header_str(&headers, "x-sandhi-parent-id"),
+        trace_context: header_str(&headers, "traceparent"),
     };
-    let (request, wants_stream) = match decode_request(dialect, body_json, metadata) {
+    let (mut request, wants_stream) = match decode_request(dialect, body_json, metadata) {
         Ok(decoded) => decoded,
         Err(message) => return ingress_error(dialect, StatusCode::BAD_REQUEST, &message),
     };
@@ -527,43 +583,224 @@ async fn handle(
         );
     }
 
-    // 5. Atomically reserve the request's conservative token estimate. The measured UsageV2
-    //    replaces this reservation after completion; failed/unmeasured calls release it.
+    // 5. Reserve a **ceiling** — a conservative upper bound (input estimate + the effective output
+    //    max), not a lower-bound estimate (ADR-0005 D1). A call whose worst case would breach the
+    //    cap is refused *before* dispatch, so a hard cap cannot be overshot. On a budget-capped
+    //    scope where the client left the output unbounded, we also set that bound on the upstream
+    //    request so the provider caps output — making the reservation enforceable. The measured
+    //    `billable()` (cache split included, D4) replaces the reservation after completion.
     let scope = budget_scope(&vk);
-    let reserved = estimate_reservation(&request);
-    match reserve_budget(&state, &scope, reserved) {
-        Ok(()) => {}
-        Err(StatusCode::TOO_MANY_REQUESTS) => {
-            return ingress_error(dialect, StatusCode::TOO_MANY_REQUESTS, "budget exhausted")
-        }
-        Err(status) => {
-            return ingress_error(dialect, status, "budget ledger unavailable");
-        }
+    let policy = scope_policy(&state, &scope);
+    // A scope is "capped" (for output-bounding) only under a hard `Block` cap: a `Warn` soft cap
+    // never rejects, so we do not shrink the client's request. Bounding output makes the ceiling
+    // reservation enforceable when the client left `max_output_tokens` unset (ADR-0005 D1).
+    let capped = policy == Policy::Block
+        && state
+            .ledger
+            .lock()
+            .ok()
+            .and_then(|ledger| ledger.limit(&scope))
+            .is_some();
+    let (ceiling, effective_max) = reservation_ceiling(&request);
+    if capped && request.max_output_tokens.is_none() {
+        request.max_output_tokens = Some(effective_max);
     }
+    let reservation = match reserve_budget(&state, &scope, ceiling, policy) {
+        Admission::Leased(reservation) => Some(reservation),
+        // Fail-open (Warn on a backend error): admit without a lease; the usage event still emits.
+        Admission::Unmetered => None,
+        Admission::Denied => {
+            return ingress_error(dialect, StatusCode::TOO_MANY_REQUESTS, "budget exhausted");
+        }
+    };
 
     let accounting = RequestAccounting::new(
         Arc::clone(&state),
         scope,
-        reserved,
+        reservation,
         provider.slug().into(),
         &request,
     );
 
-    if wants_stream {
-        stream_response(provider, request, dialect, accounting).await
-    } else {
-        complete_response(provider, request, dialect, accounting).await
+    // Plane selection (ADR-0004 D1 / TD-0006): when the client's ingress dialect and the resolved
+    // upstream are the SAME family, forward the client's bytes verbatim (transparent metering) —
+    // no `ChatRequestV1` re-encode, so prompt-cache prefixes and provider-specific fields survive,
+    // and usage is metered at the source. Cross-family (or a handle with no raw forwarder) falls
+    // back to the typed translation path. Enforcement (reserve/settle via `accounting`) wraps both.
+    let transparent =
+        ingress_family(dialect) == provider.family() && provider.raw_forwarder().is_some();
+    match (transparent, wants_stream) {
+        (true, true) => transparent_stream_response(provider, body, dialect, accounting).await,
+        (true, false) => transparent_complete_response(provider, body, dialect, accounting).await,
+        (false, true) => stream_response(provider, request, dialect, accounting).await,
+        (false, false) => complete_response(provider, request, dialect, accounting).await,
     }
 }
 
-fn reserve_budget(state: &ProxyState, scope: &str, reserved: u64) -> Result<(), StatusCode> {
-    let mut ledger = state
-        .ledger
+/// Ingress dialect → the upstream family it maps to, for plane selection (TD-0006 Step 2).
+fn ingress_family(dialect: IngressDialect) -> ProviderFamily {
+    match dialect {
+        IngressDialect::OpenAi => ProviderFamily::OpenAiCompat,
+        IngressDialect::Anthropic => ProviderFamily::Anthropic,
+        IngressDialect::Responses => ProviderFamily::OpenAiResponses,
+    }
+}
+
+/// The upstream path suffix for a same-family transparent forward — mirrors each typed adapter's
+/// endpoint. Only the three ingress families above ever reach the transparent plane.
+fn upstream_path(family: ProviderFamily) -> &'static str {
+    match family {
+        ProviderFamily::OpenAiCompat => "/chat/completions",
+        ProviderFamily::OpenAiResponses => "/responses",
+        ProviderFamily::Anthropic => "/v1/messages",
+        _ => "/",
+    }
+}
+
+/// Rebuild an axum response from a raw upstream response: status + curated header allowlist + body
+/// bytes, forwarded verbatim (the transparent plane never re-serializes the response).
+fn raw_response_to_axum(raw: sandhi_providers::raw::RawResponse) -> Response {
+    let mut builder = Response::builder().status(raw.status);
+    for (name, value) in raw.headers.iter() {
+        builder = builder.header(name, value);
+    }
+    builder
+        .body(Body::from(raw.body))
+        .unwrap_or_else(|_| error(StatusCode::BAD_GATEWAY, "invalid upstream response"))
+}
+
+/// Transparent same-family non-streaming plane: forward the client's bytes verbatim, meter usage
+/// at the source, and return the upstream response unchanged (ADR-0004 D1). Enforcement rides on
+/// `accounting` exactly as on the typed path.
+async fn transparent_complete_response(
+    provider: ProviderHandle,
+    body: Bytes,
+    dialect: IngressDialect,
+    mut accounting: RequestAccounting,
+) -> Response {
+    let Some(forwarder) = provider.raw_forwarder() else {
+        accounting.set_outcome("error");
+        accounting.finalize();
+        return error(
+            StatusCode::BAD_GATEWAY,
+            "transparent plane requires a raw forwarder",
+        );
+    };
+    match forwarder
+        .forward_metered(upstream_path(provider.family()), body)
+        .await
+    {
+        Ok((raw, mut usage)) => {
+            usage.completeness = UsageCompleteness::Final;
+            usage.outcome.get_or_insert_with(|| "success".into());
+            accounting.observe(&usage);
+            accounting.set_outcome("success");
+            accounting.finalize();
+            raw_response_to_axum(raw)
+        }
+        Err(err) => {
+            accounting.set_outcome("error");
+            accounting.finalize();
+            provider_error(&err, dialect, provider.slug())
+        }
+    }
+}
+
+/// Transparent same-family streaming plane: forward the upstream SSE bytes verbatim while the
+/// metered stream accumulates usage at the source; the terminal frame finalizes the reservation. A
+/// mid-stream disconnect settles the accrued (byte-approximate) partial via the `Drop` finalizer
+/// rather than releasing to zero (ADR-0005 D1), as on the typed streaming path.
+async fn transparent_stream_response(
+    provider: ProviderHandle,
+    body: Bytes,
+    dialect: IngressDialect,
+    mut accounting: RequestAccounting,
+) -> Response {
+    let Some(forwarder) = provider.raw_forwarder() else {
+        accounting.set_outcome("error");
+        accounting.finalize();
+        return error(
+            StatusCode::BAD_GATEWAY,
+            "transparent plane requires a raw forwarder",
+        );
+    };
+    let mut upstream = match forwarder
+        .forward_stream_metered(upstream_path(provider.family()), body)
+        .await
+    {
+        Ok(stream) => stream,
+        Err(err) => {
+            accounting.set_outcome("error");
+            accounting.finalize();
+            return provider_error(&err, dialect, provider.slug());
+        }
+    };
+
+    let body_stream = async_stream::stream! {
+        let mut seen_usage = false;
+        let mut delta_bytes: u64 = 0;
+        while let Some(item) = upstream.next().await {
+            match item {
+                Ok(chunk) => {
+                    if let Some(parsed) = chunk.usage {
+                        // Terminal frame: the finalized, source-measured usage.
+                        let mut usage: UsageV2 = parsed.into();
+                        usage.completeness = UsageCompleteness::Final;
+                        usage.outcome.get_or_insert_with(|| "success".into());
+                        accounting.observe(&usage);
+                        seen_usage = true;
+                    } else if !chunk.data.is_empty() {
+                        // Running byte-approximate Partial so a disconnect settles accrued spend.
+                        delta_bytes = delta_bytes.saturating_add(chunk.data.len() as u64);
+                        if !seen_usage {
+                            accounting.observe(&partial_usage(delta_bytes));
+                        }
+                    }
+                    if !chunk.data.is_empty() {
+                        yield Ok::<Bytes, std::io::Error>(chunk.data);
+                    }
+                }
+                Err(_) => {
+                    accounting.set_outcome("error");
+                    break;
+                }
+            }
+        }
+        if accounting.outcome != "error" {
+            accounting.set_outcome("success");
+        }
+        accounting.finalize();
+    };
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/event-stream")
+        .body(Body::from_stream(body_stream))
+        .expect("valid streaming response")
+}
+
+/// The enforcement policy configured for a scope (from the operator budgets map). Drives D6
+/// fail-open/closed and whether the scope is a hard `Block` cap. Unset → `Block` (the safe default).
+fn scope_policy(state: &ProxyState, scope: &str) -> Policy {
+    state
+        .budgets
         .lock()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    ledger
-        .reserve(scope, reserved)
-        .map_err(|_| StatusCode::TOO_MANY_REQUESTS)
+        .ok()
+        .and_then(|budgets| budgets.get(scope).map(|spec| Policy::parse(&spec.policy)))
+        .unwrap_or(Policy::Block)
+}
+
+/// Reserve a ceiling lease for one in-flight call (ADR-0005 D1). A poisoned ledger lock is treated
+/// as a backend failure and resolved by D6: `Warn` fails open (unmetered admit), `Block` fails
+/// closed (deny).
+fn reserve_budget(state: &ProxyState, scope: &str, ceiling: u64, policy: Policy) -> Admission {
+    match state.ledger.lock() {
+        Ok(mut ledger) => ledger.reserve(scope, ceiling, OffsetDateTime::now_utc(), policy),
+        Err(_) => match policy {
+            Policy::Warn => Admission::Unmetered,
+            Policy::Block => Admission::Denied,
+        },
+    }
 }
 
 /// Owns the reservation and guarantees one terminal usage observation even when an HTTP body is
@@ -571,7 +808,9 @@ fn reserve_budget(state: &ProxyState, scope: &str, reserved: u64) -> Result<(), 
 struct RequestAccounting {
     state: Arc<ProxyState>,
     scope: String,
-    reserved: u64,
+    /// The held lease to settle by id (ADR-0005 D2). `None` when the scope admitted fail-open with
+    /// no durable lease (D6) — nothing to settle.
+    reservation: Option<Reservation>,
     provider: String,
     model: String,
     metadata: RequestMetadataV1,
@@ -584,14 +823,14 @@ impl RequestAccounting {
     fn new(
         state: Arc<ProxyState>,
         scope: String,
-        reserved: u64,
+        reservation: Option<Reservation>,
         provider: String,
         request: &ChatRequestV1,
     ) -> Self {
         Self {
             state,
             scope,
-            reserved,
+            reservation,
             provider,
             model: request.model.clone(),
             metadata: request.metadata.clone(),
@@ -639,27 +878,31 @@ impl RequestAccounting {
             usage.completeness,
             UsageCompleteness::Final | UsageCompleteness::Partial
         );
-        let actual = if measured {
-            usage.tokens_in.saturating_add(usage.tokens_out)
-        } else {
-            0
-        };
-        // Reconcile the reservation against the measured terminal usage, and capture the
-        // post-reconcile spent + limit so the alert subsystem can evaluate thresholds.
-        let mut alert_input: Option<(u64, Option<u64>)> = None;
+        // Settle against the single neutral `billable()` (cache split included, ADR-0005 D4) so the
+        // ledger and the emitted usage event count the same quantity. An unmeasured (failed /
+        // cancelled) call settles `0`, which releases the lease without recording spend.
+        let actual = if measured { billable(&usage) } else { 0 };
+        // Settle the lease by id (idempotent, ADR-0005 D2), then capture the post-settle spent for
+        // the alert subsystem. Alerts evaluate only on a measured call.
+        let mut spent_after: Option<u64> = None;
         if let Ok(mut ledger) = self.state.ledger.lock() {
+            if let Some(reservation) = &self.reservation {
+                ledger.settle(reservation, actual);
+            }
             if measured {
-                ledger.reconcile(&self.scope, self.reserved, actual);
-                let spent = ledger.spent(&self.scope);
-                let limit = ledger.limit_of(&self.scope);
-                alert_input = Some((spent, limit));
-            } else {
-                ledger.release(&self.scope, self.reserved);
+                spent_after = Some(ledger.spent(&self.scope));
             }
         }
-        // P2: evaluate threshold alerts against the reconciled spend (best-effort — never breaks
-        // the request). Persists last_fired_at for restart-surviving dedup.
-        if let Some((spent, limit)) = alert_input {
+        // P2: evaluate threshold alerts against the settled spend (best-effort — never breaks the
+        // request). The configured limit comes from the budgets metadata map so a `Warn` scope (no
+        // hard cap in the in-memory ledger) still has a threshold to measure against.
+        if let Some(spent) = spent_after {
+            let limit = self
+                .state
+                .budgets
+                .lock()
+                .ok()
+                .and_then(|budgets| budgets.get(&self.scope).map(|spec| spec.limit_tokens));
             self.fire_alerts(spent, limit);
         }
         self.state.sink.emit(&usage_event(
@@ -720,15 +963,34 @@ async fn stream_response(
 
     let body = async_stream::stream! {
         let mut last_usage: Option<UsageV2> = None;
+        let mut delta_out_bytes: u64 = 0;
         while let Some(item) = upstream.next().await {
             match item {
                 Ok(event) => {
-                    if let sandhi_core::ChatStreamEventV1::Usage { usage } = &event {
-                        accounting.observe(usage);
-                        last_usage = Some(usage.clone());
+                    match &event {
+                        sandhi_core::ChatStreamEventV1::Usage { usage } => {
+                            // Terminal, authoritative usage — replaces any running partial estimate.
+                            accounting.observe(usage);
+                            last_usage = Some(usage.clone());
+                        }
+                        sandhi_core::ChatStreamEventV1::TextDelta { delta }
+                        | sandhi_core::ChatStreamEventV1::ReasoningDelta { delta }
+                        | sandhi_core::ChatStreamEventV1::RefusalDelta { delta }
+                        | sandhi_core::ChatStreamEventV1::ToolCallArgumentsDelta { delta, .. } => {
+                            delta_out_bytes = delta_out_bytes.saturating_add(delta.len() as u64);
+                        }
+                        sandhi_core::ChatStreamEventV1::Error { .. } => {
+                            accounting.set_outcome("error");
+                        }
+                        _ => {}
                     }
-                    if matches!(event, sandhi_core::ChatStreamEventV1::Error { .. }) {
-                        accounting.set_outcome("error");
+                    // ADR-0005 D1: hold a running `Partial` estimate from the output deltas until the
+                    // terminal usage arrives, so a mid-stream disconnect (which fires the Drop
+                    // finalizer, not the code below) settles the accumulated spend instead of
+                    // releasing to zero — closing the open-stream / read-a-lot / disconnect
+                    // metering-evasion hole. Approximate (bytes/4); the terminal frame overrides it.
+                    if last_usage.is_none() {
+                        accounting.observe(&partial_usage(delta_out_bytes));
                     }
                     for (event_name, value) in
                         encode_stream_event(dialect, &event, last_usage.as_ref())
@@ -766,7 +1028,10 @@ async fn stream_response(
         .expect("valid streaming response")
 }
 
-fn estimate_reservation(request: &ChatRequestV1) -> u64 {
+/// Coarse input-token estimate: bytes of the prompt payload / 4. A known lower-bound approximation
+/// (undercounts CJK, overcounts verbose tool schemas); a model-aware/tokenizer estimator is the
+/// follow-up (ADR-0005 D1). The *output* side, not this, is the load-bearing part of the ceiling.
+fn input_estimate(request: &ChatRequestV1) -> u64 {
     let bytes = serde_json::to_vec(&request.messages)
         .map(|value| value.len() as u64)
         .unwrap_or(0)
@@ -775,10 +1040,33 @@ fn estimate_reservation(request: &ChatRequestV1) -> u64 {
                 .map(|value| value.len() as u64)
                 .unwrap_or(0),
         );
-    let estimated_input = bytes.saturating_add(3) / 4;
-    estimated_input
-        .saturating_add(request.max_output_tokens.unwrap_or(1))
-        .max(1)
+    bytes.saturating_add(3) / 4
+}
+
+/// The reservation **ceiling** (ADR-0005 D1): input estimate + the effective output max (the
+/// client's `max_output_tokens`, or [`DEFAULT_OUTPUT_CEILING`] when unbounded). Returns the ceiling
+/// and the effective max so the caller can bound a capped scope's upstream request. This is a
+/// conservative upper bound, not the old `+ 1` lower-bound estimate that let streams overshoot.
+fn reservation_ceiling(request: &ChatRequestV1) -> (u64, u64) {
+    let effective_max = request.max_output_tokens.unwrap_or(DEFAULT_OUTPUT_CEILING);
+    let ceiling = input_estimate(request).saturating_add(effective_max).max(1);
+    (ceiling, effective_max)
+}
+
+/// A trimmed header value as an owned `String`, or `None` when absent/non-UTF-8/empty.
+fn header_str(headers: &HeaderMap, name: &str) -> Option<String> {
+    let value = headers.get(name)?.to_str().ok()?.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+/// A best-effort `Partial` usage synthesized from accumulated output-delta bytes, used to settle an
+/// interrupted stream (ADR-0005 D1) rather than releasing the reservation to zero.
+fn partial_usage(delta_out_bytes: u64) -> UsageV2 {
+    UsageV2 {
+        tokens_out: delta_out_bytes.saturating_add(3) / 4,
+        completeness: UsageCompleteness::Partial,
+        ..UsageV2::default()
+    }
 }
 
 fn sse_frame(event: Option<&str>, value: &Value) -> String {
@@ -817,6 +1105,13 @@ fn usage_event(
     )
     .with_route(metadata.route.clone())
     .with_session(metadata.session_id.clone())
+    .with_identity(
+        metadata.idempotency_key.clone(),
+        metadata.run_id.clone(),
+        metadata.step_id.clone(),
+        metadata.parent_id.clone(),
+        metadata.trace_context.clone(),
+    )
     .with_tokens(usage.tokens_in, usage.tokens_out)
     .with_cache(usage.cache_creation_tokens, usage.cache_read_tokens)
     .with_measurement(

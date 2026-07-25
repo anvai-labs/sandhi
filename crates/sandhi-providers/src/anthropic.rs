@@ -132,7 +132,7 @@ impl Provider for Anthropic {
 
 /// Accumulate usage from Anthropic SSE lines: input + cache from `message_start`, output from
 /// `message_delta` (cumulative).
-fn sniff_usage_line(line: &[u8], acc: &mut ParsedUsage) {
+pub(crate) fn sniff_usage_line(line: &[u8], acc: &mut ParsedUsage) {
     let Ok(s) = std::str::from_utf8(line) else {
         return;
     };
@@ -173,6 +173,7 @@ mod tests {
         tokens_out: 256,
         cache_creation_tokens: 2048,
         cache_read_tokens: 4096,
+        reasoning_tokens: 0,
     };
 
     /// Drive an SSE byte-stream (pre-split into `chunks`) through the production streaming

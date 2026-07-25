@@ -1,8 +1,36 @@
 # TD-0006: Implementation plan — the transparent-metering plane (byte-exact proxy passthrough)
 
-Status: Draft (proposed)
+Status: Draft (proposed) — **Step 1 approach revised 2026-07-23 (see banner)**
 Date: 2026-07-22
 Implements: [ADR-0004](../adr/0004-two-plane-proxy-and-enforcement-boundary.md) D1
+
+> **Revised 2026-07-23 (pressure-test) — the "surface the existing adapters" premise is
+> falsified.** The typed adapters cannot be a byte-exact transport: they parse the body to
+> `serde_json::Value`, inject `stream`/`stream_options.include_usage`, re-serialize via `.json()`,
+> and carry **no response headers**. Corrections, superseding Steps 1–3 below:
+> - **Add a dedicated raw forwarder** that owns the `reqwest` POST with `.body(bytes)` and never
+>   touches `Provider`/`ChatProvider`. Request bytes and a **curated response-header allowlist**
+>   (pass `retry-after` / request-id / rate-limit; strip hop-by-hop + `Authorization`) pass
+>   through; the client's **message/content** bytes are preserved.
+> - **The promise is "content-faithful, envelope-normalized," not "byte-identical."** Delete the
+>   golden byte-identity test. OpenAI streaming *requires* injecting `stream_options.include_usage`
+>   to meter at all — treat that (and `stream:true`, `Accept-Encoding: identity`) as documented,
+>   cache-neutral **envelope normalizations to the upstream**, and assert usage is non-zero when
+>   the client omits the flag.
+> - **Force `Accept-Encoding: identity` upstream** (reqwest is built without gzip/brotli) so bytes
+>   are plaintext for both sniffing and forwarding, or preserve `Content-Encoding` end-to-end.
+> - **Bound and shape the sniffer** — `metered_passthrough`'s line buffer is unbounded and assumes
+>   newline-delimited SSE; Gemini's non-SSE JSON-array stream and huge single tool-call lines blow
+>   it up and meter zero. Cap the buffer; make usage extraction transport-shape-aware
+>   (SSE / NDJSON / single-JSON-array); guard the JSON parse with a `contains(b"usage")` substring
+>   check before parsing every delta.
+> - **Select the plane from the vault-declared `ProviderFamily`**, never `for_slug` (which defaults
+>   unknown slugs to OpenAI-compat and would byte-forward an OpenAI body to an Anthropic upstream).
+>   Thread `ProviderFamily` onto `ProviderHandle`. Gemini stream-vs-complete is URL-method-driven,
+>   not body-`stream`-driven.
+> - **Validate `model` against a strict charset** before it enters the Gemini upstream URL path.
+> - **Keep the `Drop`-based finalizer** and, per [ADR-0005](../adr/0005-enforcement-correctness-reservation-ledger-observe-enforce-split.md)
+>   D1, settle `Partial` (not zero) on mid-stream disconnect for `Block` scopes.
 
 ## Goal
 
@@ -115,13 +143,12 @@ the binding facades (the `codegen-drift` gate enforces this). The Anthropic enco
 message-level breakpoints the way it already does for system/tool blocks
 (`anthropic_typed.rs:113-125,148-159`). Other families ignore the field.
 
-### Step 5 — (optional, from ADR-0004 D4) tighten the estimate and the billable definition
+### Step 5 — MOVED to workstream W2 (TD-0004 §Phasing converged plan, 2026-07-23)
 
-Independent of planes but adjacent: the reservation estimate is `bytes/4`
-(`lib.rs:505-518`), and the budget bills `tokens_in + tokens_out` while the event meters the
-cache split. Pick one `billable()` definition in `sandhi-core` and use it in both the ledger and
-the event; optionally swap the byte heuristic for a model-aware token count on the reserve path.
-Not required for the plane split, but cheap to land alongside.
+The single-`billable()` definition and reserve-estimate tightening are metering-semantics
+changes that belong with the durable-ledger work (ADR-0004 D4 remnants), not the plane split.
+They are owned by workstream **W2** in TD-0004's converged execution plan and dropped from this
+TD's scope; this TD owns Steps 1–4 only (= workstream **W3**).
 
 ## Testing
 

@@ -27,6 +27,8 @@ if (native.TypedEventStream && !native.TypedEventStream.prototype[Symbol.asyncIt
 
 module.exports.wireContractVersion = native.wireContractVersion;
 module.exports.parseUsage = native.parseUsage;
+module.exports.providerDescriptorJson = native.providerDescriptorJson;
+module.exports.providerModelsJson = native.providerModelsJson;
 module.exports.Gateway = native.Gateway;
 module.exports.ProviderRuntime = native.ProviderRuntime;
 module.exports.TypedProvider = native.TypedProvider;

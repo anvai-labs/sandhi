@@ -87,9 +87,34 @@ pub trait ChatProvider: Send + Sync {
     async fn stream(&self, request: ChatRequestV1) -> Result<ChatEventStream, ProviderError>;
 }
 
+/// Build the same-family raw byte-forwarder for a handle, from the **same** transport config used
+/// to build its typed provider (TD-0006). Auth and headers mirror the typed path exactly, so a
+/// transparent forward is credential- and header-identical to a translated one.
+fn build_raw_forwarder(config: &ProviderTransportConfig) -> crate::raw::RawForwarder {
+    crate::raw::RawForwarder::new(
+        config.family,
+        config.base_url.clone(),
+        config.api_key.clone(),
+    )
+    .with_headers(config.headers.clone())
+    .with_anthropic_auth(config.anthropic_auth_scheme)
+    .with_gemini_auth(config.gemini_auth_scheme)
+}
+
 #[derive(Clone)]
 pub struct ProviderHandle {
     inner: Arc<dyn ChatProvider>,
+    /// The vault-declared / config-declared family (TD-0006 / ADR-0004 D1). This is what the
+    /// proxy's plane-selection will use to decide transparent-forward vs. cross-family
+    /// translation. It is set from the factory constructor (config-driven), **not** from
+    /// [`ProviderFamily::for_slug`] (which defaults unknown slugs to OpenAI-compat and would
+    /// byte-forward an OpenAI body to an Anthropic upstream).
+    family: ProviderFamily,
+    /// The raw byte-forwarder for the same-family transparent plane (TD-0006 / ADR-0004 D1), built
+    /// from the **same** transport config as `inner`. `None` for handles created via the
+    /// [`new`](Self::new) escape hatch (host-owned typed providers), which carry no transport
+    /// config to forward with — those fall back to the typed translation path.
+    raw: Option<crate::raw::RawForwarder>,
 }
 
 impl ProviderHandle {
@@ -97,9 +122,45 @@ impl ProviderHandle {
     ///
     /// This is the typed extension seam used by gateway tests and host-owned providers. Raw
     /// provider-native request/response transports intentionally do not cross this boundary.
+    /// The family defaults to [`ProviderFamily::OpenAiCompat`]; use [`with_family`] to override
+    /// for non-OpenAI providers constructed via this escape hatch.
+    ///
+    /// [`with_family`]: Self::with_family
     #[must_use]
     pub fn new(inner: Arc<dyn ChatProvider>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            family: ProviderFamily::OpenAiCompat,
+            raw: None,
+        }
+    }
+
+    /// The raw byte-forwarder for the same-family transparent plane, or `None` for escape-hatch
+    /// handles. Proxy plane-selection (TD-0006 Step 2) uses this: same-family → forward via this;
+    /// cross-family or `None` → the typed `ChatRequestV1` translation path.
+    #[must_use]
+    pub fn raw_forwarder(&self) -> Option<&crate::raw::RawForwarder> {
+        self.raw.as_ref()
+    }
+
+    /// Declare the provider family on a handle constructed via [`new`]. For handles created
+    /// through the [`ProviderRuntime`] factory methods, the family is already set from config.
+    ///
+    /// [`new`]: Self::new
+    #[must_use]
+    pub fn with_family(mut self, family: ProviderFamily) -> Self {
+        self.family = family;
+        self
+    }
+
+    /// The vault-declared / config-declared family — **not** slug-derived. Proxy
+    /// plane-selection (TD-0006 Step 2) uses this to decide whether to forward raw bytes
+    /// (same-family transparent plane) or route through `ChatRequestV1` translation
+    /// (cross-family plane). A custom-slug row must resolve by CONFIG, not by
+    /// [`ProviderFamily::for_slug`].
+    #[must_use]
+    pub fn family(&self) -> ProviderFamily {
+        self.family
     }
 
     pub fn slug(&self) -> &str {
@@ -213,9 +274,12 @@ impl ProviderRuntime {
         config.max_retries = max_retries;
         config.timeout_secs = timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
+        let raw_forwarder = Some(build_raw_forwarder(&config));
         let raw = self.transport(config);
         ProviderHandle {
             inner: Arc::new(TypedOpenAiCompat { slug, raw }),
+            family: ProviderFamily::OpenAiCompat,
+            raw: raw_forwarder,
         }
     }
 
@@ -243,6 +307,7 @@ impl ProviderRuntime {
         config.max_retries = max_retries;
         config.timeout_secs = timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
+        let raw_forwarder = Some(build_raw_forwarder(&config));
         let raw = self.transport(config);
         ProviderHandle {
             inner: Arc::new(crate::openai_responses_typed::TypedOpenAiResponses::new(
@@ -250,6 +315,8 @@ impl ProviderRuntime {
                 raw,
                 OpenAiResponsesProfile::Standard,
             )),
+            family: ProviderFamily::OpenAiResponses,
+            raw: raw_forwarder,
         }
     }
 
@@ -278,6 +345,7 @@ impl ProviderRuntime {
         config.timeout_secs = timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
         config.openai_responses_profile = OpenAiResponsesProfile::ChatGptCodex;
+        let raw_forwarder = Some(build_raw_forwarder(&config));
         let raw = self.transport(config);
         ProviderHandle {
             inner: Arc::new(crate::openai_responses_typed::TypedOpenAiResponses::new(
@@ -285,6 +353,8 @@ impl ProviderRuntime {
                 raw,
                 OpenAiResponsesProfile::ChatGptCodex,
             )),
+            family: ProviderFamily::OpenAiResponses,
+            raw: raw_forwarder,
         }
     }
 
@@ -304,9 +374,12 @@ impl ProviderRuntime {
         config.max_retries = max_retries;
         config.timeout_secs = timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
+        let raw_forwarder = Some(build_raw_forwarder(&config));
         let raw = self.transport(config);
         ProviderHandle {
             inner: Arc::new(crate::anthropic_typed::TypedAnthropic::new(raw)),
+            family: ProviderFamily::Anthropic,
+            raw: raw_forwarder,
         }
     }
 
@@ -324,9 +397,12 @@ impl ProviderRuntime {
         config.max_retries = max_retries;
         config.timeout_secs = timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
+        let raw_forwarder = Some(build_raw_forwarder(&config));
         let raw = self.transport(config);
         ProviderHandle {
             inner: Arc::new(crate::ollama_typed::TypedOllama::new(raw)),
+            family: ProviderFamily::Ollama,
+            raw: raw_forwarder,
         }
     }
 
@@ -346,9 +422,12 @@ impl ProviderRuntime {
         config.max_retries = max_retries;
         config.timeout_secs = timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
+        let raw_forwarder = Some(build_raw_forwarder(&config));
         let raw = self.transport(config);
         ProviderHandle {
             inner: Arc::new(crate::gemini_typed::TypedGemini::new(raw)),
+            family: ProviderFamily::Gemini,
+            raw: raw_forwarder,
         }
     }
 
@@ -366,9 +445,12 @@ impl ProviderRuntime {
         config.max_retries = max_retries;
         config.timeout_secs = timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
+        let raw_forwarder = Some(build_raw_forwarder(&config));
         let raw = self.transport(config);
         ProviderHandle {
             inner: Arc::new(crate::cohere_typed::TypedCohere::new(raw)),
+            family: ProviderFamily::Cohere,
+            raw: raw_forwarder,
         }
     }
 
@@ -943,6 +1025,7 @@ mod tests {
                         tokens_out: 5,
                         cache_creation_tokens: 0,
                         cache_read_tokens: 4,
+                        reasoning_tokens: 0,
                     }),
                     attempts: 3,
                 }),
@@ -981,4 +1064,124 @@ mod tests {
             )));
         }
     }
+
+    // -----------------------------------------------------------------------------------------
+    // ProviderFamily accessor (TD-0006 / ADR-0004 D1)
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn family_accessor_returns_config_declared_family_from_factory() {
+        let runtime = ProviderRuntime::new();
+        // Each factory constructor stamps the family from config, not from slug.
+        let openai = runtime.openai_compat(
+            "openai",
+            "https://api.openai.com/v1",
+            "k",
+            HeaderMap::new(),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(openai.family(), ProviderFamily::OpenAiCompat);
+
+        let anthropic = runtime.anthropic(
+            "https://api.anthropic.com",
+            "k",
+            crate::AnthropicAuthScheme::ApiKey,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(anthropic.family(), ProviderFamily::Anthropic);
+
+        let gemini = runtime.gemini(
+            "https://generativelanguage.googleapis.com",
+            "k",
+            crate::GeminiAuthScheme::ApiKey,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(gemini.family(), ProviderFamily::Gemini);
+
+        let cohere = runtime.cohere("https://api.cohere.ai", "k", None, None, None);
+        assert_eq!(cohere.family(), ProviderFamily::Cohere);
+    }
+
+    #[test]
+    fn custom_slug_resolves_family_by_config_not_slug_heuristic() {
+        // A custom-slug endpoint configured as Anthropic must resolve as Anthropic — NOT
+        // as OpenAiCompat (which for_slug would return for an unknown slug).
+        let runtime = ProviderRuntime::new();
+        let custom = runtime.anthropic(
+            "https://internal-llm.corp.example",
+            "k",
+            crate::AnthropicAuthScheme::ApiKey,
+            None,
+            None,
+            None,
+        );
+        // The factory sets family from the constructor (config), not from the slug.
+        assert_eq!(custom.family(), ProviderFamily::Anthropic);
+        // for_slug would default to OpenAiCompat — wrong for a custom Anthropic endpoint.
+        assert_eq!(
+            ProviderFamily::for_slug("internal-llm"),
+            ProviderFamily::OpenAiCompat
+        );
+        // The config-declared family is the authoritative answer.
+        assert_ne!(custom.family(), ProviderFamily::for_slug("internal-llm"));
+    }
+
+    #[test]
+    fn handle_new_defaults_and_with_family_overrides() {
+        let bare: Arc<dyn ChatProvider> = Arc::new(NoOpProvider);
+        // new() defaults to OpenAiCompat for backward-compat extension seam.
+        let default = ProviderHandle::new(bare.clone());
+        assert_eq!(default.family(), ProviderFamily::OpenAiCompat);
+        // with_family overrides for non-OpenAI providers constructed via the escape hatch.
+        let gemini = ProviderHandle::new(bare).with_family(ProviderFamily::Gemini);
+        assert_eq!(gemini.family(), ProviderFamily::Gemini);
+    }
+
+    #[test]
+    fn factory_handles_carry_a_raw_forwarder_escape_hatch_does_not() {
+        // TD-0006: a config-built handle exposes the same-family raw forwarder for the transparent
+        // plane; a host-owned escape-hatch handle (no transport config) has none → typed fallback.
+        let runtime = ProviderRuntime::new();
+        let anthropic = runtime.anthropic(
+            "https://api.anthropic.com",
+            "k",
+            crate::AnthropicAuthScheme::ApiKey,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            anthropic.raw_forwarder().is_some(),
+            "a factory handle carries a raw forwarder for the transparent plane"
+        );
+        let escape_hatch = ProviderHandle::new(Arc::new(NoOpProvider));
+        assert!(
+            escape_hatch.raw_forwarder().is_none(),
+            "an escape-hatch handle has no transport config to forward with"
+        );
+    }
+
+    /// Minimal ChatProvider mock for handle tests (never actually completes a call).
+    struct NoOpProvider;
+    #[async_trait]
+    impl ChatProvider for NoOpProvider {
+        fn slug(&self) -> &str {
+            "noop"
+        }
+        async fn complete(&self, _: ChatRequestV1) -> Result<ChatResponseV1, ProviderError> {
+            unreachable!()
+        }
+        async fn stream(&self, _: ChatRequestV1) -> Result<ChatEventStream, ProviderError> {
+            unreachable!()
+        }
+    }
+
+    /// Minimal local import so the test compiles without adding a top-level `use`.
+    use reqwest::header::HeaderMap;
 }

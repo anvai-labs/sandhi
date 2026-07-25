@@ -11,6 +11,32 @@ lives in [TD-0005](../td/TD-0005-declarative-policy-engine.md) (declarative poli
 [TD-0006](../td/TD-0006-two-plane-proxy-transparent-metering.md) (implementation plan for the
 transparent-metering plane). Does not touch the measure-vs-price boundary — still no dollars.
 
+> **Update 2026-07-23 — TD-0003 P2/P4 landed after this ADR was drafted.** Some enforcement
+> gaps cited below as motivation are now closed; the two-plane decision (D1) and the
+> trust-tiered model (D2) are unaffected. Specifically: budget **windows** (daily/monthly/total,
+> rolling), a **warn** policy, reservation, and **threshold alerts** shipped (P2); the per-key
+> **model allowlist is now enforced** in the request path (P4, `vk.permits_model`). Still open,
+> and still the substance of D3/D4: the ledger remains **in-memory** (restart resets spend; no
+> shared/durable ledger), **per-minute rate limits** are stored-but-dead, the admin-token
+> compare is not constant-time, budget bills `tokens_in + tokens_out` (excludes cache), and the
+> P4 dashboard endpoints are unauthed-by-design (masked-only) rather than access-controlled.
+
+> **Refined 2026-07-23 by [ADR-0005](0005-enforcement-correctness-reservation-ledger-observe-enforce-split.md)
+> (four-lens pressure-test).** The two decisions here stand, but two mechanisms under them were
+> falsified and are superseded by ADR-0005:
+> - **D1 (two-plane):** the transparent plane **cannot** be byte-exact by "surfacing the existing
+>   adapters" — they parse to `Value`, inject `stream`/`stream_options`, and drop response headers;
+>   byte-exact also conflicts with OpenAI usage-metering and compression. It needs a **dedicated raw
+>   forwarder**, and the promise is **"content-faithful, envelope-normalized," not byte-identical**
+>   (see TD-0006, revised).
+> - **D3 (durable ledger):** reserve-then-reconcile is a *soft* cap (the reservation is an estimate,
+>   not a ceiling; it releases to zero on stream interruption), and durabilizing it unchanged is
+>   *less* correct than today's Mutex. ADR-0005 replaces it with reservation **ceilings**, TTL
+>   **leases**, **idempotent settle**, an **atomic in-store** decrement, and an **observe/enforce
+>   split** — and mandates "do not durabilize first."
+> - **D2 (trust tiers):** Tier-1 "attested" is renamed **"self-reported"** (no remote attestation
+>   with the credential in-process).
+
 ## Context
 
 An audit of the shipped code against the docs (2026-07-22) surfaced a structural mismatch and
@@ -35,7 +61,8 @@ a set of enforcement gaps. Two are load-bearing:
 2. **Enforcement custody is undefined.** ADR-0001 §2 says the proxy "holds the real upstream key
    server-side," and TD-0003 adds virtual keys and budgets, but nothing states *where the policy
    decision must run* or *what threat model each deployment defends against*. The budget ledger
-   is in-memory, cumulative-token-only, and proxy-only; the SDK path has no wired enforcement.
+   is in-memory and proxy-only (windowed since P2, but still not durable/shared); the SDK path
+   has no wired enforcement.
    This leaves two real questions unanswered: can enforcement be headless (in-process), and can
    a client circumvent it?
 
@@ -121,11 +148,13 @@ substrate the TD-0005 policy engine records against.
 
 ### D4. Close the incidental gaps the audit found
 
-Independent of the above, and cheap: enforce the per-key **model allowlist** (`permits_model`
-is stored but never called in the request path); require auth on **`/dashboard`** (it currently
-serves usage aggregates unauthenticated); use a **constant-time compare** for the admin token;
-and settle a single definition of "billable" (the budget currently bills `tokens_in + tokens_out`
-while the usage event meters the cache split too).
+Independent of the above, and cheap. ~~Enforce the per-key **model allowlist**~~ — **done in
+P4** (`vk.permits_model` is now called in the request path). Remaining: use a **constant-time
+compare** for the admin token (still `t == expected`); settle a single definition of "billable"
+(the budget still bills `tokens_in + tokens_out` while the usage event meters the cache split
+too); and **revisit dashboard access** — P4 shipped the read endpoints unauthed-by-design
+(masked-only, self-hosted trust), which is defensible single-node but exposes usage aggregates,
+so a multi-tenant / Tier-2 deployment should gate them.
 
 ## Consequences
 

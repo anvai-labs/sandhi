@@ -12,6 +12,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use futures_util::Stream;
@@ -72,14 +73,22 @@ impl Provider for MeteredProvider {
 
     async fn complete(&self, req: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         let base = self.event_base(&req);
+        let started = Instant::now();
         // On Err: no event — no trustworthy counts exist ("measured, never estimated").
         let resp = self.inner.complete(req).await?;
-        self.sink.emit(&resp.usage.apply(base).with_measurement(
-            sandhi_core::UsageCompleteness::Final,
-            resp.attempts,
-            Some("success".into()),
-            None,
-        ));
+        let duration_ms = started.elapsed().as_millis() as u64;
+        self.sink.emit(
+            &resp
+                .usage
+                .apply(base)
+                .with_latency(Some(duration_ms), None)
+                .with_measurement(
+                    sandhi_core::UsageCompleteness::Final,
+                    resp.attempts,
+                    Some("success".into()),
+                    None,
+                ),
+        );
         Ok(resp)
     }
 
@@ -93,6 +102,8 @@ impl Provider for MeteredProvider {
                 usage: ParsedUsage::default(),
                 usage_seen: false,
                 attempts: 1,
+                started: Instant::now(),
+                ttft_ms: None,
             }),
             sink: Arc::clone(&self.sink),
         }))
@@ -104,6 +115,10 @@ struct PendingEvent {
     usage: ParsedUsage,
     usage_seen: bool,
     attempts: u32,
+    /// When the logical stream call started (set at setup, before first poll).
+    started: Instant,
+    /// Milliseconds from start to the first delivered item.
+    ttft_ms: Option<u64>,
 }
 
 /// Passes items through verbatim while capturing the (terminal) usage; emits exactly once via
@@ -126,13 +141,14 @@ impl MeteredStream {
             } else {
                 sandhi_core::UsageCompleteness::Unavailable
             };
-            self.sink
-                .emit(&pending.usage.apply(pending.base).with_measurement(
-                    completeness,
-                    pending.attempts,
-                    Some(outcome.into()),
-                    None,
-                ));
+            let duration_ms = pending.started.elapsed().as_millis() as u64;
+            self.sink.emit(
+                &pending
+                    .usage
+                    .apply(pending.base)
+                    .with_latency(Some(duration_ms), pending.ttft_ms)
+                    .with_measurement(completeness, pending.attempts, Some(outcome.into()), None),
+            );
         }
     }
 }
@@ -144,6 +160,9 @@ impl Stream for MeteredStream {
         match self.inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(chunk))) => {
                 if let Some(pending) = self.pending.as_mut() {
+                    if pending.ttft_ms.is_none() {
+                        pending.ttft_ms = Some(pending.started.elapsed().as_millis() as u64);
+                    }
                     pending.attempts = chunk.attempts;
                     if let Some(usage) = &chunk.usage {
                         pending.usage = *usage;
@@ -222,6 +241,7 @@ mod tests {
                 tokens_out: 20,
                 cache_creation_tokens: 5,
                 cache_read_tokens: 60,
+                reasoning_tokens: 0,
             },
             attempts: 1,
         }
@@ -277,6 +297,70 @@ mod tests {
             usage,
             attempts: 1,
         }
+    }
+
+    #[tokio::test]
+    async fn complete_event_carries_duration() {
+        let sink = Arc::new(InMemorySink::new());
+        let p = MeteredProvider::new(Scripted::new(vec![Ok(ok_resp())]), sink.clone());
+        p.complete(attributed_req()).await.unwrap();
+
+        let ev = &sink.events()[0];
+        assert!(ev.duration_ms.is_some(), "duration must be measured");
+        assert!(ev.time_to_first_token_ms.is_none(), "TTFT is streams-only");
+    }
+
+    #[tokio::test]
+    async fn stream_event_carries_ttft_and_duration() {
+        let sink = Arc::new(InMemorySink::new());
+        let terminal = ParsedUsage {
+            tokens_in: 10,
+            tokens_out: 7,
+            ..Default::default()
+        };
+        let p = MeteredProvider::new(
+            stream_provider(vec![
+                Ok(chunk_with("a", None)),
+                Ok(chunk_with("", Some(terminal))),
+            ]),
+            sink.clone(),
+        );
+        let mut s = p.stream(attributed_req()).await.unwrap();
+        while s.next().await.is_some() {}
+
+        let ev = &sink.events()[0];
+        assert!(ev.duration_ms.is_some(), "duration must be measured");
+        assert!(
+            ev.time_to_first_token_ms.is_some(),
+            "TTFT set on first item"
+        );
+        assert!(ev.time_to_first_token_ms.unwrap() <= ev.duration_ms.unwrap());
+    }
+
+    #[tokio::test]
+    async fn reasoning_tokens_flow_from_parsed_usage_to_event() {
+        let sink = Arc::new(InMemorySink::new());
+        let mut resp = ok_resp();
+        resp.usage.reasoning_tokens = 44;
+        let p = MeteredProvider::new(Scripted::new(vec![Ok(resp)]), sink.clone());
+        p.complete(attributed_req()).await.unwrap();
+
+        assert_eq!(sink.events()[0].reasoning_tokens, Some(44));
+    }
+
+    #[tokio::test]
+    async fn zero_reasoning_stays_absent_on_the_wire() {
+        let sink = Arc::new(InMemorySink::new());
+        let p = MeteredProvider::new(Scripted::new(vec![Ok(ok_resp())]), sink.clone());
+        p.complete(attributed_req()).await.unwrap();
+
+        let ev = &sink.events()[0];
+        assert_eq!(ev.reasoning_tokens, None);
+        let json = serde_json::to_value(ev).unwrap();
+        assert!(
+            json.get("reasoning_tokens").is_none(),
+            "None must not serialize"
+        );
     }
 
     #[tokio::test]

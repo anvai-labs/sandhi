@@ -103,7 +103,7 @@ impl Provider for Ollama {
 
 /// Accumulate usage from an Ollama NDJSON line: the final object (`done: true`) carries
 /// `prompt_eval_count` / `eval_count`; last wins.
-fn sniff_usage_line(line: &[u8], usage: &mut ParsedUsage) {
+pub(crate) fn sniff_usage_line(line: &[u8], usage: &mut ParsedUsage) {
     if let Some(v) = std::str::from_utf8(line)
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(s.trim()).ok())
@@ -126,6 +126,7 @@ mod tests {
         tokens_out: 128,
         cache_creation_tokens: 0,
         cache_read_tokens: 0,
+        reasoning_tokens: 0,
     };
 
     /// Chunk-boundary property (TD-0001 W1): finalized usage is invariant across every split

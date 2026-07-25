@@ -145,7 +145,7 @@ impl Provider for OpenAiResponses {
     }
 }
 
-fn sniff_responses_usage_line(line: &[u8], usage: &mut ParsedUsage) {
+pub(crate) fn sniff_responses_usage_line(line: &[u8], usage: &mut ParsedUsage) {
     let Some(event) = sse_data_json(line) else {
         return;
     };

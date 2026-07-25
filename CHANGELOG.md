@@ -1,0 +1,257 @@
+# Changelog
+
+All notable changes to **Sandhi** are documented here.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+Sandhi is an **AI usage gateway** that emits neutral **units** (tokens, the
+prompt-cache split, GPU-seconds) and never dollars. See
+[ADR-0001](docs/adr/0001-sandhi-architecture-and-wire-contract.md) for the
+architecture and the measure-vs-price boundary this changelog respects.
+
+One tag `vX.Y.Z` releases everything together — the `sandhi-proxy` binaries, the
+PyPI wheel (`sandhi-gateway`), the crates.io libs, and the npm package
+(`@anvai-labs/sandhi`). Versions are derived from the tag at build time, never
+hand-edited; see [RELEASING.md](RELEASING.md).
+
+## [Unreleased]
+
+_Nothing yet._
+
+## [0.1.3] — 2026-07-24
+
+The enforcement release: budget enforcement moves off the volatile in-memory
+ledger onto a **durable lease ledger** (crash-safe, calendar-windowed), and the
+proxy gains a **transparent-metering plane** that forwards same-family traffic
+byte-for-byte instead of re-encoding it.
+
+> Tagged from `main` after the `develop → main` promotion PR merges.
+
+### Added — enforcement (ADR-0005)
+
+- **Lease-based enforcement ledger** — the trait plus an in-memory
+  implementation: reserve a conservative *ceiling*, settle by lease id.
+  ([#54](https://github.com/anvai-labs/sandhi/pull/54))
+- **Enforcement integration in the proxy** — ceiling reservation, `billable()`
+  settle, partial-on-disconnect, and identity (D1/D4/D7).
+  ([#57](https://github.com/anvai-labs/sandhi/pull/57))
+- **Durable SQLite enforcement ledger** — spend, caps, and in-flight leases
+  survive a restart; dangling leases are reclaimed (D2/D5, Phase 3).
+  ([#58](https://github.com/anvai-labs/sandhi/pull/58))
+- **Ledger windows + policy + windowed spend** — spend measured over
+  calendar-aligned daily/monthly/total windows, block/warn policy, and per-tier
+  fail-open/closed on a backend error (D5/D6).
+  ([#62](https://github.com/anvai-labs/sandhi/pull/62))
+
+### Added — data plane (ADR-0004 / TD-0006)
+
+- **Data-plane raw forwarder** — `RawForwarder`, bounded `metered_passthrough`
+  (O(1) memory), and a `ProviderFamily` accessor.
+  ([#56](https://github.com/anvai-labs/sandhi/pull/56))
+- **Same-family `RawForwarder` on `ProviderHandle`** and a public metered
+  raw-forward entry point (TD-0006 enablers).
+  ([#59](https://github.com/anvai-labs/sandhi/pull/59),
+  [#60](https://github.com/anvai-labs/sandhi/pull/60))
+- **Transparent-metering plane** — same-family byte passthrough in the proxy,
+  metered without re-encoding (ADR-0004 D1).
+  ([#61](https://github.com/anvai-labs/sandhi/pull/61))
+
+### Added — metering
+
+- **Latency + reasoning-token fields on `UsageEvent`** — `duration_ms`,
+  `time_to_first_token_ms`, and `reasoning_tokens`, measured at the adapter
+  boundary by `MeteredProvider` (TTFT on the first delivered stream item,
+  duration at the Drop-guarded emit). Reasoning tokens are parsed where a
+  provider reports them separately (OpenAI Chat + Responses
+  `*_tokens_details.reasoning_tokens`, Gemini `thoughtsTokenCount`); Anthropic
+  folds thinking into `output_tokens`, matching the `billable()` folding
+  invariant. **Additive within wire-contract v1** — the fields are optional and
+  skipped when absent, so existing consumers stay byte-identical; `sandhi-store`
+  migrates with an idempotent `ALTER`.
+  ([#68](https://github.com/anvai-labs/sandhi/pull/68))
+
+### Added — catalog
+
+- **Seed compat vendor lineups + Node catalog parity** (TD-0004).
+  ([#49](https://github.com/anvai-labs/sandhi/pull/49))
+
+### Added — project & community
+
+- **CHANGELOG.md** (Keep a Changelog), **SECURITY.md** (private reporting via
+  GitHub Security Advisories), **CODE_OF_CONDUCT.md** (Contributor Covenant
+  2.1), GitHub issue templates, and a pull-request template.
+
+### Changed
+
+- **Neutral identity + one `billable()`** — contract-level identity and a single
+  cache-inclusive billable primitive that budgets meter on, plus security
+  quick-wins. **Wire-affecting:** the `usage-event.v1` and `chat-request.v1`
+  schema digests changed (ADR-0005 D4/D7, ADR-0004 D4). The later
+  `usage-event.v1` additions in [#68](https://github.com/anvai-labs/sandhi/pull/68)
+  are optional-and-skipped, so they are **not** breaking.
+  ([#55](https://github.com/anvai-labs/sandhi/pull/55))
+- **Enforcement repointed onto the durable lease ledger** — `ProxyLedger` is
+  durable and crash-safe when `SANDHI_STORE` is set, volatile in-memory
+  otherwise (ADR-0005 step 2).
+  ([#63](https://github.com/anvai-labs/sandhi/pull/63))
+
+### Documentation
+
+- **ADR-0005** — pressure-tested enforcement-correctness design (lease ledger,
+  reserve-ceiling → settle-`billable`, calendar windows, dangling-lease reclaim,
+  per-tier fail-open/closed).
+  ([#52](https://github.com/anvai-labs/sandhi/pull/52))
+- **TD-0007** — enforcement-ledger backends: contract, conformance suite, and
+  backend choice. ([#64](https://github.com/anvai-labs/sandhi/pull/64))
+- TD-0004 B–D converged with TD-0005/TD-0006 into one execution plan, then
+  stitched to the ADR-0005 corrections; ADR-0004/TD-0005/README/CLAUDE.md
+  reconciled with TD-0003 P2+P4 landed.
+  ([#50](https://github.com/anvai-labs/sandhi/pull/50),
+  [#51](https://github.com/anvai-labs/sandhi/pull/51),
+  [#53](https://github.com/anvai-labs/sandhi/pull/53))
+
+### Known limitations
+
+- Per-minute **rate limits** are stored but **not enforced**; enforcement is
+  **proxy-only** (the in-process bindings do not enforce).
+- No shared/HA (Redis) ledger backend yet — a single-node SQLite ledger only.
+- Ingress dialects are `/v1/chat/completions`, `/v1/messages`, and
+  `/v1/responses`; there is no Gemini or Cohere ingress dialect.
+- The dashboard read endpoints are **unauthed by design** (masked values only,
+  self-hosted trust).
+
+## [0.1.2] — 2026-07-23
+
+The operator release: keys, budgets, and attribution become operable from a CLI,
+an admin API, and a dashboard.
+
+### Added
+
+- **Typed provider runtime** — `ProviderRuntime` / `ProviderHandle` normalize the
+  neutral `ChatRequestV1` through per-family codecs (TD-0002).
+  ([#38](https://github.com/anvai-labs/sandhi/pull/38))
+- **`/v1/responses` ingress** over the canonical `ChatRequestV1`.
+  ([#39](https://github.com/anvai-labs/sandhi/pull/39))
+- **Gemini OAuth/ADC** bearer auth scheme.
+  ([#40](https://github.com/anvai-labs/sandhi/pull/40))
+- **Operator P1** — credential vault, virtual keys, admin API, and the `sandhi`
+  CLI (TD-0003). ([#42](https://github.com/anvai-labs/sandhi/pull/42))
+- **Operator P2** — budget windows, warn policy, reservation, and alerts.
+  ([#46](https://github.com/anvai-labs/sandhi/pull/46))
+- **Operator P4** — dashboard (keys / budgets / attribution / alerts) and
+  **model-allowlist enforcement** (`vk.permits_model` in the request path).
+  ([#47](https://github.com/anvai-labs/sandhi/pull/47))
+- **Catalog TD-0004 Phase A** — curated model data + discovery surface.
+  ([#44](https://github.com/anvai-labs/sandhi/pull/44))
+
+### Fixed
+
+- **`crates publish`** — `allow-dirty` (`set-version` dirties the tree) and
+  dispatchable crates re-publish.
+  ([#37](https://github.com/anvai-labs/sandhi/pull/37))
+
+### Documentation
+
+- **TD-0003** operator-surface spec (keys, virtual keys, budgets, attribution)
+  and **TD-0004** catalog + unified governance dual-mode core; ADR/TD/README
+  reconciled with code reality, adding the two-plane and declarative-policy
+  designs. ([#41](https://github.com/anvai-labs/sandhi/pull/41),
+  [#43](https://github.com/anvai-labs/sandhi/pull/43),
+  [#45](https://github.com/anvai-labs/sandhi/pull/45))
+
+## [0.1.1] — 2026-07-21
+
+The decorator + QA release: metering and resilience become composable decorators
+over any `Provider`, and the usage parsers gain a fixture-backed test corpus.
+
+### Added
+
+- **`MeteredProvider` decorator** — metering with Drop-guarded stream metering;
+  the caller still assembles the `UsageEvent` (adapters never fabricate
+  attribution). ([#35](https://github.com/anvai-labs/sandhi/pull/35))
+- **Per-call timeouts** — `Timeout` taxonomy, `TimeoutConfig`, and idle policing
+  in the resilience decorator.
+  ([#31](https://github.com/anvai-labs/sandhi/pull/31))
+- **Binding transport parity** — async `complete()` and `stream()` for Python and
+  Node, plus the host-language provider escape hatches (`register_provider` /
+  `registerProvider`) (ADR-0047 D10 steps 3a–3d).
+- **TD-0001 QA corpus** — Anthropic usage-extraction fixtures, an
+  OpenAI/Gemini/Cohere/Ollama usage corpus, a differential test oracle, and the
+  `typify` narrow-model pilot.
+  ([#18](https://github.com/anvai-labs/sandhi/pull/18),
+  [#19](https://github.com/anvai-labs/sandhi/pull/19),
+  [#20](https://github.com/anvai-labs/sandhi/pull/20),
+  [#21](https://github.com/anvai-labs/sandhi/pull/21))
+- **Binding FFI-glue coverage** — `scripts/coverage-bindings.sh` gates
+  `bindings/*/src/lib.rs` at ≥85% lines (Python + Node).
+- **Path-filtered CI** — docs-only changes skip the compile/coverage/binding
+  jobs. ([#17](https://github.com/anvai-labs/sandhi/pull/17))
+
+### Changed
+
+- **Proxy metering via `MeteredProvider`** — the proxy adopts the decorator
+  stack; the Python transport gains resilience.
+  ([#33](https://github.com/anvai-labs/sandhi/pull/33))
+
+### Fixed
+
+- **Release pipeline** — pre-create the GitHub Release before uploading binaries
+  (fixes "release not found").
+  ([#12](https://github.com/anvai-labs/sandhi/pull/12))
+- **Binding coverage** — requires a pyo3-compatible venv (guard + `COV_PYTHON`),
+  builds with `maturin build` + `pip install`, and the binding jobs now trigger
+  on a coverage-script change (paths-filter gap).
+
+### Documentation
+
+- **ADR-0002** — `sandhi-providers` scope + modality-admission discipline (the
+  ≥2-consumer bar applies to *new* modalities, not chat adoption).
+- **ADR-0003** — provider-adapter authoring + codegen, with the TD-0001 QA
+  tracker. ([#16](https://github.com/anvai-labs/sandhi/pull/16))
+
+## [0.1.0] — 2026-07-19
+
+The first published release: the metering core, live provider transport, the
+inline reverse-proxy, the durable store, and both language bindings.
+
+### Added
+
+- **`sandhi-core` metering engine** — usage accounting with the prompt-cache
+  split, the `UsageEvent` wire type + `Sink`, virtual-key resolution, and
+  budget/rate-limit types. Attribution (`subject_id` / `group_id` /
+  `session_id`) rides outside the cached prompt.
+- **Live HTTP transport** — OpenAI-compatible and Anthropic adapters with
+  streaming SSE pass-through.
+- **Resilience decorator** — retry + circuit breaker wrapping any `Provider`.
+  ([#2](https://github.com/anvai-labs/sandhi/pull/2))
+- **Gemini / Cohere / Ollama adapters** — plus the `FnProvider` escape hatch and
+  more usage parsers. ([#6](https://github.com/anvai-labs/sandhi/pull/6))
+- **`sandhi-proxy`** — the inline reverse-proxy gate: virtual keys, budgets,
+  metering, and streaming pass-through.
+- **`sandhi-store`** — durable SQLite sink plus the self-hosted usage
+  **dashboard** at `/dashboard`.
+  ([#8](https://github.com/anvai-labs/sandhi/pull/8))
+- **Python in-process middleware** (`sandhi_gateway`) — the usage parsers moved
+  into `sandhi-core` (they are metering primitives, not transport).
+  ([#1](https://github.com/anvai-labs/sandhi/pull/1))
+- **Node napi binding** (`@anvai-labs/sandhi`).
+  ([#3](https://github.com/anvai-labs/sandhi/pull/3))
+- **Host escape hatch** — `register_parser` callback (Python) + `meter_tokens`
+  (both). ([#7](https://github.com/anvai-labs/sandhi/pull/7))
+- **Unified tag-driven release pipeline** — binaries + PyPI + crates.io + npm.
+  ([#4](https://github.com/anvai-labs/sandhi/pull/4))
+- **CI gates** — a ≥75% line-coverage gate (`cargo-llvm-cov`) folded into
+  `CI Success`, the no-attribution commit hooks, and `CODEOWNERS`.
+
+### Changed
+
+- **Python wheels target CPython 3.11+** (`abi3-py311`); EOL 3.9/3.10 dropped.
+  ([#9](https://github.com/anvai-labs/sandhi/pull/9),
+  [#10](https://github.com/anvai-labs/sandhi/pull/10))
+
+[Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/anvai-labs/sandhi/compare/v0.1.2...v0.1.3
+[0.1.2]: https://github.com/anvai-labs/sandhi/compare/v0.1.1...v0.1.2
+[0.1.1]: https://github.com/anvai-labs/sandhi/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/anvai-labs/sandhi/releases/tag/v0.1.0

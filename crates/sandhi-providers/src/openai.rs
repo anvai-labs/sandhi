@@ -125,7 +125,7 @@ impl Provider for OpenAiCompat {
 /// Accumulate usage from an OpenAI Chat Completions SSE line. With `stream_options.include_usage`
 /// the terminal chunk carries the `usage` object while earlier chunks send `"usage": null` — the
 /// null guard prevents a non-final chunk from zeroing the counts; last usage-bearing line wins.
-fn sniff_usage_line(line: &[u8], usage: &mut ParsedUsage) {
+pub(crate) fn sniff_usage_line(line: &[u8], usage: &mut ParsedUsage) {
     let Some(v) = sse_data_json(line) else {
         return;
     };
@@ -147,6 +147,7 @@ mod tests {
         tokens_out: 250,
         cache_creation_tokens: 0,
         cache_read_tokens: 800,
+        reasoning_tokens: 0,
     };
 
     /// Chunk-boundary property (TD-0001 W1): finalized usage is invariant across every split
@@ -174,13 +175,18 @@ mod tests {
     }
 
     /// Forward-compat property (TD-0001 W1): unknown fields + `"usage": null` chunks leave the
-    /// meter unperturbed.
+    /// meter unperturbed. `completion_tokens_details.reasoning_tokens` graduated from an
+    /// ignored-unknown to a parsed field — the fixture's value is now expected, proving both
+    /// properties at once.
     #[tokio::test]
     async fn stream_usage_ignores_unknown_fields() {
         let body: &[u8] = include_bytes!("../tests/fixtures/openai/stream_forward_compat.sse");
         assert_eq!(
             crate::accumulate_usage(vec![Bytes::copy_from_slice(body)], sniff_usage_line).await,
-            EXPECTED
+            ParsedUsage {
+                reasoning_tokens: 33,
+                ..EXPECTED
+            }
         );
     }
     use serde_json::json;

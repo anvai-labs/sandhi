@@ -235,6 +235,24 @@ test("raw provider transport exports are absent", async () => {
     assert.equal(module[name], undefined);
 });
 
+test("catalog surface serves curated model data (TD-0004)", async () => {
+  const { providerDescriptorJson, providerModelsJson } = await import("../sandhi.js");
+  const descriptor = JSON.parse(providerDescriptorJson("anthropic"));
+  assert.equal(descriptor.slug, "anthropic");
+  const models = JSON.parse(providerModelsJson("anthropic"));
+  assert.ok(models.some((m) => m.id === "claude-fable-5"));
+  const fable = models.find((m) => m.id === "claude-fable-5");
+  assert.equal(fable.max_input_tokens, 1000000);
+  // Facts only — the catalog carries no pricing (measure-vs-price line held).
+  assert.equal(fable.price, undefined);
+  // Seeded compat vendor lineups resolve through aliases too.
+  const grok = JSON.parse(providerModelsJson("grok"));
+  assert.ok(grok.some((m) => m.id === "grok-4"));
+  // Aggregators stay empty (dynamic hosting catalogs — live discovery).
+  assert.deepEqual(JSON.parse(providerModelsJson("openrouter")), []);
+  assert.throws(() => providerModelsJson("unknown-provider"));
+});
+
 test("usage parsing and metering retain cache attribution", () => {
   assert.equal(wireContractVersion(), "1");
   const usage = parseUsage(

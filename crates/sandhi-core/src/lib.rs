@@ -16,6 +16,7 @@ pub mod event;
 // Generated typify narrow models (ADR-0003 §2/§4 pilot) — regenerated, never hand-edited.
 mod generated;
 pub mod keys;
+pub mod ledger;
 pub mod sink;
 pub mod usage;
 
@@ -25,8 +26,9 @@ pub use alerts::{
 };
 pub use budget::{Budget, BudgetExceeded, BudgetLedger, Policy, Window};
 pub use chat::*;
-pub use event::{Backend, UsageEvent};
+pub use event::{billable, Backend, UsageEvent};
 pub use keys::{KeyStore, VirtualKey};
+pub use ledger::{Denied, EnforcementLedger, InMemoryLedger, LedgerView, Reservation};
 pub use sink::{InMemorySink, JsonlSink, Sink};
 pub use usage::{
     parse_anthropic_usage, parse_bedrock_usage, parse_cohere_usage, parse_gemini_usage,

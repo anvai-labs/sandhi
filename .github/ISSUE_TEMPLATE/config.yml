@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security report (private)
+    url: https://github.com/anvai-labs/sandhi/security/advisories/new
+    about: |
+      Found a vulnerability? Sandhi's proxy holds real upstream keys server-side,
+      so do NOT open a public issue. Report it privately via GitHub Security
+      Advisories. See SECURITY.md.
+  - name: Question / discussion
+    url: https://github.com/anvai-labs/sandhi/discussions
+    about: Usage questions and design discussions belong in GitHub Discussions.

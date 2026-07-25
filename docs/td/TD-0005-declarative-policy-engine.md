@@ -6,6 +6,41 @@ Depends on: [ADR-0004](../adr/0004-two-plane-proxy-and-enforcement-boundary.md) 
 [TD-0003](TD-0003-operator-surface-keys-budgets-attribution.md) (vault, vkeys, budgets),
 [TD-0002](TD-0002-typed-provider-runtime.md) (versioned wire-contract discipline)
 
+> **Update 2026-07-23 — TD-0003 P2/P4 landed.** The imperative `BudgetLedger` now has
+> daily/monthly/total **windows**, a block/**warn** policy, reservation, and **threshold alerts**
+> (P2), and the **model allowlist is enforced** in the request path (P4). This engine therefore
+> layers a declarative, distributable, in-process decision *over an existing windowed ledger* —
+> it no longer needs to introduce windows/warn itself. The still-missing substrate it depends on
+> is durability + a shared ledger + real per-minute rate limits (ADR-0004 D3). Phasing below is
+> updated accordingly.
+
+> **Refined 2026-07-23 by [ADR-0005](../adr/0005-enforcement-correctness-reservation-ledger-observe-enforce-split.md)
+> (pressure-test).** The enforcement *substrate* this engine sits on is specified there
+> (reservation ceilings, TTL leases, idempotent settle, atomic in-store decrement, observe/enforce
+> split). Two things this engine must adopt from that review:
+> - **The pure `PolicyEngine` decides eligibility, but the budget commit is an atomic store
+>   operation that re-checks and can still return `Denied`** — snapshot-decide-then-write is a
+>   TOCTOU that overruns caps across replicas. `PolicyDecision::Allow` carries the **cap** to
+>   enforce (D1), not just an amount to record.
+> Policy-schema hardening (details in ADR-0005 rationale), to fold in before implementation:
+> - **Structural deny-by-default:** replace `allow: bool` (defaults `false` → a budget-only rule
+>   silently *denies*) with an explicit `Allow{…} | Deny{reason}` effect; deny unless a rule
+>   *explicitly* allows; reject an all-permissive `default` unless an explicit flag is set.
+> - **Explicit exact-vs-prefix match kinds**, preserving **exact** as the default when compiling
+>   legacy vkey `models` — a prefix matcher silently broadens authorization (`claude-*` would admit
+>   `claude-*-experimental`, contradicting `keys.rs`'s deliberate no-wildcard test).
+> - **Signed bundles need freshness:** `issued_at` + `valid_until` *inside* the signature and a
+>   **persisted** revision floor (an in-memory floor starting at zero lets an old, more-permissive
+>   signed bundle replay against a fresh client); the **signing key custody must be separate from
+>   the admin API** (one non-constant-time admin-token compare must not be able to mint signed
+>   fleet-wide policy); the served bundle is **caller-scoped and confidential** (never leak other
+>   subjects' identities/quotas).
+> - **Freemium is a minted guest credential + a global guest ceiling + a hard rate limit**, never
+>   `guest:<ip>` (sybil via IPv6 /64; NAT collateral-deny; XFF spoof).
+> - **Add decision logs, a `shadow`/`enforce` mode, and an append-only policy-mutation audit**
+>   (table stakes vs OPA/Cedar/Ranger). `require_attribution` guarantees *presence*, not
+>   *authenticity*, off the proxy plane.
+
 ## Motivation
 
 Today policy is **imperative Rust mutating an in-memory `HashMap`**: an operator calls
@@ -156,8 +191,9 @@ This is the **PDP**, and it is the single enforcement brain. Both callers use it
 - **SDK (Tier 0/1, headless):** the bindings expose `runtime.with_policy(doc)` so an in-process
   call evaluates locally before dispatch, against a local (or attesting) ledger. No network hop.
 
-`permits_model` and the budget check stop being separate, half-wired code paths — they are two
-rules inside one evaluation. (Fixes ADR-0004 D4's "model allowlist stored but not enforced.")
+`permits_model` (enforced imperatively since P4) and the budget check stop being two separate
+code paths — the engine folds both into one evaluation, so the allowlist, expiry, budget, and
+rate limit are decided together instead of by scattered checks.
 
 ### 3. Distribution (the PAP) — optional, signed, pull-and-cache
 
@@ -198,14 +234,24 @@ The gateway serves the artifact; nobody is forced to use it:
 - `set_limit`/`check`/`reserve`/`reconcile` on the ledger stay — the engine calls them; it does
   not replace the accounting mechanic, only the *policy* over it.
 - The vkey fields already present (`models`, `budget_scope`, `rate_limit_per_min`, `expires_at`)
-  become inputs the operator API compiles into rules — so they finally get enforced.
+  become inputs the operator API compiles into rules. `models`/`expires_at` are already enforced;
+  `rate_limit_per_min` is still stored-but-dead and gets enforced when the shared ledger lands.
 
 ## Phasing
 
+> **Converged-plan mapping (2026-07-23, see TD-0004 §Phasing):** this TD **owns** P1–P4 below.
+> In the cross-TD execution plan: P1 = workstream **W1b** (preceded by W1a's parity primitives in
+> `sandhi-core` — shared secret resolution, `permits_model` in both modes, windowed binding
+> budgets, one `UsageEvent` builder — which are this engine's inputs); P2 = workstream **W2**;
+> P3/P4 = workstream **W4**. TD-0004's original "Phase D policy-as-data" is subsumed by this TD
+> and no longer separately specified.
+
 - **P1** — `PolicyDocumentV1` + schema/codegen + `PolicyEngine::evaluate` (pure, unit-tested with
-  table-driven fixtures) + proxy wired to it (replaces the ad-hoc block). Ships the model-allowlist
-  enforcement fix for free.
-- **P2** — durable + windowed + shared ledger (ADR-0004 D3); real rate limits; warn/alerts.
+  table-driven fixtures) + proxy wired to it (folds the allowlist/expiry/budget/warn checks that
+  P2/P4 wired separately into one evaluation). **Both front doors:** the binding `Gateway` calls
+  the same evaluate pre-flight (Tier 0/1), not just the proxy.
+- **P2** — durable + shared ledger (ADR-0004 D3) so budgets survive restart and hold across
+  replicas; real per-minute rate limits. (Windows/warn/alerts already landed in TD-0003 P2.)
 - **P3** — `GET /policy/bundle` + Ed25519 signing + SDK `with_policy` pull/cache/poll (headless
   Tier 0/1).
 - **P4** — guest/freemium default policy + opt-in unkeyed proxy front door.

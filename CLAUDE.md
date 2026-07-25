@@ -47,7 +47,7 @@ Data-flow invariant: **attribution rides outside the cached prompt** — `subjec
 
 Two proxy-path caveats that contradict older prose — see [ADR-0004](docs/adr/0004-two-plane-proxy-and-enforcement-boundary.md):
 - The proxy does **not** currently forward byte-exact. `metered_passthrough` (`sandhi-providers/src/lib.rs`) is the O(1) byte-passthrough primitive at the *adapter* layer; the proxy's typed ingress pipeline re-encodes instead. ADR-0004 re-draws this as a two-plane design (transparent metering for same-dialect, opt-in translation for cross-family). There is **no Gemini/Cohere ingress dialect** yet — only `/v1/chat/completions`, `/v1/messages`, `/v1/responses`.
-- Enforcement is **proxy-only, in-memory, cumulative-token-only**. No durability (restart zeroes caps + spend), no windows, no rate limits, and the per-key **model allowlist is stored but not enforced** (`permits_model` is unused in the request path). Declarative policy is TD-0005.
+- Enforcement is **proxy-only** and runs on the ADR-0005 **lease ledger** (`ProxyLedger` in `sandhi-proxy/src/ledger.rs`): reserve a conservative *ceiling* → settle by lease id against the cache-inclusive `billable()` (D4). It is **durable + crash-safe when `SANDHI_STORE` is set** — spend, caps, and in-flight leases survive a restart, spend is measured over calendar-aligned windows (D5), and dangling leases are reclaimed (D2) — and volatile in-memory otherwise. Caps honor daily/monthly/total **windows** + a block/**warn** policy (`Warn` is a soft cap: admits over the limit, still tracks spend for **alerts**, TD-0003 P2), with per-tier **fail-open/closed** on a backend error (D6). The per-key **model allowlist is enforced** (`vk.permits_model`, P4). Still open: **per-minute rate limits** are stored but not enforced, and a shared/HA (Redis) ledger backend. The P4 dashboard read endpoints are **unauthed by design** (masked-only, self-hosted trust). Declarative policy over this substrate is TD-0005.
 
 ## Codegen — never hand-edit generated files
 
@@ -58,7 +58,7 @@ Two proxy-path caveats that contradict older prose — see [ADR-0004](docs/adr/0
 
 ## Conventions
 
-- **No AI-agent authorship attribution** in commits/PRs — no `Co-Authored-By: Claude/…`, no "Generated with", no robot emoji, no model signature. Enforced by the `commit-msg` hook **and** server-side CI (not bypassable). (Mentioning `CLAUDE.md` or the Anthropic/OpenAI *APIs* is fine.)
+- **No third-party AI-agent authorship attribution** in commits/PRs — no `Co-Authored-By: Claude/…`, no "Generated with", no robot emoji, no model signature, no bot co-author. Enforced by the `commit-msg` hook **and** server-side CI (not bypassable). (Mentioning `CLAUDE.md` or the Anthropic/OpenAI *APIs* is fine.) **Our own agent is the exception:** `victor` is first-party tooling we credit on purpose — `Generated-by: victor-code-ai` and a `victor-code-ai` co-author trailer are allowed (`ALLOWED_PATTERNS` in `scripts/check_no_agent_attribution.py`). Do **not** add your own attribution.
 - PRs target **`develop`** (protected; the aggregate **`CI Success`** check must be green). `main` is the release trunk.
 - New behavior lands with tests; line coverage must stay ≥75%. Decisions go in `docs/adr/NNNN-slug.md`; larger technical designs in `docs/td/TD-NNNN-*.md`.
 - CI is path-filtered: docs-only changes skip compile/coverage/bindings but `CI Success` still reports.

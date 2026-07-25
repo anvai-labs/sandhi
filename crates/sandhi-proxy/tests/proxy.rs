@@ -11,16 +11,16 @@ use tower::ServiceExt; // oneshot
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use sandhi_core::{Budget, BudgetLedger, InMemorySink, KeyStore, VirtualKey};
+use sandhi_core::{InMemorySink, KeyStore, Policy, VirtualKey, Window};
 use sandhi_providers::{
     ChatEventStream, ChatProvider, ProviderError, ProviderHandle, ProviderRuntime,
 };
-use sandhi_proxy::{build_app, ProxyState};
+use sandhi_proxy::{build_app, ProxyLedger, ProxyState};
 
 fn state_with(
     upstream_uri: String,
     sink: Arc<InMemorySink>,
-    ledger: BudgetLedger,
+    ledger: ProxyLedger,
 ) -> Arc<ProxyState> {
     let keys = KeyStore::new();
     keys.insert(VirtualKey {
@@ -63,7 +63,7 @@ async fn complete_attributes_meters_and_records_budget() {
         .await;
 
     let sink = Arc::new(InMemorySink::new());
-    let state = state_with(upstream.uri(), sink.clone(), BudgetLedger::new());
+    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
     let app = build_app(state.clone());
 
     let req = Request::builder()
@@ -92,7 +92,10 @@ async fn complete_attributes_meters_and_records_budget() {
     assert_eq!(ev.usage_completeness, sandhi_core::UsageCompleteness::Final);
     assert_eq!(ev.outcome.as_deref(), Some("success"));
 
-    assert_eq!(state.ledger.lock().unwrap().spent("group:platform"), 60);
+    // ADR-0005 D4: the ledger settles via `billable()`, which counts the cache split — 40 fresh
+    // in + 60 cache-read + 20 out = 120. (`billable_tokens()` above is the narrower in+out display
+    // helper; unifying the display helpers onto `billable()` is a tracked follow-up.)
+    assert_eq!(state.ledger.lock().unwrap().spent("group:platform"), 120);
     assert_eq!(state.ledger.lock().unwrap().reserved("group:platform"), 0);
 }
 
@@ -133,7 +136,7 @@ async fn anthropic_ingress_uses_the_same_typed_runtime_and_meter() {
     let sink = Arc::new(InMemorySink::new());
     let state = Arc::new(ProxyState::new(
         keys,
-        BudgetLedger::new(),
+        ProxyLedger::in_memory(),
         sink.clone(),
         providers,
         None,
@@ -168,11 +171,12 @@ async fn anthropic_ingress_uses_the_same_typed_runtime_and_meter() {
 }
 
 #[tokio::test]
-async fn responses_ingress_normalizes_through_chat_request_v1() {
+async fn responses_ingress_same_family_forwards_transparently() {
     let upstream = MockServer::start().await;
-    // The resolved upstream is a Responses backend: the proxy decodes the caller's Responses
-    // ingress → ChatRequestV1, the typed provider re-encodes it and POSTs /responses upstream,
-    // then the proxy shapes the neutral response back into the Responses egress dialect.
+    // Responses ingress → a Responses upstream is SAME-FAMILY, so the transparent plane forwards
+    // the client's bytes verbatim and meters usage at the source (ADR-0004 D1 / TD-0006). The
+    // client receives the upstream's own body (not a re-encoded one); the metering event still
+    // carries the correct fresh-input split parsed at the source.
     Mock::given(method("POST"))
         .and(path("/responses"))
         .and(header("authorization", "Bearer REAL-KEY"))
@@ -212,7 +216,7 @@ async fn responses_ingress_normalizes_through_chat_request_v1() {
     let sink = Arc::new(InMemorySink::new());
     let state = Arc::new(ProxyState::new(
         keys,
-        BudgetLedger::new(),
+        ProxyLedger::in_memory(),
         sink.clone(),
         providers,
         None,
@@ -237,16 +241,13 @@ async fn responses_ingress_normalizes_through_chat_request_v1() {
         .await
         .unwrap();
     let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    // Egress is normalized back into the Responses shape.
-    assert_eq!(value["object"], "response");
+    // The upstream's body is forwarded verbatim (transparent) — raw upstream counts, not a
+    // re-encoded fresh split.
     assert_eq!(value["status"], "completed");
     assert_eq!(value["output"][0]["type"], "message");
-    assert_eq!(value["output"][0]["content"][0]["type"], "output_text");
     assert_eq!(value["output"][0]["content"][0]["text"], "hello");
     assert_eq!(value["output"][1]["type"], "function_call");
-    assert_eq!(value["output"][1]["call_id"], "call_1");
-    assert_eq!(value["usage"]["input_tokens"], 5); // 7 - 2 cached
-    assert_eq!(value["usage"]["input_tokens_details"]["cached_tokens"], 2);
+    assert_eq!(value["usage"]["input_tokens"], 7); // verbatim upstream body
 
     // One usage event, attributed to the virtual key, routed through /v1/responses.
     let events = sink.events();
@@ -264,7 +265,7 @@ async fn unknown_virtual_key_is_401() {
     let state = state_with(
         "http://127.0.0.1:1".into(),
         sink.clone(),
-        BudgetLedger::new(),
+        ProxyLedger::in_memory(),
     );
     let app = build_app(state);
 
@@ -283,9 +284,11 @@ async fn unknown_virtual_key_is_401() {
 #[tokio::test]
 async fn exhausted_budget_is_429_before_calling_upstream() {
     let sink = Arc::new(InMemorySink::new());
-    let mut ledger = BudgetLedger::new();
-    ledger.set_limit("group:platform", Budget::tokens(10));
-    ledger.record("group:platform", 10); // already at the cap
+    let mut ledger = ProxyLedger::in_memory();
+    // A tiny hard cap: the conservative ceiling of any real request (input estimate + the default
+    // output ceiling) can't fit, so admission is refused before the upstream is ever called
+    // (ADR-0005 D1 — the ceiling is the gate, not a lower-bound estimate).
+    ledger.set_budget("group:platform", Some(10), Window::Total, Policy::Block);
 
     // An upstream with no mounts — reaching it would 404; asserting 429 proves we never do.
     let upstream = MockServer::start().await;
@@ -324,7 +327,7 @@ async fn streaming_passes_through_and_emits_usage() {
         .await;
 
     let sink = Arc::new(InMemorySink::new());
-    let state = state_with(upstream.uri(), sink.clone(), BudgetLedger::new());
+    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
     let app = build_app(state.clone());
 
     let req = Request::builder()
@@ -351,7 +354,8 @@ async fn streaming_passes_through_and_emits_usage() {
     assert_eq!(events[0].tokens_out, 5);
     assert_eq!(events[0].cache_read_tokens, 4);
     assert_eq!(events[0].billable_tokens(), 11);
-    assert_eq!(state.ledger.lock().unwrap().spent("group:platform"), 11);
+    // ADR-0005 D4: ledger settles via billable() incl. the cache split — 6 in + 4 cache-read + 5 out = 15.
+    assert_eq!(state.ledger.lock().unwrap().spent("group:platform"), 15);
 }
 
 #[tokio::test]
@@ -370,7 +374,7 @@ async fn dashboard_reports_aggregates_from_the_store() {
 
     let state = Arc::new(ProxyState::new(
         KeyStore::new(),
-        BudgetLedger::new(),
+        ProxyLedger::in_memory(),
         store.clone(),
         HashMap::new(),
         Some(store.clone()),
@@ -450,7 +454,7 @@ async fn upstream_timeout_maps_to_504() {
     providers.insert("up1".into(), ProviderHandle::new(Arc::new(AlwaysTimeout)));
     let state = Arc::new(ProxyState::new(
         keys,
-        BudgetLedger::new(),
+        ProxyLedger::in_memory(),
         sink.clone(),
         providers,
         None,
@@ -497,7 +501,7 @@ data: [DONE]\n\n";
         .await;
 
     let sink = Arc::new(InMemorySink::new());
-    let state = state_with(upstream.uri(), sink.clone(), BudgetLedger::new());
+    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
     let app = build_app(state);
 
     let req = Request::builder()
@@ -526,4 +530,183 @@ data: [DONE]\n\n";
         1,
         "client disconnect must not lose the usage event"
     );
+}
+
+#[tokio::test]
+async fn ceiling_reservation_rejects_unbounded_but_admits_bounded_output() {
+    // ADR-0005 D1: the reservation is a CEILING (input estimate + effective output max), not a
+    // `+1` lower bound. On a tight budget an unbounded request (no max → the conservative default
+    // ceiling) is refused before dispatch, while the same budget admits a request that bounds its
+    // own output — proving the ceiling tracks the effective max, not a blanket reject.
+    let upstream = MockServer::start().await;
+    let resp = serde_json::json!({
+        "id":"c","object":"chat.completion","model":"gpt-x",
+        "choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],
+        "usage":{"prompt_tokens":1,"completion_tokens":1}
+    });
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(resp))
+        .mount(&upstream)
+        .await;
+
+    let mut ledger = ProxyLedger::in_memory();
+    ledger.set_budget("group:platform", Some(100), Window::Total, Policy::Block);
+    let sink = Arc::new(InMemorySink::new());
+    let state = state_with(upstream.uri(), sink.clone(), ledger);
+    let app = build_app(state);
+
+    // Unbounded output → ceiling (default) far exceeds the 100-token cap → 429, upstream untouched.
+    let unbounded = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("authorization", "Bearer vk_demo")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"model":"gpt-x","messages":[]}"#))
+        .unwrap();
+    let r1 = app.clone().oneshot(unbounded).await.unwrap();
+    assert_eq!(
+        r1.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "an unbounded output must not fit a tight cap"
+    );
+    assert_eq!(
+        sink.events().len(),
+        0,
+        "a rejected request never dispatches or meters"
+    );
+
+    // Same budget, but the client bounds output to 50 → ceiling fits → admitted.
+    let bounded = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("authorization", "Bearer vk_demo")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"model":"gpt-x","messages":[],"max_tokens":50}"#,
+        ))
+        .unwrap();
+    let r2 = app.oneshot(bounded).await.unwrap();
+    assert_eq!(
+        r2.status(),
+        StatusCode::OK,
+        "a request that bounds its own output fits the cap and is admitted"
+    );
+    assert_eq!(sink.events().len(), 1);
+}
+
+#[tokio::test]
+async fn neutral_identity_headers_flow_onto_the_usage_event() {
+    // ADR-0005 D7: idempotency + agent cost-tree + trace linkage ride as neutral metadata.
+    let upstream = MockServer::start().await;
+    let resp = serde_json::json!({
+        "id":"c","object":"chat.completion","model":"gpt-x",
+        "choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],
+        "usage":{"prompt_tokens":5,"completion_tokens":3}
+    });
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(resp))
+        .mount(&upstream)
+        .await;
+
+    let sink = Arc::new(InMemorySink::new());
+    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    let app = build_app(state);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("authorization", "Bearer vk_demo")
+        .header("content-type", "application/json")
+        .header("idempotency-key", "idem-123")
+        .header("traceparent", "00-abcabc-def-01")
+        .header("x-sandhi-run-id", "run-9")
+        .body(Body::from(r#"{"model":"gpt-x","messages":[]}"#))
+        .unwrap();
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let events = sink.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].idempotency_key.as_deref(), Some("idem-123"));
+    assert_eq!(events[0].trace_context.as_deref(), Some("00-abcabc-def-01"));
+    assert_eq!(events[0].run_id.as_deref(), Some("run-9"));
+}
+
+#[tokio::test]
+async fn cross_family_ingress_routes_through_the_typed_translation_plane() {
+    // OpenAI ingress → an Anthropic upstream is CROSS-family, so the transparent plane does not
+    // apply: the proxy decodes to ChatRequestV1, the typed Anthropic provider re-encodes and POSTs
+    // /v1/messages, and the neutral response is re-encoded back into the OpenAI egress shape. This
+    // keeps the typed translation path covered now that same-family ingress goes transparent.
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(header("x-api-key", "REAL-KEY"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id":"msg_1","type":"message","role":"assistant","model":"claude-test",
+            "content":[{"type":"text","text":"translated"}],"stop_reason":"end_turn",
+            "usage":{"input_tokens":9,"output_tokens":4}
+        })))
+        .mount(&upstream)
+        .await;
+
+    let keys = KeyStore::new();
+    keys.insert(VirtualKey {
+        id: "vk_demo".into(),
+        subject_id: Some("alice".into()),
+        group_id: Some("platform".into()),
+        upstream_ref: "up1".into(),
+        ..Default::default()
+    });
+    let mut providers: HashMap<String, ProviderHandle> = HashMap::new();
+    providers.insert(
+        "up1".into(),
+        ProviderRuntime::new().anthropic(
+            upstream.uri(),
+            "REAL-KEY",
+            sandhi_providers::AnthropicAuthScheme::ApiKey,
+            Some(0),
+            None,
+            None,
+        ),
+    );
+    let sink = Arc::new(InMemorySink::new());
+    let state = Arc::new(ProxyState::new(
+        keys,
+        ProxyLedger::in_memory(),
+        sink.clone(),
+        providers,
+        None,
+    ));
+
+    // The client speaks OpenAI Chat Completions; the resolved upstream is Anthropic.
+    let response = build_app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("authorization", "Bearer vk_demo")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"model":"claude-test","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    // Egress is TRANSLATED into the OpenAI shape — proof the typed plane ran, not passthrough.
+    assert_eq!(value["choices"][0]["message"]["content"], "translated");
+    // Metering still lands: one event, attributed, with the source counts.
+    let events = sink.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].provider, "anthropic");
+    assert_eq!(events[0].tokens_in, 9);
+    assert_eq!(events[0].tokens_out, 4);
 }
