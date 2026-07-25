@@ -1190,7 +1190,7 @@ fn provider_error(e: &ProviderError, dialect: IngressDialect, provider: &str) ->
         ProviderError::InvalidRequest(_) => (StatusCode::BAD_REQUEST, "invalid provider request"),
         ProviderError::Auth => (StatusCode::BAD_GATEWAY, "upstream auth failed"),
         ProviderError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "upstream rate limited"),
-        ProviderError::Upstream(_) => (StatusCode::BAD_GATEWAY, "upstream error"),
+        ProviderError::Upstream { .. } => (StatusCode::BAD_GATEWAY, "upstream error"),
         ProviderError::Transport(_) => (StatusCode::BAD_GATEWAY, "upstream transport error"),
         ProviderError::CircuitOpen => (
             StatusCode::SERVICE_UNAVAILABLE,

@@ -2,7 +2,7 @@
 //! in `usage.billed_units` (no prompt-cache split).
 
 use crate::{
-    error_for_status, metered_passthrough, sse_data_json, ByteStream, ParsedUsage, Provider,
+    error_for_response, metered_passthrough, sse_data_json, ByteStream, ParsedUsage, Provider,
     ProviderError, ProviderRequest, ProviderResponse,
 };
 use async_trait::async_trait;
@@ -56,7 +56,7 @@ impl Provider for Cohere {
             .map_err(|e| ProviderError::Transport(e.to_string()))?;
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
-            return Err(error_for_status(status));
+            return Err(error_for_response(resp).await);
         }
         let body: Value = resp
             .json()
@@ -85,7 +85,7 @@ impl Provider for Cohere {
             .await
             .map_err(|e| ProviderError::Transport(e.to_string()))?;
         if !resp.status().is_success() {
-            return Err(error_for_status(resp.status().as_u16()));
+            return Err(error_for_response(resp).await);
         }
         Ok(metered_passthrough(resp.bytes_stream(), sniff_usage_line))
     }
