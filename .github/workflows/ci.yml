@@ -37,6 +37,7 @@ jobs:
             python:
               - 'crates/**'
               - 'bindings/python/**'
+              - 'bindings/fixtures/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'scripts/coverage-bindings.sh'
@@ -44,6 +45,7 @@ jobs:
             node:
               - 'crates/**'
               - 'bindings/node/**'
+              - 'bindings/fixtures/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'scripts/coverage-bindings.sh'

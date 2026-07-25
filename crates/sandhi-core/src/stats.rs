@@ -36,6 +36,38 @@ pub enum Dimension {
 }
 
 impl Dimension {
+    /// Parse the short dimension name the transports speak (`/admin/usage?by=`, `sandhi usage
+    /// --by`, both language bindings). One parser, because a dimension name resolved twice is a
+    /// name that will eventually mean two things — the same argument that puts the fold here
+    /// (TD-0009 D6). `None` for an unknown name; the caller raises its own dialect of error.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        Some(match name.trim().to_ascii_lowercase().as_str() {
+            "subject" | "user" => Self::Subject,
+            "group" => Self::Group,
+            "provider" => Self::Provider,
+            "model" => Self::Model,
+            "key" | "virtual_key" => Self::VirtualKey,
+            "session" => Self::Session,
+            "total" => Self::Total,
+            _ => return None,
+        })
+    }
+
+    /// The canonical short name — the inverse of [`Dimension::parse`].
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Subject => "subject",
+            Self::Group => "group",
+            Self::Provider => "provider",
+            Self::Model => "model",
+            Self::VirtualKey => "virtual_key",
+            Self::Session => "session",
+            Self::Total => "total",
+        }
+    }
+
     /// The event field this dimension reads. `None` for [`Dimension::Total`].
     #[must_use]
     pub fn key_of(self, e: &UsageEvent) -> Option<String> {
@@ -332,6 +364,36 @@ mod tests {
         assert_eq!(agg.total().billable_tokens, 150);
         assert_eq!(agg.total().calls, 10);
         assert_eq!(rows.iter().map(|r| r.billable_tokens).sum::<u64>(), 150);
+    }
+
+    #[test]
+    fn dimension_names_round_trip_through_one_parser() {
+        for (name, want) in [
+            ("subject", Dimension::Subject),
+            ("user", Dimension::Subject),
+            ("group", Dimension::Group),
+            ("provider", Dimension::Provider),
+            ("model", Dimension::Model),
+            ("key", Dimension::VirtualKey),
+            ("virtual_key", Dimension::VirtualKey),
+            ("session", Dimension::Session),
+            ("total", Dimension::Total),
+            (" Total ", Dimension::Total),
+        ] {
+            assert_eq!(Dimension::parse(name), Some(want), "{name}");
+        }
+        assert_eq!(Dimension::parse("cost"), None);
+        for d in [
+            Dimension::Subject,
+            Dimension::Group,
+            Dimension::Provider,
+            Dimension::Model,
+            Dimension::VirtualKey,
+            Dimension::Session,
+            Dimension::Total,
+        ] {
+            assert_eq!(Dimension::parse(d.as_str()), Some(d));
+        }
     }
 
     #[test]

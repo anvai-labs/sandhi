@@ -40,6 +40,24 @@ gw.meterTokens("vk_alice", "myprovider", "model", tokensIn, tokensOut);
 virtual key's subject/group, records the budget, emits the neutral event, and returns it.
 Unknown key or bad JSON → throws.
 
+### Usage snapshots (in-process aggregation)
+
+```js
+const rows = JSON.parse(gw.usageSnapshotJson("subject"));   // busiest subject first
+rows[0].billable_tokens;                                    // what budgets enforce on
+JSON.parse(gw.usageSnapshotJson("total"))[0];               // one grand-total row
+JSON.parse(gw.usageSnapshotJson("session", 256));           // bound distinct keys to 256
+```
+
+Folds the events recorded so far into
+[`usage-aggregate.v1`](https://github.com/anvai-labs/sandhi/blob/main/schemas/usage-aggregate.v1.schema.json)
+rows for one dimension — `subject` (`user`), `group`, `provider`, `model`, `key`
+(`virtual_key`), `session`, or `total` — using the same fold the reverse proxy, the `sandhi` CLI,
+and the dashboard read. Neutral units only, never dollars. The rows are the schema'd contract
+shape (snake_case), not napi camelCase. The optional second argument caps distinct keys (default
+1024); everything past it folds into a single `"(overflow)"` row, so a long-lived process loses
+per-key detail but never the sum. Unknown dimension → throws.
+
 ### Provider transport (in-process)
 
 Forward a provider call through Sandhi's Rust transport in-process — usage is parsed at the
