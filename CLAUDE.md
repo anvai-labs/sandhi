@@ -58,7 +58,7 @@ Two proxy-path caveats that contradict older prose — see [ADR-0004](docs/adr/0
 
 ## Conventions
 
-- **No AI-agent authorship attribution** in commits/PRs — no `Co-Authored-By: Claude/…`, no "Generated with", no robot emoji, no model signature. Enforced by the `commit-msg` hook **and** server-side CI (not bypassable). (Mentioning `CLAUDE.md` or the Anthropic/OpenAI *APIs* is fine.)
+- **No third-party AI-agent authorship attribution** in commits/PRs — no `Co-Authored-By: Claude/…`, no "Generated with", no robot emoji, no model signature, no bot co-author. Enforced by the `commit-msg` hook **and** server-side CI (not bypassable). (Mentioning `CLAUDE.md` or the Anthropic/OpenAI *APIs* is fine.) **Our own agent is the exception:** `victor` is first-party tooling we credit on purpose — `Generated-by: victor-code-ai` and a `victor-code-ai` co-author trailer are allowed (`ALLOWED_PATTERNS` in `scripts/check_no_agent_attribution.py`). Do **not** add your own attribution.
 - PRs target **`develop`** (protected; the aggregate **`CI Success`** check must be green). `main` is the release trunk.
 - New behavior lands with tests; line coverage must stay ≥75%. Decisions go in `docs/adr/NNNN-slug.md`; larger technical designs in `docs/td/TD-NNNN-*.md`.
 - CI is path-filtered: docs-only changes skip compile/coverage/bindings but `CI Success` still reports.
