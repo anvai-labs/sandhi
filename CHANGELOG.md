@@ -32,6 +32,16 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 
 ### Added
 
+- **In-process usage snapshots on both bindings** (TD-0009 P2) — `Gateway.usage_snapshot_json()`
+  (Python) / `Gateway.usageSnapshotJson()` (Node) fold the events the gateway recorded into
+  `UsageAggregateV1` rows for one attribution dimension (`subject`/`user`, `group`, `provider`,
+  `model`, `key`/`virtual_key`, `session`, `total`), closing the gap where the in-process path —
+  the one Victor uses — had no aggregation surface at all. The fold is `sandhi-core`'s, the same
+  one the proxy, the CLI and the dashboard read, so the two shapes cannot disagree; no binding
+  links `sandhi-store`, so the wheels stay SQLite-free. An optional `cap` bounds distinct keys
+  before the rest fold into `"(overflow)"` (default 1024) — per-key detail is lost, the sum never
+  is. Python and Node assert byte-identical snapshots against one shared corpus
+  (`bindings/fixtures/usage-snapshot-parity.json`), so parity fails in CI rather than in review.
 - **Contract governance guards** (TD-0008 A) — `chat_contract_version()` exported from both
   bindings, a `stream_event_variant_tag()` exhaustive match so adding a `ChatStreamEventV1`
   variant fails compilation until a consumer decision is recorded, a census test cross-checking

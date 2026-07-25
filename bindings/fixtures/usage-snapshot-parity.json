@@ -1,0 +1,83 @@
+{
+  "_comment": [
+    "TD-0009 P2 cross-language parity corpus for Gateway.usage_snapshot_json / usageSnapshotJson.",
+    "Both binding suites drive the same virtual keys and the same metered calls, then assert their",
+    "snapshot string is BYTE-IDENTICAL to `expected_json` below. Comparing each language against one",
+    "hand-written artifact is what makes them equal to each other: parity fails in CI rather than in",
+    "review, which is the failure TD-0008 P4 already paid for once.",
+    "`expected_json` is exact serde output for Vec<UsageAggregateV1> — field order is the struct's,",
+    "no whitespace, `latency` omitted because in-process metering reports no duration."
+  ],
+  "virtual_keys": [
+    { "id": "vk_alice", "subject": "alice", "group": "platform", "upstream": "anthropic" },
+    { "id": "vk_bob", "subject": "bob", "group": "platform", "upstream": "anthropic" },
+    { "id": "vk_solo", "subject": "carol", "group": null, "upstream": "openai" }
+  ],
+  "calls": [
+    {
+      "virtual_key": "vk_alice",
+      "provider": "anthropic",
+      "model": "claude-x",
+      "tokens_in": 100,
+      "tokens_out": 20,
+      "cache_creation_tokens": 5,
+      "cache_read_tokens": 10,
+      "session_id": "s1"
+    },
+    {
+      "virtual_key": "vk_alice",
+      "provider": "openai",
+      "model": "gpt-x",
+      "tokens_in": 50,
+      "tokens_out": 10,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 5,
+      "session_id": "s1"
+    },
+    {
+      "virtual_key": "vk_bob",
+      "provider": "anthropic",
+      "model": "claude-x",
+      "tokens_in": 200,
+      "tokens_out": 40,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "session_id": "s2"
+    },
+    {
+      "virtual_key": "vk_solo",
+      "provider": "openai",
+      "model": "gpt-x",
+      "tokens_in": 10,
+      "tokens_out": 5,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "session_id": null
+    }
+  ],
+  "expected_json": {
+    "subject": "[{\"key\":\"bob\",\"calls\":1,\"tokens_in\":200,\"tokens_out\":40,\"cache_creation_tokens\":0,\"cache_read_tokens\":0,\"reasoning_tokens\":0,\"billable_tokens\":240},{\"key\":\"alice\",\"calls\":2,\"tokens_in\":150,\"tokens_out\":30,\"cache_creation_tokens\":5,\"cache_read_tokens\":15,\"reasoning_tokens\":0,\"billable_tokens\":200},{\"key\":\"carol\",\"calls\":1,\"tokens_in\":10,\"tokens_out\":5,\"cache_creation_tokens\":0,\"cache_read_tokens\":0,\"reasoning_tokens\":0,\"billable_tokens\":15}]",
+    "group": "[{\"key\":\"platform\",\"calls\":3,\"tokens_in\":350,\"tokens_out\":70,\"cache_creation_tokens\":5,\"cache_read_tokens\":15,\"reasoning_tokens\":0,\"billable_tokens\":440},{\"key\":\"(none)\",\"calls\":1,\"tokens_in\":10,\"tokens_out\":5,\"cache_creation_tokens\":0,\"cache_read_tokens\":0,\"reasoning_tokens\":0,\"billable_tokens\":15}]",
+    "provider": "[{\"key\":\"anthropic\",\"calls\":2,\"tokens_in\":300,\"tokens_out\":60,\"cache_creation_tokens\":5,\"cache_read_tokens\":10,\"reasoning_tokens\":0,\"billable_tokens\":375},{\"key\":\"openai\",\"calls\":2,\"tokens_in\":60,\"tokens_out\":15,\"cache_creation_tokens\":0,\"cache_read_tokens\":5,\"reasoning_tokens\":0,\"billable_tokens\":80}]",
+    "model": "[{\"key\":\"claude-x\",\"calls\":2,\"tokens_in\":300,\"tokens_out\":60,\"cache_creation_tokens\":5,\"cache_read_tokens\":10,\"reasoning_tokens\":0,\"billable_tokens\":375},{\"key\":\"gpt-x\",\"calls\":2,\"tokens_in\":60,\"tokens_out\":15,\"cache_creation_tokens\":0,\"cache_read_tokens\":5,\"reasoning_tokens\":0,\"billable_tokens\":80}]",
+    "key": "[{\"key\":\"vk_bob\",\"calls\":1,\"tokens_in\":200,\"tokens_out\":40,\"cache_creation_tokens\":0,\"cache_read_tokens\":0,\"reasoning_tokens\":0,\"billable_tokens\":240},{\"key\":\"vk_alice\",\"calls\":2,\"tokens_in\":150,\"tokens_out\":30,\"cache_creation_tokens\":5,\"cache_read_tokens\":15,\"reasoning_tokens\":0,\"billable_tokens\":200},{\"key\":\"vk_solo\",\"calls\":1,\"tokens_in\":10,\"tokens_out\":5,\"cache_creation_tokens\":0,\"cache_read_tokens\":0,\"reasoning_tokens\":0,\"billable_tokens\":15}]",
+    "session": "[{\"key\":\"s2\",\"calls\":1,\"tokens_in\":200,\"tokens_out\":40,\"cache_creation_tokens\":0,\"cache_read_tokens\":0,\"reasoning_tokens\":0,\"billable_tokens\":240},{\"key\":\"s1\",\"calls\":2,\"tokens_in\":150,\"tokens_out\":30,\"cache_creation_tokens\":5,\"cache_read_tokens\":15,\"reasoning_tokens\":0,\"billable_tokens\":200},{\"key\":\"(none)\",\"calls\":1,\"tokens_in\":10,\"tokens_out\":5,\"cache_creation_tokens\":0,\"cache_read_tokens\":0,\"reasoning_tokens\":0,\"billable_tokens\":15}]",
+    "total": "[{\"key\":\"total\",\"calls\":4,\"tokens_in\":360,\"tokens_out\":75,\"cache_creation_tokens\":5,\"cache_read_tokens\":15,\"reasoning_tokens\":0,\"billable_tokens\":455}]"
+  },
+  "overflow": {
+    "_comment": [
+      "TD-0009 D2: beyond `cap` distinct keys the rest fold into '(overflow)'. Detail is lost,",
+      "the sum is not — the rows still add up to the grand total, asserted in both languages."
+    ],
+    "virtual_key": { "id": "vk_loop", "subject": "loop", "group": null, "upstream": "openai" },
+    "provider": "openai",
+    "model": "gpt-x",
+    "sessions": ["s0", "s1", "s2", "s3", "s4", "s5"],
+    "tokens_in": 10,
+    "tokens_out": 5,
+    "cap": 2,
+    "expected_session_json": "[{\"key\":\"(overflow)\",\"calls\":4,\"tokens_in\":40,\"tokens_out\":20,\"cache_creation_tokens\":0,\"cache_read_tokens\":0,\"reasoning_tokens\":0,\"billable_tokens\":60},{\"key\":\"s0\",\"calls\":1,\"tokens_in\":10,\"tokens_out\":5,\"cache_creation_tokens\":0,\"cache_read_tokens\":0,\"reasoning_tokens\":0,\"billable_tokens\":15},{\"key\":\"s1\",\"calls\":1,\"tokens_in\":10,\"tokens_out\":5,\"cache_creation_tokens\":0,\"cache_read_tokens\":0,\"reasoning_tokens\":0,\"billable_tokens\":15}]",
+    "expected_total_json": "[{\"key\":\"total\",\"calls\":6,\"tokens_in\":60,\"tokens_out\":30,\"cache_creation_tokens\":0,\"cache_read_tokens\":0,\"reasoning_tokens\":0,\"billable_tokens\":90}]",
+    "expected_total_billable": 90
+  }
+}
