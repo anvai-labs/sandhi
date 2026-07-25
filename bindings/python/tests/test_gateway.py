@@ -747,3 +747,15 @@ def test_parse_usage_exercises_every_builtin_provider_parser():
         }
     with pytest.raises(ValueError):
         sg.parse_usage("openai", "{nope")
+
+
+def test_sandhi_provider_error_is_typed_runtime_error():
+    """Consumers must be able to branch on the typed class, not string-sniff.
+
+    The message contract: a serialized ProviderErrorV1 JSON payload.
+    Subclassing RuntimeError keeps pre-typed consumers working unchanged.
+    """
+    import sandhi_gateway as sg
+
+    assert hasattr(sg, "SandhiProviderError")
+    assert issubclass(sg.SandhiProviderError, RuntimeError)

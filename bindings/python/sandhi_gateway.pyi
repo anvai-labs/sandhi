@@ -124,6 +124,9 @@ ProviderDescriptorV1 = dict[str, JsonValue]
 
 class TypedEventStream(AsyncIterator[str]):
     async def __anext__(self) -> str: ...
+class SandhiProviderError(RuntimeError):
+    """Provider-boundary error; the message is a serialized ProviderErrorV1 JSON payload."""
+
 class TypedProvider:
     @property
     def provider(self) -> str: ...
