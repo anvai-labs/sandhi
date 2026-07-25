@@ -13,13 +13,18 @@ key, and set per-user budgets — without hand-rolling provider APIs.
 > concern. See [ADR-0001](docs/adr/0001-sandhi-architecture-and-wire-contract.md).
 
 - **License:** Apache-2.0
-- **Status:** pre-alpha, unreleased. Core metering, the provider adapters (TD-0001), the typed
-  runtime (TD-0002), and the operator surface — key vault, virtual keys, admin API, `sandhi`
-  CLI, windowed budgets + warn policy + threshold alerts, model-allowlist enforcement, and the
-  dashboard (TD-0003 P1–P4) — have landed. In flight: a durable/shared budget ledger +
-  per-minute rate limits, the two-plane proxy
-  ([ADR-0004](docs/adr/0004-two-plane-proxy-and-enforcement-boundary.md)), and the declarative
-  policy engine ([TD-0005](docs/td/TD-0005-declarative-policy-engine.md)).
+- **Status:** early, but released — `v0.1.2` is on PyPI (`sandhi-gateway`) and crates.io; the npm
+  package is not published yet. Landed: core metering, the provider adapters (TD-0001), the typed
+  runtime (TD-0002), the operator surface — key vault, virtual keys, admin API, `sandhi` CLI,
+  windowed budgets + warn policy + threshold alerts, model-allowlist enforcement, the dashboard
+  (TD-0003 P1–P4) — the **durable lease ledger**
+  ([ADR-0005](docs/adr/0005-enforcement-correctness-reservation-ledger-observe-enforce-split.md)), and the
+  **transparent-metering plane** of
+  [ADR-0004](docs/adr/0004-two-plane-proxy-and-enforcement-boundary.md). Still open: per-minute
+  rate limits (stored, not enforced), a shared/HA ledger backend
+  ([TD-0007](docs/td/TD-0007-enforcement-ledger-backends.md)), Gemini/Cohere *ingress* dialects,
+  first-party observability export, and the declarative policy engine
+  ([TD-0005](docs/td/TD-0005-declarative-policy-engine.md)).
 - **Packages:** crate `sandhi` · PyPI `sandhi-gateway` · npm `@anvai-labs/sandhi`
 
 ## Why
@@ -34,16 +39,21 @@ wrong. Sandhi is the single, fast, neutral implementation of both.
 - **Virtual keys** — one shared upstream key fronts many per-user keys; attribution and
   revocation are per person, not per shared secret.
 - **Per-user / per-team attribution** — every call tagged with `subject_id` / `group_id`.
-- **Budgets** — per-virtual-key / per-team **token** caps (reserve-then-reconcile), with
-  daily/monthly/total **windows**, a block-or-**warn** policy, and threshold **alerts**. A
-  durable/shared ledger and per-minute rate limits are still in flight — the ledger is in-memory
-  today, so a restart resets accrued spend.
+- **Budgets** — per-virtual-key / per-team **token** caps enforced by a lease ledger (reserve a
+  conservative *ceiling*, settle by lease id), with calendar-aligned daily/monthly/total
+  **windows**, a block-or-**warn** policy, and threshold **alerts**. Set `SANDHI_STORE` and the
+  ledger is **durable**: spend, caps, and in-flight leases survive a restart, and dangling leases
+  are reclaimed. Without it the ledger is in-memory and a restart resets accrued spend. Still
+  open: per-minute rate limits (stored, not enforced) and a shared/HA backend for multi-replica
+  deployments.
 - **Unified provider transport** — Anthropic, OpenAI-compatible (covers ~20 providers),
   Gemini, Cohere, local vLLM/Ollama, OpenAI Responses — streaming, pooling, retry,
   circuit-breaker, with **usage + cache-split extracted at the source**. (Bedrock is
   parser-only until SigV4 request signing lands; front it with an OpenAI-compatible gateway
   meanwhile.)
-- **Local cost display** — from a community price table (visibility, not billing).
+- **Latency + reasoning tokens** — `duration_ms` / `time_to_first_token_ms` measured at the
+  adapter boundary, and separately-reported reasoning tokens captured where a provider exposes
+  them (OpenAI Chat + Responses, Gemini `thoughtsTokenCount`).
 - **One neutral usage event** — [`schemas/usage-event.v1.schema.json`](schemas/usage-event.v1.schema.json),
   the boundary object every consumer codes against.
 
