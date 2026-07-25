@@ -52,7 +52,7 @@ neutral contract.
 | Error transit shape | `ProviderErrorV1` as JSON-in-a-string inside `PyRuntimeError`, re-parsed by regexp on the consumer | **Gap** (P2) |
 | Streaming FFI hot path | Per-event Rust serialize + Python parse (typed layer; transport itself is O(1) pass-through) | **Measure first** (P3) |
 | Node binding parity | Missing `provider_descriptor_json` / `provider_spec` / `chat_contract_schema_json` | **Gap** (P4) |
-| Anthropic/Google full typed-handle migration | Partial (victor "gap #2", scoped) | **In flight** (P5) |
+| Anthropic/Google full typed-handle migration | Verified complete: SDK wire deleted, residual SDK use is discovery/credentials (Victor-owned by design) | **Closed** (P5) |
 | Cross-repo conformance | One-directional (schema pinning + generated facades); no test that a consumer *consumes* every event kind | **Gap** (P1) |
 
 ## Hardening plan
@@ -85,9 +85,15 @@ non-chat modality pushes event rates ≥100× current.**
 `chat_contract_schema_json` from the Node binding; parity is what keeps the contract
 consumer-count honest.
 
-**P5 — Finish the typed migration (victor gap #2).** Anthropic + Google fully on typed
-handles per the merged policy-shell pattern; deletes the last SDK wire paths and makes the
-"Sandhi owns transport" statement unconditional.
+**P5 — Finish the typed migration (victor gap #2). CLOSED (2026-07-25): verified
+already complete.** Code audit: both `AnthropicProvider.chat()/stream()` and
+`GoogleProvider.chat()/stream()` raise `NotImplementedError` ("owned by the Sandhi typed
+variant") — the SDK wire paths are deleted, and `resolve_transport_class` maps both to
+their Sandhi typed variants with fail-closed semantics. The residual SDK usage is exactly
+what the boundary statement assigns to Victor: `AsyncAnthropic` for **model discovery
+only** (victor#632, catalog policy tier) and `google-genai` for **credential acquisition**
+(victor#631, OAuth/ADC resolved Victor-side and passed as a bearer to the typed Gemini
+handle). "Sandhi owns transport" is unconditional for both families.
 
 ## Operating rules going forward
 
