@@ -1,6 +1,7 @@
 # TD-0010: Ingress dialect parity — drop-in compatibility as a release gate
 
-- **Status:** Proposed (2026-07-25) — design gate, no code yet
+- **Status:** Proposed (2026-07-25). **D1 implemented in #84**; this document was corrected
+  during that implementation — see the error-shape bullet and D2.
 - **Relates to:** ADR-0004 (two-plane proxy), TD-0006 (transparent metering), TD-0002 (typed
   runtime), ADR-0001 (wire contract), TD-0003 (operator surface: the model allowlist)
 - **Companion changes:** #61 (transparent plane), #77 (error redaction — this TD must compose
@@ -32,11 +33,14 @@ Two more surfaces are missing for the same reason:
 - **No model discovery.** There is no `GET /v1/models`. SDK `.models.list()`, LangChain, LiteLLM
   health checks and most chat UIs call it. `/catalog/models` exists but is a Sandhi-shaped
   endpoint at a Sandhi-shaped path.
-- **Errors are not dialect-shaped.** `error()` returns `{"error": "<string>"}`. OpenAI clients
-  expect `error` to be an *object* (`message`/`type`/`code`); Anthropic clients expect
-  `{"type":"error","error":{...}}`. Client-side retry and rate-limit handling keys off that
-  structure, so the wrong envelope does not merely look untidy — it disables the client's own
-  resilience.
+- **Errors are dialect-shaped *after* the credential check, and flat before it.**
+  `ingress_error()` already renders per dialect (`{"error":{…}}` for OpenAI/Responses,
+  `{"type":"error","error":{…}}` for Anthropic) — an earlier draft of this TD claimed otherwise
+  and was wrong. What is still flat is `error()`, used by the pre-dialect failures: the auth
+  paths (`lib.rs` 522/527/530) and several admin/dashboard rejections. So the *first* response a
+  misconfigured client sees is the one least likely to be parseable by its SDK, and its text —
+  `"missing bearer virtual key"` — now gives an Anthropic user actively wrong advice, since
+  `x-api-key` is that dialect's native scheme (D1).
 
 ## First principles
 
@@ -71,10 +75,18 @@ Two more surfaces are missing for the same reason:
 Accepting Bearer everywhere as a secondary form costs nothing and helps curl users and proxies
 that only forward `Authorization`.
 
-**D2 — The dialect owns the error envelope, and redaction still owns the content.** Errors are
-rendered in the client's native shape so SDK retry logic works; *what* they contain is unchanged
-from #77 (redacted by default, `SANDHI_ERROR_DETAIL=full` opts in). Shape is compatibility;
-content is confidentiality. They are independent, and this TD must not quietly widen the second.
+**D2 — Extend dialect-shaped errors to the pre-dialect paths, and keep redaction owning the
+content.** Scope corrected after implementation: body-level errors already render per dialect via
+`ingress_error()`, so D2 is *narrower* than first written — route the auth/admin rejections
+through the same renderer and make the message dialect-accurate (an Anthropic client should be
+told about `x-api-key`, not "bearer"). Content is unchanged from #77 (redacted by default,
+`SANDHI_ERROR_DETAIL=full` opts in). Shape is compatibility; content is confidentiality. They are
+independent, and this TD must not quietly widen the second.
+
+> The credential check runs *before* a dialect is resolved for some paths, so D2 has a real
+> ordering question to answer: either resolve the dialect from the route before authenticating,
+> or give `error()` a dialect argument at each call site. Pick deliberately — the first is
+> tidier, the second is a smaller diff.
 
 **D3 — The dialect owns discovery, filtered by the virtual key.** `GET /v1/models` (OpenAI
 shape), the Anthropic equivalent, and Gemini's `ListModels`, all sourced from the existing
