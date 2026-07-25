@@ -421,6 +421,38 @@ pub fn wire_contract_version() -> String {
     UsageEvent::SCHEMA_VERSION.to_string()
 }
 
+/// Resolve an OpenAI-compatible provider spec (slug, aliases, base_url) as JSON.
+/// Parity with the Python binding's `provider_spec` (TD-0008 P4); JSON here
+/// because napi objects would otherwise diverge from the schema'd facades.
+#[napi]
+pub fn provider_spec_json(provider: String, model: Option<String>) -> Result<String> {
+    let spec = sandhi_providers::resolve_openai_compat_provider(&provider)
+        .ok_or_else(|| Error::from_reason(format!("unknown provider: {provider}")))?;
+    let base_url = model
+        .as_deref()
+        .map_or(spec.base_url, |name| spec.base_url_for_model(name));
+    serde_json::to_string(&serde_json::json!({
+        "slug": spec.slug,
+        "aliases": spec.aliases,
+        "base_url": base_url,
+    }))
+    .map_err(|error| Error::from_reason(format!("serialize provider spec: {error}")))
+}
+
+/// Return a checked chat-contract JSON Schema document by name
+/// (e.g. "chat-stream-event.v1"). Parity with the Python binding.
+#[napi]
+pub fn chat_contract_schema_json(name: String) -> Result<String> {
+    let filename = if name.ends_with(".schema.json") {
+        name.clone()
+    } else {
+        format!("{name}.schema.json")
+    };
+    sandhi_core::contract_schema_documents()
+        .remove(filename.as_str())
+        .ok_or_else(|| Error::from_reason(format!("unknown chat contract schema: {name}")))
+}
+
 /// Return the versioned typed descriptor for a known provider as JSON.
 #[napi]
 pub fn provider_descriptor_json(provider: String) -> Result<String> {
