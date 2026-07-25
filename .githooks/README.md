@@ -8,7 +8,7 @@ git config core.hooksPath .githooks
 
 | Hook | What it does | Bypass |
 |---|---|---|
-| `commit-msg` | Blocks AI-agent authorship attribution (runs `scripts/check_no_agent_attribution.py`). The human drives the code, not the agents. | `git commit --no-verify` |
+| `commit-msg` | Blocks **third-party** AI-agent authorship attribution (runs `scripts/check_no_agent_attribution.py`). Our own agent is the exception — `victor-code-ai` trailers are allowed. | `git commit --no-verify` |
 | `pre-push` | Fast `rustfmt --check` (no compile) — the most common avoidable CI red. | `git push --no-verify` |
 
 **Server-side enforcement (not bypassable):** `.github/workflows/ci.yml` re-runs the
