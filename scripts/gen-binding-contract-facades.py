@@ -19,6 +19,7 @@ SCHEMAS = (
     "provider-descriptor.v1.schema.json",
     "provider-error.v1.schema.json",
     "usage.v2.schema.json",
+    "usage-aggregate.v1.schema.json",
 )
 
 
@@ -131,6 +132,21 @@ class UsageV2(TypedDict):
     reasoning_tokens: NotRequired[int]
     accepted_prediction_tokens: NotRequired[int]
     rejected_prediction_tokens: NotRequired[int]
+class LatencySummary(TypedDict):
+    samples: int
+    p50_ms: int
+    p95_ms: int
+    ttft_p50_ms: NotRequired[int]
+class UsageAggregateV1(TypedDict):
+    key: str
+    calls: int
+    tokens_in: int
+    tokens_out: int
+    cache_creation_tokens: int
+    cache_read_tokens: int
+    reasoning_tokens: int
+    billable_tokens: int
+    latency: NotRequired[LatencySummary]
 class AssistantOutputV1(TypedDict):
     content: NotRequired[MessageContent]
     tool_calls: NotRequired[list[ToolCallV1]]
@@ -210,6 +226,12 @@ export interface UsageV2 {{
   completeness?: UsageCompleteness; attempts?: number; outcome?: string; upstream_request_id?: string
   audio_input_tokens?: number; audio_output_tokens?: number; reasoning_tokens?: number
   accepted_prediction_tokens?: number; rejected_prediction_tokens?: number
+}}
+export interface LatencySummary {{ samples: number; p50_ms: number; p95_ms: number; ttft_p50_ms?: number }}
+export interface UsageAggregateV1 {{
+  key: string; calls: number; tokens_in: number; tokens_out: number;
+  cache_creation_tokens: number; cache_read_tokens: number; reasoning_tokens: number;
+  billable_tokens: number; latency?: LatencySummary
 }}
 export interface AssistantOutputV1 {{ content?: MessageContent; tool_calls?: ToolCallV1[]; refusal?: string }}
 export interface ChatResponseV1 {{

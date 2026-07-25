@@ -1,10 +1,45 @@
-# TD-0009: Usage-visibility surfaces — lib parity, read-back, and live metering
+# TD-0009: Usage-visibility surfaces — one aggregate, many transports
 
-- **Status:** Proposed (2026-07-25) — design gate, no code yet
+- **Status:** **Accepted** (2026-07-25). Revised from the Proposed draft after a first-principles
+  pass: the draft prescribed three local patches, which reproduced the very defect it was written
+  to fix. See *What the first draft got wrong*.
 - **Relates to:** ADR-0001 (wire contract, measure-vs-price), TD-0002 (typed runtime,
   additive-only contract policy), TD-0003 (operator surface: CLI, admin API, dashboard),
   TD-0008 (Victor–Sandhi co-design boundary)
-- **Companion changes:** #68 (latency + reasoning-token fields), #61 (transparent plane)
+- **Companion changes:** #68 (latency + reasoning-token fields), #61 (transparent plane),
+  #78 (one billable definition — the defect this TD generalizes)
+
+## First principles
+
+1. **There is exactly one atom: the `UsageEvent`,** emitted once per logical call at the point of
+   measurement. Sandhi's job ends there.
+2. **Everything else is a view over that atom** — a total, a ranking, a live counter, a dashboard
+   row. A view is a *fold*, not a new source of truth.
+3. **A fold defined more than once is a fold that will disagree with itself.** This is not
+   theoretical: #78 fixed three implementations of "billable" that had drifted into a 2×
+   discrepancy between what the ledger charged and what the dashboard displayed.
+4. **Therefore the fold belongs in one place, and its output is a boundary object** — versioned
+   and schema'd like `UsageEvent` itself, because it crosses into the dashboard, the CLI, both
+   language bindings, and eventually the AnvaiOps control plane.
+5. **A progress signal is not a measurement.** Anything emitted mid-call is a hint about work in
+   flight; the meter is the terminal event. Conflating them double-counts.
+
+## What the first draft got wrong
+
+The Proposed draft named three gaps and proposed three fixes: extend the store's `Bucket`, add a
+separate in-core aggregator for the bindings, and emit incremental usage events. Two of those are
+local patches at the wrong boundary:
+
+- **`Bucket` is not a store type.** It is *the aggregate view*, and the store is merely one place
+  it can be computed from. Extending a store-private struct (which #78 did, correctly for its
+  scope) leaves the bindings with no aggregate at all and the dashboard coding against a shape
+  that exists only inside `sandhi-store`.
+- **"A core aggregator *and* the SQL queries, proven equal by test"** accepted two implementations
+  and proposed to police the gap. The equality test is still necessary (SQL stays as an index over
+  large histories), but the *type* and the *semantics* must be singular, with SQL demoted to an
+  optimization of a fold defined elsewhere — not a peer definition.
+
+Principle 3 was in the draft and the draft still violated it. Corrected below.
 
 ## Why this exists
 
@@ -47,12 +82,22 @@ Sandhi measures well and shows almost none of it. Three gaps, each verified agai
 
 ## Decisions
 
-**D1 — Lib-path aggregation lives in `sandhi-core`, with no new dependency.** A
-`UsageAggregator` fed by the existing `Sink` trait, keyed by the same dimensions the store
-already groups by, returning the same `Bucket` shape. Rejected: linking `sandhi-store` into the
-bindings (adds SQLite's C build and megabytes per abi3/napi wheel, and dissolves the crate
-boundary that exists for exactly this reason). Deferred: an optional `sandhi-gateway[store]`
-extra for durable local history (P4), only on demand.
+**D1 — The aggregate is a versioned contract type, not a struct in whichever crate happened to
+need it first.** `UsageAggregateV1` lives in `sandhi-core` beside `UsageEvent`, derives
+`JsonSchema`, is exported through `contract_schema_documents()` as
+`schemas/usage-aggregate.v1.schema.json`, and is carried into the generated Python/TypeScript
+facades. It crosses into the dashboard, the CLI, both bindings, and (later) the AnvaiOps control
+plane — that is the definition of a boundary object, and boundary objects in this repo are
+schema'd, digest-pinned, and drift-gated. `sandhi-store::Bucket` becomes a re-export of it, so
+there is one shape end to end.
+
+**D1a — The fold lives with the type; SQL is an index over it, not a second definition.**
+`UsageAggregator` in core folds `&UsageEvent → UsageAggregateV1` and is the semantics. The store
+keeps SQL because scanning a million rows through Rust is the wrong tool, but SQL is now an
+*optimization of a defined fold* — if the two disagree, SQL is wrong by construction. Rejected:
+linking `sandhi-store` into the bindings (SQLite's C build plus megabytes per abi3/napi wheel,
+and it dissolves the crate boundary that exists for exactly this reason). Deferred: an optional
+`sandhi-gateway[store]` extra for durable local history (P4), only on demand.
 
 **D2 — Bounded cardinality, with an honest overflow.** `subject_id` and `session_id` are
 unbounded in a long-lived process, so an unbounded map is a memory leak. Per-dimension
@@ -60,11 +105,14 @@ capacity (default 1024 keys, configurable), and everything beyond it folds into 
 `"(overflow)"` bucket. The failure mode is **losing per-key detail, never losing the sum** —
 totals stay exact under eviction. Tested explicitly, not documented and hoped for.
 
-**D3 — Read back what we already write; exact tokens, approximate latency.** Extend the query
-layer additively (`Bucket` gains optional latency/reasoning fields; existing consumers
-unaffected). Token and call counts stay exact SQL aggregates. Latency percentiles are computed
-in Rust over a bounded recent-N sample per window and **labelled approximate** — SQLite has no
-native percentile, and a t-digest is not worth a dependency for an operator panel.
+**D3 — Exact where it enforces, honest where it estimates.** Token and call counts are exact in
+both transports — budgets are enforced on them. Latency is summarised as a `LatencySummary`
+carrying `samples`, `p50_ms`, `p95_ms`, and the type says in its schema that percentiles are
+approximate: SQLite has no native percentile, a t-digest is not worth a dependency for an
+operator panel, and a percentile over a bounded recent-N sample is genuinely useful for "is this
+model slow for this team". Carrying `samples` in the payload means a consumer can see the
+approximation's weight instead of inferring confidence it does not have. The rule: **approximate
+what informs, never what enforces.**
 
 **D4 — Incremental `Usage` stream events are progress signals, never metering events.** The
 invariant "one `UsageEvent` per logical call, assembled by the caller" does not move. Emit
@@ -81,29 +129,48 @@ explicitly-labelled estimate otherwise (`1,203 tok` vs `~1,200 tok est.`), and r
 against the terminal event. The UI must never show an estimate as if it were counted — the
 whole point of Sandhi is that the meter is trustworthy.
 
-**D6 — One aggregation semantics, two implementations, proven equal.** The in-core aggregator
-and the SQL queries must produce identical buckets for the same event sequence. That is a
-conformance test over a shared fixture corpus (the TD-0001 pattern), not a code-review promise.
+**D6 — One semantics, one type, N transports — equality proven, not assumed.** The core fold is
+the definition. Every transport (in-process snapshot, SQL, HTTP) must produce the same
+`UsageAggregateV1` for the same event sequence, proven by a conformance test over a shared
+fixture corpus (the TD-0001 pattern). SQL is the transport most likely to drift, because it
+re-expresses the fold in another language; its test is therefore not optional.
+
+**D7 — Co-design: the aggregate is a consumer contract, so consumers get a decision row.** Under
+TD-0008 operating rule 1, shipping `UsageAggregateV1` obliges a recorded decision from each
+consumer rather than a producer-side capability nobody consumes — the exact failure that TD
+documents for `reasoning_delta`. Victor's decision: render per-session and per-run totals from
+its own in-process snapshot (P2) instead of the chars/4 estimate, and reconcile against the
+terminal event. Node/Python parity is required at the same commit, not as a follow-up, because
+parity-as-follow-up is what produced TD-0008 P4.
 
 ## Phases
 
 | Phase | Scope | Acceptance |
 |---|---|---|
-| **P1** | Read back #68's fields: store query + `Bucket` extension, `sandhi usage` columns, dashboard panel | Latency p50/p95 + reasoning tokens visible per dimension; approximation labelled; existing `Bucket` consumers compile unchanged |
-| **P2** | Lib parity: `UsageAggregator` in core + `usage_snapshot_json()` on both bindings | Python and Node return byte-identical snapshots for the same event sequence; cardinality cap + overflow bucket tested; no new dependency in either wheel |
+| **P1** | The boundary: `UsageAggregateV1` + `UsageAggregator` fold in core, schema + facades, `sandhi-store::Bucket` re-exports it, SQL fills it incl. latency/reasoning read-back, `sandhi usage` + dashboard render it | Core fold and SQL produce identical aggregates over a shared corpus; `codegen-drift` green with the new schema; latency carries `samples` |
+| **P2** | Lib parity: `usage_snapshot_json()` on both bindings over the same type | Python and Node return byte-identical snapshots for the same event sequence; cardinality cap + overflow tested; no new dependency in either wheel |
 | **P3** | Live metering: incremental `Usage` where provider-reported, `basis` field, Victor consumer row + labelled live counter | A scripted Anthropic stream yields a monotonic running count; an OpenAI stream yields none until terminal; a test asserts stream `Usage` events are never persisted as `UsageEvent`s |
 | **P4** | Optional durable local history (`sandhi-gateway[store]`) | Only if P2 users ask for cross-restart history; wheel stays SQLite-free by default |
 
-P1 is independent and worth landing alone. P3 is the only phase that touches the wire schema.
+P1 now carries the boundary work the draft deferred, so P2 becomes mechanical: the type, the
+fold, and the schema already exist, and the bindings only add a transport. P3 remains the only
+phase that changes the *stream* contract.
 
 ## Pressure test
 
 Each decision, attacked:
 
-1. **"The in-core aggregator duplicates `sandhi-store`."** It does, deliberately — different
-   lifetime (process-local, no durability, no file). The real risk is *semantic drift* between
-   the two aggregations, which is why D6 makes equality a test rather than an intention. If that
-   test is dropped, this TD's main hazard is live.
+1. **"The in-core fold duplicates `sandhi-store`'s SQL."** Not any more: after D1a there is one
+   *definition* and SQL is an index over it, kept because scanning a million rows through Rust is
+   the wrong tool. The residual risk is that the SQL re-expression drifts from the fold, which is
+   why D6 makes equality a test rather than an intention. If that test is ever dropped, this TD's
+   main hazard goes live — and #78 is the proof it is not hypothetical.
+1b. **"Promoting the aggregate to a schema'd contract type is over-engineering."** The counter-
+   test is what happens without it: the bindings get no aggregate, the dashboard codes against a
+   store-private struct, and the AnvaiOps control plane later invents its own shape — three
+   consumers, three definitions, which is the defect class this TD exists to end. The cost is one
+   `JsonSchema` derive, one line in `contract_schema_documents()`, and a facade regeneration that
+   `codegen-drift` already polices. Cheap now, unpayable later.
 2. **"The cardinality cap silently loses data."** It loses per-key rows and keeps totals exact
    (D2). A user reading "top 1024 subjects + overflow" is not misled; a process OOM-ing after
    three weeks of `session_id` keys would be. Alternative rejected: unbounded map with a
