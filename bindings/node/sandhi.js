@@ -11,12 +11,55 @@
 
 const native = require("./index.js");
 
+/**
+ * Provider-boundary error (parity with the Python binding's SandhiProviderError,
+ * TD-0008 P2/C). `payload` is the parsed ProviderErrorV1; `code` / `httpStatus` /
+ * `retryable` / `requestId` are conveniences so consumers branch on typed fields
+ * instead of string-sniffing arbitrary Error messages.
+ */
+class SandhiProviderError extends Error {
+  constructor(payload, message) {
+    super(message);
+    this.name = "SandhiProviderError";
+    this.payload = payload;
+    this.code = payload.code;
+    this.httpStatus = payload.http_status ?? null;
+    this.retryable = Boolean(payload.retryable);
+    this.requestId = payload.request_id ?? null;
+    this.details = payload.details ?? {};
+  }
+}
+
+// The native layer throws plain Errors whose message is the ProviderErrorV1 JSON.
+// Rewrap into the typed class when the shape matches; anything else passes through
+// (binding-internal failures stay ordinary Errors — the distinction is the point).
+function toSandhiError(error) {
+  if (error instanceof SandhiProviderError) return error;
+  const message = error && typeof error.message === "string" ? error.message : null;
+  if (message && message.startsWith("{")) {
+    try {
+      const payload = JSON.parse(message);
+      if (payload && typeof payload.code === "string") {
+        return new SandhiProviderError(payload, message);
+      }
+    } catch (_) {
+      /* not a typed payload — fall through */
+    }
+  }
+  return error;
+}
+
 if (native.TypedEventStream && !native.TypedEventStream.prototype[Symbol.asyncIterator]) {
   native.TypedEventStream.prototype[Symbol.asyncIterator] = function asyncIterator() {
     const stream = this;
     return {
       async next() {
-        const event = await stream.read();
+        let event;
+        try {
+          event = await stream.read();
+        } catch (error) {
+          throw toSandhiError(error);
+        }
         return event === null || event === undefined
           ? { done: true, value: undefined }
           : { done: false, value: event };
@@ -25,10 +68,28 @@ if (native.TypedEventStream && !native.TypedEventStream.prototype[Symbol.asyncIt
   };
 }
 
+if (native.TypedProvider && !native.TypedProvider.prototype.__sandhiTypedErrors) {
+  const rawCompleteJson = native.TypedProvider.prototype.completeJson;
+  if (typeof rawCompleteJson === "function") {
+    native.TypedProvider.prototype.completeJson = async function completeJson(requestJson) {
+      try {
+        return await rawCompleteJson.call(this, requestJson);
+      } catch (error) {
+        throw toSandhiError(error);
+      }
+    };
+  }
+  native.TypedProvider.prototype.__sandhiTypedErrors = true;
+}
+
 module.exports.wireContractVersion = native.wireContractVersion;
+module.exports.chatContractVersion = native.chatContractVersion;
 module.exports.parseUsage = native.parseUsage;
 module.exports.providerDescriptorJson = native.providerDescriptorJson;
+module.exports.providerSpecJson = native.providerSpecJson;
+module.exports.chatContractSchemaJson = native.chatContractSchemaJson;
 module.exports.providerModelsJson = native.providerModelsJson;
+module.exports.SandhiProviderError = SandhiProviderError;
 module.exports.Gateway = native.Gateway;
 module.exports.ProviderRuntime = native.ProviderRuntime;
 module.exports.TypedProvider = native.TypedProvider;
