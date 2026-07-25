@@ -62,12 +62,14 @@ Sandhi is a Rust core (`sandhi-core` + `sandhi-providers`) exposed two ways:
 > **Prompt-cache safe (by design).** Sandhi preserves per-conversation cache affinity — it
 > never collapses users to a single session and carries attribution *outside* the cached
 > prompt, so hosted prompt caches keep hitting and self-hosted KV routing stays sticky. The
-> byte-exact forwarding that guarantees this on the proxy path is being implemented as the
-> transparent-metering plane in
-> [ADR-0004](docs/adr/0004-two-plane-proxy-and-enforcement-boundary.md); today the proxy
-> re-encodes through the neutral contract, which is faithful for standard fields but can drop
-> provider-specific extras (e.g. message-level Anthropic `cache_control` breakpoints). The
-> in-process bindings, which do not re-encode, are unaffected.
+> byte-exact forwarding that guarantees this on the proxy path is **live** as the
+> transparent-metering plane of
+> [ADR-0004](docs/adr/0004-two-plane-proxy-and-enforcement-boundary.md): when the ingress dialect
+> and the upstream are the same family, the proxy forwards the client's bytes verbatim and meters
+> the stream as it passes, so provider-specific extras (e.g. message-level Anthropic
+> `cache_control` breakpoints) survive untouched. A **cross-family** request still re-encodes
+> through the neutral contract — faithful for standard fields, but it can drop those extras. The
+> in-process bindings, which never re-encode, are unaffected.
 
 ## The usage event
 
