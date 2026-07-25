@@ -392,6 +392,7 @@ mod tests {
             Scripted::new(vec![Err(ProviderError::Upstream {
                 status: 500,
                 body: None,
+                request_id: None,
             })]),
             sink.clone(),
         );

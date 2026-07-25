@@ -50,6 +50,7 @@ impl Provider for FnProvider {
         Err(ProviderError::Upstream {
             status: 501,
             body: None,
+            request_id: None,
         })
     }
 }
