@@ -421,6 +421,15 @@ pub fn wire_contract_version() -> String {
     UsageEvent::SCHEMA_VERSION.to_string()
 }
 
+/// The neutral chat-contract (ChatRequestV1/ChatStreamEventV1) major version this
+/// build targets. Today equal to `wire_contract_version()` (pinned by a
+/// sandhi-core test); exported separately so a future split cannot silently
+/// invalidate consumer handshakes that validate the chat contract.
+#[napi]
+pub fn chat_contract_version() -> String {
+    sandhi_core::chat::CHAT_SCHEMA_VERSION_V1.to_string()
+}
+
 /// Resolve an OpenAI-compatible provider spec (slug, aliases, base_url) as JSON.
 /// Parity with the Python binding's `provider_spec` (TD-0008 P4); JSON here
 /// because napi objects would otherwise diverge from the schema'd facades.

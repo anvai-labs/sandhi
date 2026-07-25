@@ -463,6 +463,15 @@ fn wire_contract_version() -> &'static str {
     UsageEvent::SCHEMA_VERSION
 }
 
+/// The neutral chat-contract (ChatRequestV1/ChatStreamEventV1) major version this
+/// build targets. Today equal to `wire_contract_version()` (pinned by a
+/// sandhi-core test); exported separately so a future split cannot silently
+/// invalidate consumer handshakes that validate the chat contract.
+#[pyfunction]
+fn chat_contract_version() -> &'static str {
+    sandhi_core::chat::CHAT_SCHEMA_VERSION_V1
+}
+
 /// Parse a provider response body (JSON string) into the neutral token breakdown. `provider`
 /// selects the parser: `anthropic` → the Anthropic Messages shape; anything else → the
 /// OpenAI-compatible shape.
@@ -801,6 +810,7 @@ fn sandhi_gateway(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.py().get_type_bound::<SandhiProviderError>(),
     )?;
     m.add_function(wrap_pyfunction!(wire_contract_version, m)?)?;
+    m.add_function(wrap_pyfunction!(chat_contract_version, m)?)?;
     m.add_function(wrap_pyfunction!(parse_usage, m)?)?;
     m.add_function(wrap_pyfunction!(provider_spec, m)?)?;
     m.add_function(wrap_pyfunction!(provider_descriptor_json, m)?)?;
