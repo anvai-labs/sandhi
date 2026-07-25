@@ -389,27 +389,31 @@ fn render_usage(response: &Value, format: &Format) {
     }
     let buckets = response.get("buckets").and_then(Value::as_array);
     let total = response.get("total");
+    let u64_at = |v: &Value, k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0);
     if let Some(total) = total {
+        // `billable` is the ADR-0005 D4 quantity budgets are enforced on, so it is what an
+        // operator needs to reconcile against a cap — the in/out columns alone under-report it
+        // whenever a prompt cache is in play.
         println!(
-            "total: {} calls, {} in / {} out (cache read {})",
-            total.get("calls").and_then(Value::as_u64).unwrap_or(0),
-            total.get("tokens_in").and_then(Value::as_u64).unwrap_or(0),
-            total.get("tokens_out").and_then(Value::as_u64).unwrap_or(0),
-            total
-                .get("cache_read_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
+            "total: {} calls, {} in / {} out (cache write {}, cache read {}) — {} billable",
+            u64_at(total, "calls"),
+            u64_at(total, "tokens_in"),
+            u64_at(total, "tokens_out"),
+            u64_at(total, "cache_creation_tokens"),
+            u64_at(total, "cache_read_tokens"),
+            u64_at(total, "billable_tokens"),
         );
     }
     if let Some(buckets) = buckets {
         println!();
         for b in buckets {
             println!(
-                "{:<28} {:>6} calls  {:>8} in  {:>8} out",
+                "{:<28} {:>6} calls  {:>8} in  {:>8} out  {:>10} billable",
                 b.get("key").and_then(Value::as_str).unwrap_or("?"),
-                b.get("calls").and_then(Value::as_u64).unwrap_or(0),
-                b.get("tokens_in").and_then(Value::as_u64).unwrap_or(0),
-                b.get("tokens_out").and_then(Value::as_u64).unwrap_or(0),
+                u64_at(b, "calls"),
+                u64_at(b, "tokens_in"),
+                u64_at(b, "tokens_out"),
+                u64_at(b, "billable_tokens"),
             );
         }
     }

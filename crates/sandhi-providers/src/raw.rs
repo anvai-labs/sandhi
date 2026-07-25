@@ -14,7 +14,7 @@
 //! fields. Everything stays inside the measure-vs-token boundary — no dollars, tiers, or SKUs.
 
 use crate::{
-    error_for_status, AnthropicAuthScheme, GeminiAuthScheme, ProviderError, ProviderFamily,
+    error_for_response, AnthropicAuthScheme, GeminiAuthScheme, ProviderError, ProviderFamily,
 };
 use bytes::Bytes;
 use futures_core::Stream;
@@ -110,7 +110,7 @@ impl RawForwarder {
         let resp = self.send(&url, out_body).await?;
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
-            return Err(error_for_status(status));
+            return Err(error_for_response(resp).await);
         }
         let headers = filter_response_headers(resp.headers());
         let body = resp
@@ -137,7 +137,7 @@ impl RawForwarder {
         let out_body = normalize_envelope(self.family, &body, true);
         let resp = self.send(&url, out_body).await?;
         if !resp.status().is_success() {
-            return Err(error_for_status(resp.status().as_u16()));
+            return Err(error_for_response(resp).await);
         }
         use futures_util::TryStreamExt;
         let stream = resp
@@ -178,7 +178,7 @@ impl RawForwarder {
         let out_body = normalize_envelope(self.family, &body, true);
         let resp = self.send(&url, out_body).await?;
         if !resp.status().is_success() {
-            return Err(error_for_status(resp.status().as_u16()));
+            return Err(error_for_response(resp).await);
         }
         Ok(crate::metered_passthrough(
             resp.bytes_stream(),

@@ -3,7 +3,7 @@
 
 use crate::parse_anthropic_usage;
 use crate::{
-    error_for_status, metered_passthrough, ByteStream, ParsedUsage, Provider, ProviderError,
+    error_for_response, metered_passthrough, ByteStream, ParsedUsage, Provider, ProviderError,
     ProviderRequest, ProviderResponse,
 };
 use async_trait::async_trait;
@@ -87,7 +87,7 @@ impl Provider for Anthropic {
             .map_err(|e| ProviderError::Transport(e.to_string()))?;
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
-            return Err(error_for_status(status));
+            return Err(error_for_response(resp).await);
         }
         let body: Value = resp
             .json()
@@ -118,7 +118,7 @@ impl Provider for Anthropic {
             .await
             .map_err(|e| ProviderError::Transport(e.to_string()))?;
         if !resp.status().is_success() {
-            return Err(error_for_status(resp.status().as_u16()));
+            return Err(error_for_response(resp).await);
         }
         // Forward every upstream chunk verbatim (O(1) memory, ADR-0047 D9) while sniffing each
         // complete line for usage. `metered_passthrough` is the single shared streaming

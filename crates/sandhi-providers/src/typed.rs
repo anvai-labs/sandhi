@@ -893,11 +893,23 @@ fn decode_openai_stream(mut raw: ByteStream, requested_model: String) -> ChatEve
 
 impl ProviderError {
     pub fn as_typed(&self, provider: Option<&str>) -> ProviderErrorV1 {
+        let mut details = BTreeMap::new();
+        let mut request_id = None;
         let (code, retryable, http_status) = match self {
             Self::InvalidRequest(_) => ("invalid_request", false, Some(400)),
             Self::Auth => ("authentication_error", false, Some(401)),
             Self::RateLimited => ("rate_limited", true, Some(429)),
-            Self::Upstream(status) => ("upstream_error", *status >= 500, Some(*status)),
+            Self::Upstream {
+                status,
+                body,
+                request_id: upstream_request_id,
+            } => {
+                if let Some(body) = body {
+                    details.insert("upstream_body".to_owned(), Value::String(body.clone()));
+                }
+                request_id = upstream_request_id.clone();
+                ("upstream_error", *status >= 500, Some(*status))
+            }
             Self::Transport(_) => ("transport_error", true, None),
             Self::CircuitOpen => ("circuit_open", true, Some(503)),
             Self::Timeout(_) => ("timeout", true, Some(504)),
@@ -908,8 +920,8 @@ impl ProviderError {
             retryable,
             http_status,
             provider: provider.map(str::to_owned),
-            request_id: None,
-            details: BTreeMap::new(),
+            request_id,
+            details,
         }
     }
 }
@@ -1180,6 +1192,80 @@ mod tests {
         async fn stream(&self, _: ChatRequestV1) -> Result<ChatEventStream, ProviderError> {
             unreachable!()
         }
+    }
+
+    #[test]
+    fn upstream_error_body_reaches_typed_details_and_message() {
+        let body = r#"{"error":{"message":"tool call id call_9 not found in messages"}}"#;
+        let err = ProviderError::Upstream {
+            status: 400,
+            body: Some(body.to_owned()),
+            request_id: None,
+        };
+        let typed = err.as_typed(Some("moonshot"));
+        assert_eq!(typed.code, "upstream_error");
+        assert_eq!(typed.http_status, Some(400));
+        assert!(!typed.retryable);
+        assert_eq!(
+            typed.details.get("upstream_body"),
+            Some(&Value::String(body.to_owned()))
+        );
+        // Display carries a single-line snippet so consumer logs are self-explaining.
+        assert!(typed.message.contains("tool call id call_9"));
+    }
+
+    #[test]
+    fn upstream_error_without_body_keeps_prior_shape() {
+        let err = ProviderError::Upstream {
+            status: 502,
+            body: None,
+            request_id: None,
+        };
+        let typed = err.as_typed(None);
+        assert_eq!(typed.message, "upstream status 502");
+        assert!(typed.retryable);
+        assert!(typed.details.is_empty());
+    }
+
+    #[test]
+    fn upstream_request_id_reaches_typed_error_and_display() {
+        let err = ProviderError::Upstream {
+            status: 400,
+            body: Some(r#"{"error":"bad tool pairing"}"#.to_owned()),
+            request_id: Some("req_abc123".to_owned()),
+        };
+        let typed = err.as_typed(Some("moonshot"));
+        assert_eq!(typed.request_id.as_deref(), Some("req_abc123"));
+        assert!(err.to_string().contains("[request-id: req_abc123]"));
+    }
+
+    #[test]
+    fn upstream_without_request_id_stays_none() {
+        let err = ProviderError::Upstream {
+            status: 502,
+            body: None,
+            request_id: None,
+        };
+        let typed = err.as_typed(None);
+        assert!(typed.request_id.is_none());
+        assert_eq!(err.to_string(), "upstream status 502");
+    }
+
+    #[test]
+    fn display_snippet_is_bounded_and_single_line() {
+        let long = format!("line1\nline2 {}", "x".repeat(500));
+        let err = ProviderError::Upstream {
+            status: 422,
+            body: Some(long),
+            request_id: None,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.len() < 260,
+            "display snippet must stay bounded: {}",
+            msg.len()
+        );
+        assert!(!msg.contains('\n'));
     }
 
     /// Minimal local import so the test compiles without adding a top-level `use`.

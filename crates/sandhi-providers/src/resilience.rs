@@ -231,7 +231,7 @@ fn is_retryable(e: &ProviderError) -> bool {
         ProviderError::Transport(_) | ProviderError::RateLimited | ProviderError::Timeout(_) => {
             true
         }
-        ProviderError::Upstream(status) => *status >= 500,
+        ProviderError::Upstream { status, .. } => *status >= 500,
         ProviderError::InvalidRequest(_) | ProviderError::Auth | ProviderError::CircuitOpen => {
             false
         }
@@ -705,7 +705,11 @@ mod tests {
     async fn retries_transient_failures_then_succeeds() {
         let flaky = Flaky::new(vec![
             Err(ProviderError::Transport("blip".into())),
-            Err(ProviderError::Upstream(503)),
+            Err(ProviderError::Upstream {
+                status: 503,
+                body: None,
+                request_id: None,
+            }),
             Ok(ok_resp()),
         ]);
         let p = ResilientProvider::new(flaky.clone()).with_retry(3, Duration::from_millis(1));

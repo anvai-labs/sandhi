@@ -17,7 +17,66 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Security
+
+- **Dashboard reads are gated by default** (ADR-0004 D4). When an admin token is configured,
+  `/dashboard` and `/dashboard/api/*` now require the admin bearer; `SANDHI_DASHBOARD_PUBLIC=1`
+  restores the previous open, masked-only behaviour, and endpoints stay open when no admin token
+  exists (there is no credential to present).
+  ([#77](https://github.com/anvai-labs/sandhi/pull/77))
+- **Client-facing provider errors are redacted by default** — code, HTTP status, request id, and a
+  canonical short message. An upstream body can echo prompt fragments or infrastructure detail, so
+  it is no longer returned to the client unless `SANDHI_ERROR_DETAIL=full` opts a single-tenant
+  deployment in. Server-side logs always carry the full error.
+  ([#77](https://github.com/anvai-labs/sandhi/pull/77))
+
+### Added
+
+- **Contract governance guards** (TD-0008 A) — `chat_contract_version()` exported from both
+  bindings, a `stream_event_variant_tag()` exhaustive match so adding a `ChatStreamEventV1`
+  variant fails compilation until a consumer decision is recorded, a census test cross-checking
+  the tag list against the checked-in schema, and a test pinning the chat/usage version equality
+  that consumer handshakes rely on. ([#73](https://github.com/anvai-labs/sandhi/pull/73))
+- **Upstream request id on provider errors** — `ProviderErrorV1.request_id` was permanently
+  `None`, dropping the identifier provider escalations are keyed on. It is now extracted from
+  `x-request-id` / `request-id` / `anthropic-request-id` and appended to `Display`, so existing
+  consumer logs quote it with no consumer change.
+  ([#75](https://github.com/anvai-labs/sandhi/pull/75))
+- **`SandhiProviderError` for Node** — Node consumers had to string-sniff `Error` messages to tell
+  a provider error from a binding failure (the gap #69 closed for Python). The shim now raises a
+  typed class carrying the parsed `ProviderErrorV1` at both provider-error surfaces, while
+  binding-internal errors pass through untouched. Shim re-exports resynced with the addon.
+  ([#76](https://github.com/anvai-labs/sandhi/pull/76))
+
+### Fixed
+
+- **One billable definition everywhere.** ADR-0005 D4 defines the billable quantity as fresh
+  input + the cache split + output (+ unfolded reasoning), and the proxy settled on it — but two
+  other paths still used a narrower `tokens_in + tokens_out`, so the same call was counted
+  differently depending on who asked:
+  - the **in-process bindings** recorded the narrow number into the budget ledger, under-counting
+    every cache read (a call with 40 fresh-input / 60 cache-read / 20 output recorded 60 while
+    the proxy charged 120 — **2× under-count** on cache-heavy traffic);
+  - the **dashboard and `sandhi usage`** ranked and displayed the narrow number, so an operator
+    reconciling against a cap saw less than the ledger had actually charged.
+
+  `UsageEvent::billable_tokens()` now returns the D4 quantity, and both it and `billable()`
+  route through one shared `billable_parts()` so they cannot drift.
+
+  > **Behaviour change:** in-process spend recorded via the Python/Node `Gateway` increases for
+  > any call with cache reads/writes or separately-reported reasoning tokens. Budgets tightened
+  > accordingly — a cap that was silently admitting more than it should now enforces as written.
+  > Proxy enforcement is unchanged; it was already correct.
+
+### Added
+
+- **`sandhi_core::billable_parts()`** — the single D4 formula over raw components, shared by
+  `billable()`, `UsageEvent::billable_tokens()`, and the store's SQL.
+- **Aggregates expose the full split.** `Bucket` gains `cache_creation_tokens`,
+  `reasoning_tokens`, and an exact `billable_tokens`, surfaced in the dashboard table and
+  `sandhi usage`. The SQL sums the D4 quantity **per row** — the reasoning fold is a per-call
+  decision, so summing the columns first and folding afterwards gives a different, wrong answer;
+  a conformance test pins the SQL against the Rust formula and asserts the naive form differs.
 
 ## [0.1.3] — 2026-07-24
 

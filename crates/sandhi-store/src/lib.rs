@@ -22,6 +22,14 @@ pub use vault::{
 };
 pub use vkeys::{MintRequest, MintedKey, VirtualKeyRecord, VirtualKeyStore};
 
+/// Per-row mirror of [`sandhi_core::billable_parts`], summed. The `CASE` reproduces the ADR-0005
+/// D4 reasoning fold **per call**, which is exactly why this cannot be written as
+/// `SUM(reasoning) > SUM(tokens_out)`. `store_matches_core_billable` pins this expression against
+/// the Rust one so the two cannot drift.
+const BILLABLE_SQL: &str = "COALESCE(SUM(tokens_in + cache_creation_tokens + cache_read_tokens \
+     + tokens_out + CASE WHEN COALESCE(reasoning_tokens,0) > tokens_out \
+     THEN COALESCE(reasoning_tokens,0) ELSE 0 END),0)";
+
 /// One aggregation row (or the grand total).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Bucket {
@@ -30,14 +38,14 @@ pub struct Bucket {
     pub calls: u64,
     pub tokens_in: u64,
     pub tokens_out: u64,
+    pub cache_creation_tokens: u64,
     pub cache_read_tokens: u64,
-}
-
-impl Bucket {
-    /// Total billable tokens (fresh in + out) — the neutral quantity for ranking/display.
-    pub fn billable_tokens(&self) -> u64 {
-        self.tokens_in + self.tokens_out
-    }
+    pub reasoning_tokens: u64,
+    /// The ADR-0005 D4 billable total — summed **per row** in SQL, mirroring
+    /// [`sandhi_core::billable_parts`], so what an operator reads equals what the ledger
+    /// charged. Not derivable from the columns above: the reasoning fold is a per-call
+    /// decision, so comparing summed reasoning against summed output gives a different answer.
+    pub billable_tokens: u64,
 }
 
 /// A SQLite-backed usage store.
@@ -153,9 +161,11 @@ impl SqliteStore {
         };
         let sql = format!(
             "SELECT COALESCE({col}, '(none)') AS k, COUNT(*), \
-                COALESCE(SUM(tokens_in),0), COALESCE(SUM(tokens_out),0), COALESCE(SUM(cache_read_tokens),0) \
+                COALESCE(SUM(tokens_in),0), COALESCE(SUM(tokens_out),0), \
+                COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(cache_read_tokens),0), \
+                COALESCE(SUM(reasoning_tokens),0), {BILLABLE_SQL} \
              FROM usage_events {where_clause} GROUP BY k \
-             ORDER BY (COALESCE(SUM(tokens_in),0)+COALESCE(SUM(tokens_out),0)) DESC"
+             ORDER BY {BILLABLE_SQL} DESC"
         );
         let mut stmt = conn.prepare(&sql)?;
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
@@ -165,7 +175,10 @@ impl SqliteStore {
                 calls: r.get::<_, i64>(1)? as u64,
                 tokens_in: r.get::<_, i64>(2)? as u64,
                 tokens_out: r.get::<_, i64>(3)? as u64,
-                cache_read_tokens: r.get::<_, i64>(4)? as u64,
+                cache_creation_tokens: r.get::<_, i64>(4)? as u64,
+                cache_read_tokens: r.get::<_, i64>(5)? as u64,
+                reasoning_tokens: r.get::<_, i64>(6)? as u64,
+                billable_tokens: r.get::<_, i64>(7)? as u64,
             })
         })?;
         rows.collect()
@@ -227,8 +240,11 @@ impl SqliteStore {
     pub fn grand_total(&self) -> rusqlite::Result<Bucket> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT COUNT(*), COALESCE(SUM(tokens_in),0), COALESCE(SUM(tokens_out),0), \
-                COALESCE(SUM(cache_read_tokens),0) FROM usage_events",
+            &format!(
+                "SELECT COUNT(*), COALESCE(SUM(tokens_in),0), COALESCE(SUM(tokens_out),0), \
+                    COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(cache_read_tokens),0), \
+                    COALESCE(SUM(reasoning_tokens),0), {BILLABLE_SQL} FROM usage_events"
+            ),
             [],
             |r| {
                 Ok(Bucket {
@@ -236,7 +252,10 @@ impl SqliteStore {
                     calls: r.get::<_, i64>(0)? as u64,
                     tokens_in: r.get::<_, i64>(1)? as u64,
                     tokens_out: r.get::<_, i64>(2)? as u64,
-                    cache_read_tokens: r.get::<_, i64>(3)? as u64,
+                    cache_creation_tokens: r.get::<_, i64>(3)? as u64,
+                    cache_read_tokens: r.get::<_, i64>(4)? as u64,
+                    reasoning_tokens: r.get::<_, i64>(5)? as u64,
+                    billable_tokens: r.get::<_, i64>(6)? as u64,
                 })
             },
         )
@@ -282,9 +301,13 @@ mod tests {
         assert_eq!(total.cache_read_tokens, 15);
 
         let by_subject = store.totals_by_subject().unwrap();
-        // bob (240 billable) ranks above alice (180)
+        // Billable is the ADR-0005 D4 quantity, so the cache split counts: bob is
+        // 200 in + 5 cache-read + 40 out = 245, alice is (100+5+20) + (50+5+10) = 190.
+        // Under the old narrow in+out helper these read 240 and 180 — less than the ledger
+        // actually charged for the same calls.
         assert_eq!(by_subject[0].key, "bob");
-        assert_eq!(by_subject[0].billable_tokens(), 240);
+        assert_eq!(by_subject[0].billable_tokens, 245);
+        assert_eq!(by_subject[0].cache_read_tokens, 5);
         let alice = by_subject.iter().find(|b| b.key == "alice").unwrap();
         assert_eq!(alice.calls, 2);
         assert_eq!(alice.tokens_in, 150);
@@ -343,11 +366,53 @@ mod tests {
     }
 
     #[test]
+    fn store_matches_core_billable() {
+        // TD-0009 D6 applied here: one billable definition, two implementations (the Rust
+        // `billable_parts` and the SQL mirror), proven equal rather than assumed.
+        //
+        // The fixtures are chosen so a naive aggregate — summing the columns and THEN applying
+        // the reasoning fold — gives a different answer. One call folds reasoning into output
+        // (4 <= 10, adds nothing), the other reports it separately (8 > 3, adds 8).
+        let store = SqliteStore::in_memory().unwrap();
+        let folded = ev("openai", "alice", "team-a", 10, 10)
+            .with_cache(0, 0)
+            .with_reasoning(Some(4));
+        let unfolded = ev("openai", "alice", "team-a", 10, 3)
+            .with_cache(0, 0)
+            .with_reasoning(Some(8));
+        store.emit(&folded);
+        store.emit(&unfolded);
+
+        let rust_sum = folded.billable_tokens() + unfolded.billable_tokens(); // 20 + 21
+        let total = store.grand_total().unwrap();
+        assert_eq!(
+            total.billable_tokens, rust_sum,
+            "SQL must mirror sandhi_core::billable_parts per row"
+        );
+
+        // Guard the guard: if the fold were applied to the summed columns instead of per call,
+        // it would read 33 (reasoning 12 is not > output 13, so nothing is added) instead of 41.
+        let naive = total.tokens_in
+            + total.cache_creation_tokens
+            + total.cache_read_tokens
+            + total.tokens_out
+            + if total.reasoning_tokens > total.tokens_out {
+                total.reasoning_tokens
+            } else {
+                0
+            };
+        assert_ne!(
+            naive, rust_sum,
+            "fixtures must expose the per-call vs aggregate fold difference, else this proves nothing"
+        );
+    }
+
+    #[test]
     fn empty_store_is_zero() {
         let store = SqliteStore::in_memory().unwrap();
         let total = store.grand_total().unwrap();
         assert_eq!(total.calls, 0);
-        assert_eq!(total.billable_tokens(), 0);
+        assert_eq!(total.billable_tokens, 0);
         assert!(store.totals_by_group().unwrap().is_empty());
     }
 }

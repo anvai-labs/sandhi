@@ -155,8 +155,15 @@ pub enum ProviderError {
     Auth,
     /// 429 — provider rate limit.
     RateLimited,
-    /// Any other non-success status.
-    Upstream(u16),
+    /// Any other non-success status, with a bounded snippet of the upstream
+    /// response body when one was readable. 4xx bodies explain WHY the
+    /// provider rejected the request (invalid tool pairing, unknown param,
+    /// context overflow); dropping them forces consumers to debug blind.
+    Upstream {
+        status: u16,
+        body: Option<String>,
+        request_id: Option<String>,
+    },
     /// Network / TLS / decode failure before or during the response.
     Transport(String),
     /// The circuit breaker is open (upstream failing) — the call was not attempted.
@@ -172,7 +179,29 @@ impl std::fmt::Display for ProviderError {
             ProviderError::InvalidRequest(e) => write!(f, "invalid request: {e}"),
             ProviderError::Auth => write!(f, "auth failed (401/403)"),
             ProviderError::RateLimited => write!(f, "rate limited (429)"),
-            ProviderError::Upstream(s) => write!(f, "upstream status {s}"),
+            ProviderError::Upstream {
+                status,
+                body,
+                request_id,
+            } => {
+                match body {
+                    Some(body) => {
+                        // Single-line, display-bounded snippet; the full (capped) body
+                        // travels in ProviderErrorV1.details["upstream_body"].
+                        let snippet: String = body
+                            .chars()
+                            .take(200)
+                            .map(|c| if c == '\n' { ' ' } else { c })
+                            .collect();
+                        write!(f, "upstream status {status}: {snippet}")?;
+                    }
+                    None => write!(f, "upstream status {status}")?,
+                }
+                if let Some(id) = request_id {
+                    write!(f, " [request-id: {id}]")?;
+                }
+                Ok(())
+            }
             ProviderError::Transport(e) => write!(f, "transport error: {e}"),
             ProviderError::CircuitOpen => write!(f, "circuit open (upstream failing)"),
             ProviderError::Timeout(d) => write!(f, "timed out after {}s", d.as_secs_f32()),
@@ -182,13 +211,51 @@ impl std::fmt::Display for ProviderError {
 
 impl std::error::Error for ProviderError {}
 
-/// Map a non-success HTTP status to a [`ProviderError`].
-pub(crate) fn error_for_status(status: u16) -> ProviderError {
+/// Cap for captured upstream error bodies — diagnosability without unbounded memory.
+pub(crate) const UPSTREAM_ERROR_BODY_CAP: usize = 2048;
+
+/// Map a non-success HTTP status to a [`ProviderError`], carrying an optional
+/// bounded snippet of the upstream response body.
+pub(crate) fn error_for_status_with_body(
+    status: u16,
+    body: Option<String>,
+    request_id: Option<String>,
+) -> ProviderError {
     match status {
         401 | 403 => ProviderError::Auth,
         429 => ProviderError::RateLimited,
-        s => ProviderError::Upstream(s),
+        s => ProviderError::Upstream {
+            status: s,
+            body,
+            request_id,
+        },
     }
+}
+
+/// Consume a non-success HTTP response into a [`ProviderError`], capturing a
+/// bounded snippet of the upstream body. Every adapter error path goes through
+/// here so provider-rejection diagnostics reach consumers uniformly.
+pub(crate) async fn error_for_response(resp: reqwest::Response) -> ProviderError {
+    let status = resp.status().as_u16();
+    // The upstream request id (support-ticket currency): providers surface it
+    // under different header names.
+    let request_id = ["x-request-id", "request-id", "anthropic-request-id"]
+        .iter()
+        .find_map(|header| resp.headers().get(*header))
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let body = match resp.text().await {
+        Ok(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.chars().take(UPSTREAM_ERROR_BODY_CAP).collect())
+            }
+        }
+        Err(_) => None,
+    };
+    error_for_status_with_body(status, body, request_id)
 }
 
 /// The adapter contract every provider implements. The metering/resilience **decorator** will

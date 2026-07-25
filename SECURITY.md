@@ -46,15 +46,25 @@ Out of scope:
 - The neutral **unit** model itself (Sandhi emits tokens / cache split /
   GPU-seconds and **never dollars**; pricing is downstream). A disagreement with
   that measure-vs-price boundary is a design question, not a vulnerability.
-- The **unauthenticated dashboard read endpoints** (`/dashboard`, `/api/*`).
-  These are unauthed *by design* for a self-hosted deployment and return masked
-  values only — do not expose the proxy's admin/dashboard surface to an untrusted
-  network. A report that they need no credentials is a known design decision; a
-  report that they leak an **unmasked** secret, or that a *write* endpoint is
-  reachable without an admin token, is in scope.
+- A dashboard deliberately opened with **`SANDHI_DASHBOARD_PUBLIC=1`**, or run with
+  no admin token configured at all. In both cases `/dashboard` and
+  `/dashboard/api/*` are open *by request* and serve masked values only — that is
+  the operator's choice, not a flaw. Either way, do not expose the proxy's
+  admin/dashboard surface to an untrusted network.
+
+  **In scope**, by contrast: reaching those reads *without* the admin bearer when a
+  token **is** configured and `SANDHI_DASHBOARD_PUBLIC` is unset (they are gated by
+  default — ADR-0004 D4), any **unmasked** secret in a response, or a *write*
+  endpoint reachable without an admin token.
 - Documented, not-yet-implemented enforcement: per-minute **rate limits** are
   stored but not enforced, and enforcement is **proxy-only** — the in-process
   bindings meter without enforcing. See the CHANGELOG's "Known limitations".
+
+Also note: client-facing provider errors are **redacted by default** (code, HTTP
+status, request id, canonical message). `SANDHI_ERROR_DETAIL=full` opts a
+single-tenant deployment into the full error including a bounded upstream body —
+an upstream body can echo prompt fragments, so leaking one *across tenants* is in
+scope, while what a deployment shows itself with `full` set is not.
 
 ## Supported versions
 

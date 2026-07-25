@@ -164,6 +164,7 @@ async fn main() {
     state.public_url = public_url;
     // ADR-0004 D4: dashboard read endpoints follow the admin token unless explicitly re-opened.
     state.dashboard_public = std::env::var("SANDHI_DASHBOARD_PUBLIC").as_deref() == Ok("1");
+    state.error_detail_full = std::env::var("SANDHI_ERROR_DETAIL").as_deref() == Ok("full");
     // Recover the operator budget metadata (policy / window / limit) persisted in the durable
     // ledger, so caps set before a restart keep their policy lookup + dashboard + alert thresholds.
     {
