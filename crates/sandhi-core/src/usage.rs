@@ -363,7 +363,8 @@ mod tests {
         assert_eq!(ev.subject_id.as_deref(), Some("alice"));
         assert_eq!(ev.tokens_in, 10);
         assert_eq!(ev.cache_read_tokens, 2);
-        assert_eq!(ev.billable_tokens(), 15);
+        // 10 fresh in + 0 cache-creation + 2 cache-read + 5 out (D4); narrow read 15.
+        assert_eq!(ev.billable_tokens(), 17);
     }
 
     #[test]

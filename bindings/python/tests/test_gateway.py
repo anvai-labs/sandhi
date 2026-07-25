@@ -448,7 +448,9 @@ def test_gateway_attributes_enforces_and_records_budget():
     assert event["subject_id"] == "alice"
     assert event["group_id"] == "platform"
     assert event["session_id"] == "conv_7"
-    assert gateway.spent("group:platform") == 300
+    # ADR-0005 D4 billable: 220 fresh in + 10 cache-write + 40 cache-read + 80 out.
+    # The narrow in+out reading was 300, i.e. less than the proxy charges for this call.
+    assert gateway.spent("group:platform") == 350
     assert gateway.check_budget("group:platform", 701) is False
 
 
@@ -645,11 +647,12 @@ def test_gateway_meter_parses_attributes_records_and_lists_events():
     assert event["provider"] == "anthropic"
     assert event["usage_completeness"] == "final"
     assert event["backend"] == "external"
-    assert gateway.spent("group:platform") == 120  # 100 + 20 billable
+    # 100 fresh in + 5 cache-write + 10 cache-read + 20 out (D4); narrow read 120.
+    assert gateway.spent("group:platform") == 135
 
-    # Within/over budget (120 spent of 1000 → 880 remaining).
-    assert gateway.check_budget("group:platform", 879) is True
-    assert gateway.check_budget("group:platform", 881) is False
+    # Within/over budget (135 spent of 1000 → 865 remaining).
+    assert gateway.check_budget("group:platform", 864) is True
+    assert gateway.check_budget("group:platform", 866) is False
 
     listed = gateway.events()
     assert len(listed) == 1

@@ -17,7 +17,35 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **One billable definition everywhere.** ADR-0005 D4 defines the billable quantity as fresh
+  input + the cache split + output (+ unfolded reasoning), and the proxy settled on it — but two
+  other paths still used a narrower `tokens_in + tokens_out`, so the same call was counted
+  differently depending on who asked:
+  - the **in-process bindings** recorded the narrow number into the budget ledger, under-counting
+    every cache read (a call with 40 fresh-input / 60 cache-read / 20 output recorded 60 while
+    the proxy charged 120 — **2× under-count** on cache-heavy traffic);
+  - the **dashboard and `sandhi usage`** ranked and displayed the narrow number, so an operator
+    reconciling against a cap saw less than the ledger had actually charged.
+
+  `UsageEvent::billable_tokens()` now returns the D4 quantity, and both it and `billable()`
+  route through one shared `billable_parts()` so they cannot drift.
+
+  > **Behaviour change:** in-process spend recorded via the Python/Node `Gateway` increases for
+  > any call with cache reads/writes or separately-reported reasoning tokens. Budgets tightened
+  > accordingly — a cap that was silently admitting more than it should now enforces as written.
+  > Proxy enforcement is unchanged; it was already correct.
+
+### Added
+
+- **`sandhi_core::billable_parts()`** — the single D4 formula over raw components, shared by
+  `billable()`, `UsageEvent::billable_tokens()`, and the store's SQL.
+- **Aggregates expose the full split.** `Bucket` gains `cache_creation_tokens`,
+  `reasoning_tokens`, and an exact `billable_tokens`, surfaced in the dashboard table and
+  `sandhi usage`. The SQL sums the D4 quantity **per row** — the reasoning fold is a per-call
+  decision, so summing the columns first and folding afterwards gives a different, wrong answer;
+  a conformance test pins the SQL against the Rust formula and asserts the naive form differs.
 
 ## [0.1.3] — 2026-07-24
 
