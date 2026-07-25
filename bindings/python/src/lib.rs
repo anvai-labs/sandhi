@@ -69,10 +69,20 @@ fn parse_openai_protocol(value: Option<&str>) -> PyResult<OpenAiProtocol> {
     }
 }
 
+pyo3::create_exception!(
+    sandhi_gateway,
+    SandhiProviderError,
+    PyRuntimeError,
+    "Provider-boundary error. The exception message is a serialized ProviderErrorV1 \
+JSON payload (code, message, retryable, http_status, provider, request_id, details) \
+so consumers can branch on typed fields without string-sniffing arbitrary \
+RuntimeErrors. Subclasses RuntimeError, so pre-typed consumers keep working."
+);
+
 fn typed_provider_err_to_py(e: ProviderError, provider: &str) -> PyErr {
     let value = e.as_typed(Some(provider));
     let json = serde_json::to_string(&value).unwrap_or_else(|_| e.to_string());
-    PyRuntimeError::new_err(json)
+    SandhiProviderError::new_err(json)
 }
 
 /// Persistent typed provider factory. Provider handles created by this object retain their Rust
@@ -370,7 +380,7 @@ impl TypedEventStreamIter {
             let mut guard = rx.lock().await;
             match guard.recv().await {
                 Some(Ok(event_json)) => Ok(event_json),
-                Some(Err(error_json)) => Err(PyRuntimeError::new_err(error_json)),
+                Some(Err(error_json)) => Err(SandhiProviderError::new_err(error_json)),
                 None => Err(PyStopAsyncIteration::new_err(())),
             }
         })
@@ -785,6 +795,10 @@ fn sandhi_gateway(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add(
         "__doc__",
         "Sandhi — the metering layer for AI agents (in-process Python middleware).",
+    )?;
+    m.add(
+        "SandhiProviderError",
+        m.py().get_type_bound::<SandhiProviderError>(),
     )?;
     m.add_function(wrap_pyfunction!(wire_contract_version, m)?)?;
     m.add_function(wrap_pyfunction!(parse_usage, m)?)?;
