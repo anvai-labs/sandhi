@@ -866,3 +866,28 @@ def test_sandhi_provider_error_is_typed_runtime_error():
 
     assert hasattr(sg, "SandhiProviderError")
     assert issubclass(sg.SandhiProviderError, RuntimeError)
+
+
+def test_bearer_auth_scheme_is_a_noop_for_openai_family():
+    """A semantically-satisfied request is accepted, not rejected (TD-0008 rule 5).
+
+    Gateway callers (victor TD-0003 P3) present virtual keys as bearer without
+    knowing which family they front; Bearer IS the openai-family default.
+    Construction-only: no network involved.
+    """
+    rt = sg.ProviderRuntime()
+    handle = rt.provider(
+        "openai", "gpt-test", "vk_virtual", base_url="http://127.0.0.1:9", auth_scheme="bearer"
+    )
+    assert handle.provider == "openai"
+
+
+def test_contradictory_auth_scheme_still_rejected_with_explanation():
+    rt = sg.ProviderRuntime()
+    with pytest.raises(ValueError) as excinfo:
+        rt.provider(
+            "openai", "gpt-test", "key", base_url="http://127.0.0.1:9", auth_scheme="api_key"
+        )
+    message = str(excinfo.value)
+    assert "api_key" in message
+    assert "no-op" in message  # the error teaches the contract
