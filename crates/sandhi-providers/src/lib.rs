@@ -235,25 +235,23 @@ pub(crate) fn error_for_status_with_body(
 /// Consume a non-success HTTP response into a [`ProviderError`], capturing a
 /// bounded snippet of the upstream body. Every adapter error path goes through
 /// here so provider-rejection diagnostics reach consumers uniformly.
-pub(crate) async fn error_for_response(resp: reqwest::Response) -> ProviderError {
+pub(crate) async fn error_for_response(
+    resp: reqwest::Response,
+    vendor_request_id_header: Option<&str>,
+) -> ProviderError {
     let status = resp.status().as_u16();
-    // The upstream request id (support-ticket currency): providers surface it
-    // under different header names. Priority: the de-facto standard, then
-    // vendor-specific (Anthropic; Moonshot's Msh-Request-Id — an OpenAI-compat
-    // vendor that skips x-request-id entirely, found via live TD-0008 e2e),
-    // then the edge-network trace id as a last resort (Cloudflare-fronted
-    // providers) — any of these is quotable in a provider support ticket.
-    let request_id = [
-        "x-request-id",
-        "request-id",
-        "anthropic-request-id",
-        "msh-request-id",
-        "cf-ray",
-    ]
-    .iter()
-    .find_map(|header| resp.headers().get(*header))
-    .and_then(|value| value.to_str().ok())
-    .map(str::to_owned);
+    // The upstream request id (support-ticket currency). The shared path knows
+    // only the de-facto standard names; a vendor that deviates declares its
+    // header as a transport fact (`OpenAiCompatProviderSpec::request_id_header`,
+    // e.g. Moonshot's `Msh-Request-Id`) or passes it from its adapter — vendor
+    // differences are data/strategy, never branches in shared code.
+    let request_id = ["x-request-id", "request-id"]
+        .iter()
+        .copied()
+        .chain(vendor_request_id_header)
+        .find_map(|header| resp.headers().get(header))
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
     let body = match resp.text().await {
         Ok(text) => {
             let trimmed = text.trim();
@@ -617,13 +615,14 @@ mod error_for_response_tests {
     }
 
     #[tokio::test]
-    async fn moonshot_msh_request_id_is_extracted() {
+    async fn vendor_declared_header_is_extracted() {
+        // The vendor header arrives as DATA (spec/adapter), not a shared-list entry.
         let resp = response_with(
             404,
             &[("Msh-Request-Id", "msh_abc123")],
             r#"{"error":{"message":"Not found the model"}}"#,
         );
-        match error_for_response(resp).await {
+        match error_for_response(resp, Some("msh-request-id")).await {
             ProviderError::Upstream {
                 status,
                 body,
@@ -641,14 +640,10 @@ mod error_for_response_tests {
     async fn standard_header_wins_over_vendor_and_edge() {
         let resp = response_with(
             500,
-            &[
-                ("cf-ray", "ray-1"),
-                ("x-request-id", "std-1"),
-                ("Msh-Request-Id", "msh-1"),
-            ],
+            &[("x-request-id", "std-1"), ("Msh-Request-Id", "msh-1")],
             "",
         );
-        match error_for_response(resp).await {
+        match error_for_response(resp, Some("msh-request-id")).await {
             ProviderError::Upstream { request_id, .. } => {
                 assert_eq!(request_id.as_deref(), Some("std-1"));
             }
@@ -657,13 +652,21 @@ mod error_for_response_tests {
     }
 
     #[tokio::test]
-    async fn cf_ray_is_the_last_resort() {
+    async fn infrastructure_headers_are_not_request_ids() {
+        // cf-ray is an edge trace id, not the provider's request id — the field's
+        // semantics stay clean: no vendor declaration, no id.
         let resp = response_with(502, &[("cf-ray", "8f3abc-SJC")], "bad gateway");
-        match error_for_response(resp).await {
+        match error_for_response(resp, None).await {
             ProviderError::Upstream { request_id, .. } => {
-                assert_eq!(request_id.as_deref(), Some("8f3abc-SJC"));
+                assert_eq!(request_id, None);
             }
             other => panic!("expected Upstream, got {other}"),
         }
+    }
+
+    #[test]
+    fn moonshot_spec_declares_its_request_id_header() {
+        let spec = resolve_openai_compat_provider("moonshot").expect("moonshot spec");
+        assert_eq!(spec.request_id_header, Some("msh-request-id"));
     }
 }

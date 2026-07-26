@@ -30,6 +30,11 @@ pub struct OpenAiCompatProviderSpec {
     pub header_options: &'static [(&'static str, &'static str)],
     /// Named endpoint option → base URL for providers with region/plan-specific routing.
     pub endpoint_options: &'static [(&'static str, &'static str)],
+    /// The response header carrying this vendor's request id, when it deviates from the
+    /// de-facto standard (`x-request-id` / `request-id`). A transport fact like
+    /// `base_url` — vendor differences are DATA on the spec, not code branches
+    /// (e.g. Moonshot's `Msh-Request-Id`).
+    pub request_id_header: Option<&'static str>,
 }
 
 impl OpenAiCompatProviderSpec {
@@ -55,6 +60,7 @@ pub const OPENAI_COMPAT_PROVIDER_SPECS: &[OpenAiCompatProviderSpec] = &[
         model_routes: &[],
         header_options: &[],
         endpoint_options: &[],
+        request_id_header: None,
     },
     OpenAiCompatProviderSpec {
         slug: "moonshot",
@@ -63,6 +69,7 @@ pub const OPENAI_COMPAT_PROVIDER_SPECS: &[OpenAiCompatProviderSpec] = &[
         model_routes: MOONSHOT_ROUTES,
         header_options: &[],
         endpoint_options: &[],
+        request_id_header: Some("msh-request-id"),
     },
     OpenAiCompatProviderSpec {
         slug: "together",
@@ -71,6 +78,7 @@ pub const OPENAI_COMPAT_PROVIDER_SPECS: &[OpenAiCompatProviderSpec] = &[
         model_routes: &[],
         header_options: &[],
         endpoint_options: &[],
+        request_id_header: None,
     },
     OpenAiCompatProviderSpec {
         slug: "groq",
@@ -79,6 +87,7 @@ pub const OPENAI_COMPAT_PROVIDER_SPECS: &[OpenAiCompatProviderSpec] = &[
         model_routes: &[],
         header_options: &[],
         endpoint_options: &[],
+        request_id_header: None,
     },
     OpenAiCompatProviderSpec {
         slug: "cerebras",
@@ -87,6 +96,7 @@ pub const OPENAI_COMPAT_PROVIDER_SPECS: &[OpenAiCompatProviderSpec] = &[
         model_routes: &[],
         header_options: &[],
         endpoint_options: &[],
+        request_id_header: None,
     },
     OpenAiCompatProviderSpec {
         slug: "fireworks",
@@ -95,6 +105,7 @@ pub const OPENAI_COMPAT_PROVIDER_SPECS: &[OpenAiCompatProviderSpec] = &[
         model_routes: &[],
         header_options: &[],
         endpoint_options: &[],
+        request_id_header: None,
     },
     OpenAiCompatProviderSpec {
         slug: "openrouter",
@@ -103,6 +114,7 @@ pub const OPENAI_COMPAT_PROVIDER_SPECS: &[OpenAiCompatProviderSpec] = &[
         model_routes: &[],
         header_options: &[("site_url", "HTTP-Referer"), ("site_name", "X-Title")],
         endpoint_options: &[],
+        request_id_header: None,
     },
     OpenAiCompatProviderSpec {
         slug: "xai",
@@ -111,6 +123,7 @@ pub const OPENAI_COMPAT_PROVIDER_SPECS: &[OpenAiCompatProviderSpec] = &[
         model_routes: &[],
         header_options: &[],
         endpoint_options: &[],
+        request_id_header: None,
     },
     OpenAiCompatProviderSpec {
         slug: "mistral",
@@ -119,6 +132,7 @@ pub const OPENAI_COMPAT_PROVIDER_SPECS: &[OpenAiCompatProviderSpec] = &[
         model_routes: &[],
         header_options: &[],
         endpoint_options: &[],
+        request_id_header: None,
     },
     OpenAiCompatProviderSpec {
         slug: "deepseek",
@@ -127,6 +141,7 @@ pub const OPENAI_COMPAT_PROVIDER_SPECS: &[OpenAiCompatProviderSpec] = &[
         model_routes: &[],
         header_options: &[],
         endpoint_options: &[],
+        request_id_header: None,
     },
     OpenAiCompatProviderSpec {
         slug: "zai",
@@ -149,6 +164,7 @@ pub const OPENAI_COMPAT_PROVIDER_SPECS: &[OpenAiCompatProviderSpec] = &[
                 "https://open.bigmodel.cn/api/coding/paas/v4",
             ),
         ],
+        request_id_header: None,
     },
     OpenAiCompatProviderSpec {
         slug: "qwen",
@@ -164,6 +180,7 @@ pub const OPENAI_COMPAT_PROVIDER_SPECS: &[OpenAiCompatProviderSpec] = &[
             ("portal", "https://portal.qwen.ai/v1"),
             ("coding", "https://coding.dashscope.aliyuncs.com/v1"),
         ],
+        request_id_header: None,
     },
 ];
 
