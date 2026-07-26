@@ -167,17 +167,29 @@ impl PyProviderRuntime {
     ) -> PyResult<TypedProvider> {
         let normalized = provider.trim().to_ascii_lowercase();
         let protocol = parse_openai_protocol(protocol.as_deref())?;
-        if auth_scheme
+        // Contract principle (TD-0008): a request whose semantics are already
+        // satisfied is a NO-OP, not an error. Every non-Anthropic/Gemini family
+        // authenticates with `Authorization: Bearer`, so `auth_scheme="bearer"`
+        // is accepted family-agnostically — callers assembling gateway handles
+        // (victor TD-0003 P3) need not know which family they front. Only a
+        // genuinely contradictory scheme (`api_key` where no such scheme
+        // exists) is rejected.
+        if let Some(scheme) = auth_scheme
             .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-            && !matches!(
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let scheme_families = matches!(
                 normalized.as_str(),
                 "anthropic" | "claude" | "gemini" | "google"
-            )
-        {
-            return Err(PyValueError::new_err(
-                "auth_scheme is only valid for the Anthropic or Gemini protocol",
-            ));
+            );
+            if !scheme_families && scheme != "bearer" {
+                return Err(PyValueError::new_err(format!(
+                    "auth_scheme {scheme:?} is only valid for the Anthropic or Gemini \
+protocol; other families always authenticate with 'Authorization: Bearer' \
+(auth_scheme=\"bearer\" is accepted there as a no-op)"
+                )));
+            }
         }
         let handle = if protocol != OpenAiProtocol::ChatCompletions {
             let resolved_base_url = if let Some(base_url) = base_url {

@@ -121,3 +121,12 @@ handle). "Sandhi owns transport" is unconditional for both families.
    paths (a replay can double-bill).
 4. **Speed claims need traces** (ADR-052 discipline, imported): no boundary redesign for
    performance without a filed measurement.
+5. **Parameter validity is contract, not a hidden runtime rule.** A constraint on a
+   binding parameter (which values, for which families) must be visible in the contract
+   surface (facade docs/types) and exercised by consumer conformance tests against the
+   REAL binding — a rule that exists only as a runtime error inside the dispatcher forces
+   consumers to duplicate it as a guess (the gateway `auth_scheme` incident, victor#678:
+   victor's mocked seam tests could not see the binding's validation, and the fix
+   re-encoded sandhi's private rule heuristically in victor). Corollary: a request whose
+   semantics are already satisfied is a NO-OP, not an error — reject contradictions,
+   accept redundancy.
