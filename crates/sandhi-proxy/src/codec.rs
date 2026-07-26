@@ -317,9 +317,13 @@ fn decode_gemini_request(
                 .collect()
         });
 
-    // Anything this codec does not model — safetySettings, cachedContent, responseSchema, topP —
-    // is kept verbatim so it survives a same-family forward instead of being dropped.
-    let mut extensions = BTreeMap::new();
+    // Anything this codec does not model — safetySettings, cachedContent, responseSchema,
+    // topP/topK — is kept verbatim so it survives translation. It is stashed under
+    // `extensions["gemini"]` (W3d/G7 D5) — the SAME key `encode_gemini_request` clones as its
+    // base body — so a gemini->typed->gemini round-trip is lossless. (The pre-D5 flat stash put
+    // these at `extensions["topP"]` / `extensions["generationConfig"]`, which the encoder never
+    // read, silently dropping them on re-encode.)
+    let mut gemini_body = Map::new();
     for (key, value) in object {
         if !matches!(
             key.as_str(),
@@ -330,7 +334,7 @@ fn decode_gemini_request(
                 | "generationConfig"
                 | "model"
         ) {
-            extensions.insert(key.clone(), value.clone());
+            gemini_body.insert(key.clone(), value.clone());
         }
     }
     if let Some(generation) = generation {
@@ -345,8 +349,12 @@ fn decode_gemini_request(
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
         if !leftovers.is_empty() {
-            extensions.insert("generationConfig".to_string(), Value::Object(leftovers));
+            gemini_body.insert("generationConfig".to_string(), Value::Object(leftovers));
         }
+    }
+    let mut extensions = BTreeMap::new();
+    if !gemini_body.is_empty() {
+        extensions.insert("gemini".to_string(), Value::Object(gemini_body));
     }
 
     let request = ChatRequestV1 {
@@ -2222,14 +2230,46 @@ mod gemini_codec_tests {
         let (request, _) = decode_gemini_request(body, metadata()).unwrap();
 
         assert_eq!(request.temperature, Some(0.5));
-        // Everything without a neutral equivalent survives in extensions.
-        assert!(request.extensions.contains_key("safetySettings"));
-        assert!(request.extensions.contains_key("cachedContent"));
-        assert_eq!(request.extensions["generationConfig"]["topP"], json!(0.9));
+        // W3d/G7 D5: unmodelled fields survive under `extensions["gemini"]` —
+        // the key the gemini encoder reads — so they round-trip losslessly.
+        let gemini = request.extensions["gemini"].as_object().unwrap();
+        assert!(gemini.contains_key("safetySettings"));
+        assert!(gemini.contains_key("cachedContent"));
+        assert_eq!(gemini["generationConfig"]["topP"], json!(0.9));
         assert_eq!(
-            request.extensions["generationConfig"]["responseMimeType"],
+            gemini["generationConfig"]["responseMimeType"],
             json!("application/json")
         );
+    }
+
+    #[test]
+    fn gemini_ingress_stash_matches_the_encoder_base_key() {
+        // W3d/G7 D5: the encoder (gemini_typed::encode_gemini_request) clones
+        // extensions["gemini"] as its base body and its generationConfig from
+        // extensions["gemini"]["generationConfig"]. The ingress stash must land
+        // exactly there for a gemini->typed->gemini round-trip to be lossless —
+        // pre-D5 it landed at extensions["topP"]/extensions["generationConfig"],
+        // which the encoder never read (silent drop on re-encode).
+        let body = json!({
+            "contents": [{"role":"user","parts":[{"text":"hi"}]}],
+            "safetySettings": [{"category":"HARM_CATEGORY_HATE_SPEECH","threshold":"BLOCK_NONE"}],
+            "generationConfig": {"temperature": 0.5, "topP": 0.9}
+        });
+        let (request, _) = decode_gemini_request(body, metadata()).unwrap();
+
+        // The ONLY extensions key is "gemini" — no stray flat keys the encoder can't see.
+        assert_eq!(
+            request.extensions.keys().collect::<Vec<_>>(),
+            vec!["gemini"]
+        );
+        let gemini = request.extensions["gemini"].as_object().unwrap();
+        assert_eq!(
+            gemini["safetySettings"][0]["threshold"],
+            json!("BLOCK_NONE")
+        );
+        // temperature is lifted to a typed field; topP (unmodelled) stays in the base gen-config.
+        assert_eq!(gemini["generationConfig"]["topP"], json!(0.9));
+        assert!(gemini["generationConfig"].get("temperature").is_none());
     }
 
     #[test]
