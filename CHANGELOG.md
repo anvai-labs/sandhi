@@ -54,6 +54,13 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 
 ### Fixed
 
+- **Client-facing failures are rendered in the caller's dialect** (TD-0010 D2, completed). Beyond
+  the auth paths below, a missing upstream registration and both transparent-plane failures
+  returned a bare `{"error": "<string>"}` on vendor routes — unparseable by the SDK that made the
+  call, which defeats its own error handling. All client-facing paths now use the dialect
+  renderer. Sandhi's **operator** API (`/admin/*`, `/catalog/models`, `/dashboard/api/*`) keeps
+  its flat envelope on purpose: it is consumed by the `sandhi` CLI, not by a vendor SDK, and has
+  no client dialect to render.
 - **Auth failures are rendered in the caller's dialect** (TD-0010 D2, auth slice). A missing,
   expired or unknown virtual key returned a flat `{"error": "<string>"}` that two of the three
   SDKs cannot parse, and its text told every client to send `Authorization: Bearer` — advice that

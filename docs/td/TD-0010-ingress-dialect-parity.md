@@ -1,7 +1,7 @@
 # TD-0010: Ingress dialect parity — drop-in compatibility as a release gate
 
 - **Status:** Proposed (2026-07-25). **P1 complete** (D1 in #84, D5 in the SDK-conformance
-  suite); **P3 and P4a complete** (discovery; Gemini on the transparent plane); **D2's auth slice complete** — the
+  suite); **P2, P3 and P4a complete** (errors; discovery; Gemini on the transparent plane); **D2 complete** — the
   401/403 paths now render per dialect and name each vendor's own scheme; this document was corrected
   during that implementation — see the error-shape bullet and D2.
 - **Relates to:** ADR-0004 (two-plane proxy), TD-0006 (transparent metering), TD-0002 (typed
@@ -87,8 +87,17 @@ independent, and this TD must not quietly widen the second.
 
 > **Resolved while implementing P4a:** there was no ordering problem at the `handle()` call
 > sites — the dialect is already a parameter there, so the auth failures simply had not been
-> routed through the dialect renderer. Done. What remains of D2 is the admin/dashboard
-> rejections, which genuinely are pre-dialect (no route-derived dialect exists for them).
+> routed through the dialect renderer.
+>
+> **D2 closed, narrower than first written.** Every remaining flat `error()` turned out to be on
+> Sandhi's **own operator surface** — `/catalog/models` and `/dashboard/api/*`, which share the
+> flat `{"error": "<string>"}` contract with `/admin/*` via `operator::err` and are consumed by
+> the `sandhi` CLI, not by any vendor SDK. Rendering those "in a dialect" is meaningless: there
+> is no client dialect to render. Converting them would be churn against a working contract with
+> real CLI-compatibility risk. **D2 therefore covers the client-facing paths only**, and those
+> are done: auth rejections, missing-upstream, and both transparent-plane failures now render in
+> the caller's dialect. If the operator API's envelope is ever revisited, that is its own
+> decision about Sandhi's admin contract — not part of vendor parity.
 
 **D3 — The dialect owns discovery, filtered by the virtual key.** `GET /v1/models` (OpenAI
 shape), the Anthropic equivalent, and Gemini's `ListModels`, all sourced from the existing
@@ -115,7 +124,7 @@ advertised as one — no aspirational rows.
 | Phase | Scope | Acceptance |
 |---|---|---|
 | **P1** ✅ | D1 credential extraction per dialect + the real-SDK conformance suite for OpenAI and Anthropic | **Met.** `tests/sdk-conformance/` starts the real proxy against a mock upstream and drives `openai-python` + `anthropic-python` unmodified; verified to fail (`401 missing bearer virtual key`) when Anthropic's scheme list is reverted to Bearer-only |
-| **P2** | D2 dialect-shaped errors | An SDK-raised error exposes `message`/`type`/`status` natively per vendor; redaction behaviour from #77 unchanged, proven by a test that asserts an upstream body is still absent by default |
+| **P2** ✅ | D2 dialect-shaped errors on the **client-facing** paths | **Met.** Auth rejections, missing-upstream and transparent-plane failures render per dialect (OpenAI `{error:{…}}`, Anthropic `{type:"error",…}`, Gemini numeric `code` + canonical `status`); redaction from #77 unchanged. Sandhi's operator API keeps its flat envelope deliberately — see the note under D2 |
 | **P3** ✅ | D3 discovery endpoints, allowlist-filtered | **Met.** `client.models.list()` works unmodified on all three SDKs; a scoped key lists exactly its allowlist, an unscoped key gets the upstream catalog, and discovery is authenticated because it reveals what a credential may call |
 | **P4a** ✅ | Gemini ingress on the **transparent plane only**, `x-goog-api-key` header auth | **Met.** `google-genai` completes streaming + non-streaming calls unmodified; `?key=` is refused; cross-family is refused rather than translated from the accounting-grade decode |
 | **P4b** | Cross-family translation for Gemini ingress (a faithful Gemini ↔ `ChatRequestV1` codec) | A Gemini client resolving to a non-Gemini upstream round-trips tools, inline media and safety settings without loss |

@@ -946,3 +946,79 @@ async fn discovery_lists_only_the_models_the_key_permits() {
         .unwrap();
     assert_eq!(anon.status(), StatusCode::UNAUTHORIZED);
 }
+
+/// TD-0010 D2: a failure on a VENDOR path must be parseable by that vendor's SDK. These are the
+/// paths a client actually hits, so a bare `{"error":"<string>"}` there defeats the client's own
+/// error handling — the operator API (`/admin/*`, `/dashboard/api/*`) keeps its flat shape on
+/// purpose, since no vendor SDK reads it.
+#[tokio::test]
+async fn upstream_failures_are_rendered_in_the_callers_dialect() {
+    // A key bound to an upstream that was never registered: the 502 path every dialect shares.
+    let keys = KeyStore::new();
+    for id in ["vk_openai", "vk_anthropic", "vk_gemini"] {
+        keys.insert(VirtualKey {
+            id: id.into(),
+            subject_id: Some("alice".into()),
+            group_id: Some("platform".into()),
+            upstream_ref: "nonexistent".into(),
+            ..Default::default()
+        });
+    }
+    let state = Arc::new(ProxyState::new(
+        keys,
+        ProxyLedger::in_memory(),
+        Arc::new(InMemorySink::default()),
+        HashMap::new(),
+        None,
+    ));
+
+    for (uri, header, token, body) in [
+        (
+            "/v1/chat/completions",
+            "authorization",
+            "Bearer vk_openai",
+            r#"{"model":"m","messages":[]}"#,
+        ),
+        ("/v1/messages", "x-api-key", "vk_anthropic", ANTHROPIC_BODY),
+        (
+            "/v1beta/models/m:generateContent",
+            "x-goog-api-key",
+            "vk_gemini",
+            r#"{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}"#,
+        ),
+    ] {
+        let app = build_app(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .header(header, token)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{uri}");
+        let payload = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+
+        // Structured in every dialect — never a bare string.
+        assert!(
+            value["error"].is_object(),
+            "{uri}: expected a structured error, got {value}"
+        );
+        match uri {
+            "/v1/messages" => assert_eq!(value["type"], "error", "{uri}"),
+            // Google's shape: numeric code + canonical status name.
+            "/v1beta/models/m:generateContent" => {
+                assert_eq!(value["error"]["code"], 502, "{uri}");
+                assert_eq!(value["error"]["status"], "INTERNAL", "{uri}");
+            }
+            _ => {}
+        }
+    }
+}
