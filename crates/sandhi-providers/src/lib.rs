@@ -238,12 +238,22 @@ pub(crate) fn error_for_status_with_body(
 pub(crate) async fn error_for_response(resp: reqwest::Response) -> ProviderError {
     let status = resp.status().as_u16();
     // The upstream request id (support-ticket currency): providers surface it
-    // under different header names.
-    let request_id = ["x-request-id", "request-id", "anthropic-request-id"]
-        .iter()
-        .find_map(|header| resp.headers().get(*header))
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
+    // under different header names. Priority: the de-facto standard, then
+    // vendor-specific (Anthropic; Moonshot's Msh-Request-Id — an OpenAI-compat
+    // vendor that skips x-request-id entirely, found via live TD-0008 e2e),
+    // then the edge-network trace id as a last resort (Cloudflare-fronted
+    // providers) — any of these is quotable in a provider support ticket.
+    let request_id = [
+        "x-request-id",
+        "request-id",
+        "anthropic-request-id",
+        "msh-request-id",
+        "cf-ray",
+    ]
+    .iter()
+    .find_map(|header| resp.headers().get(*header))
+    .and_then(|value| value.to_str().ok())
+    .map(str::to_owned);
     let body = match resp.text().await {
         Ok(text) => {
             let trimmed = text.trim();
@@ -590,6 +600,70 @@ mod metered_passthrough_tests {
             let (usage, _) = drive(chunks, sniff).await;
             assert_eq!(usage.tokens_in, 10, "split {split}");
             assert_eq!(usage.tokens_out, 5, "split {split}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod error_for_response_tests {
+    use super::*;
+
+    fn response_with(status: u16, headers: &[(&str, &str)], body: &str) -> reqwest::Response {
+        let mut builder = http::Response::builder().status(status);
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        reqwest::Response::from(builder.body(body.to_owned()).expect("test response"))
+    }
+
+    #[tokio::test]
+    async fn moonshot_msh_request_id_is_extracted() {
+        let resp = response_with(
+            404,
+            &[("Msh-Request-Id", "msh_abc123")],
+            r#"{"error":{"message":"Not found the model"}}"#,
+        );
+        match error_for_response(resp).await {
+            ProviderError::Upstream {
+                status,
+                body,
+                request_id,
+            } => {
+                assert_eq!(status, 404);
+                assert_eq!(request_id.as_deref(), Some("msh_abc123"));
+                assert!(body.unwrap().contains("Not found the model"));
+            }
+            other => panic!("expected Upstream, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn standard_header_wins_over_vendor_and_edge() {
+        let resp = response_with(
+            500,
+            &[
+                ("cf-ray", "ray-1"),
+                ("x-request-id", "std-1"),
+                ("Msh-Request-Id", "msh-1"),
+            ],
+            "",
+        );
+        match error_for_response(resp).await {
+            ProviderError::Upstream { request_id, .. } => {
+                assert_eq!(request_id.as_deref(), Some("std-1"));
+            }
+            other => panic!("expected Upstream, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cf_ray_is_the_last_resort() {
+        let resp = response_with(502, &[("cf-ray", "8f3abc-SJC")], "bad gateway");
+        match error_for_response(resp).await {
+            ProviderError::Upstream { request_id, .. } => {
+                assert_eq!(request_id.as_deref(), Some("8f3abc-SJC"));
+            }
+            other => panic!("expected Upstream, got {other}"),
         }
     }
 }
