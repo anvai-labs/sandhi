@@ -105,6 +105,9 @@ class RequestMetadataV1(TypedDict, total=False):
     subject_id: str
     group_id: str
     route: str
+class ThinkingV1(TypedDict):
+    enabled: bool
+    budget_tokens: NotRequired[int]
 class ChatRequestV1(TypedDict):
     model: str
     messages: list[ChatMessageV1]
@@ -117,6 +120,8 @@ class ChatRequestV1(TypedDict):
     response_format: NotRequired[JsonValue]
     seed: NotRequired[int]
     metadata: NotRequired[RequestMetadataV1]
+    reasoning_effort: NotRequired[str]
+    thinking: NotRequired[ThinkingV1]
     include_native_response: NotRequired[bool]
     extensions: NotRequired[dict[str, JsonValue]]
 class UsageV2(TypedDict):
@@ -241,11 +246,13 @@ export type ChatMessageV1 =
   | {{ role: "function"; content: MessageContent; name: string }}
 export interface ToolDefinitionV1 {{ name: string; parameters: JsonValue; description?: string; strict?: boolean }}
 export interface RequestMetadataV1 {{ session_id?: string; virtual_key_id?: string; subject_id?: string; group_id?: string; route?: string }}
+export interface ThinkingV1 {{ enabled: boolean; budget_tokens?: number }}
 export interface ChatRequestV1 {{
   schema_version?: "1"; model: string; messages: ChatMessageV1[]; tools?: ToolDefinitionV1[]
   tool_choice?: "none" | "auto" | "required" | {{ name: string }}; temperature?: number
   max_output_tokens?: number; stop?: string[]; response_format?: JsonValue; seed?: number
-  metadata?: RequestMetadataV1; include_native_response?: boolean
+  metadata?: RequestMetadataV1; reasoning_effort?: string; thinking?: ThinkingV1
+  include_native_response?: boolean
   extensions?: Record<string, JsonValue>
 }}
 export interface UsageV2 {{

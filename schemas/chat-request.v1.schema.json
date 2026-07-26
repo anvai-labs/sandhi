@@ -40,6 +40,13 @@
     "model": {
       "type": "string"
     },
+    "reasoning_effort": {
+      "description": "Reasoning effort budget (W3d/G7). OpenAI o-series/GPT-5 and Moonshot kimi-k3 take it as a top-level `reasoning_effort`; the Responses codec maps it to `reasoning.effort`. Promoted from `extensions[\"openai\"]` so it is portable across families instead of visible only to the openai encoder. Vocabulary is the OpenAI one (`low`/`medium`/`high`); other encoders that lack an effort concept ignore it.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "response_format": true,
     "schema_version": {
       "default": "1",
@@ -67,6 +74,17 @@
         "null"
       ],
       "format": "double"
+    },
+    "thinking": {
+      "description": "Extended-thinking request (W3d/G7). Neutral shape; each encoder maps it to its family-native form (Anthropic `thinking`, Gemini `thinkingConfig`, OpenAI-compat/ZAI `thinking`). Promoted from `extensions[<family>]` so it reaches every family through one field.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ThinkingV1"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "tool_choice": {
       "anyOf": [
@@ -429,6 +447,26 @@
             "string",
             "null"
           ]
+        }
+      }
+    },
+    "ThinkingV1": {
+      "description": "Neutral extended-thinking request (W3d/G7). `enabled` toggles reasoning; `budget_tokens` optionally caps the reasoning allowance (honored by families that support a budget — Anthropic, Gemini — and ignored by those that only take a boolean).",
+      "type": "object",
+      "required": [
+        "enabled"
+      ],
+      "properties": {
+        "budget_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "enabled": {
+          "type": "boolean"
         }
       }
     },

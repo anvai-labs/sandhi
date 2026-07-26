@@ -158,6 +158,20 @@ pub fn encode_gemini_request(request: &ChatRequestV1) -> Result<Value, ProviderE
     if let Some(stop) = &request.stop {
         generation.insert("stopSequences".into(), json!(stop));
     }
+    // W3d/G7: Gemini expresses thinking as generationConfig.thinkingConfig.
+    // `thinkingBudget: 0` disables; a positive budget caps it; enabled with no
+    // budget leaves the model default (omit thinkingBudget). Typed field wins
+    // over an extensions duplicate. `reasoning_effort` has no Gemini analogue —
+    // explicitly ignored (consumer-decision row).
+    if let Some(thinking) = &request.thinking {
+        let mut thinking_config = serde_json::Map::new();
+        if !thinking.enabled {
+            thinking_config.insert("thinkingBudget".into(), json!(0));
+        } else if let Some(budget) = thinking.budget_tokens {
+            thinking_config.insert("thinkingBudget".into(), json!(budget));
+        }
+        generation.insert("thinkingConfig".into(), Value::Object(thinking_config));
+    }
     if !generation.is_empty() {
         body.insert("generationConfig".into(), Value::Object(generation));
     }
@@ -351,6 +365,36 @@ fn decode_gemini_stream(mut raw: ByteStream, requested_model: String) -> ChatEve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn w3d_thinking_maps_to_thinking_config_and_effort_is_ignored() {
+        let request: ChatRequestV1 = serde_json::from_value(json!({
+            "model": "gemini-test",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "high",
+            "thinking": {"enabled": true, "budget_tokens": 8192}
+        }))
+        .unwrap();
+        let body = encode_gemini_request(&request).unwrap();
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            8192
+        );
+        assert!(body.get("reasoning_effort").is_none());
+
+        // Disabled thinking pins the budget to 0.
+        let off: ChatRequestV1 = serde_json::from_value(json!({
+            "model": "gemini-test",
+            "messages": [{"role": "user", "content": "hi"}],
+            "thinking": {"enabled": false}
+        }))
+        .unwrap();
+        let body = encode_gemini_request(&off).unwrap();
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            0
+        );
+    }
 
     #[test]
     fn request_and_response_codecs_preserve_native_tool_semantics() {
