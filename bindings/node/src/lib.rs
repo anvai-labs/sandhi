@@ -431,6 +431,14 @@ pub fn chat_contract_version() -> String {
     sandhi_core::chat::CHAT_SCHEMA_VERSION_V1.to_string()
 }
 
+/// Additive growth counter within the v1 chat contract (W3c). Consumers
+/// feature-detect this export — an older binding without it reads as minor 0
+/// — and gate trust in newer additive fields on a minimum minor.
+#[napi]
+pub fn chat_contract_minor() -> u32 {
+    sandhi_core::chat::CHAT_CONTRACT_MINOR
+}
+
 /// Resolve an OpenAI-compatible provider spec (slug, aliases, base_url) as JSON.
 /// Parity with the Python binding's `provider_spec` (TD-0008 P4); JSON here
 /// because napi objects would otherwise diverge from the schema'd facades.
