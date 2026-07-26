@@ -56,7 +56,7 @@ impl Provider for Cohere {
             .map_err(|e| ProviderError::Transport(e.to_string()))?;
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
-            return Err(error_for_response(resp).await);
+            return Err(error_for_response(resp, None).await);
         }
         let body: Value = resp
             .json()
@@ -85,7 +85,7 @@ impl Provider for Cohere {
             .await
             .map_err(|e| ProviderError::Transport(e.to_string()))?;
         if !resp.status().is_success() {
-            return Err(error_for_response(resp).await);
+            return Err(error_for_response(resp, None).await);
         }
         Ok(metered_passthrough(resp.bytes_stream(), sniff_usage_line))
     }

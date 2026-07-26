@@ -14,7 +14,8 @@ use napi_derive::napi;
 use sandhi_core::{
     parse_anthropic_usage, parse_bedrock_usage, parse_cohere_usage, parse_gemini_usage,
     parse_ollama_usage, parse_openai_responses_usage, parse_openai_usage, Backend, Budget,
-    BudgetLedger, KeyStore, ParsedUsage, UsageEvent, VirtualKey,
+    BudgetLedger, Dimension, KeyStore, ParsedUsage, UsageAggregateV1, UsageAggregator, UsageEvent,
+    VirtualKey,
 };
 use sandhi_providers::{
     AnthropicAuthScheme, GeminiAuthScheme, ProviderError, ProviderHandle,
@@ -622,6 +623,32 @@ impl Gateway {
             .map(event_to_napi)
             .collect()
     }
+
+    /// Fold the events recorded so far into `UsageAggregateV1` rows for one attribution
+    /// `dimension`, serialized as a JSON array (TD-0009 P2). `dimension` is one of `subject`
+    /// (`user`), `group`, `provider`, `model`, `key` (`virtual_key`), `session`, or `total`.
+    ///
+    /// The fold is `sandhi_core::UsageAggregator` — the same definition the proxy, the CLI, and
+    /// the dashboard read, so the in-process path cannot disagree with them. `cap` bounds the
+    /// number of distinct keys before the rest fold into `"(overflow)"` (default 1024): a
+    /// long-lived process metering unbounded `sessionId`s loses per-key detail, never the sum —
+    /// the rows always add up to the exact total. Throws on an unknown dimension.
+    #[napi]
+    pub fn usage_snapshot_json(&self, dimension: String, cap: Option<u32>) -> Result<String> {
+        let parsed = Dimension::parse(&dimension).ok_or_else(|| {
+            Error::from_reason(format!(
+                "unknown usage dimension {dimension:?}; expected one of \
+subject, group, provider, model, key, session, total"
+            ))
+        })?;
+        let inner = self.inner.lock().unwrap();
+        serde_json::to_string(&fold_usage(
+            &inner.events,
+            parsed,
+            cap.map(|cap| cap as usize),
+        ))
+        .map_err(|e| Error::from_reason(format!("serialize usage aggregate: {e}")))
+    }
 }
 
 impl Gateway {
@@ -689,6 +716,24 @@ impl Gateway {
 
         Ok(event_to_napi(&event))
     }
+}
+
+/// Fold recorded events into aggregate rows for one dimension. Mirrors the Python binding exactly
+/// (same core fold, same insertion order, same serializer), which is what makes the two
+/// snapshots byte-identical rather than merely similar (TD-0009 D6).
+fn fold_usage(
+    events: &[UsageEvent],
+    dimension: Dimension,
+    cap: Option<usize>,
+) -> Vec<UsageAggregateV1> {
+    let mut agg = match cap {
+        Some(cap) => UsageAggregator::with_cap(dimension, cap),
+        None => UsageAggregator::new(dimension),
+    };
+    for event in events {
+        agg.add(event);
+    }
+    agg.rows()
 }
 
 fn parse_for(provider: &str, value: &serde_json::Value) -> ParsedUsage {

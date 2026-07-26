@@ -119,5 +119,25 @@ proxy), attributes it to the virtual key's subject/group, records the budget, em
 neutral usage event (matching [`usage-event.v1.schema.json`](https://github.com/anvai-labs/sandhi/blob/main/schemas/usage-event.v1.schema.json)),
 and returns it for local display. Unknown key → `KeyError`; bad JSON → `ValueError`.
 
+### Usage snapshots (in-process aggregation)
+
+```python
+import json
+
+rows = json.loads(gw.usage_snapshot_json("subject"))   # busiest subject first
+rows[0]["billable_tokens"]                             # the quantity budgets enforce on
+json.loads(gw.usage_snapshot_json("total"))[0]         # one grand-total row
+json.loads(gw.usage_snapshot_json("session", 256))     # bound distinct keys to 256
+```
+
+Folds the events recorded so far into
+[`usage-aggregate.v1`](https://github.com/anvai-labs/sandhi/blob/main/schemas/usage-aggregate.v1.schema.json)
+rows for one dimension — `subject` (`user`), `group`, `provider`, `model`, `key`
+(`virtual_key`), `session`, or `total` — using the same fold the reverse proxy, the
+`sandhi` CLI, and the dashboard read. Neutral units only, never dollars. The optional
+second argument caps distinct keys (default 1024); everything past it folds into a single
+`"(overflow)"` row, so a long-lived process loses per-key detail but never the sum.
+Unknown dimension → `ValueError`.
+
 Apache-2.0. See the [main README](https://github.com/anvai-labs/sandhi) and
 [ADR-0001](https://github.com/anvai-labs/sandhi/blob/main/docs/adr/0001-sandhi-architecture-and-wire-contract.md).

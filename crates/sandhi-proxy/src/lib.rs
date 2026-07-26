@@ -147,6 +147,15 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         .route("/v1/chat/completions", post(handle_openai))
         .route("/v1/messages", post(handle_anthropic))
         .route("/v1/responses", post(handle_responses))
+        // Gemini's path carries the model AND the method, colon-separated
+        // (`/v1beta/models/gemini-2.5-flash:generateContent`), so it matches as ONE segment and
+        // is split below — axum has no pattern for a colon-suffixed verb.
+        .route("/v1beta/models/:model_method", post(handle_gemini))
+        // TD-0010 D3 discovery. `/v1/models` is shared by the OpenAI and Anthropic SDKs, which
+        // is resolvable because they authenticate differently: an `x-api-key` request is an
+        // Anthropic client and gets Anthropic's envelope.
+        .route("/v1/models", get(list_models))
+        .route("/v1beta/models", get(list_models_gemini))
         // TD-0003 P1 operator (admin) API.
         .route(
             "/admin/keys",
@@ -392,18 +401,23 @@ const fmt = n => (n ?? 0).toLocaleString();
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c =>
   ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
 const orDash = s => (s === null || s === undefined || s === "") ? "—" : esc(s);
+// No latency is "—", never "0 ms": a call that never reported a duration is unknown, not fast.
+const lat = l => (!l || !l.samples) ? "—"
+  : `${fmt(l.p50_ms)} / ${fmt(l.p95_ms)} ms <span class="sub">(n=${fmt(l.samples)})</span>`;
 
 function tbl(title, rows) {
   const body = rows.map(r => `<tr><td>${esc(r.key)}</td><td class="num">${fmt(r.calls)}</td>`
     + `<td class="num">${fmt(r.tokens_in)}</td><td class="num">${fmt(r.tokens_out)}</td>`
     + `<td class="num">${fmt(r.cache_creation_tokens)}</td><td class="num">${fmt(r.cache_read_tokens)}</td>`
-    + `<td class="num">${fmt(r.billable_tokens)}</td></tr>`).join("");
+    + `<td class="num">${fmt(r.billable_tokens)}</td>`
+    + `<td class="num">${lat(r.latency)}</td></tr>`).join("");
   return `<h2>${title}</h2><table><thead><tr><th>key</th><th class="num">calls</th>`
     + `<th class="num">in</th><th class="num">out</th><th class="num">cache write</th>`
     + `<th class="num">cache read</th><th class="num" title="ADR-0005 D4: the quantity budgets `
     + `are enforced on — fresh input + cache split + output (+ unfolded reasoning)">billable`
-    + `</th></tr></thead>`
-    + `<tbody>${body || '<tr><td colspan=7>no data yet</td></tr>'}</tbody></table>`;
+    + `</th><th class="num" title="p50 / p95 milliseconds over the sampled calls that reported a `
+    + `duration — approximate by design; tokens above are exact">latency</th></tr></thead>`
+    + `<tbody>${body || '<tr><td colspan=8>no data yet</td></tr>'}</tbody></table>`;
 }
 
 fetch("/dashboard/api/usage").then(r => r.json()).then(d => {
@@ -490,7 +504,7 @@ async fn handle_openai(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    handle(state, headers, body, IngressDialect::OpenAi).await
+    handle(state, headers, body, IngressDialect::OpenAi, None).await
 }
 
 async fn handle_anthropic(
@@ -498,7 +512,7 @@ async fn handle_anthropic(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    handle(state, headers, body, IngressDialect::Anthropic).await
+    handle(state, headers, body, IngressDialect::Anthropic, None).await
 }
 
 async fn handle_responses(
@@ -506,7 +520,184 @@ async fn handle_responses(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    handle(state, headers, body, IngressDialect::Responses).await
+    handle(state, headers, body, IngressDialect::Responses, None).await
+}
+
+/// `GET /v1/models` — OpenAI and Anthropic discovery (TD-0010 D3).
+///
+/// The listing is the key's *permitted* models: the upstream catalog intersected with the virtual
+/// key's allowlist. A key that may call two models lists two, which makes the allowlist
+/// discoverable instead of a surprise 403 at call time, and is honest in a way a static catalog
+/// dump is not.
+async fn list_models(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -> Response {
+    // Same path, two vendors: the credential presentation identifies the client.
+    let dialect = if headers.contains_key("x-api-key") {
+        IngressDialect::Anthropic
+    } else {
+        IngressDialect::OpenAi
+    };
+    let (vk, provider) = match resolve_for_discovery(&state, dialect, &headers) {
+        Ok(pair) => pair,
+        Err(response) => return response,
+    };
+    let models = permitted_models(&vk, provider.slug());
+    let body = match dialect {
+        IngressDialect::Anthropic => json!({
+            "data": models.iter().map(|id| json!({
+                "type": "model",
+                "id": id,
+                "display_name": id,
+            })).collect::<Vec<_>>(),
+            "has_more": false,
+        }),
+        _ => json!({
+            "object": "list",
+            "data": models.iter().map(|id| json!({
+                "id": id,
+                "object": "model",
+                "owned_by": provider.slug(),
+            })).collect::<Vec<_>>(),
+        }),
+    };
+    Json(body).into_response()
+}
+
+/// `GET /v1beta/models` — Gemini discovery (TD-0010 D3).
+async fn list_models_gemini(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -> Response {
+    let (vk, provider) = match resolve_for_discovery(&state, IngressDialect::Gemini, &headers) {
+        Ok(pair) => pair,
+        Err(response) => return response,
+    };
+    let models = permitted_models(&vk, provider.slug());
+    Json(json!({
+        "models": models.iter().map(|id| json!({
+            // Gemini names a model by its resource path, and its SDK strips the prefix back off.
+            "name": format!("models/{id}"),
+            "displayName": id,
+            "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
+        })).collect::<Vec<_>>(),
+    }))
+    .into_response()
+}
+
+/// Shared auth + upstream resolution for the discovery endpoints.
+#[allow(clippy::result_large_err)] // axum::Response is intentionally large; idiomatic shape.
+fn resolve_for_discovery(
+    state: &Arc<ProxyState>,
+    dialect: IngressDialect,
+    headers: &HeaderMap,
+) -> Result<(VirtualKey, ProviderHandle), Response> {
+    let Some(token) = dialect.extract_credential(headers) else {
+        return Err(ingress_error(
+            dialect,
+            StatusCode::UNAUTHORIZED,
+            &format!(
+                "missing virtual key: send it as {}",
+                dialect.credential_hint()
+            ),
+        ));
+    };
+    let vk = match resolve_virtual_key(state, token) {
+        VirtualKeyResolution::Found(vk) => vk,
+        VirtualKeyResolution::Expired => {
+            return Err(ingress_error(
+                dialect,
+                StatusCode::UNAUTHORIZED,
+                "virtual key expired",
+            ));
+        }
+        VirtualKeyResolution::NotFound => {
+            return Err(ingress_error(
+                dialect,
+                StatusCode::UNAUTHORIZED,
+                "unknown virtual key",
+            ));
+        }
+    };
+    let Some(provider) = state
+        .providers
+        .lock()
+        .expect("providers poisoned")
+        .get(&vk.upstream_ref)
+        .cloned()
+    else {
+        return Err(ingress_error(
+            dialect,
+            StatusCode::BAD_GATEWAY,
+            "no upstream registered for this key",
+        ));
+    };
+    Ok((vk, provider))
+}
+
+/// The models this key may actually call: the upstream's catalog filtered by the allowlist.
+///
+/// With no allowlist the catalog is returned as-is. With an allowlist, entries the catalog does
+/// not know about are still listed — the catalog holds transport facts, not an authority on which
+/// models exist, so omitting an allowed-but-uncatalogued model would under-report what works.
+fn permitted_models(vk: &VirtualKey, slug: &str) -> Vec<String> {
+    let catalog: Vec<String> = sandhi_providers::provider_descriptor(slug)
+        .map(|d| d.models.into_iter().map(|m| m.id).collect())
+        .unwrap_or_default();
+    match vk.models.as_deref() {
+        None | Some([]) => catalog,
+        Some(allowed) => {
+            let mut out: Vec<String> = catalog
+                .iter()
+                .filter(|id| allowed.iter().any(|a| a.eq_ignore_ascii_case(id)))
+                .cloned()
+                .collect();
+            for a in allowed {
+                if !out.iter().any(|id| id.eq_ignore_ascii_case(a)) {
+                    out.push(a.clone());
+                }
+            }
+            out
+        }
+    }
+}
+
+/// `POST /v1beta/models/{model}:{generateContent|streamGenerateContent}` (TD-0010 D4a).
+async fn handle_gemini(
+    State(state): State<Arc<ProxyState>>,
+    axum::extract::Path(model_method): axum::extract::Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    // Split on the LAST colon: a model id may legitimately contain one (tuned models are
+    // `tunedModels/x`), the method never does.
+    let Some((model, method)) = model_method.rsplit_once(':') else {
+        return ingress_error(
+            IngressDialect::Gemini,
+            StatusCode::NOT_FOUND,
+            "expected /v1beta/models/{model}:generateContent",
+        );
+    };
+    let stream = match method {
+        "generateContent" => false,
+        "streamGenerateContent" => true,
+        // countTokens, embedContent and the rest are not metered surfaces yet; say so in Gemini's
+        // own error shape rather than 404-ing with an empty body.
+        other => {
+            return ingress_error(
+                IngressDialect::Gemini,
+                StatusCode::NOT_IMPLEMENTED,
+                &format!("method '{other}' is not supported by this gateway"),
+            );
+        }
+    };
+    if model.is_empty() {
+        return ingress_error(
+            IngressDialect::Gemini,
+            StatusCode::BAD_REQUEST,
+            "model is empty",
+        );
+    }
+    let route = GeminiRoute {
+        model: model.to_string(),
+        stream,
+    };
+    handle(state, headers, body, IngressDialect::Gemini, Some(route)).await
 }
 
 async fn handle(
@@ -514,20 +705,35 @@ async fn handle(
     headers: HeaderMap,
     body: Bytes,
     dialect: IngressDialect,
+    gemini_route: Option<GeminiRoute>,
 ) -> Response {
-    // 1. Virtual key from `Authorization: Bearer vk_…`. Resolve the live key store by exact token
-    //    (legacy/demo path, where the id doubles as the token) then by its hash (operator-minted
-    //    path, where only the hash is the lookup key — the plaintext is never retained).
-    let Some(vk_token) = bearer(&headers) else {
-        return error(StatusCode::UNAUTHORIZED, "missing bearer virtual key");
+    // 1. Virtual key, presented the way this dialect's own SDK presents a credential
+    //    (TD-0010 D1 — `x-api-key` on `/v1/messages`, `Authorization: Bearer` on the OpenAI
+    //    paths). Resolve the live key store by exact token (legacy/demo path, where the id
+    //    doubles as the token) then by its hash (operator-minted path, where only the hash is
+    //    the lookup key — the plaintext is never retained).
+    let Some(vk_token) = dialect.extract_credential(&headers) else {
+        // TD-0010 D2 (auth slice): render in the caller's dialect and NAME ITS OWN SCHEME. The
+        // flat `{"error":"missing bearer virtual key"}` this used to return was unparseable by
+        // two of the three SDKs and told an Anthropic or Gemini client to send a header its
+        // vendor never documents. The dialect is already known here — it is a parameter — so
+        // there is no ordering problem to solve at these call sites.
+        return ingress_error(
+            dialect,
+            StatusCode::UNAUTHORIZED,
+            &format!(
+                "missing virtual key: send it as {}",
+                dialect.credential_hint()
+            ),
+        );
     };
     let vk = match resolve_virtual_key(&state, vk_token) {
         VirtualKeyResolution::Found(vk) => vk,
         VirtualKeyResolution::Expired => {
-            return error(StatusCode::UNAUTHORIZED, "virtual key expired");
+            return ingress_error(dialect, StatusCode::UNAUTHORIZED, "virtual key expired");
         }
         VirtualKeyResolution::NotFound => {
-            return error(StatusCode::UNAUTHORIZED, "unknown virtual key");
+            return ingress_error(dialect, StatusCode::UNAUTHORIZED, "unknown virtual key");
         }
     };
 
@@ -539,7 +745,8 @@ async fn handle(
         .get(&vk.upstream_ref)
         .cloned()
     else {
-        return error(
+        return ingress_error(
+            dialect,
             StatusCode::BAD_GATEWAY,
             "no upstream registered for this key",
         );
@@ -557,6 +764,7 @@ async fn handle(
         IngressDialect::OpenAi => "/v1/chat/completions",
         IngressDialect::Anthropic => "/v1/messages",
         IngressDialect::Responses => "/v1/responses",
+        IngressDialect::Gemini => "/v1beta/models/:generateContent",
     };
     let metadata = RequestMetadataV1 {
         session_id: session,
@@ -573,10 +781,32 @@ async fn handle(
         parent_id: header_str(&headers, "x-sandhi-parent-id"),
         trace_context: header_str(&headers, "traceparent"),
     };
-    let (mut request, wants_stream) = match decode_request(dialect, body_json, metadata) {
+    let (mut request, mut wants_stream) = match decode_request(dialect, body_json, metadata) {
         Ok(decoded) => decoded,
         Err(message) => return ingress_error(dialect, StatusCode::BAD_REQUEST, &message),
     };
+
+    // Gemini carries the model and the streaming choice in the PATH, so stamp them onto the
+    // decoded request before anything downstream reads them — the allowlist check and the
+    // reservation both do.
+    if let Some(route) = &gemini_route {
+        request.model = route.model.clone();
+        wants_stream = route.stream;
+    }
+
+    // TD-0010 D4a admits Gemini on the transparent plane only. Its decode is accounting-grade,
+    // not a faithful codec, so re-encoding it for a different upstream family would silently
+    // change the caller's request — tools, inline media and safety settings would vanish. Refuse
+    // instead, in Gemini's own error shape (D4b lifts this).
+    if dialect == IngressDialect::Gemini
+        && !(ingress_family(dialect) == provider.family() && provider.raw_forwarder().is_some())
+    {
+        return ingress_error(
+            dialect,
+            StatusCode::NOT_IMPLEMENTED,
+            "Gemini ingress currently requires a Gemini upstream; cross-family translation is not implemented (TD-0010 D4b)",
+        );
+    }
 
     // 4. Model allowlist (TD-0003 P4): if the resolved key carries a non-empty `models[]`, admit
     //    only a model on that list. Empty/absent allowlist = any model (unchanged). Enforced after
@@ -644,12 +874,26 @@ async fn handle(
     let full_error_detail = state.error_detail_full;
     match (transparent, wants_stream) {
         (true, true) => {
-            transparent_stream_response(provider, body, dialect, accounting, full_error_detail)
-                .await
+            transparent_stream_response(
+                provider,
+                body,
+                dialect,
+                accounting,
+                full_error_detail,
+                gemini_route,
+            )
+            .await
         }
         (true, false) => {
-            transparent_complete_response(provider, body, dialect, accounting, full_error_detail)
-                .await
+            transparent_complete_response(
+                provider,
+                body,
+                dialect,
+                accounting,
+                full_error_detail,
+                gemini_route,
+            )
+            .await
         }
         (false, true) => {
             stream_response(provider, request, dialect, accounting, full_error_detail).await
@@ -666,30 +910,62 @@ fn ingress_family(dialect: IngressDialect) -> ProviderFamily {
         IngressDialect::OpenAi => ProviderFamily::OpenAiCompat,
         IngressDialect::Anthropic => ProviderFamily::Anthropic,
         IngressDialect::Responses => ProviderFamily::OpenAiResponses,
+        IngressDialect::Gemini => ProviderFamily::Gemini,
     }
 }
 
 /// The upstream path suffix for a same-family transparent forward — mirrors each typed adapter's
 /// endpoint. Only the three ingress families above ever reach the transparent plane.
-fn upstream_path(family: ProviderFamily) -> &'static str {
+fn upstream_path(family: ProviderFamily, gemini: Option<&GeminiRoute>) -> String {
     match family {
-        ProviderFamily::OpenAiCompat => "/chat/completions",
-        ProviderFamily::OpenAiResponses => "/responses",
-        ProviderFamily::Anthropic => "/v1/messages",
-        _ => "/",
+        ProviderFamily::OpenAiCompat => "/chat/completions".to_string(),
+        ProviderFamily::OpenAiResponses => "/responses".to_string(),
+        ProviderFamily::Anthropic => "/v1/messages".to_string(),
+        // Gemini is the first dialect whose upstream path is not a constant: the model and the
+        // streaming choice are path segments, so the route the client asked for determines the
+        // route we forward to. `?alt=sse` is what makes the stream SSE rather than a chunked
+        // JSON array — the framing the adapter's usage sniffer expects.
+        ProviderFamily::Gemini => match gemini {
+            Some(route) if route.stream => format!(
+                "/v1beta/models/{}:streamGenerateContent?alt=sse",
+                route.model
+            ),
+            Some(route) => format!("/v1beta/models/{}:generateContent", route.model),
+            None => "/".to_string(),
+        },
+        _ => "/".to_string(),
     }
+}
+
+/// What a Gemini ingress request carries in its PATH rather than its body.
+///
+/// The other three dialects read the model from a body field and the streaming choice from a
+/// `stream` flag; Gemini puts both in the URL (`/v1beta/models/{model}:generateContent`). That
+/// difference reaches the allowlist check, the reservation, and the upstream URL, so it is
+/// carried explicitly instead of being re-parsed at each site.
+#[derive(Debug, Clone)]
+struct GeminiRoute {
+    model: String,
+    stream: bool,
 }
 
 /// Rebuild an axum response from a raw upstream response: status + curated header allowlist + body
 /// bytes, forwarded verbatim (the transparent plane never re-serializes the response).
-fn raw_response_to_axum(raw: sandhi_providers::raw::RawResponse) -> Response {
+fn raw_response_to_axum(
+    raw: sandhi_providers::raw::RawResponse,
+    dialect: IngressDialect,
+) -> Response {
     let mut builder = Response::builder().status(raw.status);
     for (name, value) in raw.headers.iter() {
         builder = builder.header(name, value);
     }
-    builder
-        .body(Body::from(raw.body))
-        .unwrap_or_else(|_| error(StatusCode::BAD_GATEWAY, "invalid upstream response"))
+    builder.body(Body::from(raw.body)).unwrap_or_else(|_| {
+        ingress_error(
+            dialect,
+            StatusCode::BAD_GATEWAY,
+            "invalid upstream response",
+        )
+    })
 }
 
 /// Transparent same-family non-streaming plane: forward the client's bytes verbatim, meter usage
@@ -701,17 +977,19 @@ async fn transparent_complete_response(
     dialect: IngressDialect,
     mut accounting: RequestAccounting,
     full_error_detail: bool,
+    gemini: Option<GeminiRoute>,
 ) -> Response {
     let Some(forwarder) = provider.raw_forwarder() else {
         accounting.set_outcome("error");
         accounting.finalize();
-        return error(
+        return ingress_error(
+            dialect,
             StatusCode::BAD_GATEWAY,
             "transparent plane requires a raw forwarder",
         );
     };
     match forwarder
-        .forward_metered(upstream_path(provider.family()), body)
+        .forward_metered(&upstream_path(provider.family(), gemini.as_ref()), body)
         .await
     {
         Ok((raw, mut usage)) => {
@@ -720,7 +998,7 @@ async fn transparent_complete_response(
             accounting.observe(&usage);
             accounting.set_outcome("success");
             accounting.finalize();
-            raw_response_to_axum(raw)
+            raw_response_to_axum(raw, dialect)
         }
         Err(err) => {
             accounting.set_outcome("error");
@@ -740,17 +1018,19 @@ async fn transparent_stream_response(
     dialect: IngressDialect,
     mut accounting: RequestAccounting,
     full_error_detail: bool,
+    gemini: Option<GeminiRoute>,
 ) -> Response {
     let Some(forwarder) = provider.raw_forwarder() else {
         accounting.set_outcome("error");
         accounting.finalize();
-        return error(
+        return ingress_error(
+            dialect,
             StatusCode::BAD_GATEWAY,
             "transparent plane requires a raw forwarder",
         );
     };
     let mut upstream = match forwarder
-        .forward_stream_metered(upstream_path(provider.family()), body)
+        .forward_stream_metered(&upstream_path(provider.family(), gemini.as_ref()), body)
         .await
     {
         Ok(stream) => stream,
@@ -1203,15 +1483,6 @@ fn resolve_virtual_key(state: &ProxyState, token: &str) -> VirtualKeyResolution 
     }
 }
 
-fn bearer(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get("authorization")?
-        .to_str()
-        .ok()?
-        .strip_prefix("Bearer ")
-        .map(str::trim)
-}
-
 fn provider_error(
     e: &ProviderError,
     dialect: IngressDialect,
@@ -1243,8 +1514,30 @@ fn provider_error(
     let body = match dialect {
         IngressDialect::OpenAi | IngressDialect::Responses => json!({"error":typed}),
         IngressDialect::Anthropic => json!({"type":"error","error":typed}),
+        // Google's shape: `error.code` is the HTTP status as a NUMBER and `error.status` is the
+        // canonical enum name — that is what a google-genai client reads to classify a failure.
+        IngressDialect::Gemini => json!({"error":{
+            "code": status.as_u16(),
+            "message": typed.message,
+            "status": google_status(status),
+        }}),
     };
     (status, Json(body)).into_response()
+}
+
+/// HTTP status → the canonical google.rpc status name a Gemini client expects in `error.status`.
+fn google_status(status: StatusCode) -> &'static str {
+    match status {
+        StatusCode::BAD_REQUEST => "INVALID_ARGUMENT",
+        StatusCode::UNAUTHORIZED => "UNAUTHENTICATED",
+        StatusCode::FORBIDDEN => "PERMISSION_DENIED",
+        StatusCode::NOT_FOUND => "NOT_FOUND",
+        StatusCode::TOO_MANY_REQUESTS => "RESOURCE_EXHAUSTED",
+        StatusCode::NOT_IMPLEMENTED => "UNIMPLEMENTED",
+        StatusCode::SERVICE_UNAVAILABLE => "UNAVAILABLE",
+        StatusCode::GATEWAY_TIMEOUT => "DEADLINE_EXCEEDED",
+        _ => "INTERNAL",
+    }
 }
 
 fn ingress_error(dialect: IngressDialect, status: StatusCode, msg: &str) -> Response {
@@ -1257,6 +1550,11 @@ fn ingress_error(dialect: IngressDialect, status: StatusCode, msg: &str) -> Resp
     let body = match dialect {
         IngressDialect::OpenAi | IngressDialect::Responses => json!({"error":typed}),
         IngressDialect::Anthropic => json!({"type":"error","error":typed}),
+        IngressDialect::Gemini => json!({"error":{
+            "code": status.as_u16(),
+            "message": msg,
+            "status": google_status(status),
+        }}),
     };
     (status, Json(body)).into_response()
 }

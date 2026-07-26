@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 
+use axum::http::HeaderMap;
 use sandhi_core::{
     ChatMessageV1, ChatRequestV1, ChatResponseV1, ChatStreamEventV1, ContentPart, FinishReasonV1,
     MessageContent, RequestMetadataV1, ToolCallV1, ToolChoiceMode, ToolChoiceV1, ToolDefinitionV1,
@@ -20,6 +21,92 @@ pub(crate) enum IngressDialect {
     /// `ChatRequestV1` as the other dialects; the field mapping mirrors the typed Responses
     /// codec in `sandhi-providers::openai_responses_typed`.
     Responses,
+    /// Google Gemini (`/v1beta/models/{model}:generateContent`). Structurally unlike the other
+    /// three: the **model and the streaming choice live in the path**, not the body, and the
+    /// credential is `x-goog-api-key`.
+    ///
+    /// TD-0010 D4a admits this dialect on the **transparent plane only** — a Gemini client must
+    /// resolve to a Gemini upstream, where the body is forwarded byte-for-byte. Its decode below
+    /// is therefore accounting-grade (enough to meter and enforce), NOT a faithful round-trip;
+    /// cross-family translation is refused rather than served from a lossy decode (D4b).
+    Gemini,
+}
+
+/// One way a client may present its virtual key on the wire.
+///
+/// Kept as data rather than as branches in a handler so that a dialect declares its credential
+/// contract in one place (TD-0010 D1) — adding a dialect means listing its schemes, not editing
+/// the auth path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CredentialScheme {
+    /// `Authorization: Bearer <vk>` — the OpenAI-family presentation.
+    AuthorizationBearer,
+    /// A header whose entire value is the credential, e.g. Anthropic's `x-api-key: <vk>`.
+    RawHeader(&'static str),
+}
+
+impl CredentialScheme {
+    fn extract(self, headers: &HeaderMap) -> Option<&str> {
+        let raw = match self {
+            CredentialScheme::AuthorizationBearer => headers
+                .get("authorization")?
+                .to_str()
+                .ok()?
+                .strip_prefix("Bearer ")?,
+            CredentialScheme::RawHeader(name) => headers.get(name)?.to_str().ok()?,
+        };
+        let token = raw.trim();
+        (!token.is_empty()).then_some(token)
+    }
+}
+
+impl IngressDialect {
+    /// The credential presentations this dialect accepts, **most-native first**.
+    ///
+    /// A dialect is the whole client-facing contract, not just a body schema: a stock SDK
+    /// authenticates the way its vendor documents. The Anthropic SDK sends `x-api-key`, so a
+    /// gateway that only reads `Authorization: Bearer` 401s an unmodified client. `Bearer` is
+    /// accepted everywhere as a secondary form — it costs nothing and it keeps curl users and
+    /// header-stripping intermediaries working.
+    fn credential_schemes(self) -> &'static [CredentialScheme] {
+        match self {
+            // No `x-api-key` here on purpose: the OpenAI SDKs never send it, so accepting it
+            // would invent a cross-vendor auth scheme no client asked for.
+            IngressDialect::OpenAi | IngressDialect::Responses => {
+                &[CredentialScheme::AuthorizationBearer]
+            }
+            IngressDialect::Anthropic => &[
+                CredentialScheme::RawHeader("x-api-key"),
+                CredentialScheme::AuthorizationBearer,
+            ],
+            // Header only. Gemini also documents `?key=<credential>`, which puts a live virtual
+            // key in a URL — access logs, crash reports, browser history. Until that can be
+            // guaranteed not to be logged end to end, the query form is a stated gap in the
+            // compatibility matrix rather than a quiet acceptance (TD-0010 D4a).
+            IngressDialect::Gemini => &[
+                CredentialScheme::RawHeader("x-goog-api-key"),
+                CredentialScheme::AuthorizationBearer,
+            ],
+        }
+    }
+
+    /// How this dialect's own SDK is documented to present a credential — used in the 401 so the
+    /// message tells a client what its vendor actually sends, not what another vendor sends.
+    pub(crate) fn credential_hint(self) -> &'static str {
+        match self {
+            IngressDialect::OpenAi | IngressDialect::Responses => "'Authorization: Bearer <key>'",
+            IngressDialect::Anthropic => "'x-api-key: <key>' (or 'Authorization: Bearer <key>')",
+            IngressDialect::Gemini => "'x-goog-api-key: <key>' (or 'Authorization: Bearer <key>')",
+        }
+    }
+
+    /// The client's virtual key, read in whichever presentation this dialect accepts.
+    /// The dialect-native scheme wins when a request carries more than one.
+    pub(crate) fn extract_credential(self, headers: &HeaderMap) -> Option<&str> {
+        self.credential_schemes()
+            .iter()
+            .find_map(|scheme| scheme.extract(headers))
+    }
 }
 
 pub(crate) fn decode_request(
@@ -31,7 +118,96 @@ pub(crate) fn decode_request(
         IngressDialect::OpenAi => decode_openai_request(body, metadata),
         IngressDialect::Anthropic => decode_anthropic_request(body, metadata),
         IngressDialect::Responses => decode_responses_request(body, metadata),
+        IngressDialect::Gemini => decode_gemini_request(body, metadata),
     }
+}
+
+/// Accounting-grade decode of a Gemini `generateContent` body.
+///
+/// Deliberately NOT a faithful codec. On the transparent plane the client's bytes are forwarded
+/// verbatim, so this exists only to answer the questions enforcement asks: which model, how much
+/// output was requested, and roughly how much input is being sent. Tool declarations, inline
+/// media, safety settings and the rest ride through untouched in the raw body.
+///
+/// `model` and the streaming choice come from the PATH and are stamped by the handler, so both
+/// are placeholders here. A cross-family request is refused upstream of this function precisely
+/// because re-encoding from a lossy decode would silently change the caller's request (D4b).
+fn decode_gemini_request(
+    body: Value,
+    metadata: RequestMetadataV1,
+) -> Result<(ChatRequestV1, bool), String> {
+    let object = body
+        .as_object()
+        .ok_or_else(|| "request body must be a JSON object".to_string())?;
+
+    let mut messages = Vec::new();
+    if let Some(system) = object.get("systemInstruction") {
+        if let Some(text) = gemini_parts_text(system.get("parts")) {
+            messages.push(ChatMessageV1::System {
+                content: MessageContent::Text(text),
+                name: None,
+            });
+        }
+    }
+    for content in object
+        .get("contents")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "contents must be an array".to_string())?
+    {
+        let text = gemini_parts_text(content.get("parts")).unwrap_or_default();
+        // Gemini names the assistant role "model"; everything else is treated as user input.
+        match content.get("role").and_then(Value::as_str) {
+            Some("model") => messages.push(ChatMessageV1::Assistant {
+                content: Some(MessageContent::Text(text)),
+                name: None,
+                tool_calls: Vec::new(),
+                refusal: None,
+            }),
+            _ => messages.push(ChatMessageV1::User {
+                content: MessageContent::Text(text),
+                name: None,
+            }),
+        }
+    }
+
+    let generation = object.get("generationConfig");
+    let max_output_tokens = generation
+        .and_then(|g| g.get("maxOutputTokens"))
+        .and_then(Value::as_u64);
+    let temperature = generation
+        .and_then(|g| g.get("temperature"))
+        .and_then(Value::as_f64);
+
+    let request = ChatRequestV1 {
+        schema_version: CHAT_SCHEMA_VERSION_V1.to_string(),
+        // Stamped by the handler from the path segment.
+        model: String::new(),
+        messages,
+        tools: Vec::new(),
+        tool_choice: None,
+        temperature,
+        max_output_tokens,
+        stop: None,
+        response_format: None,
+        seed: None,
+        metadata,
+        include_native_response: true,
+        extensions: BTreeMap::new(),
+    };
+    // Streaming is a path verb, not a body field; the handler stamps it.
+    Ok((request, false))
+}
+
+/// Concatenate the `text` parts of a Gemini `parts[]` array. Non-text parts (inline data, function
+/// calls) contribute nothing to the input estimate here — they ride through in the raw body.
+fn gemini_parts_text(parts: Option<&Value>) -> Option<String> {
+    let parts = parts?.as_array()?;
+    let text: String = parts
+        .iter()
+        .filter_map(|p| p.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("");
+    (!text.is_empty()).then_some(text)
 }
 
 fn decode_openai_request(
@@ -92,6 +268,7 @@ fn decode_openai_request(
         response_format: object.get("response_format").cloned(),
         seed: object.get("seed").and_then(Value::as_i64),
         metadata,
+        include_native_response: true,
         extensions: BTreeMap::from([("openai".into(), body.clone())]),
     };
     request.validate()?;
@@ -324,6 +501,7 @@ fn decode_anthropic_request(
         response_format: None,
         seed: None,
         metadata,
+        include_native_response: true,
         extensions: BTreeMap::from([("anthropic".into(), body.clone())]),
     };
     request.validate()?;
@@ -592,6 +770,7 @@ fn decode_responses_request(
             .transpose()?,
         seed: None,
         metadata,
+        include_native_response: true,
         extensions: BTreeMap::from([("openai_responses".into(), body.clone())]),
     };
     request.validate()?;
@@ -748,6 +927,17 @@ pub(crate) fn encode_response(dialect: IngressDialect, response: &ChatResponseV1
         IngressDialect::OpenAi => encode_openai_response(response),
         IngressDialect::Anthropic => encode_anthropic_response(response),
         IngressDialect::Responses => encode_responses_response(response),
+        // Unreachable by construction: Gemini ingress is admitted only on the transparent plane
+        // (TD-0010 D4a), where the upstream's own bytes are returned and nothing is re-encoded.
+        // A cross-family Gemini request is refused in `handle` rather than translated, so if this
+        // ever runs the refusal was lost — surface it as an error instead of inventing a body.
+        IngressDialect::Gemini => json!({
+            "error": {
+                "code": 501,
+                "message": "Gemini ingress requires a Gemini upstream (cross-family translation is TD-0010 D4b)",
+                "status": "UNIMPLEMENTED",
+            }
+        }),
     }
 }
 
@@ -898,6 +1088,10 @@ pub(crate) fn encode_stream_event(
         IngressDialect::OpenAi => encode_openai_stream_event(event, last_usage),
         IngressDialect::Anthropic => encode_anthropic_stream_event(event, last_usage),
         IngressDialect::Responses => encode_responses_stream_event(event, last_usage),
+        // See `encode_response`: the transparent plane streams the upstream's own frames, so a
+        // Gemini re-encode never runs. Emitting nothing is the safe reading — a fabricated frame
+        // would be worse than a silent one.
+        IngressDialect::Gemini => Vec::new(),
     }
 }
 
@@ -1182,6 +1376,84 @@ fn optional_string(object: &Map<String, Value>, key: &str) -> Result<Option<Stri
 mod tests {
     use super::*;
     use sandhi_core::AssistantOutputV1;
+
+    fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(
+                axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                value.parse().unwrap(),
+            );
+        }
+        map
+    }
+
+    #[test]
+    fn anthropic_dialect_accepts_the_sdks_x_api_key_header() {
+        // The stock Anthropic SDK authenticates with `x-api-key` and nothing else.
+        assert_eq!(
+            IngressDialect::Anthropic.extract_credential(&headers(&[("x-api-key", "vk_demo")])),
+            Some("vk_demo")
+        );
+    }
+
+    #[test]
+    fn anthropic_dialect_still_accepts_bearer_and_prefers_the_native_header() {
+        assert_eq!(
+            IngressDialect::Anthropic
+                .extract_credential(&headers(&[("authorization", "Bearer vk_bearer")])),
+            Some("vk_bearer")
+        );
+        assert_eq!(
+            IngressDialect::Anthropic.extract_credential(&headers(&[
+                ("authorization", "Bearer vk_bearer"),
+                ("x-api-key", "vk_native"),
+            ])),
+            Some("vk_native")
+        );
+    }
+
+    #[test]
+    fn openai_dialects_accept_bearer_only() {
+        for dialect in [IngressDialect::OpenAi, IngressDialect::Responses] {
+            assert_eq!(
+                dialect.extract_credential(&headers(&[("authorization", "Bearer vk_demo")])),
+                Some("vk_demo")
+            );
+            // `x-api-key` is not an OpenAI credential scheme — accepting it would invent one.
+            assert_eq!(
+                dialect.extract_credential(&headers(&[("x-api-key", "vk_demo")])),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn missing_or_malformed_credentials_extract_to_none() {
+        for dialect in [
+            IngressDialect::OpenAi,
+            IngressDialect::Responses,
+            IngressDialect::Anthropic,
+        ] {
+            assert_eq!(dialect.extract_credential(&HeaderMap::new()), None);
+            // Wrong scheme, empty token, and an empty native header all fail closed.
+            assert_eq!(
+                dialect.extract_credential(&headers(&[("authorization", "Basic vk_demo")])),
+                None
+            );
+            assert_eq!(
+                dialect.extract_credential(&headers(&[("authorization", "Bearer   ")])),
+                None
+            );
+            assert_eq!(
+                dialect.extract_credential(&headers(&[
+                    ("x-api-key", "   "),
+                    ("authorization", "Bearer vk_demo"),
+                ])),
+                Some("vk_demo")
+            );
+        }
+    }
 
     #[test]
     fn openai_ingress_covers_all_roles_and_tool_linkage() {

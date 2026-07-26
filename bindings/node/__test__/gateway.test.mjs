@@ -492,6 +492,108 @@ test("Gateway meters a group-less virtual key against the vk:* scope and writes 
   rmSync(sink, { force: true });
 });
 
+// ---------------------------------------------------------------------------
+// Gateway.usageSnapshotJson (TD-0009 P2): the in-process aggregate surface.
+// The corpus is shared with the Python suite so the two cannot drift.
+// ---------------------------------------------------------------------------
+
+function parityCorpus() {
+  const path = new URL("../../fixtures/usage-snapshot-parity.json", import.meta.url);
+  return JSON.parse(readFileSync(path, "utf8"));
+}
+
+function drive(gateway, corpus) {
+  for (const key of corpus.virtual_keys) {
+    gateway.addVirtualKey(key.id, key.subject, key.group ?? undefined, key.upstream);
+  }
+  for (const call of corpus.calls) {
+    gateway.meterTokens(
+      call.virtual_key,
+      call.provider,
+      call.model,
+      call.tokens_in,
+      call.tokens_out,
+      call.cache_creation_tokens,
+      call.cache_read_tokens,
+      call.session_id ?? undefined,
+    );
+  }
+}
+
+test("usageSnapshotJson matches the cross-language parity corpus", () => {
+  // Byte-identical to the fixture the Python suite asserts against (TD-0009 D6/P2).
+  const corpus = parityCorpus();
+  const gateway = new Gateway();
+  drive(gateway, corpus);
+
+  for (const [dimension, expected] of Object.entries(corpus.expected_json)) {
+    assert.equal(gateway.usageSnapshotJson(dimension), expected, dimension);
+  }
+
+  // Aliases resolve through the one core parser, so `key`/`virtualKey` and `subject`/`user`
+  // cannot mean different things here than at /admin/usage?by=.
+  assert.equal(gateway.usageSnapshotJson("virtual_key"), corpus.expected_json.key);
+  assert.equal(gateway.usageSnapshotJson("user"), corpus.expected_json.subject);
+  assert.equal(gateway.usageSnapshotJson(" TOTAL "), corpus.expected_json.total);
+
+  // Neutral units only (ADR-0001): no dollars anywhere in the aggregate.
+  const rows = JSON.parse(gateway.usageSnapshotJson("subject"));
+  assert.equal(rows[0].key, "bob"); // ranked by billable tokens, busiest first
+  assert.ok(rows.every((r) => !("cost" in r) && !("price" in r)));
+  // No call reported a duration, so latency is absent rather than zeroed.
+  assert.ok(rows.every((r) => !("latency" in r)));
+
+  assert.throws(() => gateway.usageSnapshotJson("cost"), /unknown usage dimension/);
+});
+
+test("usageSnapshotJson cap folds overflow and keeps the total exact", () => {
+  // TD-0009 D2: the cap loses per-key detail, never the sum.
+  const corpus = parityCorpus().overflow;
+  const key = corpus.virtual_key;
+  const gateway = new Gateway();
+  gateway.addVirtualKey(key.id, key.subject, key.group ?? undefined, key.upstream);
+  for (const session of corpus.sessions) {
+    gateway.meterTokens(
+      key.id,
+      corpus.provider,
+      corpus.model,
+      corpus.tokens_in,
+      corpus.tokens_out,
+      0,
+      0,
+      session,
+    );
+  }
+
+  const capped = gateway.usageSnapshotJson("session", corpus.cap);
+  assert.equal(capped, corpus.expected_session_json);
+  const rows = JSON.parse(capped);
+  // cap distinct keys survive; everything after them lands in one honest bucket.
+  assert.equal(rows.length, corpus.cap + 1);
+  const overflow = rows.find((r) => r.key === "(overflow)");
+  assert.equal(overflow.calls, corpus.sessions.length - corpus.cap);
+
+  // The sum is exact under eviction: rows still add up to the grand total.
+  assert.equal(gateway.usageSnapshotJson("total"), corpus.expected_total_json);
+  const total = JSON.parse(gateway.usageSnapshotJson("total"));
+  // The payload is the serde JSON of UsageAggregateV1 — snake_case, not the napi camelCase
+  // objects `events()` returns; the schema'd contract shape crosses the seam unchanged.
+  assert.equal(total[0].billable_tokens, corpus.expected_total_billable);
+  assert.equal(
+    rows.reduce((sum, r) => sum + r.billable_tokens, 0),
+    corpus.expected_total_billable,
+  );
+  assert.equal(
+    rows.reduce((sum, r) => sum + r.calls, 0),
+    corpus.sessions.length,
+  );
+
+  // Uncapped, every session keeps its own row.
+  const uncapped = JSON.parse(gateway.usageSnapshotJson("session"));
+  assert.deepEqual(uncapped.map((r) => r.key), corpus.sessions);
+  assert.ok(uncapped.every((r) => r.key !== "(overflow)"));
+});
+
 test("parseUsage exercises every built-in provider parser", () => {
   // Anthropic-style.
   const anthropic = parseUsage(

@@ -100,9 +100,8 @@ async fn complete_attributes_meters_and_records_budget() {
     assert_eq!(state.ledger.lock().unwrap().reserved("group:platform"), 0);
 }
 
-#[tokio::test]
-async fn anthropic_ingress_uses_the_same_typed_runtime_and_meter() {
-    let upstream = MockServer::start().await;
+/// A proxy fronting a mocked **Anthropic** upstream that answers `/v1/messages` once.
+async fn anthropic_state(upstream: &MockServer, sink: Arc<InMemorySink>) -> Arc<ProxyState> {
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
         .and(header("x-api-key", "REAL-KEY"))
@@ -111,7 +110,7 @@ async fn anthropic_ingress_uses_the_same_typed_runtime_and_meter() {
             "content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn",
             "usage":{"input_tokens":7,"output_tokens":3,"cache_read_input_tokens":2}
         })))
-        .mount(&upstream)
+        .mount(upstream)
         .await;
 
     let keys = KeyStore::new();
@@ -134,14 +133,23 @@ async fn anthropic_ingress_uses_the_same_typed_runtime_and_meter() {
             None,
         ),
     );
-    let sink = Arc::new(InMemorySink::new());
-    let state = Arc::new(ProxyState::new(
+    Arc::new(ProxyState::new(
         keys,
         ProxyLedger::in_memory(),
-        sink.clone(),
+        sink,
         providers,
         None,
-    ));
+    ))
+}
+
+const ANTHROPIC_BODY: &str =
+    r#"{"model":"claude-test","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}"#;
+
+#[tokio::test]
+async fn anthropic_ingress_uses_the_same_typed_runtime_and_meter() {
+    let upstream = MockServer::start().await;
+    let sink = Arc::new(InMemorySink::new());
+    let state = anthropic_state(&upstream, sink.clone()).await;
 
     let response = build_app(state.clone())
         .oneshot(
@@ -149,9 +157,7 @@ async fn anthropic_ingress_uses_the_same_typed_runtime_and_meter() {
                 .method("POST")
                 .uri("/v1/messages")
                 .header("authorization", "Bearer vk_demo")
-                .body(Body::from(
-                    r#"{"model":"claude-test","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}"#,
-                ))
+                .body(Body::from(ANTHROPIC_BODY))
                 .unwrap(),
         )
         .await
@@ -169,6 +175,124 @@ async fn anthropic_ingress_uses_the_same_typed_runtime_and_meter() {
     assert_eq!(sink.events()[0].tokens_in, 7);
     assert_eq!(sink.events()[0].cache_read_tokens, 2);
     assert_eq!(state.ledger.lock().unwrap().reserved("group:platform"), 0);
+}
+
+/// TD-0010 D1 — the regression this fixes: the stock Anthropic SDK authenticates with
+/// `x-api-key` and nothing else, so `anthropic.Anthropic(base_url=…, api_key="vk_…")` used to
+/// get a flat 401 from the proxy's single `Authorization: Bearer` credential path. Nothing in
+/// the request below is Sandhi-specific — it is exactly what the vendor SDK puts on the wire.
+#[tokio::test]
+async fn anthropic_ingress_accepts_the_sdk_x_api_key_header() {
+    let upstream = MockServer::start().await;
+    let sink = Arc::new(InMemorySink::new());
+    let state = anthropic_state(&upstream, sink.clone()).await;
+
+    let response = build_app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("x-api-key", "vk_demo")
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .body(Body::from(ANTHROPIC_BODY))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["content"][0]["text"], "hello");
+    // The call was attributed and metered like any other — the credential form is presentation,
+    // not policy.
+    assert_eq!(sink.events().len(), 1);
+    assert_eq!(sink.events()[0].virtual_key_id.as_deref(), Some("vk_demo"));
+    assert_eq!(sink.events()[0].subject_id.as_deref(), Some("alice"));
+}
+
+/// `x-api-key` is Anthropic's scheme, not OpenAI's. Accepting it on `/v1/chat/completions` would
+/// invent a cross-vendor auth form no client sends and no vendor documents.
+#[tokio::test]
+async fn openai_ingress_rejects_x_api_key() {
+    let sink = Arc::new(InMemorySink::new());
+    let state = state_with(
+        "http://127.0.0.1:1".into(),
+        sink.clone(),
+        ProxyLedger::in_memory(),
+    );
+
+    let response = build_app(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("x-api-key", "vk_demo")
+                .body(Body::from(r#"{"model":"gpt-x","messages":[]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(sink.len(), 0);
+}
+
+/// Absent or malformed credentials still fail closed on every ingress path, with the same
+/// error body shape as before.
+#[tokio::test]
+async fn missing_or_malformed_credential_is_401_on_every_ingress_path() {
+    for (uri, body) in [
+        ("/v1/chat/completions", r#"{"model":"gpt-x","messages":[]}"#),
+        ("/v1/messages", ANTHROPIC_BODY),
+        ("/v1/responses", r#"{"model":"gpt-x","input":[]}"#),
+    ] {
+        for credential in [None, Some(("authorization", "Basic vk_demo"))] {
+            let sink = Arc::new(InMemorySink::new());
+            let state = state_with(
+                "http://127.0.0.1:1".into(),
+                sink.clone(),
+                ProxyLedger::in_memory(),
+            );
+            let mut request = Request::builder().method("POST").uri(uri);
+            if let Some((name, value)) = credential {
+                request = request.header(name, value);
+            }
+            let response = build_app(state)
+                .oneshot(request.body(Body::from(body)).unwrap())
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+            let payload = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+            // Dialect-shaped now (TD-0010 D2 auth slice): OpenAI/Responses nest under `error`,
+            // Anthropic wraps in `{"type":"error",...}`, and the text names the scheme THAT
+            // dialect's SDK sends rather than telling everyone to use bearer.
+            let message = value["error"]["message"].as_str().unwrap_or_else(|| {
+                panic!("{uri}: expected a structured error object, got {value}")
+            });
+            assert!(
+                message.starts_with("missing virtual key"),
+                "{uri}: {message}"
+            );
+            if uri == "/v1/messages" {
+                assert_eq!(value["type"], "error", "{uri}");
+                assert!(message.contains("x-api-key"), "{uri}: {message}");
+            } else {
+                assert!(
+                    message.contains("Authorization: Bearer"),
+                    "{uri}: {message}"
+                );
+            }
+            assert_eq!(sink.len(), 0);
+        }
+    }
 }
 
 #[tokio::test]
@@ -711,4 +835,190 @@ async fn cross_family_ingress_routes_through_the_typed_translation_plane() {
     assert_eq!(events[0].provider, "anthropic");
     assert_eq!(events[0].tokens_in, 9);
     assert_eq!(events[0].tokens_out, 4);
+}
+
+/// TD-0010 D3: discovery lists exactly what the key may call, so the allowlist is discoverable
+/// instead of surfacing as a 403 at call time. The SDK-conformance suite covers the unfiltered
+/// case; this covers the filtered one, which is the part the decision is actually about.
+#[tokio::test]
+async fn discovery_lists_only_the_models_the_key_permits() {
+    let upstream = MockServer::start().await;
+    let sink = Arc::new(InMemorySink::default());
+    let keys = KeyStore::new();
+    keys.insert(VirtualKey {
+        id: "vk_scoped".into(),
+        subject_id: Some("alice".into()),
+        group_id: Some("platform".into()),
+        upstream_ref: "up1".into(),
+        models: Some(vec!["gpt-only-this".into()]),
+        ..Default::default()
+    });
+    keys.insert(VirtualKey {
+        id: "vk_open".into(),
+        subject_id: Some("bob".into()),
+        group_id: Some("platform".into()),
+        upstream_ref: "up1".into(),
+        ..Default::default()
+    });
+    let mut providers: HashMap<String, ProviderHandle> = HashMap::new();
+    providers.insert(
+        "up1".into(),
+        ProviderRuntime::new().openai_compat(
+            "openai",
+            upstream.uri(),
+            "REAL-KEY",
+            Default::default(),
+            None,
+            None,
+            None,
+        ),
+    );
+    let state = Arc::new(ProxyState::new(
+        keys,
+        ProxyLedger::in_memory(),
+        sink,
+        providers,
+        None,
+    ));
+
+    let listing = |token: &'static str| {
+        let app = build_app(Arc::clone(&state));
+        async move {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri("/v1/models")
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let payload = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap()
+        }
+    };
+
+    // A scoped key sees exactly its allowlist — one entry, the one it may call.
+    let scoped = listing("vk_scoped").await;
+    let ids: Vec<&str> = scoped["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["gpt-only-this"]);
+    assert_eq!(scoped["object"], "list");
+
+    // An unscoped key is NOT narrowed: absent allowlist means the upstream's own catalog, and
+    // it must not pick up the other key's single entry.
+    let open = listing("vk_open").await;
+    let open_ids: Vec<&str> = open["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert_ne!(
+        open_ids, ids,
+        "an unscoped key inherited a scoped key's narrowing"
+    );
+    assert!(
+        !open_ids.contains(&"gpt-only-this"),
+        "the allowlist-only entry leaked into an unscoped key's listing: {open_ids:?}"
+    );
+
+    // Discovery is authenticated: it reveals which models a credential may use.
+    let app = build_app(Arc::clone(&state));
+    let anon = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/models")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(anon.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// TD-0010 D2: a failure on a VENDOR path must be parseable by that vendor's SDK. These are the
+/// paths a client actually hits, so a bare `{"error":"<string>"}` there defeats the client's own
+/// error handling — the operator API (`/admin/*`, `/dashboard/api/*`) keeps its flat shape on
+/// purpose, since no vendor SDK reads it.
+#[tokio::test]
+async fn upstream_failures_are_rendered_in_the_callers_dialect() {
+    // A key bound to an upstream that was never registered: the 502 path every dialect shares.
+    let keys = KeyStore::new();
+    for id in ["vk_openai", "vk_anthropic", "vk_gemini"] {
+        keys.insert(VirtualKey {
+            id: id.into(),
+            subject_id: Some("alice".into()),
+            group_id: Some("platform".into()),
+            upstream_ref: "nonexistent".into(),
+            ..Default::default()
+        });
+    }
+    let state = Arc::new(ProxyState::new(
+        keys,
+        ProxyLedger::in_memory(),
+        Arc::new(InMemorySink::default()),
+        HashMap::new(),
+        None,
+    ));
+
+    for (uri, header, token, body) in [
+        (
+            "/v1/chat/completions",
+            "authorization",
+            "Bearer vk_openai",
+            r#"{"model":"m","messages":[]}"#,
+        ),
+        ("/v1/messages", "x-api-key", "vk_anthropic", ANTHROPIC_BODY),
+        (
+            "/v1beta/models/m:generateContent",
+            "x-goog-api-key",
+            "vk_gemini",
+            r#"{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}"#,
+        ),
+    ] {
+        let app = build_app(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .header(header, token)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{uri}");
+        let payload = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+
+        // Structured in every dialect — never a bare string.
+        assert!(
+            value["error"].is_object(),
+            "{uri}: expected a structured error, got {value}"
+        );
+        match uri {
+            "/v1/messages" => assert_eq!(value["type"], "error", "{uri}"),
+            // Google's shape: numeric code + canonical status name.
+            "/v1beta/models/m:generateContent" => {
+                assert_eq!(value["error"]["code"], 502, "{uri}");
+                assert_eq!(value["error"]["status"], "INTERNAL", "{uri}");
+            }
+            _ => {}
+        }
+    }
 }

@@ -87,7 +87,7 @@ impl Provider for Anthropic {
             .map_err(|e| ProviderError::Transport(e.to_string()))?;
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
-            return Err(error_for_response(resp).await);
+            return Err(error_for_response(resp, Some("anthropic-request-id")).await);
         }
         let body: Value = resp
             .json()
@@ -118,7 +118,7 @@ impl Provider for Anthropic {
             .await
             .map_err(|e| ProviderError::Transport(e.to_string()))?;
         if !resp.status().is_success() {
-            return Err(error_for_response(resp).await);
+            return Err(error_for_response(resp, Some("anthropic-request-id")).await);
         }
         // Forward every upstream chunk verbatim (O(1) memory, ADR-0047 D9) while sniffing each
         // complete line for usage. `metered_passthrough` is the single shared streaming

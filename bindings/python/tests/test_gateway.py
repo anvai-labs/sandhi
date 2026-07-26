@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import pathlib
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -719,6 +720,109 @@ def test_gateway_meter_tokens_and_jsonl_sink_round_trip():
     finally:
         if os.path.exists(sink.name):
             os.unlink(sink.name)
+
+
+# ---------------------------------------------------------------------------
+# Gateway.usage_snapshot_json (TD-0009 P2): the in-process aggregate surface.
+# The corpus is shared with the Node suite so the two cannot drift.
+# ---------------------------------------------------------------------------
+
+PARITY_FIXTURE = (
+    pathlib.Path(__file__).resolve().parents[2] / "fixtures/usage-snapshot-parity.json"
+)
+
+
+def _parity_corpus():
+    with open(PARITY_FIXTURE) as fh:
+        return json.load(fh)
+
+
+def _drive(gateway, corpus):
+    for key in corpus["virtual_keys"]:
+        gateway.add_virtual_key(
+            key["id"],
+            subject=key["subject"],
+            group=key["group"],
+            upstream=key["upstream"],
+        )
+    for call in corpus["calls"]:
+        gateway.meter_tokens(
+            call["virtual_key"],
+            call["provider"],
+            call["model"],
+            call["tokens_in"],
+            call["tokens_out"],
+            call["cache_creation_tokens"],
+            call["cache_read_tokens"],
+            session_id=call["session_id"],
+        )
+
+
+def test_usage_snapshot_matches_the_cross_language_parity_corpus():
+    """Byte-identical to the fixture the Node suite asserts against (TD-0009 D6/P2)."""
+    corpus = _parity_corpus()
+    gateway = sg.Gateway()
+    _drive(gateway, corpus)
+
+    for dimension, expected in corpus["expected_json"].items():
+        assert gateway.usage_snapshot_json(dimension) == expected, dimension
+
+    # Aliases resolve through the one core parser, so `key`/`virtual_key` and
+    # `subject`/`user` cannot mean different things here than at /admin/usage?by=.
+    assert gateway.usage_snapshot_json("virtual_key") == corpus["expected_json"]["key"]
+    assert gateway.usage_snapshot_json("user") == corpus["expected_json"]["subject"]
+    assert gateway.usage_snapshot_json(" TOTAL ") == corpus["expected_json"]["total"]
+
+    # Neutral units only (ADR-0001): no dollars anywhere in the aggregate.
+    rows = json.loads(gateway.usage_snapshot_json("subject"))
+    assert rows[0]["key"] == "bob"  # ranked by billable tokens, busiest first
+    assert all("cost" not in r and "price" not in r for r in rows)
+    # No call reported a duration, so latency is absent rather than zeroed.
+    assert all("latency" not in r for r in rows)
+
+    with pytest.raises(ValueError, match="unknown usage dimension"):
+        gateway.usage_snapshot_json("cost")
+
+
+def test_usage_snapshot_cap_folds_overflow_and_keeps_the_total_exact():
+    """TD-0009 D2: the cap loses per-key detail, never the sum."""
+    corpus = _parity_corpus()["overflow"]
+    key = corpus["virtual_key"]
+    gateway = sg.Gateway()
+    gateway.add_virtual_key(
+        key["id"], subject=key["subject"], group=key["group"], upstream=key["upstream"]
+    )
+    for session in corpus["sessions"]:
+        gateway.meter_tokens(
+            key["id"],
+            corpus["provider"],
+            corpus["model"],
+            corpus["tokens_in"],
+            corpus["tokens_out"],
+            session_id=session,
+        )
+
+    capped = gateway.usage_snapshot_json("session", corpus["cap"])
+    assert capped == corpus["expected_session_json"]
+    rows = json.loads(capped)
+    # cap distinct keys survive; everything after them lands in one honest bucket.
+    assert len(rows) == corpus["cap"] + 1
+    overflow = next(r for r in rows if r["key"] == "(overflow)")
+    assert overflow["calls"] == len(corpus["sessions"]) - corpus["cap"]
+
+    # The sum is exact under eviction: rows still add up to the grand total.
+    total = json.loads(gateway.usage_snapshot_json("total"))
+    assert gateway.usage_snapshot_json("total") == corpus["expected_total_json"]
+    assert total[0]["billable_tokens"] == corpus["expected_total_billable"]
+    assert (
+        sum(r["billable_tokens"] for r in rows) == corpus["expected_total_billable"]
+    )
+    assert sum(r["calls"] for r in rows) == len(corpus["sessions"])
+
+    # Uncapped, every session keeps its own row.
+    uncapped = json.loads(gateway.usage_snapshot_json("session"))
+    assert [r["key"] for r in uncapped] == corpus["sessions"]
+    assert all(r["key"] != "(overflow)" for r in uncapped)
 
 
 def test_parse_usage_exercises_every_builtin_provider_parser():

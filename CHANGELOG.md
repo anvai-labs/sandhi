@@ -17,6 +17,56 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
+### Added
+
+- **Model discovery per dialect** (TD-0010 D3) — `GET /v1/models` in OpenAI *and* Anthropic
+  shape (the credential presentation identifies the client, since both SDKs use that path) and
+  `GET /v1beta/models` for Gemini. The listing is the key's **permitted** models: the upstream
+  catalog intersected with the virtual key's allowlist, so a scoped key discovers exactly what it
+  may call instead of meeting a 403 at call time. Discovery is authenticated, because it reveals
+  which models a credential can use. `.models.list()` now works unmodified on all three SDKs
+  (LangChain, LiteLLM health checks and most chat UIs call it before anything else).
+- **Gemini ingress dialect** (TD-0010 D4a) — `POST /v1beta/models/{model}:generateContent` and
+  `:streamGenerateContent`, authenticated with the `x-goog-api-key` header. A `google-genai`
+  client now points its `base_url` at Sandhi unmodified. Gemini is the first dialect whose model
+  and streaming choice live in the **path** rather than the body, which reaches the model
+  allowlist, the reservation, and the upstream URL.
+  - Admitted on the **transparent plane only**: a Gemini client must resolve to a Gemini upstream,
+    where the body is forwarded byte-for-byte and metered in flight. Cross-family is **refused**
+    (501, Google's error shape) rather than translated from an accounting-grade decode that would
+    silently drop tools, inline media and safety settings (D4b will lift this).
+  - The documented `?key=` query form is **not** accepted — it would put a live virtual key into
+    URLs, access logs and crash reports. Stated as a gap in the README matrix instead.
+  - `SANDHI_GEMINI_KEY` / `SANDHI_GEMINI_BASE` register a Gemini upstream.
+
+- **SDK-conformance suite** (TD-0010 D5) — `tests/sdk-conformance/` starts the real `sandhi-proxy`
+  binary against a mock upstream and drives it with the **vendors' own clients**
+  (`openai-python`, `anthropic-python`), asserting that pointing `base_url` at Sandhi with a
+  virtual key needs no other client change. It also asserts the virtual key never reaches the
+  provider and that the real upstream credential is substituted server-side. Every other test in
+  this repo hand-rolls the request, which is how an Anthropic ingress that no stock SDK could
+  authenticate against shipped unnoticed; this suite is verified to catch that defect by reverting
+  the fix and watching it fail. Gated in CI as a required check, and the README's compatibility
+  matrix is now backed by it.
+- **`SANDHI_ANTHROPIC_BASE`** — base-URL override for the Anthropic upstream, symmetric with the
+  long-standing `SANDHI_OPENAI_BASE`. Without it the Anthropic upstream could only ever be the
+  public API: no Anthropic-compatible gateway, no local mock, and no way to test that path.
+
+### Fixed
+
+- **Client-facing failures are rendered in the caller's dialect** (TD-0010 D2, completed). Beyond
+  the auth paths below, a missing upstream registration and both transparent-plane failures
+  returned a bare `{"error": "<string>"}` on vendor routes — unparseable by the SDK that made the
+  call, which defeats its own error handling. All client-facing paths now use the dialect
+  renderer. Sandhi's **operator** API (`/admin/*`, `/catalog/models`, `/dashboard/api/*`) keeps
+  its flat envelope on purpose: it is consumed by the `sandhi` CLI, not by a vendor SDK, and has
+  no client dialect to render.
+- **Auth failures are rendered in the caller's dialect** (TD-0010 D2, auth slice). A missing,
+  expired or unknown virtual key returned a flat `{"error": "<string>"}` that two of the three
+  SDKs cannot parse, and its text told every client to send `Authorization: Bearer` — advice that
+  is wrong for Anthropic (`x-api-key`) and Gemini (`x-goog-api-key`). The 401 now uses each
+  dialect's envelope and names that vendor's own scheme.
+
 ### Security
 
 - **Dashboard reads are gated by default** (ADR-0004 D4). When an admin token is configured,
@@ -32,6 +82,16 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 
 ### Added
 
+- **In-process usage snapshots on both bindings** (TD-0009 P2) — `Gateway.usage_snapshot_json()`
+  (Python) / `Gateway.usageSnapshotJson()` (Node) fold the events the gateway recorded into
+  `UsageAggregateV1` rows for one attribution dimension (`subject`/`user`, `group`, `provider`,
+  `model`, `key`/`virtual_key`, `session`, `total`), closing the gap where the in-process path —
+  the one Victor uses — had no aggregation surface at all. The fold is `sandhi-core`'s, the same
+  one the proxy, the CLI and the dashboard read, so the two shapes cannot disagree; no binding
+  links `sandhi-store`, so the wheels stay SQLite-free. An optional `cap` bounds distinct keys
+  before the rest fold into `"(overflow)"` (default 1024) — per-key detail is lost, the sum never
+  is. Python and Node assert byte-identical snapshots against one shared corpus
+  (`bindings/fixtures/usage-snapshot-parity.json`), so parity fails in CI rather than in review.
 - **Contract governance guards** (TD-0008 A) — `chat_contract_version()` exported from both
   bindings, a `stream_event_variant_tag()` exhaustive match so adding a `ChatStreamEventV1`
   variant fails compilation until a consumer decision is recorded, a census test cross-checking
@@ -49,6 +109,16 @@ hand-edited; see [RELEASING.md](RELEASING.md).
   ([#76](https://github.com/anvai-labs/sandhi/pull/76))
 
 ### Fixed
+
+- **The Anthropic SDK works unmodified against `/v1/messages`** (TD-0010 D1). The proxy read the
+  client's virtual key from exactly one place — `Authorization: Bearer` — while the official
+  Anthropic SDK authenticates with `x-api-key`, so `anthropic.Anthropic(base_url=…,
+  api_key="vk_…")` got a **401** and the drop-in promise held only for OpenAI clients. Credential
+  extraction now belongs to the **ingress dialect**, which owns the whole client-facing contract
+  rather than just the body schema: `/v1/messages` accepts `x-api-key` (preferred) **and**
+  `Authorization: Bearer`; `/v1/chat/completions` and `/v1/responses` stay Bearer-only, so no
+  cross-vendor auth scheme is invented. Existing Bearer clients are unaffected, and missing or
+  malformed credentials still fail closed with a 401.
 
 - **One billable definition everywhere.** ADR-0005 D4 defines the billable quantity as fresh
   input + the cache split + output (+ unfolded reasoning), and the proxy settled on it — but two

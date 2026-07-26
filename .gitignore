@@ -29,3 +29,7 @@ bindings/node/npm/
 
 # Victor project runtime artifacts (per-project state, never source)
 .victor/
+
+# Local agent worktrees + session scratch (tooling artifacts, never part of the repo).
+.claude/
+.worktrees/

@@ -169,8 +169,24 @@ pub struct ChatRequestV1 {
     pub seed: Option<i64>,
     #[serde(default)]
     pub metadata: RequestMetadataV1,
+    /// Whether adapters re-embed the full native provider response body under
+    /// `extensions[<endpoint family>]` on the response. Defaults to true for
+    /// compatibility; clients that consume only the neutral contract can opt
+    /// out to shed bandwidth and coupling (G8). The `reasoning` extension is
+    /// unaffected — it is decoded content, not a native body.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub include_native_response: bool,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extensions: BTreeMap<String, Value>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 impl ChatRequestV1 {
@@ -529,6 +545,10 @@ pub fn contract_schema_documents() -> BTreeMap<&'static str, String> {
             render(&schemars::schema_for!(ChatStreamEventV1)),
         ),
         (
+            "usage-aggregate.v1.schema.json",
+            render(&schemars::schema_for!(crate::stats::UsageAggregateV1)),
+        ),
+        (
             "provider-descriptor.v1.schema.json",
             render(&schemars::schema_for!(ProviderDescriptorV1)),
         ),
@@ -545,6 +565,29 @@ pub fn contract_schema_documents() -> BTreeMap<&'static str, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn include_native_response_defaults_true_and_stays_off_the_wire() {
+        // Old request JSON (field absent) keeps today's behavior: include.
+        let req: ChatRequestV1 = serde_json::from_value(serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .unwrap();
+        assert!(req.include_native_response);
+
+        // Default stays off the wire — old consumers see byte-identical requests.
+        let wire = serde_json::to_value(&req).unwrap();
+        assert!(wire.get("include_native_response").is_none());
+
+        // Opt-out round-trips.
+        let mut opted_out = req.clone();
+        opted_out.include_native_response = false;
+        let wire = serde_json::to_value(&opted_out).unwrap();
+        assert_eq!(wire["include_native_response"], serde_json::json!(false));
+        let back: ChatRequestV1 = serde_json::from_value(wire).unwrap();
+        assert!(!back.include_native_response);
+    }
+
     use super::*;
 
     #[test]

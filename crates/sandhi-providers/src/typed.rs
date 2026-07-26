@@ -499,6 +499,11 @@ impl ChatProvider for TypedOpenAiCompat {
         let req = provider_request(&request, encode_openai_request(&request)?);
         let response = self.raw.complete(req).await?;
         let mut decoded = decode_openai_response(response.body, response.usage, &request.model)?;
+        if !request.include_native_response {
+            // G8: the native body is debug metadata, not contract. Decoded
+            // extensions (e.g. "reasoning") always survive.
+            decoded.extensions.remove("openai");
+        }
         decoded.usage.attempts = response.attempts;
         decoded.usage.outcome = Some("success".into());
         Ok(decoded)
@@ -929,6 +934,7 @@ impl ProviderError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{ProviderRequest, ProviderResponse};
     use bytes::Bytes;
     use futures_util::StreamExt;
 
@@ -1177,6 +1183,55 @@ mod tests {
             escape_hatch.raw_forwarder().is_none(),
             "an escape-hatch handle has no transport config to forward with"
         );
+    }
+
+    /// Canned raw provider for complete()-level tests of the native-body gate (G8).
+    struct CannedRaw(Value);
+    #[async_trait]
+    impl Provider for CannedRaw {
+        fn slug(&self) -> &str {
+            "openai"
+        }
+        async fn complete(&self, _: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+            Ok(ProviderResponse {
+                status: 200,
+                body: self.0.clone(),
+                usage: ParsedUsage::default(),
+                attempts: 1,
+            })
+        }
+        async fn stream(&self, _: ProviderRequest) -> Result<ByteStream, ProviderError> {
+            unreachable!()
+        }
+    }
+
+    fn canned_openai_provider() -> TypedOpenAiCompat {
+        TypedOpenAiCompat {
+            slug: "openai".into(),
+            raw: Arc::new(CannedRaw(json!({
+                "id": "r1",
+                "model": "gpt-test",
+                "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+            }))),
+        }
+    }
+
+    #[tokio::test]
+    async fn native_body_is_included_by_default() {
+        let out = canned_openai_provider().complete(request()).await.unwrap();
+        assert!(out.extensions.contains_key("openai"));
+    }
+
+    #[tokio::test]
+    async fn include_native_response_false_strips_the_native_body() {
+        let mut req = request();
+        req.include_native_response = false;
+        let out = canned_openai_provider().complete(req).await.unwrap();
+        assert!(!out.extensions.contains_key("openai"));
+        // Neutral contract untouched.
+        assert_eq!(out.output.content, Some(MessageContent::Text("hi".into())));
+        assert_eq!(out.finish_reason, Some(FinishReasonV1::Stop));
     }
 
     /// Minimal ChatProvider mock for handle tests (never actually completes a call).
