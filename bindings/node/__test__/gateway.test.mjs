@@ -344,9 +344,12 @@ test("provider() rejects invalid dispatch inputs at the FFI seam", () => {
     () => runtime.provider("anthropic", "m", "k", undefined, undefined, 0, undefined, undefined, "bogus"),
     /auth_scheme/,
   );
-  // auth_scheme supplied for a non-Anthropic provider.
+  // bearer for a non-scheme family is a NO-OP (its default IS Bearer) — accepted,
+  // not rejected (TD-0008 rule 5). Only a contradictory scheme is an error.
+  const bearerNoop = runtime.provider("openai", "m", "k", "https://e.test/v1", undefined, 0, undefined, undefined, "bearer");
+  assert.equal(bearerNoop.provider, "openai");
   assert.throws(
-    () => runtime.provider("openai", "m", "k", "https://e.test/v1", undefined, 0, undefined, undefined, "bearer"),
+    () => runtime.provider("openai", "m", "k", "https://e.test/v1", undefined, 0, undefined, undefined, "api_key"),
     /Anthropic/,
   );
   // Unsupported protocol value.

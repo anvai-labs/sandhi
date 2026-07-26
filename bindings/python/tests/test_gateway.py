@@ -512,7 +512,17 @@ def test_provider_rejects_invalid_dispatch_inputs_at_the_ffi_seam():
     # Unsupported auth_scheme value.
     with pytest.raises(ValueError, match="auth_scheme"):
         runtime.provider("anthropic", "m", "k", max_retries=0, auth_scheme="bogus")
-    # auth_scheme supplied for a provider that does not support it.
+    # bearer for a non-scheme family is a NO-OP (its default IS Bearer) — accepted,
+    # not rejected (TD-0008 rule 5). Only a contradictory scheme is an error.
+    handle = runtime.provider(
+        "openai",
+        "m",
+        "k",
+        base_url="https://e.test/v1",
+        max_retries=0,
+        auth_scheme="bearer",
+    )
+    assert handle.provider == "openai"
     with pytest.raises(ValueError, match="Anthropic"):
         runtime.provider(
             "openai",
@@ -520,7 +530,7 @@ def test_provider_rejects_invalid_dispatch_inputs_at_the_ffi_seam():
             "k",
             base_url="https://e.test/v1",
             max_retries=0,
-            auth_scheme="bearer",
+            auth_scheme="api_key",
         )
     # Unsupported protocol value.
     with pytest.raises(ValueError, match="protocol"):
