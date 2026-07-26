@@ -128,6 +128,8 @@ class UsageV2(TypedDict):
     attempts: NotRequired[int]
     outcome: NotRequired[str]
     upstream_request_id: NotRequired[str]
+    duration_ms: NotRequired[int]
+    time_to_first_token_ms: NotRequired[int]
     audio_input_tokens: NotRequired[int]
     audio_output_tokens: NotRequired[int]
     reasoning_tokens: NotRequired[int]
@@ -239,6 +241,7 @@ export interface ChatRequestV1 {{
 export interface UsageV2 {{
   tokens_in: number; tokens_out: number; cache_creation_tokens: number; cache_read_tokens: number
   completeness?: UsageCompleteness; attempts?: number; outcome?: string; upstream_request_id?: string
+  duration_ms?: number; time_to_first_token_ms?: number
   audio_input_tokens?: number; audio_output_tokens?: number; reasoning_tokens?: number
   accepted_prediction_tokens?: number; rejected_prediction_tokens?: number
 }}

@@ -168,12 +168,50 @@ impl ProviderHandle {
     }
 
     pub async fn complete(&self, request: ChatRequestV1) -> Result<ChatResponseV1, ProviderError> {
-        self.inner.complete(request).await
+        // Wire-truth latency, stamped once at the family-neutral typed
+        // boundary (W3b) — the one seam every binding and the proxy call.
+        let started = std::time::Instant::now();
+        let mut response = self.inner.complete(request).await?;
+        response.usage.duration_ms = Some(elapsed_ms(started));
+        Ok(response)
     }
 
     pub async fn stream(&self, request: ChatRequestV1) -> Result<ChatEventStream, ProviderError> {
-        self.inner.stream(request).await
+        let started = std::time::Instant::now();
+        let inner = self.inner.stream(request).await?;
+        Ok(stamp_stream_latency(inner, started))
     }
+}
+
+fn elapsed_ms(started: std::time::Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Rewrite the terminal `Usage` event with wire-truth latency (W3b): duration
+/// spans request dispatch to the usage emission; time-to-first-token is the
+/// first delivered event (parity with the metering decorator's TTFT
+/// semantics). All other events pass through untouched.
+fn stamp_stream_latency(inner: ChatEventStream, started: std::time::Instant) -> ChatEventStream {
+    use futures_util::StreamExt;
+
+    Box::pin(async_stream::try_stream! {
+        let mut inner = inner;
+        let mut ttft_ms: Option<u64> = None;
+        while let Some(event) = inner.next().await {
+            let event = event?;
+            if ttft_ms.is_none() {
+                ttft_ms = Some(elapsed_ms(started));
+            }
+            match event {
+                ChatStreamEventV1::Usage { mut usage } => {
+                    usage.duration_ms = Some(elapsed_ms(started));
+                    usage.time_to_first_token_ms = ttft_ms;
+                    yield ChatStreamEventV1::Usage { usage };
+                }
+                other => yield other,
+            }
+        }
+    })
 }
 
 /// Factory for persistent typed provider handles. A handle owns one adapter and therefore one
@@ -1232,6 +1270,80 @@ mod tests {
         // Neutral contract untouched.
         assert_eq!(out.output.content, Some(MessageContent::Text("hi".into())));
         assert_eq!(out.finish_reason, Some(FinishReasonV1::Stop));
+    }
+
+    /// Canned typed provider for the W3b latency-stamp tests.
+    struct CannedChat;
+    #[async_trait]
+    impl ChatProvider for CannedChat {
+        fn slug(&self) -> &str {
+            "canned"
+        }
+        async fn complete(&self, _: ChatRequestV1) -> Result<ChatResponseV1, ProviderError> {
+            Ok(serde_json::from_value(json!({
+                "schema_version": "1",
+                "model": "m",
+                "output": {"content": "hi"},
+                "usage": {"tokens_in": 1, "tokens_out": 1,
+                          "cache_creation_tokens": 0, "cache_read_tokens": 0}
+            }))
+            .unwrap())
+        }
+        async fn stream(&self, _: ChatRequestV1) -> Result<ChatEventStream, ProviderError> {
+            let events: Vec<Result<ChatStreamEventV1, ProviderError>> = vec![
+                Ok(ChatStreamEventV1::TextDelta { delta: "hi".into() }),
+                Ok(ChatStreamEventV1::Usage {
+                    usage: serde_json::from_value(json!({
+                        "tokens_in": 1, "tokens_out": 1,
+                        "cache_creation_tokens": 0, "cache_read_tokens": 0
+                    }))
+                    .unwrap(),
+                }),
+            ];
+            Ok(Box::pin(futures_util::stream::iter(events)))
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_complete_stamps_wire_duration() {
+        let handle = ProviderHandle::new(Arc::new(CannedChat));
+        let out = handle
+            .complete(
+                serde_json::from_value(json!({
+                    "model": "m",
+                    "messages": [{"role": "user", "content": "hi"}]
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(out.usage.duration_ms.is_some());
+        assert!(out.usage.time_to_first_token_ms.is_none()); // streaming-only
+    }
+
+    #[tokio::test]
+    async fn handle_stream_stamps_latency_on_terminal_usage() {
+        let handle = ProviderHandle::new(Arc::new(CannedChat));
+        let mut stream = handle
+            .stream(
+                serde_json::from_value(json!({
+                    "model": "m",
+                    "messages": [{"role": "user", "content": "hi"}]
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut usage = None;
+        while let Some(event) = stream.next().await {
+            if let ChatStreamEventV1::Usage { usage: u } = event.unwrap() {
+                usage = Some(u);
+            }
+        }
+        let usage = usage.expect("terminal usage event");
+        assert!(usage.duration_ms.is_some());
+        assert!(usage.time_to_first_token_ms.is_some());
+        assert!(usage.time_to_first_token_ms <= usage.duration_ms);
     }
 
     /// Minimal ChatProvider mock for handle tests (never actually completes a call).
