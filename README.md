@@ -25,7 +25,9 @@ key, and set per-user budgets — without hand-rolling provider APIs.
   ([TD-0007](docs/td/TD-0007-enforcement-ledger-backends.md)), Gemini/Cohere *ingress* dialects,
   first-party observability export, and the declarative policy engine
   ([TD-0005](docs/td/TD-0005-declarative-policy-engine.md)).
-- **Packages:** crate `sandhi` · PyPI `sandhi-gateway` · npm `@anvai-labs/sandhi`
+- **Packages:** crates.io `sandhi-core` / `-providers` / `-store` / `-proxy` · PyPI
+  `sandhi-gateway` · npm `@anvai-labs/sandhi` *(not published yet — the Node client is
+  still in development; the binding builds and is tested in CI)*
 
 ## Why
 
