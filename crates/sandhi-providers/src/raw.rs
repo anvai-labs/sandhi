@@ -110,7 +110,7 @@ impl RawForwarder {
         let resp = self.send(&url, out_body).await?;
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
-            return Err(error_for_response(resp).await);
+            return Err(error_for_response(resp, None).await);
         }
         let headers = filter_response_headers(resp.headers());
         let body = resp
@@ -137,7 +137,7 @@ impl RawForwarder {
         let out_body = normalize_envelope(self.family, &body, true);
         let resp = self.send(&url, out_body).await?;
         if !resp.status().is_success() {
-            return Err(error_for_response(resp).await);
+            return Err(error_for_response(resp, None).await);
         }
         use futures_util::TryStreamExt;
         let stream = resp
@@ -178,7 +178,7 @@ impl RawForwarder {
         let out_body = normalize_envelope(self.family, &body, true);
         let resp = self.send(&url, out_body).await?;
         if !resp.status().is_success() {
-            return Err(error_for_response(resp).await);
+            return Err(error_for_response(resp, None).await);
         }
         Ok(crate::metered_passthrough(
             resp.bytes_stream(),

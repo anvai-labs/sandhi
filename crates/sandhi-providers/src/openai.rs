@@ -19,6 +19,9 @@ pub struct OpenAiCompat {
     base_url: String,
     api_key: String,
     headers: HeaderMap,
+    /// Vendor request-id header from the catalog spec (strategy-via-data): set for
+    /// slugs whose id header deviates from the standard (e.g. moonshot).
+    request_id_header: Option<&'static str>,
 }
 
 impl OpenAiCompat {
@@ -27,12 +30,16 @@ impl OpenAiCompat {
         base_url: impl Into<String>,
         api_key: impl Into<String>,
     ) -> Self {
+        let slug = slug.into();
+        let request_id_header =
+            crate::resolve_openai_compat_provider(&slug).and_then(|spec| spec.request_id_header);
         Self {
             client: crate::default_client(),
-            slug: slug.into(),
+            slug,
             base_url: base_url.into(),
             api_key: api_key.into(),
             headers: HeaderMap::new(),
+            request_id_header,
         }
     }
 
@@ -80,7 +87,7 @@ impl Provider for OpenAiCompat {
             .map_err(|e| ProviderError::Transport(e.to_string()))?;
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
-            return Err(error_for_response(resp).await);
+            return Err(error_for_response(resp, self.request_id_header).await);
         }
         let body: Value = resp
             .json()
@@ -113,7 +120,7 @@ impl Provider for OpenAiCompat {
             .await
             .map_err(|e| ProviderError::Transport(e.to_string()))?;
         if !resp.status().is_success() {
-            return Err(error_for_response(resp).await);
+            return Err(error_for_response(resp, self.request_id_header).await);
         }
         // Forward every upstream chunk verbatim (O(1) pass-through) while sniffing each complete
         // line for the terminal usage object; `metered_passthrough` is the shared streaming

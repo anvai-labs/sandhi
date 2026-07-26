@@ -106,7 +106,7 @@ impl Provider for OpenAiResponses {
             .await
             .map_err(|error| ProviderError::Transport(error.to_string()))?;
         if !response.status().is_success() {
-            return Err(error_for_response(response).await);
+            return Err(error_for_response(response, None).await);
         }
         let status = response.status().as_u16();
         let body: Value = response
@@ -136,7 +136,7 @@ impl Provider for OpenAiResponses {
             .await
             .map_err(|error| ProviderError::Transport(error.to_string()))?;
         if !response.status().is_success() {
-            return Err(error_for_response(response).await);
+            return Err(error_for_response(response, None).await);
         }
         Ok(metered_passthrough(
             response.bytes_stream(),
