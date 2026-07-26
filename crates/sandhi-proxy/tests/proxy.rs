@@ -271,7 +271,25 @@ async fn missing_or_malformed_credential_is_401_on_every_ingress_path() {
                 .await
                 .unwrap();
             let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
-            assert_eq!(value["error"], "missing bearer virtual key", "{uri}");
+            // Dialect-shaped now (TD-0010 D2 auth slice): OpenAI/Responses nest under `error`,
+            // Anthropic wraps in `{"type":"error",...}`, and the text names the scheme THAT
+            // dialect's SDK sends rather than telling everyone to use bearer.
+            let message = value["error"]["message"].as_str().unwrap_or_else(|| {
+                panic!("{uri}: expected a structured error object, got {value}")
+            });
+            assert!(
+                message.starts_with("missing virtual key"),
+                "{uri}: {message}"
+            );
+            if uri == "/v1/messages" {
+                assert_eq!(value["type"], "error", "{uri}");
+                assert!(message.contains("x-api-key"), "{uri}: {message}");
+            } else {
+                assert!(
+                    message.contains("Authorization: Bearer"),
+                    "{uri}: {message}"
+                );
+            }
             assert_eq!(sink.len(), 0);
         }
     }

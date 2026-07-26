@@ -21,6 +21,15 @@ pub(crate) enum IngressDialect {
     /// `ChatRequestV1` as the other dialects; the field mapping mirrors the typed Responses
     /// codec in `sandhi-providers::openai_responses_typed`.
     Responses,
+    /// Google Gemini (`/v1beta/models/{model}:generateContent`). Structurally unlike the other
+    /// three: the **model and the streaming choice live in the path**, not the body, and the
+    /// credential is `x-goog-api-key`.
+    ///
+    /// TD-0010 D4a admits this dialect on the **transparent plane only** — a Gemini client must
+    /// resolve to a Gemini upstream, where the body is forwarded byte-for-byte. Its decode below
+    /// is therefore accounting-grade (enough to meter and enforce), NOT a faithful round-trip;
+    /// cross-family translation is refused rather than served from a lossy decode (D4b).
+    Gemini,
 }
 
 /// One way a client may present its virtual key on the wire.
@@ -70,6 +79,24 @@ impl IngressDialect {
                 CredentialScheme::RawHeader("x-api-key"),
                 CredentialScheme::AuthorizationBearer,
             ],
+            // Header only. Gemini also documents `?key=<credential>`, which puts a live virtual
+            // key in a URL — access logs, crash reports, browser history. Until that can be
+            // guaranteed not to be logged end to end, the query form is a stated gap in the
+            // compatibility matrix rather than a quiet acceptance (TD-0010 D4a).
+            IngressDialect::Gemini => &[
+                CredentialScheme::RawHeader("x-goog-api-key"),
+                CredentialScheme::AuthorizationBearer,
+            ],
+        }
+    }
+
+    /// How this dialect's own SDK is documented to present a credential — used in the 401 so the
+    /// message tells a client what its vendor actually sends, not what another vendor sends.
+    pub(crate) fn credential_hint(self) -> &'static str {
+        match self {
+            IngressDialect::OpenAi | IngressDialect::Responses => "'Authorization: Bearer <key>'",
+            IngressDialect::Anthropic => "'x-api-key: <key>' (or 'Authorization: Bearer <key>')",
+            IngressDialect::Gemini => "'x-goog-api-key: <key>' (or 'Authorization: Bearer <key>')",
         }
     }
 
@@ -91,7 +118,95 @@ pub(crate) fn decode_request(
         IngressDialect::OpenAi => decode_openai_request(body, metadata),
         IngressDialect::Anthropic => decode_anthropic_request(body, metadata),
         IngressDialect::Responses => decode_responses_request(body, metadata),
+        IngressDialect::Gemini => decode_gemini_request(body, metadata),
     }
+}
+
+/// Accounting-grade decode of a Gemini `generateContent` body.
+///
+/// Deliberately NOT a faithful codec. On the transparent plane the client's bytes are forwarded
+/// verbatim, so this exists only to answer the questions enforcement asks: which model, how much
+/// output was requested, and roughly how much input is being sent. Tool declarations, inline
+/// media, safety settings and the rest ride through untouched in the raw body.
+///
+/// `model` and the streaming choice come from the PATH and are stamped by the handler, so both
+/// are placeholders here. A cross-family request is refused upstream of this function precisely
+/// because re-encoding from a lossy decode would silently change the caller's request (D4b).
+fn decode_gemini_request(
+    body: Value,
+    metadata: RequestMetadataV1,
+) -> Result<(ChatRequestV1, bool), String> {
+    let object = body
+        .as_object()
+        .ok_or_else(|| "request body must be a JSON object".to_string())?;
+
+    let mut messages = Vec::new();
+    if let Some(system) = object.get("systemInstruction") {
+        if let Some(text) = gemini_parts_text(system.get("parts")) {
+            messages.push(ChatMessageV1::System {
+                content: MessageContent::Text(text),
+                name: None,
+            });
+        }
+    }
+    for content in object
+        .get("contents")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "contents must be an array".to_string())?
+    {
+        let text = gemini_parts_text(content.get("parts")).unwrap_or_default();
+        // Gemini names the assistant role "model"; everything else is treated as user input.
+        match content.get("role").and_then(Value::as_str) {
+            Some("model") => messages.push(ChatMessageV1::Assistant {
+                content: Some(MessageContent::Text(text)),
+                name: None,
+                tool_calls: Vec::new(),
+                refusal: None,
+            }),
+            _ => messages.push(ChatMessageV1::User {
+                content: MessageContent::Text(text),
+                name: None,
+            }),
+        }
+    }
+
+    let generation = object.get("generationConfig");
+    let max_output_tokens = generation
+        .and_then(|g| g.get("maxOutputTokens"))
+        .and_then(Value::as_u64);
+    let temperature = generation
+        .and_then(|g| g.get("temperature"))
+        .and_then(Value::as_f64);
+
+    let request = ChatRequestV1 {
+        schema_version: CHAT_SCHEMA_VERSION_V1.to_string(),
+        // Stamped by the handler from the path segment.
+        model: String::new(),
+        messages,
+        tools: Vec::new(),
+        tool_choice: None,
+        temperature,
+        max_output_tokens,
+        stop: None,
+        response_format: None,
+        seed: None,
+        metadata,
+        extensions: BTreeMap::new(),
+    };
+    // Streaming is a path verb, not a body field; the handler stamps it.
+    Ok((request, false))
+}
+
+/// Concatenate the `text` parts of a Gemini `parts[]` array. Non-text parts (inline data, function
+/// calls) contribute nothing to the input estimate here — they ride through in the raw body.
+fn gemini_parts_text(parts: Option<&Value>) -> Option<String> {
+    let parts = parts?.as_array()?;
+    let text: String = parts
+        .iter()
+        .filter_map(|p| p.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("");
+    (!text.is_empty()).then_some(text)
 }
 
 fn decode_openai_request(
@@ -808,6 +923,17 @@ pub(crate) fn encode_response(dialect: IngressDialect, response: &ChatResponseV1
         IngressDialect::OpenAi => encode_openai_response(response),
         IngressDialect::Anthropic => encode_anthropic_response(response),
         IngressDialect::Responses => encode_responses_response(response),
+        // Unreachable by construction: Gemini ingress is admitted only on the transparent plane
+        // (TD-0010 D4a), where the upstream's own bytes are returned and nothing is re-encoded.
+        // A cross-family Gemini request is refused in `handle` rather than translated, so if this
+        // ever runs the refusal was lost — surface it as an error instead of inventing a body.
+        IngressDialect::Gemini => json!({
+            "error": {
+                "code": 501,
+                "message": "Gemini ingress requires a Gemini upstream (cross-family translation is TD-0010 D4b)",
+                "status": "UNIMPLEMENTED",
+            }
+        }),
     }
 }
 
@@ -958,6 +1084,10 @@ pub(crate) fn encode_stream_event(
         IngressDialect::OpenAi => encode_openai_stream_event(event, last_usage),
         IngressDialect::Anthropic => encode_anthropic_stream_event(event, last_usage),
         IngressDialect::Responses => encode_responses_stream_event(event, last_usage),
+        // See `encode_response`: the transparent plane streams the upstream's own frames, so a
+        // Gemini re-encode never runs. Emitting nothing is the safe reading — a fabricated frame
+        // would be worse than a silent one.
+        IngressDialect::Gemini => Vec::new(),
     }
 }
 

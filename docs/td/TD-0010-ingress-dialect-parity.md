@@ -1,7 +1,8 @@
 # TD-0010: Ingress dialect parity — drop-in compatibility as a release gate
 
-- **Status:** Proposed (2026-07-25). **P1 complete — D1 in #84, D5 in the SDK-conformance
-  suite**; this document was corrected
+- **Status:** Proposed (2026-07-25). **P1 complete** (D1 in #84, D5 in the SDK-conformance
+  suite); **P4a complete** (Gemini on the transparent plane); **D2's auth slice complete** — the
+  401/403 paths now render per dialect and name each vendor's own scheme; this document was corrected
   during that implementation — see the error-shape bullet and D2.
 - **Relates to:** ADR-0004 (two-plane proxy), TD-0006 (transparent metering), TD-0002 (typed
   runtime), ADR-0001 (wire contract), TD-0003 (operator surface: the model allowlist)
@@ -84,10 +85,10 @@ told about `x-api-key`, not "bearer"). Content is unchanged from #77 (redacted b
 `SANDHI_ERROR_DETAIL=full` opts in). Shape is compatibility; content is confidentiality. They are
 independent, and this TD must not quietly widen the second.
 
-> The credential check runs *before* a dialect is resolved for some paths, so D2 has a real
-> ordering question to answer: either resolve the dialect from the route before authenticating,
-> or give `error()` a dialect argument at each call site. Pick deliberately — the first is
-> tidier, the second is a smaller diff.
+> **Resolved while implementing P4a:** there was no ordering problem at the `handle()` call
+> sites — the dialect is already a parameter there, so the auth failures simply had not been
+> routed through the dialect renderer. Done. What remains of D2 is the admin/dashboard
+> rejections, which genuinely are pre-dialect (no route-derived dialect exists for them).
 
 **D3 — The dialect owns discovery, filtered by the virtual key.** `GET /v1/models` (OpenAI
 shape), the Anthropic equivalent, and Gemini's `ListModels`, all sourced from the existing
@@ -116,7 +117,8 @@ advertised as one — no aspirational rows.
 | **P1** ✅ | D1 credential extraction per dialect + the real-SDK conformance suite for OpenAI and Anthropic | **Met.** `tests/sdk-conformance/` starts the real proxy against a mock upstream and drives `openai-python` + `anthropic-python` unmodified; verified to fail (`401 missing bearer virtual key`) when Anthropic's scheme list is reverted to Bearer-only |
 | **P2** | D2 dialect-shaped errors | An SDK-raised error exposes `message`/`type`/`status` natively per vendor; redaction behaviour from #77 unchanged, proven by a test that asserts an upstream body is still absent by default |
 | **P3** | D3 discovery endpoints, allowlist-filtered | `client.models.list()` returns exactly the key's permitted models on both dialects |
-| **P4** | D4 Gemini ingress dialect | google-genai SDK completes streaming + non-streaming calls unmodified |
+| **P4a** ✅ | Gemini ingress on the **transparent plane only**, `x-goog-api-key` header auth | **Met.** `google-genai` completes streaming + non-streaming calls unmodified; `?key=` is refused; cross-family is refused rather than translated from the accounting-grade decode |
+| **P4b** | Cross-family translation for Gemini ingress (a faithful Gemini ↔ `ChatRequestV1` codec) | A Gemini client resolving to a non-Gemini upstream round-trips tools, inline media and safety settings without loss |
 
 P1 is the adoption unblocker and should land alone. P4 is the largest and is deliberately last —
 it is also the phase that proves the trait from D1–D3 was the right shape, because adding a
