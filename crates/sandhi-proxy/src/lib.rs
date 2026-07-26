@@ -151,6 +151,11 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         // (`/v1beta/models/gemini-2.5-flash:generateContent`), so it matches as ONE segment and
         // is split below — axum has no pattern for a colon-suffixed verb.
         .route("/v1beta/models/:model_method", post(handle_gemini))
+        // TD-0010 D3 discovery. `/v1/models` is shared by the OpenAI and Anthropic SDKs, which
+        // is resolvable because they authenticate differently: an `x-api-key` request is an
+        // Anthropic client and gets Anthropic's envelope.
+        .route("/v1/models", get(list_models))
+        .route("/v1beta/models", get(list_models_gemini))
         // TD-0003 P1 operator (admin) API.
         .route(
             "/admin/keys",
@@ -516,6 +521,140 @@ async fn handle_responses(
     body: Bytes,
 ) -> Response {
     handle(state, headers, body, IngressDialect::Responses, None).await
+}
+
+/// `GET /v1/models` — OpenAI and Anthropic discovery (TD-0010 D3).
+///
+/// The listing is the key's *permitted* models: the upstream catalog intersected with the virtual
+/// key's allowlist. A key that may call two models lists two, which makes the allowlist
+/// discoverable instead of a surprise 403 at call time, and is honest in a way a static catalog
+/// dump is not.
+async fn list_models(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -> Response {
+    // Same path, two vendors: the credential presentation identifies the client.
+    let dialect = if headers.contains_key("x-api-key") {
+        IngressDialect::Anthropic
+    } else {
+        IngressDialect::OpenAi
+    };
+    let (vk, provider) = match resolve_for_discovery(&state, dialect, &headers) {
+        Ok(pair) => pair,
+        Err(response) => return response,
+    };
+    let models = permitted_models(&vk, provider.slug());
+    let body = match dialect {
+        IngressDialect::Anthropic => json!({
+            "data": models.iter().map(|id| json!({
+                "type": "model",
+                "id": id,
+                "display_name": id,
+            })).collect::<Vec<_>>(),
+            "has_more": false,
+        }),
+        _ => json!({
+            "object": "list",
+            "data": models.iter().map(|id| json!({
+                "id": id,
+                "object": "model",
+                "owned_by": provider.slug(),
+            })).collect::<Vec<_>>(),
+        }),
+    };
+    Json(body).into_response()
+}
+
+/// `GET /v1beta/models` — Gemini discovery (TD-0010 D3).
+async fn list_models_gemini(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -> Response {
+    let (vk, provider) = match resolve_for_discovery(&state, IngressDialect::Gemini, &headers) {
+        Ok(pair) => pair,
+        Err(response) => return response,
+    };
+    let models = permitted_models(&vk, provider.slug());
+    Json(json!({
+        "models": models.iter().map(|id| json!({
+            // Gemini names a model by its resource path, and its SDK strips the prefix back off.
+            "name": format!("models/{id}"),
+            "displayName": id,
+            "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
+        })).collect::<Vec<_>>(),
+    }))
+    .into_response()
+}
+
+/// Shared auth + upstream resolution for the discovery endpoints.
+#[allow(clippy::result_large_err)] // axum::Response is intentionally large; idiomatic shape.
+fn resolve_for_discovery(
+    state: &Arc<ProxyState>,
+    dialect: IngressDialect,
+    headers: &HeaderMap,
+) -> Result<(VirtualKey, ProviderHandle), Response> {
+    let Some(token) = dialect.extract_credential(headers) else {
+        return Err(ingress_error(
+            dialect,
+            StatusCode::UNAUTHORIZED,
+            &format!(
+                "missing virtual key: send it as {}",
+                dialect.credential_hint()
+            ),
+        ));
+    };
+    let vk = match resolve_virtual_key(state, token) {
+        VirtualKeyResolution::Found(vk) => vk,
+        VirtualKeyResolution::Expired => {
+            return Err(ingress_error(
+                dialect,
+                StatusCode::UNAUTHORIZED,
+                "virtual key expired",
+            ));
+        }
+        VirtualKeyResolution::NotFound => {
+            return Err(ingress_error(
+                dialect,
+                StatusCode::UNAUTHORIZED,
+                "unknown virtual key",
+            ));
+        }
+    };
+    let Some(provider) = state
+        .providers
+        .lock()
+        .expect("providers poisoned")
+        .get(&vk.upstream_ref)
+        .cloned()
+    else {
+        return Err(ingress_error(
+            dialect,
+            StatusCode::BAD_GATEWAY,
+            "no upstream registered for this key",
+        ));
+    };
+    Ok((vk, provider))
+}
+
+/// The models this key may actually call: the upstream's catalog filtered by the allowlist.
+///
+/// With no allowlist the catalog is returned as-is. With an allowlist, entries the catalog does
+/// not know about are still listed — the catalog holds transport facts, not an authority on which
+/// models exist, so omitting an allowed-but-uncatalogued model would under-report what works.
+fn permitted_models(vk: &VirtualKey, slug: &str) -> Vec<String> {
+    let catalog: Vec<String> = sandhi_providers::provider_descriptor(slug)
+        .map(|d| d.models.into_iter().map(|m| m.id).collect())
+        .unwrap_or_default();
+    match vk.models.as_deref() {
+        None | Some([]) => catalog,
+        Some(allowed) => {
+            let mut out: Vec<String> = catalog
+                .iter()
+                .filter(|id| allowed.iter().any(|a| a.eq_ignore_ascii_case(id)))
+                .cloned()
+                .collect();
+            for a in allowed {
+                if !out.iter().any(|id| id.eq_ignore_ascii_case(a)) {
+                    out.push(a.clone());
+                }
+            }
+            out
+        }
+    }
 }
 
 /// `POST /v1beta/models/{model}:{generateContent|streamGenerateContent}` (TD-0010 D4a).

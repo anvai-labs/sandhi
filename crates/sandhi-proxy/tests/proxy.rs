@@ -836,3 +836,113 @@ async fn cross_family_ingress_routes_through_the_typed_translation_plane() {
     assert_eq!(events[0].tokens_in, 9);
     assert_eq!(events[0].tokens_out, 4);
 }
+
+/// TD-0010 D3: discovery lists exactly what the key may call, so the allowlist is discoverable
+/// instead of surfacing as a 403 at call time. The SDK-conformance suite covers the unfiltered
+/// case; this covers the filtered one, which is the part the decision is actually about.
+#[tokio::test]
+async fn discovery_lists_only_the_models_the_key_permits() {
+    let upstream = MockServer::start().await;
+    let sink = Arc::new(InMemorySink::default());
+    let keys = KeyStore::new();
+    keys.insert(VirtualKey {
+        id: "vk_scoped".into(),
+        subject_id: Some("alice".into()),
+        group_id: Some("platform".into()),
+        upstream_ref: "up1".into(),
+        models: Some(vec!["gpt-only-this".into()]),
+        ..Default::default()
+    });
+    keys.insert(VirtualKey {
+        id: "vk_open".into(),
+        subject_id: Some("bob".into()),
+        group_id: Some("platform".into()),
+        upstream_ref: "up1".into(),
+        ..Default::default()
+    });
+    let mut providers: HashMap<String, ProviderHandle> = HashMap::new();
+    providers.insert(
+        "up1".into(),
+        ProviderRuntime::new().openai_compat(
+            "openai",
+            upstream.uri(),
+            "REAL-KEY",
+            Default::default(),
+            None,
+            None,
+            None,
+        ),
+    );
+    let state = Arc::new(ProxyState::new(
+        keys,
+        ProxyLedger::in_memory(),
+        sink,
+        providers,
+        None,
+    ));
+
+    let listing = |token: &'static str| {
+        let app = build_app(Arc::clone(&state));
+        async move {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri("/v1/models")
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let payload = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap()
+        }
+    };
+
+    // A scoped key sees exactly its allowlist — one entry, the one it may call.
+    let scoped = listing("vk_scoped").await;
+    let ids: Vec<&str> = scoped["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["gpt-only-this"]);
+    assert_eq!(scoped["object"], "list");
+
+    // An unscoped key is NOT narrowed: absent allowlist means the upstream's own catalog, and
+    // it must not pick up the other key's single entry.
+    let open = listing("vk_open").await;
+    let open_ids: Vec<&str> = open["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert_ne!(
+        open_ids, ids,
+        "an unscoped key inherited a scoped key's narrowing"
+    );
+    assert!(
+        !open_ids.contains(&"gpt-only-this"),
+        "the allowlist-only entry leaked into an unscoped key's listing: {open_ids:?}"
+    );
+
+    // Discovery is authenticated: it reveals which models a credential may use.
+    let app = build_app(Arc::clone(&state));
+    let anon = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/models")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(anon.status(), StatusCode::UNAUTHORIZED);
+}

@@ -1,7 +1,7 @@
 # TD-0010: Ingress dialect parity — drop-in compatibility as a release gate
 
 - **Status:** Proposed (2026-07-25). **P1 complete** (D1 in #84, D5 in the SDK-conformance
-  suite); **P4a complete** (Gemini on the transparent plane); **D2's auth slice complete** — the
+  suite); **P3 and P4a complete** (discovery; Gemini on the transparent plane); **D2's auth slice complete** — the
   401/403 paths now render per dialect and name each vendor's own scheme; this document was corrected
   during that implementation — see the error-shape bullet and D2.
 - **Relates to:** ADR-0004 (two-plane proxy), TD-0006 (transparent metering), TD-0002 (typed
@@ -116,7 +116,7 @@ advertised as one — no aspirational rows.
 |---|---|---|
 | **P1** ✅ | D1 credential extraction per dialect + the real-SDK conformance suite for OpenAI and Anthropic | **Met.** `tests/sdk-conformance/` starts the real proxy against a mock upstream and drives `openai-python` + `anthropic-python` unmodified; verified to fail (`401 missing bearer virtual key`) when Anthropic's scheme list is reverted to Bearer-only |
 | **P2** | D2 dialect-shaped errors | An SDK-raised error exposes `message`/`type`/`status` natively per vendor; redaction behaviour from #77 unchanged, proven by a test that asserts an upstream body is still absent by default |
-| **P3** | D3 discovery endpoints, allowlist-filtered | `client.models.list()` returns exactly the key's permitted models on both dialects |
+| **P3** ✅ | D3 discovery endpoints, allowlist-filtered | **Met.** `client.models.list()` works unmodified on all three SDKs; a scoped key lists exactly its allowlist, an unscoped key gets the upstream catalog, and discovery is authenticated because it reveals what a credential may call |
 | **P4a** ✅ | Gemini ingress on the **transparent plane only**, `x-goog-api-key` header auth | **Met.** `google-genai` completes streaming + non-streaming calls unmodified; `?key=` is refused; cross-family is refused rather than translated from the accounting-grade decode |
 | **P4b** | Cross-family translation for Gemini ingress (a faithful Gemini ↔ `ChatRequestV1` codec) | A Gemini client resolving to a non-Gemini upstream round-trips tools, inline media and safety settings without loss |
 

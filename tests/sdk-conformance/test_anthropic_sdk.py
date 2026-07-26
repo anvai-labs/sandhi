@@ -77,3 +77,9 @@ def test_a_wrong_virtual_key_is_rejected(proxy: str):
             messages=[{"role": "user", "content": "ping"}],
         )
     assert excinfo.value.status_code == 401
+
+
+def test_models_list_works_unmodified(client: anthropic.Anthropic):
+    page = client.models.list()
+    assert page.data, "discovery should return the key's permitted models"
+    assert all(m.type == "model" for m in page.data)
