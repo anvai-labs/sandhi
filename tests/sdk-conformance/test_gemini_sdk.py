@@ -110,3 +110,23 @@ def test_models_list_works_unmodified(client):
     assert names, "discovery should return the key's permitted models"
     # The SDK expects Gemini's `models/{id}` resource-path naming.
     assert all(n.startswith("models/") for n in names)
+
+
+def test_cross_family_gemini_client_to_openai_upstream(proxy: str, upstream):
+    """TD-0010 D4b: a Gemini client may now resolve to a NON-Gemini upstream.
+
+    D4a refused this (501) because its decode was accounting-grade. With the faithful codec the
+    request is translated and the response is rendered back in Gemini's shape, so the client never
+    learns the upstream was OpenAI.
+    """
+    client = genai.Client(
+        # vk_openai_demo is bound to the OpenAI upstream, but we speak Gemini's dialect at it.
+        api_key="vk_openai_demo",
+        http_options=genai.types.HttpOptions(base_url=proxy),
+    )
+    response = client.models.generate_content(model="gpt-mock", contents="ping")
+
+    assert response.text == "pong"
+    # Proof it really crossed families: the upstream saw OpenAI's chat-completions path.
+    assert "/chat/completions" in upstream.last().path
+    assert ":generateContent" not in upstream.last().path

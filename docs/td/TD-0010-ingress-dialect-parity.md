@@ -1,6 +1,6 @@
 # TD-0010: Ingress dialect parity — drop-in compatibility as a release gate
 
-- **Status:** Proposed (2026-07-25). **P1 complete** (D1 in #84, D5 in the SDK-conformance
+- **Status:** **Accepted / complete** (2026-07-26) — every phase met. **P1 complete** (D1 in #84, D5 in the SDK-conformance
   suite); **P2, P3 and P4a complete** (errors; discovery; Gemini on the transparent plane); **D2 complete** — the
   401/403 paths now render per dialect and name each vendor's own scheme; this document was corrected
   during that implementation — see the error-shape bullet and D2.
@@ -127,7 +127,7 @@ advertised as one — no aspirational rows.
 | **P2** ✅ | D2 dialect-shaped errors on the **client-facing** paths | **Met.** Auth rejections, missing-upstream and transparent-plane failures render per dialect (OpenAI `{error:{…}}`, Anthropic `{type:"error",…}`, Gemini numeric `code` + canonical `status`); redaction from #77 unchanged. Sandhi's operator API keeps its flat envelope deliberately — see the note under D2 |
 | **P3** ✅ | D3 discovery endpoints, allowlist-filtered | **Met.** `client.models.list()` works unmodified on all three SDKs; a scoped key lists exactly its allowlist, an unscoped key gets the upstream catalog, and discovery is authenticated because it reveals what a credential may call |
 | **P4a** ✅ | Gemini ingress on the **transparent plane only**, `x-goog-api-key` header auth | **Met.** `google-genai` completes streaming + non-streaming calls unmodified; `?key=` is refused; cross-family is refused rather than translated from the accounting-grade decode |
-| **P4b** | Cross-family translation for Gemini ingress (a faithful Gemini ↔ `ChatRequestV1` codec) | A Gemini client resolving to a non-Gemini upstream round-trips tools, inline media and safety settings without loss |
+| **P4b** ✅ | Cross-family translation for Gemini ingress (a faithful Gemini ↔ `ChatRequestV1` codec) | **Met.** A `google-genai` client resolving to an **OpenAI** upstream completes unmodified and receives Gemini-shaped output; tools, inline media, tool results and unmodelled keys survive the decode. Known limitation: a *streamed* tool call is not rendered (Gemini has no partial-function-call frame) — non-streaming tool calls translate fully |
 
 P1 is the adoption unblocker and should land alone. P4 is the largest and is deliberately last —
 it is also the phase that proves the trait from D1–D3 was the right shape, because adding a

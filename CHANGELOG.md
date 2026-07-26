@@ -26,6 +26,19 @@ hand-edited; see [RELEASING.md](RELEASING.md).
   may call instead of meeting a 403 at call time. Discovery is authenticated, because it reveals
   which models a credential can use. `.models.list()` now works unmodified on all three SDKs
   (LangChain, LiteLLM health checks and most chat UIs call it before anything else).
+- **Cross-family Gemini translation** (TD-0010 D4b) — a Gemini client may now resolve to *any*
+  upstream. D4a admitted Gemini on the transparent plane only and refused cross-family with a 501,
+  because its decode was accounting-grade and re-encoding from it would silently drop tools, inline
+  media and safety settings. The decode is now faithful — the mirror of the adapter's request
+  encoder — and responses are rendered back in Gemini's shape (`candidates[]`, `usageMetadata`,
+  `functionCall.args` as an object rather than the OpenAI-family JSON string), so a `google-genai`
+  client talking to an OpenAI upstream never learns the difference. Gemini fields with no neutral
+  equivalent (`safetySettings`, `cachedContent`, `responseSchema`, `topP`) are preserved in
+  `extensions` instead of being dropped.
+  - **Known limitation:** a *streamed* tool call is not rendered in Gemini's shape. Gemini has no
+    partial-function-call frame — it sends one complete `functionCall` part — while the canonical
+    stream reports start / argument-deltas / end. Emitting those as text would corrupt the client's
+    parse, so nothing is emitted; non-streaming tool calls translate fully.
 - **Gemini ingress dialect** (TD-0010 D4a) — `POST /v1beta/models/{model}:generateContent` and
   `:streamGenerateContent`, authenticated with the `x-goog-api-key` header. A `google-genai`
   client now points its `base_url` at Sandhi unmodified. Gemini is the first dialect whose model
