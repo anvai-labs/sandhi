@@ -75,7 +75,10 @@ FORBIDDEN_PATTERNS = [
      "robot emoji (agent-generated marker)"),
     (re.compile(r"(?:authored|written|created|generated|produced)\s+by\s+(?:claude|codex|gemini|copilot|chatgpt|anthropic|openai)", re.I),
      '"<verb> by <agent>" attribution'),
-    (re.compile(r"\b(?:claude|gemini)\s+(?:opus|sonnet|haiku|code|pro|flash|\d)", re.I),
+    # Word-anchored on BOTH sides: without the trailing \b this fires on ordinary technical
+    # prose in a repo that integrates these vendors — "Gemini codec", "Gemini code path",
+    # "claude-3 codegen" — and blocking a legitimate commit teaches people to bypass the hook.
+    (re.compile(r"\b(?:claude|gemini)\s+(?:opus|sonnet|haiku|code|pro|flash|\d+)\b", re.I),
      "agent model/product signature (e.g. 'Claude Opus', 'Claude Code')"),
     (re.compile(r"noreply@anthropic\.com|noreply@openai\.com|@users\.noreply\.github\.com.*(?:claude|copilot)", re.I),
      "agent no-reply email trailer"),
