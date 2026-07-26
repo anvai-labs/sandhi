@@ -634,7 +634,39 @@ pub fn encode_openai_request(request: &ChatRequestV1) -> Result<Value, ProviderE
     if let Some(format) = &request.response_format {
         body.insert("response_format".into(), format.clone());
     }
+    // W3d/G7: typed fields override any extensions-carried duplicate (inserted
+    // after the extensions clone). OpenAI chat / ZAI take reasoning_effort
+    // top-level and thinking as `{type, budget_tokens}`.
+    insert_optional(
+        &mut body,
+        "reasoning_effort",
+        request.reasoning_effort.clone(),
+    );
+    if let Some(thinking) = &request.thinking {
+        body.insert("thinking".into(), encode_openai_thinking(thinking));
+    }
     Ok(Value::Object(body))
+}
+
+/// OpenAI-compat / ZAI extended-thinking shape: `{type: enabled|disabled,
+/// budget_tokens?}`.
+pub(crate) fn encode_openai_thinking(thinking: &sandhi_core::chat::ThinkingV1) -> Value {
+    let mut obj = Map::new();
+    obj.insert(
+        "type".into(),
+        Value::String(
+            if thinking.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            }
+            .into(),
+        ),
+    );
+    if let Some(budget) = thinking.budget_tokens {
+        obj.insert("budget_tokens".into(), json!(budget));
+    }
+    Value::Object(obj)
 }
 
 fn insert_optional<T: serde::Serialize>(
@@ -1010,6 +1042,58 @@ mod tests {
         assert_eq!(body["messages"][3]["tool_call_id"], "c1");
         assert_eq!(body["max_tokens"], 42);
         assert_eq!(body["top_p"], 0.8);
+    }
+
+    // W3d/G7: promoted typed fields (reasoning_effort, thinking).
+    fn w3d_request(extra: Value) -> ChatRequestV1 {
+        let mut base = json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        base.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(base).unwrap()
+    }
+
+    #[test]
+    fn openai_chat_encodes_reasoning_effort_and_thinking() {
+        let body = encode_openai_request(&w3d_request(json!({
+            "reasoning_effort": "high",
+            "thinking": {"enabled": true, "budget_tokens": 2048}
+        })))
+        .unwrap();
+        assert_eq!(body["reasoning_effort"], "high");
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 2048);
+    }
+
+    #[test]
+    fn openai_chat_disabled_thinking_encodes_disabled() {
+        let body = encode_openai_request(&w3d_request(json!({
+            "thinking": {"enabled": false}
+        })))
+        .unwrap();
+        assert_eq!(body["thinking"]["type"], "disabled");
+        assert!(body["thinking"].get("budget_tokens").is_none());
+    }
+
+    #[test]
+    fn typed_reasoning_effort_overrides_extensions_duplicate() {
+        // Precedence: the typed field wins over a stale extensions copy.
+        let body = encode_openai_request(&w3d_request(json!({
+            "reasoning_effort": "high",
+            "extensions": {"openai": {"reasoning_effort": "low"}}
+        })))
+        .unwrap();
+        assert_eq!(body["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn absent_w3d_fields_stay_off_the_wire() {
+        let body = encode_openai_request(&w3d_request(json!({}))).unwrap();
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("thinking").is_none());
     }
 
     #[test]

@@ -180,6 +180,22 @@ pub fn encode_anthropic_request(request: &ChatRequestV1) -> Result<Value, Provid
             }
         }
     }
+    // W3d/G7: Anthropic extended thinking is `{type: enabled, budget_tokens}`.
+    // Typed field wins over an extensions-carried duplicate (inserted after
+    // the extensions clone). `reasoning_effort` has no Anthropic analogue —
+    // explicitly ignored (consumer-decision row).
+    if let Some(thinking) = &request.thinking {
+        if thinking.enabled {
+            let mut obj = serde_json::Map::new();
+            obj.insert("type".into(), Value::String("enabled".into()));
+            if let Some(budget) = thinking.budget_tokens {
+                obj.insert("budget_tokens".into(), json!(budget));
+            }
+            body.insert("thinking".into(), Value::Object(obj));
+        } else {
+            body.remove("thinking");
+        }
+    }
     Ok(Value::Object(body))
 }
 
@@ -411,6 +427,22 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use futures_util::StreamExt;
+
+    #[test]
+    fn w3d_thinking_maps_to_native_and_effort_is_ignored() {
+        let request: ChatRequestV1 = serde_json::from_value(json!({
+            "model": "claude-test", "max_output_tokens": 128,
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "high",
+            "thinking": {"enabled": true, "budget_tokens": 4096}
+        }))
+        .unwrap();
+        let body = encode_anthropic_request(&request).unwrap();
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 4096);
+        // Anthropic has no effort concept — the typed field is dropped, not leaked.
+        assert!(body.get("reasoning_effort").is_none());
+    }
 
     #[test]
     fn request_codec_maps_system_tools_and_tool_results() {

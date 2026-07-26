@@ -6,12 +6,44 @@
 use std::collections::BTreeMap;
 
 use axum::http::HeaderMap;
+use sandhi_core::chat::ThinkingV1;
 use sandhi_core::{
     ChatMessageV1, ChatRequestV1, ChatResponseV1, ChatStreamEventV1, ContentPart, FinishReasonV1,
     MessageContent, RequestMetadataV1, ToolCallV1, ToolChoiceMode, ToolChoiceV1, ToolDefinitionV1,
     UsageV2, CHAT_SCHEMA_VERSION_V1,
 };
 use serde_json::{json, Map, Value};
+
+/// Lift the OpenAI-compat / ZAI `thinking` object (`{type, budget_tokens}`)
+/// into the neutral `ThinkingV1` at ingress (W3d/G7), so a promoted param
+/// reaches the typed field instead of surviving only inside the extensions
+/// body clone (which dies on any cross-family route).
+fn lift_openai_thinking(object: &Map<String, Value>) -> Option<ThinkingV1> {
+    let thinking = object.get("thinking")?.as_object()?;
+    let enabled = match thinking.get("type").and_then(Value::as_str) {
+        Some("disabled") => false,
+        _ => true, // "enabled" or a bare budget object both mean on
+    };
+    Some(ThinkingV1 {
+        enabled,
+        budget_tokens: thinking.get("budget_tokens").and_then(Value::as_u64),
+    })
+}
+
+/// Lift Gemini's `generationConfig.thinkingConfig.thinkingBudget` into the
+/// neutral `ThinkingV1` (W3d/G7). Budget 0 = disabled; a positive budget = on
+/// with a cap.
+fn lift_gemini_thinking(object: &Map<String, Value>) -> Option<ThinkingV1> {
+    let budget = object
+        .get("generationConfig")?
+        .get("thinkingConfig")?
+        .get("thinkingBudget")?
+        .as_u64()?;
+    Some(ThinkingV1 {
+        enabled: budget != 0,
+        budget_tokens: (budget != 0).then_some(budget),
+    })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IngressDialect {
@@ -330,6 +362,10 @@ fn decode_gemini_request(
         response_format: None,
         seed: None,
         metadata,
+        // W3d/G7: Gemini has no effort concept; thinking rides
+        // generationConfig.thinkingConfig.thinkingBudget.
+        reasoning_effort: None,
+        thinking: lift_gemini_thinking(object),
         // #90's native-response gate, matching every other dialect's decode.
         include_native_response: true,
         // D4b: the populated map — unmodelled Gemini keys survive here rather than being dropped.
@@ -563,6 +599,10 @@ fn decode_openai_request(
         response_format: object.get("response_format").cloned(),
         seed: object.get("seed").and_then(Value::as_i64),
         metadata,
+        // W3d/G7: lift promoted params to typed fields so they survive a
+        // cross-family route (they otherwise live only in the openai body clone).
+        reasoning_effort: optional_string(object, "reasoning_effort")?,
+        thinking: lift_openai_thinking(object),
         include_native_response: true,
         extensions: BTreeMap::from([("openai".into(), body.clone())]),
     };
@@ -796,6 +836,10 @@ fn decode_anthropic_request(
         response_format: None,
         seed: None,
         metadata,
+        // W3d/G7: Anthropic `thinking` uses the same {type, budget_tokens}
+        // shape; no effort concept.
+        reasoning_effort: None,
+        thinking: lift_openai_thinking(object),
         include_native_response: true,
         extensions: BTreeMap::from([("anthropic".into(), body.clone())]),
     };
@@ -1065,6 +1109,13 @@ fn decode_responses_request(
             .transpose()?,
         seed: None,
         metadata,
+        // W3d/G7: Responses expresses effort as `reasoning.effort`; no thinking.
+        reasoning_effort: object
+            .get("reasoning")
+            .and_then(|reasoning| reasoning.get("effort"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        thinking: None,
         include_native_response: true,
         extensions: BTreeMap::from([("openai_responses".into(), body.clone())]),
     };
@@ -1668,6 +1719,40 @@ mod tests {
             );
         }
         map
+    }
+
+    #[test]
+    fn openai_ingress_lifts_w3d_params_to_typed_fields() {
+        // W3d/G7: promoted params must reach the typed fields at ingress, not
+        // just survive inside the extensions body clone (which dies cross-family).
+        let (request, _) = decode_openai_request(
+            json!({
+                "model": "gpt-5",
+                "messages": [{"role": "user", "content": "hi"}],
+                "reasoning_effort": "high",
+                "thinking": {"type": "enabled", "budget_tokens": 2048}
+            }),
+            RequestMetadataV1::default(),
+        )
+        .unwrap();
+        assert_eq!(request.reasoning_effort.as_deref(), Some("high"));
+        let thinking = request.thinking.expect("thinking lifted");
+        assert!(thinking.enabled);
+        assert_eq!(thinking.budget_tokens, Some(2048));
+    }
+
+    #[test]
+    fn gemini_ingress_lifts_thinking_budget() {
+        let (request, _) = decode_gemini_request(
+            json!({
+                "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+                "generationConfig": {"thinkingConfig": {"thinkingBudget": 0}}
+            }),
+            RequestMetadataV1::default(),
+        )
+        .unwrap();
+        let thinking = request.thinking.expect("thinking lifted");
+        assert!(!thinking.enabled); // budget 0 = disabled
     }
 
     #[test]

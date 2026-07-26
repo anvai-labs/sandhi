@@ -12,9 +12,10 @@ pub const CHAT_SCHEMA_VERSION_V1: &str = "1";
 /// changes`, which fails when the rendered schemas change without a bump.
 /// History: 1 = usage latency/reasoning on UsageEvent (#68), 2 =
 /// `include_native_response` request gate (#90), 3 = wire-truth latency on
-/// `UsageV2` (#97). Consumers feature-detect the binding export and treat an
-/// absent fn as minor 0.
-pub const CHAT_CONTRACT_MINOR: u32 = 3;
+/// `UsageV2` (#97), 4 = `reasoning_effort` + `thinking` typed request fields
+/// (W3d/G7). Consumers feature-detect the binding export and treat an absent
+/// fn as minor 0.
+pub const CHAT_CONTRACT_MINOR: u32 = 4;
 
 fn schema_v1() -> String {
     CHAT_SCHEMA_VERSION_V1.to_owned()
@@ -178,6 +179,20 @@ pub struct ChatRequestV1 {
     pub seed: Option<i64>,
     #[serde(default)]
     pub metadata: RequestMetadataV1,
+    /// Reasoning effort budget (W3d/G7). OpenAI o-series/GPT-5 and Moonshot
+    /// kimi-k3 take it as a top-level `reasoning_effort`; the Responses codec
+    /// maps it to `reasoning.effort`. Promoted from `extensions["openai"]` so
+    /// it is portable across families instead of visible only to the openai
+    /// encoder. Vocabulary is the OpenAI one (`low`/`medium`/`high`); other
+    /// encoders that lack an effort concept ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    /// Extended-thinking request (W3d/G7). Neutral shape; each encoder maps it
+    /// to its family-native form (Anthropic `thinking`, Gemini
+    /// `thinkingConfig`, OpenAI-compat/ZAI `thinking`). Promoted from
+    /// `extensions[<family>]` so it reaches every family through one field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingV1>,
     /// Whether adapters re-embed the full native provider response body under
     /// `extensions[<endpoint family>]` on the response. Defaults to true for
     /// compatibility; clients that consume only the neutral contract can opt
@@ -187,6 +202,17 @@ pub struct ChatRequestV1 {
     pub include_native_response: bool,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extensions: BTreeMap<String, Value>,
+}
+
+/// Neutral extended-thinking request (W3d/G7). `enabled` toggles reasoning;
+/// `budget_tokens` optionally caps the reasoning allowance (honored by
+/// families that support a budget — Anthropic, Gemini — and ignored by those
+/// that only take a boolean).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ThinkingV1 {
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<u64>,
 }
 
 fn default_true() -> bool {
@@ -692,7 +718,7 @@ mod tests {
         let digest = fnv1a(concatenated.as_bytes());
         assert_eq!(
             (CHAT_CONTRACT_MINOR, digest),
-            (3, 0x46c44575425c789a_u64),
+            (4, 0xa6cf2de020cdcd03_u64),
             "contract schemas changed: bump CHAT_CONTRACT_MINOR and update this digest \
              (new digest = {digest:#x})"
         );

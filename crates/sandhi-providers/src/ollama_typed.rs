@@ -332,6 +332,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn w3d_fields_are_ignored_no_leak() {
+        // Consumer-decision row: Ollama honors neither field.
+        let request: ChatRequestV1 = serde_json::from_value(json!({
+            "model": "llama3",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "high",
+            "thinking": {"enabled": true}
+        }))
+        .unwrap();
+        let body = encode_ollama_request(&request).unwrap();
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("thinking").is_none());
+        assert!(body["options"].get("thinking").is_none());
+    }
+
+    #[test]
     fn request_and_response_codecs_preserve_tools_images_and_usage() {
         let request: ChatRequestV1 = serde_json::from_value(json!({
             "model":"llama", "max_output_tokens":64,
