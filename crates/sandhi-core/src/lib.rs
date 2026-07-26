@@ -110,3 +110,43 @@ mod flow_tests {
         assert!(ledger.check("group:platform", 800).is_err());
     }
 }
+
+#[cfg(test)]
+mod observability_boundary_tests {
+    //! TD-0011 D1: a library emits, an application decides.
+    //!
+    //! `sandhi-core`, `-providers` and `-store` are linked in-process by hosts like Victor. If any
+    //! of them could install a subscriber, that host would get Sandhi's logging configuration
+    //! imposed on it — and two subscribers in one process means one of them silently wins. The
+    //! strongest form of the guarantee is dependency-level: without `tracing-subscriber` they
+    //! *cannot* install one, no matter what a future patch tries. `include_str!` resolves at
+    //! compile time, so a moved crate breaks the build rather than skipping the check.
+
+    const CORE: &str = include_str!("../Cargo.toml");
+    const PROVIDERS: &str = include_str!("../../sandhi-providers/Cargo.toml");
+    const STORE: &str = include_str!("../../sandhi-store/Cargo.toml");
+
+    #[test]
+    fn libraries_cannot_install_a_tracing_subscriber() {
+        for (crate_name, manifest) in [
+            ("sandhi-core", CORE),
+            ("sandhi-providers", PROVIDERS),
+            ("sandhi-store", STORE),
+        ] {
+            assert!(
+                !manifest.contains("tracing-subscriber"),
+                "{crate_name} must not depend on tracing-subscriber (TD-0011 D1): a library that \
+                 installs a subscriber hijacks its host's logging"
+            );
+        }
+    }
+
+    #[test]
+    fn libraries_do_emit_through_the_facade() {
+        // The other half of D1: emitting is expected, only installing is not.
+        assert!(
+            CORE.contains("tracing"),
+            "sandhi-core should emit through the tracing facade"
+        );
+    }
+}

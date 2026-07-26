@@ -20,6 +20,8 @@ name = "sandhi"
 path = "src/cli.rs"
 
 [dependencies]
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 sandhi-core = { path = "../sandhi-core", version = "0.1.2" }
 sandhi-providers = { path = "../sandhi-providers", version = "0.1.2" }
 sandhi-store = { path = "../sandhi-store", version = "0.1.2" }

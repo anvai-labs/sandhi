@@ -841,8 +841,21 @@ async fn handle(
     let reservation = match reserve_budget(&state, &scope, ceiling, policy) {
         Admission::Leased(reservation) => Some(reservation),
         // Fail-open (Warn on a backend error): admit without a lease; the usage event still emits.
-        Admission::Unmetered => None,
+        Admission::Unmetered => {
+            // ADR-0005 D6. Admitting unmetered is correct under a Warn policy but must never be
+            // invisible: without this, a ledger outage looks like normal traffic.
+            tracing::warn!(scope = %scope, "admitted WITHOUT a lease (fail-open)");
+            None
+        }
         Admission::Denied => {
+            // A denial is the one enforcement outcome an operator must be able to see without
+            // reading the sink; `scope` is an operator-set budget name, not caller-supplied.
+            tracing::warn!(
+                scope = %scope,
+                ceiling,
+                provider = provider.slug(),
+                "reservation denied: budget exhausted"
+            );
             return ingress_error(dialect, StatusCode::TOO_MANY_REQUESTS, "budget exhausted");
         }
     };
@@ -862,6 +875,15 @@ async fn handle(
     // back to the typed translation path. Enforcement (reserve/settle via `accounting`) wraps both.
     let transparent =
         ingress_family(dialect) == provider.family() && provider.raw_forwarder().is_some();
+    // TD-0011 D6: which plane served the call is the ADR-0004 adoption signal — how much traffic
+    // still re-encodes. Bounded fields only (D2): provider slug and model, never subject/session.
+    tracing::debug!(
+        provider = provider.slug(),
+        model = %request.model,
+        plane = if transparent { "transparent" } else { "translation" },
+        stream = wants_stream,
+        "plane selected"
+    );
     let full_error_detail = state.error_detail_full;
     match (transparent, wants_stream) {
         (true, true) => {
