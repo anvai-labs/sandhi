@@ -7,6 +7,15 @@ use std::collections::BTreeMap;
 
 pub const CHAT_SCHEMA_VERSION_V1: &str = "1";
 
+/// Additive growth counter within v1 (W3c). Bumped whenever the contract
+/// gains fields — machine-enforced by `contract_minor_ratchets_with_schema_
+/// changes`, which fails when the rendered schemas change without a bump.
+/// History: 1 = usage latency/reasoning on UsageEvent (#68), 2 =
+/// `include_native_response` request gate (#90), 3 = wire-truth latency on
+/// `UsageV2` (#97). Consumers feature-detect the binding export and treat an
+/// absent fn as minor 0.
+pub const CHAT_CONTRACT_MINOR: u32 = 3;
+
 fn schema_v1() -> String {
     CHAT_SCHEMA_VERSION_V1.to_owned()
 }
@@ -658,6 +667,35 @@ mod tests {
                 .unwrap_or_else(|error| panic!("read checked schema {filename}: {error}"));
             assert_eq!(checked, generated, "regenerate {filename}");
         }
+    }
+
+    #[test]
+    fn contract_minor_ratchets_with_schema_changes() {
+        // Additive-only within v1 is policy (TD-0002); this makes the growth
+        // signal machine-enforced: any change to the rendered contract
+        // schemas must come with a CHAT_CONTRACT_MINOR bump and a digest
+        // update here. Consumers gate feature trust on the minor.
+        fn fnv1a(bytes: &[u8]) -> u64 {
+            let mut hash: u64 = 0xcbf29ce484222325;
+            for byte in bytes {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+            hash
+        }
+        let mut concatenated = String::new();
+        for (filename, generated) in contract_schema_documents() {
+            concatenated.push_str(filename);
+            concatenated.push('\n');
+            concatenated.push_str(&generated);
+        }
+        let digest = fnv1a(concatenated.as_bytes());
+        assert_eq!(
+            (CHAT_CONTRACT_MINOR, digest),
+            (3, 0x46c44575425c789a_u64),
+            "contract schemas changed: bump CHAT_CONTRACT_MINOR and update this digest \
+             (new digest = {digest:#x})"
+        );
     }
 
     #[test]

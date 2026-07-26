@@ -473,6 +473,14 @@ fn chat_contract_version() -> &'static str {
     sandhi_core::chat::CHAT_SCHEMA_VERSION_V1
 }
 
+/// Additive growth counter within the v1 chat contract (W3c). Consumers
+/// feature-detect this export — an older binding without it reads as minor 0
+/// — and gate trust in newer additive fields on a minimum minor.
+#[pyfunction]
+fn chat_contract_minor() -> u32 {
+    sandhi_core::chat::CHAT_CONTRACT_MINOR
+}
+
 /// Parse a provider response body (JSON string) into the neutral token breakdown. `provider`
 /// selects the parser: `anthropic` → the Anthropic Messages shape; anything else → the
 /// OpenAI-compatible shape.
@@ -852,6 +860,7 @@ fn sandhi_gateway(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     m.add_function(wrap_pyfunction!(wire_contract_version, m)?)?;
     m.add_function(wrap_pyfunction!(chat_contract_version, m)?)?;
+    m.add_function(wrap_pyfunction!(chat_contract_minor, m)?)?;
     m.add_function(wrap_pyfunction!(parse_usage, m)?)?;
     m.add_function(wrap_pyfunction!(provider_spec, m)?)?;
     m.add_function(wrap_pyfunction!(provider_descriptor_json, m)?)?;
