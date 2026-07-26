@@ -33,6 +33,11 @@ impl ChatProvider for TypedCohere {
         let body = encode_cohere_request(&request)?;
         let response = self.raw.complete(provider_request(&request, body)).await?;
         let mut decoded = decode_cohere_response(response.body, response.usage, &request.model)?;
+        if !request.include_native_response {
+            // G8: the native body is debug metadata, not contract. Decoded
+            // extensions (e.g. "reasoning") always survive.
+            decoded.extensions.remove("cohere");
+        }
         decoded.usage.attempts = response.attempts;
         decoded.usage.outcome = Some("success".into());
         Ok(decoded)

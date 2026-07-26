@@ -22,7 +22,7 @@ export interface ChatRequestV1 {
   schema_version?: "1"; model: string; messages: ChatMessageV1[]; tools?: ToolDefinitionV1[]
   tool_choice?: "none" | "auto" | "required" | { name: string }; temperature?: number
   max_output_tokens?: number; stop?: string[]; response_format?: JsonValue; seed?: number
-  metadata?: RequestMetadataV1; extensions?: Record<string, JsonValue>
+  metadata?: RequestMetadataV1; include_native_response?: boolean; extensions?: Record<string, JsonValue>
 }
 export interface UsageV2 {
   tokens_in: number; tokens_out: number; cache_creation_tokens: number; cache_read_tokens: number

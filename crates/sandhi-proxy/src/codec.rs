@@ -191,6 +191,7 @@ fn decode_gemini_request(
         response_format: None,
         seed: None,
         metadata,
+        include_native_response: true,
         extensions: BTreeMap::new(),
     };
     // Streaming is a path verb, not a body field; the handler stamps it.
@@ -267,6 +268,7 @@ fn decode_openai_request(
         response_format: object.get("response_format").cloned(),
         seed: object.get("seed").and_then(Value::as_i64),
         metadata,
+        include_native_response: true,
         extensions: BTreeMap::from([("openai".into(), body.clone())]),
     };
     request.validate()?;
@@ -499,6 +501,7 @@ fn decode_anthropic_request(
         response_format: None,
         seed: None,
         metadata,
+        include_native_response: true,
         extensions: BTreeMap::from([("anthropic".into(), body.clone())]),
     };
     request.validate()?;
@@ -767,6 +770,7 @@ fn decode_responses_request(
             .transpose()?,
         seed: None,
         metadata,
+        include_native_response: true,
         extensions: BTreeMap::from([("openai_responses".into(), body.clone())]),
     };
     request.validate()?;
