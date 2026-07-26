@@ -745,7 +745,8 @@ async fn handle(
         .get(&vk.upstream_ref)
         .cloned()
     else {
-        return error(
+        return ingress_error(
+            dialect,
             StatusCode::BAD_GATEWAY,
             "no upstream registered for this key",
         );
@@ -950,14 +951,21 @@ struct GeminiRoute {
 
 /// Rebuild an axum response from a raw upstream response: status + curated header allowlist + body
 /// bytes, forwarded verbatim (the transparent plane never re-serializes the response).
-fn raw_response_to_axum(raw: sandhi_providers::raw::RawResponse) -> Response {
+fn raw_response_to_axum(
+    raw: sandhi_providers::raw::RawResponse,
+    dialect: IngressDialect,
+) -> Response {
     let mut builder = Response::builder().status(raw.status);
     for (name, value) in raw.headers.iter() {
         builder = builder.header(name, value);
     }
-    builder
-        .body(Body::from(raw.body))
-        .unwrap_or_else(|_| error(StatusCode::BAD_GATEWAY, "invalid upstream response"))
+    builder.body(Body::from(raw.body)).unwrap_or_else(|_| {
+        ingress_error(
+            dialect,
+            StatusCode::BAD_GATEWAY,
+            "invalid upstream response",
+        )
+    })
 }
 
 /// Transparent same-family non-streaming plane: forward the client's bytes verbatim, meter usage
@@ -974,7 +982,8 @@ async fn transparent_complete_response(
     let Some(forwarder) = provider.raw_forwarder() else {
         accounting.set_outcome("error");
         accounting.finalize();
-        return error(
+        return ingress_error(
+            dialect,
             StatusCode::BAD_GATEWAY,
             "transparent plane requires a raw forwarder",
         );
@@ -989,7 +998,7 @@ async fn transparent_complete_response(
             accounting.observe(&usage);
             accounting.set_outcome("success");
             accounting.finalize();
-            raw_response_to_axum(raw)
+            raw_response_to_axum(raw, dialect)
         }
         Err(err) => {
             accounting.set_outcome("error");
@@ -1014,7 +1023,8 @@ async fn transparent_stream_response(
     let Some(forwarder) = provider.raw_forwarder() else {
         accounting.set_outcome("error");
         accounting.finalize();
-        return error(
+        return ingress_error(
+            dialect,
             StatusCode::BAD_GATEWAY,
             "transparent plane requires a raw forwarder",
         );
