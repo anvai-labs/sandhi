@@ -77,3 +77,12 @@ def test_a_wrong_virtual_key_is_rejected(proxy: str):
             messages=[{"role": "user", "content": "ping"}],
         )
     assert excinfo.value.status_code == 401
+
+
+def test_models_list_returns_only_what_the_key_permits(client: openai.OpenAI):
+    """`.models.list()` is what LangChain, LiteLLM health checks and most UIs call first."""
+    models = list(client.models.list())
+
+    assert models, "a key with no allowlist should still discover its upstream's catalog"
+    assert all(m.object == "model" for m in models)
+    assert all(m.owned_by for m in models)

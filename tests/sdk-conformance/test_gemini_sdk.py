@@ -103,3 +103,10 @@ def test_an_unsupported_method_is_refused_in_googles_shape(proxy: str):
     )
     assert response.status_code == 501
     assert response.json()["error"]["status"] == "UNIMPLEMENTED"
+
+
+def test_models_list_works_unmodified(client):
+    names = [m.name for m in client.models.list()]
+    assert names, "discovery should return the key's permitted models"
+    # The SDK expects Gemini's `models/{id}` resource-path naming.
+    assert all(n.startswith("models/") for n in names)

@@ -19,6 +19,13 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 
 ### Added
 
+- **Model discovery per dialect** (TD-0010 D3) — `GET /v1/models` in OpenAI *and* Anthropic
+  shape (the credential presentation identifies the client, since both SDKs use that path) and
+  `GET /v1beta/models` for Gemini. The listing is the key's **permitted** models: the upstream
+  catalog intersected with the virtual key's allowlist, so a scoped key discovers exactly what it
+  may call instead of meeting a 403 at call time. Discovery is authenticated, because it reveals
+  which models a credential can use. `.models.list()` now works unmodified on all three SDKs
+  (LangChain, LiteLLM health checks and most chat UIs call it before anything else).
 - **Gemini ingress dialect** (TD-0010 D4a) — `POST /v1beta/models/{model}:generateContent` and
   `:streamGenerateContent`, authenticated with the `x-goog-api-key` header. A `google-genai`
   client now points its `base_url` at Sandhi unmodified. Gemini is the first dialect whose model
