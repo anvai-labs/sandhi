@@ -794,19 +794,10 @@ async fn handle(
         wants_stream = route.stream;
     }
 
-    // TD-0010 D4a admits Gemini on the transparent plane only. Its decode is accounting-grade,
-    // not a faithful codec, so re-encoding it for a different upstream family would silently
-    // change the caller's request — tools, inline media and safety settings would vanish. Refuse
-    // instead, in Gemini's own error shape (D4b lifts this).
-    if dialect == IngressDialect::Gemini
-        && !(ingress_family(dialect) == provider.family() && provider.raw_forwarder().is_some())
-    {
-        return ingress_error(
-            dialect,
-            StatusCode::NOT_IMPLEMENTED,
-            "Gemini ingress currently requires a Gemini upstream; cross-family translation is not implemented (TD-0010 D4b)",
-        );
-    }
+    // D4a refused a cross-family Gemini request because its decode was accounting-grade and
+    // re-encoding from it would silently drop tools, inline media and safety settings. D4b
+    // replaced that with a faithful codec (the mirror of the adapter's encoder, pinned by a
+    // round-trip test), so the refusal is gone: a Gemini client may now resolve to any upstream.
 
     // 4. Model allowlist (TD-0003 P4): if the resolved key carries a non-empty `models[]`, admit
     //    only a model on that list. Empty/absent allowlist = any model (unchanged). Enforced after

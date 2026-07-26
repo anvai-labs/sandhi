@@ -122,16 +122,14 @@ pub(crate) fn decode_request(
     }
 }
 
-/// Accounting-grade decode of a Gemini `generateContent` body.
+/// Faithful decode of a Gemini `generateContent` body (TD-0010 D4b).
 ///
-/// Deliberately NOT a faithful codec. On the transparent plane the client's bytes are forwarded
-/// verbatim, so this exists only to answer the questions enforcement asks: which model, how much
-/// output was requested, and roughly how much input is being sent. Tool declarations, inline
-/// media, safety settings and the rest ride through untouched in the raw body.
-///
-/// `model` and the streaming choice come from the PATH and are stamped by the handler, so both
-/// are placeholders here. A cross-family request is refused upstream of this function precisely
-/// because re-encoding from a lossy decode would silently change the caller's request (D4b).
+/// This is the mirror of `sandhi-providers::gemini_typed`'s request encoder — which is what makes
+/// a round trip meaningful: whatever that encoder produces from a `ChatRequestV1`, this reads back
+/// into the same request. D4a shipped an accounting-grade decode and *refused* cross-family rather
+/// than translate from it, because dropping tools or media silently changes the caller's request.
+/// This lifts that refusal by preserving what carries meaning, and by keeping everything it does
+/// not model verbatim in `extensions` rather than on the floor.
 fn decode_gemini_request(
     body: Value,
     metadata: RequestMetadataV1,
@@ -141,65 +139,251 @@ fn decode_gemini_request(
         .ok_or_else(|| "request body must be a JSON object".to_string())?;
 
     let mut messages = Vec::new();
-    if let Some(system) = object.get("systemInstruction") {
-        if let Some(text) = gemini_parts_text(system.get("parts")) {
-            messages.push(ChatMessageV1::System {
-                content: MessageContent::Text(text),
-                name: None,
-            });
-        }
+    if let Some(text) = object
+        .get("systemInstruction")
+        .and_then(|s| gemini_parts_text(s.get("parts")))
+    {
+        messages.push(ChatMessageV1::System {
+            content: MessageContent::Text(text),
+            name: None,
+        });
     }
+
     for content in object
         .get("contents")
         .and_then(Value::as_array)
         .ok_or_else(|| "contents must be an array".to_string())?
     {
-        let text = gemini_parts_text(content.get("parts")).unwrap_or_default();
-        // Gemini names the assistant role "model"; everything else is treated as user input.
-        match content.get("role").and_then(Value::as_str) {
-            Some("model") => messages.push(ChatMessageV1::Assistant {
-                content: Some(MessageContent::Text(text)),
+        let parts: &[Value] = content
+            .get("parts")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+
+        // A `functionResponse` is a TOOL RESULT — its own role in the neutral contract, even
+        // though Gemini nests it inside a `user` turn.
+        let mut emitted_tool_result = false;
+        for fr in parts.iter().filter_map(|part| part.get("functionResponse")) {
+            let tool_call_id = fr
+                .get("id")
+                .or_else(|| fr.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let output = fr
+                .get("response")
+                .and_then(|r| r.get("output"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            messages.push(ChatMessageV1::Tool {
+                content: MessageContent::Text(match output {
+                    Value::String(text) => text,
+                    other => other.to_string(),
+                }),
+                tool_call_id,
+            });
+            emitted_tool_result = true;
+        }
+        if emitted_tool_result {
+            continue;
+        }
+
+        let tool_calls: Vec<ToolCallV1> = parts
+            .iter()
+            .filter_map(|part| part.get("functionCall"))
+            .map(|fc| {
+                let name = fc
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                ToolCallV1 {
+                    id: fc
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or(name.as_str())
+                        .to_string(),
+                    name,
+                    arguments: fc
+                        .get("args")
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| "{}".to_string()),
+                    extensions: BTreeMap::new(),
+                }
+            })
+            .collect();
+
+        let decoded = gemini_content(parts);
+        if content.get("role").and_then(Value::as_str) == Some("model") {
+            messages.push(ChatMessageV1::Assistant {
+                content: decoded,
                 name: None,
-                tool_calls: Vec::new(),
+                tool_calls,
                 refusal: None,
-            }),
-            _ => messages.push(ChatMessageV1::User {
-                content: MessageContent::Text(text),
+            });
+        } else {
+            messages.push(ChatMessageV1::User {
+                content: decoded.unwrap_or_else(|| MessageContent::Text(String::new())),
                 name: None,
-            }),
+            });
         }
     }
 
-    let generation = object.get("generationConfig");
-    let max_output_tokens = generation
-        .and_then(|g| g.get("maxOutputTokens"))
-        .and_then(Value::as_u64);
+    let tools: Vec<ToolDefinitionV1> = object
+        .get("tools")
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.get("functionDeclarations"))
+                .filter_map(Value::as_array)
+                .flatten()
+                .filter_map(|d| serde_json::from_value::<ToolDefinitionV1>(d.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let tool_choice = object
+        .get("toolConfig")
+        .and_then(|tc| tc.get("functionCallingConfig"))
+        .and_then(|config| {
+            let mode = config.get("mode").and_then(Value::as_str)?;
+            Some(match mode {
+                "NONE" => ToolChoiceV1::Mode(ToolChoiceMode::None),
+                // Gemini's ANY means "call something"; with an allow-list of one it is the
+                // neutral contract's named-function choice.
+                "ANY" => match config
+                    .get("allowedFunctionNames")
+                    .and_then(Value::as_array)
+                    .and_then(|names| names.first())
+                    .and_then(Value::as_str)
+                {
+                    Some(name) => ToolChoiceV1::Function {
+                        name: name.to_string(),
+                    },
+                    None => ToolChoiceV1::Mode(ToolChoiceMode::Required),
+                },
+                _ => ToolChoiceV1::Mode(ToolChoiceMode::Auto),
+            })
+        });
+
+    let generation = object.get("generationConfig").and_then(Value::as_object);
     let temperature = generation
         .and_then(|g| g.get("temperature"))
         .and_then(Value::as_f64);
+    let max_output_tokens = generation
+        .and_then(|g| g.get("maxOutputTokens"))
+        .and_then(Value::as_u64);
+    let stop = generation
+        .and_then(|g| g.get("stopSequences"))
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        });
+
+    // Anything this codec does not model — safetySettings, cachedContent, responseSchema, topP —
+    // is kept verbatim so it survives a same-family forward instead of being dropped.
+    let mut extensions = BTreeMap::new();
+    for (key, value) in object {
+        if !matches!(
+            key.as_str(),
+            "contents"
+                | "systemInstruction"
+                | "tools"
+                | "toolConfig"
+                | "generationConfig"
+                | "model"
+        ) {
+            extensions.insert(key.clone(), value.clone());
+        }
+    }
+    if let Some(generation) = generation {
+        let leftovers: Map<String, Value> = generation
+            .iter()
+            .filter(|(key, _)| {
+                !matches!(
+                    key.as_str(),
+                    "temperature" | "maxOutputTokens" | "stopSequences"
+                )
+            })
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        if !leftovers.is_empty() {
+            extensions.insert("generationConfig".to_string(), Value::Object(leftovers));
+        }
+    }
 
     let request = ChatRequestV1 {
         schema_version: CHAT_SCHEMA_VERSION_V1.to_string(),
         // Stamped by the handler from the path segment.
         model: String::new(),
         messages,
-        tools: Vec::new(),
-        tool_choice: None,
+        tools,
+        tool_choice,
         temperature,
         max_output_tokens,
-        stop: None,
+        stop,
         response_format: None,
         seed: None,
         metadata,
+        // #90's native-response gate, matching every other dialect's decode.
         include_native_response: true,
-        extensions: BTreeMap::new(),
+        // D4b: the populated map — unmodelled Gemini keys survive here rather than being dropped.
+        extensions,
     };
     // Streaming is a path verb, not a body field; the handler stamps it.
     Ok((request, false))
 }
 
-/// Concatenate the `text` parts of a Gemini `parts[]` array. Non-text parts (inline data, function
-/// calls) contribute nothing to the input estimate here — they ride through in the raw body.
+/// Gemini `parts[]` → neutral content. Text-only collapses to `Text`; anything richer keeps its
+/// parts, with `inlineData` rendered as the data URI the neutral contract carries images in.
+fn gemini_content(parts: &[Value]) -> Option<MessageContent> {
+    let mut collected: Vec<ContentPart> = Vec::new();
+    for part in parts {
+        if let Some(text) = part.get("text").and_then(Value::as_str) {
+            collected.push(ContentPart::Text {
+                text: text.to_string(),
+            });
+        } else if let Some(inline) = part.get("inlineData") {
+            let mime = inline
+                .get("mimeType")
+                .and_then(Value::as_str)
+                .unwrap_or("application/octet-stream");
+            let data = inline
+                .get("data")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            collected.push(ContentPart::ImageUrl {
+                image_url: format!("data:{mime};base64,{data}"),
+                detail: None,
+            });
+        }
+    }
+    match collected.len() {
+        0 => None,
+        _ if collected
+            .iter()
+            .all(|part| matches!(part, ContentPart::Text { .. })) =>
+        {
+            let text = collected
+                .iter()
+                .filter_map(|part| match part {
+                    ContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            Some(MessageContent::Text(text))
+        }
+        _ => Some(MessageContent::Parts(collected)),
+    }
+}
+
+/// Concatenate the `text` parts of a Gemini `parts[]` array.
 fn gemini_parts_text(parts: Option<&Value>) -> Option<String> {
     let parts = parts?.as_array()?;
     let text: String = parts
@@ -208,6 +392,117 @@ fn gemini_parts_text(parts: Option<&Value>) -> Option<String> {
         .collect::<Vec<_>>()
         .join("");
     (!text.is_empty()).then_some(text)
+}
+
+/// `ChatResponseV1` → a Gemini `generateContent` response (TD-0010 D4b).
+///
+/// Needed only on the CROSS-FAMILY path: a Gemini client talking to a Gemini upstream gets the
+/// upstream's own bytes back verbatim (D4a). When the upstream is another family, the client
+/// still expects Gemini's shape, so this is the mirror of the adapter's response parser.
+fn encode_gemini_response(response: &ChatResponseV1) -> Value {
+    let mut parts: Vec<Value> = Vec::new();
+    if let Some(content) = &response.output.content {
+        match content {
+            MessageContent::Text(text) if !text.is_empty() => parts.push(json!({ "text": text })),
+            MessageContent::Text(_) => {}
+            MessageContent::Parts(items) => {
+                for item in items {
+                    if let ContentPart::Text { text } = item {
+                        parts.push(json!({ "text": text }));
+                    }
+                }
+            }
+        }
+    }
+    for call in &response.output.tool_calls {
+        parts.push(json!({"functionCall": {
+            "name": call.name,
+            "id": call.id,
+            // Gemini carries arguments as an OBJECT, not the JSON string the OpenAI family uses.
+            "args": serde_json::from_str::<Value>(&call.arguments).unwrap_or(Value::Null),
+        }}));
+    }
+
+    let mut candidate = json!({
+        "content": {"role": "model", "parts": parts},
+        "index": 0,
+    });
+    if let Some(reason) = response.finish_reason {
+        candidate["finishReason"] = json!(gemini_finish_reason(reason));
+    }
+    json!({
+        "candidates": [candidate],
+        "usageMetadata": gemini_usage(&response.usage),
+        "modelVersion": response.model,
+    })
+}
+
+/// Neutral finish reason → Gemini's enum name.
+fn gemini_finish_reason(reason: FinishReasonV1) -> &'static str {
+    match reason {
+        FinishReasonV1::Stop => "STOP",
+        FinishReasonV1::Length => "MAX_TOKENS",
+        FinishReasonV1::ContentFilter => "SAFETY",
+        // Gemini reports a tool turn as an ordinary stop; the functionCall part is the signal.
+        FinishReasonV1::ToolCalls | FinishReasonV1::FunctionCall => "STOP",
+        FinishReasonV1::Unknown => "FINISH_REASON_UNSPECIFIED",
+    }
+}
+
+/// Neutral usage → Gemini's `usageMetadata`, preserving the cache split it reports natively.
+fn gemini_usage(usage: &UsageV2) -> Value {
+    let mut meta = json!({
+        "promptTokenCount": usage.tokens_in,
+        "candidatesTokenCount": usage.tokens_out,
+        "totalTokenCount": usage.tokens_in + usage.tokens_out + usage.cache_read_tokens,
+    });
+    if usage.cache_read_tokens > 0 {
+        meta["cachedContentTokenCount"] = json!(usage.cache_read_tokens);
+    }
+    if let Some(reasoning) = usage.reasoning_tokens {
+        meta["thoughtsTokenCount"] = json!(reasoning);
+    }
+    meta
+}
+
+/// Canonical stream event → Gemini streaming chunks (`?alt=sse` framing).
+///
+/// Gemini has no per-event envelope: every chunk is a whole `GenerateContentResponse` carrying a
+/// delta, so a text delta and a finish become separate chunks of the same shape. Events with no
+/// Gemini representation (reasoning/refusal deltas, tool-call scaffolding) emit nothing rather
+/// than inventing a frame the client would mis-parse.
+fn encode_gemini_stream_event(
+    event: &ChatStreamEventV1,
+    last_usage: Option<&UsageV2>,
+) -> Vec<(Option<&'static str>, Value)> {
+    match event {
+        ChatStreamEventV1::TextDelta { delta } => vec![(
+            None,
+            json!({"candidates":[{"content":{"role":"model","parts":[{"text":delta}]},"index":0}]}),
+        )],
+        ChatStreamEventV1::Finish { reason } => {
+            let mut chunk = json!({"candidates":[{
+                "content": {"role": "model", "parts": []},
+                "finishReason": gemini_finish_reason(*reason),
+                "index": 0,
+            }]});
+            // The terminal chunk carries usage — where a Gemini client reads it from.
+            if let Some(usage) = last_usage {
+                chunk["usageMetadata"] = gemini_usage(usage);
+            }
+            vec![(None, chunk)]
+        }
+        // Known limitation, stated rather than faked: a STREAMED tool call cannot be rendered.
+        // Gemini has no partial-function-call frame — it sends one complete `functionCall` part —
+        // whereas the canonical stream reports a call as start / argument-deltas / end. Emitting
+        // those as Gemini text would corrupt the client's parse, and assembling them needs
+        // buffering this per-event signature cannot do. Cross-family tool calls therefore work
+        // NON-streaming (see `encode_gemini_response`); streaming them is tracked as follow-up.
+        ChatStreamEventV1::ToolCallStart { .. }
+        | ChatStreamEventV1::ToolCallArgumentsDelta { .. }
+        | ChatStreamEventV1::ToolCallEnd { .. } => Vec::new(),
+        _ => Vec::new(),
+    }
 }
 
 fn decode_openai_request(
@@ -927,17 +1222,7 @@ pub(crate) fn encode_response(dialect: IngressDialect, response: &ChatResponseV1
         IngressDialect::OpenAi => encode_openai_response(response),
         IngressDialect::Anthropic => encode_anthropic_response(response),
         IngressDialect::Responses => encode_responses_response(response),
-        // Unreachable by construction: Gemini ingress is admitted only on the transparent plane
-        // (TD-0010 D4a), where the upstream's own bytes are returned and nothing is re-encoded.
-        // A cross-family Gemini request is refused in `handle` rather than translated, so if this
-        // ever runs the refusal was lost — surface it as an error instead of inventing a body.
-        IngressDialect::Gemini => json!({
-            "error": {
-                "code": 501,
-                "message": "Gemini ingress requires a Gemini upstream (cross-family translation is TD-0010 D4b)",
-                "status": "UNIMPLEMENTED",
-            }
-        }),
+        IngressDialect::Gemini => encode_gemini_response(response),
     }
 }
 
@@ -1088,10 +1373,7 @@ pub(crate) fn encode_stream_event(
         IngressDialect::OpenAi => encode_openai_stream_event(event, last_usage),
         IngressDialect::Anthropic => encode_anthropic_stream_event(event, last_usage),
         IngressDialect::Responses => encode_responses_stream_event(event, last_usage),
-        // See `encode_response`: the transparent plane streams the upstream's own frames, so a
-        // Gemini re-encode never runs. Emitting nothing is the safe reading — a fabricated frame
-        // would be worse than a silent one.
-        IngressDialect::Gemini => Vec::new(),
+        IngressDialect::Gemini => encode_gemini_stream_event(event, last_usage),
     }
 }
 
@@ -1726,5 +2008,184 @@ mod tests {
 
         let end = encode_responses_stream_event(&ChatStreamEventV1::ToolCallEnd { index: 0 }, None);
         assert_eq!(end[0].0, Some("response.output_item.done"));
+    }
+}
+
+#[cfg(test)]
+mod gemini_codec_tests {
+    use super::*;
+    use sandhi_core::AssistantOutputV1;
+
+    fn metadata() -> RequestMetadataV1 {
+        RequestMetadataV1 {
+            session_id: None,
+            virtual_key_id: None,
+            subject_id: None,
+            group_id: None,
+            route: None,
+            idempotency_key: None,
+            run_id: None,
+            step_id: None,
+            parent_id: None,
+            trace_context: None,
+        }
+    }
+
+    /// TD-0010 D4b's central claim: this decode is the MIRROR of the adapter's request encoder.
+    ///
+    /// Executing that encoder here is not possible — every `*_typed` codec in `sandhi-providers`
+    /// is a private module, a boundary worth more than this test's convenience. So the mirror is
+    /// pinned from BOTH sides instead: `gemini_typed`'s own tests assert the wire shape it emits
+    /// (e.g. `systemInstruction.parts[0].text`), and this consumes exactly that shape and asserts
+    /// every field arrives. If either side moves, one of the two fails.
+    #[test]
+    fn decodes_the_exact_wire_shape_the_adapter_emits() {
+        // Byte-for-byte the structure `gemini_typed::encode_gemini_request` produces.
+        let wire = json!({
+            "contents": [
+                {"role":"user","parts":[{"text":"ping"}]},
+                {"role":"model","parts":[{"text":"pong"}]}
+            ],
+            "systemInstruction": {"parts":[{"text":"be terse"}]},
+            "tools": [{"functionDeclarations":[{
+                "name":"lookup",
+                "description":"look something up",
+                "parameters":{"type":"object","properties":{"q":{"type":"string"}}}
+            }]}],
+            "toolConfig": {"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["lookup"]}},
+            "generationConfig": {"temperature":0.25,"maxOutputTokens":512,"stopSequences":["END"]}
+        });
+
+        let (request, streaming) =
+            decode_gemini_request(wire, metadata()).expect("the mirror decodes the adapter shape");
+        assert!(!streaming, "streaming is a path verb, never a body field");
+
+        // Every field the encoder writes must arrive — a field lost here is a field silently
+        // dropped from a caller's cross-family request.
+        assert_eq!(request.messages.len(), 3, "system + user + model");
+        assert!(matches!(
+            &request.messages[0],
+            ChatMessageV1::System { content: MessageContent::Text(t), .. } if t == "be terse"
+        ));
+        assert!(matches!(
+            &request.messages[2],
+            ChatMessageV1::Assistant { content: Some(MessageContent::Text(t)), .. } if t == "pong"
+        ));
+        assert_eq!(request.tools.len(), 1);
+        assert_eq!(request.tools[0].name, "lookup");
+        assert_eq!(
+            request.tool_choice,
+            Some(ToolChoiceV1::Function {
+                name: "lookup".into()
+            })
+        );
+        assert_eq!(request.temperature, Some(0.25));
+        assert_eq!(request.max_output_tokens, Some(512));
+        assert_eq!(request.stop.as_deref(), Some(&["END".to_string()][..]));
+    }
+
+    #[test]
+    fn inline_media_and_tool_results_survive_the_decode() {
+        let body = json!({
+            "contents": [
+                {"role":"user","parts":[
+                    {"text":"what is this?"},
+                    {"inlineData":{"mimeType":"image/png","data":"aGk="}}
+                ]},
+                {"role":"model","parts":[{"functionCall":{"name":"lookup","id":"call_1","args":{"q":"x"}}}]},
+                {"role":"user","parts":[{"functionResponse":{"name":"lookup","id":"call_1","response":{"output":"found"}}}]}
+            ]
+        });
+        let (request, _) = decode_gemini_request(body, metadata()).unwrap();
+
+        // Mixed text + image keeps its parts rather than flattening to text.
+        match &request.messages[0] {
+            ChatMessageV1::User {
+                content: MessageContent::Parts(parts),
+                ..
+            } => {
+                assert_eq!(parts.len(), 2);
+                assert!(matches!(parts[1], ContentPart::ImageUrl { .. }));
+            }
+            other => panic!("expected a multi-part user message, got {other:?}"),
+        }
+        // A functionCall becomes an assistant tool call, arguments preserved as JSON text.
+        match &request.messages[1] {
+            ChatMessageV1::Assistant { tool_calls, .. } => {
+                assert_eq!(tool_calls.len(), 1);
+                assert_eq!(tool_calls[0].name, "lookup");
+                assert_eq!(tool_calls[0].id, "call_1");
+                assert!(tool_calls[0].arguments.contains("\"q\""));
+            }
+            other => panic!("expected an assistant tool call, got {other:?}"),
+        }
+        // A functionResponse is a TOOL result, not a user turn.
+        match &request.messages[2] {
+            ChatMessageV1::Tool { tool_call_id, .. } => assert_eq!(tool_call_id, "call_1"),
+            other => panic!("expected a tool result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unmodelled_gemini_fields_are_preserved_not_dropped() {
+        let body = json!({
+            "contents": [{"role":"user","parts":[{"text":"hi"}]}],
+            "safetySettings": [{"category":"HARM_CATEGORY_HATE_SPEECH","threshold":"BLOCK_NONE"}],
+            "cachedContent": "caches/abc",
+            "generationConfig": {"temperature": 0.5, "topP": 0.9, "responseMimeType": "application/json"}
+        });
+        let (request, _) = decode_gemini_request(body, metadata()).unwrap();
+
+        assert_eq!(request.temperature, Some(0.5));
+        // Everything without a neutral equivalent survives in extensions.
+        assert!(request.extensions.contains_key("safetySettings"));
+        assert!(request.extensions.contains_key("cachedContent"));
+        assert_eq!(request.extensions["generationConfig"]["topP"], json!(0.9));
+        assert_eq!(
+            request.extensions["generationConfig"]["responseMimeType"],
+            json!("application/json")
+        );
+    }
+
+    #[test]
+    fn responses_are_rendered_in_geminis_shape() {
+        let response = ChatResponseV1 {
+            schema_version: CHAT_SCHEMA_VERSION_V1.to_string(),
+            id: Some("resp_1".into()),
+            model: "gpt-mock".into(),
+            output: AssistantOutputV1 {
+                content: Some(MessageContent::Text("pong".into())),
+                tool_calls: vec![ToolCallV1 {
+                    id: "call_1".into(),
+                    name: "lookup".into(),
+                    arguments: "{\"q\":\"x\"}".into(),
+                    extensions: BTreeMap::new(),
+                }],
+                refusal: None,
+            },
+            finish_reason: Some(FinishReasonV1::ToolCalls),
+            usage: UsageV2 {
+                tokens_in: 11,
+                tokens_out: 3,
+                cache_read_tokens: 4,
+                ..UsageV2::default()
+            },
+            extensions: BTreeMap::new(),
+        };
+        let encoded = encode_response(IngressDialect::Gemini, &response);
+
+        assert_eq!(
+            encoded["candidates"][0]["content"]["parts"][0]["text"],
+            "pong"
+        );
+        // Gemini carries tool arguments as an OBJECT, not the OpenAI-family JSON string.
+        assert_eq!(
+            encoded["candidates"][0]["content"]["parts"][1]["functionCall"]["args"]["q"],
+            "x"
+        );
+        assert_eq!(encoded["usageMetadata"]["promptTokenCount"], 11);
+        assert_eq!(encoded["usageMetadata"]["cachedContentTokenCount"], 4);
+        // A tool turn is an ordinary STOP for Gemini; the functionCall part is the signal.
+        assert_eq!(encoded["candidates"][0]["finishReason"], "STOP");
     }
 }
