@@ -11,6 +11,10 @@
       "type": "object",
       "additionalProperties": true
     },
+    "include_native_response": {
+      "description": "Whether adapters re-embed the full native provider response body under `extensions[<endpoint family>]` on the response. Defaults to true for compatibility; clients that consume only the neutral contract can opt out to shed bandwidth and coupling (G8). The `reasoning` extension is unaffected — it is decoded content, not a native body.",
+      "type": "boolean"
+    },
     "max_output_tokens": {
       "type": [
         "integer",

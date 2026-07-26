@@ -33,6 +33,11 @@ impl ChatProvider for TypedAnthropic {
         let body = encode_anthropic_request(&request)?;
         let response = self.raw.complete(provider_request(&request, body)).await?;
         let mut decoded = decode_anthropic_response(response.body, response.usage, &request.model)?;
+        if !request.include_native_response {
+            // G8: the native body is debug metadata, not contract. Decoded
+            // extensions (e.g. "reasoning") always survive.
+            decoded.extensions.remove("anthropic");
+        }
         decoded.usage.attempts = response.attempts;
         decoded.usage.outcome = Some("success".into());
         Ok(decoded)
@@ -379,6 +384,30 @@ fn decode_anthropic_stream(mut raw: ByteStream, requested_model: String) -> Chat
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_body_gate_preserves_the_reasoning_extension() {
+        // What complete() does under include_native_response=false: only the
+        // family key goes; decoded-content extensions survive.
+        let mut out = decode_anthropic_response(
+            serde_json::json!({
+                "id": "m1",
+                "model": "claude-x",
+                "content": [
+                    {"type": "thinking", "thinking": "consider"},
+                    {"type": "text", "text": "hi"}
+                ],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1}
+            }),
+            ParsedUsage::default(),
+            "claude-x",
+        )
+        .unwrap();
+        assert!(out.extensions.contains_key("anthropic"));
+        out.extensions.remove("anthropic");
+        assert_eq!(out.extensions["reasoning"], "consider");
+    }
+
     use super::*;
     use bytes::Bytes;
     use futures_util::StreamExt;

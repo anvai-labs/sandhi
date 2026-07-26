@@ -33,6 +33,11 @@ impl ChatProvider for TypedGemini {
         let body = encode_gemini_request(&request)?;
         let response = self.raw.complete(provider_request(&request, body)).await?;
         let mut decoded = decode_gemini_response(response.body, response.usage, &request.model)?;
+        if !request.include_native_response {
+            // G8: the native body is debug metadata, not contract. Decoded
+            // extensions (e.g. "reasoning") always survive.
+            decoded.extensions.remove("gemini");
+        }
         decoded.usage.attempts = response.attempts;
         decoded.usage.outcome = Some("success".into());
         Ok(decoded)
