@@ -248,6 +248,14 @@ pub struct UsageV2 {
     pub outcome: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_request_id: Option<String>,
+    /// Wall-clock call duration measured at the typed boundary (W3b) — wire
+    /// truth, so clients stop self-measuring around the FFI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// Time from request dispatch to the first streamed event (streaming
+    /// only; W3b). Absent on non-streaming calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_to_first_token_ms: Option<u64>,
 }
 
 const fn one() -> u32 {
@@ -565,6 +573,29 @@ pub fn contract_schema_documents() -> BTreeMap<&'static str, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn usage_latency_fields_are_absent_by_default() {
+        // Old usage JSON (fields absent) round-trips; absent stays absent so
+        // pre-W3b consumers see byte-identical documents.
+        let usage: UsageV2 = serde_json::from_value(serde_json::json!({
+            "tokens_in": 1, "tokens_out": 2,
+            "cache_creation_tokens": 0, "cache_read_tokens": 0
+        }))
+        .unwrap();
+        assert!(usage.duration_ms.is_none());
+        assert!(usage.time_to_first_token_ms.is_none());
+        let wire = serde_json::to_value(&usage).unwrap();
+        assert!(wire.get("duration_ms").is_none());
+        assert!(wire.get("time_to_first_token_ms").is_none());
+
+        let mut stamped = usage.clone();
+        stamped.duration_ms = Some(120);
+        stamped.time_to_first_token_ms = Some(45);
+        let wire = serde_json::to_value(&stamped).unwrap();
+        assert_eq!(wire["duration_ms"], 120);
+        assert_eq!(wire["time_to_first_token_ms"], 45);
+    }
+
     #[test]
     fn include_native_response_defaults_true_and_stays_off_the_wire() {
         // Old request JSON (field absent) keeps today's behavior: include.
