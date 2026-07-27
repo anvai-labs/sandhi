@@ -48,6 +48,24 @@ Until each is set up, that job **skips gracefully** (binaries + PyPI need no sto
 Also create a GitHub **Environment** named `pypi` (Settings → Environments) so the trusted
 publisher is scoped to it.
 
+## After the tag: verification is part of the release
+
+`release.yml`'s publish steps `exit 0` when their credential is absent, so a job can report
+**success while shipping nothing** — deliberate for an unconfigured target, but the identical guard
+would hide a genuinely broken publish. The `verify` job therefore checks the *registries*, not the
+job results, and fails the run if an expected target is missing.
+
+Run it by hand any time:
+
+```bash
+python3 scripts/verify-release.py v0.1.4
+```
+
+Two hard-won details are baked in: crates.io **rejects requests without a `User-Agent`** and returns
+an error object that reads exactly like "not published", and PyPI's JSON API lags an upload by up to
+a minute — so the script sends a UA and retries before concluding anything is absent. Both produced
+wrong conclusions before this existed.
+
 ## Notes
 
 - Internal crate deps carry a `version` (e.g. `sandhi-core = { path = "…", version = "0.0.0" }`)
