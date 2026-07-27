@@ -7,6 +7,7 @@
 
 mod codec;
 pub mod ledger;
+pub mod metrics;
 pub mod operator;
 
 // Re-export the admin API request/response types for the `sandhi` CLI client + the startup
@@ -97,6 +98,8 @@ pub struct ProxyState {
     /// self-hosted deployments into the full ProviderErrorV1 (bounded upstream body in
     /// `details.upstream_body`). Server-side logs always carry the full error either way.
     pub error_detail_full: bool,
+    /// TD-0011 P2 metric registry, served at `/metrics` (gated like the dashboard).
+    pub metrics: Arc<metrics::Metrics>,
 }
 
 impl ProxyState {
@@ -126,6 +129,7 @@ impl ProxyState {
             alert_store: None,
             dashboard_public: false,
             error_detail_full: false,
+            metrics: Arc::new(metrics::Metrics::new()),
         }
     }
 }
@@ -144,6 +148,9 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         .route("/dashboard/api/keys", get(dashboard_keys))
         .route("/dashboard/api/budgets", get(dashboard_budgets))
         .route("/dashboard/api/alerts", get(dashboard_alerts))
+        // TD-0011 D5: /metrics reveals traffic shape and model mix, so it reuses the dashboard's
+        // gate rather than inventing a second policy.
+        .route("/metrics", get(metrics_endpoint))
         .route("/v1/chat/completions", post(handle_openai))
         .route("/v1/messages", post(handle_anthropic))
         .route("/v1/responses", post(handle_responses))
@@ -523,6 +530,22 @@ async fn handle_responses(
     handle(state, headers, body, IngressDialect::Responses, None).await
 }
 
+/// `GET /metrics` — Prometheus text exposition (TD-0011 P2).
+async fn metrics_endpoint(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -> Response {
+    if let Err(denied) = require_dashboard_access(&state, &headers) {
+        return denied;
+    }
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        state.metrics.render(),
+    )
+        .into_response()
+}
+
 /// `GET /v1/models` — OpenAI and Anthropic discovery (TD-0010 D3).
 ///
 /// The listing is the key's *permitted* models: the upstream catalog intersected with the virtual
@@ -845,6 +868,7 @@ async fn handle(
             // ADR-0005 D6. Admitting unmetered is correct under a Warn policy but must never be
             // invisible: without this, a ledger outage looks like normal traffic.
             tracing::warn!(scope = %scope, "admitted WITHOUT a lease (fail-open)");
+            state.metrics.record_admitted_unmetered();
             None
         }
         Admission::Denied => {
@@ -856,9 +880,26 @@ async fn handle(
                 provider = provider.slug(),
                 "reservation denied: budget exhausted"
             );
+            // Labelled by POLICY, never by scope: a scope may be `vk:<id>`, which is per-key and
+            // therefore unbounded (TD-0011 D2).
+            state.metrics.record_denied(match policy {
+                Policy::Block => "block",
+                Policy::Warn => "warn",
+            });
             return ingress_error(dialect, StatusCode::TOO_MANY_REQUESTS, "budget exhausted");
         }
     };
+
+    // Plane selection (ADR-0004 D1 / TD-0006): when the client's ingress dialect and the resolved
+    // upstream are the SAME family, forward the client's bytes verbatim (transparent metering) —
+    // no `ChatRequestV1` re-encode, so prompt-cache prefixes and provider-specific fields survive,
+    // and usage is metered at the source. Cross-family (or a handle with no raw forwarder) falls
+    // back to the typed translation path. Enforcement (reserve/settle via `accounting`) wraps both.
+    //
+    // Decided BEFORE accounting is constructed so the plane can be a metric dimension for the
+    // whole call rather than something patched in afterwards (TD-0011 D2).
+    let transparent =
+        ingress_family(dialect) == provider.family() && provider.raw_forwarder().is_some();
 
     let accounting = RequestAccounting::new(
         Arc::clone(&state),
@@ -866,15 +907,13 @@ async fn handle(
         reservation,
         provider.slug().into(),
         &request,
+        dialect_label(dialect),
+        if transparent {
+            metrics::Plane::Transparent
+        } else {
+            metrics::Plane::Translation
+        },
     );
-
-    // Plane selection (ADR-0004 D1 / TD-0006): when the client's ingress dialect and the resolved
-    // upstream are the SAME family, forward the client's bytes verbatim (transparent metering) —
-    // no `ChatRequestV1` re-encode, so prompt-cache prefixes and provider-specific fields survive,
-    // and usage is metered at the source. Cross-family (or a handle with no raw forwarder) falls
-    // back to the typed translation path. Enforcement (reserve/settle via `accounting`) wraps both.
-    let transparent =
-        ingress_family(dialect) == provider.family() && provider.raw_forwarder().is_some();
     // TD-0011 D6: which plane served the call is the ADR-0004 adoption signal — how much traffic
     // still re-encodes. Bounded fields only (D2): provider slug and model, never subject/session.
     tracing::debug!(
@@ -914,6 +953,16 @@ async fn handle(
         (false, false) => {
             complete_response(provider, request, dialect, accounting, full_error_detail).await
         }
+    }
+}
+
+/// Ingress dialect → a bounded metric label (TD-0011 D2). Four values, fixed by the code.
+fn dialect_label(dialect: IngressDialect) -> &'static str {
+    match dialect {
+        IngressDialect::OpenAi => "openai",
+        IngressDialect::Anthropic => "anthropic",
+        IngressDialect::Responses => "responses",
+        IngressDialect::Gemini => "gemini",
     }
 }
 
@@ -1124,6 +1173,9 @@ fn reserve_budget(state: &ProxyState, scope: &str, ceiling: u64, policy: Policy)
 /// Owns the reservation and guarantees one terminal usage observation even when an HTTP body is
 /// abandoned. Counts are always measured; an unavailable observation releases the reservation.
 struct RequestAccounting {
+    /// Bounded metric dimensions for this call (TD-0011 D2) — set once at dispatch.
+    dialect: &'static str,
+    plane: metrics::Plane,
     state: Arc<ProxyState>,
     scope: String,
     /// The held lease to settle by id (ADR-0005 D2). `None` when the scope admitted fail-open with
@@ -1144,6 +1196,8 @@ impl RequestAccounting {
         reservation: Option<Reservation>,
         provider: String,
         request: &ChatRequestV1,
+        dialect: &'static str,
+        plane: metrics::Plane,
     ) -> Self {
         Self {
             state,
@@ -1155,6 +1209,19 @@ impl RequestAccounting {
             usage: None,
             outcome: "cancelled",
             finalized: false,
+            dialect,
+            plane,
+        }
+    }
+
+    /// The bounded label set for this call (TD-0011 D2).
+    fn metric_labels(&self) -> metrics::Labels {
+        metrics::Labels {
+            provider: self.provider.clone(),
+            model: self.model.clone(),
+            dialect: self.dialect,
+            plane: self.plane,
+            outcome: self.outcome,
         }
     }
 
@@ -1223,6 +1290,21 @@ impl RequestAccounting {
                 .and_then(|budgets| budgets.get(&self.scope).map(|spec| spec.limit_tokens));
             self.fire_alerts(spent, limit);
         }
+        // TD-0011 D3: `actual` is exactly what the ledger settled, so the metric cannot disagree
+        // with the charge. Recording here (not at observe) means one sample per logical call.
+        self.state.metrics.observe_call(
+            &self.metric_labels(),
+            metrics::CallMeasurements {
+                fresh_input: usage.tokens_in,
+                cache_creation: usage.cache_creation_tokens,
+                cache_read: usage.cache_read_tokens,
+                output: usage.tokens_out,
+                reasoning: usage.reasoning_tokens.unwrap_or(0),
+                billable: actual,
+                duration_ms: usage.duration_ms,
+                ttft_ms: usage.time_to_first_token_ms,
+            },
+        );
         self.state.sink.emit(&usage_event(
             &self.provider,
             &self.model,

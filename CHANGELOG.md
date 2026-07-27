@@ -19,6 +19,18 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 
 ### Added
 
+- **`GET /metrics`** (TD-0011 P2) — Prometheus text exposition for the gateway's own behaviour:
+  calls by provider/model/dialect/**plane**/outcome, neutral token counters per kind (including the
+  settled `billable` quantity), duration and TTFT histograms with buckets chosen for model calls,
+  and enforcement counters for denials, fail-open admissions, lease reclaims and durable-settle
+  failures. Gated exactly like the dashboard (ADR-0004 D4) — admin bearer when a token is
+  configured — because traffic shape and model mix are commercially interesting.
+
+  Two deliberate properties: the label set is a **type**, so an unbounded dimension
+  (`subject_id`, `session_id`, a `vk:*` budget scope) is *unrepresentable* rather than merely
+  discouraged; and the `billable` counter is handed the same quantity the ledger settled rather
+  than recomputed, so a dashboard cannot disagree with a charge. The registry is hand-rolled — a
+  few atomics and a text formatter — adding **no new dependency**.
 - **First-party telemetry** (TD-0011 P1) — `sandhi-core`, `-providers` and `-store` now emit through
   the `tracing` facade and install **no** subscriber; the `sandhi-proxy` binary installs one
   (stderr, filtered by `SANDHI_LOG` / `RUST_LOG`). A host that links the libraries in-process

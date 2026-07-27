@@ -1022,3 +1022,118 @@ async fn upstream_failures_are_rendered_in_the_callers_dialect() {
         }
     }
 }
+
+/// TD-0011 P2: `/metrics` serves the registry, gated exactly like the dashboard, and never
+/// carries an unbounded label. The unit tests in `metrics.rs` cover rendering; this covers the
+/// wiring — that a real request lands in the registry and that the endpoint's gate is the
+/// dashboard's, not a second policy.
+#[tokio::test]
+async fn metrics_endpoint_reflects_traffic_and_is_gated() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id":"c1","object":"chat.completion","created":1,"model":"gpt-test",
+            "choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120,
+                     "prompt_tokens_details":{"cached_tokens":60}}
+        })))
+        .mount(&upstream)
+        .await;
+
+    let sink = Arc::new(InMemorySink::default());
+    let state = state_with(upstream.uri(), Arc::clone(&sink), ProxyLedger::in_memory());
+
+    // Drive one call so the registry has something in it.
+    let app = build_app(Arc::clone(&state));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer vk_demo")
+                .body(Body::from(
+                    r#"{"model":"gpt-test","messages":[{"role":"user","content":"hi"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // No admin token configured on this state, so the gate is open (same rule as the dashboard).
+    let app = build_app(Arc::clone(&state));
+    let metrics = app
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(metrics.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(metrics.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+
+    // The call is counted, with the transparent plane (OpenAI ingress -> OpenAI upstream).
+    assert!(text.contains("sandhi_requests_total{"), "{text}");
+    assert!(text.contains("plane=\"transparent\""), "{text}");
+    assert!(text.contains("dialect=\"openai\""), "{text}");
+    // Tokens are recorded per kind, and `billable` is the settled 40 fresh + 60 cache-read + 20 out.
+    assert!(text.contains("kind=\"cache_read\"} 60"), "{text}");
+    assert!(text.contains("kind=\"billable\"} 120"), "{text}");
+
+    // TD-0011 D2: nothing unbounded, ever.
+    for forbidden in [
+        "subject_id",
+        "session_id",
+        "virtual_key_id",
+        "vk_demo",
+        "alice",
+    ] {
+        assert!(
+            !text.contains(forbidden),
+            "'{forbidden}' leaked into /metrics:\n{text}"
+        );
+    }
+
+    // With an admin token configured the endpoint requires it — the dashboard's gate (D5).
+    let mut gated = ProxyState::new(
+        KeyStore::new(),
+        ProxyLedger::in_memory(),
+        Arc::new(InMemorySink::default()),
+        HashMap::new(),
+        None,
+    );
+    gated.admin_token = Some("admin-secret".into());
+    let gated = Arc::new(gated);
+
+    let app = build_app(Arc::clone(&gated));
+    let anon = app
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(anon.status(), StatusCode::UNAUTHORIZED);
+
+    let app = build_app(Arc::clone(&gated));
+    let authed = app
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .header("authorization", "Bearer admin-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(authed.status(), StatusCode::OK);
+}
