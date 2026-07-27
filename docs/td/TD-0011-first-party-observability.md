@@ -1,6 +1,6 @@
 # TD-0011: First-party observability — telemetry about the gateway, not a second meter
 
-- **Status:** Accepted (2026-07-26). **P1 complete**; P2–P4 open.
+- **Status:** Accepted (2026-07-26). **P1 and P2 complete**; P3–P4 open.
 - **Relates to:** ADR-0001 (measure-vs-price), ADR-0004 D4 (dashboard gating), ADR-0005
   (enforcement ledger), TD-0009 (usage aggregate + cardinality discipline), TD-0008 (Victor
   co-design boundary)
@@ -92,7 +92,7 @@ building; these are the signals no sidecar can compute:
 | Phase | Scope | Acceptance |
 |---|---|---|
 | **P1** ✅ | `tracing` events at the points only Sandhi can see; subscriber installed in the binary only | **Met.** A compile-time test asserts the three library crates cannot depend on `tracing-subscriber`; three tests drive the shipped binary and assert the plane event fires, that request telemetry carries no credential or attribution, and that a subscriber is actually installed |
-| **P2** | `GET /metrics` (Prometheus text), the D6 signal set, D5 gating | Bounded-label test passes; a scrape contains no forbidden label and no secret; counters reconcile against a replayed event corpus |
+| **P2** ✅ | `GET /metrics` (Prometheus text), the D6 signal set, D5 gating | **Met, and stronger than specified.** The label set is a *type* (`metrics::Labels`), so a forbidden dimension is unrepresentable rather than merely tested; the render test guards the output as a second line; a real request through the proxy lands in the registry with the right plane/dialect and no secret; `/metrics` reuses the dashboard's gate (401 without the admin bearer, 200 with it). Registry is hand-rolled — no new dependency |
 | **P3** | OTLP export behind a non-default feature | Default build's dependency tree unchanged; feature build exports spans to a local collector in a test |
 | **P4** | Operator guidance: example scrape config, the four alerts worth having | Docs only |
 
@@ -131,10 +131,9 @@ has to hold. P3 must not move the default build's dependency graph.
 
 ## Open questions
 
-- Does the metrics registry live in `sandhi-core` (so the bindings *could* expose a snapshot later,
-  as TD-0009 P2 did for aggregates) or only in `sandhi-proxy`? Core is more reusable and more
-  tempting to misuse; proxy-only is the tighter boundary. Leaning proxy-only until an in-process
-  consumer actually asks.
+- ~~Does the metrics registry live in `sandhi-core` or only in `sandhi-proxy`?~~ **Resolved in P2:
+  proxy-only.** No in-process consumer asked, and the bindings already have the aggregate snapshot
+  for what they need (TD-0009 P2). Moving it later is additive; moving it back would not be.
 - Should `plane` be a metric label or a span attribute? As a label it is bounded and genuinely
   useful for the ADR-0004 adoption question; the risk is that it invites `dialect`×`plane`×`model`
   fan-out. Measure the series count on a realistic model mix before committing.
