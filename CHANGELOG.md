@@ -19,6 +19,16 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 
 ### Added
 
+- **Release verification** — `scripts/verify-release.py` plus a `verify` job that runs after the
+  publish steps and checks each **registry** for the tag's version rather than trusting job status.
+  The publish steps `exit 0` when their credential is absent, so a job can report success while
+  shipping nothing; that is intentional for an unconfigured target (npm, pending a Node client) but
+  the same guard would hide a broken publish. Expectation is derived from which secrets are
+  configured, so an intentional skip is *reported* rather than silently passing. Two failure modes
+  it exists to prevent, both of which already produced wrong conclusions: crates.io rejects requests
+  without a `User-Agent` and returns an error that reads like "not published", and PyPI's JSON API
+  lags an upload by up to a minute — so the script sends a UA and retries before reporting absence.
+
 - **`GET /metrics`** (TD-0011 P2) — Prometheus text exposition for the gateway's own behaviour:
   calls by provider/model/dialect/**plane**/outcome, neutral token counters per kind (including the
   settled `billable` quantity), duration and TTFT histograms with buckets chosen for model calls,
