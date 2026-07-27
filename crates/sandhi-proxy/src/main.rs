@@ -18,6 +18,24 @@ use sandhi_store::{AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
 
 #[tokio::main]
 async fn main() {
+    // TD-0011 D1: the BINARY installs the subscriber; the libraries only emit through the
+    // `tracing` facade. That is what lets an in-process host (Victor) capture Sandhi's spans in
+    // its own logging without Sandhi imposing a runtime or a second subscriber.
+    //
+    // `SANDHI_LOG` (falling back to `RUST_LOG`) controls filtering; the default keeps the
+    // operator-relevant events — denials, fail-open admissions, reclaims, settle failures —
+    // without the per-request debug chatter.
+    let filter = std::env::var("SANDHI_LOG")
+        .or_else(|_| std::env::var("RUST_LOG"))
+        .unwrap_or_else(|_| "sandhi_proxy=info,sandhi_core=info,sandhi_providers=info,warn".into());
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
+        .with_target(true)
+        // stderr, not the default stdout: a server's diagnostics must not interleave with
+        // anything a caller might pipe, and operators expect logs on fd 2.
+        .with_writer(std::io::stderr)
+        .init();
+
     let runtime = ProviderRuntime::new();
     let keys = KeyStore::new();
     let mut providers: HashMap<String, ProviderHandle> = HashMap::new();

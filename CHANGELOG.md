@@ -17,7 +17,24 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **First-party telemetry** (TD-0011 P1) — `sandhi-core`, `-providers` and `-store` now emit through
+  the `tracing` facade and install **no** subscriber; the `sandhi-proxy` binary installs one
+  (stderr, filtered by `SANDHI_LOG` / `RUST_LOG`). A host that links the libraries in-process
+  captures Sandhi's events in its own logging with no Sandhi-side configuration and no second
+  runtime, which is what the boundary is for — a compile-time test asserts the libraries cannot
+  depend on `tracing-subscriber`, so a future patch cannot hijack a host's logging.
+
+  The events are chosen for what no sidecar could compute: **plane selection**
+  (transparent vs translation — the ADR-0004 adoption signal), **reservation denials**,
+  **fail-open admissions** (a `Warn`-policy admit during a ledger outage previously looked like
+  ordinary traffic), **lease reclaims** (the crash-recovery signal), and **durable-settle
+  failures** (which leave capacity reserved until the lease expires).
+
+  Telemetry deliberately does **not** repeat caller attribution: per-subject accounting has a
+  bounded home in the usage aggregate, and a test asserts the request path logs no virtual key,
+  no upstream credential, and no `subject_id`/`session_id`/`virtual_key_id`.
 
 ## [0.1.4] — 2026-07-26
 

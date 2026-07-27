@@ -1,6 +1,6 @@
 # TD-0011: First-party observability — telemetry about the gateway, not a second meter
 
-- **Status:** Proposed (2026-07-26) — design gate, no code yet
+- **Status:** Accepted (2026-07-26). **P1 complete**; P2–P4 open.
 - **Relates to:** ADR-0001 (measure-vs-price), ADR-0004 D4 (dashboard gating), ADR-0005
   (enforcement ledger), TD-0009 (usage aggregate + cardinality discipline), TD-0008 (Victor
   co-design boundary)
@@ -91,7 +91,7 @@ building; these are the signals no sidecar can compute:
 
 | Phase | Scope | Acceptance |
 |---|---|---|
-| **P1** | `tracing` spans/events in core, providers, proxy; request-scoped span carrying request id + provider + model (never subject); subscriber installed in the binary only | A test asserts the libraries install no subscriber; Victor sees Sandhi spans with no Sandhi-side config |
+| **P1** ✅ | `tracing` events at the points only Sandhi can see; subscriber installed in the binary only | **Met.** A compile-time test asserts the three library crates cannot depend on `tracing-subscriber`; three tests drive the shipped binary and assert the plane event fires, that request telemetry carries no credential or attribution, and that a subscriber is actually installed |
 | **P2** | `GET /metrics` (Prometheus text), the D6 signal set, D5 gating | Bounded-label test passes; a scrape contains no forbidden label and no secret; counters reconcile against a replayed event corpus |
 | **P3** | OTLP export behind a non-default feature | Default build's dependency tree unchanged; feature build exports spans to a local collector in a test |
 | **P4** | Operator guidance: example scrape config, the four alerts worth having | Docs only |

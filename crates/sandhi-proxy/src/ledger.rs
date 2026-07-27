@@ -123,9 +123,13 @@ impl ProxyLedger {
             Self::Memory(l) => l.settle(reservation.id, actual),
             Self::Durable(l) => {
                 if let Err(e) = l.settle_durable(reservation.id, actual) {
-                    eprintln!(
-                        "sandhi-proxy: durable settle failed for reservation {}: {e}",
-                        reservation.id
+                    // A settle that does not land leaves the lease holding capacity until its TTL
+                    // expires, so this is an operator-visible fault, not a debug detail.
+                    tracing::error!(
+                        lease = reservation.id,
+                        actual,
+                        error = %e,
+                        "durable settle FAILED — capacity stays reserved until the lease expires"
                     );
                 }
             }
@@ -169,10 +173,17 @@ impl ProxyLedger {
 
     /// Reclaim every lease expired at or before `now` (crash/leak backstop); returns the count.
     pub fn reclaim_expired(&mut self, now: OffsetDateTime) -> usize {
-        match self {
+        let reclaimed = match self {
             Self::Memory(l) => l.reclaim_expired(now),
             Self::Durable(l) => l.reclaim_expired_durable(now).unwrap_or(0),
+        };
+        // TD-0011 D6: reclaims are the crash-recovery signal. Zero is the steady state, so only a
+        // non-zero count is worth an operator's attention — a sustained trickle means leases are
+        // leaking rather than settling (ADR-0005 D2).
+        if reclaimed > 0 {
+            tracing::warn!(reclaimed, "reclaimed expired leases");
         }
+        reclaimed
     }
 }
 
