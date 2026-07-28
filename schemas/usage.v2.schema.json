@@ -39,6 +39,15 @@
       "format": "uint64",
       "minimum": 0.0
     },
+    "basis": {
+      "description": "Whether these counts were measured or estimated (TD-0013 D5).",
+      "default": "provider_reported",
+      "allOf": [
+        {
+          "$ref": "#/definitions/UsageBasis"
+        }
+      ]
+    },
     "cache_creation_tokens": {
       "type": "integer",
       "format": "uint64",
@@ -115,6 +124,25 @@
     }
   },
   "definitions": {
+    "UsageBasis": {
+      "description": "Where a usage number came from (TD-0013 D5).\n\nOrthogonal to [`UsageCompleteness`], which answers *how complete* the counts are. This answers *whether they were measured at all* — and the two are genuinely independent: an interrupted stream can carry real provider counts (`Partial` + `ProviderReported`) or a byte-derived floor (`Partial` + `Estimated`), and today nothing on the wire tells them apart.\n\nDeliberately a separate field rather than a fourth `UsageCompleteness` variant: redefining what `Partial` means would retroactively change the meaning of rows already written to operators' stores, without changing a single byte of schema. Adding a field does not.",
+      "oneOf": [
+        {
+          "description": "Every category came from the provider. The default, because it is what every code path that existed before this discriminator was introduced actually did.",
+          "type": "string",
+          "enum": [
+            "provider_reported"
+          ]
+        },
+        {
+          "description": "At least one category was derived from a byte count rather than reported. Reached only when a stream ends before the family had reported that category — never on a completed call.",
+          "type": "string",
+          "enum": [
+            "estimated"
+          ]
+        }
+      ]
+    },
     "UsageCompleteness": {
       "type": "string",
       "enum": [

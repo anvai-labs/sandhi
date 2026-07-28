@@ -13,9 +13,10 @@ pub const CHAT_SCHEMA_VERSION_V1: &str = "1";
 /// History: 1 = usage latency/reasoning on UsageEvent (#68), 2 =
 /// `include_native_response` request gate (#90), 3 = wire-truth latency on
 /// `UsageV2` (#97), 4 = `reasoning_effort` + `thinking` typed request fields
-/// (W3d/G7). Consumers feature-detect the binding export and treat an absent
-/// fn as minor 0.
-pub const CHAT_CONTRACT_MINOR: u32 = 4;
+/// (W3d/G7), 5 = `UsageV2::basis` — measured vs estimated counts (TD-0013 D5).
+/// Consumers feature-detect the binding export and treat an absent fn as
+/// minor 0.
+pub const CHAT_CONTRACT_MINOR: u32 = 5;
 
 fn schema_v1() -> String {
     CHAT_SCHEMA_VERSION_V1.to_owned()
@@ -259,6 +260,28 @@ pub enum UsageCompleteness {
     Unavailable,
 }
 
+/// Where a usage number came from (TD-0013 D5).
+///
+/// Orthogonal to [`UsageCompleteness`], which answers *how complete* the counts are.
+/// This answers *whether they were measured at all* — and the two are genuinely independent:
+/// an interrupted stream can carry real provider counts (`Partial` + `ProviderReported`) or a
+/// byte-derived floor (`Partial` + `Estimated`), and today nothing on the wire tells them apart.
+///
+/// Deliberately a separate field rather than a fourth `UsageCompleteness` variant: redefining what
+/// `Partial` means would retroactively change the meaning of rows already written to operators'
+/// stores, without changing a single byte of schema. Adding a field does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageBasis {
+    /// Every category came from the provider. The default, because it is what every code path
+    /// that existed before this discriminator was introduced actually did.
+    #[default]
+    ProviderReported,
+    /// At least one category was derived from a byte count rather than reported. Reached only when
+    /// a stream ends before the family had reported that category — never on a completed call.
+    Estimated,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 pub struct UsageV2 {
     pub tokens_in: u64,
@@ -277,6 +300,9 @@ pub struct UsageV2 {
     pub rejected_prediction_tokens: Option<u64>,
     #[serde(default)]
     pub completeness: UsageCompleteness,
+    /// Whether these counts were measured or estimated (TD-0013 D5).
+    #[serde(default)]
+    pub basis: UsageBasis,
     #[serde(default = "one")]
     pub attempts: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -718,7 +744,7 @@ mod tests {
         let digest = fnv1a(concatenated.as_bytes());
         assert_eq!(
             (CHAT_CONTRACT_MINOR, digest),
-            (4, 0xa6cf2de020cdcd03_u64),
+            (5, 0x585a1d7e8b06ba3a_u64),
             "contract schemas changed: bump CHAT_CONTRACT_MINOR and update this digest \
              (new digest = {digest:#x})"
         );

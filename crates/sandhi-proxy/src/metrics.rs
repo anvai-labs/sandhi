@@ -149,6 +149,10 @@ pub struct CallMeasurements {
     pub reasoning: u64,
     /// Passed in, never recomputed here (TD-0011 D3).
     pub billable: u64,
+    /// Whether any part of `billable` came from the byte fallback rather than the provider
+    /// (TD-0013 D5). Lets an operator answer "how much of my settled spend was guessed?", which
+    /// until now was visible only per-event in the sink.
+    pub estimated: bool,
     pub duration_ms: Option<u64>,
     pub ttft_ms: Option<u64>,
 }
@@ -162,6 +166,8 @@ struct Inner {
     /// Enforcement counters, labelled by policy only — a budget scope is unbounded (see [`Labels`]).
     denied: BTreeMap<&'static str, u64>,
     rate_limited: BTreeMap<Labels, u64>,
+    /// Billable tokens settled from an estimate rather than a provider measurement.
+    estimated_tokens: BTreeMap<Labels, u64>,
     admitted_unmetered: u64,
     leases_reclaimed: u64,
     settle_failures: u64,
@@ -198,6 +204,9 @@ impl Metrics {
             if value > 0 {
                 *inner.tokens.entry((labels.clone(), kind)).or_default() += value;
             }
+        }
+        if m.estimated && m.billable > 0 {
+            *inner.estimated_tokens.entry(labels.clone()).or_default() += m.billable;
         }
         if let Some(ms) = m.duration_ms {
             inner
@@ -299,6 +308,19 @@ impl Metrics {
             let _ = writeln!(
                 out,
                 "sandhi_rate_limited_total{{{}}} {value}",
+                labels.render()
+            );
+        }
+
+        out.push_str(
+            "# HELP sandhi_estimated_tokens_total Billable tokens settled from a byte estimate \
+             rather than a provider measurement.\n",
+        );
+        out.push_str("# TYPE sandhi_estimated_tokens_total counter\n");
+        for (labels, value) in &inner.estimated_tokens {
+            let _ = writeln!(
+                out,
+                "sandhi_estimated_tokens_total{{{}}} {value}",
                 labels.render()
             );
         }
