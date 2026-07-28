@@ -171,6 +171,8 @@ struct Inner {
     admitted_unmetered: u64,
     leases_reclaimed: u64,
     settle_failures: u64,
+    settle_overshoot: u64,
+    settle_overshoot_tokens: u64,
 }
 
 /// The gateway's metric registry. Cheap to share: one mutex around a few maps, touched once per
@@ -250,6 +252,19 @@ impl Metrics {
     pub fn record_leases_reclaimed(&self, count: u64) {
         if let Ok(mut inner) = self.inner.lock() {
             inner.leases_reclaimed += count;
+        }
+    }
+
+    /// A settle whose measured usage exceeded the ceiling it was admitted against (TD-0013 D6).
+    ///
+    /// The full amount is still settled — discarding it would lose a real measurement, which is
+    /// the defect this TD exists to remove. What this counter buys is visibility: a sustained rate
+    /// means reservation ceilings are systematically too tight, so caps are being enforced a call
+    /// later than intended. `overshoot` is how far past the ceiling the call landed.
+    pub fn observe_settle_overshoot(&self, overshoot: u64) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.settle_overshoot += 1;
+            inner.settle_overshoot_tokens = inner.settle_overshoot_tokens.saturating_add(overshoot);
         }
     }
 
@@ -351,6 +366,16 @@ impl Metrics {
                 "sandhi_settle_failures_total",
                 "Durable settles that did not land, leaving capacity reserved until the lease TTL.",
                 inner.settle_failures,
+            ),
+            (
+                "sandhi_settle_overshoot_total",
+                "Settles whose measured usage exceeded the ceiling they were admitted against.",
+                inner.settle_overshoot,
+            ),
+            (
+                "sandhi_settle_overshoot_tokens_total",
+                "Tokens settled beyond the reserved ceiling; a sustained rate means ceilings are too tight and caps bind a call later than intended.",
+                inner.settle_overshoot_tokens,
             ),
         ] {
             let _ = writeln!(out, "# HELP {name} {help}");

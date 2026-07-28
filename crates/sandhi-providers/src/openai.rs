@@ -107,8 +107,17 @@ impl Provider for OpenAiCompat {
         let mut body = req.body;
         if let Some(obj) = body.as_object_mut() {
             obj.insert("stream".into(), Value::Bool(true));
-            // Ask for usage in the terminal SSE chunk.
-            obj.insert("stream_options".into(), json!({ "include_usage": true }));
+            // Ask for usage in the terminal SSE chunk — by *merging*, not replacing. Inserting a
+            // fresh object dropped every sibling the client had set (TD-0013 P4); the raw plane
+            // has always merged here, and metering must not cost the caller a request field.
+            match obj.get_mut("stream_options").and_then(Value::as_object_mut) {
+                Some(options) => {
+                    options.insert("include_usage".into(), Value::Bool(true));
+                }
+                None => {
+                    obj.insert("stream_options".into(), json!({ "include_usage": true }));
+                }
+            }
         }
         let resp = self
             .client
@@ -282,6 +291,48 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err2, ProviderError::RateLimited));
+    }
+
+    /// TD-0013 P4: asking for usage must not cost the caller a request field.
+    ///
+    /// The typed plane inserted a fresh `stream_options` object, silently dropping every sibling
+    /// the client had set. The raw plane has always merged (see
+    /// `normalize_envelope_merges_into_existing_stream_options`), so the two planes disagreed on
+    /// the same request — and the typed one lost data.
+    #[tokio::test]
+    async fn stream_merges_into_the_clients_stream_options() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string("data: [DONE]\n\n"),
+            )
+            .mount(&server)
+            .await;
+
+        let provider = OpenAiCompat::new("openai", server.uri(), "k");
+        let request = ProviderRequest::new(
+            "m",
+            json!({
+                "model": "m",
+                "messages": [],
+                "stream_options": {"show_usage_stats": true}
+            }),
+        );
+        let mut stream = provider.stream(request).await.unwrap();
+        while stream.next().await.is_some() {}
+
+        let sent: serde_json::Value =
+            serde_json::from_slice(&server.received_requests().await.unwrap()[0].body).unwrap();
+        assert_eq!(
+            sent["stream_options"]["include_usage"], true,
+            "metering still opts in"
+        );
+        assert_eq!(
+            sent["stream_options"]["show_usage_stats"], true,
+            "the client's sibling field must survive — the raw plane already preserves it"
+        );
     }
 
     #[tokio::test]

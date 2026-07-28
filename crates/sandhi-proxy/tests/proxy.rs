@@ -1584,3 +1584,71 @@ async fn a_stream_whose_usage_is_never_reported_still_settles_what_it_accrued() 
         );
     }
 }
+
+/// TD-0013 D6 — a measured usage above the reserved ceiling is settled in full, and counted.
+///
+/// `core/src/ledger.rs` used to claim `actual` was "trusted to be ≤ the reserved ceiling (the
+/// proxy's mid-stream cutoff enforces that bound)". No cutoff was ever built, and the bound is
+/// unenforceable in general: a ceiling is built from `input_estimate` (bytes/4 of the request) and
+/// a provider can tokenize the same prompt higher.
+///
+/// Clamping to the ceiling was implemented first and reverted: it silently discarded the
+/// difference, recreating one layer down exactly the defect this TD removes. The measurement is
+/// the product, so the truth is recorded and the under-reservation is made visible instead.
+#[tokio::test]
+async fn a_settle_above_the_ceiling_is_recorded_in_full_and_counted() {
+    let upstream = MockServer::start().await;
+    // A tiny request (so the reservation ceiling is small) answered with a large usage report.
+    let resp = serde_json::json!({
+        "choices": [{ "message": { "content": "hi" } }],
+        "usage": { "prompt_tokens": 900_000, "completion_tokens": 900_000 }
+    });
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(resp))
+        .mount(&upstream)
+        .await;
+
+    let sink = Arc::new(InMemorySink::new());
+    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    state.ledger.lock().unwrap().set_budget(
+        "group:platform",
+        Some(10_000_000),
+        Window::Total,
+        Policy::Block,
+    );
+    let app = build_app(state.clone());
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("authorization", "Bearer vk_demo")
+        .body(Body::from(
+            r#"{"model":"gpt-x","max_output_tokens":16,"messages":[{"role":"user","content":"hi"}]}"#,
+        ))
+        .unwrap();
+    assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::OK);
+
+    let ledger = state.ledger.lock().unwrap();
+    assert_eq!(
+        ledger.spent("group:platform"),
+        1_800_000,
+        "the provider's measurement must survive intact — a ceiling is an estimate, not a truth"
+    );
+    assert_eq!(
+        ledger.reserved("group:platform"),
+        0,
+        "the lease must still be released"
+    );
+    drop(ledger);
+
+    let metrics = state.metrics.render();
+    assert!(
+        metrics.contains("sandhi_settle_overshoot_total 1"),
+        "an under-reserved call must be visible, or ceilings stay wrong forever:\n{metrics}"
+    );
+    assert!(
+        metrics.contains("sandhi_settle_overshoot_tokens_total "),
+        "how far past the ceiling it landed is the actionable part"
+    );
+}

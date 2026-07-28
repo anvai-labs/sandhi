@@ -88,8 +88,20 @@ pub trait EnforcementLedger: LedgerView {
     ///
     /// A no-op if `reservation_id` is unknown (already settled, or reclaimed after expiry) — safe
     /// under at-least-once delivery. `actual` is the neutral billable quantity the caller computed
-    /// (e.g. via `billable()`); it is trusted to be ≤ the reserved ceiling (the proxy's mid-stream
-    /// cutoff enforces that bound).
+    /// (e.g. via `billable()`).
+    ///
+    /// **`actual` may exceed the reserved ceiling, and a backend must tolerate that.** This
+    /// previously claimed `actual` "is trusted to be ≤ the reserved ceiling (the proxy's
+    /// mid-stream cutoff enforces that bound)". No cutoff exists — ADR-0005 D1 specified one and
+    /// it was never built, so the sentence described code nobody wrote, which is worse than a
+    /// known gap because it stops the next reader from looking.
+    ///
+    /// The bound is not merely unenforced, it is unenforceable in general: a ceiling is built from
+    /// an estimate of the request, and a provider can report more than was estimated. Clamping was
+    /// considered and rejected — it would discard a real measurement, and the measurement is the
+    /// product (TD-0013 D6). So spend may land above the cap by at most one call's overshoot, and
+    /// the *next* reservation is refused, which is how the cap recovers. `reserve` still never
+    /// admits over the limit, which is the invariant TD-0007 C1/C4 actually assert.
     fn settle(&mut self, reservation_id: u64, actual: u64);
 
     /// Reclaim every lease that expired at or before `now` (crash/leak backstop) and return how

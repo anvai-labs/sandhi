@@ -1301,6 +1301,27 @@ impl RequestAccounting {
         // ledger and the emitted usage event count the same quantity. An unmeasured (failed /
         // cancelled) call settles `0`, which releases the lease without recording spend.
         let actual = if measured { billable(&usage) } else { 0 };
+        // TD-0013 D6: the settled quantity is the measured one, even when it exceeds the ceiling
+        // the call was admitted against — but the overshoot is counted.
+        //
+        // Clamping was the obvious move and is wrong. A ceiling is built from `input_estimate`,
+        // which is bytes/4 of the request; a provider's tokenization of the same prompt can exceed
+        // it (notably for scripts averaging ~3 bytes/char). Clamping would silently discard the
+        // difference — recreating, one layer down, exactly the defect this TD exists to remove.
+        //
+        // You cannot simultaneously guarantee "spend never exceeds the cap" and "a real
+        // measurement is never lost", once the provider can report more than was reserved.
+        // Sandhi's product is the measurement, and the count feeds a downstream ledger it must not
+        // lie to; the cap is a control that recovers on its own, because the overshoot is bounded
+        // by one call and the *next* reservation is refused. So: record the truth, and make the
+        // under-reservation visible instead of paying for it in silence.
+        if let Some(reservation) = &self.reservation {
+            if actual > reservation.ceiling {
+                self.state
+                    .metrics
+                    .observe_settle_overshoot(actual - reservation.ceiling);
+            }
+        }
         // Settle the lease by id (idempotent, ADR-0005 D2), then capture the post-settle spent for
         // the alert subsystem. Alerts evaluate only on a measured call.
         let mut spent_after: Option<u64> = None;
