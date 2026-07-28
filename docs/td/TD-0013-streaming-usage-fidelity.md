@@ -122,11 +122,28 @@ envelope, `proxy/src/lib.rs` `upstream_path`, `operator.rs` `default_base_url`, 
 transport construction); a fact table that grows by accretion is reviewable, one that lands as a
 seven-site refactor is not.
 
-**D2 — The declaration must be falsifiable.** A test drives each family's shipped SSE fixture
-through `metered_passthrough` and asserts that a family declared `Incremental` genuinely exposes
-non-zero usage *before* the terminal chunk, and that a `TerminalOnly` family does not. A transport
-fact nobody can refute is a comment, and comments drift. This is the same discipline
-`conformance.rs` applies to the ledger contract.
+> **Amended while implementing P1 — the runtime does not switch on this fact, and should not.**
+> D1 was drafted as "the fallback is chosen by a declared fact, not by emergent behaviour". The
+> implementation showed that framing was wrong in a useful way: a family that reports nothing
+> mid-stream simply leaves `usage_running` unset, so **the absence of a number is itself the
+> signal** and no caller has to know which family it is talking to. Branching on the declaration
+> would add a second source of truth that could disagree with the sniffer — precisely the drift
+> D2 exists to catch. The declaration's job is to state per-family behaviour once, make it
+> testable, and give the docs and operator surface something to cite. It is documentation with a
+> test attached, which is the strongest form of documentation available.
+
+**D2 — The declaration must be falsifiable.** A test drives each family's shipped fixture through
+the production `metered_passthrough` path and asserts the declaration against what actually
+happens. A transport fact nobody can refute is a comment, and comments drift. This is the same
+discipline `conformance.rs` applies to the ledger contract.
+
+The property asserted is the operationally meaningful one: **at the moment the last content byte
+arrives, is there a number to settle?** That is exactly the question an interrupted stream asks,
+and it separates the families cleanly on evidence already in the repo — Anthropic reports on
+`message_start` before any content and Gemini attaches `usageMetadata` to a content-bearing chunk,
+while OpenAI (`choices: []`), Cohere (`message-end`) and Ollama (`done: true`) carry usage only on
+a trailing control frame with no content. Flipping any single declaration fails the test with a
+message naming the family.
 
 **D3 — Surface the running accumulator; never fabricate one.** `StreamChunk` gains
 `usage_running: Option<ParsedUsage>`, set to `Some` only once a sniff has actually mutated the
