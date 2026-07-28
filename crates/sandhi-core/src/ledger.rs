@@ -5,8 +5,10 @@
 //! single streaming request can overshoot (ADR-0005 Context) — this ledger:
 //!
 //! - **reserves a ceiling, not an estimate** ([`EnforcementLedger::reserve`]): a conservative upper
-//!   bound is held so admitting a call can never overshoot a hard cap. The proxy's mid-stream cutoff
-//!   guarantees actual ≤ ceiling; this ledger guarantees `spent + reserved ≤ limit` at all times.
+//!   bound is held, so **admission** can never overshoot a hard cap. Nothing guarantees the settled
+//!   actual is ≤ that ceiling — this used to claim "the proxy's mid-stream cutoff guarantees
+//!   actual ≤ ceiling", and no such cutoff was ever built (TD-0013 D6). What holds is narrower and
+//!   true: `reserve` never admits over the limit.
 //! - **holds it as a TTL lease** ([`Reservation`]): a lease left dangling by a crash is reclaimed
 //!   ([`EnforcementLedger::reclaim_expired`]) rather than leaking capacity forever.
 //! - **settles idempotently by id** ([`EnforcementLedger::settle`]): an at-least-once settle (retry,
