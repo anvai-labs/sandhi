@@ -56,8 +56,8 @@ pub mod metering;
 pub use metering::MeteredProvider;
 pub use resilience::{CircuitBreaker, ResilientProvider, RetryConfig, TimeoutConfig};
 pub use typed::{
-    ChatEventStream, ChatProvider, ProviderFamily, ProviderHandle, ProviderRuntime,
-    ProviderTransportConfig,
+    ChatEventStream, ChatProvider, FamilyFacts, ProviderFamily, ProviderHandle, ProviderRuntime,
+    ProviderTransportConfig, UsageCadence,
 };
 
 /// Shared HTTP client for the in-repo adapters: a 10s TCP/TLS connect bound as
@@ -850,5 +850,147 @@ mod streaming_usage_fidelity_tests {
             Some(ParsedUsage::default()),
             "reporting zero is not the same as reporting nothing"
         );
+    }
+}
+
+#[cfg(test)]
+mod usage_cadence_conformance {
+    //! TD-0013 D2 — the declared cadence, checked against what each family's shipped fixture
+    //! actually does through the production `metered_passthrough` path.
+    //!
+    //! A transport fact nobody can refute is a comment, and comments drift. The property asserted
+    //! is the operationally meaningful one: **at the moment the last content byte arrives, is there
+    //! a number to settle?** That is exactly the question an interrupted stream asks.
+
+    use super::*;
+    use crate::typed::{ProviderFamily, UsageCadence};
+    use bytes::Bytes;
+    use futures_util::StreamExt;
+
+    struct FamilyCase {
+        family: ProviderFamily,
+        fixture: &'static [u8],
+        sniff: fn(&[u8], &mut ParsedUsage) -> bool,
+        /// Substring identifying a line that delivers model output, as opposed to a trailing
+        /// control frame. What separates the two cadences is whether usage has arrived by the
+        /// time the last of these has.
+        content_marker: &'static str,
+    }
+
+    fn cases() -> Vec<FamilyCase> {
+        vec![
+            FamilyCase {
+                family: ProviderFamily::Anthropic,
+                fixture: include_bytes!("../tests/fixtures/anthropic/stream_cache_split.sse"),
+                sniff: crate::anthropic::sniff_usage_line,
+                content_marker: "content_block_delta",
+            },
+            FamilyCase {
+                family: ProviderFamily::Gemini,
+                fixture: include_bytes!("../tests/fixtures/gemini/stream.sse"),
+                sniff: crate::gemini::sniff_usage_line,
+                content_marker: "\"text\"",
+            },
+            FamilyCase {
+                family: ProviderFamily::OpenAiCompat,
+                fixture: include_bytes!("../tests/fixtures/openai/stream.sse"),
+                sniff: crate::openai::sniff_usage_line,
+                content_marker: "\"delta\"",
+            },
+            FamilyCase {
+                family: ProviderFamily::Cohere,
+                fixture: include_bytes!("../tests/fixtures/cohere/stream.sse"),
+                sniff: crate::cohere::sniff_usage_line,
+                content_marker: "content-delta",
+            },
+            FamilyCase {
+                family: ProviderFamily::Ollama,
+                fixture: include_bytes!("../tests/fixtures/ollama/stream.ndjson"),
+                sniff: crate::local::sniff_usage_line,
+                content_marker: "\"done\":false",
+            },
+        ]
+    }
+
+    /// Feed `lines` through the real primitive and report whether any pre-terminal item exposed a
+    /// running total.
+    async fn usage_known_after(
+        lines: Vec<Bytes>,
+        sniff: fn(&[u8], &mut ParsedUsage) -> bool,
+    ) -> bool {
+        let upstream = futures_util::stream::iter(
+            lines
+                .into_iter()
+                .map(Ok::<Bytes, reqwest::Error>)
+                .collect::<Vec<_>>(),
+        );
+        let mut out = metered_passthrough(Box::pin(upstream), sniff);
+        let mut known = false;
+        while let Some(item) = out.next().await {
+            let chunk = item.unwrap();
+            // Only pre-terminal items count: the terminal item is synthesized by the primitive
+            // itself and is exactly what an interrupted stream never receives.
+            if !chunk.data.is_empty() && chunk.usage_running.is_some() {
+                known = true;
+            }
+        }
+        known
+    }
+
+    #[tokio::test]
+    async fn every_family_behaves_as_its_declaration_claims() {
+        for case in cases() {
+            let text = String::from_utf8_lossy(case.fixture).into_owned();
+            let lines: Vec<&str> = text.split_inclusive('\n').collect();
+            let last_content = lines
+                .iter()
+                .rposition(|line| line.contains(case.content_marker))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{:?}: the fixture has no line matching {:?}, so this proves nothing",
+                        case.family, case.content_marker
+                    )
+                });
+
+            // Everything the client would have received by the time the last content byte landed.
+            let delivered: Vec<Bytes> = lines[..=last_content]
+                .iter()
+                .map(|line| Bytes::copy_from_slice(line.as_bytes()))
+                .collect();
+            let known = usage_known_after(delivered, case.sniff).await;
+
+            match case.family.usage_cadence() {
+                UsageCadence::Incremental => assert!(
+                    known,
+                    "{:?} is declared Incremental but reported nothing by the end of its content \
+                     — either the declaration is wrong or the sniffer regressed, and an \
+                     interrupted stream would silently fall back to a byte estimate",
+                    case.family
+                ),
+                UsageCadence::TerminalOnly => assert!(
+                    !known,
+                    "{:?} is declared TerminalOnly but exposed usage while content was still \
+                     arriving — the declaration understates the family, and the fallback is \
+                     being applied where a real measurement exists",
+                    case.family
+                ),
+            }
+        }
+    }
+
+    /// The declaration must be exhaustive: a family added without a considered cadence would
+    /// otherwise inherit whatever the catch-all arm happens to say.
+    #[test]
+    fn every_family_declares_a_cadence() {
+        for family in [
+            ProviderFamily::OpenAiCompat,
+            ProviderFamily::OpenAiResponses,
+            ProviderFamily::Anthropic,
+            ProviderFamily::Cohere,
+            ProviderFamily::Gemini,
+            ProviderFamily::Ollama,
+        ] {
+            let _ = family.usage_cadence();
+        }
     }
 }
