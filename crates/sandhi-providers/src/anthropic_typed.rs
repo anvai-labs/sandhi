@@ -321,6 +321,8 @@ fn decode_anthropic_stream(mut raw: ByteStream, requested_model: String) -> Chat
         let mut started = false;
         let mut open_tools = BTreeSet::<u32>::new();
         let mut emitted_usage = false;
+        // The last running total published, so progress is emitted on change rather than per chunk.
+        let mut last_running: Option<crate::ParsedUsage> = None;
         while let Some(chunk) = raw.next().await {
             let chunk = chunk?;
             let attempts = chunk.attempts;
@@ -392,6 +394,22 @@ fn decode_anthropic_stream(mut raw: ByteStream, requested_model: String) -> Chat
                     yield ChatStreamEventV1::Usage { usage };
                     emitted_usage = true;
                 }
+            } else if chunk.usage_running.is_some() && chunk.usage_running != last_running {
+                // Anthropic is an `Incremental` family (TD-0013 D1): `message_start` carries input
+                // and the full cache split before any content, and `message_delta` carries
+                // cumulative output. Surfacing that as a non-final `Usage` is what lets an
+                // interrupted stream settle the real numbers instead of a byte estimate — on a
+                // cached prompt those categories *are* the bill. Emitted only when the totals
+                // actually move, so a long stream does not carry one event per chunk.
+                //
+                // `Partial` is load-bearing here: the proxy treats a non-final `Usage` as
+                // accounting-only, so it never supersedes the terminal frame and never reaches
+                // the client (TD-0013 D7).
+                last_running = chunk.usage_running;
+                let mut usage: UsageV2 = chunk.usage_running.unwrap_or_default().into();
+                usage.completeness = UsageCompleteness::Partial;
+                usage.attempts = attempts;
+                yield ChatStreamEventV1::Usage { usage };
             }
         }
     };
@@ -516,11 +534,13 @@ mod tests {
                 Ok(crate::StreamChunk {
                     data: Bytes::copy_from_slice(&sse[..split]),
                     usage: None,
+                    usage_running: None,
                     attempts: 1,
                 }),
                 Ok(crate::StreamChunk {
                     data: Bytes::copy_from_slice(&sse[split..]),
                     usage: None,
+                    usage_running: None,
                     attempts: 1,
                 }),
                 Ok(crate::StreamChunk {
@@ -532,6 +552,7 @@ mod tests {
                         cache_read_tokens: 5,
                         reasoning_tokens: 0,
                     }),
+                    usage_running: None,
                     attempts: 1,
                 }),
             ]));

@@ -723,11 +723,13 @@ mod tests {
                 Ok(crate::StreamChunk {
                     data: Bytes::copy_from_slice(&sse.as_bytes()[..split]),
                     usage: None,
+                    usage_running: None,
                     attempts: 2,
                 }),
                 Ok(crate::StreamChunk {
                     data: Bytes::copy_from_slice(&sse.as_bytes()[split..]),
                     usage: None,
+                    usage_running: None,
                     attempts: 2,
                 }),
             ];

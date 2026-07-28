@@ -1309,3 +1309,243 @@ async fn a_key_without_a_limit_is_never_rate_limited() {
         assert_eq!(response.status(), StatusCode::OK, "request {i}");
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// TD-0013 — streaming usage fidelity.
+//
+// The pre-existing disconnect test (`client_disconnect_mid_stream_still_meters`) cannot fail for
+// the right reason: wiremock writes the whole SSE body in one go with a `content-length`, so the
+// first frame the client reads usually already carries the terminal usage and the estimated-partial
+// branch is never reached. These tests need an upstream that emits frames one at a time and then
+// *holds the connection open*, so a disconnect genuinely lands mid-stream.
+// ---------------------------------------------------------------------------------------------
+
+/// A deliberately **paced** SSE upstream: writes each frame separately, flushes it, and then holds
+/// the connection open without ever sending a terminal usage frame.
+///
+/// Blocking std sockets on a background thread rather than a tokio listener — this needs no extra
+/// tokio features and no shutdown choreography, and the thread dies with the test process.
+fn paced_sse_upstream(frames: Vec<String>) -> String {
+    use std::io::{Read, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut sock) = stream else { continue };
+            let frames = frames.clone();
+            std::thread::spawn(move || {
+                // Drain the request head. Its contents do not matter here; the credential
+                // substitution it would prove is covered by the wiremock tests above.
+                let mut scratch = [0_u8; 8192];
+                let _ = sock.read(&mut scratch);
+                let _ = sock.write_all(
+                    b"HTTP/1.1 200 OK\r\n\
+                      content-type: text/event-stream\r\n\
+                      transfer-encoding: chunked\r\n\r\n",
+                );
+                for frame in &frames {
+                    let _ = sock.write_all(format!("{:x}\r\n{frame}\r\n", frame.len()).as_bytes());
+                    let _ = sock.flush();
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                // Never send the terminating chunk: this stream is abandoned by the *client*.
+                std::thread::sleep(std::time::Duration::from_secs(30));
+            });
+        }
+    });
+    format!("http://{addr}")
+}
+
+/// `message_start` as Anthropic really sends it — input and the full cache split arrive before a
+/// single content byte. Mirrors `sandhi-providers/tests/fixtures/anthropic/stream_cache_split.sse`.
+const PACED_FRAMES_INPUT: u64 = 1024;
+const PACED_FRAMES_CACHE_CREATION: u64 = 2048;
+const PACED_FRAMES_CACHE_READ: u64 = 4096;
+
+fn paced_anthropic_frames() -> Vec<String> {
+    let message_start = serde_json::json!({
+        "type": "message_start",
+        "message": {
+            "id": "msg_1",
+            "model": "claude-test",
+            "usage": {
+                "input_tokens": PACED_FRAMES_INPUT,
+                "cache_creation_input_tokens": PACED_FRAMES_CACHE_CREATION,
+                "cache_read_input_tokens": PACED_FRAMES_CACHE_READ,
+                // Anthropic seeds output at 1 here; the real count arrives on `message_delta`,
+                // which this stream is abandoned before ever reaching.
+                "output_tokens": 1
+            }
+        }
+    });
+    let text_delta = serde_json::json!({
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {"type": "text_delta", "text": "hi"}
+    });
+    vec![
+        format!("event: message_start\ndata: {message_start}\n\n"),
+        format!("event: content_block_delta\ndata: {text_delta}\n\n"),
+    ]
+}
+
+fn paced_anthropic_state(upstream_uri: String, sink: Arc<InMemorySink>) -> Arc<ProxyState> {
+    let keys = KeyStore::new();
+    keys.insert(VirtualKey {
+        id: "vk_demo".into(),
+        subject_id: Some("alice".into()),
+        group_id: Some("platform".into()),
+        upstream_ref: "up1".into(),
+        ..Default::default()
+    });
+    let mut providers = HashMap::new();
+    providers.insert(
+        "up1".into(),
+        ProviderRuntime::new().anthropic(
+            upstream_uri,
+            "REAL-KEY",
+            sandhi_providers::AnthropicAuthScheme::ApiKey,
+            Some(0),
+            None,
+            None,
+        ),
+    );
+    Arc::new(ProxyState::new(
+        keys,
+        ProxyLedger::in_memory(),
+        sink,
+        providers,
+        None,
+    ))
+}
+
+/// **The test TD-0013 exists to pass.** A client disconnects right after `message_start`, which
+/// announced 1024 input + 2048 cache-creation + 4096 cache-read. Those 7168 tokens are real,
+/// provider-reported, and known before any content streams — and the byte-only fallback recorded
+/// every one of them as zero, settling the `bytes/4` of two characters of text instead.
+///
+/// Reverting the `usage_running` plumbing makes this assert ~1 against an expected 7168.
+#[tokio::test]
+async fn a_disconnect_after_message_start_settles_the_reported_cache_split() {
+    use futures_util::StreamExt;
+
+    let uri = paced_sse_upstream(paced_anthropic_frames());
+    let sink = Arc::new(InMemorySink::new());
+    let state = paced_anthropic_state(uri, sink.clone());
+    let app = build_app(state.clone());
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("x-api-key", "vk_demo")
+        .body(Body::from(
+            r#"{"model":"claude-test","max_tokens":32,"stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
+        ))
+        .unwrap();
+
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Read until the frame carrying `message_start` has reached us. The proxy observes usage
+    // before it forwards the bytes, so once we hold this frame the accounting has already seen it.
+    let mut body = response.into_body().into_data_stream();
+    let mut seen = String::new();
+    for _ in 0..4 {
+        match body.next().await {
+            Some(Ok(bytes)) => seen.push_str(&String::from_utf8_lossy(&bytes)),
+            _ => break,
+        }
+        if seen.contains("message_start") {
+            break;
+        }
+    }
+    assert!(
+        seen.contains("message_start"),
+        "the paced upstream should have delivered message_start; got: {seen}"
+    );
+
+    // The disconnect. Dropping the body drops the stream generator, which drops
+    // `RequestAccounting`, which finalizes.
+    drop(body);
+
+    let expected = PACED_FRAMES_INPUT + PACED_FRAMES_CACHE_CREATION + PACED_FRAMES_CACHE_READ;
+    let spent = state.ledger.lock().unwrap().spent("group:platform");
+    assert!(
+        spent >= expected,
+        "a disconnect after message_start must settle the reported {expected} tokens, not a byte \
+         guess — settled {spent}"
+    );
+
+    // And the event must still say it is an interrupted call, not a completed one.
+    let events = sink.events();
+    assert_eq!(events.len(), 1, "the disconnect must still emit one event");
+    assert_eq!(events[0].tokens_in, PACED_FRAMES_INPUT);
+    assert_eq!(events[0].cache_read_tokens, PACED_FRAMES_CACHE_READ);
+    assert_eq!(events[0].cache_creation_tokens, PACED_FRAMES_CACHE_CREATION);
+}
+
+/// The second integrity hole TD-0013 closes, at the layer where it costs money.
+///
+/// When the sniffer never matches — an upstream that ignores `stream_options.include_usage`, a
+/// proxy in front of it that strips the frame, or a usage frame past the sniff budget — the
+/// terminal item used to carry an all-zero *finalized* usage. That overwrote the accrued running
+/// estimate, so a fully-delivered response settled `0`: a metering hole that needs no disconnect
+/// and no bad intent to trigger.
+#[tokio::test]
+async fn a_stream_whose_usage_is_never_reported_still_settles_what_it_accrued() {
+    let upstream = MockServer::start().await;
+    let sse = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"a fully delivered response\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\" with no usage frame at all\"}}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse),
+        )
+        .mount(&upstream)
+        .await;
+
+    let sink = Arc::new(InMemorySink::new());
+    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    let app = build_app(state.clone());
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("authorization", "Bearer vk_demo")
+        .body(Body::from(
+            r#"{"model":"gpt-x","messages":[],"stream":true}"#,
+        ))
+        .unwrap();
+
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&body).contains("[DONE]"),
+        "forwarded"
+    );
+
+    let spent = state.ledger.lock().unwrap().spent("group:platform");
+    assert!(
+        spent > 0,
+        "a delivered response whose usage was never reported must still settle the accrued \
+         estimate — settling 0 is a metering hole that needs no disconnect to exploit"
+    );
+
+    // And it must be labelled an estimate, not passed off as a measured call.
+    let events = sink.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].usage_completeness,
+        sandhi_core::UsageCompleteness::Partial,
+        "an unreported stream is not a finalized measurement"
+    );
+}

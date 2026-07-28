@@ -93,9 +93,9 @@ impl Provider for Cohere {
 
 /// Accumulate usage from a Cohere v2 chat SSE line. Cohere carries usage on the `message-end`
 /// event under `delta.usage` (falling back to a top-level `usage`); last wins.
-pub(crate) fn sniff_usage_line(line: &[u8], usage: &mut ParsedUsage) {
+pub(crate) fn sniff_usage_line(line: &[u8], usage: &mut ParsedUsage) -> bool {
     let Some(v) = sse_data_json(line) else {
-        return;
+        return false;
     };
     let obj = v
         .get("usage")
@@ -103,8 +103,10 @@ pub(crate) fn sniff_usage_line(line: &[u8], usage: &mut ParsedUsage) {
     if let Some(uo) = obj {
         if let Some(u) = parse_cohere_usage(&json!({ "usage": uo })) {
             *usage = u;
+            return true;
         }
     }
+    false
 }
 
 #[cfg(test)]

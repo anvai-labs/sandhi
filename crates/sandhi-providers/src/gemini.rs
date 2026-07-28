@@ -115,12 +115,14 @@ impl Provider for Gemini {
 
 /// Accumulate usage from a Gemini `streamGenerateContent` SSE line: the chunk carrying
 /// `usageMetadata` (typically the final one) holds the full counts; last wins.
-pub(crate) fn sniff_usage_line(line: &[u8], usage: &mut ParsedUsage) {
+pub(crate) fn sniff_usage_line(line: &[u8], usage: &mut ParsedUsage) -> bool {
     if let Some(v) = sse_data_json(line) {
         if let Some(u) = parse_gemini_usage(&v) {
             *usage = u;
+            return true;
         }
     }
+    false
 }
 
 #[cfg(test)]

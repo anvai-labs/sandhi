@@ -131,14 +131,28 @@ pub struct ProviderResponse {
     pub attempts: u32,
 }
 
-/// One item of a streaming response: raw bytes to forward verbatim, plus (on the terminal
-/// item only) the finalized usage.
-#[derive(Debug, Clone)]
+/// One item of a streaming response: raw bytes to forward verbatim, plus the usage counts —
+/// finalized on the terminal item, running on every item before it.
+#[derive(Debug, Clone, Default)]
 pub struct StreamChunk {
     /// Raw upstream bytes, forwarded to the caller unchanged (O(1) pass-through).
     pub data: Bytes,
     /// Present only on the terminal item: the finalized usage counts.
+    ///
+    /// `None` on the terminal item means the sniffer never matched anything — an upstream that
+    /// ignored `stream_options.include_usage`, or a usage frame past [`LINE_SNIFF_BUDGET`]. That
+    /// is deliberately distinct from `Some(ParsedUsage::default())`: a caller must be able to tell
+    /// "the provider reported zero" from "the provider reported nothing", because settling the
+    /// latter as a finalized zero silently discards a whole response's worth of spend (TD-0013).
     pub usage: Option<ParsedUsage>,
+    /// The accumulator *so far*, `Some` once any line has actually moved it (TD-0013 D3).
+    ///
+    /// Anthropic reports input and the cache split on `message_start`, before a single content
+    /// byte; Gemini attaches `usageMetadata` to chunks. Surfacing the running total is what lets an
+    /// interrupted stream settle those real per-category numbers instead of a byte estimate. For a
+    /// family that only reports at the end this stays `None` for the whole stream, so no caller
+    /// has to know which family it is talking to — the absence of a number *is* the signal.
+    pub usage_running: Option<ParsedUsage>,
     /// Upstream stream-setup attempts made for this logical call.
     pub attempts: u32,
 }
@@ -313,7 +327,7 @@ const LINE_SNIFF_BUDGET: usize = 64 * 1024;
 /// events, NDJSON, or the terminal JSON array — the per-adapter parser decides).
 pub(crate) fn metered_passthrough<S>(
     mut upstream: S,
-    mut sniff: impl FnMut(&[u8], &mut ParsedUsage) + Send + 'static,
+    mut sniff: impl FnMut(&[u8], &mut ParsedUsage) -> bool + Send + 'static,
 ) -> ByteStream
 where
     S: Stream<Item = reqwest::Result<Bytes>> + Send + Unpin + 'static,
@@ -325,6 +339,9 @@ where
         // this offset are rescanned on each new chunk — O(chunks) not O(chunks²).
         let mut searched_to: usize = 0;
         let mut usage = ParsedUsage::default();
+        // Has any line moved the accumulator? Distinguishes "reported zero" from "reported
+        // nothing" on the terminal item, and gates `usage_running` before it.
+        let mut sniffed = false;
         while let Some(chunk) = upstream.next().await {
             let chunk = chunk.map_err(|e| ProviderError::Transport(e.to_string()))?;
             line_buf.extend_from_slice(&chunk);
@@ -341,7 +358,11 @@ where
                 searched_to = 0;
                 // Guard: skip the JSON parse for lines that can't carry a usage object.
                 if line_contains_usage(&line) {
-                    sniff(&line, &mut usage);
+                    // The sniffer reports whether it recorded anything — comparing the accumulator
+                    // before and after would be cheaper but wrong: a provider that legitimately
+                    // reports all zeros would be indistinguishable from one that reported nothing,
+                    // and those two must settle differently (TD-0013 D3).
+                    sniffed |= sniff(&line, &mut usage);
                 }
             }
             // Bounded memory: if no newline was found and the buffer exceeds the sniff budget,
@@ -352,7 +373,12 @@ where
                 line_buf.clear();
                 searched_to = 0;
             }
-            yield StreamChunk { data: chunk, usage: None, attempts: 1 };
+            yield StreamChunk {
+                data: chunk,
+                usage: None,
+                usage_running: sniffed.then_some(usage),
+                attempts: 1,
+            };
         }
         // Transport-shape awareness: on stream end, sniff any remaining buffered bytes. Handles
         // NDJSON without a trailing newline and the single-JSON-array transport (Gemini's
@@ -362,9 +388,17 @@ where
             && line_buf.len() <= LINE_SNIFF_BUDGET
             && line_contains_usage(&line_buf)
         {
-            sniff(&line_buf, &mut usage);
+            sniffed |= sniff(&line_buf, &mut usage);
         }
-        yield StreamChunk { data: Bytes::new(), usage: Some(usage), attempts: 1 };
+        // `None` when nothing was ever sniffed. Previously this yielded `Some(default())`, an
+        // all-zero *finalized* usage that overwrote whatever the caller had accrued — so a stream
+        // whose usage frame was never matched settled 0 after a full response (TD-0013 P1).
+        yield StreamChunk {
+            data: Bytes::new(),
+            usage: sniffed.then_some(usage),
+            usage_running: sniffed.then_some(usage),
+            attempts: 1,
+        };
     };
     Box::pin(s)
 }
@@ -401,7 +435,7 @@ pub(crate) fn sse_data_json(line: &[u8]) -> Option<serde_json::Value> {
 #[cfg(test)]
 pub(crate) async fn accumulate_usage(
     chunks: Vec<Bytes>,
-    sniff: impl FnMut(&[u8], &mut ParsedUsage) + Send + 'static,
+    sniff: impl FnMut(&[u8], &mut ParsedUsage) -> bool + Send + 'static,
 ) -> ParsedUsage {
     use futures_util::StreamExt;
     let upstream = futures_util::stream::iter(
@@ -418,7 +452,10 @@ pub(crate) async fn accumulate_usage(
             final_usage = c.usage;
         }
     }
-    final_usage.expect("terminal item carries usage")
+    // The terminal item now carries `None` when the sniffer never matched (TD-0013): callers of
+    // this helper always pass usage-bearing fixtures, so a `None` here means the fixture or the
+    // sniffer regressed, not that the stream legitimately reported nothing.
+    final_usage.expect("terminal item carries usage — the fixture is usage-bearing")
 }
 
 #[cfg(test)]
@@ -430,7 +467,7 @@ mod metered_passthrough_tests {
     /// Drive chunks through `metered_passthrough` and return (finalized usage, all forwarded data).
     async fn drive(
         chunks: Vec<Bytes>,
-        sniff: impl FnMut(&[u8], &mut ParsedUsage) + Send + 'static,
+        sniff: impl FnMut(&[u8], &mut ParsedUsage) -> bool + Send + 'static,
     ) -> (ParsedUsage, Vec<u8>) {
         let upstream = futures_util::stream::iter(
             chunks
@@ -461,7 +498,7 @@ mod metered_passthrough_tests {
         let chunks: Vec<Bytes> = array.chunks(16).map(Bytes::copy_from_slice).collect();
 
         // A sniffer that understands non-SSE JSON (not the SSE-specific sse_data_json).
-        fn sniff(line: &[u8], usage: &mut ParsedUsage) {
+        fn sniff(line: &[u8], usage: &mut ParsedUsage) -> bool {
             if let Ok(v) = serde_json::from_slice::<serde_json::Value>(line) {
                 if let Some(arr) = v.as_array() {
                     // Gemini puts usageMetadata on the last array element.
@@ -483,10 +520,12 @@ mod metered_passthrough_tests {
                                 .get("cachedContentTokenCount")
                                 .and_then(serde_json::Value::as_u64)
                                 .unwrap_or(0);
+                            return true;
                         }
                     }
                 }
             }
+            false
         }
 
         let (usage, forwarded) = drive(chunks, sniff).await;
@@ -511,14 +550,16 @@ mod metered_passthrough_tests {
         // Feed as small chunks to exercise the bounded-buffer path.
         let chunks: Vec<Bytes> = body.chunks(1024).map(Bytes::copy_from_slice).collect();
 
-        fn sniff(line: &[u8], usage: &mut ParsedUsage) {
+        fn sniff(line: &[u8], usage: &mut ParsedUsage) -> bool {
             if let Some(v) = sse_data_json(line) {
                 if v.get("usage").is_some_and(|u| !u.is_null()) {
                     if let Some(u) = parse_openai_usage(&v) {
                         *usage = u;
+                        return true;
                     }
                 }
             }
+            false
         }
 
         let (usage, forwarded) = drive(chunks, sniff).await;
@@ -554,14 +595,16 @@ mod metered_passthrough_tests {
         let body = br#"{"id":"b","usage":{"prompt_tokens":10,"completion_tokens":5}}"#;
         let chunks: Vec<Bytes> = vec![Bytes::copy_from_slice(body)];
 
-        fn sniff(line: &[u8], usage: &mut ParsedUsage) {
+        fn sniff(line: &[u8], usage: &mut ParsedUsage) -> bool {
             if let Ok(v) = serde_json::from_slice::<serde_json::Value>(line) {
                 if v.get("usage").is_some_and(|u| !u.is_null()) {
                     if let Some(u) = parse_openai_usage(&v) {
                         *usage = u;
+                        return true;
                     }
                 }
             }
+            false
         }
 
         let (usage, _) = drive(chunks, sniff).await;
@@ -581,14 +624,16 @@ mod metered_passthrough_tests {
         )
         .as_bytes();
         // Split at every offset — usage must be invariant.
-        fn sniff(line: &[u8], usage: &mut ParsedUsage) {
+        fn sniff(line: &[u8], usage: &mut ParsedUsage) -> bool {
             if let Some(v) = sse_data_json(line) {
                 if v.get("usage").is_some_and(|u| !u.is_null()) {
                     if let Some(u) = parse_openai_usage(&v) {
                         *usage = u;
+                        return true;
                     }
                 }
             }
+            false
         }
         for split in 0..=sse.len() {
             let chunks = vec![
@@ -668,5 +713,142 @@ mod error_for_response_tests {
     fn moonshot_spec_declares_its_request_id_header() {
         let spec = resolve_openai_compat_provider("moonshot").expect("moonshot spec");
         assert_eq!(spec.request_id_header, Some("msh-request-id"));
+    }
+}
+
+#[cfg(test)]
+mod streaming_usage_fidelity_tests {
+    //! TD-0013 — the running accumulator, and the difference between "reported zero" and
+    //! "reported nothing".
+
+    use super::*;
+    use bytes::Bytes;
+    use futures_util::StreamExt;
+
+    /// Every item a stream produced, so a test can assert on what was visible *before* the end.
+    ///
+    /// The body is fed **one SSE frame per chunk**, because that is the only way the ordering
+    /// question ("was this known before the end?") is meaningful — delivered as a single chunk,
+    /// every frame including the terminal one arrives at once and every family looks incremental.
+    async fn collect_chunks(
+        body: &[u8],
+        sniff: impl FnMut(&[u8], &mut ParsedUsage) -> bool + Send + 'static,
+    ) -> Vec<StreamChunk> {
+        let frames: Vec<Bytes> = String::from_utf8_lossy(body)
+            .split_inclusive("\n\n")
+            .map(|frame| Bytes::copy_from_slice(frame.as_bytes()))
+            .collect();
+        let upstream = futures_util::stream::iter(
+            frames
+                .into_iter()
+                .map(Ok::<Bytes, reqwest::Error>)
+                .collect::<Vec<_>>(),
+        );
+        let mut out = metered_passthrough(Box::pin(upstream), sniff);
+        let mut chunks = Vec::new();
+        while let Some(item) = out.next().await {
+            chunks.push(item.unwrap());
+        }
+        chunks
+    }
+
+    /// The whole point. Anthropic announces input and the cache split on `message_start`, so a
+    /// consumer must be able to see those counts *before* the terminal item — that is what lets an
+    /// interrupted stream settle a real number instead of a byte estimate.
+    #[tokio::test]
+    async fn an_incremental_family_exposes_usage_before_the_terminal_item() {
+        let body: &[u8] = include_bytes!("../tests/fixtures/anthropic/stream_cache_split.sse");
+        let chunks = collect_chunks(body, crate::anthropic::sniff_usage_line).await;
+
+        // The very first frame is `message_start`, and it is already enough to bill the prompt.
+        let running = chunks[0]
+            .usage_running
+            .expect("Anthropic announces input and the cache split on the first frame");
+
+        assert_eq!(running.tokens_in, 1024, "input is known at message_start");
+        assert_eq!(running.cache_creation_tokens, 2048);
+        assert_eq!(running.cache_read_tokens, 4096);
+
+        // And the terminal item still carries the finalized counts — progress must not replace
+        // the verdict.
+        assert_eq!(
+            chunks
+                .last()
+                .unwrap()
+                .usage
+                .expect("terminal usage")
+                .tokens_out,
+            256,
+            "the terminal item still carries the finalized output count"
+        );
+    }
+
+    /// The converse, and the reason no caller needs to know which family it is talking to: a
+    /// terminal-only family has told us nothing at the moment a disconnect would happen, so the
+    /// absence of a number is itself the signal to fall back to the estimate.
+    ///
+    /// The question is specifically "what was known while content was still streaming" — asserting
+    /// over *all* pre-terminal chunks would be wrong, since the frame carrying OpenAI's usage is
+    /// itself a data chunk.
+    #[tokio::test]
+    async fn a_terminal_only_family_exposes_nothing_while_content_streams() {
+        let body: &[u8] = include_bytes!("../tests/fixtures/openai/stream.sse");
+        let chunks = collect_chunks(body, crate::openai::sniff_usage_line).await;
+
+        // Note OpenAI puts `"usage": null` on *every* streamed chunk, which is precisely why the
+        // sniffer's null guard exists: a usage-*shaped* frame is not a usage report.
+        let first_exposed = chunks
+            .iter()
+            .position(|chunk| chunk.usage_running.is_some())
+            .expect("the fixture does report usage, eventually");
+        assert!(
+            first_exposed > 0,
+            "nothing is known when the stream begins — a disconnect here has no number to settle"
+        );
+        assert!(
+            String::from_utf8_lossy(&chunks[first_exposed].data).contains("completion_tokens"),
+            "usage must not surface before the frame that actually carries it; otherwise the proxy \
+             would settle a number the provider never sent"
+        );
+        assert!(
+            chunks.last().unwrap().usage.is_some(),
+            "the terminal item must still carry the finalized usage"
+        );
+    }
+
+    /// The second integrity hole TD-0013 closes. A stream whose usage is never matched — an
+    /// upstream that ignored `stream_options.include_usage`, or a usage frame past the sniff
+    /// budget — used to yield a terminal `Some(ParsedUsage::default())`. That all-zero *finalized*
+    /// usage overwrote whatever the caller had accrued, so a full response settled `0`.
+    #[tokio::test]
+    async fn a_stream_that_reports_nothing_is_distinguishable_from_one_reporting_zero() {
+        let body = b"data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n";
+        let chunks = collect_chunks(body, crate::openai::sniff_usage_line).await;
+
+        let terminal = chunks.last().expect("a terminal item is always produced");
+        assert!(
+            terminal.usage.is_none(),
+            "a stream the sniffer never matched must not present an authoritative zero — the \
+             caller has to be able to keep its own accrued estimate"
+        );
+        assert!(terminal.usage_running.is_none());
+
+        // The bytes are still forwarded verbatim regardless: metering must never cost fidelity.
+        let forwarded: Vec<u8> = chunks.iter().flat_map(|c| c.data.to_vec()).collect();
+        assert_eq!(forwarded, body);
+    }
+
+    /// A provider that genuinely reports zeros is a measurement, and must survive as one.
+    #[tokio::test]
+    async fn a_genuine_zero_is_still_reported() {
+        let body =
+            b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0}}\n\n";
+        let chunks = collect_chunks(body, crate::openai::sniff_usage_line).await;
+
+        assert_eq!(
+            chunks.last().unwrap().usage,
+            Some(ParsedUsage::default()),
+            "reporting zero is not the same as reporting nothing"
+        );
     }
 }

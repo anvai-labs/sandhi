@@ -145,14 +145,26 @@ impl Provider for OpenAiResponses {
     }
 }
 
-pub(crate) fn sniff_responses_usage_line(line: &[u8], usage: &mut ParsedUsage) {
+pub(crate) fn sniff_responses_usage_line(line: &[u8], usage: &mut ParsedUsage) -> bool {
     let Some(event) = sse_data_json(line) else {
-        return;
+        return false;
     };
     let response = event.get("response").unwrap_or(&event);
+    // The null guard its Chat counterpart has always had. `response.created` and
+    // `response.in_progress` carry `"usage": null`, which parses to all-zeros and would otherwise
+    // overwrite the accumulator — today that is survived only by `response.completed` happening to
+    // arrive later. Ordering is not a guarantee, and with the sniffer now reporting *whether* it
+    // recorded anything, a zeroing match would also claim to be a real measurement (TD-0013).
+    match response.get("usage") {
+        None => return false,
+        Some(usage) if usage.is_null() => return false,
+        Some(_) => {}
+    }
     if let Some(parsed) = parse_openai_responses_usage(response) {
         *usage = parsed;
+        return true;
     }
+    false
 }
 
 #[cfg(test)]

@@ -304,6 +304,8 @@ fn decode_gemini_stream(mut raw: ByteStream, requested_model: String) -> ChatEve
         let mut buffer = Vec::<u8>::new();
         let mut started = false;
         let mut emitted_usage = false;
+        // The last running total published, so progress is emitted on change rather than per chunk.
+        let mut last_running: Option<crate::ParsedUsage> = None;
         while let Some(chunk) = raw.next().await {
             let chunk = chunk?;
             let attempts = chunk.attempts;
@@ -356,6 +358,17 @@ fn decode_gemini_stream(mut raw: ByteStream, requested_model: String) -> ChatEve
                     yield ChatStreamEventV1::Usage { usage };
                     emitted_usage = true;
                 }
+            } else if chunk.usage_running.is_some() && chunk.usage_running != last_running {
+                // Gemini is an `Incremental` family (TD-0013 D1): `usageMetadata` rides on chunks,
+                // so a real cumulative count exists before the stream ends. Publishing it as a
+                // non-final `Usage` lets an interrupted stream settle that instead of a byte
+                // estimate; the proxy treats it as accounting-only (D7), so it never supersedes
+                // the terminal frame and never reaches the client.
+                last_running = chunk.usage_running;
+                let mut usage: UsageV2 = chunk.usage_running.unwrap_or_default().into();
+                usage.completeness = UsageCompleteness::Partial;
+                usage.attempts = attempts;
+                yield ChatStreamEventV1::Usage { usage };
             }
         }
     };
