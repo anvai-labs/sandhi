@@ -25,6 +25,35 @@ pub enum ProviderFamily {
     Ollama,
 }
 
+/// When a family reports token usage during a streaming response (TD-0013 D1).
+///
+/// A transport fact in the same sense as `base_url` or
+/// [`OpenAiCompatProviderSpec::request_id_header`](crate::catalog::OpenAiCompatProviderSpec):
+/// vendor differences are data, never branches in shared code.
+///
+/// The runtime does **not** switch on this. It does not need to — a family that reports nothing
+/// mid-stream simply leaves [`StreamChunk::usage_running`](crate::StreamChunk::usage_running)
+/// unset, so the absence of a number *is* the signal to fall back, and no caller has to know which
+/// family it is talking to. What the declaration buys is the ability to state per-family behaviour
+/// once, in one place, and to **test that the statement is true** rather than trusting a comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageCadence {
+    /// Real counts are available **while content is still arriving**, so an interrupted stream has
+    /// a measurement to settle. Anthropic announces input and the full cache split on
+    /// `message_start`, before any content; Gemini attaches `usageMetadata` to content chunks.
+    Incremental,
+    /// Nothing is reported until content is finished. A stream interrupted before that point has
+    /// no number, and the fallback estimate is a *policy* choice, not an accuracy one.
+    TerminalOnly,
+}
+
+/// Per-family transport facts. Deliberately one field for now: a table that grows by accretion is
+/// reviewable, one that lands as a seven-site refactor of the existing `match` arms is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FamilyFacts {
+    pub usage_cadence: UsageCadence,
+}
+
 impl ProviderFamily {
     #[must_use]
     pub fn for_slug(slug: &str) -> Self {
@@ -35,6 +64,30 @@ impl ProviderFamily {
             "ollama" => Self::Ollama,
             _ => Self::OpenAiCompat,
         }
+    }
+
+    /// The declared transport facts for this family.
+    #[must_use]
+    pub const fn facts(self) -> FamilyFacts {
+        let usage_cadence = match self {
+            // `message_start` carries input + `cache_creation_input_tokens` +
+            // `cache_read_input_tokens` before a single content byte.
+            Self::Anthropic => UsageCadence::Incremental,
+            // `usageMetadata` rides on content-bearing chunks rather than a trailing control frame.
+            Self::Gemini => UsageCadence::Incremental,
+            // The usage frame arrives only once content is done: OpenAI sends it with
+            // `choices: []`, Cohere on `message-end`, Ollama on the `done: true` line.
+            Self::OpenAiCompat | Self::OpenAiResponses | Self::Cohere | Self::Ollama => {
+                UsageCadence::TerminalOnly
+            }
+        };
+        FamilyFacts { usage_cadence }
+    }
+
+    /// Convenience accessor for the fact that matters most often.
+    #[must_use]
+    pub const fn usage_cadence(self) -> UsageCadence {
+        self.facts().usage_cadence
     }
 }
 
