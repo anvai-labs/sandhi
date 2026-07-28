@@ -161,6 +161,7 @@ struct Inner {
     ttft: BTreeMap<Labels, Histogram>,
     /// Enforcement counters, labelled by policy only — a budget scope is unbounded (see [`Labels`]).
     denied: BTreeMap<&'static str, u64>,
+    rate_limited: BTreeMap<Labels, u64>,
     admitted_unmetered: u64,
     leases_reclaimed: u64,
     settle_failures: u64,
@@ -211,6 +212,14 @@ impl Metrics {
                 .entry(labels.clone())
                 .or_insert_with(Histogram::new)
                 .record(ms);
+        }
+    }
+
+    /// A request refused by the per-key rate limiter (TD-0012 D6). Uses the standard bounded
+    /// label set — never the virtual key, which is unbounded.
+    pub fn record_rate_limited(&self, labels: &Labels) {
+        if let Ok(mut inner) = self.inner.lock() {
+            *inner.rate_limited.entry(labels.clone()).or_default() += 1;
         }
     }
 
@@ -281,6 +290,18 @@ impl Metrics {
             "Streams only: milliseconds to the first delivered item.",
             &inner.ttft,
         );
+
+        out.push_str(
+            "# HELP sandhi_rate_limited_total Requests refused by the per-key rate limiter.\n",
+        );
+        out.push_str("# TYPE sandhi_rate_limited_total counter\n");
+        for (labels, value) in &inner.rate_limited {
+            let _ = writeln!(
+                out,
+                "sandhi_rate_limited_total{{{}}} {value}",
+                labels.render()
+            );
+        }
 
         out.push_str(
             "# HELP sandhi_reservations_denied_total Calls refused before dispatch by a cap.\n",

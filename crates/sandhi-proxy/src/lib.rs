@@ -9,6 +9,7 @@ mod codec;
 pub mod ledger;
 pub mod metrics;
 pub mod operator;
+pub mod ratelimit;
 
 // Re-export the admin API request/response types for the `sandhi` CLI client + the startup
 // rehydration helpers used by the `sandhi-proxy` binary.
@@ -100,6 +101,9 @@ pub struct ProxyState {
     pub error_detail_full: bool,
     /// TD-0011 P2 metric registry, served at `/metrics` (gated like the dashboard).
     pub metrics: Arc<metrics::Metrics>,
+    /// TD-0012 per-virtual-key request rate limiting. In-memory: with N replicas the effective
+    /// limit is N × the configured value (D2).
+    pub rate_limiter: Arc<ratelimit::RateLimiter>,
 }
 
 impl ProxyState {
@@ -130,6 +134,7 @@ impl ProxyState {
             dashboard_public: false,
             error_detail_full: false,
             metrics: Arc::new(metrics::Metrics::new()),
+            rate_limiter: Arc::new(ratelimit::RateLimiter::new()),
         }
     }
 }
@@ -845,6 +850,45 @@ async fn handle(
     //    scope where the client left the output unbounded, we also set that bound on the upstream
     //    request so the provider caps output — making the reservation enforceable. The measured
     //    `billable()` (cache split included, D4) replaces the reservation after completion.
+    // Plane selection (ADR-0004 D1 / TD-0006): when the client's ingress dialect and the resolved
+    // upstream are the SAME family, forward the client's bytes verbatim (transparent metering) —
+    // no `ChatRequestV1` re-encode, so prompt-cache prefixes and provider-specific fields survive,
+    // and usage is metered at the source. Cross-family (or a handle with no raw forwarder) falls
+    // back to the typed translation path.
+    //
+    // Decided here, before enforcement, so the plane is a metric dimension for every outcome —
+    // including the calls that get refused below and never reach a provider.
+    let transparent =
+        ingress_family(dialect) == provider.family() && provider.raw_forwarder().is_some();
+    let plane = if transparent {
+        metrics::Plane::Transparent
+    } else {
+        metrics::Plane::Translation
+    };
+
+    // TD-0012 D5: rate limit AFTER the allowlist and BEFORE the budget reservation. It is the
+    // cheap check (an in-memory bucket) and the reservation is the expensive one (a durable
+    // write), and — more importantly — a throttled request must consume no lease, record no
+    // spend, and emit no usage event. It never reached a provider.
+    if let ratelimit::Decision::Limited { retry_after_secs } =
+        state.rate_limiter.check(&vk.id, vk.rate_limit_per_min)
+    {
+        tracing::warn!(
+            provider = provider.slug(),
+            limit_per_min = vk.rate_limit_per_min,
+            retry_after_secs,
+            "request rate-limited"
+        );
+        state.metrics.record_rate_limited(&metrics::Labels {
+            provider: provider.slug().into(),
+            model: request.model.clone(),
+            dialect: dialect_label(dialect),
+            plane,
+            outcome: "rate_limited",
+        });
+        return rate_limited_error(dialect, retry_after_secs);
+    }
+
     let scope = budget_scope(&vk);
     let policy = scope_policy(&state, &scope);
     // A scope is "capped" (for output-bounding) only under a hard `Block` cap: a `Warn` soft cap
@@ -890,17 +934,6 @@ async fn handle(
         }
     };
 
-    // Plane selection (ADR-0004 D1 / TD-0006): when the client's ingress dialect and the resolved
-    // upstream are the SAME family, forward the client's bytes verbatim (transparent metering) —
-    // no `ChatRequestV1` re-encode, so prompt-cache prefixes and provider-specific fields survive,
-    // and usage is metered at the source. Cross-family (or a handle with no raw forwarder) falls
-    // back to the typed translation path. Enforcement (reserve/settle via `accounting`) wraps both.
-    //
-    // Decided BEFORE accounting is constructed so the plane can be a metric dimension for the
-    // whole call rather than something patched in afterwards (TD-0011 D2).
-    let transparent =
-        ingress_family(dialect) == provider.family() && provider.raw_forwarder().is_some();
-
     let accounting = RequestAccounting::new(
         Arc::clone(&state),
         scope,
@@ -908,11 +941,7 @@ async fn handle(
         provider.slug().into(),
         &request,
         dialect_label(dialect),
-        if transparent {
-            metrics::Plane::Transparent
-        } else {
-            metrics::Plane::Translation
-        },
+        plane,
     );
     // TD-0011 D6: which plane served the call is the ADR-0004 adoption signal — how much traffic
     // still re-encodes. Bounded fields only (D2): provider slug and model, never subject/session.
@@ -1633,6 +1662,23 @@ fn google_status(status: StatusCode) -> &'static str {
         StatusCode::GATEWAY_TIMEOUT => "DEADLINE_EXCEEDED",
         _ => "INTERNAL",
     }
+}
+
+/// A dialect-shaped 429 carrying `Retry-After` (TD-0012 D4).
+///
+/// The header is the point: both the OpenAI and Anthropic SDKs honour it for backoff, and a 429
+/// without one makes a well-behaved client retry immediately — turning a throttle into a hot loop
+/// that costs more than the traffic it was meant to bound.
+fn rate_limited_error(dialect: IngressDialect, retry_after_secs: u64) -> Response {
+    let mut response = ingress_error(
+        dialect,
+        StatusCode::TOO_MANY_REQUESTS,
+        &format!("rate limit exceeded; retry in {retry_after_secs}s"),
+    );
+    if let Ok(value) = retry_after_secs.to_string().parse() {
+        response.headers_mut().insert("retry-after", value);
+    }
+    response
 }
 
 fn ingress_error(dialect: IngressDialect, status: StatusCode, msg: &str) -> Response {
