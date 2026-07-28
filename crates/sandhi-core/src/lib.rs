@@ -12,6 +12,7 @@
 pub mod alerts;
 pub mod budget;
 pub mod chat;
+pub mod conformance;
 pub mod event;
 // Generated typify narrow models (ADR-0003 §2/§4 pilot) — regenerated, never hand-edited.
 mod generated;
