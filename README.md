@@ -148,6 +148,39 @@ Run the proxy with `SANDHI_STORE=usage.db` to persist events to SQLite and serve
 usage **dashboard** at `/dashboard` (per-user / per-team / per-provider totals; neutral units, no
 pricing).
 
+## Operating it
+
+**Logs.** `SANDHI_LOG` (or `RUST_LOG`) filters; output goes to stderr. The default keeps the
+operator-relevant events — reservation denials, fail-open admissions, lease reclaims, settle
+failures — without per-request chatter. `SANDHI_LOG=debug` adds plane selection per call.
+
+**Metrics.** `GET /metrics` serves Prometheus text, gated by the same admin bearer as the dashboard
+when `SANDHI_ADMIN_TOKEN` is set:
+
+```yaml
+scrape_configs:
+  - job_name: sandhi
+    metrics_path: /metrics
+    authorization: { credentials: "<SANDHI_ADMIN_TOKEN>" }   # omit if no admin token is configured
+    static_configs: [{ targets: ["sandhi:8787"] }]
+```
+
+Metrics describe the **gateway**, not who called it: labels are bounded (`provider`, `model`,
+`dialect`, `plane`, `outcome`), and per-subject attribution deliberately lives in the usage
+aggregate instead — a metric labelled by user is a memory leak with a dashboard attached.
+
+The four alerts worth having, in the order they will save you:
+
+| alert | expression | why |
+|---|---|---|
+| **Capacity leaking** | `increase(sandhi_settle_failures_total[15m]) > 0` | a settle that did not land holds budget until the lease TTL expires; silent otherwise |
+| **Enforcement is off** | `increase(sandhi_admitted_unmetered_total[15m]) > 0` | a `Warn`-policy scope admitting fail-open during a ledger fault looks exactly like normal traffic |
+| **Callers being refused** | `rate(sandhi_reservations_denied_total{policy="block"}[5m]) > 0` | distinguishes a runaway caller from a mis-set cap — both need a human |
+| **Upstream degrading** | `histogram_quantile(0.95, rate(sandhi_request_duration_ms_bucket[10m])) > 30000` | per provider/model, so one bad upstream is visible before users report it |
+
+A sustained `sandhi_leases_reclaimed_total` is worth watching too: reclaims are normal after a
+restart, but a steady trickle means leases are leaking rather than settling.
+
 ## Tests & coverage
 
 ```

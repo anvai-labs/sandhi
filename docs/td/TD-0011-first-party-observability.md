@@ -1,6 +1,6 @@
 # TD-0011: First-party observability — telemetry about the gateway, not a second meter
 
-- **Status:** Accepted (2026-07-26). **P1 and P2 complete**; P3–P4 open.
+- **Status:** Accepted (2026-07-26). **P1, P2 and P4 complete**; P3 (OTLP) deferred — see below.
 - **Relates to:** ADR-0001 (measure-vs-price), ADR-0004 D4 (dashboard gating), ADR-0005
   (enforcement ledger), TD-0009 (usage aggregate + cardinality discipline), TD-0008 (Victor
   co-design boundary)
@@ -93,8 +93,8 @@ building; these are the signals no sidecar can compute:
 |---|---|---|
 | **P1** ✅ | `tracing` events at the points only Sandhi can see; subscriber installed in the binary only | **Met.** A compile-time test asserts the three library crates cannot depend on `tracing-subscriber`; three tests drive the shipped binary and assert the plane event fires, that request telemetry carries no credential or attribution, and that a subscriber is actually installed |
 | **P2** ✅ | `GET /metrics` (Prometheus text), the D6 signal set, D5 gating | **Met, and stronger than specified.** The label set is a *type* (`metrics::Labels`), so a forbidden dimension is unrepresentable rather than merely tested; the render test guards the output as a second line; a real request through the proxy lands in the registry with the right plane/dialect and no secret; `/metrics` reuses the dashboard's gate (401 without the admin bearer, 200 with it). Registry is hand-rolled — no new dependency |
-| **P3** | OTLP export behind a non-default feature | Default build's dependency tree unchanged; feature build exports spans to a local collector in a test |
-| **P4** | Operator guidance: example scrape config, the four alerts worth having | Docs only |
+| **P3** ⏸ | OTLP export behind a non-default feature | **Deferred, deliberately.** Pull-based `/metrics` needs no collector and covers the operator questions P1/P2 were written for; nobody has asked for traces, and D4's own reasoning says ship the prerequisite-free option first. Re-open when a deployment actually runs a collector — the pressure test's "measure before adding the knob" applies to the dependency too |
+| **P4** ✅ | Operator guidance: example scrape config, the four alerts worth having | **Met.** README "Operating it": log filtering, a gated scrape config, and four alerts (capacity leaking, enforcement off, callers refused, upstream degrading) — each expression checked against a series the code actually emits |
 
 P1 is independently useful and touches no wire contract. P2 is where the cardinality discipline
 has to hold. P3 must not move the default build's dependency graph.
