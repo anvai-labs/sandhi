@@ -6,14 +6,14 @@
   [ADR-0004](../adr/0004-two-plane-proxy-and-enforcement-boundary.md) (the two planes this must fix
   symmetrically), [TD-0009](TD-0009-usage-visibility-surfaces.md) D4 (which already ruled "emit
   mid-stream `Usage` only where the provider actually reports it" and proposed the `basis`
-  discriminator — unimplemented until now), [TD-0007](TD-0007-enforcement-ledger-backends.md) C4
-  (the invariant D6 protects), [TD-0010](TD-0010-ingress-dialect-parity.md) (the client-visible wire
+  discriminator — unimplemented until now), [TD-0007](TD-0007-enforcement-ledger-backends.md) C1/C4
+  (the admission invariant D6 clarifies), [TD-0010](TD-0010-ingress-dialect-parity.md) (the client-visible wire
   shape D7 must not disturb), [TD-0011](TD-0011-first-party-observability.md) (bounded label set)
-- **Companion facts:** `grep -rn "usage_running\|UsageCadence\|UsageBasis" crates/*/src` returns
-  **nothing** — none of the machinery below exists yet. And
-  `grep -n "ceiling" crates/sandhi-proxy/src/lib.rs` returns only pre-flight sites: the mid-stream
-  cutoff that `crates/sandhi-core/src/ledger.rs:91-92` claims "enforces that bound" was specified in
-  ADR-0005 D1 and never built.
+- **Companion facts**, measured against `develop` at `a8df991` *before* this TD was implemented:
+  `grep -rn "usage_running\|UsageCadence\|UsageBasis" crates/*/src` returned **nothing** — none of
+  the machinery below existed. And `grep -n "ceiling" crates/sandhi-proxy/src/lib.rs` returned only
+  pre-flight sites: the mid-stream cutoff that `crates/sandhi-core/src/ledger.rs:91-92` claimed
+  "enforces that bound" was specified in ADR-0005 D1 and never built.
 
 ## Why this exists
 
@@ -90,10 +90,10 @@ workloads — the workload Sandhi exists to serve — the cache split *is* the b
 ## Non-goals
 
 - **Not implementing ADR-0005 D1's mid-stream cutoff** (aborting the upstream when cumulative usage
-  crosses the reservation ceiling). D6 clamps the *accounting* so the invariant holds; the cutoff is
-  a separate change with its own failure modes (half-delivered responses, dialect-shaped aborts).
-  Stating this is the point — `crates/sandhi-core/src/ledger.rs:91-92` currently describes that
-  cutoff as though it exists.
+  crosses the reservation ceiling). D6 makes the accounting honest about the overshoot instead; the
+  cutoff is a separate change with its own failure modes (half-delivered responses, dialect-shaped
+  aborts). Stating this is the point — `crates/sandhi-core/src/ledger.rs` described that cutoff as
+  though it existed.
 - **No synthetic usage for terminal-only families.** TD-0009 D4's rule stands: no invented deltas,
   no interpolation between a start and an end we never saw.
 - **No re-tokenization.** Sandhi does not ship a tokenizer and will not guess better by counting
@@ -179,20 +179,55 @@ did the number come from*. Today `Partial` is silently overloaded across both ax
 the meaning of rows already persisted in operators' stores; adding a field does not. This implements
 the discriminator TD-0009 D4 proposed and never got.
 
-**D6 — Settlement is clamped to the reserved ceiling.** `crates/sandhi-core/src/ledger.rs:91-92`
-states `actual` "is trusted to be ≤ the reserved ceiling (the proxy's mid-stream cutoff enforces
-that bound)". There is no cutoff. Settling real input + cache makes an overshoot materially more
-likely than settling `bytes/4` of output ever did, and an unclamped settle can push
-`spent + reserved` past the limit — the exact invariant TD-0007 C4 asserts and
-`conformance.rs` now tests. So: clamp at settle, count the clamp
-(`sandhi_settle_clamped_total`), and **correct the comment**. A doc line describing code nobody
-wrote is worse than a known gap, because it stops the next reader from looking.
+**D6 — Settlement records the measurement, even above the reserved ceiling — and counts the
+overshoot.** `crates/sandhi-core/src/ledger.rs` stated that `actual` "is trusted to be ≤ the
+reserved ceiling (the proxy's mid-stream cutoff enforces that bound)". There is no cutoff:
+ADR-0005 D1 specified one and it was never built, so the line described code nobody wrote — worse
+than a known gap, because it stops the next reader from looking.
 
-**D7 — Partial usage is accounting-only and never re-encoded.** Mid-stream usage observed for
-settlement must not become an extra client-visible SSE frame. The proxy observes it, does not let it
-supersede a terminal `Final`, and does not pass it to `encode_stream_event`. The acceptance evidence
-is the real-SDK conformance suite passing **unchanged** — 22 tests that assert byte-level client
-behaviour across all three dialects.
+> **Reversed while implementing P4 — clamping was implemented, tested, and reverted.** D6 was
+> drafted as "clamp at settle to protect the invariant". The paced disconnect test from P1
+> immediately failed: the clamp cut a measured **7168 down to 47**, the ceiling derived from
+> `input_estimate` (bytes/4 of a small request). That is the *exact defect this TD exists to
+> remove*, recreated one layer down.
+>
+> The bound is not merely unenforced, it is unenforceable in general — a ceiling is an estimate of
+> the request and a provider can tokenize the same prompt higher (notably for scripts averaging
+> ~3 bytes/char). So the two goals cannot both hold: **"spend never exceeds the cap"** and **"a
+> real measurement is never lost"**. Sandhi's product is the measurement, and the count feeds a
+> downstream ledger it must not lie to; the cap is a control that recovers on its own, because the
+> overshoot is bounded by one call and the *next* reservation is refused. `reserve` still never
+> admits over the limit, which is the invariant TD-0007 C1/C4 actually assert — settle was never
+> what they constrained.
+>
+> The resolution: settle the truth, and emit `sandhi_settle_overshoot_total` /
+> `sandhi_settle_overshoot_tokens_total` so systematically-tight ceilings become visible instead
+> of being paid for in silence.
+
+**D7 — Partial usage is accounting-only on the proxy, and a declared addition on the typed
+stream.** Mid-stream usage observed for settlement must not become an extra client-visible SSE
+frame. The proxy observes it, does not let it supersede a terminal `Final`, and does not pass it to
+`encode_stream_event`. The acceptance evidence is the real-SDK conformance suite passing
+**unchanged** — 22 tests asserting byte-level client behaviour across all three dialects.
+
+> **Consequence for in-process consumers, found while implementing P1.** The bindings serialize
+> *every* `ChatStreamEventV1` straight to the caller (`stream_json`), and the proxy's typed plane
+> can only receive progress through that same event stream — there is no side channel. So on the
+> **binding path** an `Incremental` family now emits one or more `Usage { completeness: Partial }`
+> events before the terminal `Final`, where it previously emitted exactly one event. This is a
+> contract addition, not a leak: TD-0009 D4 already ruled that mid-stream usage should be emitted
+> where the provider reports it, and a consumer wanting live token counts needs exactly this.
+>
+> **The rule consumers must follow: exactly one `Final` per logical call is the verdict; a
+> non-final `Usage` is progress and must never be treated as the end of the call.** Taking the
+> latest `Usage` value is correct under both old and new behaviour, which is what makes this
+> additive in practice.
+>
+> This nearly escaped notice. `anthropic_typed.rs`'s chunk-boundary test asserts *exactly one*
+> `Usage` event and still passes — because its hand-built raw stream sets `usage_running: None`,
+> modelling a terminal-only family. `streaming_usage_progress_tests` now drives the real fixture
+> through the production `metered_passthrough` primitive and pins the rule that actually applies.
+> `chat_contract_minor()` moving 4 → 5 is the handshake signal for a pinned consumer.
 
 ## Phases
 
@@ -201,7 +236,7 @@ behaviour across all three dialects.
 | **P1** | D3 + D4 on both planes; the zeroed-terminal fix | A paced Anthropic stream disconnected after `message_start` settles the real 1024 + 2048 + 4096, not a byte guess — and reverting the change makes that test fail; a stream whose usage is never sniffed settles the accrued partial instead of `0`; the SDK-conformance suite is unchanged and green |
 | **P2** | D1 + D2 — cadence as a declared fact | Each family's declared cadence is asserted against its shipped fixture through the production `metered_passthrough` path; a family whose declaration disagrees with its sniffer fails the build |
 | **P3** | D5 — `basis` on the wire, plus the operator signal | `usage.basis` round-trips through all five exported schemas and both binding facades with `codegen-drift` green; `sandhi_estimated_tokens_total` carries the TD-0011 bounded label set, with the forbidden-label loop extended to cover it |
-| **P4** | D6 clamp + the two adjacent streaming defects | An `actual` above the lease ceiling settles clamped and increments the counter, with the C4 invariant asserted after; the false cutoff claim in `ledger.rs` is corrected; a client's sibling `stream_options` fields survive the typed plane as they already do on the raw plane; a `"usage": null` Responses event cannot zero the accumulator |
+| **P4** | D6 + the two adjacent streaming defects | An `actual` above the lease ceiling settles **in full** and increments `sandhi_settle_overshoot_total`; the false cutoff claim in `ledger.rs` is corrected to say what is actually true; a client's sibling `stream_options` fields survive the typed plane as they already do on the raw plane; a `"usage": null` Responses event cannot zero the accumulator |
 
 P1 is the accuracy fix and is independently shippable. P2 turns it from behaviour into a declared
 contract. P3 is the only phase that touches the wire contract, so it lands on its own. P4 is
@@ -231,11 +266,12 @@ correctness debt this work surfaced and would otherwise leave slightly worse tha
    TD-0002 additive policy, and it is the *conservative* option: the alternative considered was
    redefining `UsageCompleteness::Partial`, which would have changed the meaning of data already
    written to operators' stores without changing a single byte of schema.
-6. **"Clamping under-charges when the real usage exceeds the ceiling."** Yes — deliberately. The
-   ceiling is what the ledger admitted; charging beyond it would let a settle breach the cap the
-   admission decision was made against, and C4 says the invariant holds at every step, not on
-   average. `sandhi_settle_clamped_total` makes the trade visible so a deployment can widen its
-   ceilings if it is clamping often.
+6. **"Settling above the ceiling lets spend exceed the cap."** It does, by at most one call's
+   overshoot, and then the next reservation is refused. The alternative was tried and reverted:
+   clamping cut a measured 7168 to 47 in P1's own test. Between "the cap binds one call later" and
+   "a real measurement is destroyed", the first is recoverable and the second is not — and a
+   gateway whose product is the count must not lie to the ledger downstream of it. `reserve` still
+   never admits over the limit, which is what TD-0007 C1/C4 actually assert.
 7. **"The disconnect test already exists."** It does, and it cannot fail for the right reason:
    `tests/proxy.rs:613-659` serves the whole SSE body in one write with a `content-length`, so the
    first frame usually already carries the terminal usage and the estimated-partial branch is never

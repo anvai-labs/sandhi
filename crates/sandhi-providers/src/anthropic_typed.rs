@@ -585,6 +585,11 @@ mod tests {
                 )),
                 "split {split}"
             );
+            // Exactly one here because this raw stream is hand-built with `usage_running: None`
+            // on its data chunks, i.e. it models a terminal-only family. For a real Anthropic
+            // stream the count is higher — progress events precede the verdict — which
+            // `streaming_usage_progress_tests` pins against the production primitive. What is
+            // invariant across both is *one `Final`*, not one `Usage`.
             assert_eq!(
                 events
                     .iter()
@@ -594,5 +599,103 @@ mod tests {
                 "split {split}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod streaming_usage_progress_tests {
+    //! TD-0013 — what a consumer of the *typed* stream now sees for an `Incremental` family.
+    //!
+    //! The chunk-boundary test above hand-builds its raw stream with `usage_running: None`, so it
+    //! never exercises this path — and it asserts exactly one `Usage` event, which would otherwise
+    //! read as a guarantee that no longer holds. This drives a real Anthropic fixture through the
+    //! production `metered_passthrough` primitive instead, and pins the rule that actually applies.
+
+    use super::*;
+    use bytes::Bytes;
+    use futures_util::StreamExt;
+
+    async fn decode_real_fixture() -> Vec<ChatStreamEventV1> {
+        let body: &[u8] = include_bytes!("../tests/fixtures/anthropic/stream_cache_split.sse");
+        // One SSE frame per chunk, as a paced upstream delivers them.
+        let frames: Vec<Bytes> = String::from_utf8_lossy(body)
+            .split_inclusive("\n\n")
+            .map(|frame| Bytes::copy_from_slice(frame.as_bytes()))
+            .collect();
+        let upstream = futures_util::stream::iter(
+            frames
+                .into_iter()
+                .map(Ok::<Bytes, reqwest::Error>)
+                .collect::<Vec<_>>(),
+        );
+        let raw =
+            crate::metered_passthrough(Box::pin(upstream), crate::anthropic::sniff_usage_line);
+        let mut out = decode_anthropic_stream(raw, "claude-test".into());
+        let mut events = Vec::new();
+        while let Some(event) = out.next().await {
+            events.push(event.unwrap());
+        }
+        events
+    }
+
+    /// **The contract rule, stated once.** Exactly one `Final` usage — the verdict — preceded by
+    /// zero or more `Partial` ones carrying progress. A consumer must treat a non-final `Usage` as
+    /// an update, never as the end of the call; the proxy does exactly that (TD-0013 D7).
+    #[tokio::test]
+    async fn an_incremental_family_emits_progress_then_exactly_one_verdict() {
+        let events = decode_real_fixture().await;
+        let usages: Vec<&UsageV2> = events
+            .iter()
+            .filter_map(|event| match event {
+                ChatStreamEventV1::Usage { usage } => Some(usage),
+                _ => None,
+            })
+            .collect();
+
+        let finals = usages
+            .iter()
+            .filter(|usage| usage.completeness == UsageCompleteness::Final)
+            .count();
+        assert_eq!(
+            finals, 1,
+            "there must be exactly one authoritative usage per logical call"
+        );
+        assert_eq!(
+            usages.last().map(|usage| usage.completeness),
+            Some(UsageCompleteness::Final),
+            "the verdict must arrive last, so a consumer taking the latest value is correct"
+        );
+
+        let partials: Vec<&&UsageV2> = usages
+            .iter()
+            .filter(|usage| usage.completeness == UsageCompleteness::Partial)
+            .collect();
+        assert!(
+            !partials.is_empty(),
+            "Anthropic reports input and the cache split on message_start; not surfacing it is \
+             the defect TD-0013 removed"
+        );
+
+        // The first progress event already carries the whole prompt cost — this is what makes an
+        // interrupted stream settleable.
+        let first = partials[0];
+        assert_eq!(first.tokens_in, 1024);
+        assert_eq!(first.cache_creation_tokens, 2048);
+        assert_eq!(first.cache_read_tokens, 4096);
+    }
+
+    /// Progress must not repeat unchanged: a long stream must not carry one usage event per chunk.
+    #[tokio::test]
+    async fn progress_is_emitted_on_change_not_per_chunk() {
+        let events = decode_real_fixture().await;
+        let usage_events = events
+            .iter()
+            .filter(|event| matches!(event, ChatStreamEventV1::Usage { .. }))
+            .count();
+        let data_events = events.len() - usage_events;
+        assert!(
+            usage_events < data_events,
+            "usage events ({usage_events}) must not dominate the stream ({data_events} others)"
+        );
     }
 }
