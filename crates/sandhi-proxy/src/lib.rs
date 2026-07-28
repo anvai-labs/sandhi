@@ -35,8 +35,8 @@ use serde_json::{json, Value};
 use time::OffsetDateTime;
 
 use sandhi_core::{
-    billable, AlertRegistry, Backend, ChatRequestV1, KeyStore, Policy, RequestMetadataV1,
-    Reservation, Sink, UsageCompleteness, UsageEvent, UsageV2, VirtualKey,
+    billable, AlertRegistry, Backend, ChatRequestV1, KeyStore, ParsedUsage, Policy,
+    RequestMetadataV1, Reservation, Sink, UsageCompleteness, UsageEvent, UsageV2, VirtualKey,
 };
 use sandhi_providers::{ProviderError, ProviderFamily, ProviderHandle, ProviderRuntime};
 use sandhi_store::{hash_secret, AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
@@ -1146,10 +1146,14 @@ async fn transparent_stream_response(
                         accounting.observe(&usage);
                         seen_usage = true;
                     } else if !chunk.data.is_empty() {
-                        // Running byte-approximate Partial so a disconnect settles accrued spend.
+                        // Running Partial so a disconnect settles accrued spend. `usage_running`
+                        // carries whatever the family has already announced — for Anthropic that
+                        // is input plus the full cache split from `message_start`, which is the
+                        // dominant term on a cached prompt and used to be settled as zero
+                        // (TD-0013 D4).
                         delta_bytes = delta_bytes.saturating_add(chunk.data.len() as u64);
                         if !seen_usage {
-                            accounting.observe(&partial_usage(delta_bytes));
+                            accounting.observe(&partial_usage(chunk.usage_running, delta_bytes));
                         }
                     }
                     if !chunk.data.is_empty() {
@@ -1394,11 +1398,26 @@ async fn stream_response(
 
     let body = async_stream::stream! {
         let mut last_usage: Option<UsageV2> = None;
+        // What the family has reported so far, for families that report before the end
+        // (TD-0013 D3). `None` for a terminal-only family, for the whole stream.
+        let mut running_reported: Option<ParsedUsage> = None;
+        // A non-final `Usage` event is accounting-only and must not reach the client (TD-0013 D7):
+        // the ingress wire shape is a TD-0010 parity guarantee, and a metering improvement that
+        // adds frames to a caller's stream has broken something more important than it fixed.
+        let mut accounting_only;
         let mut delta_out_bytes: u64 = 0;
         while let Some(item) = upstream.next().await {
             match item {
                 Ok(event) => {
+                    accounting_only = false;
                     match &event {
+                        sandhi_core::ChatStreamEventV1::Usage { usage }
+                            if usage.completeness != UsageCompleteness::Final =>
+                        {
+                            // Progress, not a verdict: it must not supersede the terminal frame.
+                            running_reported = Some(reported_parts(usage));
+                            accounting_only = true;
+                        }
                         sandhi_core::ChatStreamEventV1::Usage { usage } => {
                             // Terminal, authoritative usage — replaces any running partial estimate.
                             accounting.observe(usage);
@@ -1415,13 +1434,17 @@ async fn stream_response(
                         }
                         _ => {}
                     }
-                    // ADR-0005 D1: hold a running `Partial` estimate from the output deltas until the
-                    // terminal usage arrives, so a mid-stream disconnect (which fires the Drop
-                    // finalizer, not the code below) settles the accumulated spend instead of
-                    // releasing to zero — closing the open-stream / read-a-lot / disconnect
-                    // metering-evasion hole. Approximate (bytes/4); the terminal frame overrides it.
+                    // ADR-0005 D1: hold a running `Partial` until the terminal usage arrives, so a
+                    // mid-stream disconnect (which fires the Drop finalizer, not the code below)
+                    // settles the accumulated spend instead of releasing to zero — closing the
+                    // open-stream / read-a-lot / disconnect metering-evasion hole. Per-category:
+                    // real numbers where the family has reported them, the byte estimate only for
+                    // output and only as far as it must (TD-0013 D4). The terminal frame overrides.
                     if last_usage.is_none() {
-                        accounting.observe(&partial_usage(delta_out_bytes));
+                        accounting.observe(&partial_usage(running_reported, delta_out_bytes));
+                    }
+                    if accounting_only {
+                        continue;
                     }
                     for (event_name, value) in
                         encode_stream_event(dialect, &event, last_usage.as_ref())
@@ -1490,31 +1513,69 @@ fn header_str(headers: &HeaderMap, name: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
-/// A best-effort `Partial` usage synthesized from accumulated output-delta bytes, used to settle an
-/// interrupted stream (ADR-0005 D1) rather than releasing the reservation to zero.
-/// A deliberately **approximate** output count for a stream that ended without provider usage.
+/// The running `Partial` usage for a stream that has not delivered its terminal frame, used to
+/// settle an interrupted stream (ADR-0005 D1) rather than releasing the reservation to zero.
 ///
-/// Only reached when a client disconnects mid-stream: the provider's terminal frame carries the
-/// real numbers, and a `Final` observation always supersedes this (see the streaming test, which
-/// asserts the settled quantity equals the provider's usage, not this estimate).
+/// Only reached when a stream ends early — a client disconnect or a mid-stream transport error. The
+/// provider's terminal frame carries the real numbers and a `Final` observation always supersedes
+/// this.
 ///
-/// **The factor is 4 bytes per token, and it over-counts.** The bytes measured are wire bytes —
-/// SSE framing, JSON punctuation and field names included — not decoded content, so the estimate
-/// runs *above* the true token count for the same text. Over-counting is the safe direction for
-/// enforcement (an abandoned stream slightly over-consumes rather than leaking capacity that was
-/// genuinely used), and the result is tagged [`UsageCompleteness::Partial`] so a consumer can
-/// always tell a measured call from an estimated one.
+/// **The fallback is per-category, not per-call** (TD-0013 D4). `reported` is whatever the family
+/// has actually announced so far ([`StreamChunk::usage_running`]), and it is used wherever it
+/// exists:
 ///
-/// **This is a fallback, and today it is applied too widely** (TD-0013). Anthropic reports real
-/// per-category usage *during* a stream (`message_start` carries input + the cache split,
-/// `message_delta` carries cumulative output) and Gemini reports `usageMetadata` on chunks — for
-/// those families an accurate number exists at disconnect and this estimate discards it. Only the
-/// terminal-only families (OpenAI Chat and Responses, Cohere, Ollama) genuinely have nothing to
-/// report mid-stream, and there the choice is a policy call, not an accuracy one: settling zero
-/// would let a caller stream-and-abort repeatedly for free.
-fn partial_usage(delta_out_bytes: u64) -> UsageV2 {
+/// - **Input, cache-creation and cache-read are taken or zero — never estimated.** No byte count
+///   observed on the *response* can stand in for the tokenization of a prompt, and inventing one
+///   would make Sandhi a second meter disagreeing with the provider. Anthropic announces all three
+///   on `message_start`, before a single content byte, so for that family they are exact here.
+/// - **Output is `max(reported, byte estimate)`.** Anthropic's `message_delta` lags the text it
+///   describes, so between `message_start` and the first delta the reported output is legitimately
+///   `0` while real output has flowed. Taking the max never settles below the byte-only behaviour
+///   this replaced.
+///
+/// **The byte factor is 4 bytes per token, and its bias depends on the plane.** On the transparent
+/// plane the bytes are wire bytes — SSE framing, JSON punctuation and field names included — so the
+/// estimate runs *above* the true count, which is the safe direction for enforcement. On the typed
+/// plane the caller counts *decoded* delta strings, which is near-neutral for English and a
+/// substantial **under**-count for scripts averaging ~3 bytes/char (e.g. CJK). The result is tagged
+/// [`UsageCompleteness::Partial`] either way, so a consumer can always tell an interrupted call
+/// from a completed one.
+///
+/// For the families that report nothing until the end (OpenAI Chat and Responses, Cohere, Ollama)
+/// `reported` is `None` and the estimate stands alone. That is a policy call, not an accuracy one:
+/// settling zero would be the honest measurement and would let a caller stream-and-abort
+/// repeatedly for free.
+/// Narrow a typed `Usage` event back to the raw per-category counts.
+///
+/// The typed plane carries `UsageV2` while the transparent plane carries [`ParsedUsage`]; reducing
+/// to the latter lets both planes share one fallback rule (TD-0013 D4) rather than growing two that
+/// can drift. Only the categories a family reports mid-stream survive the narrowing, which is
+/// exactly the set the fallback is allowed to use.
+fn reported_parts(usage: &UsageV2) -> ParsedUsage {
+    ParsedUsage {
+        tokens_in: usage.tokens_in,
+        tokens_out: usage.tokens_out,
+        cache_creation_tokens: usage.cache_creation_tokens,
+        cache_read_tokens: usage.cache_read_tokens,
+        reasoning_tokens: usage.reasoning_tokens.unwrap_or(0),
+    }
+}
+
+fn partial_usage(reported: Option<ParsedUsage>, delta_out_bytes: u64) -> UsageV2 {
+    let estimated_out = delta_out_bytes.saturating_add(3) / 4;
+    let Some(reported) = reported else {
+        return UsageV2 {
+            tokens_out: estimated_out,
+            completeness: UsageCompleteness::Partial,
+            ..UsageV2::default()
+        };
+    };
     UsageV2 {
-        tokens_out: delta_out_bytes.saturating_add(3) / 4,
+        tokens_in: reported.tokens_in,
+        cache_creation_tokens: reported.cache_creation_tokens,
+        cache_read_tokens: reported.cache_read_tokens,
+        tokens_out: reported.tokens_out.max(estimated_out),
+        reasoning_tokens: (reported.reasoning_tokens > 0).then_some(reported.reasoning_tokens),
         completeness: UsageCompleteness::Partial,
         ..UsageV2::default()
     }
@@ -1779,36 +1840,112 @@ mod error_detail_tests {
 mod partial_accounting_tests {
     use super::*;
 
+    /// The counts a real Anthropic `message_start` announces before any content streams —
+    /// the numbers taken verbatim from `tests/fixtures/anthropic/stream_cache_split.sse`.
+    const AT_MESSAGE_START: ParsedUsage = ParsedUsage {
+        tokens_in: 1024,
+        tokens_out: 0,
+        cache_creation_tokens: 2048,
+        cache_read_tokens: 4096,
+        reasoning_tokens: 0,
+    };
+
     /// The audit flagged this factor as unverified. It is an estimate by construction; what must be
     /// true is that it is tagged as one and biased in the safe direction.
     #[test]
     fn the_byte_estimate_is_marked_partial_and_biased_high() {
-        // Roughly a small SSE frame's worth of wire bytes.
-        let usage = partial_usage(400);
+        // Roughly a small SSE frame's worth of wire bytes, with nothing reported (the
+        // terminal-only families: OpenAI Chat and Responses, Cohere, Ollama).
+        let usage = partial_usage(None, 400);
         assert_eq!(
             usage.completeness,
             UsageCompleteness::Partial,
             "an estimate must never be indistinguishable from a measured call"
         );
         assert_eq!(usage.tokens_out, 100, "4 wire bytes per token");
-        // Wire bytes include SSE framing and JSON punctuation, so for the same text the estimate
-        // exceeds the true token count — over-consuming an abandoned stream's budget rather than
-        // leaking capacity that was genuinely used.
+        // Wire bytes include SSE framing and JSON punctuation, so on the transparent plane the
+        // estimate exceeds the true token count — over-consuming an abandoned stream's budget
+        // rather than leaking capacity that was genuinely used.
         assert!(
             usage.tokens_out >= 400 / 4,
             "the estimate must not round below the byte-derived floor"
         );
-        // Nothing is invented on the input side: a disconnect says nothing about prompt tokens.
+        // Nothing is invented on the input side: with nothing reported, a disconnect says nothing
+        // about prompt tokens, and guessing would make Sandhi a second meter.
         assert_eq!(usage.tokens_in, 0);
         assert_eq!(usage.cache_read_tokens, 0);
     }
 
     #[test]
     fn an_empty_stream_estimates_nothing() {
-        let usage = partial_usage(0);
+        let usage = partial_usage(None, 0);
         assert_eq!(
             usage.tokens_out, 0,
             "no bytes delivered means no output to charge"
         );
+    }
+
+    /// The defect TD-0013 exists to fix. Anthropic announces input and the whole cache split on
+    /// `message_start`, before a single content byte — so at a disconnect there those numbers are
+    /// exact, and the old byte-only fallback recorded all three as zero.
+    #[test]
+    fn reported_input_and_cache_are_settled_not_estimated_away() {
+        // A disconnect right after `message_start`: 40 bytes of output have flowed, nothing more.
+        let usage = partial_usage(Some(AT_MESSAGE_START), 40);
+
+        assert_eq!(usage.tokens_in, 1024, "reported input must survive");
+        assert_eq!(usage.cache_creation_tokens, 2048);
+        assert_eq!(usage.cache_read_tokens, 4096);
+
+        // `billable()` counts all four categories (ADR-0005 D4). The byte-only fallback would have
+        // settled 10 here; the real exposure is three orders of magnitude larger, which is what
+        // made this an evasion vector rather than a rounding error.
+        let billed = billable(&usage);
+        assert_eq!(billed, 1024 + 2048 + 4096 + 10);
+        assert!(
+            billed > 100 * (40 / 4),
+            "settling the byte estimate alone would discard the dominant term"
+        );
+    }
+
+    /// `max`, not "reported wins": Anthropic's `message_delta` lags the text it describes, so
+    /// between `message_start` and the first delta the reported output is legitimately 0 while real
+    /// output has flowed. Taking the reported value alone would settle *less* than the byte-only
+    /// fallback this replaced — a regression disguised as an accuracy fix.
+    #[test]
+    fn output_never_settles_below_the_byte_floor() {
+        let usage = partial_usage(Some(AT_MESSAGE_START), 400);
+        assert_eq!(
+            usage.tokens_out, 100,
+            "reported output of 0 must not erase 400 bytes of streamed text"
+        );
+
+        // Once the provider does report output, and it exceeds the byte guess, the real number
+        // wins — the estimate is a floor, never a ceiling.
+        let after_delta = ParsedUsage {
+            tokens_out: 256,
+            ..AT_MESSAGE_START
+        };
+        assert_eq!(partial_usage(Some(after_delta), 400).tokens_out, 256);
+    }
+
+    /// The narrowing that lets both planes share one fallback rule must not silently drop a
+    /// category, or the typed plane would quietly meter less than the transparent one.
+    #[test]
+    fn narrowing_a_typed_usage_preserves_every_category() {
+        let typed = UsageV2 {
+            tokens_in: 11,
+            tokens_out: 22,
+            cache_creation_tokens: 33,
+            cache_read_tokens: 44,
+            reasoning_tokens: Some(55),
+            ..UsageV2::default()
+        };
+        let parts = reported_parts(&typed);
+        assert_eq!(parts.tokens_in, 11);
+        assert_eq!(parts.tokens_out, 22);
+        assert_eq!(parts.cache_creation_tokens, 33);
+        assert_eq!(parts.cache_read_tokens, 44);
+        assert_eq!(parts.reasoning_tokens, 55);
     }
 }

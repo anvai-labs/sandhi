@@ -1151,11 +1151,13 @@ mod tests {
                 Ok(crate::StreamChunk {
                     data: Bytes::copy_from_slice(&sse[..split]),
                     usage: None,
+                    usage_running: None,
                     attempts: 3,
                 }),
                 Ok(crate::StreamChunk {
                     data: Bytes::copy_from_slice(&sse[split..]),
                     usage: None,
+                    usage_running: None,
                     attempts: 3,
                 }),
                 Ok(crate::StreamChunk {
@@ -1167,6 +1169,7 @@ mod tests {
                         cache_read_tokens: 4,
                         reasoning_tokens: 0,
                     }),
+                    usage_running: None,
                     attempts: 3,
                 }),
             ]));

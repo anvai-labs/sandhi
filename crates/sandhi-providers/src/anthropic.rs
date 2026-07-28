@@ -132,15 +132,15 @@ impl Provider for Anthropic {
 
 /// Accumulate usage from Anthropic SSE lines: input + cache from `message_start`, output from
 /// `message_delta` (cumulative).
-pub(crate) fn sniff_usage_line(line: &[u8], acc: &mut ParsedUsage) {
+pub(crate) fn sniff_usage_line(line: &[u8], acc: &mut ParsedUsage) -> bool {
     let Ok(s) = std::str::from_utf8(line) else {
-        return;
+        return false;
     };
     let Some(payload) = s.trim().strip_prefix("data:") else {
-        return;
+        return false;
     };
     let Ok(v) = serde_json::from_str::<Value>(payload.trim()) else {
-        return;
+        return false;
     };
     match v.get("type").and_then(Value::as_str) {
         Some("message_start") => {
@@ -148,15 +148,18 @@ pub(crate) fn sniff_usage_line(line: &[u8], acc: &mut ParsedUsage) {
                 acc.tokens_in = u64_at(u, "input_tokens");
                 acc.cache_creation_tokens = u64_at(u, "cache_creation_input_tokens");
                 acc.cache_read_tokens = u64_at(u, "cache_read_input_tokens");
+                return true;
             }
         }
         Some("message_delta") => {
             if let Some(u) = v.get("usage") {
                 acc.tokens_out = u64_at(u, "output_tokens");
+                return true;
             }
         }
         _ => {}
     }
+    false
 }
 
 #[cfg(test)]
