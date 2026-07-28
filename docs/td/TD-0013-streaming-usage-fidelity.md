@@ -204,11 +204,30 @@ than a known gap, because it stops the next reader from looking.
 > `sandhi_settle_overshoot_tokens_total` so systematically-tight ceilings become visible instead
 > of being paid for in silence.
 
-**D7 — Partial usage is accounting-only and never re-encoded.** Mid-stream usage observed for
-settlement must not become an extra client-visible SSE frame. The proxy observes it, does not let it
-supersede a terminal `Final`, and does not pass it to `encode_stream_event`. The acceptance evidence
-is the real-SDK conformance suite passing **unchanged** — 22 tests that assert byte-level client
-behaviour across all three dialects.
+**D7 — Partial usage is accounting-only on the proxy, and a declared addition on the typed
+stream.** Mid-stream usage observed for settlement must not become an extra client-visible SSE
+frame. The proxy observes it, does not let it supersede a terminal `Final`, and does not pass it to
+`encode_stream_event`. The acceptance evidence is the real-SDK conformance suite passing
+**unchanged** — 22 tests asserting byte-level client behaviour across all three dialects.
+
+> **Consequence for in-process consumers, found while implementing P1.** The bindings serialize
+> *every* `ChatStreamEventV1` straight to the caller (`stream_json`), and the proxy's typed plane
+> can only receive progress through that same event stream — there is no side channel. So on the
+> **binding path** an `Incremental` family now emits one or more `Usage { completeness: Partial }`
+> events before the terminal `Final`, where it previously emitted exactly one event. This is a
+> contract addition, not a leak: TD-0009 D4 already ruled that mid-stream usage should be emitted
+> where the provider reports it, and a consumer wanting live token counts needs exactly this.
+>
+> **The rule consumers must follow: exactly one `Final` per logical call is the verdict; a
+> non-final `Usage` is progress and must never be treated as the end of the call.** Taking the
+> latest `Usage` value is correct under both old and new behaviour, which is what makes this
+> additive in practice.
+>
+> This nearly escaped notice. `anthropic_typed.rs`'s chunk-boundary test asserts *exactly one*
+> `Usage` event and still passes — because its hand-built raw stream sets `usage_running: None`,
+> modelling a terminal-only family. `streaming_usage_progress_tests` now drives the real fixture
+> through the production `metered_passthrough` primitive and pins the rule that actually applies.
+> `chat_contract_minor()` moving 4 → 5 is the handshake signal for a pinned consumer.
 
 ## Phases
 
