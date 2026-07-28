@@ -1137,3 +1137,175 @@ async fn metrics_endpoint_reflects_traffic_and_is_gated() {
         .unwrap();
     assert_eq!(authed.status(), StatusCode::OK);
 }
+
+/// TD-0012 P1: the limit an operator sets is actually enforced, and a refused call costs nothing.
+///
+/// The unit tests in `ratelimit.rs` cover the bucket arithmetic; this covers the wiring — that the
+/// stored `rate_limit_per_min` reaches the request path at all (it did not, for three releases),
+/// that the refusal is dialect-shaped with `Retry-After`, and that a throttled request consumes no
+/// lease and emits no usage event.
+#[tokio::test]
+async fn rate_limited_requests_are_refused_without_consuming_budget() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id":"c1","object":"chat.completion","created":1,"model":"gpt-test",
+            "choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}
+        })))
+        .mount(&upstream)
+        .await;
+
+    let keys = KeyStore::new();
+    keys.insert(VirtualKey {
+        id: "vk_slow".into(),
+        subject_id: Some("alice".into()),
+        group_id: Some("platform".into()),
+        upstream_ref: "up1".into(),
+        // Two requests per minute: small enough to exhaust deterministically in a test.
+        rate_limit_per_min: Some(2),
+        ..Default::default()
+    });
+    let mut providers: HashMap<String, ProviderHandle> = HashMap::new();
+    providers.insert(
+        "up1".into(),
+        ProviderRuntime::new().openai_compat(
+            "openai",
+            upstream.uri(),
+            "REAL-KEY",
+            Default::default(),
+            None,
+            None,
+            None,
+        ),
+    );
+    let sink = Arc::new(InMemorySink::default());
+    // Coerce to the trait object the state holds, keeping the concrete handle for assertions.
+    let sink_for_state: Arc<dyn sandhi_core::Sink> = sink.clone();
+    let state = Arc::new(ProxyState::new(
+        keys,
+        ProxyLedger::in_memory(),
+        sink_for_state,
+        providers,
+        None,
+    ));
+
+    let call = |state: Arc<ProxyState>| async move {
+        build_app(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer vk_slow")
+                    .body(Body::from(
+                        r#"{"model":"gpt-test","messages":[{"role":"user","content":"hi"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    };
+
+    // The configured burst is admitted.
+    for i in 0..2 {
+        let response = call(Arc::clone(&state)).await;
+        assert_eq!(response.status(), StatusCode::OK, "burst request {i}");
+    }
+
+    // The next one is refused — this is the assertion that would have failed for three releases.
+    let limited = call(Arc::clone(&state)).await;
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    // D4: Retry-After must be present, or a well-behaved SDK retries immediately.
+    let retry_after = limited
+        .headers()
+        .get("retry-after")
+        .expect("a 429 without Retry-After turns a throttle into a hot loop")
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        retry_after.parse::<u64>().is_ok_and(|s| s >= 1),
+        "Retry-After must be whole seconds, never 0: {retry_after}"
+    );
+
+    // The refusal is in the caller's dialect (TD-0010 D2), not a bare string.
+    let payload = axum::body::to_bytes(limited.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+    assert!(
+        value["error"].is_object(),
+        "expected a structured error: {value}"
+    );
+
+    // D5: the throttled call never reached a provider, so it must leave no trace in accounting.
+    assert_eq!(
+        sink.events().len(),
+        2,
+        "a rate-limited request must not emit a usage event"
+    );
+    assert_eq!(
+        state.ledger.lock().unwrap().reserved("group:platform"),
+        0,
+        "a rate-limited request must not hold a lease"
+    );
+
+    // And it is visible to an operator (TD-0012 D6) with bounded labels only.
+    let metrics = build_app(Arc::clone(&state))
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(metrics.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(text.contains("sandhi_rate_limited_total{"), "{text}");
+    assert!(text.contains("outcome=\"rate_limited\""), "{text}");
+    assert!(
+        !text.contains("vk_slow"),
+        "the key must not become a label:\n{text}"
+    );
+}
+
+/// A key with no configured limit is never throttled — an absent limit must not become a block.
+#[tokio::test]
+async fn a_key_without_a_limit_is_never_rate_limited() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id":"c1","object":"chat.completion","created":1,"model":"gpt-test",
+            "choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
+        })))
+        .mount(&upstream)
+        .await;
+    let sink = Arc::new(InMemorySink::default());
+    let state = state_with(upstream.uri(), Arc::clone(&sink), ProxyLedger::in_memory());
+
+    for i in 0..25 {
+        let response = build_app(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer vk_demo")
+                    .body(Body::from(
+                        r#"{"model":"gpt-test","messages":[{"role":"user","content":"hi"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "request {i}");
+    }
+}

@@ -17,6 +17,24 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`rate_limit_per_min` is enforced** (TD-0012 P1). It had been accepted by `sandhi vkeys share`,
+  persisted, and returned by the admin API since TD-0003 — and read nowhere in the request path. An
+  operator could set a limit, see it echoed back, and be told nothing when it did not apply.
+
+  Enforcement is a per-key **token bucket** (refill `limit/60` per second, capacity `limit`), not a
+  per-minute counter — a fixed window admits `2 ×` the limit across a boundary. A throttled request
+  is refused **before** the budget reservation, so it consumes no lease, records no spend and emits
+  no usage event; the 429 is rendered in the caller's dialect and carries **`Retry-After`**, without
+  which a well-behaved SDK retries immediately and turns a throttle into a hot loop. Buckets are
+  evicted after 10 idle minutes — an order of magnitude past a full refill, so eviction can never
+  grant extra headroom.
+
+  **Single-node semantics:** the limiter is in-memory, so with N replicas the effective limit is
+  `N × limit` — the same limitation the enforcement ledger has, and it shares TD-0007's eventual
+  shared backend rather than inventing a second story.
+
 ### Added
 
 - **Operator guidance for telemetry** (TD-0011 P4) — README gains an "Operating it" section: log
