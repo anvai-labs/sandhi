@@ -603,3 +603,20 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod conformance {
+    use super::SqliteLedger;
+
+    /// TD-0007 C1–C6 against the backend we actually ship durably.
+    ///
+    /// The suite lives in `sandhi-core` so any backend — including a future shared one — is held to
+    /// the same executable bar rather than to a prose description. Until this existed, the durable
+    /// ledger's conformance was asserted only by the design doc that specified it.
+    #[test]
+    fn sqlite_ledger_is_conformant() {
+        sandhi_core::conformance::assert_enforcement_conformance("SqliteLedger", || {
+            SqliteLedger::open(":memory:").expect("an in-memory SQLite ledger")
+        });
+    }
+}

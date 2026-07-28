@@ -1492,6 +1492,26 @@ fn header_str(headers: &HeaderMap, name: &str) -> Option<String> {
 
 /// A best-effort `Partial` usage synthesized from accumulated output-delta bytes, used to settle an
 /// interrupted stream (ADR-0005 D1) rather than releasing the reservation to zero.
+/// A deliberately **approximate** output count for a stream that ended without provider usage.
+///
+/// Only reached when a client disconnects mid-stream: the provider's terminal frame carries the
+/// real numbers, and a `Final` observation always supersedes this (see the streaming test, which
+/// asserts the settled quantity equals the provider's usage, not this estimate).
+///
+/// **The factor is 4 bytes per token, and it over-counts.** The bytes measured are wire bytes —
+/// SSE framing, JSON punctuation and field names included — not decoded content, so the estimate
+/// runs *above* the true token count for the same text. Over-counting is the safe direction for
+/// enforcement (an abandoned stream slightly over-consumes rather than leaking capacity that was
+/// genuinely used), and the result is tagged [`UsageCompleteness::Partial`] so a consumer can
+/// always tell a measured call from an estimated one.
+///
+/// **This is a fallback, and today it is applied too widely** (TD-0013). Anthropic reports real
+/// per-category usage *during* a stream (`message_start` carries input + the cache split,
+/// `message_delta` carries cumulative output) and Gemini reports `usageMetadata` on chunks — for
+/// those families an accurate number exists at disconnect and this estimate discards it. Only the
+/// terminal-only families (OpenAI Chat and Responses, Cohere, Ollama) genuinely have nothing to
+/// report mid-stream, and there the choice is a policy call, not an accuracy one: settling zero
+/// would let a caller stream-and-abort repeatedly for free.
 fn partial_usage(delta_out_bytes: u64) -> UsageV2 {
     UsageV2 {
         tokens_out: delta_out_bytes.saturating_add(3) / 4,
@@ -1751,6 +1771,44 @@ mod error_detail_tests {
                 .unwrap_or("")
                 .contains("call_9"),
             "full mode must forward the bounded body: {value}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod partial_accounting_tests {
+    use super::*;
+
+    /// The audit flagged this factor as unverified. It is an estimate by construction; what must be
+    /// true is that it is tagged as one and biased in the safe direction.
+    #[test]
+    fn the_byte_estimate_is_marked_partial_and_biased_high() {
+        // Roughly a small SSE frame's worth of wire bytes.
+        let usage = partial_usage(400);
+        assert_eq!(
+            usage.completeness,
+            UsageCompleteness::Partial,
+            "an estimate must never be indistinguishable from a measured call"
+        );
+        assert_eq!(usage.tokens_out, 100, "4 wire bytes per token");
+        // Wire bytes include SSE framing and JSON punctuation, so for the same text the estimate
+        // exceeds the true token count — over-consuming an abandoned stream's budget rather than
+        // leaking capacity that was genuinely used.
+        assert!(
+            usage.tokens_out >= 400 / 4,
+            "the estimate must not round below the byte-derived floor"
+        );
+        // Nothing is invented on the input side: a disconnect says nothing about prompt tokens.
+        assert_eq!(usage.tokens_in, 0);
+        assert_eq!(usage.cache_read_tokens, 0);
+    }
+
+    #[test]
+    fn an_empty_stream_estimates_nothing() {
+        let usage = partial_usage(0);
+        assert_eq!(
+            usage.tokens_out, 0,
+            "no bytes delivered means no output to charge"
         );
     }
 }
