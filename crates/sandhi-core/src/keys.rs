@@ -37,7 +37,11 @@ pub struct VirtualKey {
     pub budget_scope: Option<String>,
     /// RFC 3339 expiry timestamp. A presented key past this instant is rejected.
     pub expires_at: Option<String>,
-    /// Optional rate limit in requests/minute. Stored only in P1; enforcement is P2.
+    /// Optional rate limit in requests/minute.
+    ///
+    /// Enforced by the proxy's token bucket (TD-0012), which is per process: with N replicas the
+    /// effective limit is N x this value. The in-process bindings do not enforce it — enforcement
+    /// is proxy-only, as it is for budgets.
     pub rate_limit_per_min: Option<u32>,
 }
 

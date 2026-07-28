@@ -21,7 +21,7 @@ key, and set per-user budgets — without hand-rolling provider APIs.
   ([ADR-0005](docs/adr/0005-enforcement-correctness-reservation-ledger-observe-enforce-split.md)), and the
   **transparent-metering plane** of
   [ADR-0004](docs/adr/0004-two-plane-proxy-and-enforcement-boundary.md). Still open: per-minute
-  rate limits (stored, not enforced), a shared/HA ledger backend
+  a shared/HA ledger backend
   ([TD-0007](docs/td/TD-0007-enforcement-ledger-backends.md)), Gemini/Cohere *ingress* dialects,
   first-party observability export, and the declarative policy engine
   ([TD-0005](docs/td/TD-0005-declarative-policy-engine.md)).
@@ -46,8 +46,12 @@ wrong. Sandhi is the single, fast, neutral implementation of both.
   **windows**, a block-or-**warn** policy, and threshold **alerts**. Set `SANDHI_STORE` and the
   ledger is **durable**: spend, caps, and in-flight leases survive a restart, and dangling leases
   are reclaimed. Without it the ledger is in-memory and a restart resets accrued spend. Still
-  open: per-minute rate limits (stored, not enforced) and a shared/HA backend for multi-replica
-  deployments.
+- **Rate limits** — per-virtual-key requests/minute, enforced by a token bucket before the budget
+  reservation, so a throttled call consumes no budget. The 429 carries `Retry-After` in the
+  caller's own dialect. **Per process:** the limiter is in-memory, so with N replicas the effective
+  limit is N × the configured value — the same single-node caveat as the ledger below.
+  Still open: a shared/HA backend for multi-replica deployments
+  ([TD-0007](docs/td/TD-0007-enforcement-ledger-backends.md)).
 - **Unified provider transport** — Anthropic, OpenAI-compatible (covers ~20 providers),
   Gemini, Cohere, local vLLM/Ollama, OpenAI Responses — streaming, pooling, retry,
   circuit-breaker, with **usage + cache-split extracted at the source**. (Bedrock is

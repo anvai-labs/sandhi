@@ -113,7 +113,10 @@ enum KeysAction {
         /// RFC 3339 expiry.
         #[arg(long)]
         expires: Option<String>,
-        /// Rate limit (requests/min, stored — enforcement is P2).
+        /// Rate limit in requests/minute, enforced per proxy process.
+        ///
+        /// With N replicas the effective limit is N x this value — the limiter is in-memory
+        /// (TD-0012 D2), the same single-node caveat the budget ledger carries.
         #[arg(long)]
         rate: Option<u32>,
     },

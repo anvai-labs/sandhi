@@ -1,6 +1,6 @@
 # TD-0012: Rate-limit enforcement — closing a promise the API already makes
 
-- **Status:** Accepted (2026-07-27). **P1 complete**; P2 (operator-surface honesty) and P3 (shared backend) open.
+- **Status:** Accepted (2026-07-27). **P1 and P2 complete**; P3 (shared backend) waits on TD-0007.
 - **Relates to:** TD-0003 (operator surface: the field exists there), ADR-0005 (enforcement
   ordering and the lease ledger), TD-0007 (shared-backend contract), TD-0010 D2 (dialect-shaped
   errors), TD-0011 (bounded-label metrics)
@@ -81,7 +81,7 @@ unbounded. Per-key attribution belongs in the aggregate.
 | Phase | Scope | Acceptance |
 |---|---|---|
 | **P1** ✅ | Token bucket + enforcement at D5's position + dialect-shaped 429 with `Retry-After` + eviction + the D6 counter | A key with `rate_limit_per_min=N` admits N in a burst and refuses the N+1th; the refusal carries `Retry-After` and the caller's error shape; the refused call consumes no lease and emits no usage event; buckets for idle keys are evicted |
-| **P2** | Honesty in the operator surface: `sandhi vkeys share --rate-limit` documents per-replica semantics; admin API and README say the same | The CLI help and README state the N-replica multiplication rather than implying a global limit |
+| **P2** ✅ | Honesty in the operator surface | **Met.** `sandhi keys share --rate` help states the N-replica multiplication at the point of decision; README, SECURITY.md, CLAUDE.md and the `VirtualKey` field doc all corrected — six places still claimed the limit was "stored, not enforced" after P1 shipped |
 | **P3** | Shared backend behind TD-0007's contract | A limit holds across two proxy instances against the shared store |
 
 P1 makes the promise true on a single node, which is the deployment shape the ledger already

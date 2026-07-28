@@ -19,6 +19,12 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 
 ### Fixed
 
+- **Docs no longer claim rate limits are unenforced** (TD-0012 P2). Six places still said "stored,
+  not enforced" after P1 shipped — README (twice), SECURITY.md's out-of-scope list, CLAUDE.md, the
+  `sandhi keys share --rate` help, and the `VirtualKey::rate_limit_per_min` field doc. All corrected,
+  and each now carries the caveat that matters operationally: the limiter is **per process**, so with
+  N replicas the effective limit is N × the configured value. An operator reads that in `--help` at
+  the moment they set the limit, not afterwards in a design doc.
 - **`rate_limit_per_min` is enforced** (TD-0012 P1). It had been accepted by `sandhi vkeys share`,
   persisted, and returned by the admin API since TD-0003 — and read nowhere in the request path. An
   operator could set a limit, see it echoed back, and be told nothing when it did not apply.
