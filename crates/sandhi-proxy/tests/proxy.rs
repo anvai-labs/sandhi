@@ -1477,9 +1477,20 @@ async fn a_disconnect_after_message_start_settles_the_reported_cache_split() {
          guess — settled {spent}"
     );
 
-    // And the event must still say it is an interrupted call, not a completed one.
+    // And the event must still say it is an interrupted call, not a completed one — and must
+    // admit that its output number came from the byte fallback (TD-0013 D5).
     let events = sink.events();
     assert_eq!(events.len(), 1, "the disconnect must still emit one event");
+    assert_eq!(
+        events[0].usage_completeness,
+        sandhi_core::UsageCompleteness::Partial
+    );
+    assert_eq!(
+        events[0].usage_basis,
+        sandhi_core::UsageBasis::Estimated,
+        "input and cache are real here, but output was estimated — the call must not present as \
+         a clean measurement"
+    );
     assert_eq!(events[0].tokens_in, PACED_FRAMES_INPUT);
     assert_eq!(events[0].cache_read_tokens, PACED_FRAMES_CACHE_READ);
     assert_eq!(events[0].cache_creation_tokens, PACED_FRAMES_CACHE_CREATION);
@@ -1548,4 +1559,28 @@ async fn a_stream_whose_usage_is_never_reported_still_settles_what_it_accrued() 
         sandhi_core::UsageCompleteness::Partial,
         "an unreported stream is not a finalized measurement"
     );
+    assert_eq!(
+        events[0].usage_basis,
+        sandhi_core::UsageBasis::Estimated,
+        "nothing here was measured — the event must say so"
+    );
+
+    // The operator-facing signal: how much settled spend was guessed (TD-0013 P3).
+    let metrics = state.metrics.render();
+    assert!(
+        metrics.contains("sandhi_estimated_tokens_total{"),
+        "an operator must be able to measure estimated spend, not just find it per-event"
+    );
+    for forbidden in [
+        "subject_id",
+        "session_id",
+        "virtual_key_id",
+        "vk_demo",
+        "alice",
+    ] {
+        assert!(
+            !metrics.contains(forbidden),
+            "{forbidden} must never become a metric label (TD-0011 D2)"
+        );
+    }
 }

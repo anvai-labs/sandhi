@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::chat::{UsageCompleteness, UsageV2};
+use crate::chat::{UsageBasis, UsageCompleteness, UsageV2};
 
 /// The single billable-token definition (ADR-0005 D4), used identically by reserve, settle,
 /// and the durable aggregate — closing the budget-vs-event divergence.
@@ -120,6 +120,11 @@ pub struct UsageEvent {
     /// Whether token counts are final, partial, or unavailable for this logical call.
     #[serde(default)]
     pub usage_completeness: UsageCompleteness,
+    /// Whether those counts were measured or estimated (TD-0013 D5). Orthogonal to
+    /// `usage_completeness`: an interrupted stream may carry real provider counts or a
+    /// byte-derived floor, and only this field tells a consumer which.
+    #[serde(default)]
+    pub usage_basis: UsageBasis,
     /// Number of upstream attempts made by the runtime for this logical call.
     #[serde(default = "one")]
     pub attempts: u32,
@@ -180,6 +185,7 @@ impl UsageEvent {
             cache_creation_tokens: 0,
             cache_read_tokens: 0,
             usage_completeness: UsageCompleteness::Unavailable,
+            usage_basis: UsageBasis::ProviderReported,
             attempts: 1,
             outcome: None,
             upstream_request_id: None,
@@ -296,6 +302,17 @@ impl UsageEvent {
         self.attempts = attempts.max(1);
         self.outcome = outcome;
         self.upstream_request_id = upstream_request_id;
+        self
+    }
+
+    /// Record whether these counts were measured or estimated (TD-0013 D5).
+    ///
+    /// Separate from [`with_measurement`](Self::with_measurement) on purpose: every existing caller
+    /// reports provider-measured counts, which is the default, so adding a parameter there would
+    /// have made a hundred call sites restate a fact none of them had a choice about.
+    #[must_use]
+    pub fn with_basis(mut self, basis: UsageBasis) -> Self {
+        self.usage_basis = basis;
         self
     }
 

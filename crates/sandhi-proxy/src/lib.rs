@@ -36,7 +36,8 @@ use time::OffsetDateTime;
 
 use sandhi_core::{
     billable, AlertRegistry, Backend, ChatRequestV1, KeyStore, ParsedUsage, Policy,
-    RequestMetadataV1, Reservation, Sink, UsageCompleteness, UsageEvent, UsageV2, VirtualKey,
+    RequestMetadataV1, Reservation, Sink, UsageBasis, UsageCompleteness, UsageEvent, UsageV2,
+    VirtualKey,
 };
 use sandhi_providers::{ProviderError, ProviderFamily, ProviderHandle, ProviderRuntime};
 use sandhi_store::{hash_secret, AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
@@ -1334,6 +1335,7 @@ impl RequestAccounting {
                 output: usage.tokens_out,
                 reasoning: usage.reasoning_tokens.unwrap_or(0),
                 billable: actual,
+                estimated: usage.basis == UsageBasis::Estimated,
                 duration_ms: usage.duration_ms,
                 ttft_ms: usage.time_to_first_token_ms,
             },
@@ -1567,6 +1569,7 @@ fn partial_usage(reported: Option<ParsedUsage>, delta_out_bytes: u64) -> UsageV2
         return UsageV2 {
             tokens_out: estimated_out,
             completeness: UsageCompleteness::Partial,
+            basis: UsageBasis::Estimated,
             ..UsageV2::default()
         };
     };
@@ -1577,6 +1580,15 @@ fn partial_usage(reported: Option<ParsedUsage>, delta_out_bytes: u64) -> UsageV2
         tokens_out: reported.tokens_out.max(estimated_out),
         reasoning_tokens: (reported.reasoning_tokens > 0).then_some(reported.reasoning_tokens),
         completeness: UsageCompleteness::Partial,
+        // `Estimated` means "at least one category came from the byte fallback" — so the label
+        // tracks whether the estimate actually contributed, not merely whether one was available.
+        // A disconnect after `message_delta`, where every category is the provider's, is a real
+        // measurement of an incomplete call and must not be tarred as a guess.
+        basis: if estimated_out > reported.tokens_out {
+            UsageBasis::Estimated
+        } else {
+            UsageBasis::ProviderReported
+        },
         ..UsageV2::default()
     }
 }
@@ -1632,6 +1644,7 @@ fn usage_event(
         usage.outcome.clone(),
         usage.upstream_request_id.clone(),
     )
+    .with_basis(usage.basis)
 }
 
 fn now_rfc3339() -> String {
@@ -1927,6 +1940,50 @@ mod partial_accounting_tests {
             ..AT_MESSAGE_START
         };
         assert_eq!(partial_usage(Some(after_delta), 400).tokens_out, 256);
+    }
+
+    /// D5 — the label tracks whether the estimate actually contributed, not merely whether one
+    /// was available. Laundering a guess into an authoritative-looking number is the failure mode
+    /// this field exists to prevent; so is tarring a real measurement as a guess.
+    #[test]
+    fn basis_distinguishes_a_measurement_from_a_guess() {
+        // Nothing reported: the output number is purely byte-derived.
+        assert_eq!(
+            partial_usage(None, 400).basis,
+            UsageBasis::Estimated,
+            "a byte-derived count must never present as provider-reported"
+        );
+
+        // Reported input and cache, but output still estimated (the message_start window).
+        assert_eq!(
+            partial_usage(Some(AT_MESSAGE_START), 400).basis,
+            UsageBasis::Estimated
+        );
+
+        // Every category reported, and the provider's output exceeds the byte floor: this is a
+        // real measurement of an incomplete call, not a guess.
+        let after_delta = ParsedUsage {
+            tokens_out: 4_000,
+            ..AT_MESSAGE_START
+        };
+        let usage = partial_usage(Some(after_delta), 400);
+        assert_eq!(usage.basis, UsageBasis::ProviderReported);
+        assert_eq!(
+            usage.completeness,
+            UsageCompleteness::Partial,
+            "still incomplete — `basis` and `completeness` are independent axes"
+        );
+    }
+
+    /// The default must match what every pre-TD-0013 code path actually did, or adding the field
+    /// silently relabels historical events.
+    #[test]
+    fn the_default_basis_is_provider_reported() {
+        assert_eq!(UsageV2::default().basis, UsageBasis::ProviderReported);
+        assert_eq!(
+            sandhi_core::UsageEvent::new("r", "t", "p", "m", Backend::External).usage_basis,
+            UsageBasis::ProviderReported
+        );
     }
 
     /// The narrowing that lets both planes share one fallback rule must not silently drop a

@@ -41,6 +41,7 @@ JsonValue = Any
 Role = Literal["developer", "system", "user", "assistant", "tool", "function"]
 FinishReasonV1 = Literal["stop", "length", "tool_calls", "content_filter", "function_call", "unknown"]
 UsageCompleteness = Literal["final", "partial", "unavailable"]
+UsageBasis = Literal["provider_reported", "estimated"]
 
 class TextPart(TypedDict):
     type: Literal["text"]
@@ -130,6 +131,7 @@ class UsageV2(TypedDict):
     cache_creation_tokens: int
     cache_read_tokens: int
     completeness: NotRequired[UsageCompleteness]
+    basis: NotRequired[UsageBasis]
     attempts: NotRequired[int]
     outcome: NotRequired[str]
     upstream_request_id: NotRequired[str]
@@ -232,6 +234,7 @@ export type JsonValue = unknown
 export type Role = "developer" | "system" | "user" | "assistant" | "tool" | "function"
 export type FinishReasonV1 = "stop" | "length" | "tool_calls" | "content_filter" | "function_call" | "unknown"
 export type UsageCompleteness = "final" | "partial" | "unavailable"
+export type UsageBasis = "provider_reported" | "estimated"
 export type ContentPart =
   | {{ type: "text"; text: string }}
   | {{ type: "image_url"; image_url: string; detail?: string }}
@@ -257,7 +260,8 @@ export interface ChatRequestV1 {{
 }}
 export interface UsageV2 {{
   tokens_in: number; tokens_out: number; cache_creation_tokens: number; cache_read_tokens: number
-  completeness?: UsageCompleteness; attempts?: number; outcome?: string; upstream_request_id?: string
+  completeness?: UsageCompleteness; basis?: UsageBasis; attempts?: number; outcome?: string
+  upstream_request_id?: string
   duration_ms?: number; time_to_first_token_ms?: number
   audio_input_tokens?: number; audio_output_tokens?: number; reasoning_tokens?: number
   accepted_prediction_tokens?: number; rejected_prediction_tokens?: number
