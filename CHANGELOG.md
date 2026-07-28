@@ -19,6 +19,13 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 
 ### Added
 
+- **Operator guidance for telemetry** (TD-0011 P4) — README gains an "Operating it" section: log
+  filtering via `SANDHI_LOG`, a Prometheus scrape config including the admin bearer the endpoint
+  requires, and the four alerts worth having (capacity leaking via settle failures, enforcement
+  silently off via fail-open admissions, callers being refused, and upstream latency degrading).
+  Each expression was checked against a series the code actually emits, rather than written from
+  memory.
+
 - **Release verification** — `scripts/verify-release.py` plus a `verify` job that runs after the
   publish steps and checks each **registry** for the tag's version rather than trusting job status.
   The publish steps `exit 0` when their credential is absent, so a job can report success while
