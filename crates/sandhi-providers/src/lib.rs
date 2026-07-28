@@ -28,6 +28,7 @@ mod anthropic_typed;
 pub mod catalog;
 pub mod cohere;
 mod cohere_typed;
+pub mod embed;
 pub mod escape_hatch;
 pub mod gemini;
 mod gemini_typed;
@@ -46,6 +47,7 @@ pub use catalog::{
     ModelEndpointRoute, OpenAiCompatProviderSpec, OPENAI_COMPAT_PROVIDER_SPECS,
 };
 pub use cohere::Cohere;
+pub use embed::{EmbedRequest, EmbedResponse, EmbedUsage, EmbeddingProvider};
 pub use escape_hatch::FnProvider;
 pub use gemini::{Gemini, GeminiAuthScheme};
 pub use local::Ollama;
