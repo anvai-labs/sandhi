@@ -90,7 +90,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: pip install check-jsonschema
@@ -110,7 +110,7 @@ jobs:
         with:
           components: rustfmt, clippy, llvm-tools-preview
       - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: fmt + clippy (the binding is its own workspace)
@@ -274,7 +274,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       # The vendors' own clients decide how a request is shaped. Pinning majors keeps a vendor
