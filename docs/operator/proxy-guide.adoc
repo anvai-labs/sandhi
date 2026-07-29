@@ -1,0 +1,527 @@
+= Sandhi Proxy — Operator Guide
+:toc: left
+:toclevels: 3
+:sectnums:
+:icons: font
+:docinfo: shared
+//:source-highlighter: rouge   # GitHub applies its own; harmless elsewhere
+
+This guide walks an operator through running Sandhi as an **inline reverse-proxy** and
+pointing a client — Victor, or any vendor SDK — at it, so every model call is counted and
+attributed while the real upstream key never leaves the server.
+
+*Audience:* anyone deploying Sandhi for a team that shares one upstream key.
+*Scope:* the proxy shape (cross-process / shared-key). For the in-process binding shape
+(same process, no network hop) see the README's _Two shapes, one core_.
+
+[NOTE]
+====
+Sandhi emits **neutral units only** (tokens, the cache-creation/read split, GPU-seconds).
+Pricing, billing, and tier policy are downstream concerns owned by the AnvaiOps control
+plane — nothing here involves dollars.
+====
+
+
+== How it fits
+
+Sandhi sits between your callers and the real provider. Callers authenticate with a
+per-user *virtual key*; Sandhi holds the *real* upstream key server-side, forwards the
+request, meters it as the bytes pass through, and reconciles the caller's budget.
+
+[literal]
+....
+  +----------+     Bearer vk_alice     +-----------------+     real key     +-----------+
+  |  Client  | ----------------------> |  Sandhi proxy   | ---------------> |  Upstream |
+  | (Victor /|        (virtual key)    |    :8787        |   (held server-  | (Anthropic|
+  |   SDK)   | <---------------------- |  meters in-path | <--------------- |  / OpenAI)|
+  +----------+     response bytes      +-----------------+     response     +-----------+
+                                          |  ^
+                                          v  |  UsageEvent (tokens + cache split)
+                                       +-----------------+
+                                       |  usage sink/db  |   durable when SANDHI_STORE is set
+                                       +-----------------+
+....
+
+The client never sees the real key. Attribution (`subject_id` / `group_id` / `session_id`)
+rides in metadata *outside* the cached prompt, so hosted prompt caches keep hitting and
+self-hosted KV routing stays sticky.
+
+
+== The operator mental model: credential, virtual key, budget
+
+Three objects, configured in that order. Two are server-side secrets; one is what you hand
+to a caller.
+
+[literal]
+....
+  1. register once               2. mint per user                  3. enforce
+  +----------------+             +----------------+                 +----------------+
+  |  CREDENTIAL    |  upstream   |  VIRTUAL KEY   |   budget_scope  |   BUDGET       |
+  |  anthropic:    |   _ref      |  vk_alice      |   ------------> |  group:platform|
+  |    default     | <---------. |  subject=alice |                 |  limit=1M tok  |
+  |  sk-ant-XXXX   |            | | rate=60/min   |                 |  window=monthly|
+  |  (in the vault)|            | | (stored hash) |                 |  policy=block  |
+  +----------------+            | +----------------+                 +----------------+
+        |  real key + base_url   |
+        |  rehydrated into a     |   The vkey carries ONLY upstream_ref (provider:label),
+        |  ProviderHandle at     |   never the secret. Lose the vkey? Revoke + re-mint.
+        |  startup; never sent   |
+        |  to the client.        |
+....
+
+[NOTE]
+====
+The binding between a virtual key and its upstream is the **credential id** `provider:label`
+(e.g. `anthropic:default`). The real key and base URL live in the vault under that id; the
+virtual key references it by name only.
+====
+
+
+== Prerequisites
+
+* A built Sandhi workspace — the first `cargo run` compiles (~1–2 min).
+* A real upstream key to put in the vault (e.g. an Anthropic `sk-ant-…`).
+* For the Victor client path: Victor installed with its `sandhi` extra
+  (`pip install -e '.[sandhi]'`), which pulls the `sandhi-gateway` FFI wheel.
+
+
+== Step 1 — start the proxy
+
+The server binary reads **environment variables only** — it takes no CLI flags.
+
+[source,bash]
+----
+SANDHI_STORE=usage.db \
+SANDHI_ADMIN_TOKEN=admin-secret \
+cargo run -p sandhi-proxy --bin sandhi-proxy
+----
+
+On startup it prints (to stderr):
+
+[literal]
+....
+sandhi-proxy listening on http://127.0.0.1:8787  (POST /v1/chat/completions | /v1/messages, Authorization: Bearer vk_...)
+....
+
+[start=2] .Startup environment
+|===
+| Variable | Default | Effect
+
+| `SANDHI_BIND`
+| `127.0.0.1:8787`
+| Listen socket. Must parse as a `SocketAddr`.
+
+| `SANDHI_STORE`
+| _(unset → in-memory)_
+| SQLite path. When set, metering + vkeys + budgets + the enforcement ledger are **durable and crash-safe**; survive a restart.
+
+| `SANDHI_ADMIN_TOKEN`
+| _(unset → admin API disabled)_
+| The admin bearer. **Setting it enables `/admin/*`** and (by default) gates `/dashboard` and `/metrics`.
+
+| `SANDHI_PUBLIC_URL`
+| `http://localhost:8787`
+| Externally-reachable URL returned to callers when a vkey is minted.
+
+| `SANDHI_VAULT_BACKEND`
+| `keyring`
+| Secret backend: `keyring` (OS keychain) or `sentinelpass` (SentinelPass daemon). Unknown → `keyring`.
+
+| `SANDHI_DASHBOARD_PUBLIC`
+| _(unset → false)_
+| Set to exactly `1` to open `/dashboard` + `/metrics` without the admin token.
+
+| `SANDHI_ERROR_DETAIL`
+| _(unset → redacted)_
+| Set to exactly `full` to surface full upstream errors to clients. Default redacts to code/status/request-id; server logs always carry the full error.
+
+| `SANDHI_LOG` (or `RUST_LOG`)
+| `sandhi_proxy=info,…`
+| tracing filter; logs go to stderr.
+|===
+
+[IMPORTANT]
+====
+Without `SANDHI_ADMIN_TOKEN`, every `/admin/*` call returns **403** and you cannot provision
+keys. Set it now — steps 2–4 depend on it.
+====
+
+[CAUTION]
+====
+The proxy serves **plain HTTP only** (no built-in TLS). The virtual key is a bearer token
+sent in cleartext, so terminate TLS in front of it (a reverse proxy / load balancer) for
+anything beyond localhost.
+====
+
+
+== Step 2 — register the real upstream credential
+
+In a second shell, use the `sandhi` operator CLI (a thin client to the admin API):
+
+[source,bash]
+----
+# Pipe the secret via stdin so it never appears in shell history:
+printf '%s' 'sk-ant-xxxxxxxx' | cargo run -p sandhi-proxy --bin sandhi -- \
+  --admin-token admin-secret \
+  keys add anthropic default --base-url https://api.anthropic.com
+----
+
+This stores the key in the vault under credential id **`anthropic:default`** and caches a
+`ProviderHandle` (key + base URL baked in) ready to serve.
+
+`keys add` reference:
+[cols="1,3"]
+|===
+| `keys add <provider> [label]` | Registers `provider:label`. `label` defaults to `default`.
+| `--base-url <URL>` | Upstream API base. Optional — per-provider defaults apply (e.g. `https://api.anthropic.com`).
+| `--secret <SECRET>` | The real key. Omit and pipe one line via stdin to keep it out of history.
+| `--scheme api-key\|bearer\|oauth` | Credential scheme. Optional — inferred from the provider.
+|===
+
+[TIP]
+====
+`keys list` shows registered credentials; `keys revoke <provider> <label>` removes one.
+====
+
+
+== Step 3 — mint a virtual key
+
+[source,bash]
+----
+cargo run -p sandhi-proxy --bin sandhi -- --admin-token admin-secret \
+  keys share anthropic:default \
+    --subject alice --group platform \
+    --budget group:platform \
+    --models "claude-sonnet-5,claude-haiku-4-5" \
+    --rate 60
+----
+
+The response prints the plaintext key **once**:
+
+[source,json]
+----
+{
+  "virtual_key": "vk_3Kp9...mQ",        // <-- COPY NOW; irretrievable afterwards
+  "id": "key_01HK...",
+  "upstream_ref": "anthropic:default",
+  "endpoint": "http://localhost:8787/v1/messages",
+  "auth": "Authorization: Bearer vk_3Kp9...mQ"
+}
+----
+
+`keys share` reference:
+[cols="1,3"]
+|===
+| `--subject <id>` | Who this key attributes spend to.
+| `--group <id>` | Team; budgets pool at the group when set.
+| `--budget <scope>` | Budget scope to bind (e.g. `group:platform` or `vk:<id>`).
+| `--models "a,b"` | Comma-separated **model allowlist**; calls for other models are refused.
+| `--rate <n>` | Per-minute request limit for this key.
+| `--expires <RFC3339>` | Optional expiry; expired keys are rejected at resolve time.
+|===
+
+[WARNING]
+====
+The virtual key is shown **only at mint time**. Sandhi stores a SHA-256 hash, not the
+plaintext — if you lose it, `vkeys revoke <id>` the old one and mint a new one.
+====
+
+[NOTE]
+====
+Per-minute rate limits are held **in-memory**. With N proxy replicas the effective limit is
+N × the configured value (a shared/HA ledger backend is the planned follow-up).
+====
+
+
+== Step 4 — set a budget
+
+[source,bash]
+----
+cargo run -p sandhi-proxy --bin sandhi -- --admin-token admin-secret \
+  budget set group:platform 1000000 --window monthly --policy block --alert 80 --alert 100
+----
+
+* `--window total|daily|monthly` — spend is measured over calendar-aligned windows.
+* `--policy block|warn` — `block` refuses calls past the cap; `warn` is a soft cap that
+  admits over the limit but still tracks spend (for alerts).
+* `--alert <pct>` — repeatable; each value creates a log-channel alert rule at that % of the limit.
+
+Inspect with `budget list`, `budget usage group:platform`.
+
+
+== Step 5 — sanity-check the proxy directly
+
+Before wiring up a client, confirm the resolve → forward → meter loop with one call:
+
+[source,bash]
+----
+curl -sS http://localhost:8787/v1/messages \
+  -H 'Content-Type: application/json' \
+  -H 'anthropic-version: 2023-06-01' \
+  -H 'x-api-key: vk_3Kp9...mQ' \
+  -d '{"model":"claude-sonnet-5","max_tokens":64,"messages":[{"role":"user","content":"Say hi in one word."}]}'
+----
+
+[NOTE]
+====
+`/v1/messages` accepts `x-api-key: <vk>` (native Anthropic) **or** `Authorization: Bearer <vk>`.
+For an OpenAI upstream, use `/v1/chat/completions` with `Authorization: Bearer <vk>` only.
+The model string must be one the upstream accepts (and, if you set `--models`, one on the allowlist).
+====
+
+
+== Step 6 — point a client at Sandhi
+
+=== Option A: any vendor SDK (drop-in)
+
+Change the base URL and the key — nothing else. The proxy speaks the vendor dialect.
+
+[source,python]
+----
+import anthropic, openai
+
+claude = anthropic.Anthropic(
+    base_url="http://localhost:8787",          # the proxy
+    api_key="vk_3Kp9...mQ",                    # the virtual key, not the real one
+)
+
+gpt = openai.OpenAI(
+    base_url="http://localhost:8787/v1",
+    api_key="vk_3Kp9...mQ",
+)
+----
+
+=== Option B: Victor (the dedicated gateway block)
+
+Victor has a first-class gateway mode (TD-0003 P3). In `~/.victor/profiles.yaml`:
+
+[source,yaml]
+----
+providers:
+  anthropic:
+    gateway:
+      url: http://localhost:8787          # the Sandhi proxy
+      virtual_key: vk_3Kp9...mQ           # from Step 3
+  # openai:                                # same shape for an OpenAI upstream
+  #   gateway:
+  #     url: http://localhost:8787
+  #     virtual_key: vk_3Kp9...mQ
+----
+
+This builds the Sandhi FFI handle with `base_url=proxy`, `api_key=virtual_key`, and
+**`auth_scheme=bearer`**, so Victor presents the virtual key as a bearer token in the right
+dialect. Then run Victor normally (chat / TUI / API) — Anthropic calls route through Sandhi.
+
+[cols="2,1,5"]
+|===
+| Virtual key via | Works? | Notes
+
+| config file (`virtual_key:`)
+| ✓
+| Recommended.
+
+| env `SANDHI_GATEWAY_VIRTUAL_KEY`
+| ✓
+| Fallback for any provider.
+
+| env `SANDHI_GATEWAY_VIRTUAL_KEY_<PROVIDER>`
+| ✓
+| Per-provider override.
+
+| env for the gateway *URL*
+| ✗
+| The URL has **no env fallback** — it must be in config.
+|===
+
+[CAUTION]
+====
+**Do not double-meter.** In proxy mode, Sandhi meters every call in-path. Victor's separate
+in-process `SandhiMeter` bridge is default-**off** (`usage_gateway.enabled` defaults to
+`false`) — leave it off. Turning it on counts the same tokens twice.
+====
+
+[NOTE]
+====
+This is *not* `victor gateway serve`. That command makes **Victor** the gateway (a different
+binary, port 8600). Here Victor is the *client* of Sandhi; only the `providers.<name>.gateway`
+block is involved.
+====
+
+
+== Step 7 — observe the metering
+
+[source,bash]
+----
+# Spend attributed per subject
+cargo run -p sandhi-proxy --bin sandhi -- --admin-token admin-secret usage --by subject
+
+# Budget burn-down for a scope
+cargo run -p sandhi-proxy --bin sandhi -- --admin-token admin-secret budget usage group:platform
+
+# Masked virtual-key inventory
+cargo run -p sandhi-proxy --bin sandhi -- --admin-token admin-secret vkeys list
+----
+
+* **Dashboard:** `http://localhost:8787/dashboard` — requires `Authorization: Bearer admin-secret`
+  unless `SANDHI_DASHBOARD_PUBLIC=1`. Values are masked.
+* **Metrics:** `GET /metrics` (Prometheus text), gated the same way. See the README's
+  _Operating it_ for the four alerts worth wiring.
+
+
+== The request lifecycle
+
+What happens to one call, end to end:
+
+[literal]
+....
+  admit            decode               forward              meter              reconcile
+  -----            ------               -------              -----              ----------
+  resolve vk   ->  reserve a       ->   ingress dialect  ->  upstream        -> UsageEvent  -> settle the
+  (hash match)     ceiling (lease)      -> ChatRequestV1      (real key,          (tokens +     lease against
+  check budget                          -> re-encode to       held server-       cache split,   the real billable;
+  check allowlist                       upstream family       side)              attribution)   overshoot is
+  check rate-limit                                                                                   counted, not lost
+....
+
+[NOTE]
+====
+The **reserve ceiling is an admission control, not a cap on the settled total**. A provider
+can legitimately report more than was reserved (e.g. a large cache read announced before any
+content); Sandhi settles the *real* measured usage and counts the overshoot as a metric
+(`sandhi_settle_overshoot_total`) so ceilings can be tuned — it never silently discards a
+real measurement.
+====
+
+
+== The two planes (why byte-exact matters)
+
+[literal]
+....
+  Is the ingress dialect the same family as the upstream?
+        |  YES                                  |  NO (cross-family)
+        v                                       v
+  TRANSPARENT plane                        TRANSLATION plane
+  bytes forwarded verbatim                 decode -> ChatRequestV1 -> re-encode
+  provider extras survive                  (e.g. /v1/messages -> OpenAI upstream)
+  (Anthropic cache_control, etc.)          standard fields preserved; extras can drop
+  metered as the stream passes             faithful for common requests, lossy for vendor extras
+....
+
+Pick an upstream that **matches the client's dialect** when you need byte-exact forwarding
+of provider-specific fields (prompt-cache breakpoints, vendor params).
+
+
+== Reference
+
+=== Client ingress and authentication
+
+[cols="1,2,2"]
+|===
+| Route | Dialect | Client auth (the virtual key)
+
+| `POST /v1/chat/completions`
+| OpenAI Chat
+| `Authorization: Bearer vk_…` (only)
+
+| `POST /v1/responses`
+| OpenAI Responses
+| `Authorization: Bearer vk_…` (only)
+
+| `POST /v1/messages`
+| Anthropic Messages
+| `x-api-key: vk_…` (native) *or* `Authorization: Bearer vk_…`
+
+| `POST /v1beta/models/{m}:generateContent`
+| Gemini
+| `x-goog-api-key: vk_…` *or* `Authorization: Bearer vk_…` (the `?key=` query form is refused)
+|===
+
+[NOTE]
+====
+There is **no Gemini/Cohere ingress** yet — those two are reachable as *upstreams only*,
+always via the translation plane. Cohere/Ollama likewise have no ingress dialect.
+====
+
+=== Operator CLI (`sandhi`) command map
+
+[cols="1,3"]
+|===
+| `keys add <provider> [label]` | Register a real upstream credential.
+| `keys list` / `keys revoke <provider> <label>` | Inventory / remove credentials.
+| `keys share <provider:label> …` | Mint a virtual key.
+| `vkeys list` / `vkeys revoke <id>` | Inventory / revoke virtual keys.
+| `budget set <scope> <tokens>` / `budget list` / `budget usage <scope>` | Budgets.
+| `usage [--by subject\|group\|provider\|model\|key\|virtual_key\|session]` | Attribution aggregates.
+| `alerts list` / `alerts ack <id>` | Alert rules (creation is via `budget set --alert` or `POST /admin/alerts`).
+|===
+
+Global CLI options: `--admin-url` (default `http://localhost:8787`) and `--admin-token`
+(required; also read from `SANDHI_ADMIN_TOKEN`).
+
+=== Admin HTTP API
+
+Every CLI command maps 1:1 onto a call under `/admin/*` (all require the admin bearer):
+
+[cols="2,3"]
+|===
+| Endpoint | Purpose
+| `POST /admin/keys` | Add credential `{provider, label?, base_url?, scheme?, secret}`.
+| `GET /admin/keys` / `DELETE /admin/keys/{p}/{label}` | List / revoke credentials.
+| `POST /admin/keys/share` | Mint vkey `{upstream, subject?, group?, models?, budget_scope?, expires_at?, rate_limit_per_min?}`.
+| `GET /admin/keys/virtual` / `DELETE /admin/vkeys/{id}` | List / revoke virtual keys.
+| `POST /admin/budget` / `GET /admin/budget` / `GET /admin/budget/usage?scope=` | Budget CRUD + spend.
+| `GET /admin/usage?by=&since=` | Attribution query.
+| `POST /admin/alerts` / `GET /admin/alerts` / `…/{id}/ack` / `DELETE …/{id}` | Alert rules.
+|===
+
+
+== Troubleshooting
+
+[cols="1,3"]
+|===
+| Symptom | Cause / fix
+
+| `/admin/*` returns 403
+| `SANDHI_ADMIN_TOKEN` not set on the server (Step 1), or the CLI/curl lacks `--admin-token` / `Authorization: Bearer`.
+
+| Client gets 401 / "invalid or missing virtual key"
+| Wrong/expired vkey, or wrong header for the dialect (see the auth table). `vkeys revoke` + re-mint if lost.
+
+| "no upstream registered for this key"
+| The vkey's `upstream_ref` (`provider:label`) has no matching credential. `keys add` it, or share the correct `provider:label`.
+
+| Calls for a model are refused
+| `--models` allowlist on the vkey. Re-mint with the model included, or drop the allowlist.
+
+| Spend looks doubled
+| You turned on Victor's in-process metering (`usage_gateway.enabled`). Leave it off in proxy mode.
+
+| Budget spend survives a restart at 0
+| `SANDHI_STORE` was unset — metering was in-memory. Set it (Step 1).
+|===
+
+[NOTE]
+====
+**Contract version skew:** a proxy built from current `develop` speaks contract `5`; the
+Victor-installed `sandhi-gateway` wheel may be `0.1.4` (contract `4`). The additive ratchet
+means they interoperate, but the version handshake is *inert* on the older wheel (it won't
+detect drift). Match versions at a release for a live handshake.
+====
+
+[NOTE]
+====
+Client-facing errors are **redacted by default** (code + status + request id). Set
+`SANDHI_ERROR_DETAIL=full` to opt into the full upstream body on the client side; server logs
+always carry the full error regardless.
+====
+
+
+== Security notes
+
+* The **real upstream key never leaves the proxy** — it lives in the vault and is rehydrated
+  into an in-memory `ProviderHandle` at startup. Clients hold only their virtual key.
+* **Terminate TLS in front of the proxy** — the proxy itself is plaintext HTTP.
+* **Gate the dashboard/metrics** with `SANDHI_ADMIN_TOKEN`; open them only behind a firewall
+  or with `SANDHI_DASHBOARD_PUBLIC=1` (values are still masked).
+* **Rotate by revoking** — `keys revoke` (credential) and `vkeys revoke` (per-user) are
+  immediate; mint replacements with `keys add` / `keys share`.

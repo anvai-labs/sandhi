@@ -154,6 +154,10 @@ pricing).
 
 ## Operating it
 
+**Operator guide.** For the full step-by-step — launching the proxy, registering the real
+upstream key, minting virtual keys, setting budgets, and pointing a client (Victor or any
+vendor SDK) at it — see [`docs/operator/proxy-guide.adoc`](docs/operator/proxy-guide.adoc).
+
 **Logs.** `SANDHI_LOG` (or `RUST_LOG`) filters; output goes to stderr. The default keeps the
 operator-relevant events — reservation denials, fail-open admissions, lease reclaims, settle
 failures — without per-request chatter. `SANDHI_LOG=debug` adds plane selection per call.
