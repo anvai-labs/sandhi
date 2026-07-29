@@ -163,10 +163,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: cargo-deny advisories (known vulnerabilities + yanked crates)
+        # cargo-deny-action@v2 composes `cargo-deny <arguments> <command> <command-arguments>`,
+        # so the check-target (advisories) goes in `command-arguments`, NOT `arguments` — putting it
+        # in `arguments` yields `cargo-deny advisories check`, which clap rejects ("unrecognized
+        # subcommand 'advisories'"). `command` defaults to `check`; left explicit for readability.
         uses: embarkstudios/cargo-deny-action@v2
         with:
           command: check
-          arguments: advisories
+          command-arguments: advisories
       - name: dependency review (new vulnerable deps introduced by this PR)
         if: ${{ github.event_name == 'pull_request' }}
         uses: actions/dependency-review-action@v4
