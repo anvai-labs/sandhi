@@ -1,6 +1,13 @@
 # Dependabot — keeps Cargo deps + GitHub Actions current against `develop`. PR titles are
 # prefixed `chore:` so they satisfy the conventional-commit title gate (ci.yml `lint-title`)
 # and can flow through the same autonomous-merge path as any other PR.
+#
+# Tuned to cut noise (a first-run flood of 10 PRs, 9 of them breaking majors, taught us this):
+#   - Cargo minor/patch updates are GROUPED into one PR (not one-per-crate).
+#   - Cargo MAJOR bumps are IGNORED — they are breaking (getrandom/schemars/rusqlite/axum/…)
+#     and need deliberate upgrade work, so they should not auto-PR. Bump them by hand when ready.
+#   - GitHub Actions updates are GROUPED into one PR.
+# `ignore`/`groups` only affect future runs; already-open PRs are closed/triaged separately.
 version: 2
 updates:
   - package-ecosystem: "cargo"
@@ -13,6 +20,14 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
+    groups:
+      cargo:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    ignore:
+      # Breaking majors are real upgrade work, not autobot fodder.
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
@@ -23,3 +38,6 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
+    groups:
+      github-actions:
+        patterns: ["*"]
