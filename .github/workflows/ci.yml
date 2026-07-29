@@ -90,9 +90,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: usage-event schema is valid JSON Schema
-        run: |
-          python3 -c "import json; json.load(open('schemas/usage-event.v1.schema.json')); print('schema OK')"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install check-jsonschema
+      - name: every shipped schema is valid JSON Schema (against its declared $schema metaschema)
+        # Previously this only json.load-ed usage-event.v1. Now every schemas/*.v*.schema.json is
+        # validated against its own declared metaschema — so a hand-edited or regenerated schema
+        # that drifts from the spec fails here, not at a downstream consumer.
+        run: check-jsonschema --check-metaschema schemas/*.v1.schema.json schemas/*.v2.schema.json
 
   python-binding:
     needs: changes
@@ -144,6 +150,54 @@ jobs:
             python3 scripts/check_no_agent_attribution.py \
               --range "${{ github.event.before }}..${{ github.sha }}"
           fi
+
+  security:
+    # Security/dependency gate — Sandhi previously had none. `cargo deny check advisories`
+    # fails on known vulnerabilities + yanked crates (deny.toml). Runs whenever Rust deps/code
+    # change (the `rust` filter includes Cargo.lock/Cargo.toml); dependabot covers new advisories
+    # against unchanged deps via its own PRs.
+    #
+    # `actions/dependency-review-action` (per-PR diff of newly-introduced vulns) is deliberately
+    # NOT here yet: it needs the repo Dependency graph enabled, which is a governance setting
+    # (see Phase 2). cargo-deny advisories already covers vuln-detection across the whole tree,
+    # so dependency-review is a fast-follow once the dependency graph is turned on, not a blocker.
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: cargo-deny advisories (known vulnerabilities + yanked crates)
+        # cargo-deny-action@v2 composes `cargo-deny <arguments> <command> <command-arguments>`,
+        # so the check-target (advisories) goes in `command-arguments`, NOT `arguments` — putting it
+        # in `arguments` yields `cargo-deny advisories check`, which clap rejects ("unrecognized
+        # subcommand 'advisories'"). `command` defaults to `check`; left explicit for readability.
+        uses: embarkstudios/cargo-deny-action@v2
+        with:
+          command: check
+          command-arguments: advisories
+
+  lint-title:
+    # Conventional-commit PR title gate. Dependabot PRs are prefixed `chore:`
+    # (.github/dependabot.yml) so they pass too. PR-only (the action errors on push events).
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          requireScope: false
+          types: |
+            feat
+            fix
+            perf
+            refactor
+            docs
+            test
+            ci
+            chore
+            build
+            revert
 
   node-binding:
     needs: changes
@@ -234,7 +288,7 @@ jobs:
     name: CI Success
     runs-on: ubuntu-latest
     if: ${{ always() }}
-    needs: [changes, rust, schema, python-binding, node-binding, attribution, coverage, codegen-drift, sdk-conformance]
+    needs: [changes, rust, schema, python-binding, node-binding, attribution, coverage, codegen-drift, sdk-conformance, security, lint-title]
     steps:
       - name: Verify no required job failed (skipped is OK for docs-only)
         env:
