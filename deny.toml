@@ -1,0 +1,14 @@
+# cargo-deny configuration. CI runs `cargo deny check advisories` (see .github/workflows/ci.yml
+# `security` job) — the security value: fail on known vulnerabilities and yanked crates.
+#
+# Scoped to advisories only for the first pass. License / bans / sources enforcement is a
+# follow-up once the allowlists are tuned — a strict license allowlist is high false-positive
+# across a transitive tree and is not the security goal of this gate.
+[advisories]
+version = 2
+# Fail the build only on real exploits and yanked crates.
+vulnerability = "deny"
+yanked = "deny"
+# `unmaintained` advisories (e.g. `paste`, `instant`) are noisy and not exploits — ignored for
+# now so the gate catches vulnerabilities without churning the tree. Tighten to "workspace" later.
+unmaintained = "none"

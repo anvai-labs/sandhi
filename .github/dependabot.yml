@@ -1,0 +1,25 @@
+# Dependabot — keeps Cargo deps + GitHub Actions current against `develop`. PR titles are
+# prefixed `chore:` so they satisfy the conventional-commit title gate (ci.yml `lint-title`)
+# and can flow through the same autonomous-merge path as any other PR.
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    target-branch: "develop"
+    open-pull-requests-limit: 5
+    labels: ["dependencies"]
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    target-branch: "develop"
+    open-pull-requests-limit: 5
+    labels: ["dependencies"]
+    commit-message:
+      prefix: "chore"
+      include: "scope"
