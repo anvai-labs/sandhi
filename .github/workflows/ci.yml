@@ -153,10 +153,14 @@ jobs:
 
   security:
     # Security/dependency gate — Sandhi previously had none. `cargo deny check advisories`
-    # fails on known vulnerabilities + yanked crates (deny.toml); dependency-review fails if
-    # this PR introduces a dep with a known GitHub-advisory vuln. Runs whenever Rust deps/code
+    # fails on known vulnerabilities + yanked crates (deny.toml). Runs whenever Rust deps/code
     # change (the `rust` filter includes Cargo.lock/Cargo.toml); dependabot covers new advisories
     # against unchanged deps via its own PRs.
+    #
+    # `actions/dependency-review-action` (per-PR diff of newly-introduced vulns) is deliberately
+    # NOT here yet: it needs the repo Dependency graph enabled, which is a governance setting
+    # (see Phase 2). cargo-deny advisories already covers vuln-detection across the whole tree,
+    # so dependency-review is a fast-follow once the dependency graph is turned on, not a blocker.
     needs: changes
     if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
@@ -171,9 +175,6 @@ jobs:
         with:
           command: check
           command-arguments: advisories
-      - name: dependency review (new vulnerable deps introduced by this PR)
-        if: ${{ github.event_name == 'pull_request' }}
-        uses: actions/dependency-review-action@v4
 
   lint-title:
     # Conventional-commit PR title gate. Dependabot PRs are prefixed `chore:`
