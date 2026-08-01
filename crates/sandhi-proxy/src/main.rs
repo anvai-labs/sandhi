@@ -38,6 +38,17 @@ async fn main() {
         .with_writer(std::io::stderr)
         .init();
 
+    // Scope 5 (TD-0011 P3): OTLP export of gen_ai.* spans + metrics. `init()` returns None unless
+    // the `otel-otlp` feature is compiled in AND `SANDHI_OTEL_EXPORT=otlp` is set — so the default
+    // build is unaffected. The guard must outlive `serve()` so the OTel providers flush on shutdown.
+    let (otel_recorder, _otel_guard) = sandhi_proxy::otel::init().unzip();
+    if otel_recorder.is_some() {
+        eprintln!(
+            "sandhi-proxy: OTLP export ON — gen_ai.* spans + metrics to {} (feature `otel-otlp`, TD-0011 P3)",
+            std::env::var("SANDHI_OTEL_ENDPOINT").unwrap_or_else(|_| "http://localhost:4318".into())
+        );
+    }
+
     let runtime = ProviderRuntime::new();
     let keys = KeyStore::new();
     let mut providers: HashMap<String, ProviderHandle> = HashMap::new();
@@ -218,6 +229,9 @@ async fn main() {
         let ledger = state.ledger.lock().expect("ledger poisoned");
         rehydrate_budgets(&ledger, &state.budgets);
     }
+    // Scope 5: attach the OTLP recorder (None unless feature-on + configured). The `_otel_guard`
+    // captured above flushes the providers when main returns.
+    state.otel = otel_recorder;
     let state = Arc::new(state);
 
     // ADR-0005 D2: reclaim leases left dangling by a crash on a timer, so an abandoned scope's

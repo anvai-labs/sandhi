@@ -83,6 +83,18 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo build --workspace --all-targets
       - run: cargo test --workspace
+      # Scope 5 (TD-0011 P3): the `otel-otlp` feature is default-off. Verify it builds, clippy-
+      # cleans, and tests when opted in — and that the default build stays free of the
+      # OpenTelemetry dependency tree (TD-0011 D1/D4: the feature must not move the default graph).
+      - run: cargo clippy -p sandhi-proxy --features otel-otlp --all-targets -- -D warnings
+      - run: cargo test -p sandhi-proxy --features otel-otlp
+      - name: default build excludes the OTel dependency tree
+        run: |
+          cargo build -p sandhi-proxy
+          if cargo tree -p sandhi-proxy -e no-dev | grep -q opentelemetry; then
+            echo "opentelemetry leaked into the default build — the otel-otlp feature must be default-off"
+            exit 1
+          fi
 
   schema:
     needs: changes
