@@ -190,6 +190,47 @@ The four alerts worth having, in the order they will save you:
 A sustained `sandhi_leases_reclaimed_total` is worth watching too: reclaims are normal after a
 restart, but a steady trickle means leases are leaking rather than settling.
 
+**Tracing / OTLP (opt-in).** When you would rather push to a collector than scrape `/metrics`,
+build the proxy with the `otel-otlp` cargo feature and point it at an OTLP/HTTP receiver (TD-0011
+P3). It exports the OpenTelemetry GenAI semantic conventions — one `gen_ai` operation span per
+chat call (input / output / cache-creation / cache-read / reasoning tokens, provider, model) plus
+the `gen_ai.client.token.usage`, `gen_ai.client.operation.duration`, and
+`gen_ai.server.time_to_first_token` metrics. It layers *beside* `/metrics`; both can run at once.
+
+```shell
+# the feature is default-off (it pulls the OpenTelemetry stack), so opt in at build time
+cargo build -p sandhi-proxy --features otel-otlp
+
+# run it pointed at a collector's OTLP/HTTP receiver
+SANDHI_OTEL_EXPORT=otlp \
+SANDHI_OTEL_ENDPOINT=http://otelcol:4318 \
+SANDHI_STORE=usage.db \
+  cargo run -p sandhi-proxy --features otel-otlp --bin sandhi-proxy
+```
+
+| env | default | purpose |
+|---|---|---|
+| `SANDHI_OTEL_EXPORT` | _unset_ | set to exactly `otlp` to enable; unset behaves identically to the default build |
+| `SANDHI_OTEL_ENDPOINT` | `http://localhost:4318` | OTLP base URL (the exporter appends `/v1/traces` and `/v1/metrics`) |
+| `SANDHI_OTEL_PROTOCOL` | `http/protobuf` | `http/protobuf` (binary) or `http/json` |
+
+The attribution boundary is the same as `/metrics`, applied to *exported* spans and metrics: they
+carry `gen_ai.system` / `gen_ai.request.model` / `gen_ai.operation.name` and the token counts, but
+**never** `subject_id` / `group_id` / `session_id` / `virtual_key_id` / `request_id` (those stay in
+the usage aggregate), and never a cost. A minimal collector that receives them:
+
+```yaml
+receivers:
+  otlp:
+    protocols: { http: { endpoint: 0.0.0.0:4318 } }
+exporters:
+  debug: {}        # swap for otlphttp / prometheusremotewrite / your backend
+service:
+  pipelines:
+    traces:  { receivers: [otlp], exporters: [debug] }
+    metrics: { receivers: [otlp], exporters: [debug] }
+```
+
 ## Tests & coverage
 
 ```
