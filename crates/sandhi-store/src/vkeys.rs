@@ -283,6 +283,29 @@ mod tests {
     }
 
     #[test]
+    fn minted_secret_has_min_128_bits_of_entropy() {
+        // A virtual-key secret is a LOOKUP INDEX, not a password (see `hash_secret`): its security
+        // rests on being unguessable, so 128 bits of OS CSPRNG entropy is the floor. If this ever
+        // drops, the unsalted-SHA-256 lookup becomes brute-forceable and the whole vault design
+        // must be revisited — this test fails loudly before that happens.
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..64 {
+            let s = generate_secret();
+            assert!(s.starts_with("vk_"), "secret is vk_-prefixed: {s}");
+            let hex = &s["vk_".len()..];
+            assert_eq!(hex.len(), 32, "secret carries 128 bits (32 hex chars): {s}");
+            assert!(
+                hex.bytes().all(|b| b.is_ascii_hexdigit()),
+                "secret suffix is lowercase hex: {s}"
+            );
+            assert!(
+                seen.insert(s.clone()),
+                "secrets must not repeat (CSPRNG): {s}"
+            );
+        }
+    }
+
+    #[test]
     fn mint_then_present_resolves_with_scope() {
         let store = VirtualKeyStore::in_memory().unwrap();
         let minted = store.mint(req("anthropic:default")).unwrap();
