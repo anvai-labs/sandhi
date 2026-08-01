@@ -138,6 +138,10 @@ sandhi-proxy listening on http://127.0.0.1:8787  (POST /v1/chat/completions | /v
 | `SANDHI_LOG` (or `RUST_LOG`)
 | `sandhi_proxy=info,…`
 | tracing filter; logs go to stderr.
+
+| `SANDHI_OTEL_EXPORT`
+| _(unset → off)_
+| OTLP export (TD-0011 P3, requires the `otel-otlp` cargo feature). Set to exactly `otlp` to push `gen_ai.*` spans + metrics to a collector; unset behaves like the default build. See also `SANDHI_OTEL_ENDPOINT` / `SANDHI_OTEL_PROTOCOL` (default `http://localhost:4318` / `http/protobuf`).
 |===
 
 [IMPORTANT]
