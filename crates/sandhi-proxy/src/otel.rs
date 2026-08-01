@@ -27,14 +27,14 @@
 //!
 //! Only neutral units are exported. `gen_ai.*.cost.*` is deliberately **never** emitted.
 
-use sandhi_core::UsageV2;
+use sandhi_core::{FinishReasonV1, UsageV2};
 
 #[cfg(not(feature = "otel-otlp"))]
 mod disabled {
     //! Default-build stubs. The recorder is never constructed (`ProxyState::new` sets
     //! `otel: None`), but the types must exist so `lib.rs`'s unconditional call sites compile
     //! identically whether or not the feature is on.
-    use super::UsageV2;
+    use super::{FinishReasonV1, UsageV2};
     use std::sync::Arc;
 
     #[derive(Clone, Default)]
@@ -55,6 +55,7 @@ mod disabled {
             _system: &str,
             _model: &str,
             _usage: &UsageV2,
+            _finish_reason: Option<FinishReasonV1>,
         ) {
         }
     }
@@ -67,15 +68,28 @@ mod disabled {
 
 #[cfg(feature = "otel-otlp")]
 mod enabled {
-    use super::UsageV2;
+    use super::{FinishReasonV1, UsageV2};
     use opentelemetry::metrics::{Counter, Histogram, Meter, MeterProvider as _};
     use opentelemetry::trace::{Span as _, SpanBuilder, SpanKind, TracerProvider as _};
-    use opentelemetry::KeyValue;
+    use opentelemetry::{Array, KeyValue, Value};
     use opentelemetry_otlp::{MetricExporter, Protocol, SpanExporter, WithExportConfig};
     use opentelemetry_sdk::metrics::SdkMeterProvider;
     use opentelemetry_sdk::trace::{SdkTracer, SdkTracerProvider};
     use opentelemetry_sdk::Resource;
     use std::sync::Arc;
+
+    /// `FinishReasonV1` → the `gen_ai.response.finish_reasons` element. The names match the enum's
+    /// `#[serde(rename_all = "snake_case")]` and the OTel GenAI semconv recommended values.
+    pub(crate) fn finish_reason_str(reason: FinishReasonV1) -> &'static str {
+        match reason {
+            FinishReasonV1::Stop => "stop",
+            FinishReasonV1::Length => "length",
+            FinishReasonV1::ToolCalls => "tool_calls",
+            FinishReasonV1::ContentFilter => "content_filter",
+            FinishReasonV1::FunctionCall => "function_call",
+            FinishReasonV1::Unknown => "unknown",
+        }
+    }
 
     /// The only operation Sandhi proxies is chat completion.
     const OPERATION: &str = "chat";
@@ -209,8 +223,18 @@ mod enabled {
             system: &str,
             model: &str,
             usage: &UsageV2,
+            finish_reason: Option<FinishReasonV1>,
         ) {
             span.span.set_attributes(usage_attributes(usage, model));
+            // gen_ai.response.finish_reasons is a string[] (a response can carry more than one);
+            // Sandhi reports a single reason, so a one-element array. Typed-plane only — the
+            // transparent byte paths have no ChatResponseV1, so it stays unset there.
+            if let Some(reason) = finish_reason {
+                span.span.set_attribute(KeyValue::new(
+                    "gen_ai.response.finish_reasons",
+                    Value::Array(Array::String(vec![finish_reason_str(reason).into()])),
+                ));
+            }
 
             let base = metric_attrs(system);
             // gen_ai.client.token.usage — input/output only; the cache split has no metric home
@@ -335,13 +359,32 @@ pub use enabled::{init, OtelGuard, OtelRecorder, SpanHandle};
 
 #[cfg(all(test, feature = "otel-otlp"))]
 mod tests {
-    use super::enabled::{metric_attrs, usage_attributes, GenAiAttrs, OtelRecorder};
+    use super::enabled::{
+        finish_reason_str, metric_attrs, usage_attributes, GenAiAttrs, OtelRecorder,
+    };
     use opentelemetry::metrics::MeterProvider as _;
     use opentelemetry::trace::TracerProvider as _;
     use opentelemetry::KeyValue;
     use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
     use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
-    use sandhi_core::{UsageBasis, UsageCompleteness, UsageV2};
+    use sandhi_core::{FinishReasonV1, UsageBasis, UsageCompleteness, UsageV2};
+
+    #[test]
+    fn finish_reason_maps_to_semconv_snake_case() {
+        // Matches FinishReasonV1's serde rename_all = "snake_case" and the GenAI semconv values.
+        assert_eq!(finish_reason_str(FinishReasonV1::Stop), "stop");
+        assert_eq!(finish_reason_str(FinishReasonV1::Length), "length");
+        assert_eq!(finish_reason_str(FinishReasonV1::ToolCalls), "tool_calls");
+        assert_eq!(
+            finish_reason_str(FinishReasonV1::ContentFilter),
+            "content_filter"
+        );
+        assert_eq!(
+            finish_reason_str(FinishReasonV1::FunctionCall),
+            "function_call"
+        );
+        assert_eq!(finish_reason_str(FinishReasonV1::Unknown), "unknown");
+    }
 
     /// Every string that must never appear on an exported span or metric — as a key or a value.
     const FORBIDDEN: &[&str] = &[
@@ -473,7 +516,13 @@ mod tests {
         let recorder = OtelRecorder::new(meter, tracer);
 
         let mut span = recorder.start_span("openai", "gpt-x");
-        recorder.record_usage(&mut span, "openai", "gpt-x", &usage_full());
+        recorder.record_usage(
+            &mut span,
+            "openai",
+            "gpt-x",
+            &usage_full(),
+            Some(FinishReasonV1::Stop),
+        );
         // record_usage ends the span; the SimpleSpanProcessor exports synchronously on end. Read
         // before any shutdown — `SdkTracerProvider::shutdown` resets the in-memory exporter.
         drop(span);
@@ -510,7 +559,7 @@ mod tests {
         let recorder = OtelRecorder::new(meter, tracer);
 
         let mut span = recorder.start_span("anthropic", "claude-x");
-        recorder.record_usage(&mut span, "anthropic", "claude-x", &usage_full());
+        recorder.record_usage(&mut span, "anthropic", "claude-x", &usage_full(), None);
         drop(span);
         provider.force_flush().ok();
 
