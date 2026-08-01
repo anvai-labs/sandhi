@@ -1056,14 +1056,21 @@ struct GeminiRoute {
     stream: bool,
 }
 
-/// Rebuild an axum response from a raw upstream response: status + curated header allowlist + body
-/// bytes, forwarded verbatim (the transparent plane never re-serializes the response).
+/// Rebuild an axum response from a raw upstream response: status + the curated header allowlist +
+/// body bytes, forwarded verbatim (the transparent plane never re-serializes the response body).
+///
+/// The provider layer already filters headers at construction
+/// ([`filter_response_headers`][sandhi_providers::raw::filter_response_headers]); this enforces
+/// the **same** allowlist at the egress boundary too — defense-in-depth, so a `RawResponse` that
+/// one day bypassed that constructor still cannot surface a non-allowlisted header (an upstream
+/// `openai-organization`, `server`, or credential header) to a client.
 fn raw_response_to_axum(
     raw: sandhi_providers::raw::RawResponse,
     dialect: IngressDialect,
 ) -> Response {
+    let headers = sandhi_providers::raw::filter_response_headers(&raw.headers);
     let mut builder = Response::builder().status(raw.status);
-    for (name, value) in raw.headers.iter() {
+    for (name, value) in headers.iter() {
         builder = builder.header(name, value);
     }
     builder.body(Body::from(raw.body)).unwrap_or_else(|_| {
@@ -1882,6 +1889,54 @@ mod error_detail_tests {
                 .contains("call_9"),
             "full mode must forward the bounded body: {value}"
         );
+    }
+}
+
+#[cfg(test)]
+mod header_egress_tests {
+    use super::*;
+    use axum::http::{HeaderName, HeaderValue};
+    use bytes::Bytes;
+    use sandhi_providers::raw::RawResponse;
+
+    /// Build a `RawResponse` bypassing `filter_response_headers`, so the egress filter is what is
+    /// under test (not the provider-layer constructor).
+    fn raw_with(headers: &[(&str, &str)]) -> RawResponse {
+        let mut map = HeaderMap::new();
+        for (k, v) in headers {
+            map.insert(
+                HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        RawResponse {
+            status: 200,
+            body: Bytes::from_static(b"{}"),
+            headers: map,
+        }
+    }
+
+    #[test]
+    fn raw_response_enforces_allowlist_at_egress() {
+        // A RawResponse that bypassed the provider-layer filter still cannot leak a
+        // non-allowlisted header to the client (defense-in-depth at the egress boundary).
+        let raw = raw_with(&[
+            ("content-type", "application/json"), // allowlisted → forwarded
+            ("x-should-retry", "true"),           // allowlisted → forwarded
+            ("openai-organization", "org_x"),     // NOT allowlisted → stripped
+            ("server", "cloudflare"),             // NOT allowlisted → stripped
+            ("set-cookie", "session=secret"),     // NOT allowlisted → stripped
+        ]);
+        let resp = raw_response_to_axum(raw, IngressDialect::OpenAi);
+        let h = resp.headers();
+        assert_eq!(h.get("content-type").unwrap(), "application/json");
+        assert_eq!(h.get("x-should-retry").unwrap(), "true");
+        for leaked in ["openai-organization", "server", "set-cookie"] {
+            assert!(
+                h.get(leaked).is_none(),
+                "egress leaked upstream header {leaked}"
+            );
+        }
     }
 }
 
