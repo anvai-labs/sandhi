@@ -52,7 +52,14 @@ pub fn billable_parts(
     } else {
         0
     };
-    tokens_in + cache_creation_tokens + cache_read_tokens + tokens_out + unfolded_reasoning
+    // Saturate, never wrap: a malformed/adversarial upstream returning u64-near-MAX in any one
+    // dimension must not wrap the billable total to a small number (silently under-charging the
+    // budget and the durable aggregate). Mirrors `reserve`/`check`, which already saturate.
+    tokens_in
+        .saturating_add(cache_creation_tokens)
+        .saturating_add(cache_read_tokens)
+        .saturating_add(tokens_out)
+        .saturating_add(unfolded_reasoning)
 }
 
 /// The cost basis of a call's backend.
@@ -433,5 +440,19 @@ mod tests {
         assert_eq!(billable(&unfolded), 360);
         // Absent reasoning → no contribution.
         assert_eq!(billable(&usage(10, 100, 0, 0)), 110);
+    }
+
+    #[test]
+    fn billable_parts_saturates_instead_of_wrapping() {
+        // Four near-MAX dimensions summed with plain `+` overflow (debug panics, release wraps to
+        // a small number → silent under-charge). Saturating pins the total at u64::MAX.
+        assert_eq!(
+            billable_parts(u64::MAX / 2, u64::MAX / 2, u64::MAX / 2, u64::MAX / 2, 0),
+            u64::MAX
+        );
+        // Reasoning beyond tokens_out is added and saturates the same way.
+        assert_eq!(billable_parts(u64::MAX, 0, 0, 10, u64::MAX), u64::MAX);
+        // A single runaway dimension saturates rather than wrapping the rest away.
+        assert_eq!(billable_parts(u64::MAX, 1, 0, 0, 0), u64::MAX);
     }
 }
