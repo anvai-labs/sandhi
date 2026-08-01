@@ -556,31 +556,32 @@ impl Gateway {
         });
     }
 
-    /// Set a token budget on a scope (e.g. `group:platform`).
+    /// Set a token budget on a scope (e.g. `group:platform`). Exposed as a 64-bit `bigint` (napi
+    /// has no bare `u64`); negatives clamp to 0 — a budget is a non-negative token count.
     #[napi]
-    pub fn set_budget(&self, scope: String, tokens: u32) {
+    pub fn set_budget(&self, scope: String, tokens: i64) {
         self.inner
             .lock()
             .unwrap()
             .ledger
-            .set_limit(scope, Budget::tokens(u64::from(tokens)));
+            .set_limit(scope, Budget::tokens(tokens.max(0) as u64));
     }
 
     /// Would `add` more tokens be within the scope's budget?
     #[napi]
-    pub fn check_budget(&self, scope: String, add: u32) -> bool {
+    pub fn check_budget(&self, scope: String, add: i64) -> bool {
         self.inner
             .lock()
             .unwrap()
             .ledger
-            .check(&scope, u64::from(add))
+            .check(&scope, add.max(0) as u64)
             .is_ok()
     }
 
     /// Tokens spent so far on a scope.
     #[napi]
-    pub fn spent(&self, scope: String) -> u32 {
-        self.inner.lock().unwrap().ledger.spent(&scope) as u32
+    pub fn spent(&self, scope: String) -> i64 {
+        i64::try_from(self.inner.lock().unwrap().ledger.spent(&scope)).unwrap_or(i64::MAX)
     }
 
     /// Meter one completed call: parse usage from `responseJson` (built-in parser for `provider`),
