@@ -1,6 +1,6 @@
 # TD-0013: Streaming usage fidelity — settle what the provider reported, not what we guessed
 
-- **Status:** Draft (proposed) — 2026-07-28
+- **Status:** Accepted; P1–P4 implemented (interrupted streams now settle the provider's real per-category tokens rather than a zero/estimate) — 2026-07-28
 - **Relates to:** [ADR-0005](../adr/0005-enforcement-correctness-reservation-ledger-observe-enforce-split.md)
   D1 (whose settle-on-interruption mechanism this refines — no new ADR needed),
   [ADR-0004](../adr/0004-two-plane-proxy-and-enforcement-boundary.md) (the two planes this must fix

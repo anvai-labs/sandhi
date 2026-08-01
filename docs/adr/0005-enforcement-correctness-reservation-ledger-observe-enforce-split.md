@@ -4,7 +4,9 @@ Date: 2026-07-23
 
 ## Status
 
-Proposed. Refines [ADR-0004](0004-two-plane-proxy-and-enforcement-boundary.md) D3 (the
+Accepted (implemented — the lease ledger backs the proxy's enforcement: reserve → settle →
+reclaim, calendar windows, fail-open/closed; the shared/HA backend remains open in
+[TD-0007](../td/TD-0007-enforcement-ledger-backends.md)). Refines [ADR-0004](0004-two-plane-proxy-and-enforcement-boundary.md) D3 (the
 "durable, atomic, shared ledger") and the reserve-then-reconcile mechanism assumed across
 [TD-0003](../td/TD-0003-operator-surface-keys-budgets-attribution.md) and
 [TD-0005](../td/TD-0005-declarative-policy-engine.md). Records the design that survived a
