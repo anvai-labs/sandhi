@@ -11,6 +11,11 @@ pub mod metrics;
 pub mod operator;
 pub mod ratelimit;
 
+/// First-party OTel/OTLP export of `gen_ai.*` spans + metrics (Scope 5, TD-0011 P3). Feature-gated
+/// (`otel-otlp`, default off); provides no-op stubs when the feature is off so call sites compile
+/// identically either way.
+pub mod otel;
+
 // Re-export the admin API request/response types for the `sandhi` CLI client + the startup
 // rehydration helpers used by the `sandhi-proxy` binary.
 pub use ledger::{reclaim_sweep_at, Admission, ProxyLedger};
@@ -102,6 +107,10 @@ pub struct ProxyState {
     pub error_detail_full: bool,
     /// TD-0011 P2 metric registry, served at `/metrics` (gated like the dashboard).
     pub metrics: Arc<metrics::Metrics>,
+    /// Scope 5 (TD-0011 P3): OTLP export of `gen_ai.*` spans + metrics, when the `otel-otlp`
+    /// feature is compiled in **and** `SANDHI_OTEL_EXPORT=otlp` is set. `None` otherwise — the
+    /// default prerequisite-free `/metrics` path is unaffected. Built by `otel::init` in `main`.
+    pub otel: Option<Arc<otel::OtelRecorder>>,
     /// TD-0012 per-virtual-key request rate limiting. In-memory: with N replicas the effective
     /// limit is N × the configured value (D2).
     pub rate_limiter: Arc<ratelimit::RateLimiter>,
@@ -136,6 +145,7 @@ impl ProxyState {
             error_detail_full: false,
             metrics: Arc::new(metrics::Metrics::new()),
             rate_limiter: Arc::new(ratelimit::RateLimiter::new()),
+            otel: None,
         }
     }
 }
@@ -1243,6 +1253,11 @@ struct RequestAccounting {
     usage: Option<UsageV2>,
     outcome: &'static str,
     finalized: bool,
+    /// Scope 5 OTel recorder (a clone of `state.otel`); `None` when the feature is off or
+    /// unconfigured. Held per-call so finalize records without touching `state` again.
+    otel: Option<Arc<otel::OtelRecorder>>,
+    /// The gen_ai operation span opened at dispatch, closed (with usage attrs) in finalize.
+    otel_span: Option<otel::SpanHandle>,
 }
 
 impl RequestAccounting {
@@ -1255,6 +1270,16 @@ impl RequestAccounting {
         dialect: &'static str,
         plane: metrics::Plane,
     ) -> Self {
+        // Scope 5: open the gen_ai operation span at dispatch if OTel export is on. Request-time
+        // attributes only (system + request.model + operation); usage/response attrs are added when
+        // the span is closed in finalize. None of the attribute keys come from the request body.
+        let (otel, otel_span) = match state.otel.as_ref() {
+            Some(recorder) => (
+                Some(Arc::clone(recorder)),
+                Some(recorder.start_span(&provider, &request.model)),
+            ),
+            None => (None, None),
+        };
         Self {
             state,
             scope,
@@ -1267,6 +1292,8 @@ impl RequestAccounting {
             finalized: false,
             dialect,
             plane,
+            otel,
+            otel_span,
         }
     }
 
@@ -1383,6 +1410,12 @@ impl RequestAccounting {
                 ttft_ms: usage.time_to_first_token_ms,
             },
         );
+        // Scope 5 (TD-0011 P3): record the gen_ai span + metrics from the same settled usage, one
+        // OTel sample per logical call — the same single-emission discipline as `observe_call`.
+        // Best-effort like the metric path: OTel must never fail the request.
+        if let (Some(recorder), Some(span)) = (self.otel.as_ref(), self.otel_span.as_mut()) {
+            recorder.record_usage(span, &self.provider, &self.model, &usage);
+        }
         self.state.sink.emit(&usage_event(
             &self.provider,
             &self.model,
@@ -2095,5 +2128,111 @@ mod partial_accounting_tests {
         assert_eq!(parts.cache_creation_tokens, 33);
         assert_eq!(parts.cache_read_tokens, 44);
         assert_eq!(parts.reasoning_tokens, 55);
+    }
+}
+
+#[cfg(all(test, feature = "otel-otlp"))]
+mod otel_wiring_tests {
+    //! The chokepoint integration: a request whose metadata carries the full attribution set
+    //! (`subject_id`/`group_id`/`session_id`/`virtual_key_id`) flows through
+    //! `RequestAccounting::new` → `finalize`, and the exported gen_ai span carries the token
+    //! values but NONE of that attribution. This is the guarantee the recorder unit tests (in
+    //! `otel::tests`) cannot give alone — they drive the recorder in isolation, not through the
+    //! one path that actually has the attribution in hand.
+    use super::*;
+    use crate::metrics::Plane;
+    use crate::otel::OtelRecorder;
+    use opentelemetry::metrics::MeterProvider as _;
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_sdk::metrics::SdkMeterProvider;
+    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+    use sandhi_core::{InMemorySink, KeyStore, RequestMetadataV1, UsageCompleteness, UsageV2};
+
+    /// Strings that must never reach the exported span — both the forbidden attribute *keys* and
+    /// the actual attribution *values* present on this request's metadata.
+    const FORBIDDEN: &[&str] = &[
+        "subject_id",
+        "group_id",
+        "session_id",
+        "virtual_key_id",
+        "request_id",
+        "alice",
+        "platform",
+        "sess-42",
+        "vk_demo",
+        "cost",
+        "price",
+        "usd",
+    ];
+
+    #[test]
+    fn finalize_exports_genai_span_with_no_request_attribution() {
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        // A readerless meter is fine — this test inspects the span, not metrics (covered in
+        // `otel::tests`); the instruments just no-op.
+        let meter = SdkMeterProvider::builder().build().meter("test");
+        let recorder = Arc::new(OtelRecorder::new(meter, provider.tracer("test")));
+
+        let mut state = ProxyState::new(
+            KeyStore::new(),
+            ProxyLedger::in_memory(),
+            Arc::new(InMemorySink::new()),
+            HashMap::new(),
+            None,
+        );
+        state.otel = Some(recorder);
+        let state = Arc::new(state);
+
+        // A request whose metadata carries the full attribution set — exactly what must NEVER
+        // reach the exported span.
+        let mut request: ChatRequestV1 =
+            serde_json::from_str(r#"{"model":"gpt-otel","messages":[]}"#).unwrap();
+        request.metadata = RequestMetadataV1 {
+            subject_id: Some("alice".into()),
+            group_id: Some("platform".into()),
+            session_id: Some("sess-42".into()),
+            virtual_key_id: Some("vk_demo".into()),
+            ..Default::default()
+        };
+
+        let mut acc = RequestAccounting::new(
+            Arc::clone(&state),
+            "vk:alice".into(),
+            None,
+            "openai".into(),
+            &request,
+            "openai",
+            Plane::Translation,
+        );
+        acc.observe(&UsageV2 {
+            tokens_in: 40,
+            cache_read_tokens: 60,
+            tokens_out: 20,
+            upstream_request_id: Some("resp_upstream_9".into()),
+            completeness: UsageCompleteness::Final,
+            ..Default::default()
+        });
+        acc.set_outcome("success");
+        acc.finalize();
+        drop(acc);
+
+        let spans = exporter.get_finished_spans().expect("span exported");
+        assert_eq!(spans.len(), 1, "one gen_ai span per finalized call");
+        let span = &spans[0];
+        let blob = format!("{} {:?}", span.name, span.attributes);
+        for f in FORBIDDEN {
+            assert!(
+                !blob.contains(f),
+                "attribution/cost `{f}` leaked into the exported span: {blob}"
+            );
+        }
+        // The trustworthy numbers DID make it through: input = fresh(40) + cache_read(60) = 100,
+        // and gen_ai.response.id is the UPSTREAM id (never Sandhi's request_id).
+        assert!(blob.contains("gen_ai.usage.input_tokens"));
+        assert!(blob.contains("gen_ai.system"));
+        assert!(blob.contains("resp_upstream_9"));
     }
 }

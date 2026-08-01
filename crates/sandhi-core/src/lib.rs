@@ -150,4 +150,27 @@ mod observability_boundary_tests {
             "sandhi-core should emit through the tracing facade"
         );
     }
+
+    #[test]
+    fn libraries_cannot_pull_an_observability_sdk() {
+        // TD-0011 D4 / P3 (Scope 5): OTLP export lives behind a non-default feature in the
+        // *binary* only. The same dependency-level reasoning as the subscriber guard applies: a
+        // library crate that pulls `opentelemetry*`, `prometheus`, or the `metrics` crate would
+        // inflate the binding wheels and drag an exporter/runtime into every in-process host.
+        // `opentelemetry` as a substring also covers `opentelemetry_sdk` / `opentelemetry-otlp`.
+        const FORBIDDEN: &[&str] = &["opentelemetry", "prometheus", "metrics"];
+        for (crate_name, manifest) in [
+            ("sandhi-core", CORE),
+            ("sandhi-providers", PROVIDERS),
+            ("sandhi-store", STORE),
+        ] {
+            for dep in FORBIDDEN {
+                assert!(
+                    !manifest.contains(dep),
+                    "{crate_name} must not depend on `{dep}` (TD-0011 D1/D4): the observability \
+                     SDK belongs to the proxy binary behind a feature, never a library crate"
+                );
+            }
+        }
+    }
 }

@@ -19,6 +19,18 @@ path = "src/main.rs"
 name = "sandhi"
 path = "src/cli.rs"
 
+[features]
+default = []
+# TD-0011 P3 (Scope 5): first-party OTLP export of gen_ai.* spans + metrics. DEFAULT OFF —
+# disposable observability layered beside the prerequisite-free Prometheus `/metrics` path,
+# which stays the default. Only the binary takes these deps (TD-0011 D1: library crates must
+# not). HTTP/protobuf over the async reqwest client, not gRPC/tonic — the leaner tree.
+otel-otlp = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+]
+
 [dependencies]
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
@@ -39,6 +51,28 @@ reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls",
     "blocking",
+] }
+# OTLP export (Scope 5, feature `otel-otlp`, default off). 0.32 across the board; the SDK's
+# `testing` feature exposes the in-memory span exporter + `ManualReader` the leak tests use.
+# `opentelemetry-otlp` selects the async HTTP/protobuf client (not the gRPC/tonic stack).
+opentelemetry = { version = "0.32", optional = true, default-features = false, features = [
+    "trace",
+    "metrics",
+] }
+opentelemetry_sdk = { version = "0.32", optional = true, features = [
+    "trace",
+    "metrics",
+    "testing",
+    # Exposes ManualReader/PeriodicReader/InMemoryMetricExporter used by the leak tests.
+    "experimental_metrics_custom_reader",
+] }
+opentelemetry-otlp = { version = "0.32", optional = true, default-features = false, features = [
+    "trace",
+    "metrics",
+    "http-proto",
+    "http-json",
+    "reqwest-client",
+    "reqwest-rustls-webpki-roots",
 ] }
 
 [dev-dependencies]

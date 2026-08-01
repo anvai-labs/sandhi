@@ -1,6 +1,7 @@
 # TD-0011: First-party observability — telemetry about the gateway, not a second meter
 
-- **Status:** Accepted (2026-07-26). **P1, P2 and P4 complete**; P3 (OTLP) deferred — see below.
+- **Status:** Accepted (2026-07-26). **P1, P2, P3 and P4 complete.** P3 (OTLP) landed behind the
+  non-default `otel-otlp` cargo feature — see the **P3 amendment** below.
 - **Relates to:** ADR-0001 (measure-vs-price), ADR-0004 D4 (dashboard gating), ADR-0005
   (enforcement ledger), TD-0009 (usage aggregate + cardinality discipline), TD-0008 (Victor
   co-design boundary)
@@ -93,11 +94,57 @@ building; these are the signals no sidecar can compute:
 |---|---|---|
 | **P1** ✅ | `tracing` events at the points only Sandhi can see; subscriber installed in the binary only | **Met.** A compile-time test asserts the three library crates cannot depend on `tracing-subscriber`; three tests drive the shipped binary and assert the plane event fires, that request telemetry carries no credential or attribution, and that a subscriber is actually installed |
 | **P2** ✅ | `GET /metrics` (Prometheus text), the D6 signal set, D5 gating | **Met, and stronger than specified.** The label set is a *type* (`metrics::Labels`), so a forbidden dimension is unrepresentable rather than merely tested; the render test guards the output as a second line; a real request through the proxy lands in the registry with the right plane/dialect and no secret; `/metrics` reuses the dashboard's gate (401 without the admin bearer, 200 with it). Registry is hand-rolled — no new dependency |
-| **P3** ⏸ | OTLP export behind a non-default feature | **Deferred, deliberately.** Pull-based `/metrics` needs no collector and covers the operator questions P1/P2 were written for; nobody has asked for traces, and D4's own reasoning says ship the prerequisite-free option first. Re-open when a deployment actually runs a collector — the pressure test's "measure before adding the knob" applies to the dependency too |
+| **P3** ✅ | OTLP export behind a non-default feature | **Met.** The `otel-otlp` feature (default off, `sandhi-proxy` only) exports `gen_ai.*` spans + metrics over OTLP/HTTP. The default build is unchanged — a CI guard asserts `opentelemetry` is absent from `cargo tree` without the feature, and the D1 compile-time test forbids it in the library crates. Attribution never leaves the process: the gen_ai span is built directly via the OTel Tracer API through a closed attribute allowlist (the `tracing_opentelemetry` bridge is deliberately **not** installed — see the amendment), and a red test asserts `subject_id`/`group_id`/`session_id`/`virtual_key_id`/`request_id` are absent from exported spans **and** metrics. |
 | **P4** ✅ | Operator guidance: example scrape config, the four alerts worth having | **Met.** README "Operating it": log filtering, a gated scrape config, and four alerts (capacity leaking, enforcement off, callers refused, upstream degrading) — each expression checked against a series the code actually emits |
 
 P1 is independently useful and touches no wire contract. P2 is where the cardinality discipline
 has to hold. P3 must not move the default build's dependency graph.
+
+## P3 amendment — the OTLP export path overrides D2 to a stricter, symmetric boundary
+
+P3 landed as the `otel-otlp` cargo feature (default off, `sandhi-proxy` only). Four decisions
+override or sharpen what D1/D2/D4 anticipated, recorded here so the implementation is not a
+mystery:
+
+1. **Attribution is forbidden on exported spans *and* metrics — stricter than D2.** D2 permits
+   `subject_id`/`group_id`/`session_id`/`virtual_key_id`/`request_id` on *in-process* `tracing`
+   spans ("bounded lifetime, sampled"). OTLP sends spans **off-process**, past the trust boundary,
+   where those protections no longer hold — so the export path applies the metric rule to spans too.
+   The boundary is structural: span/metric attribute keys are literals in `otel.rs`, produced only
+   by a closed allowlist type (mirroring `metrics::Labels`); a `UsageEvent` field *name* can never
+   become an attribute *key*, and the recorder only ever observes `UsageV2` + a provider slug + a
+   model name (never the attribution fields, which live in `RequestMetadataV1`). A red test drives a
+   request carrying the full attribution set through the dispatch→finalize chokepoint and asserts
+   none of it reaches the exported span or metric.
+
+2. **The `tracing_opentelemetry` bridge is deliberately not installed.** Layering it would bridge
+   the proxy's existing `tracing::` events into exported spans verbatim — and `scope` (which encodes
+   `vk:<id>`) and `request_id` appear in those events. There are no `#[instrument]`/`span!` sites in
+   the tree, so the bridge's only effect would be to export exactly the events that leak. The gen_ai
+   span is instead created directly via the OTel `Tracer` API. (If span correlation is ever wanted,
+   the bridge must ship with a per-target filter that excludes `sandhi_store` and anything carrying
+   `scope`.)
+
+3. **The cache split is exported on span attributes only.** `gen_ai.client.token.usage` carries
+   `gen_ai.token.type ∈ {input, output}` — there is no metric dimension for the prompt-cache split.
+   `gen_ai.usage.cache_creation.input_tokens` / `cache_read.input_tokens` therefore live on the span.
+   A faithful export of the cache split (the reason the metering split exists) *requires* spans, not
+   just metrics. The token metric is **not** the billable quantity — billable stays in
+   `sandhi_tokens_total{kind="billable"}`. `gen_ai.usage.input_tokens` = `tokens_in +
+   cache_read_tokens` (semconv: "input SHOULD include cached"; cache_creation stays its own
+   attribute, a write rather than consumed input).
+
+4. **Measure-vs-price holds: no `gen_ai.*.cost.*`.** Neutral units only — never dollars, tiers, or
+   SKU names (ADR-0001). The OTel export is `gen_ai.system` (deprecated → `gen_ai.provider.name` in
+   newer semconv; emit the former, which collectors parse today), `gen_ai.request.model`,
+   `gen_ai.operation.name = "chat"`, the usage attributes, and `gen_ai.response.id` (the provider's
+   completion id — `upstream_request_id`, never Sandhi's `request_id`).
+
+Dependency note: `opentelemetry`/`opentelemetry_sdk`/`opentelemetry-otlp` at 0.32, HTTP/protobuf over
+the async reqwest client (not gRPC/tonic). `opentelemetry-otlp` 0.32's reqwest client pulls reqwest
+0.13 while the proxy is on 0.12, so the binary carries both majors — accepted to keep the change
+isolated (unifying on 0.13 is a separate scope). The OTel 0.32 MSRV (1.75) matches the workspace; the
+feature does not move the default build's MSRV.
 
 ## Pressure test
 
