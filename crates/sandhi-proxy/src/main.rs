@@ -198,6 +198,18 @@ async fn main() {
     // ADR-0004 D4: dashboard read endpoints follow the admin token unless explicitly re-opened.
     state.dashboard_public = std::env::var("SANDHI_DASHBOARD_PUBLIC").as_deref() == Ok("1");
     state.error_detail_full = std::env::var("SANDHI_ERROR_DETAIL").as_deref() == Ok("full");
+    // ADR-0004 D4 footgun: with no admin token, the /dashboard/api/* read endpoints (subject/group
+    // usage aggregates, masked vkey metadata) stay open. That is the documented single-node dev
+    // trust posture, but it must not be silent when a real store is configured — surface it loudly
+    // rather than fail-closed (which would break every dev who sets SANDHI_STORE without a token).
+    if state.store.is_some() && state.admin_token.is_none() && !state.dashboard_public {
+        eprintln!(
+            "sandhi-proxy: WARNING: SANDHI_STORE is set without SANDHI_ADMIN_TOKEN — the \
+             /dashboard/api/* read endpoints (subject/group usage, masked vkey metadata) are open \
+             to any caller. Set SANDHI_ADMIN_TOKEN to gate them, or SANDHI_DASHBOARD_PUBLIC=1 to \
+             acknowledge the open single-node posture."
+        );
+    }
     // Recover the operator budget metadata (policy / window / limit) persisted in the durable
     // ledger, so caps set before a restart keep their policy lookup + dashboard + alert thresholds.
     {
