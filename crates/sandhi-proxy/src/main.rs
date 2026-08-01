@@ -13,7 +13,9 @@ use std::sync::Arc;
 
 use sandhi_core::{InMemorySink, KeyStore, Sink, VirtualKey};
 use sandhi_providers::{AnthropicAuthScheme, GeminiAuthScheme, ProviderHandle, ProviderRuntime};
-use sandhi_proxy::{rehydrate_alerts, rehydrate_budgets, serve, ProxyLedger, ProxyState};
+use sandhi_proxy::{
+    reclaim_sweep_at, rehydrate_alerts, rehydrate_budgets, serve, ProxyLedger, ProxyState,
+};
 use sandhi_store::{AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
 
 #[tokio::main]
@@ -205,6 +207,21 @@ async fn main() {
         rehydrate_budgets(&ledger, &state.budgets);
     }
     let state = Arc::new(state);
+
+    // ADR-0005 D2: reclaim leases left dangling by a crash on a timer, so an abandoned scope's
+    // held capacity is released without waiting for its next request (`reserve` also reclaims
+    // opportunistically per scope; this covers scopes that go quiet). Best-effort by design.
+    {
+        let sweep_state = Arc::clone(&state);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            tick.tick().await; // discard the immediate first tick
+            loop {
+                tick.tick().await;
+                reclaim_sweep_at(&sweep_state.ledger, time::OffsetDateTime::now_utc());
+            }
+        });
+    }
 
     let addr: SocketAddr = std::env::var("SANDHI_BIND")
         .unwrap_or_else(|_| "127.0.0.1:8787".into())

@@ -9,7 +9,9 @@ pub mod vault;
 pub mod vkeys;
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use rusqlite::{params, Connection};
 use sandhi_core::{Backend, LatencySummary, Sink, UsageAggregateV1, UsageEvent};
@@ -46,28 +48,83 @@ const BILLABLE_SQL: &str = "COALESCE(SUM(tokens_in + cache_creation_tokens + cac
 /// never a second definition. `store_matches_core_fold` proves the two agree.
 pub type Bucket = UsageAggregateV1;
 
+/// The per-connection `synchronous` level to set on a durable connection. `journal_mode=WAL` is
+/// persistent on the database file (every connection to it sees WAL once any sets it); `synchronous`
+/// is per-connection and is the lever for the durability/speed trade-off.
+enum Synchronous {
+    /// `NORMAL` — fast; may lose the last committed transaction on a power loss. Correct for the
+    /// best-effort usage-event sink (ADR-0047 D7: a sink failure must never break the request, so a
+    /// lost last metering row on a hard crash is an acceptable trade for write throughput).
+    Normal,
+    /// `FULL` — every committed transaction is durable across a power loss. Required for the
+    /// enforcement ledger: a cap/lease commit must not vanish (ADR-0005 C2/C3).
+    Full,
+}
+
+impl Synchronous {
+    const fn pragma(self) -> &'static str {
+        match self {
+            Synchronous::Normal => "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;",
+            Synchronous::Full => "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",
+        }
+    }
+}
+
+/// Configure a durable SQLite connection: WAL journal + a 5s `busy_timeout` so concurrent writers
+/// on the shared file **wait** rather than failing `SQLITE_BUSY` immediately (the proxy opens
+/// several connections to one file — the store and the ledger write concurrently on every request).
+/// `journal_mode=WAL` is a no-op on `:memory:` (stays `memory`); on an FS that cannot do WAL it is
+/// silently left at the default, which is still strictly better than no `busy_timeout`.
+fn apply_durable_pragmas(conn: &Connection, synchronous: Synchronous) -> rusqlite::Result<()> {
+    conn.busy_timeout(Duration::from_secs(5))?;
+    conn.execute_batch(synchronous.pragma())?;
+    Ok(())
+}
+
 /// A SQLite-backed usage store.
 pub struct SqliteStore {
     conn: Mutex<Connection>,
+    /// How many `emit`s failed at the DB (best-effort sink — ADR-0047 D7 keeps a failure from
+    /// breaking the request, so this counter + a log are the only signal an event was lost).
+    emit_failures: AtomicU64,
 }
 
 impl SqliteStore {
     /// Open (creating if needed) a store at `path`.
     pub fn open(path: &str) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
-        Self::init(&conn)?;
-        Ok(Self {
-            conn: Mutex::new(conn),
-        })
+        Self::setup(&conn)?;
+        Ok(Self::from_conn(conn))
     }
 
     /// An ephemeral in-memory store (tests / demos).
     pub fn in_memory() -> rusqlite::Result<Self> {
         let conn = Connection::open_in_memory()?;
-        Self::init(&conn)?;
-        Ok(Self {
+        Self::setup(&conn)?;
+        Ok(Self::from_conn(conn))
+    }
+
+    fn from_conn(conn: Connection) -> Self {
+        Self {
             conn: Mutex::new(conn),
-        })
+            emit_failures: AtomicU64::new(0),
+        }
+    }
+
+    fn setup(conn: &Connection) -> rusqlite::Result<()> {
+        // NORMAL: the usage sink is best-effort (ADR-0047 D7) — write throughput is worth more than
+        // surviving a hard crash mid-row, and the busy_timeout is what stops a concurrent ledger
+        // write from dropping the event entirely.
+        apply_durable_pragmas(conn, Synchronous::Normal)?;
+        Self::init(conn)
+    }
+
+    /// How many `emit`s failed at the DB. The sink is best-effort (ADR-0047 D7 — a failure never
+    /// breaks the request), so this counter plus an `error!` log are the only signal a metering
+    /// event was lost. Non-zero means spend/attribution is silently incomplete.
+    #[must_use]
+    pub fn emit_failures(&self) -> u64 {
+        self.emit_failures.load(Ordering::Relaxed)
     }
 
     fn init(conn: &Connection) -> rusqlite::Result<()> {
@@ -322,8 +379,32 @@ impl SqliteStore {
 
 impl Sink for SqliteStore {
     fn emit(&self, event: &UsageEvent) {
-        // Best-effort — a storage failure must never break the caller (ADR-0047 D7).
-        let _ = self.insert(event);
+        // Best-effort — a storage failure must never break the caller (ADR-0047 D7). But it must
+        // not be silent either: count it and log so an operator knows spend/attribution is
+        // incomplete. A dropped metering event is the one failure mode a meter cannot hide.
+        if let Err(e) = self.insert(event) {
+            self.emit_failures.fetch_add(1, Ordering::Relaxed);
+            tracing::error!(
+                target: "sandhi.store.emit_failed",
+                error = %e,
+                request_id = %event.request_id,
+                provider = %event.provider,
+                "usage-event emit FAILED; event lost (best-effort sink, ADR-0047 D7)"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+impl SqliteStore {
+    /// Test-only: drop the events table so the next `emit` deterministically fails, exercising the
+    /// failure-observability path (counter + log) without depending on FS contention timing.
+    fn inject_emit_failure(&self) {
+        self.conn
+            .lock()
+            .expect("store poisoned")
+            .execute_batch("DROP TABLE usage_events")
+            .expect("drop events table");
     }
 }
 
@@ -417,6 +498,7 @@ mod tests {
 
         let store = SqliteStore {
             conn: Mutex::new(conn),
+            emit_failures: AtomicU64::new(0),
         };
         let event = ev("openai", "alice", "team-a", 1, 2).with_latency(Some(5), None);
         store.emit(&event);
@@ -530,5 +612,107 @@ mod tests {
         assert_eq!(total.calls, 0);
         assert_eq!(total.billable_tokens, 0);
         assert!(store.totals_by_group().unwrap().is_empty());
+    }
+
+    // ── Scope 2: durability + observable emit failures + no silent loss under contention. ──
+
+    fn temp_db(prefix: &str) -> String {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let p = std::env::temp_dir().join(format!(
+            "{prefix}_{}_{}.db",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        p.to_str().unwrap().to_string()
+    }
+
+    fn cleanup_db(path: &str) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(format!("{path}-wal"));
+        let _ = std::fs::remove_file(format!("{path}-shm"));
+    }
+
+    #[test]
+    fn apply_durable_pragmas_sets_wal_and_busy_timeout_on_a_file() {
+        let path = temp_db("sandhi_pragma");
+        {
+            let conn = Connection::open(&path).unwrap();
+            apply_durable_pragmas(&conn, Synchronous::Normal).unwrap();
+            let mode: String = conn
+                .pragma_query_value(None, "journal_mode", |r| r.get::<_, String>(0))
+                .unwrap();
+            assert_eq!(mode, "wal", "WAL must be set on a file-backed connection");
+            let bt: i64 = conn
+                .pragma_query_value(None, "busy_timeout", |r| r.get(0))
+                .unwrap();
+            assert_eq!(bt, 5000, "busy_timeout must be 5s");
+        }
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn emit_failure_is_counted_and_does_not_break_the_caller() {
+        let store = SqliteStore::in_memory().unwrap();
+        assert_eq!(store.emit_failures(), 0);
+        store.inject_emit_failure(); // deterministically break the sink
+                                     // A storage failure must never break the request (ADR-0047 D7)...
+        store.emit(&ev("openai", "alice", "team-a", 1, 2));
+        // ...but it must not be silent either — the failure was counted.
+        assert_eq!(store.emit_failures(), 1);
+    }
+
+    #[test]
+    fn store_and_ledger_on_one_file_do_not_drop_events_under_contention() {
+        // The proxy opens the store and the ledger against one file and writes both on every
+        // request. Without WAL + busy_timeout the concurrent writers collided on SQLITE_BUSY and
+        // the best-effort emit silently dropped events. This pins that they no longer do.
+        use sandhi_core::{Policy, Window};
+        use std::sync::Arc;
+        use std::thread;
+        use time::{Duration, OffsetDateTime};
+
+        let path = temp_db("sandhi_conc");
+        let store = Arc::new(SqliteStore::open(&path).unwrap());
+        let ledger = Arc::new(Mutex::new(SqliteLedger::open(&path).unwrap()));
+        ledger
+            .lock()
+            .unwrap()
+            .set_limit_durable("g", Some(1_000_000), Window::Total, Policy::Block)
+            .unwrap();
+
+        let now = OffsetDateTime::UNIX_EPOCH;
+        let ttl = Duration::seconds(60);
+        const TASKS: usize = 16;
+        let mut handles = Vec::new();
+        for i in 0..TASKS {
+            let (store, ledger) = (Arc::clone(&store), Arc::clone(&ledger));
+            handles.push(thread::spawn(move || {
+                let outcome = ledger
+                    .lock()
+                    .unwrap()
+                    .reserve_durable("g", 100, now, ttl)
+                    .unwrap();
+                let id = match outcome {
+                    ReserveOutcome::Admitted(r) => r.id,
+                    ReserveOutcome::Denied(_) => panic!("should admit well under the 1M cap"),
+                };
+                store.emit(&ev("openai", "alice", "team-a", i as u64, (i + 1) as u64));
+                ledger.lock().unwrap().settle_durable(id, 50).unwrap();
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(
+            store.emit_failures(),
+            0,
+            "no metering event dropped under contention"
+        );
+        assert_eq!(
+            ledger.lock().unwrap().spent_durable("g").unwrap(),
+            (TASKS as u64) * 50
+        );
+        cleanup_db(&path);
     }
 }
