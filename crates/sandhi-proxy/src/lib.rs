@@ -859,9 +859,12 @@ async fn handle(
     //
     // Decided here, before enforcement, so the plane is a metric dimension for every outcome —
     // including the calls that get refused below and never reach a provider.
-    let transparent =
+    let transparent_eligible =
         ingress_family(dialect) == provider.family() && provider.raw_forwarder().is_some();
-    let plane = if transparent {
+    // Preliminary plane label for the rate-limit metric (a throttled call never reaches a provider,
+    // so its plane is nominal). The final plane is recomputed below once we know whether the cap
+    // forces the translation plane.
+    let plane = if transparent_eligible {
         metrics::Plane::Transparent
     } else {
         metrics::Plane::Translation
@@ -903,9 +906,21 @@ async fn handle(
             .and_then(|ledger| ledger.limit(&scope))
             .is_some();
     let (ceiling, effective_max) = reservation_ceiling(&request);
-    if capped && request.max_output_tokens.is_none() {
+    let inject_output_bound = capped && request.max_output_tokens.is_none();
+    if inject_output_bound {
         request.max_output_tokens = Some(effective_max);
     }
+    // A Block cap is an enforcement boundary. When the client left output unbounded we inject
+    // `effective_max` above — but only the translation plane re-encodes `request`, so only it can
+    // carry that bound to the upstream (`max_tokens`). The transparent plane forwards the raw body
+    // verbatim and would stream unbounded output past the cap (ADR-0005 D1). So a capped,
+    // otherwise-same-family call with unbounded output must NOT take the transparent plane.
+    let transparent = transparent_eligible && !inject_output_bound;
+    let plane = if transparent {
+        metrics::Plane::Transparent
+    } else {
+        metrics::Plane::Translation
+    };
     let reservation = match reserve_budget(&state, &scope, ceiling, policy) {
         Admission::Leased(reservation) => Some(reservation),
         // Fail-open (Warn on a backend error): admit without a lease; the usage event still emits.
