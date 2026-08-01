@@ -385,6 +385,64 @@ async fn responses_ingress_same_family_forwards_transparently() {
 }
 
 #[tokio::test]
+async fn block_capped_scope_with_unbounded_output_is_not_passed_through() {
+    // A Block-capped same-family call with no max_output_tokens must NOT use the transparent plane:
+    // that forwards the raw body verbatim and would stream unbounded output past the cap. It routes
+    // through the translation plane, where the injected DEFAULT_OUTPUT_CEILING reaches the upstream
+    // as `max_tokens` (ADR-0005 D1).
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id":"chatcmpl-1","model":"gpt-x",
+            "choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":5,"completion_tokens":2}
+        })))
+        .mount(&upstream)
+        .await;
+
+    let sink = Arc::new(InMemorySink::new());
+    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    state.ledger.lock().unwrap().set_budget(
+        "group:platform",
+        Some(1_000_000),
+        Window::Total,
+        Policy::Block,
+    );
+
+    let response = build_app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("authorization", "Bearer vk_demo")
+                .header("content-type", "application/json")
+                // No max_output_tokens: the scope is Block-capped and output is unbounded.
+                .body(Body::from(
+                    r#"{"model":"gpt-x","messages":[{"role":"user","content":"hi"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // The upstream received `max_tokens` (the injected ceiling) — proof the request was re-encoded
+    // through the translation plane, not forwarded verbatim (which would carry no output bound and
+    // could stream past the cap).
+    let received = upstream
+        .received_requests()
+        .await
+        .expect("requests were recorded");
+    assert_eq!(received.len(), 1, "exactly one upstream request");
+    let sent: serde_json::Value = serde_json::from_slice(&received[0].body).unwrap();
+    assert_eq!(
+        sent["max_tokens"], 4096,
+        "capped unbounded output must be bounded via translation (max_tokens), not passed through: {sent}"
+    );
+}
+
+#[tokio::test]
 async fn unknown_virtual_key_is_401() {
     let sink = Arc::new(InMemorySink::new());
     let state = state_with(
