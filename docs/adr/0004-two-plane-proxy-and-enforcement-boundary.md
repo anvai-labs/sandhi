@@ -4,7 +4,8 @@ Date: 2026-07-22
 
 ## Status
 
-Proposed. Amends [ADR-0001](0001-sandhi-architecture-and-wire-contract.md) §4 (byte-exact
+Accepted (implemented — the transparent plane and the trust-tiered enforcement boundary are
+live; see [TD-0006](../td/TD-0006-two-plane-proxy-transparent-metering.md)). Amends [ADR-0001](0001-sandhi-architecture-and-wire-contract.md) §4 (byte-exact
 forwarding) and clarifies the enforcement location left implicit across ADR-0001 §2 and
 [TD-0003](../td/TD-0003-operator-surface-keys-budgets-attribution.md). Companion design detail
 lives in [TD-0005](../td/TD-0005-declarative-policy-engine.md) (declarative policy engine) and

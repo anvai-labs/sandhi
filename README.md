@@ -22,7 +22,7 @@ key, and set per-user budgets — without hand-rolling provider APIs.
   **transparent-metering plane** of
   [ADR-0004](docs/adr/0004-two-plane-proxy-and-enforcement-boundary.md). Still open: per-minute
   a shared/HA ledger backend
-  ([TD-0007](docs/td/TD-0007-enforcement-ledger-backends.md)), Gemini/Cohere *ingress* dialects,
+  ([TD-0007](docs/td/TD-0007-enforcement-ledger-backends.md)), the Cohere *ingress* dialect,
   first-party observability export, and the declarative policy engine
   ([TD-0005](docs/td/TD-0005-declarative-policy-engine.md)).
 - **Packages:** crates.io `sandhi-core` / `-providers` / `-store` / `-proxy` · PyPI
@@ -102,11 +102,12 @@ are added when they pass, never in advance.
 > **Prompt-cache safe (by design).** Sandhi preserves per-conversation cache affinity — it
 > never collapses users to a single session and carries attribution *outside* the cached
 > prompt, so hosted prompt caches keep hitting and self-hosted KV routing stays sticky. The
-> byte-exact forwarding that guarantees this on the proxy path is **live** as the
+> **content-faithful forwarding** that guarantees this on the proxy path is **live** as the
 > transparent-metering plane of
 > [ADR-0004](docs/adr/0004-two-plane-proxy-and-enforcement-boundary.md): when the ingress dialect
-> and the upstream are the same family, the proxy forwards the client's bytes verbatim and meters
-> the stream as it passes, so provider-specific extras (e.g. message-level Anthropic
+> and the upstream are the same family, the proxy forwards the client's bytes verbatim — except a
+> minimal envelope normalization that injects usage-metering on OpenAI streams (ADR-0004 D1) — and
+> meters the stream as it passes, so provider-specific extras (e.g. message-level Anthropic
 > `cache_control` breakpoints) survive untouched. A **cross-family** request still re-encodes
 > through the neutral contract — faithful for standard fields, but it can drop those extras. The
 > in-process bindings, which never re-encode, are unaffected.
