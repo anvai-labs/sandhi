@@ -13,7 +13,7 @@ pub mod ratelimit;
 
 // Re-export the admin API request/response types for the `sandhi` CLI client + the startup
 // rehydration helpers used by the `sandhi-proxy` binary.
-pub use ledger::{Admission, ProxyLedger};
+pub use ledger::{reclaim_sweep_at, Admission, ProxyLedger};
 pub use operator::{
     admin, build_provider_handle, rehydrate_alerts, rehydrate_budgets, rehydrate_live_keys,
 };

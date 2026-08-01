@@ -52,8 +52,16 @@ impl SqliteLedger {
     /// Open (creating if needed) a ledger at `path` (`:memory:` for a volatile one).
     pub fn open(path: &str) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
-        Self::init(&conn)?;
+        Self::setup(&conn)?;
         Ok(Self { conn })
+    }
+
+    fn setup(conn: &Connection) -> rusqlite::Result<()> {
+        // FULL: a cap/lease commit must survive a power loss (ADR-0005 C2/C3). WAL + busy_timeout
+        // also stop the concurrent store writes from colliding with reserve/settle on the same file
+        // (the proxy opens both against one store path).
+        crate::apply_durable_pragmas(conn, crate::Synchronous::Full)?;
+        Self::init(conn)
     }
 
     fn init(conn: &Connection) -> rusqlite::Result<()> {

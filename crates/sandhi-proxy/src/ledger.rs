@@ -15,6 +15,8 @@
 //! (a backend error denies — a hard cap must never admit on a blind write), a `Warn` scope fails
 //! open (admit, unmetered). Neutral tokens throughout — no dollars.
 
+use std::sync::Mutex;
+
 use time::{Duration, OffsetDateTime};
 
 use sandhi_core::{EnforcementLedger, InMemoryLedger, LedgerView, Policy, Reservation, Window};
@@ -187,6 +189,18 @@ impl ProxyLedger {
     }
 }
 
+/// Reclaim every lease expired at or before `now`, returning the count — the ADR-0005 D2 crash
+/// backstop, driven on a timer by the binary (see `main.rs`). [`ProxyLedger::reserve`] already
+/// reclaims opportunistically per scope; this covers scopes that go quiet after abandoning a lease,
+/// so their held capacity is released without waiting for the next request. Safe to call
+/// concurrently (idempotent delete); takes an injected `now` so tests are deterministic.
+pub fn reclaim_sweep_at(ledger: &Mutex<ProxyLedger>, now: OffsetDateTime) -> usize {
+    ledger
+        .lock()
+        .map(|mut l| l.reclaim_expired(now))
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,5 +302,36 @@ mod tests {
         assert_eq!(spec.policy, "block");
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn sweep_reclaims_an_abandoned_lease_without_a_subsequent_reserve() {
+        // A lease left dangling (a crash before settle) must be reclaimed by the sweep alone — not
+        // only by the next reserve on that scope (the opportunistic-in-reserve path). This is the
+        // gap a background sweep closes: an abandoned scope's held capacity is released even with no
+        // further traffic.
+        let ledger = Mutex::new(ProxyLedger::in_memory());
+        ledger
+            .lock()
+            .unwrap()
+            .set_budget("g", Some(1000), Window::Total, Policy::Block);
+        let Admission::Leased(_r) = ledger
+            .lock()
+            .unwrap()
+            .reserve("g", 100, now(), Policy::Block)
+        else {
+            panic!("admits under the cap");
+        };
+        assert_eq!(ledger.lock().unwrap().reserved("g"), 100);
+
+        // Do NOT settle, do NOT reserve "g" again. Advance past the TTL and run the sweep.
+        let reclaimed =
+            reclaim_sweep_at(&ledger, now() + Duration::seconds(RESERVATION_TTL_SECS + 1));
+        assert_eq!(reclaimed, 1);
+        assert_eq!(
+            ledger.lock().unwrap().reserved("g"),
+            0,
+            "sweep reclaimed the abandoned lease"
+        );
     }
 }
