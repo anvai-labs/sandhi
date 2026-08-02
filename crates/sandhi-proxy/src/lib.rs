@@ -40,7 +40,7 @@ use serde_json::{json, Value};
 use time::OffsetDateTime;
 
 use sandhi_core::{
-    billable, AlertRegistry, Backend, ChatRequestV1, KeyStore, ParsedUsage, Policy,
+    billable, AlertRegistry, Backend, ChatRequestV1, FinishReasonV1, KeyStore, ParsedUsage, Policy,
     RequestMetadataV1, Reservation, Sink, UsageBasis, UsageCompleteness, UsageEvent, UsageV2,
     VirtualKey,
 };
@@ -1258,6 +1258,9 @@ struct RequestAccounting {
     otel: Option<Arc<otel::OtelRecorder>>,
     /// The gen_ai operation span opened at dispatch, closed (with usage attrs) in finalize.
     otel_span: Option<otel::SpanHandle>,
+    /// The response finish reason, captured on the typed translation plane (complete/stream) for
+    /// `gen_ai.response.finish_reasons`. `None` on the transparent byte paths (no ChatResponseV1).
+    finish_reason: Option<FinishReasonV1>,
 }
 
 impl RequestAccounting {
@@ -1294,6 +1297,7 @@ impl RequestAccounting {
             plane,
             otel,
             otel_span,
+            finish_reason: None,
         }
     }
 
@@ -1414,7 +1418,13 @@ impl RequestAccounting {
         // OTel sample per logical call — the same single-emission discipline as `observe_call`.
         // Best-effort like the metric path: OTel must never fail the request.
         if let (Some(recorder), Some(span)) = (self.otel.as_ref(), self.otel_span.as_mut()) {
-            recorder.record_usage(span, &self.provider, &self.model, &usage);
+            recorder.record_usage(
+                span,
+                &self.provider,
+                &self.model,
+                &usage,
+                self.finish_reason,
+            );
         }
         self.state.sink.emit(&usage_event(
             &self.provider,
@@ -1446,6 +1456,7 @@ async fn complete_response(
                 .outcome
                 .get_or_insert_with(|| "success".into());
             accounting.observe(&response.usage);
+            accounting.finish_reason = response.finish_reason;
             accounting.set_outcome("success");
             accounting.finalize();
             Json(encode_response(dialect, &response)).into_response()
@@ -1509,6 +1520,10 @@ async fn stream_response(
                         }
                         sandhi_core::ChatStreamEventV1::Error { .. } => {
                             accounting.set_outcome("error");
+                        }
+                        sandhi_core::ChatStreamEventV1::Finish { reason } => {
+                            // Scope 5: capture the finish reason for `gen_ai.response.finish_reasons`.
+                            accounting.finish_reason = Some(*reason);
                         }
                         _ => {}
                     }
@@ -2215,6 +2230,8 @@ mod otel_wiring_tests {
             completeness: UsageCompleteness::Final,
             ..Default::default()
         });
+        // complete_response / the stream `Finish` event set this on the typed plane.
+        acc.finish_reason = Some(FinishReasonV1::Stop);
         acc.set_outcome("success");
         acc.finalize();
         drop(acc);
@@ -2234,5 +2251,10 @@ mod otel_wiring_tests {
         assert!(blob.contains("gen_ai.usage.input_tokens"));
         assert!(blob.contains("gen_ai.system"));
         assert!(blob.contains("resp_upstream_9"));
+        // gen_ai.response.finish_reasons carries the mapped reason (string[]).
+        assert!(
+            blob.contains("gen_ai.response.finish_reasons") && blob.contains("stop"),
+            "finish_reason did not land on the span: {blob}"
+        );
     }
 }
