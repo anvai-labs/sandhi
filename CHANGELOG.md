@@ -17,6 +17,16 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
+### Added
+
+- _Nothing yet._
+
+## [0.1.5] — 2026-08-02
+
+The observability + meter-trust release: first-party **OTel/OTLP export** of the GenAI semantic
+conventions (TD-0011 P3) completes the telemetry story atop a **hardened, drift-defended meter**
+(scopes 1–4), and per-key rate limiting is enforced (TD-0012).
+
 ### Fixed
 
 - **Docs no longer claim rate limits are unenforced** (TD-0012 P2). Six places still said "stored,
@@ -40,6 +50,18 @@ hand-edited; see [RELEASING.md](RELEASING.md).
   **Single-node semantics:** the limiter is in-memory, so with N replicas the effective limit is
   `N × limit` — the same limitation the enforcement ledger has, and it shares TD-0007's eventual
   shared backend rather than inventing a second story.
+
+- **Metering-correctness hardening (scopes 1–4, #134–#140)** — the meter the observability story
+  rests on was made trustworthy. `billable_parts` saturates and a `u64_at` clamp bounds the
+  reservation ceiling; the DeepSeek/Anthropic prompt-cache split is read at the source and an
+  observable guards `cached > prompt`; `ParsedUsage::apply` is non-destructive so a partial can no
+  longer overwrite a final; Cohere stops emitting zero-valued fields. Virtual-key expiry compares
+  RFC-3339 instants, not strings. The durable store gained per-connection `busy_timeout` + WAL,
+  observable emit-failure counters, and a background lease-reclaim sweep. A Block-capped scope's
+  unbounded output is routed through the translation plane instead of passing through
+  transparently. The Node budget API is widened u32 → i64. `hash_secret` is documented as a
+  high-entropy index and the dashboard warns on its exposure. #141 aligns the decision log with
+  what shipped.
 
 ### Added
 
@@ -88,6 +110,31 @@ hand-edited; see [RELEASING.md](RELEASING.md).
   Telemetry deliberately does **not** repeat caller attribution: per-subject accounting has a
   bounded home in the usage aggregate, and a test asserts the request path logs no virtual key,
   no upstream credential, and no `subject_id`/`session_id`/`virtual_key_id`.
+
+- **OTLP export of `gen_ai.*` spans + metrics** (TD-0011 P3, #143) — a default-off `otel-otlp`
+  cargo feature pushes the OpenTelemetry GenAI semantic conventions to a collector over OTLP/HTTP
+  (opentelemetry 0.32): one `gen_ai` operation span per chat call (input / output /
+  cache-creation / cache-read / reasoning tokens, provider, model, **finish reason**) plus the
+  `gen_ai.client.token.usage`, `gen_ai.client.operation.duration`, and
+  `gen_ai.server.time_to_first_token` metrics. It layers beside `/metrics` (both can run at once).
+  Only the proxy binary takes the OpenTelemetry deps — the D1 compile-time guard now forbids them
+  in the library crates, and a CI guard asserts the default build's `cargo tree` stays free of
+  them.
+
+  The attribution boundary is **stricter than `/metrics`**: exported spans and metrics never carry
+  `subject_id`/`group_id`/`session_id`/`virtual_key_id`/`request_id` (OTLP sends them off-process,
+  past the trust boundary), and never a cost. The `gen_ai` span is built directly via the OTel
+  Tracer API through a closed attribute allowlist — the `tracing_opentelemetry` bridge is
+  deliberately **not** installed, since it would bridge the proxy's `tracing::` events (which carry
+  `scope` = `vk:<id>`) into exported spans. A red test drives a request carrying the full
+  attribution set through the dispatch→finalize chokepoint and asserts none of it leaks. #144 adds
+  the operator guidance + a collector config; #145 adds `gen_ai.response.finish_reasons`.
+
+- **Live parser-conformance harness** (#142) — `#[ignore]`d, env-gated tests that make one real
+  call per provider and run the result through the *shipped* parser, asserting the counts are
+  sane. The drift detector: it surfaces a provider renaming or moving a usage field before users
+  see wrong bills — the complement to the captured-corpus mock tests, which pin known shapes but
+  cannot detect drift.
 
 ## [0.1.4] — 2026-07-26
 
