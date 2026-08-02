@@ -31,6 +31,8 @@ pub enum Dimension {
     Model,
     VirtualKey,
     Session,
+    /// Agent run (ADR-0005 D7 `run_id`) — the cost-tree root dimension.
+    Run,
     /// Everything folded into a single row.
     Total,
 }
@@ -49,6 +51,7 @@ impl Dimension {
             "model" => Self::Model,
             "key" | "virtual_key" => Self::VirtualKey,
             "session" => Self::Session,
+            "run" => Self::Run,
             "total" => Self::Total,
             _ => return None,
         })
@@ -64,6 +67,7 @@ impl Dimension {
             Self::Model => "model",
             Self::VirtualKey => "virtual_key",
             Self::Session => "session",
+            Self::Run => "run",
             Self::Total => "total",
         }
     }
@@ -78,6 +82,7 @@ impl Dimension {
             Dimension::Model => Some(e.model.clone()),
             Dimension::VirtualKey => e.virtual_key_id.clone(),
             Dimension::Session => e.session_id.clone(),
+            Dimension::Run => e.run_id.clone(),
             Dimension::Total => Some(TOTAL_KEY.to_string()),
         }
     }
@@ -153,6 +158,144 @@ impl UsageAggregateV1 {
             e.tokens_out,
             e.reasoning_tokens.unwrap_or(0),
         );
+    }
+
+    /// Merge another aggregate into this one (the run-tree rollup). Summing `billable_tokens`
+    /// directly is correct because the reasoning fold already happened per call inside each
+    /// operand — re-deriving from the merged columns would apply the fold once over the sums,
+    /// which is the exact wrong answer [`billable_parts`] warns about. Latency percentiles are
+    /// not mergeable and are left untouched.
+    pub fn merge(&mut self, other: &Self) {
+        self.calls += other.calls;
+        self.tokens_in += other.tokens_in;
+        self.tokens_out += other.tokens_out;
+        self.cache_creation_tokens += other.cache_creation_tokens;
+        self.cache_read_tokens += other.cache_read_tokens;
+        self.reasoning_tokens += other.reasoning_tokens;
+        self.billable_tokens += other.billable_tokens;
+    }
+}
+
+/// One node of a run's cost tree: a `(step_id, parent_id)` pair with its own spend and the
+/// rollup of itself plus every descendant.
+///
+/// `step_id` is unique only *per parent*: the same step name under two different parents is two
+/// nodes (pinned by test). Latency is omitted — percentiles do not merge across nodes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RunUsageNodeV1 {
+    /// The step this node aggregates, or [`NONE_KEY`] for events that carried no `step_id`.
+    pub step_id: String,
+    /// The parent step, when one was declared. A parent naming no step in this run is an
+    /// orphan and this node surfaces as a root (cross-run nesting is out of scope for v1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    /// Spend of the calls attributed directly to this step (`key` = `step_id`).
+    pub own: UsageAggregateV1,
+    /// `own` plus every descendant's `own` — what this step *cost*, subtree-inclusive.
+    pub rollup: UsageAggregateV1,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<RunUsageNodeV1>,
+}
+
+/// The cost tree of one agent run (ADR-0005 D7): every [`UsageEvent`] sharing a `run_id`,
+/// folded per step and assembled by `parent_id`. Neutral units only — no dollars.
+///
+/// This is the **definition** of the run fold (TD-0009 D6): the durable store filters rows by
+/// `run_id` and calls [`RunCostTreeV1::from_events`] — SQL never re-derives the arithmetic.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RunCostTreeV1 {
+    pub run_id: String,
+    /// The grand total over every event of the run (`key` = `run_id`). Always equals the sum
+    /// of the root rollups — cycles and orphans are re-rooted, never dropped.
+    pub total: UsageAggregateV1,
+    pub roots: Vec<RunUsageNodeV1>,
+}
+
+/// Node key during assembly: `(step_id, parent_id)`.
+type StepKey = (String, Option<String>);
+
+impl RunCostTreeV1 {
+    /// Fold `events` (already filtered to one run) into the tree. Events whose `run_id`
+    /// differs are still folded — the caller owns the filter; this function owns the shape.
+    #[must_use]
+    pub fn from_events<'a, I>(run_id: &str, events: I) -> Self
+    where
+        I: IntoIterator<Item = &'a UsageEvent>,
+    {
+        let mut total = UsageAggregateV1::empty(run_id);
+        let mut own: BTreeMap<StepKey, UsageAggregateV1> = BTreeMap::new();
+        for e in events {
+            total.add(e);
+            let step = e.step_id.clone().unwrap_or_else(|| NONE_KEY.to_string());
+            own.entry((step.clone(), e.parent_id.clone()))
+                .or_insert_with(|| UsageAggregateV1::empty(&step))
+                .add(e);
+        }
+
+        let step_names: std::collections::BTreeSet<&str> =
+            own.keys().map(|(s, _)| s.as_str()).collect();
+        let mut visited: std::collections::BTreeSet<StepKey> = std::collections::BTreeSet::new();
+        let mut roots = Vec::new();
+        // Natural roots: no parent, or a parent naming no step in this run (orphan).
+        let root_keys: Vec<StepKey> = own
+            .keys()
+            .filter(|(_, p)| match p {
+                None => true,
+                Some(p) => !step_names.contains(p.as_str()),
+            })
+            .cloned()
+            .collect();
+        for key in root_keys {
+            if let Some(node) = Self::build(&key, &own, &mut visited) {
+                roots.push(node);
+            }
+        }
+        // Any node still unvisited sits on a parent cycle (a→b→a, or self-parented). Promote
+        // the smallest unvisited key to a root — deterministically breaking the cycle without
+        // losing or double-counting its spend — until every node is placed.
+        while let Some(key) = own.keys().find(|k| !visited.contains(*k)).cloned() {
+            if let Some(node) = Self::build(&key, &own, &mut visited) {
+                roots.push(node);
+            }
+        }
+        Self {
+            run_id: run_id.to_string(),
+            total,
+            roots,
+        }
+    }
+
+    /// Depth-first assembly with a visited guard: a key is consumed exactly once, so cycles
+    /// terminate and shared names cannot double-count.
+    fn build(
+        key: &StepKey,
+        own: &BTreeMap<StepKey, UsageAggregateV1>,
+        visited: &mut std::collections::BTreeSet<StepKey>,
+    ) -> Option<RunUsageNodeV1> {
+        if !visited.insert(key.clone()) {
+            return None;
+        }
+        let own_row = own.get(key)?.clone();
+        let mut rollup = own_row.clone();
+        let mut children = Vec::new();
+        let child_keys: Vec<StepKey> = own
+            .keys()
+            .filter(|(_, p)| p.as_deref() == Some(key.0.as_str()))
+            .cloned()
+            .collect();
+        for child_key in child_keys {
+            if let Some(child) = Self::build(&child_key, own, visited) {
+                rollup.merge(&child.rollup);
+                children.push(child);
+            }
+        }
+        Some(RunUsageNodeV1 {
+            step_id: key.0.clone(),
+            parent_id: key.1.clone(),
+            own: own_row,
+            rollup,
+            children,
+        })
     }
 }
 
@@ -401,6 +544,135 @@ mod tests {
         let mut agg = UsageAggregator::new(Dimension::Session);
         agg.add(&ev("alice", 10, 5, 0, 0)); // no session_id
         assert_eq!(agg.rows()[0].key, NONE_KEY);
+    }
+
+    fn run_ev(run: &str, step: Option<&str>, parent: Option<&str>, tin: u64, tout: u64) -> UsageEvent {
+        ev("alice", tin, tout, 0, 0).with_identity(
+            None,
+            Some(run.into()),
+            step.map(str::to_string),
+            parent.map(str::to_string),
+            None,
+        )
+    }
+
+    #[test]
+    fn run_tree_rolls_up_children_into_parents() {
+        // root(10+5) ── plan(20+10) ── act(40+20): rollup(root) = everything,
+        // rollup(plan) = plan + act, own stays per-step.
+        let events = [
+            run_ev("r1", Some("root"), None, 10, 5),
+            run_ev("r1", Some("plan"), Some("root"), 20, 10),
+            run_ev("r1", Some("act"), Some("plan"), 40, 20),
+        ];
+        let tree = RunCostTreeV1::from_events("r1", &events);
+        assert_eq!(tree.run_id, "r1");
+        assert_eq!(tree.total.calls, 3);
+        assert_eq!(tree.total.billable_tokens, 105);
+        assert_eq!(tree.roots.len(), 1);
+        let root = &tree.roots[0];
+        assert_eq!(root.step_id, "root");
+        assert_eq!(root.own.billable_tokens, 15);
+        assert_eq!(root.rollup.billable_tokens, 105);
+        let plan = &root.children[0];
+        assert_eq!(plan.own.billable_tokens, 30);
+        assert_eq!(plan.rollup.billable_tokens, 90);
+        assert_eq!(plan.children[0].step_id, "act");
+        assert_eq!(plan.children[0].rollup.billable_tokens, 60);
+    }
+
+    #[test]
+    fn run_tree_total_equals_sum_of_root_rollups() {
+        let events = [
+            run_ev("r1", Some("a"), None, 10, 0),
+            run_ev("r1", Some("b"), None, 20, 0),
+            run_ev("r1", Some("b1"), Some("b"), 5, 0),
+        ];
+        let tree = RunCostTreeV1::from_events("r1", &events);
+        let rollup_sum: u64 = tree.roots.iter().map(|n| n.rollup.billable_tokens).sum();
+        assert_eq!(rollup_sum, tree.total.billable_tokens);
+        assert_eq!(tree.total.calls, 3);
+    }
+
+    #[test]
+    fn run_tree_orphan_parent_and_missing_step_become_roots() {
+        // A parent id that names no step in this run is an orphan (cross-run nesting is v1
+        // out-of-scope) → the node surfaces as a root rather than vanishing. An event with no
+        // step_id folds into the "(none)" bucket.
+        let events = [
+            run_ev("r1", Some("child"), Some("elsewhere"), 10, 0),
+            run_ev("r1", None, None, 7, 0),
+        ];
+        let tree = RunCostTreeV1::from_events("r1", &events);
+        assert_eq!(tree.roots.len(), 2);
+        let keys: Vec<&str> = tree.roots.iter().map(|n| n.step_id.as_str()).collect();
+        assert!(keys.contains(&"child"));
+        assert!(keys.contains(&NONE_KEY));
+        assert_eq!(tree.total.billable_tokens, 17);
+    }
+
+    #[test]
+    fn run_tree_same_step_under_different_parents_is_two_nodes() {
+        // step_id is only unique per parent; "verify" under "plan" and under "act" must not
+        // merge into one node (pinned limitation, documented on the type).
+        let events = [
+            run_ev("r1", Some("plan"), None, 1, 0),
+            run_ev("r1", Some("act"), None, 1, 0),
+            run_ev("r1", Some("verify"), Some("plan"), 10, 0),
+            run_ev("r1", Some("verify"), Some("act"), 20, 0),
+        ];
+        let tree = RunCostTreeV1::from_events("r1", &events);
+        let verify_nodes: Vec<u64> = tree
+            .roots
+            .iter()
+            .flat_map(|r| r.children.iter())
+            .filter(|n| n.step_id == "verify")
+            .map(|n| n.own.billable_tokens)
+            .collect();
+        assert_eq!(verify_nodes.len(), 2);
+        assert_eq!(verify_nodes.iter().sum::<u64>(), 30);
+    }
+
+    #[test]
+    fn run_tree_survives_adversarial_parent_cycles() {
+        // a→b→a would loop forever without the visited guard; the cycle is broken by promoting
+        // a deterministic member to a root, and no spend is lost or double-counted.
+        let events = [
+            run_ev("r1", Some("a"), Some("b"), 10, 0),
+            run_ev("r1", Some("b"), Some("a"), 20, 0),
+            run_ev("r1", Some("self"), Some("self"), 5, 0),
+        ];
+        let tree = RunCostTreeV1::from_events("r1", &events);
+        assert_eq!(tree.total.calls, 3);
+        let rollup_sum: u64 = tree.roots.iter().map(|n| n.rollup.billable_tokens).sum();
+        assert_eq!(rollup_sum, 35, "cycles must neither lose nor double-count spend");
+    }
+
+    #[test]
+    fn run_dimension_parses_and_reads_run_id() {
+        assert_eq!(Dimension::parse("run"), Some(Dimension::Run));
+        assert_eq!(Dimension::Run.as_str(), "run");
+        let e = run_ev("r7", None, None, 1, 1);
+        assert_eq!(Dimension::Run.key_of(&e), Some("r7".to_string()));
+        let mut agg = UsageAggregator::new(Dimension::Run);
+        agg.add(&e);
+        agg.add(&ev("alice", 1, 1, 0, 0)); // no run_id → (none)
+        let rows = agg.rows();
+        assert!(rows.iter().any(|r| r.key == "r7"));
+        assert!(rows.iter().any(|r| r.key == NONE_KEY));
+    }
+
+    #[test]
+    fn aggregate_merge_sums_counts_per_call_billable() {
+        let mut a = UsageAggregateV1::empty("x");
+        a.add(&ev("alice", 10, 3, 0, 0).with_reasoning(Some(8))); // unfolded: 21
+        let mut b = UsageAggregateV1::empty("x");
+        b.add(&ev("alice", 10, 10, 0, 0).with_reasoning(Some(4))); // folded: 20
+        a.merge(&b);
+        assert_eq!(a.calls, 2);
+        // Per-call folds are preserved by merging the already-folded sums (41), not
+        // re-deriving from merged columns (which would wrongly read 33).
+        assert_eq!(a.billable_tokens, 41);
     }
 
     #[test]

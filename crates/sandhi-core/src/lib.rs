@@ -33,7 +33,8 @@ pub use keys::{KeyStore, VirtualKey};
 pub use ledger::{Denied, EnforcementLedger, InMemoryLedger, LedgerView, Reservation};
 pub use sink::{InMemorySink, JsonlSink, Sink};
 pub use stats::{
-    Dimension, LatencySummary, UsageAggregateV1, UsageAggregator, NONE_KEY, OVERFLOW_KEY, TOTAL_KEY,
+    Dimension, LatencySummary, RunCostTreeV1, RunUsageNodeV1, UsageAggregateV1, UsageAggregator,
+    NONE_KEY, OVERFLOW_KEY, TOTAL_KEY,
 };
 pub use usage::{
     parse_anthropic_usage, parse_bedrock_usage, parse_cohere_usage, parse_gemini_usage,
