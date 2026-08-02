@@ -13,10 +13,11 @@ pub const CHAT_SCHEMA_VERSION_V1: &str = "1";
 /// History: 1 = usage latency/reasoning on UsageEvent (#68), 2 =
 /// `include_native_response` request gate (#90), 3 = wire-truth latency on
 /// `UsageV2` (#97), 4 = `reasoning_effort` + `thinking` typed request fields
-/// (W3d/G7), 5 = `UsageV2::basis` — measured vs estimated counts (TD-0013 D5).
+/// (W3d/G7), 5 = `UsageV2::basis` — measured vs estimated counts (TD-0013 D5),
+/// 6 = `RunCostTreeV1` — the ADR-0005 D7 agent-run cost tree.
 /// Consumers feature-detect the binding export and treat an absent fn as
 /// minor 0.
-pub const CHAT_CONTRACT_MINOR: u32 = 5;
+pub const CHAT_CONTRACT_MINOR: u32 = 6;
 
 fn schema_v1() -> String {
     CHAT_SCHEMA_VERSION_V1.to_owned()
@@ -618,6 +619,10 @@ pub fn contract_schema_documents() -> BTreeMap<&'static str, String> {
             render(&schemars::schema_for!(crate::stats::UsageAggregateV1)),
         ),
         (
+            "run-cost-tree.v1.schema.json",
+            render(&schemars::schema_for!(crate::stats::RunCostTreeV1)),
+        ),
+        (
             "provider-descriptor.v1.schema.json",
             render(&schemars::schema_for!(ProviderDescriptorV1)),
         ),
@@ -744,7 +749,7 @@ mod tests {
         let digest = fnv1a(concatenated.as_bytes());
         assert_eq!(
             (CHAT_CONTRACT_MINOR, digest),
-            (5, 0x585a1d7e8b06ba3a_u64),
+            (6, 0xf669dc9014fee5c7_u64),
             "contract schemas changed: bump CHAT_CONTRACT_MINOR and update this digest \
              (new digest = {digest:#x})"
         );

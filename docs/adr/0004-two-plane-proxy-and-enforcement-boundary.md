@@ -38,6 +38,26 @@ transparent-metering plane). Does not touch the measure-vs-price boundary — st
 > - **D2 (trust tiers):** Tier-1 "attested" is renamed **"self-reported"** (no remote attestation
 >   with the credential in-process).
 
+> **Update 2026-08-01 — D4 closed out; attribution made explicitly key-authoritative.** The
+> "still open" list in the 2026-07-23 block above is now historical: per-minute **rate limits
+> are enforced** (TD-0012), **billable** has one definition (#78, ADR-0005 D4), the **dashboard
+> read endpoints are admin-bearer-gated** by default (D4 below), and the admin-token compare
+> **is constant-time** (landed with #55 as a hand-rolled accumulator loop; now delegates to
+> `subtle::ConstantTimeEq` for compiler-proof barriers). Two additions in the same D4 spirit:
+> - **Attribution is key-authoritative.** The usage event has always carried the *resolved
+>   key's* `subject_id`/`group_id`; `x-sandhi-subject-id`/`x-sandhi-group-id` request headers
+>   were never read. That contract is now enforced fail-loud: a header is admitted only as a
+>   byte-exact echo of the key's binding (`VirtualKey::permits_attribution`), anything else —
+>   including any value on a field the key does not bind — is a dialect-shaped **403** placed
+>   before the rate limit and the reservation, so a spoof holds no lease and emits no usage.
+>   Residual caveat: two groups sharing one `upstream_ref` share the *provider-side* prompt
+>   cache regardless — namespace isolation is only as strong as upstream credential separation.
+> - **The agent cost tree is persisted and queryable.** The ADR-0005 D7 identity
+>   (`run_id`/`step_id`/`parent_id`) was stamped on every event but dropped at the store
+>   boundary; it is now persisted (additive columns) and served as `RunCostTreeV1`
+>   (`GET /admin/usage/run/{run_id}`, `sandhi usage --run`, `?by=run`). Events recorded before
+>   the columns existed have NULL identity forever — the data was never persisted.
+
 ## Context
 
 An audit of the shipped code against the docs (2026-07-22) surfaced a structural mismatch and
@@ -149,13 +169,16 @@ substrate the TD-0005 policy engine records against.
 
 ### D4. Close the incidental gaps the audit found
 
-Independent of the above, and cheap. ~~Enforce the per-key **model allowlist**~~ — **done in
-P4** (`vk.permits_model` is now called in the request path). Remaining: use a **constant-time
-compare** for the admin token (still `t == expected`); settle a single definition of "billable"
-(the budget still bills `tokens_in + tokens_out` while the usage event meters the cache split
-too); and **revisit dashboard access** — P4 shipped the read endpoints unauthed-by-design
-(masked-only, self-hosted trust), which is defensible single-node but exposes usage aggregates,
-so a multi-tenant / Tier-2 deployment should gate them.
+Independent of the above, and cheap. All closed as of 2026-08-01: ~~enforce the per-key
+**model allowlist**~~ — **done in P4** (`vk.permits_model` is now called in the request path);
+~~use a **constant-time compare** for the admin token~~ — **done** (#55; the body now delegates
+to `subtle::ConstantTimeEq`); ~~settle a single definition of "billable"~~ — **done** (#78,
+`billable_parts` is the one formula, SQL mirrors it per row under a pin test); ~~**revisit
+dashboard access**~~ — **done** (read endpoints are admin-bearer-gated by default when an admin
+token is configured; `SANDHI_DASHBOARD_PUBLIC=1` opts back into the open masked-only model).
+Same spirit, added later: **attribution is key-authoritative** — `x-sandhi-subject-id`/
+`x-sandhi-group-id` are echo-only and any mismatch (or a value on an unbound field) is a
+dialect-shaped 403 before the rate limit and the reservation (see the 2026-08-01 update block).
 
 ## Consequences
 

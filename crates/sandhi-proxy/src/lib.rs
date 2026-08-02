@@ -194,6 +194,8 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         )
         .route("/admin/budget/usage", get(operator::budget_usage))
         .route("/admin/usage", get(operator::usage))
+        // ADR-0005 D7: the agent cost tree for one run (per-step rollups by parent_id).
+        .route("/admin/usage/run/:run_id", get(operator::usage_run))
         // TD-0003 P2 alert rules.
         .route(
             "/admin/alerts",
@@ -852,6 +854,26 @@ async fn handle(
                 request.model,
                 allowed.join(", ")
             ),
+        );
+    }
+
+    // 4b. Attribution is key-authoritative (ADR-0004 D4): the usage event always carries the
+    //     resolved key's subject/group (step 3 above), and `x-sandhi-subject-id` /
+    //     `x-sandhi-group-id` are admitted only as an idempotent echo of that binding. A
+    //     mismatch — or any value on a field the key does not bind — is a fail-loud 403:
+    //     silently ignoring it would hide data loss from a client that expects the
+    //     attribution, and adopting it would let any key holder pollute another
+    //     subject/group's aggregates (and, once a group-keyed cache namespace ships per
+    //     ADR-0001 §4, cross prompt-cache namespaces). Checked before the rate limit and the
+    //     reservation, so a spoof holds no lease and emits no usage.
+    let presented_subject = header_str(&headers, "x-sandhi-subject-id");
+    let presented_group = header_str(&headers, "x-sandhi-group-id");
+    if !vk.permits_attribution(presented_subject.as_deref(), presented_group.as_deref()) {
+        return ingress_error(
+            dialect,
+            StatusCode::FORBIDDEN,
+            "attribution is key-bound: x-sandhi-subject-id / x-sandhi-group-id must match this \
+             virtual key's subject/group (or be omitted); re-mint the key to change attribution",
         );
     }
 
