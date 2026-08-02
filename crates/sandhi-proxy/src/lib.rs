@@ -194,6 +194,8 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         )
         .route("/admin/budget/usage", get(operator::budget_usage))
         .route("/admin/usage", get(operator::usage))
+        // ADR-0005 D7: the agent cost tree for one run (per-step rollups by parent_id).
+        .route("/admin/usage/run/:run_id", get(operator::usage_run))
         // TD-0003 P2 alert rules.
         .route(
             "/admin/alerts",

@@ -57,12 +57,17 @@ enum Command {
     },
     /// Attribution / usage aggregates.
     Usage {
-        /// Dimension to aggregate by.
+        /// Dimension to aggregate by (`subject`, `group`, `provider`, `model`, `key`,
+        /// `session`, `run`).
         #[arg(long, default_value = "subject")]
         by: String,
         /// RFC 3339 lower-bound (inclusive).
         #[arg(long)]
         since: Option<String>,
+        /// Show the cost tree of ONE run id (ADR-0005 D7) instead of an aggregate:
+        /// per-step spend assembled by parent, with subtree-inclusive rollups.
+        #[arg(long, conflicts_with_all = ["by", "since"])]
+        run: Option<String>,
         /// Output format.
         #[arg(long, default_value = "table")]
         format: Format,
@@ -261,14 +266,18 @@ pub(crate) fn admin_request(base_url: &str, command: &Command) -> AdminRequest {
         Command::Usage {
             by,
             since,
+            run,
             format: _,
-        } => {
-            let mut path = format!("/admin/usage?by={by}");
-            if let Some(since) = since {
-                path.push_str(&format!("&since={since}"));
+        } => match run {
+            Some(run_id) => ("GET", format!("/admin/usage/run/{run_id}"), None),
+            None => {
+                let mut path = format!("/admin/usage?by={by}");
+                if let Some(since) = since {
+                    path.push_str(&format!("&since={since}"));
+                }
+                ("GET", path, None)
             }
-            ("GET", path, None)
-        }
+        },
         Command::Alerts {
             action: AlertsAction::List { scope },
         } => {
@@ -368,6 +377,11 @@ fn execute(req: &AdminRequest, token: &str) -> Result<Value, String> {
 
 fn render(command: &Command, response: &Value, _base_url: &str) {
     match command {
+        Command::Usage {
+            format,
+            run: Some(_),
+            ..
+        } => render_run_tree(response, format),
         Command::Usage { format, .. } => render_usage(response, format),
         Command::Budget {
             action: BudgetAction::List,
@@ -432,6 +446,61 @@ fn render_usage(response: &Value, format: &Format) {
                 u64_at(b, "billable_tokens"),
                 latency_cell(b),
             );
+        }
+    }
+}
+
+/// Render one run's cost tree: the grand total, then each node indented under its parent with
+/// own vs subtree-inclusive (`rollup`) billable tokens — the ADR-0005 D4 quantity.
+fn render_run_tree(response: &Value, format: &Format) {
+    if matches!(format, Format::Json) {
+        print_json(response);
+        return;
+    }
+    let Some(run) = response.get("run") else {
+        print_json(response);
+        return;
+    };
+    let u64_at = |v: &Value, k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0);
+    if let Some(total) = run.get("total") {
+        println!(
+            "run {}: {} calls, {} in / {} out (cache write {}, cache read {}) — {} billable",
+            run.get("run_id").and_then(Value::as_str).unwrap_or("?"),
+            u64_at(total, "calls"),
+            u64_at(total, "tokens_in"),
+            u64_at(total, "tokens_out"),
+            u64_at(total, "cache_creation_tokens"),
+            u64_at(total, "cache_read_tokens"),
+            u64_at(total, "billable_tokens"),
+        );
+    }
+    if let Some(roots) = run.get("roots").and_then(Value::as_array) {
+        println!();
+        for node in roots {
+            render_run_node(node, 0);
+        }
+    }
+}
+
+fn render_run_node(node: &Value, depth: usize) {
+    let u64_in = |k: &str, f: &str| {
+        node.get(k)
+            .and_then(|v| v.get(f))
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    };
+    println!(
+        "{:indent$}{:<28} {:>6} calls  {:>10} own  {:>10} rollup",
+        "",
+        node.get("step_id").and_then(Value::as_str).unwrap_or("?"),
+        u64_in("own", "calls"),
+        u64_in("own", "billable_tokens"),
+        u64_in("rollup", "billable_tokens"),
+        indent = depth * 2
+    );
+    if let Some(children) = node.get("children").and_then(Value::as_array) {
+        for child in children {
+            render_run_node(child, depth + 1);
         }
     }
 }
@@ -515,6 +584,30 @@ mod tests {
     }
 
     #[test]
+    fn usage_run_flag_maps_to_the_run_tree_endpoint() {
+        let cmd = Command::Usage {
+            by: "subject".into(),
+            since: None,
+            run: Some("run-1".into()),
+            format: Format::Table,
+        };
+        let req = admin_request(url(), &cmd);
+        assert_eq!(req.method, "GET");
+        assert_eq!(req.path, "http://localhost:8787/admin/usage/run/run-1");
+        assert_eq!(req.body, None);
+
+        // Without --run, the aggregate path is unchanged.
+        let cmd = Command::Usage {
+            by: "run".into(),
+            since: None,
+            run: None,
+            format: Format::Table,
+        };
+        let req = admin_request(url(), &cmd);
+        assert_eq!(req.path, "http://localhost:8787/admin/usage?by=run");
+    }
+
+    #[test]
     fn budget_set_and_usage_paths() {
         let set_cmd = Command::Budget {
             action: BudgetAction::Set {
@@ -536,6 +629,7 @@ mod tests {
         let usage_cmd = Command::Usage {
             by: "model".into(),
             since: Some("2026-01-01T00:00:00Z".into()),
+            run: None,
             format: Format::Json,
         };
         let req = admin_request(url(), &usage_cmd);

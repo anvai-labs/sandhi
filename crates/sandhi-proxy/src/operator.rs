@@ -99,6 +99,7 @@ pub mod admin {
         Model,
         Key,
         Session,
+        Run,
     }
 
     impl UsageDimension {
@@ -110,6 +111,7 @@ pub mod admin {
                 "model" => Self::Model,
                 "key" | "virtual_key" => Self::Key,
                 "session" => Self::Session,
+                "run" => Self::Run,
                 _ => return None,
             })
         }
@@ -122,6 +124,7 @@ pub mod admin {
                 Self::Model => "model",
                 Self::Key => "key",
                 Self::Session => "session",
+                Self::Run => "run",
             }
         }
     }
@@ -624,6 +627,37 @@ pub(crate) async fn usage(
     .into_response()
 }
 
+/// `GET /admin/usage/run/{run_id}` — the ADR-0005 D7 agent cost tree for one run: per-step
+/// spend assembled by `parent_id`, with subtree-inclusive rollups. 404 when no usage event
+/// carries the run id (including events recorded before the identity columns existed — that
+/// data was never persisted and cannot be backfilled).
+pub(crate) async fn usage_run(
+    State(state): State<Arc<ProxyState>>,
+    headers: HeaderMap,
+    Path(run_id): Path<String>,
+) -> Response {
+    if let Err(r) = require_admin(&state, &headers) {
+        return r;
+    }
+    let Some(store) = state.store.clone() else {
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "usage store not configured (set SANDHI_STORE)",
+        );
+    };
+    match store.run_cost_tree(&run_id) {
+        Ok(Some(tree)) => Json(json!({ "run": tree })).into_response(),
+        Ok(None) => err(
+            StatusCode::NOT_FOUND,
+            "unknown run id (no usage event carries it)",
+        ),
+        Err(e) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("run query failed: {e}"),
+        ),
+    }
+}
+
 fn dimension_buckets(
     store: &Arc<sandhi_store::SqliteStore>,
     by: &str,
@@ -632,7 +666,15 @@ fn dimension_buckets(
     let validate = |dim: &str| -> bool {
         matches!(
             dim,
-            "subject" | "user" | "group" | "provider" | "model" | "key" | "virtual_key" | "session"
+            "subject"
+                | "user"
+                | "group"
+                | "provider"
+                | "model"
+                | "key"
+                | "virtual_key"
+                | "session"
+                | "run"
         )
     };
     if !validate(by) {
@@ -648,6 +690,7 @@ fn dimension_buckets(
             "model" => store.totals_by_model().ok()?,
             "key" | "virtual_key" => store.totals_by_virtual_key().ok()?,
             "session" => store.totals_by_session().ok()?,
+            "run" => store.totals_by_run().ok()?,
             _ => return None,
         }
     };
