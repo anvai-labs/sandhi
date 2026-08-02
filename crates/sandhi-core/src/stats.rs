@@ -546,7 +546,13 @@ mod tests {
         assert_eq!(agg.rows()[0].key, NONE_KEY);
     }
 
-    fn run_ev(run: &str, step: Option<&str>, parent: Option<&str>, tin: u64, tout: u64) -> UsageEvent {
+    fn run_ev(
+        run: &str,
+        step: Option<&str>,
+        parent: Option<&str>,
+        tin: u64,
+        tout: u64,
+    ) -> UsageEvent {
         ev("alice", tin, tout, 0, 0).with_identity(
             None,
             Some(run.into()),
@@ -645,7 +651,10 @@ mod tests {
         let tree = RunCostTreeV1::from_events("r1", &events);
         assert_eq!(tree.total.calls, 3);
         let rollup_sum: u64 = tree.roots.iter().map(|n| n.rollup.billable_tokens).sum();
-        assert_eq!(rollup_sum, 35, "cycles must neither lose nor double-count spend");
+        assert_eq!(
+            rollup_sum, 35,
+            "cycles must neither lose nor double-count spend"
+        );
     }
 
     #[test]

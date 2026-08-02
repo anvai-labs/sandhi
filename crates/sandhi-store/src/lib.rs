@@ -383,19 +383,11 @@ impl SqliteStore {
         )?;
         let events: Vec<UsageEvent> = stmt
             .query_map(params![run_id], |r| {
-                Ok(
-                    UsageEvent::new("", "", "", "", Backend::External)
-                        .with_tokens(r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)
-                        .with_cache(r.get::<_, i64>(2)? as u64, r.get::<_, i64>(3)? as u64)
-                        .with_reasoning(r.get::<_, Option<i64>>(4)?.map(|v| v as u64))
-                        .with_identity(
-                            None,
-                            Some(run_id.to_string()),
-                            r.get(5)?,
-                            r.get(6)?,
-                            None,
-                        ),
-                )
+                Ok(UsageEvent::new("", "", "", "", Backend::External)
+                    .with_tokens(r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)
+                    .with_cache(r.get::<_, i64>(2)? as u64, r.get::<_, i64>(3)? as u64)
+                    .with_reasoning(r.get::<_, Option<i64>>(4)?.map(|v| v as u64))
+                    .with_identity(None, Some(run_id.to_string()), r.get(5)?, r.get(6)?, None))
             })?
             .collect::<rusqlite::Result<_>>()?;
         if events.is_empty() {
@@ -660,15 +652,13 @@ mod tests {
             store.emit(e);
         }
         // An event of a DIFFERENT run must not leak into run-1's tree.
-        store.emit(
-            &ev("openai", "bob", "team-b", 999, 999).with_identity(
-                None,
-                Some("run-2".into()),
-                None,
-                None,
-                None,
-            ),
-        );
+        store.emit(&ev("openai", "bob", "team-b", 999, 999).with_identity(
+            None,
+            Some("run-2".into()),
+            None,
+            None,
+            None,
+        ));
 
         let stored = store.run_cost_tree("run-1").unwrap().expect("run exists");
         let expected = RunCostTreeV1::from_events("run-1", &corpus);
@@ -690,7 +680,10 @@ mod tests {
             None,
         ));
         store.emit(&ev("openai", "alice", "team-a", 20, 5)); // no run → (none)
-        let rows = store.totals_since("run", "2020-01-01T00:00:00Z").unwrap().unwrap();
+        let rows = store
+            .totals_since("run", "2020-01-01T00:00:00Z")
+            .unwrap()
+            .unwrap();
         let keys: Vec<&str> = rows.iter().map(|b| b.key.as_str()).collect();
         assert!(keys.contains(&"run-1"));
         assert!(keys.contains(&"(none)"));
