@@ -134,7 +134,8 @@ impl SqliteStore {
                 virtual_key_id TEXT, subject_id TEXT, group_id TEXT, route TEXT, session_id TEXT,
                 tokens_in INTEGER, tokens_out INTEGER,
                 cache_creation_tokens INTEGER, cache_read_tokens INTEGER, gpu_seconds REAL,
-                duration_ms INTEGER, time_to_first_token_ms INTEGER, reasoning_tokens INTEGER
+                duration_ms INTEGER, time_to_first_token_ms INTEGER, reasoning_tokens INTEGER,
+                run_id TEXT, step_id TEXT, parent_id TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_usage_subject ON usage_events(subject_id);
             CREATE INDEX IF NOT EXISTS idx_usage_group ON usage_events(group_id);
@@ -144,13 +145,16 @@ impl SqliteStore {
             CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_events(session_id);
             CREATE INDEX IF NOT EXISTS idx_usage_occurred ON usage_events(occurred_at);",
         )?;
-        // Additive columns for databases created before the latency/reasoning fields
-        // existed. SQLite has no ADD COLUMN IF NOT EXISTS — attempt and ignore the
-        // duplicate-column error so init stays idempotent.
+        // Additive columns for databases created before the latency/reasoning fields (or the
+        // ADR-0005 D7 run/step/parent identity) existed. SQLite has no ADD COLUMN IF NOT
+        // EXISTS — attempt and ignore the duplicate-column error so init stays idempotent.
         for ddl in [
             "ALTER TABLE usage_events ADD COLUMN duration_ms INTEGER",
             "ALTER TABLE usage_events ADD COLUMN time_to_first_token_ms INTEGER",
             "ALTER TABLE usage_events ADD COLUMN reasoning_tokens INTEGER",
+            "ALTER TABLE usage_events ADD COLUMN run_id TEXT",
+            "ALTER TABLE usage_events ADD COLUMN step_id TEXT",
+            "ALTER TABLE usage_events ADD COLUMN parent_id TEXT",
         ] {
             match conn.execute(ddl, []) {
                 Ok(_) => {}
@@ -158,6 +162,8 @@ impl SqliteStore {
                 Err(e) => return Err(e),
             }
         }
+        // After the columns exist (either path above), the run index can be created.
+        conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_usage_run ON usage_events(run_id);")?;
         Ok(())
     }
 
@@ -172,8 +178,9 @@ impl SqliteStore {
                 request_id, occurred_at, provider, model, backend,
                 virtual_key_id, subject_id, group_id, route, session_id,
                 tokens_in, tokens_out, cache_creation_tokens, cache_read_tokens, gpu_seconds,
-                duration_ms, time_to_first_token_ms, reasoning_tokens
-            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+                duration_ms, time_to_first_token_ms, reasoning_tokens,
+                run_id, step_id, parent_id
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
             params![
                 e.request_id,
                 e.occurred_at,
@@ -193,6 +200,9 @@ impl SqliteStore {
                 e.duration_ms.map(|v| v as i64),
                 e.time_to_first_token_ms.map(|v| v as i64),
                 e.reasoning_tokens.map(|v| v as i64),
+                e.run_id,
+                e.step_id,
+                e.parent_id,
             ],
         )?;
         Ok(())
@@ -339,9 +349,53 @@ impl SqliteStore {
             "model" => "model",
             "key" | "virtual_key" => "virtual_key_id",
             "session" => "session_id",
+            "run" => "run_id",
             _ => return Ok(None),
         };
         Ok(Some(self.totals_grouped_since(col, Some(since))?))
+    }
+
+    /// TD-0003 P1 attribution: per-run totals (ADR-0005 D7 `run_id`).
+    pub fn totals_by_run(&self) -> rusqlite::Result<Vec<Bucket>> {
+        self.totals_grouped("run_id")
+    }
+
+    /// The cost tree of one agent run (ADR-0005 D7 `run_id`/`step_id`/`parent_id`).
+    ///
+    /// SQL only **filters** (`WHERE run_id = ?`) — the fold and the tree assembly are
+    /// [`sandhi_core::RunCostTreeV1::from_events`], the one definition (TD-0009 D6), over
+    /// events minimally reconstructed from the persisted columns (`run_tree_matches_core_fold`
+    /// pins that the round trip preserves every input the fold reads). A run's event count is
+    /// bounded by the run itself, so loading its rows is affordable and uses `idx_usage_run`.
+    ///
+    /// `None` when no event carries this run id. Rows written before the identity columns
+    /// existed have NULL `run_id` forever — the data was dropped at insert and cannot be
+    /// backfilled.
+    pub fn run_cost_tree(
+        &self,
+        run_id: &str,
+    ) -> rusqlite::Result<Option<sandhi_core::RunCostTreeV1>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT tokens_in, tokens_out, cache_creation_tokens, cache_read_tokens, \
+                    reasoning_tokens, step_id, parent_id \
+             FROM usage_events WHERE run_id = ?1",
+        )?;
+        let events: Vec<UsageEvent> = stmt
+            .query_map(params![run_id], |r| {
+                Ok(UsageEvent::new("", "", "", "", Backend::External)
+                    .with_tokens(r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)
+                    .with_cache(r.get::<_, i64>(2)? as u64, r.get::<_, i64>(3)? as u64)
+                    .with_reasoning(r.get::<_, Option<i64>>(4)?.map(|v| v as u64))
+                    .with_identity(None, Some(run_id.to_string()), r.get(5)?, r.get(6)?, None))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        if events.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(sandhi_core::RunCostTreeV1::from_events(
+            run_id, &events,
+        )))
     }
 
     /// The grand total across every event.
@@ -479,6 +533,72 @@ mod tests {
     }
 
     #[test]
+    fn persists_run_identity_columns() {
+        // ADR-0005 D7: the proxy stamps run/step/parent on every event; the store must not
+        // drop them (it silently did before the run-cost-tree query existed).
+        let store = SqliteStore::in_memory().unwrap();
+        let event = ev("openai", "alice", "team-a", 100, 20).with_identity(
+            None,
+            Some("run-1".into()),
+            Some("plan".into()),
+            Some("root".into()),
+            None,
+        );
+        store.emit(&event);
+
+        let conn = store.conn.lock().unwrap();
+        let (run, step, parent): (Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT run_id, step_id, parent_id FROM usage_events",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(run.as_deref(), Some("run-1"));
+        assert_eq!(step.as_deref(), Some("plan"));
+        assert_eq!(parent.as_deref(), Some("root"));
+    }
+
+    #[test]
+    fn init_migrates_pre_run_identity_databases() {
+        // A database created before the run/step/parent columns existed (i.e. with the latency
+        // columns but not the D7 identity) must gain them idempotently — same additive ALTER
+        // mechanism the latency columns used.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE usage_events (
+                request_id TEXT, occurred_at TEXT, provider TEXT, model TEXT, backend TEXT,
+                virtual_key_id TEXT, subject_id TEXT, group_id TEXT, route TEXT, session_id TEXT,
+                tokens_in INTEGER, tokens_out INTEGER,
+                cache_creation_tokens INTEGER, cache_read_tokens INTEGER, gpu_seconds REAL,
+                duration_ms INTEGER, time_to_first_token_ms INTEGER, reasoning_tokens INTEGER
+            );",
+        )
+        .unwrap();
+
+        SqliteStore::init(&conn).unwrap();
+        SqliteStore::init(&conn).unwrap(); // idempotent
+
+        let store = SqliteStore {
+            conn: Mutex::new(conn),
+            emit_failures: AtomicU64::new(0),
+        };
+        let event = ev("openai", "alice", "team-a", 1, 2).with_identity(
+            None,
+            Some("run-9".into()),
+            None,
+            None,
+            None,
+        );
+        store.emit(&event);
+        let conn = store.conn.lock().unwrap();
+        let run: Option<String> = conn
+            .query_row("SELECT run_id FROM usage_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(run.as_deref(), Some("run-9"));
+    }
+
+    #[test]
     fn init_migrates_pre_latency_databases() {
         // Simulate a database created before the latency/reasoning columns existed.
         let conn = Connection::open_in_memory().unwrap();
@@ -503,6 +623,70 @@ mod tests {
         let event = ev("openai", "alice", "team-a", 1, 2).with_latency(Some(5), None);
         store.emit(&event);
         assert_eq!(store.grand_total().unwrap().calls, 1);
+    }
+
+    #[test]
+    fn run_tree_matches_core_fold() {
+        // TD-0009 D6 for the run fold: the store filters rows and calls
+        // `RunCostTreeV1::from_events` — this pins that the column round-trip preserves every
+        // input the fold reads (tokens, cache split, reasoning, step/parent identity).
+        use sandhi_core::RunCostTreeV1;
+
+        let store = SqliteStore::in_memory().unwrap();
+        let run_ev = |step: Option<&str>, parent: Option<&str>, tin: u64, tout: u64| {
+            ev("openai", "alice", "team-a", tin, tout).with_identity(
+                None,
+                Some("run-1".into()),
+                step.map(str::to_string),
+                parent.map(str::to_string),
+                None,
+            )
+        };
+        let corpus = [
+            run_ev(Some("root"), None, 10, 5),
+            run_ev(Some("plan"), Some("root"), 20, 10),
+            run_ev(Some("act"), Some("plan"), 10, 3).with_reasoning(Some(8)), // unfolded
+            run_ev(None, None, 7, 1),
+        ];
+        for e in &corpus {
+            store.emit(e);
+        }
+        // An event of a DIFFERENT run must not leak into run-1's tree.
+        store.emit(&ev("openai", "bob", "team-b", 999, 999).with_identity(
+            None,
+            Some("run-2".into()),
+            None,
+            None,
+            None,
+        ));
+
+        let stored = store.run_cost_tree("run-1").unwrap().expect("run exists");
+        let expected = RunCostTreeV1::from_events("run-1", &corpus);
+        assert_eq!(stored, expected, "store tree must equal the core fold");
+        assert_eq!(stored.total.calls, 4);
+
+        // Unknown run → None, not an empty tree.
+        assert!(store.run_cost_tree("run-404").unwrap().is_none());
+    }
+
+    #[test]
+    fn totals_by_run_groups_on_run_id() {
+        let store = SqliteStore::in_memory().unwrap();
+        store.emit(&ev("openai", "alice", "team-a", 10, 5).with_identity(
+            None,
+            Some("run-1".into()),
+            None,
+            None,
+            None,
+        ));
+        store.emit(&ev("openai", "alice", "team-a", 20, 5)); // no run → (none)
+        let rows = store
+            .totals_since("run", "2020-01-01T00:00:00Z")
+            .unwrap()
+            .unwrap();
+        let keys: Vec<&str> = rows.iter().map(|b| b.key.as_str()).collect();
+        assert!(keys.contains(&"run-1"));
+        assert!(keys.contains(&"(none)"));
     }
 
     #[test]

@@ -86,6 +86,23 @@ impl VirtualKey {
             Some(allowed) => allowed.iter().any(|m| m.eq_ignore_ascii_case(model)),
         }
     }
+
+    /// Whether client-presented attribution is admissible for this key (ADR-0004 D4).
+    ///
+    /// Attribution is **key-authoritative**: the usage event always carries the key's own
+    /// `subject_id`/`group_id`. A presented value is admitted only as an idempotent echo of
+    /// the bound value (byte-exact); a presented value on a field this key does not bind is
+    /// refused rather than adopted — otherwise any key holder could pollute another
+    /// subject/group's aggregates or (ADR-0001 §4) a group-keyed cache namespace. Presenting
+    /// nothing is always admissible.
+    pub fn permits_attribution(&self, subject: Option<&str>, group: Option<&str>) -> bool {
+        let echoes_binding = |bound: Option<&str>, presented: Option<&str>| match presented {
+            None => true,
+            Some(p) => bound == Some(p),
+        };
+        echoes_binding(self.subject_id.as_deref(), subject)
+            && echoes_binding(self.group_id.as_deref(), group)
+    }
 }
 
 /// An in-memory virtual-key store. Interior-mutable (the admin/mint path mutates it through a
@@ -199,6 +216,32 @@ mod tests {
         // An empty allowlist admits any model (treated as unscoped).
         key.models = Some(vec![]);
         assert!(key.permits_model("anything"));
+    }
+
+    #[test]
+    fn attribution_is_key_authoritative() {
+        let key = vk(); // bound: alice / platform
+
+        // No presented attribution is always fine.
+        assert!(key.permits_attribution(None, None));
+        // An idempotent echo of the binding is fine.
+        assert!(key.permits_attribution(Some("alice"), Some("platform")));
+        assert!(key.permits_attribution(Some("alice"), None));
+        // Any other value is a spoof.
+        assert!(!key.permits_attribution(Some("mallory"), None));
+        assert!(!key.permits_attribution(None, Some("other-team")));
+        // Byte-exact: attribution ids are opaque, so no case folding.
+        assert!(!key.permits_attribution(Some("Alice"), None));
+
+        // An unbound key never adopts presented identity.
+        let unbound = VirtualKey {
+            id: "vk_2".into(),
+            upstream_ref: "openai:default".into(),
+            ..Default::default()
+        };
+        assert!(unbound.permits_attribution(None, None));
+        assert!(!unbound.permits_attribution(Some("anyone"), None));
+        assert!(!unbound.permits_attribution(None, Some("any-team")));
     }
 
     #[test]

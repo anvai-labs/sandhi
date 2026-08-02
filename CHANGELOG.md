@@ -25,7 +25,27 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 
 The observability + meter-trust release: first-party **OTel/OTLP export** of the GenAI semantic
 conventions (TD-0011 P3) completes the telemetry story atop a **hardened, drift-defended meter**
-(scopes 1–4), and per-key rate limiting is enforced (TD-0012).
+(scopes 1–4), per-key rate limiting is enforced (TD-0012), and the **agent-run cost tree** ships
+(#149).
+
+### Added
+
+- **The agent-run cost tree is persisted and queryable** (ADR-0005 D7, #149). The proxy had
+  stamped `run_id`/`step_id`/`parent_id` on every usage event since D7 landed — and the durable
+  store silently dropped them at insert. The three identity columns are now persisted (additive
+  migration + `idx_usage_run`; rows written before this release have NULL identity forever — the
+  data was never stored, so there is nothing to backfill), and the tree is served three ways:
+  `GET /admin/usage/run/{run_id}` (admin-gated `RunCostTreeV1`: per-step own spend + subtree
+  rollups, orphan parents surfacing as roots, cycle-safe), `?by=run` on the existing usage
+  endpoint, and `sandhi usage --run <run_id>` in the CLI. The fold is defined once in
+  `sandhi-core` (`run-cost-tree.v1.schema.json`, contract minor **6**); store SQL only filters,
+  pinned by test.
+- **Attribution is key-authoritative, fail-loud** (ADR-0004 D4, #149). The usage event has always
+  carried the *resolved virtual key's* subject/group; `x-sandhi-subject-id`/`x-sandhi-group-id`
+  request headers (never previously read) are now admitted only as a byte-exact echo of the key's
+  binding — anything else is a dialect-shaped **403** placed before the rate limit and the
+  reservation, so a spoof holds no lease, records no spend, and emits no usage event. The admin
+  bearer compare now delegates to `subtle::ConstantTimeEq` (no new lockfile crate).
 
 ### Fixed
 

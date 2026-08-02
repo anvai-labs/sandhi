@@ -442,8 +442,18 @@ of provider-specific fields (prompt-cache breakpoints, vendor params).
 
 [NOTE]
 ====
-There is **no Gemini/Cohere ingress** yet — those two are reachable as *upstreams only*,
-always via the translation plane. Cohere/Ollama likewise have no ingress dialect.
+There is **no Cohere ingress** — it is reachable as an *upstream only*, always via the
+translation plane. Ollama likewise has no ingress dialect. (Gemini ingress **is** wired —
+TD-0010 P4, `POST /v1beta/models/{model}:generateContent`.)
+====
+
+[NOTE]
+====
+**Attribution is key-bound.** The usage event always carries the *virtual key's*
+`subject`/`group` (set at mint time). The optional `x-sandhi-subject-id` /
+`x-sandhi-group-id` request headers are accepted only when they exactly echo that binding —
+any other value (including on a key minted without a subject/group) is refused with a
+dialect-shaped **403** before any budget lease. To change attribution, re-mint the key.
 ====
 
 === Operator CLI (`sandhi`) command map
@@ -455,7 +465,8 @@ always via the translation plane. Cohere/Ollama likewise have no ingress dialect
 | `keys share <provider:label> …` | Mint a virtual key.
 | `vkeys list` / `vkeys revoke <id>` | Inventory / revoke virtual keys.
 | `budget set <scope> <tokens>` / `budget list` / `budget usage <scope>` | Budgets.
-| `usage [--by subject\|group\|provider\|model\|key\|virtual_key\|session]` | Attribution aggregates.
+| `usage [--by subject\|group\|provider\|model\|key\|virtual_key\|session\|run]` | Attribution aggregates.
+| `usage --run <run_id>` | One agent run's cost tree (per-step own + subtree rollups, ADR-0005 D7).
 | `alerts list` / `alerts ack <id>` | Alert rules (creation is via `budget set --alert` or `POST /admin/alerts`).
 |===
 
@@ -474,7 +485,8 @@ Every CLI command maps 1:1 onto a call under `/admin/*` (all require the admin b
 | `POST /admin/keys/share` | Mint vkey `{upstream, subject?, group?, models?, budget_scope?, expires_at?, rate_limit_per_min?}`.
 | `GET /admin/keys/virtual` / `DELETE /admin/vkeys/{id}` | List / revoke virtual keys.
 | `POST /admin/budget` / `GET /admin/budget` / `GET /admin/budget/usage?scope=` | Budget CRUD + spend.
-| `GET /admin/usage?by=&since=` | Attribution query.
+| `GET /admin/usage?by=&since=` | Attribution query (`by=` also accepts `run`).
+| `GET /admin/usage/run/{run_id}` | The run's cost tree (`RunCostTreeV1`); 404 when no event carries the id.
 | `POST /admin/alerts` / `GET /admin/alerts` / `…/{id}/ack` / `DELETE …/{id}` | Alert rules.
 |===
 
@@ -497,6 +509,12 @@ Every CLI command maps 1:1 onto a call under `/admin/*` (all require the admin b
 | Calls for a model are refused
 | `--models` allowlist on the vkey. Re-mint with the model included, or drop the allowlist.
 
+| 403 "attribution is key-bound"
+| The client sent `x-sandhi-subject-id` / `x-sandhi-group-id` that does not match the vkey's
+  minted subject/group (or the key was minted without one). Remove the headers, or re-mint
+  the key with the intended `--subject`/`--group` — the proxy never adopts client-supplied
+  attribution.
+
 | Spend looks doubled
 | You turned on Victor's in-process metering (`usage_gateway.enabled`). Leave it off in proxy mode.
 
@@ -506,7 +524,7 @@ Every CLI command maps 1:1 onto a call under `/admin/*` (all require the admin b
 
 [NOTE]
 ====
-**Contract version skew:** a proxy built from current `develop` speaks contract `5`; the
+**Contract version skew:** a proxy built from current `develop` speaks contract `6`; the
 Victor-installed `sandhi-gateway` wheel may be `0.1.4` (contract `4`). The additive ratchet
 means they interoperate, but the version handshake is *inert* on the older wheel (it won't
 detect drift). Match versions at a release for a live handshake.

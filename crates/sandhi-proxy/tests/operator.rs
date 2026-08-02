@@ -601,6 +601,93 @@ async fn usage_aggregates_by_dimension_and_since() {
 }
 
 #[tokio::test]
+async fn run_cost_tree_endpoint_serves_the_run_tree() {
+    let state = admin_state();
+    let store = state.store.clone().unwrap();
+    let run_ev = |step: &str, parent: Option<&str>, tin: u64, tout: u64| {
+        UsageEvent::new(
+            "r",
+            "2026-07-01T00:00:00Z",
+            "openai",
+            "gpt-5",
+            sandhi_core::Backend::External,
+        )
+        .with_attribution(Some("vk".into()), Some("alice".into()), Some("team".into()))
+        .with_tokens(tin, tout)
+        .with_identity(
+            None,
+            Some("run-1".into()),
+            Some(step.into()),
+            parent.map(str::to_string),
+            None,
+        )
+    };
+    store.emit(&run_ev("root", None, 10, 5));
+    store.emit(&run_ev("plan", Some("root"), 20, 10));
+    let app = build_app(state);
+
+    // The tree, with subtree-inclusive rollups.
+    let r = app
+        .clone()
+        .oneshot(req("GET", "/admin/usage/run/run-1", Some(TOKEN), None))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let v = body_json(r).await;
+    assert_eq!(v["run"]["run_id"], "run-1");
+    assert_eq!(v["run"]["total"]["calls"], 2);
+    assert_eq!(v["run"]["total"]["billable_tokens"], 45);
+    assert_eq!(v["run"]["roots"][0]["step_id"], "root");
+    assert_eq!(v["run"]["roots"][0]["own"]["billable_tokens"], 15);
+    assert_eq!(v["run"]["roots"][0]["rollup"]["billable_tokens"], 45);
+    assert_eq!(v["run"]["roots"][0]["children"][0]["step_id"], "plan");
+
+    // Admin-gated like every /admin route.
+    let r = app
+        .clone()
+        .oneshot(req("GET", "/admin/usage/run/run-1", Some("nope"), None))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+
+    // Unknown run → 404, not an empty tree.
+    let r = app
+        .clone()
+        .oneshot(req("GET", "/admin/usage/run/run-404", Some(TOKEN), None))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+
+    // The run dimension aggregates through the existing usage endpoint.
+    let r = app
+        .oneshot(req("GET", "/admin/usage?by=run", Some(TOKEN), None))
+        .await
+        .unwrap();
+    let v = body_json(r).await;
+    assert_eq!(v["buckets"][0]["key"], "run-1");
+    assert_eq!(v["buckets"][0]["calls"], 2);
+}
+
+#[tokio::test]
+async fn run_cost_tree_endpoint_requires_a_store() {
+    // Admin token configured but no durable store → 503, mirroring /admin/usage.
+    let mut state = ProxyState::new(
+        KeyStore::new(),
+        ProxyLedger::in_memory(),
+        Arc::new(sandhi_core::InMemorySink::new()),
+        HashMap::new(),
+        None,
+    );
+    state.admin_token = Some(TOKEN.into());
+    let app = build_app(Arc::new(state));
+    let r = app
+        .oneshot(req("GET", "/admin/usage/run/run-1", Some(TOKEN), None))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
 async fn unknown_usage_dimension_returns_empty_not_500() {
     let app = build_app(admin_state());
     let r = app
