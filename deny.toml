@@ -1,0 +1,17 @@
+# cargo-deny configuration. CI runs `cargo deny check advisories` (see .github/workflows/ci.yml
+# `security` job) — the security value: fail on known vulnerabilities and yanked crates.
+#
+# Scoped to advisories only for the first pass. License / bans / sources enforcement is a
+# follow-up once the allowlists are tuned — a strict license allowlist is high false-positive
+# across a transitive tree and is not the security goal of this gate.
+[advisories]
+# Vulnerability advisories emit errors automatically in current cargo-deny — the `vulnerability`
+# severity key was removed (cargo-deny PR #611), so the build fails on any RUSTSEC exploit with no
+# key set. `yanked` is the one severity key that survived; we keep it strict.
+yanked = "deny"
+# `unmaintained` advisories (e.g. `paste`, `instant`) are noisy and not exploits — ignored for
+# now so the gate catches vulnerabilities without churning the tree. Tighten to "workspace" later.
+unmaintained = "none"
+# Escape hatch: add RUSTSEC-IDs or `yanked@<crate-version>` here when an advisory is a deliberate
+# accept (e.g. no patched release yet). Empty = no blanket ignores.
+ignore = []

@@ -344,9 +344,12 @@ test("provider() rejects invalid dispatch inputs at the FFI seam", () => {
     () => runtime.provider("anthropic", "m", "k", undefined, undefined, 0, undefined, undefined, "bogus"),
     /auth_scheme/,
   );
-  // auth_scheme supplied for a non-Anthropic provider.
+  // bearer for a non-scheme family is a NO-OP (its default IS Bearer) — accepted,
+  // not rejected (TD-0008 rule 5). Only a contradictory scheme is an error.
+  const bearerNoop = runtime.provider("openai", "m", "k", "https://e.test/v1", undefined, 0, undefined, undefined, "bearer");
+  assert.equal(bearerNoop.provider, "openai");
   assert.throws(
-    () => runtime.provider("openai", "m", "k", "https://e.test/v1", undefined, 0, undefined, undefined, "bearer"),
+    () => runtime.provider("openai", "m", "k", "https://e.test/v1", undefined, 0, undefined, undefined, "api_key"),
     /Anthropic/,
   );
   // Unsupported protocol value.
@@ -473,6 +476,22 @@ test("Gateway.meter parses, attributes, records budget, and lists events", () =>
   assert.throws(() => gateway.meter("ghost", "openai", "m", JSON.stringify({})), /unknown virtual key/);
   // Bad JSON throws.
   assert.throws(() => gateway.meter("vk_alice", "openai", "m", "{not json"), /valid JSON/);
+});
+
+test("Gateway budgets are 64-bit (no u32 truncation/overflow)", () => {
+  // Regression: set_budget/check_budget/spent were u32, silently wrapping past ~4.29G tokens
+  // (an enforcement bypass absent on the Python binding/core). They are now i64 (a JS safe
+  // integer, range to ~9e15), so a budget above the old u32 ceiling survives intact.
+  const gateway = new Gateway();
+  gateway.addVirtualKey("vk", "alice", "platform", "openai");
+  // 5e9 > u32::MAX (4_294_967_295): a u32 budget would truncate this to ~705M.
+  gateway.setBudget("group:platform", 5_000_000_000);
+  // 5e9 is within the 5e9 cap; 5e9 + 1 is not — no truncation either way.
+  assert.equal(gateway.checkBudget("group:platform", 5_000_000_000), true);
+  assert.equal(gateway.checkBudget("group:platform", 5_000_000_001), false);
+  // spent round-trips the i64; meter a small amount and confirm the value is exact.
+  gateway.meterTokens("vk", "openai", "m", 10, 5, 0, 0, "s");
+  assert.equal(gateway.spent("group:platform"), 15);
 });
 
 test("Gateway meters a group-less virtual key against the vk:* scope and writes a JSONL sink", () => {

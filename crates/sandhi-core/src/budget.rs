@@ -15,6 +15,14 @@
 //! The ledger is the **live enforcement surface** (in-memory). Durable spent-by-window aggregates
 //! come from `usage_events` in `sandhi-store`; a proxy restart re-derives the window from those
 //! events (the in-memory counter simply resets). No dollars anywhere.
+//!
+//! **Two ledgers, two window models (deliberate, not a bug to "fix" by accident):** this
+//! [`BudgetLedger`] rolls a window at a fixed `duration()` from `now` (a rolling 24h/30d
+//! approximation) and is the volatile in-process surface used by the language bindings. The
+//! proxy's durable [`SqliteLedger`](sandhi_store::SqliteLedger) (in `sandhi-store`) measures spend
+//! over **calendar-aligned** windows (UTC midnight / first-of-month — ADR-0005 D5) and is the
+//! authoritative enforcement surface. They share a name but not the window rule; consolidating them
+//! onto one model is a tracked follow-up, so do not assume parity.
 
 use std::collections::HashMap;
 

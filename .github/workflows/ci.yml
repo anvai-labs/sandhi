@@ -25,8 +25,8 @@ jobs:
       sdk_conformance: ${{ steps.filter.outputs.sdk_conformance }}
       codegen: ${{ steps.filter.outputs.codegen }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -75,7 +75,7 @@ jobs:
     if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -83,28 +83,46 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo build --workspace --all-targets
       - run: cargo test --workspace
+      # Scope 5 (TD-0011 P3): the `otel-otlp` feature is default-off. Verify it builds, clippy-
+      # cleans, and tests when opted in — and that the default build stays free of the
+      # OpenTelemetry dependency tree (TD-0011 D1/D4: the feature must not move the default graph).
+      - run: cargo clippy -p sandhi-proxy --features otel-otlp --all-targets -- -D warnings
+      - run: cargo test -p sandhi-proxy --features otel-otlp
+      - name: default build excludes the OTel dependency tree
+        run: |
+          cargo build -p sandhi-proxy
+          if cargo tree -p sandhi-proxy -e no-dev | grep -q opentelemetry; then
+            echo "opentelemetry leaked into the default build — the otel-otlp feature must be default-off"
+            exit 1
+          fi
 
   schema:
     needs: changes
     if: ${{ needs.changes.outputs.schema == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: usage-event schema is valid JSON Schema
-        run: |
-          python3 -c "import json; json.load(open('schemas/usage-event.v1.schema.json')); print('schema OK')"
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install check-jsonschema
+      - name: every shipped schema is valid JSON Schema (against its declared $schema metaschema)
+        # Previously this only json.load-ed usage-event.v1. Now every schemas/*.v*.schema.json is
+        # validated against its own declared metaschema — so a hand-edited or regenerated schema
+        # that drifts from the spec fails here, not at a downstream consumer.
+        run: check-jsonschema --check-metaschema schemas/*.v1.schema.json schemas/*.v2.schema.json
 
   python-binding:
     needs: changes
     if: ${{ needs.changes.outputs.python == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy, llvm-tools-preview
       - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: fmt + clippy (the binding is its own workspace)
@@ -128,7 +146,7 @@ jobs:
   attribution:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: No AI-agent authorship attribution in commit messages
@@ -145,17 +163,65 @@ jobs:
               --range "${{ github.event.before }}..${{ github.sha }}"
           fi
 
+  security:
+    # Security/dependency gate — Sandhi previously had none. `cargo deny check advisories`
+    # fails on known vulnerabilities + yanked crates (deny.toml). Runs whenever Rust deps/code
+    # change (the `rust` filter includes Cargo.lock/Cargo.toml); dependabot covers new advisories
+    # against unchanged deps via its own PRs.
+    #
+    # `actions/dependency-review-action` (per-PR diff of newly-introduced vulns) is deliberately
+    # NOT here yet: it needs the repo Dependency graph enabled, which is a governance setting
+    # (see Phase 2). cargo-deny advisories already covers vuln-detection across the whole tree,
+    # so dependency-review is a fast-follow once the dependency graph is turned on, not a blocker.
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: cargo-deny advisories (known vulnerabilities + yanked crates)
+        # cargo-deny-action@v2 composes `cargo-deny <arguments> <command> <command-arguments>`,
+        # so the check-target (advisories) goes in `command-arguments`, NOT `arguments` — putting it
+        # in `arguments` yields `cargo-deny advisories check`, which clap rejects ("unrecognized
+        # subcommand 'advisories'"). `command` defaults to `check`; left explicit for readability.
+        uses: embarkstudios/cargo-deny-action@v2
+        with:
+          command: check
+          command-arguments: advisories
+
+  lint-title:
+    # Conventional-commit PR title gate. Dependabot PRs are prefixed `chore:`
+    # (.github/dependabot.yml) so they pass too. PR-only (the action errors on push events).
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          requireScope: false
+          types: |
+            feat
+            fix
+            perf
+            refactor
+            docs
+            test
+            ci
+            chore
+            build
+            revert
+
   node-binding:
     needs: changes
     if: ${{ needs.changes.outputs.node == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy, llvm-tools-preview
       - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
       - name: fmt + clippy (the node binding is its own workspace)
@@ -178,7 +244,7 @@ jobs:
     if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
@@ -195,7 +261,7 @@ jobs:
     if: ${{ needs.changes.outputs.codegen == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -217,10 +283,10 @@ jobs:
     if: ${{ needs.changes.outputs.sdk_conformance == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       # The vendors' own clients decide how a request is shaped. Pinning majors keeps a vendor
@@ -234,7 +300,7 @@ jobs:
     name: CI Success
     runs-on: ubuntu-latest
     if: ${{ always() }}
-    needs: [changes, rust, schema, python-binding, node-binding, attribution, coverage, codegen-drift, sdk-conformance]
+    needs: [changes, rust, schema, python-binding, node-binding, attribution, coverage, codegen-drift, sdk-conformance, security, lint-title]
     steps:
       - name: Verify no required job failed (skipped is OK for docs-only)
         env:

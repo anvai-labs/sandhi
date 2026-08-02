@@ -12,6 +12,7 @@
 pub mod alerts;
 pub mod budget;
 pub mod chat;
+pub mod conformance;
 pub mod event;
 // Generated typify narrow models (ADR-0003 §2/§4 pilot) — regenerated, never hand-edited.
 mod generated;
@@ -108,5 +109,68 @@ mod flow_tests {
 
         // A second big call is now blocked by the group budget (340 + 800 > 1000).
         assert!(ledger.check("group:platform", 800).is_err());
+    }
+}
+
+#[cfg(test)]
+mod observability_boundary_tests {
+    //! TD-0011 D1: a library emits, an application decides.
+    //!
+    //! `sandhi-core`, `-providers` and `-store` are linked in-process by hosts like Victor. If any
+    //! of them could install a subscriber, that host would get Sandhi's logging configuration
+    //! imposed on it — and two subscribers in one process means one of them silently wins. The
+    //! strongest form of the guarantee is dependency-level: without `tracing-subscriber` they
+    //! *cannot* install one, no matter what a future patch tries. `include_str!` resolves at
+    //! compile time, so a moved crate breaks the build rather than skipping the check.
+
+    const CORE: &str = include_str!("../Cargo.toml");
+    const PROVIDERS: &str = include_str!("../../sandhi-providers/Cargo.toml");
+    const STORE: &str = include_str!("../../sandhi-store/Cargo.toml");
+
+    #[test]
+    fn libraries_cannot_install_a_tracing_subscriber() {
+        for (crate_name, manifest) in [
+            ("sandhi-core", CORE),
+            ("sandhi-providers", PROVIDERS),
+            ("sandhi-store", STORE),
+        ] {
+            assert!(
+                !manifest.contains("tracing-subscriber"),
+                "{crate_name} must not depend on tracing-subscriber (TD-0011 D1): a library that \
+                 installs a subscriber hijacks its host's logging"
+            );
+        }
+    }
+
+    #[test]
+    fn libraries_do_emit_through_the_facade() {
+        // The other half of D1: emitting is expected, only installing is not.
+        assert!(
+            CORE.contains("tracing"),
+            "sandhi-core should emit through the tracing facade"
+        );
+    }
+
+    #[test]
+    fn libraries_cannot_pull_an_observability_sdk() {
+        // TD-0011 D4 / P3 (Scope 5): OTLP export lives behind a non-default feature in the
+        // *binary* only. The same dependency-level reasoning as the subscriber guard applies: a
+        // library crate that pulls `opentelemetry*`, `prometheus`, or the `metrics` crate would
+        // inflate the binding wheels and drag an exporter/runtime into every in-process host.
+        // `opentelemetry` as a substring also covers `opentelemetry_sdk` / `opentelemetry-otlp`.
+        const FORBIDDEN: &[&str] = &["opentelemetry", "prometheus", "metrics"];
+        for (crate_name, manifest) in [
+            ("sandhi-core", CORE),
+            ("sandhi-providers", PROVIDERS),
+            ("sandhi-store", STORE),
+        ] {
+            for dep in FORBIDDEN {
+                assert!(
+                    !manifest.contains(dep),
+                    "{crate_name} must not depend on `{dep}` (TD-0011 D1/D4): the observability \
+                     SDK belongs to the proxy binary behind a feature, never a library crate"
+                );
+            }
+        }
     }
 }

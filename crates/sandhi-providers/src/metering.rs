@@ -295,6 +295,7 @@ mod tests {
         StreamChunk {
             data: bytes::Bytes::copy_from_slice(data.as_bytes()),
             usage,
+            usage_running: None,
             attempts: 1,
         }
     }

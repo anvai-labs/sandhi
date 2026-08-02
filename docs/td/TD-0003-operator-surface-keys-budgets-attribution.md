@@ -1,6 +1,6 @@
 # TD-0003: Operator surface — keys, virtual keys, budgets, attribution
 
-- **Status:** Draft (proposed)
+- **Status:** Accepted; P1–P4 implemented (the vault, virtual-key store, budgets, and alerts are live in `sandhi-proxy`/`sandhi-store`).
 - **Date:** 2026-07-22
 - **Related:** TD-0002 (typed provider runtime), ADR-0047 D3 (Sandhi measures; the commercial layer prices), FEP-0020 (Sandhi↔Victor integration)
 

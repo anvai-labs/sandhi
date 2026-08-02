@@ -25,6 +25,35 @@ pub enum ProviderFamily {
     Ollama,
 }
 
+/// When a family reports token usage during a streaming response (TD-0013 D1).
+///
+/// A transport fact in the same sense as `base_url` or
+/// [`OpenAiCompatProviderSpec::request_id_header`](crate::catalog::OpenAiCompatProviderSpec):
+/// vendor differences are data, never branches in shared code.
+///
+/// The runtime does **not** switch on this. It does not need to — a family that reports nothing
+/// mid-stream simply leaves [`StreamChunk::usage_running`](crate::StreamChunk::usage_running)
+/// unset, so the absence of a number *is* the signal to fall back, and no caller has to know which
+/// family it is talking to. What the declaration buys is the ability to state per-family behaviour
+/// once, in one place, and to **test that the statement is true** rather than trusting a comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageCadence {
+    /// Real counts are available **while content is still arriving**, so an interrupted stream has
+    /// a measurement to settle. Anthropic announces input and the full cache split on
+    /// `message_start`, before any content; Gemini attaches `usageMetadata` to content chunks.
+    Incremental,
+    /// Nothing is reported until content is finished. A stream interrupted before that point has
+    /// no number, and the fallback estimate is a *policy* choice, not an accuracy one.
+    TerminalOnly,
+}
+
+/// Per-family transport facts. Deliberately one field for now: a table that grows by accretion is
+/// reviewable, one that lands as a seven-site refactor of the existing `match` arms is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FamilyFacts {
+    pub usage_cadence: UsageCadence,
+}
+
 impl ProviderFamily {
     #[must_use]
     pub fn for_slug(slug: &str) -> Self {
@@ -35,6 +64,30 @@ impl ProviderFamily {
             "ollama" => Self::Ollama,
             _ => Self::OpenAiCompat,
         }
+    }
+
+    /// The declared transport facts for this family.
+    #[must_use]
+    pub const fn facts(self) -> FamilyFacts {
+        let usage_cadence = match self {
+            // `message_start` carries input + `cache_creation_input_tokens` +
+            // `cache_read_input_tokens` before a single content byte.
+            Self::Anthropic => UsageCadence::Incremental,
+            // `usageMetadata` rides on content-bearing chunks rather than a trailing control frame.
+            Self::Gemini => UsageCadence::Incremental,
+            // The usage frame arrives only once content is done: OpenAI sends it with
+            // `choices: []`, Cohere on `message-end`, Ollama on the `done: true` line.
+            Self::OpenAiCompat | Self::OpenAiResponses | Self::Cohere | Self::Ollama => {
+                UsageCadence::TerminalOnly
+            }
+        };
+        FamilyFacts { usage_cadence }
+    }
+
+    /// Convenience accessor for the fact that matters most often.
+    #[must_use]
+    pub const fn usage_cadence(self) -> UsageCadence {
+        self.facts().usage_cadence
     }
 }
 
@@ -168,12 +221,50 @@ impl ProviderHandle {
     }
 
     pub async fn complete(&self, request: ChatRequestV1) -> Result<ChatResponseV1, ProviderError> {
-        self.inner.complete(request).await
+        // Wire-truth latency, stamped once at the family-neutral typed
+        // boundary (W3b) — the one seam every binding and the proxy call.
+        let started = std::time::Instant::now();
+        let mut response = self.inner.complete(request).await?;
+        response.usage.duration_ms = Some(elapsed_ms(started));
+        Ok(response)
     }
 
     pub async fn stream(&self, request: ChatRequestV1) -> Result<ChatEventStream, ProviderError> {
-        self.inner.stream(request).await
+        let started = std::time::Instant::now();
+        let inner = self.inner.stream(request).await?;
+        Ok(stamp_stream_latency(inner, started))
     }
+}
+
+fn elapsed_ms(started: std::time::Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Rewrite the terminal `Usage` event with wire-truth latency (W3b): duration
+/// spans request dispatch to the usage emission; time-to-first-token is the
+/// first delivered event (parity with the metering decorator's TTFT
+/// semantics). All other events pass through untouched.
+fn stamp_stream_latency(inner: ChatEventStream, started: std::time::Instant) -> ChatEventStream {
+    use futures_util::StreamExt;
+
+    Box::pin(async_stream::try_stream! {
+        let mut inner = inner;
+        let mut ttft_ms: Option<u64> = None;
+        while let Some(event) = inner.next().await {
+            let event = event?;
+            if ttft_ms.is_none() {
+                ttft_ms = Some(elapsed_ms(started));
+            }
+            match event {
+                ChatStreamEventV1::Usage { mut usage } => {
+                    usage.duration_ms = Some(elapsed_ms(started));
+                    usage.time_to_first_token_ms = ttft_ms;
+                    yield ChatStreamEventV1::Usage { usage };
+                }
+                other => yield other,
+            }
+        }
+    })
 }
 
 /// Factory for persistent typed provider handles. A handle owns one adapter and therefore one
@@ -596,7 +687,39 @@ pub fn encode_openai_request(request: &ChatRequestV1) -> Result<Value, ProviderE
     if let Some(format) = &request.response_format {
         body.insert("response_format".into(), format.clone());
     }
+    // W3d/G7: typed fields override any extensions-carried duplicate (inserted
+    // after the extensions clone). OpenAI chat / ZAI take reasoning_effort
+    // top-level and thinking as `{type, budget_tokens}`.
+    insert_optional(
+        &mut body,
+        "reasoning_effort",
+        request.reasoning_effort.clone(),
+    );
+    if let Some(thinking) = &request.thinking {
+        body.insert("thinking".into(), encode_openai_thinking(thinking));
+    }
     Ok(Value::Object(body))
+}
+
+/// OpenAI-compat / ZAI extended-thinking shape: `{type: enabled|disabled,
+/// budget_tokens?}`.
+pub(crate) fn encode_openai_thinking(thinking: &sandhi_core::chat::ThinkingV1) -> Value {
+    let mut obj = Map::new();
+    obj.insert(
+        "type".into(),
+        Value::String(
+            if thinking.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            }
+            .into(),
+        ),
+    );
+    if let Some(budget) = thinking.budget_tokens {
+        obj.insert("budget_tokens".into(), json!(budget));
+    }
+    Value::Object(obj)
 }
 
 fn insert_optional<T: serde::Serialize>(
@@ -974,6 +1097,58 @@ mod tests {
         assert_eq!(body["top_p"], 0.8);
     }
 
+    // W3d/G7: promoted typed fields (reasoning_effort, thinking).
+    fn w3d_request(extra: Value) -> ChatRequestV1 {
+        let mut base = json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        base.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(base).unwrap()
+    }
+
+    #[test]
+    fn openai_chat_encodes_reasoning_effort_and_thinking() {
+        let body = encode_openai_request(&w3d_request(json!({
+            "reasoning_effort": "high",
+            "thinking": {"enabled": true, "budget_tokens": 2048}
+        })))
+        .unwrap();
+        assert_eq!(body["reasoning_effort"], "high");
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 2048);
+    }
+
+    #[test]
+    fn openai_chat_disabled_thinking_encodes_disabled() {
+        let body = encode_openai_request(&w3d_request(json!({
+            "thinking": {"enabled": false}
+        })))
+        .unwrap();
+        assert_eq!(body["thinking"]["type"], "disabled");
+        assert!(body["thinking"].get("budget_tokens").is_none());
+    }
+
+    #[test]
+    fn typed_reasoning_effort_overrides_extensions_duplicate() {
+        // Precedence: the typed field wins over a stale extensions copy.
+        let body = encode_openai_request(&w3d_request(json!({
+            "reasoning_effort": "high",
+            "extensions": {"openai": {"reasoning_effort": "low"}}
+        })))
+        .unwrap();
+        assert_eq!(body["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn absent_w3d_fields_stay_off_the_wire() {
+        let body = encode_openai_request(&w3d_request(json!({}))).unwrap();
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("thinking").is_none());
+    }
+
     #[test]
     fn moonshot_k3_constraint_is_single_sourced_in_the_typed_codec() {
         let raw: Arc<dyn Provider> = Arc::new(crate::FnProvider::new("moonshot", |_req| async {
@@ -1029,11 +1204,13 @@ mod tests {
                 Ok(crate::StreamChunk {
                     data: Bytes::copy_from_slice(&sse[..split]),
                     usage: None,
+                    usage_running: None,
                     attempts: 3,
                 }),
                 Ok(crate::StreamChunk {
                     data: Bytes::copy_from_slice(&sse[split..]),
                     usage: None,
+                    usage_running: None,
                     attempts: 3,
                 }),
                 Ok(crate::StreamChunk {
@@ -1045,6 +1222,7 @@ mod tests {
                         cache_read_tokens: 4,
                         reasoning_tokens: 0,
                     }),
+                    usage_running: None,
                     attempts: 3,
                 }),
             ]));
@@ -1232,6 +1410,80 @@ mod tests {
         // Neutral contract untouched.
         assert_eq!(out.output.content, Some(MessageContent::Text("hi".into())));
         assert_eq!(out.finish_reason, Some(FinishReasonV1::Stop));
+    }
+
+    /// Canned typed provider for the W3b latency-stamp tests.
+    struct CannedChat;
+    #[async_trait]
+    impl ChatProvider for CannedChat {
+        fn slug(&self) -> &str {
+            "canned"
+        }
+        async fn complete(&self, _: ChatRequestV1) -> Result<ChatResponseV1, ProviderError> {
+            Ok(serde_json::from_value(json!({
+                "schema_version": "1",
+                "model": "m",
+                "output": {"content": "hi"},
+                "usage": {"tokens_in": 1, "tokens_out": 1,
+                          "cache_creation_tokens": 0, "cache_read_tokens": 0}
+            }))
+            .unwrap())
+        }
+        async fn stream(&self, _: ChatRequestV1) -> Result<ChatEventStream, ProviderError> {
+            let events: Vec<Result<ChatStreamEventV1, ProviderError>> = vec![
+                Ok(ChatStreamEventV1::TextDelta { delta: "hi".into() }),
+                Ok(ChatStreamEventV1::Usage {
+                    usage: serde_json::from_value(json!({
+                        "tokens_in": 1, "tokens_out": 1,
+                        "cache_creation_tokens": 0, "cache_read_tokens": 0
+                    }))
+                    .unwrap(),
+                }),
+            ];
+            Ok(Box::pin(futures_util::stream::iter(events)))
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_complete_stamps_wire_duration() {
+        let handle = ProviderHandle::new(Arc::new(CannedChat));
+        let out = handle
+            .complete(
+                serde_json::from_value(json!({
+                    "model": "m",
+                    "messages": [{"role": "user", "content": "hi"}]
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(out.usage.duration_ms.is_some());
+        assert!(out.usage.time_to_first_token_ms.is_none()); // streaming-only
+    }
+
+    #[tokio::test]
+    async fn handle_stream_stamps_latency_on_terminal_usage() {
+        let handle = ProviderHandle::new(Arc::new(CannedChat));
+        let mut stream = handle
+            .stream(
+                serde_json::from_value(json!({
+                    "model": "m",
+                    "messages": [{"role": "user", "content": "hi"}]
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut usage = None;
+        while let Some(event) = stream.next().await {
+            if let ChatStreamEventV1::Usage { usage: u } = event.unwrap() {
+                usage = Some(u);
+            }
+        }
+        let usage = usage.expect("terminal usage event");
+        assert!(usage.duration_ms.is_some());
+        assert!(usage.time_to_first_token_ms.is_some());
+        assert!(usage.time_to_first_token_ms <= usage.duration_ms);
     }
 
     /// Minimal ChatProvider mock for handle tests (never actually completes a call).

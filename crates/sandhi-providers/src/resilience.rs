@@ -436,6 +436,7 @@ mod tests {
                 Ok(StreamChunk {
                     data: bytes::Bytes::new(),
                     usage: Some(ParsedUsage::default()),
+                    usage_running: None,
                     attempts: 1,
                 })
             })))
@@ -520,6 +521,7 @@ mod tests {
         StreamChunk {
             data: bytes::Bytes::copy_from_slice(data.as_bytes()),
             usage: None,
+            usage_running: None,
             attempts: 1,
         }
     }
@@ -532,6 +534,7 @@ mod tests {
                 tokens_out: 2,
                 ..Default::default()
             }),
+            usage_running: None,
             attempts: 1,
         }
     }

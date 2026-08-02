@@ -15,6 +15,8 @@
 //! (a backend error denies — a hard cap must never admit on a blind write), a `Warn` scope fails
 //! open (admit, unmetered). Neutral tokens throughout — no dollars.
 
+use std::sync::Mutex;
+
 use time::{Duration, OffsetDateTime};
 
 use sandhi_core::{EnforcementLedger, InMemoryLedger, LedgerView, Policy, Reservation, Window};
@@ -123,9 +125,13 @@ impl ProxyLedger {
             Self::Memory(l) => l.settle(reservation.id, actual),
             Self::Durable(l) => {
                 if let Err(e) = l.settle_durable(reservation.id, actual) {
-                    eprintln!(
-                        "sandhi-proxy: durable settle failed for reservation {}: {e}",
-                        reservation.id
+                    // A settle that does not land leaves the lease holding capacity until its TTL
+                    // expires, so this is an operator-visible fault, not a debug detail.
+                    tracing::error!(
+                        lease = reservation.id,
+                        actual,
+                        error = %e,
+                        "durable settle FAILED — capacity stays reserved until the lease expires"
                     );
                 }
             }
@@ -169,11 +175,30 @@ impl ProxyLedger {
 
     /// Reclaim every lease expired at or before `now` (crash/leak backstop); returns the count.
     pub fn reclaim_expired(&mut self, now: OffsetDateTime) -> usize {
-        match self {
+        let reclaimed = match self {
             Self::Memory(l) => l.reclaim_expired(now),
             Self::Durable(l) => l.reclaim_expired_durable(now).unwrap_or(0),
+        };
+        // TD-0011 D6: reclaims are the crash-recovery signal. Zero is the steady state, so only a
+        // non-zero count is worth an operator's attention — a sustained trickle means leases are
+        // leaking rather than settling (ADR-0005 D2).
+        if reclaimed > 0 {
+            tracing::warn!(reclaimed, "reclaimed expired leases");
         }
+        reclaimed
     }
+}
+
+/// Reclaim every lease expired at or before `now`, returning the count — the ADR-0005 D2 crash
+/// backstop, driven on a timer by the binary (see `main.rs`). [`ProxyLedger::reserve`] already
+/// reclaims opportunistically per scope; this covers scopes that go quiet after abandoning a lease,
+/// so their held capacity is released without waiting for the next request. Safe to call
+/// concurrently (idempotent delete); takes an injected `now` so tests are deterministic.
+pub fn reclaim_sweep_at(ledger: &Mutex<ProxyLedger>, now: OffsetDateTime) -> usize {
+    ledger
+        .lock()
+        .map(|mut l| l.reclaim_expired(now))
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -277,5 +302,36 @@ mod tests {
         assert_eq!(spec.policy, "block");
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn sweep_reclaims_an_abandoned_lease_without_a_subsequent_reserve() {
+        // A lease left dangling (a crash before settle) must be reclaimed by the sweep alone — not
+        // only by the next reserve on that scope (the opportunistic-in-reserve path). This is the
+        // gap a background sweep closes: an abandoned scope's held capacity is released even with no
+        // further traffic.
+        let ledger = Mutex::new(ProxyLedger::in_memory());
+        ledger
+            .lock()
+            .unwrap()
+            .set_budget("g", Some(1000), Window::Total, Policy::Block);
+        let Admission::Leased(_r) = ledger
+            .lock()
+            .unwrap()
+            .reserve("g", 100, now(), Policy::Block)
+        else {
+            panic!("admits under the cap");
+        };
+        assert_eq!(ledger.lock().unwrap().reserved("g"), 100);
+
+        // Do NOT settle, do NOT reserve "g" again. Advance past the TTL and run the sweep.
+        let reclaimed =
+            reclaim_sweep_at(&ledger, now() + Duration::seconds(RESERVATION_TTL_SECS + 1));
+        assert_eq!(reclaimed, 1);
+        assert_eq!(
+            ledger.lock().unwrap().reserved("g"),
+            0,
+            "sweep reclaimed the abandoned lease"
+        );
     }
 }

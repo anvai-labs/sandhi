@@ -385,6 +385,64 @@ async fn responses_ingress_same_family_forwards_transparently() {
 }
 
 #[tokio::test]
+async fn block_capped_scope_with_unbounded_output_is_not_passed_through() {
+    // A Block-capped same-family call with no max_output_tokens must NOT use the transparent plane:
+    // that forwards the raw body verbatim and would stream unbounded output past the cap. It routes
+    // through the translation plane, where the injected DEFAULT_OUTPUT_CEILING reaches the upstream
+    // as `max_tokens` (ADR-0005 D1).
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id":"chatcmpl-1","model":"gpt-x",
+            "choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":5,"completion_tokens":2}
+        })))
+        .mount(&upstream)
+        .await;
+
+    let sink = Arc::new(InMemorySink::new());
+    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    state.ledger.lock().unwrap().set_budget(
+        "group:platform",
+        Some(1_000_000),
+        Window::Total,
+        Policy::Block,
+    );
+
+    let response = build_app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("authorization", "Bearer vk_demo")
+                .header("content-type", "application/json")
+                // No max_output_tokens: the scope is Block-capped and output is unbounded.
+                .body(Body::from(
+                    r#"{"model":"gpt-x","messages":[{"role":"user","content":"hi"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // The upstream received `max_tokens` (the injected ceiling) — proof the request was re-encoded
+    // through the translation plane, not forwarded verbatim (which would carry no output bound and
+    // could stream past the cap).
+    let received = upstream
+        .received_requests()
+        .await
+        .expect("requests were recorded");
+    assert_eq!(received.len(), 1, "exactly one upstream request");
+    let sent: serde_json::Value = serde_json::from_slice(&received[0].body).unwrap();
+    assert_eq!(
+        sent["max_tokens"], 4096,
+        "capped unbounded output must be bounded via translation (max_tokens), not passed through: {sent}"
+    );
+}
+
+#[tokio::test]
 async fn unknown_virtual_key_is_401() {
     let sink = Arc::new(InMemorySink::new());
     let state = state_with(
@@ -1021,4 +1079,634 @@ async fn upstream_failures_are_rendered_in_the_callers_dialect() {
             _ => {}
         }
     }
+}
+
+/// TD-0011 P2: `/metrics` serves the registry, gated exactly like the dashboard, and never
+/// carries an unbounded label. The unit tests in `metrics.rs` cover rendering; this covers the
+/// wiring — that a real request lands in the registry and that the endpoint's gate is the
+/// dashboard's, not a second policy.
+#[tokio::test]
+async fn metrics_endpoint_reflects_traffic_and_is_gated() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id":"c1","object":"chat.completion","created":1,"model":"gpt-test",
+            "choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120,
+                     "prompt_tokens_details":{"cached_tokens":60}}
+        })))
+        .mount(&upstream)
+        .await;
+
+    let sink = Arc::new(InMemorySink::default());
+    let state = state_with(upstream.uri(), Arc::clone(&sink), ProxyLedger::in_memory());
+
+    // Drive one call so the registry has something in it.
+    let app = build_app(Arc::clone(&state));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer vk_demo")
+                .body(Body::from(
+                    r#"{"model":"gpt-test","messages":[{"role":"user","content":"hi"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // No admin token configured on this state, so the gate is open (same rule as the dashboard).
+    let app = build_app(Arc::clone(&state));
+    let metrics = app
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(metrics.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(metrics.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+
+    // The call is counted, with the transparent plane (OpenAI ingress -> OpenAI upstream).
+    assert!(text.contains("sandhi_requests_total{"), "{text}");
+    assert!(text.contains("plane=\"transparent\""), "{text}");
+    assert!(text.contains("dialect=\"openai\""), "{text}");
+    // Tokens are recorded per kind, and `billable` is the settled 40 fresh + 60 cache-read + 20 out.
+    assert!(text.contains("kind=\"cache_read\"} 60"), "{text}");
+    assert!(text.contains("kind=\"billable\"} 120"), "{text}");
+
+    // TD-0011 D2: nothing unbounded, ever.
+    for forbidden in [
+        "subject_id",
+        "session_id",
+        "virtual_key_id",
+        "vk_demo",
+        "alice",
+    ] {
+        assert!(
+            !text.contains(forbidden),
+            "'{forbidden}' leaked into /metrics:\n{text}"
+        );
+    }
+
+    // With an admin token configured the endpoint requires it — the dashboard's gate (D5).
+    let mut gated = ProxyState::new(
+        KeyStore::new(),
+        ProxyLedger::in_memory(),
+        Arc::new(InMemorySink::default()),
+        HashMap::new(),
+        None,
+    );
+    gated.admin_token = Some("admin-secret".into());
+    let gated = Arc::new(gated);
+
+    let app = build_app(Arc::clone(&gated));
+    let anon = app
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(anon.status(), StatusCode::UNAUTHORIZED);
+
+    let app = build_app(Arc::clone(&gated));
+    let authed = app
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .header("authorization", "Bearer admin-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(authed.status(), StatusCode::OK);
+}
+
+/// TD-0012 P1: the limit an operator sets is actually enforced, and a refused call costs nothing.
+///
+/// The unit tests in `ratelimit.rs` cover the bucket arithmetic; this covers the wiring — that the
+/// stored `rate_limit_per_min` reaches the request path at all (it did not, for three releases),
+/// that the refusal is dialect-shaped with `Retry-After`, and that a throttled request consumes no
+/// lease and emits no usage event.
+#[tokio::test]
+async fn rate_limited_requests_are_refused_without_consuming_budget() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id":"c1","object":"chat.completion","created":1,"model":"gpt-test",
+            "choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}
+        })))
+        .mount(&upstream)
+        .await;
+
+    let keys = KeyStore::new();
+    keys.insert(VirtualKey {
+        id: "vk_slow".into(),
+        subject_id: Some("alice".into()),
+        group_id: Some("platform".into()),
+        upstream_ref: "up1".into(),
+        // Two requests per minute: small enough to exhaust deterministically in a test.
+        rate_limit_per_min: Some(2),
+        ..Default::default()
+    });
+    let mut providers: HashMap<String, ProviderHandle> = HashMap::new();
+    providers.insert(
+        "up1".into(),
+        ProviderRuntime::new().openai_compat(
+            "openai",
+            upstream.uri(),
+            "REAL-KEY",
+            Default::default(),
+            None,
+            None,
+            None,
+        ),
+    );
+    let sink = Arc::new(InMemorySink::default());
+    // Coerce to the trait object the state holds, keeping the concrete handle for assertions.
+    let sink_for_state: Arc<dyn sandhi_core::Sink> = sink.clone();
+    let state = Arc::new(ProxyState::new(
+        keys,
+        ProxyLedger::in_memory(),
+        sink_for_state,
+        providers,
+        None,
+    ));
+
+    let call = |state: Arc<ProxyState>| async move {
+        build_app(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer vk_slow")
+                    .body(Body::from(
+                        r#"{"model":"gpt-test","messages":[{"role":"user","content":"hi"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    };
+
+    // The configured burst is admitted.
+    for i in 0..2 {
+        let response = call(Arc::clone(&state)).await;
+        assert_eq!(response.status(), StatusCode::OK, "burst request {i}");
+    }
+
+    // The next one is refused — this is the assertion that would have failed for three releases.
+    let limited = call(Arc::clone(&state)).await;
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    // D4: Retry-After must be present, or a well-behaved SDK retries immediately.
+    let retry_after = limited
+        .headers()
+        .get("retry-after")
+        .expect("a 429 without Retry-After turns a throttle into a hot loop")
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        retry_after.parse::<u64>().is_ok_and(|s| s >= 1),
+        "Retry-After must be whole seconds, never 0: {retry_after}"
+    );
+
+    // The refusal is in the caller's dialect (TD-0010 D2), not a bare string.
+    let payload = axum::body::to_bytes(limited.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+    assert!(
+        value["error"].is_object(),
+        "expected a structured error: {value}"
+    );
+
+    // D5: the throttled call never reached a provider, so it must leave no trace in accounting.
+    assert_eq!(
+        sink.events().len(),
+        2,
+        "a rate-limited request must not emit a usage event"
+    );
+    assert_eq!(
+        state.ledger.lock().unwrap().reserved("group:platform"),
+        0,
+        "a rate-limited request must not hold a lease"
+    );
+
+    // And it is visible to an operator (TD-0012 D6) with bounded labels only.
+    let metrics = build_app(Arc::clone(&state))
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(metrics.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(text.contains("sandhi_rate_limited_total{"), "{text}");
+    assert!(text.contains("outcome=\"rate_limited\""), "{text}");
+    assert!(
+        !text.contains("vk_slow"),
+        "the key must not become a label:\n{text}"
+    );
+}
+
+/// A key with no configured limit is never throttled — an absent limit must not become a block.
+#[tokio::test]
+async fn a_key_without_a_limit_is_never_rate_limited() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id":"c1","object":"chat.completion","created":1,"model":"gpt-test",
+            "choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
+        })))
+        .mount(&upstream)
+        .await;
+    let sink = Arc::new(InMemorySink::default());
+    let state = state_with(upstream.uri(), Arc::clone(&sink), ProxyLedger::in_memory());
+
+    for i in 0..25 {
+        let response = build_app(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer vk_demo")
+                    .body(Body::from(
+                        r#"{"model":"gpt-test","messages":[{"role":"user","content":"hi"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "request {i}");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// TD-0013 — streaming usage fidelity.
+//
+// The pre-existing disconnect test (`client_disconnect_mid_stream_still_meters`) cannot fail for
+// the right reason: wiremock writes the whole SSE body in one go with a `content-length`, so the
+// first frame the client reads usually already carries the terminal usage and the estimated-partial
+// branch is never reached. These tests need an upstream that emits frames one at a time and then
+// *holds the connection open*, so a disconnect genuinely lands mid-stream.
+// ---------------------------------------------------------------------------------------------
+
+/// A deliberately **paced** SSE upstream: writes each frame separately, flushes it, and then holds
+/// the connection open without ever sending a terminal usage frame.
+///
+/// Blocking std sockets on a background thread rather than a tokio listener — this needs no extra
+/// tokio features and no shutdown choreography, and the thread dies with the test process.
+fn paced_sse_upstream(frames: Vec<String>) -> String {
+    use std::io::{Read, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut sock) = stream else { continue };
+            let frames = frames.clone();
+            std::thread::spawn(move || {
+                // Drain the request head. Its contents do not matter here; the credential
+                // substitution it would prove is covered by the wiremock tests above.
+                let mut scratch = [0_u8; 8192];
+                let _ = sock.read(&mut scratch);
+                let _ = sock.write_all(
+                    b"HTTP/1.1 200 OK\r\n\
+                      content-type: text/event-stream\r\n\
+                      transfer-encoding: chunked\r\n\r\n",
+                );
+                for frame in &frames {
+                    let _ = sock.write_all(format!("{:x}\r\n{frame}\r\n", frame.len()).as_bytes());
+                    let _ = sock.flush();
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                // Never send the terminating chunk: this stream is abandoned by the *client*.
+                std::thread::sleep(std::time::Duration::from_secs(30));
+            });
+        }
+    });
+    format!("http://{addr}")
+}
+
+/// `message_start` as Anthropic really sends it — input and the full cache split arrive before a
+/// single content byte. Mirrors `sandhi-providers/tests/fixtures/anthropic/stream_cache_split.sse`.
+const PACED_FRAMES_INPUT: u64 = 1024;
+const PACED_FRAMES_CACHE_CREATION: u64 = 2048;
+const PACED_FRAMES_CACHE_READ: u64 = 4096;
+
+fn paced_anthropic_frames() -> Vec<String> {
+    let message_start = serde_json::json!({
+        "type": "message_start",
+        "message": {
+            "id": "msg_1",
+            "model": "claude-test",
+            "usage": {
+                "input_tokens": PACED_FRAMES_INPUT,
+                "cache_creation_input_tokens": PACED_FRAMES_CACHE_CREATION,
+                "cache_read_input_tokens": PACED_FRAMES_CACHE_READ,
+                // Anthropic seeds output at 1 here; the real count arrives on `message_delta`,
+                // which this stream is abandoned before ever reaching.
+                "output_tokens": 1
+            }
+        }
+    });
+    let text_delta = serde_json::json!({
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {"type": "text_delta", "text": "hi"}
+    });
+    vec![
+        format!("event: message_start\ndata: {message_start}\n\n"),
+        format!("event: content_block_delta\ndata: {text_delta}\n\n"),
+    ]
+}
+
+fn paced_anthropic_state(upstream_uri: String, sink: Arc<InMemorySink>) -> Arc<ProxyState> {
+    let keys = KeyStore::new();
+    keys.insert(VirtualKey {
+        id: "vk_demo".into(),
+        subject_id: Some("alice".into()),
+        group_id: Some("platform".into()),
+        upstream_ref: "up1".into(),
+        ..Default::default()
+    });
+    let mut providers = HashMap::new();
+    providers.insert(
+        "up1".into(),
+        ProviderRuntime::new().anthropic(
+            upstream_uri,
+            "REAL-KEY",
+            sandhi_providers::AnthropicAuthScheme::ApiKey,
+            Some(0),
+            None,
+            None,
+        ),
+    );
+    Arc::new(ProxyState::new(
+        keys,
+        ProxyLedger::in_memory(),
+        sink,
+        providers,
+        None,
+    ))
+}
+
+/// **The test TD-0013 exists to pass.** A client disconnects right after `message_start`, which
+/// announced 1024 input + 2048 cache-creation + 4096 cache-read. Those 7168 tokens are real,
+/// provider-reported, and known before any content streams — and the byte-only fallback recorded
+/// every one of them as zero, settling the `bytes/4` of two characters of text instead.
+///
+/// Reverting the `usage_running` plumbing makes this assert ~1 against an expected 7168.
+#[tokio::test]
+async fn a_disconnect_after_message_start_settles_the_reported_cache_split() {
+    use futures_util::StreamExt;
+
+    let uri = paced_sse_upstream(paced_anthropic_frames());
+    let sink = Arc::new(InMemorySink::new());
+    let state = paced_anthropic_state(uri, sink.clone());
+    let app = build_app(state.clone());
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("x-api-key", "vk_demo")
+        .body(Body::from(
+            r#"{"model":"claude-test","max_tokens":32,"stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
+        ))
+        .unwrap();
+
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Read until the frame carrying `message_start` has reached us. The proxy observes usage
+    // before it forwards the bytes, so once we hold this frame the accounting has already seen it.
+    let mut body = response.into_body().into_data_stream();
+    let mut seen = String::new();
+    for _ in 0..4 {
+        match body.next().await {
+            Some(Ok(bytes)) => seen.push_str(&String::from_utf8_lossy(&bytes)),
+            _ => break,
+        }
+        if seen.contains("message_start") {
+            break;
+        }
+    }
+    assert!(
+        seen.contains("message_start"),
+        "the paced upstream should have delivered message_start; got: {seen}"
+    );
+
+    // The disconnect. Dropping the body drops the stream generator, which drops
+    // `RequestAccounting`, which finalizes.
+    drop(body);
+
+    let expected = PACED_FRAMES_INPUT + PACED_FRAMES_CACHE_CREATION + PACED_FRAMES_CACHE_READ;
+    let spent = state.ledger.lock().unwrap().spent("group:platform");
+    assert!(
+        spent >= expected,
+        "a disconnect after message_start must settle the reported {expected} tokens, not a byte \
+         guess — settled {spent}"
+    );
+
+    // And the event must still say it is an interrupted call, not a completed one — and must
+    // admit that its output number came from the byte fallback (TD-0013 D5).
+    let events = sink.events();
+    assert_eq!(events.len(), 1, "the disconnect must still emit one event");
+    assert_eq!(
+        events[0].usage_completeness,
+        sandhi_core::UsageCompleteness::Partial
+    );
+    assert_eq!(
+        events[0].usage_basis,
+        sandhi_core::UsageBasis::Estimated,
+        "input and cache are real here, but output was estimated — the call must not present as \
+         a clean measurement"
+    );
+    assert_eq!(events[0].tokens_in, PACED_FRAMES_INPUT);
+    assert_eq!(events[0].cache_read_tokens, PACED_FRAMES_CACHE_READ);
+    assert_eq!(events[0].cache_creation_tokens, PACED_FRAMES_CACHE_CREATION);
+}
+
+/// The second integrity hole TD-0013 closes, at the layer where it costs money.
+///
+/// When the sniffer never matches — an upstream that ignores `stream_options.include_usage`, a
+/// proxy in front of it that strips the frame, or a usage frame past the sniff budget — the
+/// terminal item used to carry an all-zero *finalized* usage. That overwrote the accrued running
+/// estimate, so a fully-delivered response settled `0`: a metering hole that needs no disconnect
+/// and no bad intent to trigger.
+#[tokio::test]
+async fn a_stream_whose_usage_is_never_reported_still_settles_what_it_accrued() {
+    let upstream = MockServer::start().await;
+    let sse = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"a fully delivered response\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\" with no usage frame at all\"}}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse),
+        )
+        .mount(&upstream)
+        .await;
+
+    let sink = Arc::new(InMemorySink::new());
+    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    let app = build_app(state.clone());
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("authorization", "Bearer vk_demo")
+        .body(Body::from(
+            r#"{"model":"gpt-x","messages":[],"stream":true}"#,
+        ))
+        .unwrap();
+
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&body).contains("[DONE]"),
+        "forwarded"
+    );
+
+    let spent = state.ledger.lock().unwrap().spent("group:platform");
+    assert!(
+        spent > 0,
+        "a delivered response whose usage was never reported must still settle the accrued \
+         estimate — settling 0 is a metering hole that needs no disconnect to exploit"
+    );
+
+    // And it must be labelled an estimate, not passed off as a measured call.
+    let events = sink.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].usage_completeness,
+        sandhi_core::UsageCompleteness::Partial,
+        "an unreported stream is not a finalized measurement"
+    );
+    assert_eq!(
+        events[0].usage_basis,
+        sandhi_core::UsageBasis::Estimated,
+        "nothing here was measured — the event must say so"
+    );
+
+    // The operator-facing signal: how much settled spend was guessed (TD-0013 P3).
+    let metrics = state.metrics.render();
+    assert!(
+        metrics.contains("sandhi_estimated_tokens_total{"),
+        "an operator must be able to measure estimated spend, not just find it per-event"
+    );
+    for forbidden in [
+        "subject_id",
+        "session_id",
+        "virtual_key_id",
+        "vk_demo",
+        "alice",
+    ] {
+        assert!(
+            !metrics.contains(forbidden),
+            "{forbidden} must never become a metric label (TD-0011 D2)"
+        );
+    }
+}
+
+/// TD-0013 D6 — a measured usage above the reserved ceiling is settled in full, and counted.
+///
+/// `core/src/ledger.rs` used to claim `actual` was "trusted to be ≤ the reserved ceiling (the
+/// proxy's mid-stream cutoff enforces that bound)". No cutoff was ever built, and the bound is
+/// unenforceable in general: a ceiling is built from `input_estimate` (bytes/4 of the request) and
+/// a provider can tokenize the same prompt higher.
+///
+/// Clamping to the ceiling was implemented first and reverted: it silently discarded the
+/// difference, recreating one layer down exactly the defect this TD removes. The measurement is
+/// the product, so the truth is recorded and the under-reservation is made visible instead.
+#[tokio::test]
+async fn a_settle_above_the_ceiling_is_recorded_in_full_and_counted() {
+    let upstream = MockServer::start().await;
+    // A tiny request (so the reservation ceiling is small) answered with a large usage report.
+    let resp = serde_json::json!({
+        "choices": [{ "message": { "content": "hi" } }],
+        "usage": { "prompt_tokens": 900_000, "completion_tokens": 900_000 }
+    });
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(resp))
+        .mount(&upstream)
+        .await;
+
+    let sink = Arc::new(InMemorySink::new());
+    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    state.ledger.lock().unwrap().set_budget(
+        "group:platform",
+        Some(10_000_000),
+        Window::Total,
+        Policy::Block,
+    );
+    let app = build_app(state.clone());
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("authorization", "Bearer vk_demo")
+        .body(Body::from(
+            r#"{"model":"gpt-x","max_output_tokens":16,"messages":[{"role":"user","content":"hi"}]}"#,
+        ))
+        .unwrap();
+    assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::OK);
+
+    let ledger = state.ledger.lock().unwrap();
+    assert_eq!(
+        ledger.spent("group:platform"),
+        1_800_000,
+        "the provider's measurement must survive intact — a ceiling is an estimate, not a truth"
+    );
+    assert_eq!(
+        ledger.reserved("group:platform"),
+        0,
+        "the lease must still be released"
+    );
+    drop(ledger);
+
+    let metrics = state.metrics.render();
+    assert!(
+        metrics.contains("sandhi_settle_overshoot_total 1"),
+        "an under-reserved call must be visible, or ceilings stay wrong forever:\n{metrics}"
+    );
+    assert!(
+        metrics.contains("sandhi_settle_overshoot_tokens_total "),
+        "how far past the ceiling it landed is the actionable part"
+    );
 }

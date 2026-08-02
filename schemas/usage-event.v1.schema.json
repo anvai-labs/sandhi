@@ -151,6 +151,15 @@
       "default": "unavailable",
       "description": "Whether token counts are final, partial, or unavailable for this logical call."
     },
+    "usage_basis": {
+      "type": "string",
+      "enum": [
+        "provider_reported",
+        "estimated"
+      ],
+      "default": "provider_reported",
+      "description": "Whether the token counts were measured by the provider or derived from a byte estimate. Orthogonal to `usage_completeness`: an interrupted stream may carry real provider counts or a byte-derived floor, and only this field distinguishes them. `estimated` means at least one category came from the fallback, which is reachable only when a stream ended before the provider reported that category."
+    },
     "attempts": {
       "type": "integer",
       "minimum": 1,

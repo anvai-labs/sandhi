@@ -133,6 +133,20 @@ fn encode_responses_request_for_profile(
             json!({"format": responses_text_format(format)}),
         );
     }
+    // W3d/G7: Responses expresses effort as `reasoning.effort` (not the Chat
+    // top-level `reasoning_effort`). Merge into any existing reasoning object
+    // (e.g. an extensions-carried `encrypted_content` include) rather than
+    // clobbering it. Typed field wins over an extensions duplicate.
+    if let Some(effort) = &request.reasoning_effort {
+        let reasoning = body
+            .entry("reasoning")
+            .or_insert_with(|| Value::Object(Map::new()));
+        if let Some(obj) = reasoning.as_object_mut() {
+            obj.insert("effort".into(), Value::String(effort.clone()));
+        }
+    }
+    // `thinking` is not a Responses concept — reasoning is the effort field
+    // above. Explicitly ignored (consumer-decision row, W3d/G7).
     if profile == OpenAiResponsesProfile::ChatGptCodex {
         let instructions = body
             .get("instructions")
@@ -614,6 +628,34 @@ mod tests {
     use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    #[test]
+    fn w3d_reasoning_effort_maps_to_reasoning_effort_object() {
+        let request: ChatRequestV1 = serde_json::from_value(json!({
+            "model": "gpt-5",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "high"
+        }))
+        .unwrap();
+        let body = encode_responses_request(&request).unwrap();
+        // Responses uses reasoning.effort, not the Chat top-level field.
+        assert_eq!(body["reasoning"]["effort"], "high");
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn w3d_reasoning_effort_merges_into_existing_reasoning_object() {
+        let request: ChatRequestV1 = serde_json::from_value(json!({
+            "model": "gpt-5",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "high",
+            "extensions": {"openai_responses": {"reasoning": {"summary": "auto"}}}
+        }))
+        .unwrap();
+        let body = encode_responses_request(&request).unwrap();
+        assert_eq!(body["reasoning"]["effort"], "high");
+        assert_eq!(body["reasoning"]["summary"], "auto");
+    }
+
     fn request() -> ChatRequestV1 {
         serde_json::from_value(json!({
             "model":"gpt-test",
@@ -681,11 +723,13 @@ mod tests {
                 Ok(crate::StreamChunk {
                     data: Bytes::copy_from_slice(&sse.as_bytes()[..split]),
                     usage: None,
+                    usage_running: None,
                     attempts: 2,
                 }),
                 Ok(crate::StreamChunk {
                     data: Bytes::copy_from_slice(&sse.as_bytes()[split..]),
                     usage: None,
+                    usage_running: None,
                     attempts: 2,
                 }),
             ];

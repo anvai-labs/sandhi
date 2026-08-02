@@ -41,6 +41,7 @@ JsonValue = Any
 Role = Literal["developer", "system", "user", "assistant", "tool", "function"]
 FinishReasonV1 = Literal["stop", "length", "tool_calls", "content_filter", "function_call", "unknown"]
 UsageCompleteness = Literal["final", "partial", "unavailable"]
+UsageBasis = Literal["provider_reported", "estimated"]
 
 class TextPart(TypedDict):
     type: Literal["text"]
@@ -105,6 +106,9 @@ class RequestMetadataV1(TypedDict, total=False):
     subject_id: str
     group_id: str
     route: str
+class ThinkingV1(TypedDict):
+    enabled: bool
+    budget_tokens: NotRequired[int]
 class ChatRequestV1(TypedDict):
     model: str
     messages: list[ChatMessageV1]
@@ -117,6 +121,8 @@ class ChatRequestV1(TypedDict):
     response_format: NotRequired[JsonValue]
     seed: NotRequired[int]
     metadata: NotRequired[RequestMetadataV1]
+    reasoning_effort: NotRequired[str]
+    thinking: NotRequired[ThinkingV1]
     include_native_response: NotRequired[bool]
     extensions: NotRequired[dict[str, JsonValue]]
 class UsageV2(TypedDict):
@@ -125,9 +131,12 @@ class UsageV2(TypedDict):
     cache_creation_tokens: int
     cache_read_tokens: int
     completeness: NotRequired[UsageCompleteness]
+    basis: NotRequired[UsageBasis]
     attempts: NotRequired[int]
     outcome: NotRequired[str]
     upstream_request_id: NotRequired[str]
+    duration_ms: NotRequired[int]
+    time_to_first_token_ms: NotRequired[int]
     audio_input_tokens: NotRequired[int]
     audio_output_tokens: NotRequired[int]
     reasoning_tokens: NotRequired[int]
@@ -183,6 +192,15 @@ class TypedProvider:
     async def complete_json(self, request_json: str) -> str: ...
     def stream_json(self, request_json: str) -> TypedEventStream: ...
 class ProviderRuntime:
+    """Persistent typed provider factory.
+
+    `auth_scheme`: explicit credential scheme. Meaningful for the Anthropic/Gemini
+    protocols (`"api_key"` vs `"bearer"`); for every other family the default is
+    already `Authorization: Bearer`, so `"bearer"` is accepted as a no-op and
+    `"api_key"` is rejected. Validity is part of the contract, not a hidden
+    runtime rule (TD-0008 operating rule 5).
+    """
+
     def provider(self, provider: str, model: str, api_key: str, *, base_url: str | None = ..., headers_json: str | None = ..., max_retries: int | None = ..., timeout_secs: float | None = ..., stream_idle_timeout_secs: float | None = ..., auth_scheme: Literal["api_key", "bearer"] | None = ..., protocol: Literal["chat_completions", "responses", "chatgpt_responses"] | None = ...) -> TypedProvider: ...
     def openai_compat(self, provider: str, base_url: str, api_key: str, *, headers_json: str | None = ..., max_retries: int | None = ..., timeout_secs: float | None = ..., stream_idle_timeout_secs: float | None = ...) -> TypedProvider: ...
     def openai_responses(self, provider: str, base_url: str, bearer_token: str, *, headers_json: str | None = ..., max_retries: int | None = ..., timeout_secs: float | None = ..., stream_idle_timeout_secs: float | None = ...) -> TypedProvider: ...
@@ -205,6 +223,7 @@ def provider_descriptor_json(provider: str) -> str: ...
 def chat_contract_schema_json(name: str) -> str: ...
 def wire_contract_version() -> str: ...
 def chat_contract_version() -> str: ...
+def chat_contract_minor() -> int: ...
 '''
 
 
@@ -215,6 +234,7 @@ export type JsonValue = unknown
 export type Role = "developer" | "system" | "user" | "assistant" | "tool" | "function"
 export type FinishReasonV1 = "stop" | "length" | "tool_calls" | "content_filter" | "function_call" | "unknown"
 export type UsageCompleteness = "final" | "partial" | "unavailable"
+export type UsageBasis = "provider_reported" | "estimated"
 export type ContentPart =
   | {{ type: "text"; text: string }}
   | {{ type: "image_url"; image_url: string; detail?: string }}
@@ -229,16 +249,20 @@ export type ChatMessageV1 =
   | {{ role: "function"; content: MessageContent; name: string }}
 export interface ToolDefinitionV1 {{ name: string; parameters: JsonValue; description?: string; strict?: boolean }}
 export interface RequestMetadataV1 {{ session_id?: string; virtual_key_id?: string; subject_id?: string; group_id?: string; route?: string }}
+export interface ThinkingV1 {{ enabled: boolean; budget_tokens?: number }}
 export interface ChatRequestV1 {{
   schema_version?: "1"; model: string; messages: ChatMessageV1[]; tools?: ToolDefinitionV1[]
   tool_choice?: "none" | "auto" | "required" | {{ name: string }}; temperature?: number
   max_output_tokens?: number; stop?: string[]; response_format?: JsonValue; seed?: number
-  metadata?: RequestMetadataV1; include_native_response?: boolean
+  metadata?: RequestMetadataV1; reasoning_effort?: string; thinking?: ThinkingV1
+  include_native_response?: boolean
   extensions?: Record<string, JsonValue>
 }}
 export interface UsageV2 {{
   tokens_in: number; tokens_out: number; cache_creation_tokens: number; cache_read_tokens: number
-  completeness?: UsageCompleteness; attempts?: number; outcome?: string; upstream_request_id?: string
+  completeness?: UsageCompleteness; basis?: UsageBasis; attempts?: number; outcome?: string
+  upstream_request_id?: string
+  duration_ms?: number; time_to_first_token_ms?: number
   audio_input_tokens?: number; audio_output_tokens?: number; reasoning_tokens?: number
   accepted_prediction_tokens?: number; rejected_prediction_tokens?: number
 }}

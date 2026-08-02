@@ -4,13 +4,28 @@ Date: 2026-07-23
 
 ## Status
 
-Proposed. Refines [ADR-0004](0004-two-plane-proxy-and-enforcement-boundary.md) D3 (the
+Accepted (implemented — the lease ledger backs the proxy's enforcement: reserve → settle →
+reclaim, calendar windows, fail-open/closed; the shared/HA backend remains open in
+[TD-0007](../td/TD-0007-enforcement-ledger-backends.md)). Refines [ADR-0004](0004-two-plane-proxy-and-enforcement-boundary.md) D3 (the
 "durable, atomic, shared ledger") and the reserve-then-reconcile mechanism assumed across
 [TD-0003](../td/TD-0003-operator-surface-keys-budgets-attribution.md) and
 [TD-0005](../td/TD-0005-declarative-policy-engine.md). Records the design that survived a
 four-lens adversarial pressure-test (proxy data-path, distributed-systems ledger, policy/trust,
 and agentic-workload). Does not touch the measure-vs-price boundary — enforcement is in neutral
 tokens; still no dollars.
+
+> **Update 2026-07-28 — D1's mid-stream cutoff was never built, and the phase table below implies
+> it was.** Phase 1 lists "Ceiling reservation + **mid-stream cutoff** + Partial-on-disconnect +
+> idempotent settle" as shipped; the first, third and fourth did, the cutoff did not.
+> `grep -n "ceiling" crates/sandhi-proxy/src/lib.rs` returns only pre-flight sites. Two doc
+> comments in `sandhi-core/src/ledger.rs` compounded this by describing the cutoff as the thing
+> that guarantees `actual ≤ ceiling`; both are corrected by
+> [TD-0013](../td/TD-0013-streaming-usage-fidelity.md) D6, which also establishes what happens
+> instead — the measured overshoot is **settled in full and counted**
+> (`sandhi_settle_overshoot_total`) rather than clamped, because clamping destroys a real
+> measurement and the cap recovers on its own at the next reservation. A streaming `Block` cap is
+> therefore **soft by one call**, which is exactly what D1 said to "state explicitly wherever
+> Tier-2 'prevented' is claimed".
 
 ## Context — what the pressure-test falsified
 

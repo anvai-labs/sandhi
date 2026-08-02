@@ -269,7 +269,7 @@ impl RawForwarder {
 /// request on a parse failure).
 /// The family's streaming usage sniffer, single-sourced with each typed adapter — so the
 /// transparent plane accumulates usage exactly as the translated path does.
-fn sniff_for_family(family: ProviderFamily) -> fn(&[u8], &mut crate::ParsedUsage) {
+fn sniff_for_family(family: ProviderFamily) -> fn(&[u8], &mut crate::ParsedUsage) -> bool {
     match family {
         ProviderFamily::OpenAiCompat => crate::openai::sniff_usage_line,
         ProviderFamily::OpenAiResponses => crate::openai_responses::sniff_responses_usage_line,

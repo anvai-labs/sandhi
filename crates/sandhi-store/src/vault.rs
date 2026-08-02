@@ -474,6 +474,15 @@ impl VaultStore {
 /// SHA-256 hex digest of a presented virtual-key secret. Used as the durable + live lookup key so
 /// the plaintext secret is never stored (only its hash). Public so the proxy can hash a presented
 /// token before resolving it against the in-memory store.
+///
+/// This is a **lookup index over high-entropy secrets, not a password hash.** A minted key is
+/// `vk_` + 16 bytes (≥128 bits) of OS CSPRNG entropy ([`vkeys`](crate::vkeys)::generate_secret),
+/// so an offline brute-force of this digest against a guessed secret is 2¹²⁸ work — infeasible
+/// regardless of salt or pepper, which exist to defend *low-entropy* secrets (passwords) that
+/// virtual keys are not. It is therefore deliberately unsalted: a salt would not slow that attack
+/// and would add a stored column for no security gain. If a future mint path ever produced a
+/// low-entropy secret this assumption must be revisited — `minted_secret_has_min_128_bits_of_entropy`
+/// exists to fail loudly if it does.
 pub fn hash_secret(secret: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(secret.as_bytes());

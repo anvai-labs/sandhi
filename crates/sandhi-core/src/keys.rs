@@ -14,6 +14,9 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
+
 /// A virtual key: what a caller presents instead of the real upstream key.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VirtualKey {
@@ -37,17 +40,35 @@ pub struct VirtualKey {
     pub budget_scope: Option<String>,
     /// RFC 3339 expiry timestamp. A presented key past this instant is rejected.
     pub expires_at: Option<String>,
-    /// Optional rate limit in requests/minute. Stored only in P1; enforcement is P2.
+    /// Optional rate limit in requests/minute.
+    ///
+    /// Enforced by the proxy's token bucket (TD-0012), which is per process: with N replicas the
+    /// effective limit is N x this value. The in-process bindings do not enforce it — enforcement
+    /// is proxy-only, as it is for budgets.
     pub rate_limit_per_min: Option<u32>,
 }
 
 impl VirtualKey {
-    /// Whether this key has expired at `now_rfc3339` (lexicographic compare is correct for the
-    /// fixed-width RFC 3339 `YYYY-MM-DDTHH:MM:SSZ` form). `None` expiry = never expires.
+    /// Whether this key has expired at `now_rfc3339`. `None` expiry = never expires.
+    ///
+    /// Compares the two instants by parsing them as RFC 3339 — a lexicographic string compare is
+    /// only correct for the fixed-width `…Z` form and gets offsets and fractional seconds wrong:
+    /// `+05:00` sorts before `Z` (0x2B < 0x5A), and `.5Z` mis-orders against `Z`, so a 2030 key
+    /// with a fractional-second or offset expiry could be reported expired today. If either side
+    /// is not valid RFC 3339, fall back to the lexicographic compare (back-compat for any
+    /// non-standard stored timestamp).
     pub fn is_expired(&self, now_rfc3339: &str) -> bool {
-        self.expires_at
-            .as_deref()
-            .is_some_and(|exp| exp <= now_rfc3339)
+        let Some(exp) = self.expires_at.as_deref() else {
+            return false;
+        };
+        match (
+            OffsetDateTime::parse(exp, &Rfc3339),
+            OffsetDateTime::parse(now_rfc3339, &Rfc3339),
+        ) {
+            (Ok(exp_t), Ok(now_t)) => exp_t <= now_t,
+            // Back-compat: a non-RFC-3339 value compares lexicographically, as it always did.
+            _ => exp <= now_rfc3339,
+        }
     }
 
     /// Whether `model` is permitted by the optional model allowlist. No allowlist (or an empty one)
@@ -178,5 +199,27 @@ mod tests {
         // An empty allowlist admits any model (treated as unscoped).
         key.models = Some(vec![]);
         assert!(key.permits_model("anything"));
+    }
+
+    #[test]
+    fn is_expired_compares_rfc3339_instants_not_strings() {
+        let mut key = vk();
+
+        // Fractional seconds: 12:00:00.5 is AFTER 12:00:00, so not expired. A lexicographic
+        // compare mis-orders '.5Z' before 'Z' (0x2E < 0x5A) and wrongly reports expired.
+        key.expires_at = Some("2030-01-01T12:00:00.5Z".into());
+        assert!(!key.is_expired("2030-01-01T12:00:00Z"));
+
+        // Mirror: exactly 12:00:00Z has elapsed by 12:00:00.5Z → expired (lex would say not).
+        key.expires_at = Some("2030-01-01T12:00:00Z".into());
+        assert!(key.is_expired("2030-01-01T12:00:00.5Z"));
+
+        // A numeric offset is parsed to an instant, not compared as text: +00:00 ≡ Z.
+        key.expires_at = Some("2030-01-01T12:00:00+00:00".into());
+        assert!(key.is_expired("2030-01-01T12:00:00Z")); // equal instants ⇒ expired (≤)
+
+        // Back-compat: a non-RFC-3339 stored value falls back to lexicographic compare.
+        key.expires_at = Some("not-a-timestamp".into());
+        assert!(!key.is_expired("2030-01-01T12:00:00Z"));
     }
 }

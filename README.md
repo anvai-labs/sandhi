@@ -21,8 +21,8 @@ key, and set per-user budgets — without hand-rolling provider APIs.
   ([ADR-0005](docs/adr/0005-enforcement-correctness-reservation-ledger-observe-enforce-split.md)), and the
   **transparent-metering plane** of
   [ADR-0004](docs/adr/0004-two-plane-proxy-and-enforcement-boundary.md). Still open: per-minute
-  rate limits (stored, not enforced), a shared/HA ledger backend
-  ([TD-0007](docs/td/TD-0007-enforcement-ledger-backends.md)), Gemini/Cohere *ingress* dialects,
+  a shared/HA ledger backend
+  ([TD-0007](docs/td/TD-0007-enforcement-ledger-backends.md)), the Cohere *ingress* dialect,
   first-party observability export, and the declarative policy engine
   ([TD-0005](docs/td/TD-0005-declarative-policy-engine.md)).
 - **Packages:** crates.io `sandhi-core` / `-providers` / `-store` / `-proxy` · PyPI
@@ -46,8 +46,12 @@ wrong. Sandhi is the single, fast, neutral implementation of both.
   **windows**, a block-or-**warn** policy, and threshold **alerts**. Set `SANDHI_STORE` and the
   ledger is **durable**: spend, caps, and in-flight leases survive a restart, and dangling leases
   are reclaimed. Without it the ledger is in-memory and a restart resets accrued spend. Still
-  open: per-minute rate limits (stored, not enforced) and a shared/HA backend for multi-replica
-  deployments.
+- **Rate limits** — per-virtual-key requests/minute, enforced by a token bucket before the budget
+  reservation, so a throttled call consumes no budget. The 429 carries `Retry-After` in the
+  caller's own dialect. **Per process:** the limiter is in-memory, so with N replicas the effective
+  limit is N × the configured value — the same single-node caveat as the ledger below.
+  Still open: a shared/HA backend for multi-replica deployments
+  ([TD-0007](docs/td/TD-0007-enforcement-ledger-backends.md)).
 - **Unified provider transport** — Anthropic, OpenAI-compatible (covers ~20 providers),
   Gemini, Cohere, local vLLM/Ollama, OpenAI Responses — streaming, pooling, retry,
   circuit-breaker, with **usage + cache-split extracted at the source**. (Bedrock is
@@ -98,11 +102,12 @@ are added when they pass, never in advance.
 > **Prompt-cache safe (by design).** Sandhi preserves per-conversation cache affinity — it
 > never collapses users to a single session and carries attribution *outside* the cached
 > prompt, so hosted prompt caches keep hitting and self-hosted KV routing stays sticky. The
-> byte-exact forwarding that guarantees this on the proxy path is **live** as the
+> **content-faithful forwarding** that guarantees this on the proxy path is **live** as the
 > transparent-metering plane of
 > [ADR-0004](docs/adr/0004-two-plane-proxy-and-enforcement-boundary.md): when the ingress dialect
-> and the upstream are the same family, the proxy forwards the client's bytes verbatim and meters
-> the stream as it passes, so provider-specific extras (e.g. message-level Anthropic
+> and the upstream are the same family, the proxy forwards the client's bytes verbatim — except a
+> minimal envelope normalization that injects usage-metering on OpenAI streams (ADR-0004 D1) — and
+> meters the stream as it passes, so provider-specific extras (e.g. message-level Anthropic
 > `cache_control` breakpoints) survive untouched. A **cross-family** request still re-encodes
 > through the neutral contract — faithful for standard fields, but it can drop those extras. The
 > in-process bindings, which never re-encode, are unaffected.
@@ -147,6 +152,84 @@ docs/adr/                            # architecture decisions
 Run the proxy with `SANDHI_STORE=usage.db` to persist events to SQLite and serve a self-hosted
 usage **dashboard** at `/dashboard` (per-user / per-team / per-provider totals; neutral units, no
 pricing).
+
+## Operating it
+
+**Operator guide.** For the full step-by-step — launching the proxy, registering the real
+upstream key, minting virtual keys, setting budgets, and pointing a client (Victor or any
+vendor SDK) at it — see [`docs/operator/proxy-guide.adoc`](docs/operator/proxy-guide.adoc).
+
+**Logs.** `SANDHI_LOG` (or `RUST_LOG`) filters; output goes to stderr. The default keeps the
+operator-relevant events — reservation denials, fail-open admissions, lease reclaims, settle
+failures — without per-request chatter. `SANDHI_LOG=debug` adds plane selection per call.
+
+**Metrics.** `GET /metrics` serves Prometheus text, gated by the same admin bearer as the dashboard
+when `SANDHI_ADMIN_TOKEN` is set:
+
+```yaml
+scrape_configs:
+  - job_name: sandhi
+    metrics_path: /metrics
+    authorization: { credentials: "<SANDHI_ADMIN_TOKEN>" }   # omit if no admin token is configured
+    static_configs: [{ targets: ["sandhi:8787"] }]
+```
+
+Metrics describe the **gateway**, not who called it: labels are bounded (`provider`, `model`,
+`dialect`, `plane`, `outcome`), and per-subject attribution deliberately lives in the usage
+aggregate instead — a metric labelled by user is a memory leak with a dashboard attached.
+
+The four alerts worth having, in the order they will save you:
+
+| alert | expression | why |
+|---|---|---|
+| **Capacity leaking** | `increase(sandhi_settle_failures_total[15m]) > 0` | a settle that did not land holds budget until the lease TTL expires; silent otherwise |
+| **Enforcement is off** | `increase(sandhi_admitted_unmetered_total[15m]) > 0` | a `Warn`-policy scope admitting fail-open during a ledger fault looks exactly like normal traffic |
+| **Callers being refused** | `rate(sandhi_reservations_denied_total{policy="block"}[5m]) > 0` | distinguishes a runaway caller from a mis-set cap — both need a human |
+| **Upstream degrading** | `histogram_quantile(0.95, rate(sandhi_request_duration_ms_bucket[10m])) > 30000` | per provider/model, so one bad upstream is visible before users report it |
+
+A sustained `sandhi_leases_reclaimed_total` is worth watching too: reclaims are normal after a
+restart, but a steady trickle means leases are leaking rather than settling.
+
+**Tracing / OTLP (opt-in).** When you would rather push to a collector than scrape `/metrics`,
+build the proxy with the `otel-otlp` cargo feature and point it at an OTLP/HTTP receiver (TD-0011
+P3). It exports the OpenTelemetry GenAI semantic conventions — one `gen_ai` operation span per
+chat call (input / output / cache-creation / cache-read / reasoning tokens, provider, model) plus
+the `gen_ai.client.token.usage`, `gen_ai.client.operation.duration`, and
+`gen_ai.server.time_to_first_token` metrics. It layers *beside* `/metrics`; both can run at once.
+
+```shell
+# the feature is default-off (it pulls the OpenTelemetry stack), so opt in at build time
+cargo build -p sandhi-proxy --features otel-otlp
+
+# run it pointed at a collector's OTLP/HTTP receiver
+SANDHI_OTEL_EXPORT=otlp \
+SANDHI_OTEL_ENDPOINT=http://otelcol:4318 \
+SANDHI_STORE=usage.db \
+  cargo run -p sandhi-proxy --features otel-otlp --bin sandhi-proxy
+```
+
+| env | default | purpose |
+|---|---|---|
+| `SANDHI_OTEL_EXPORT` | _unset_ | set to exactly `otlp` to enable; unset behaves identically to the default build |
+| `SANDHI_OTEL_ENDPOINT` | `http://localhost:4318` | OTLP base URL (the exporter appends `/v1/traces` and `/v1/metrics`) |
+| `SANDHI_OTEL_PROTOCOL` | `http/protobuf` | `http/protobuf` (binary) or `http/json` |
+
+The attribution boundary is the same as `/metrics`, applied to *exported* spans and metrics: they
+carry `gen_ai.system` / `gen_ai.request.model` / `gen_ai.operation.name` and the token counts, but
+**never** `subject_id` / `group_id` / `session_id` / `virtual_key_id` / `request_id` (those stay in
+the usage aggregate), and never a cost. A minimal collector that receives them:
+
+```yaml
+receivers:
+  otlp:
+    protocols: { http: { endpoint: 0.0.0.0:4318 } }
+exporters:
+  debug: {}        # swap for otlphttp / prometheusremotewrite / your backend
+service:
+  pipelines:
+    traces:  { receivers: [otlp], exporters: [debug] }
+    metrics: { receivers: [otlp], exporters: [debug] }
+```
 
 ## Tests & coverage
 

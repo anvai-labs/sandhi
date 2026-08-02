@@ -6,12 +6,44 @@
 use std::collections::BTreeMap;
 
 use axum::http::HeaderMap;
+use sandhi_core::chat::ThinkingV1;
 use sandhi_core::{
     ChatMessageV1, ChatRequestV1, ChatResponseV1, ChatStreamEventV1, ContentPart, FinishReasonV1,
     MessageContent, RequestMetadataV1, ToolCallV1, ToolChoiceMode, ToolChoiceV1, ToolDefinitionV1,
     UsageV2, CHAT_SCHEMA_VERSION_V1,
 };
 use serde_json::{json, Map, Value};
+
+/// Lift the OpenAI-compat / ZAI `thinking` object (`{type, budget_tokens}`)
+/// into the neutral `ThinkingV1` at ingress (W3d/G7), so a promoted param
+/// reaches the typed field instead of surviving only inside the extensions
+/// body clone (which dies on any cross-family route).
+fn lift_openai_thinking(object: &Map<String, Value>) -> Option<ThinkingV1> {
+    let thinking = object.get("thinking")?.as_object()?;
+    let enabled = match thinking.get("type").and_then(Value::as_str) {
+        Some("disabled") => false,
+        _ => true, // "enabled" or a bare budget object both mean on
+    };
+    Some(ThinkingV1 {
+        enabled,
+        budget_tokens: thinking.get("budget_tokens").and_then(Value::as_u64),
+    })
+}
+
+/// Lift Gemini's `generationConfig.thinkingConfig.thinkingBudget` into the
+/// neutral `ThinkingV1` (W3d/G7). Budget 0 = disabled; a positive budget = on
+/// with a cap.
+fn lift_gemini_thinking(object: &Map<String, Value>) -> Option<ThinkingV1> {
+    let budget = object
+        .get("generationConfig")?
+        .get("thinkingConfig")?
+        .get("thinkingBudget")?
+        .as_u64()?;
+    Some(ThinkingV1 {
+        enabled: budget != 0,
+        budget_tokens: (budget != 0).then_some(budget),
+    })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IngressDialect {
@@ -285,9 +317,13 @@ fn decode_gemini_request(
                 .collect()
         });
 
-    // Anything this codec does not model — safetySettings, cachedContent, responseSchema, topP —
-    // is kept verbatim so it survives a same-family forward instead of being dropped.
-    let mut extensions = BTreeMap::new();
+    // Anything this codec does not model — safetySettings, cachedContent, responseSchema,
+    // topP/topK — is kept verbatim so it survives translation. It is stashed under
+    // `extensions["gemini"]` (W3d/G7 D5) — the SAME key `encode_gemini_request` clones as its
+    // base body — so a gemini->typed->gemini round-trip is lossless. (The pre-D5 flat stash put
+    // these at `extensions["topP"]` / `extensions["generationConfig"]`, which the encoder never
+    // read, silently dropping them on re-encode.)
+    let mut gemini_body = Map::new();
     for (key, value) in object {
         if !matches!(
             key.as_str(),
@@ -298,7 +334,7 @@ fn decode_gemini_request(
                 | "generationConfig"
                 | "model"
         ) {
-            extensions.insert(key.clone(), value.clone());
+            gemini_body.insert(key.clone(), value.clone());
         }
     }
     if let Some(generation) = generation {
@@ -313,8 +349,12 @@ fn decode_gemini_request(
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
         if !leftovers.is_empty() {
-            extensions.insert("generationConfig".to_string(), Value::Object(leftovers));
+            gemini_body.insert("generationConfig".to_string(), Value::Object(leftovers));
         }
+    }
+    let mut extensions = BTreeMap::new();
+    if !gemini_body.is_empty() {
+        extensions.insert("gemini".to_string(), Value::Object(gemini_body));
     }
 
     let request = ChatRequestV1 {
@@ -330,6 +370,10 @@ fn decode_gemini_request(
         response_format: None,
         seed: None,
         metadata,
+        // W3d/G7: Gemini has no effort concept; thinking rides
+        // generationConfig.thinkingConfig.thinkingBudget.
+        reasoning_effort: None,
+        thinking: lift_gemini_thinking(object),
         // #90's native-response gate, matching every other dialect's decode.
         include_native_response: true,
         // D4b: the populated map — unmodelled Gemini keys survive here rather than being dropped.
@@ -563,6 +607,10 @@ fn decode_openai_request(
         response_format: object.get("response_format").cloned(),
         seed: object.get("seed").and_then(Value::as_i64),
         metadata,
+        // W3d/G7: lift promoted params to typed fields so they survive a
+        // cross-family route (they otherwise live only in the openai body clone).
+        reasoning_effort: optional_string(object, "reasoning_effort")?,
+        thinking: lift_openai_thinking(object),
         include_native_response: true,
         extensions: BTreeMap::from([("openai".into(), body.clone())]),
     };
@@ -796,6 +844,10 @@ fn decode_anthropic_request(
         response_format: None,
         seed: None,
         metadata,
+        // W3d/G7: Anthropic `thinking` uses the same {type, budget_tokens}
+        // shape; no effort concept.
+        reasoning_effort: None,
+        thinking: lift_openai_thinking(object),
         include_native_response: true,
         extensions: BTreeMap::from([("anthropic".into(), body.clone())]),
     };
@@ -1065,6 +1117,13 @@ fn decode_responses_request(
             .transpose()?,
         seed: None,
         metadata,
+        // W3d/G7: Responses expresses effort as `reasoning.effort`; no thinking.
+        reasoning_effort: object
+            .get("reasoning")
+            .and_then(|reasoning| reasoning.get("effort"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        thinking: None,
         include_native_response: true,
         extensions: BTreeMap::from([("openai_responses".into(), body.clone())]),
     };
@@ -1671,6 +1730,40 @@ mod tests {
     }
 
     #[test]
+    fn openai_ingress_lifts_w3d_params_to_typed_fields() {
+        // W3d/G7: promoted params must reach the typed fields at ingress, not
+        // just survive inside the extensions body clone (which dies cross-family).
+        let (request, _) = decode_openai_request(
+            json!({
+                "model": "gpt-5",
+                "messages": [{"role": "user", "content": "hi"}],
+                "reasoning_effort": "high",
+                "thinking": {"type": "enabled", "budget_tokens": 2048}
+            }),
+            RequestMetadataV1::default(),
+        )
+        .unwrap();
+        assert_eq!(request.reasoning_effort.as_deref(), Some("high"));
+        let thinking = request.thinking.expect("thinking lifted");
+        assert!(thinking.enabled);
+        assert_eq!(thinking.budget_tokens, Some(2048));
+    }
+
+    #[test]
+    fn gemini_ingress_lifts_thinking_budget() {
+        let (request, _) = decode_gemini_request(
+            json!({
+                "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+                "generationConfig": {"thinkingConfig": {"thinkingBudget": 0}}
+            }),
+            RequestMetadataV1::default(),
+        )
+        .unwrap();
+        let thinking = request.thinking.expect("thinking lifted");
+        assert!(!thinking.enabled); // budget 0 = disabled
+    }
+
+    #[test]
     fn anthropic_dialect_accepts_the_sdks_x_api_key_header() {
         // The stock Anthropic SDK authenticates with `x-api-key` and nothing else.
         assert_eq!(
@@ -2137,14 +2230,46 @@ mod gemini_codec_tests {
         let (request, _) = decode_gemini_request(body, metadata()).unwrap();
 
         assert_eq!(request.temperature, Some(0.5));
-        // Everything without a neutral equivalent survives in extensions.
-        assert!(request.extensions.contains_key("safetySettings"));
-        assert!(request.extensions.contains_key("cachedContent"));
-        assert_eq!(request.extensions["generationConfig"]["topP"], json!(0.9));
+        // W3d/G7 D5: unmodelled fields survive under `extensions["gemini"]` —
+        // the key the gemini encoder reads — so they round-trip losslessly.
+        let gemini = request.extensions["gemini"].as_object().unwrap();
+        assert!(gemini.contains_key("safetySettings"));
+        assert!(gemini.contains_key("cachedContent"));
+        assert_eq!(gemini["generationConfig"]["topP"], json!(0.9));
         assert_eq!(
-            request.extensions["generationConfig"]["responseMimeType"],
+            gemini["generationConfig"]["responseMimeType"],
             json!("application/json")
         );
+    }
+
+    #[test]
+    fn gemini_ingress_stash_matches_the_encoder_base_key() {
+        // W3d/G7 D5: the encoder (gemini_typed::encode_gemini_request) clones
+        // extensions["gemini"] as its base body and its generationConfig from
+        // extensions["gemini"]["generationConfig"]. The ingress stash must land
+        // exactly there for a gemini->typed->gemini round-trip to be lossless —
+        // pre-D5 it landed at extensions["topP"]/extensions["generationConfig"],
+        // which the encoder never read (silent drop on re-encode).
+        let body = json!({
+            "contents": [{"role":"user","parts":[{"text":"hi"}]}],
+            "safetySettings": [{"category":"HARM_CATEGORY_HATE_SPEECH","threshold":"BLOCK_NONE"}],
+            "generationConfig": {"temperature": 0.5, "topP": 0.9}
+        });
+        let (request, _) = decode_gemini_request(body, metadata()).unwrap();
+
+        // The ONLY extensions key is "gemini" — no stray flat keys the encoder can't see.
+        assert_eq!(
+            request.extensions.keys().collect::<Vec<_>>(),
+            vec!["gemini"]
+        );
+        let gemini = request.extensions["gemini"].as_object().unwrap();
+        assert_eq!(
+            gemini["safetySettings"][0]["threshold"],
+            json!("BLOCK_NONE")
+        );
+        // temperature is lifted to a typed field; topP (unmodelled) stays in the base gen-config.
+        assert_eq!(gemini["generationConfig"]["topP"], json!(0.9));
+        assert!(gemini["generationConfig"].get("temperature").is_none());
     }
 
     #[test]

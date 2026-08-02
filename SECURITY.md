@@ -57,7 +57,8 @@ Out of scope:
   default — ADR-0004 D4), any **unmasked** secret in a response, or a *write*
   endpoint reachable without an admin token.
 - Documented, not-yet-implemented enforcement: per-minute **rate limits** are
-  stored but not enforced, and enforcement is **proxy-only** — the in-process
+  enforced **per process** (with N replicas the effective limit is N × the configured
+  value), and enforcement is **proxy-only** — the in-process
   bindings meter without enforcing. See the CHANGELOG's "Known limitations".
 
 Also note: client-facing provider errors are **redacted by default** (code, HTTP

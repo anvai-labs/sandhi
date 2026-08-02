@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::chat::{UsageCompleteness, UsageV2};
+use crate::chat::{UsageBasis, UsageCompleteness, UsageV2};
 
 /// The single billable-token definition (ADR-0005 D4), used identically by reserve, settle,
 /// and the durable aggregate — closing the budget-vs-event divergence.
@@ -52,7 +52,14 @@ pub fn billable_parts(
     } else {
         0
     };
-    tokens_in + cache_creation_tokens + cache_read_tokens + tokens_out + unfolded_reasoning
+    // Saturate, never wrap: a malformed/adversarial upstream returning u64-near-MAX in any one
+    // dimension must not wrap the billable total to a small number (silently under-charging the
+    // budget and the durable aggregate). Mirrors `reserve`/`check`, which already saturate.
+    tokens_in
+        .saturating_add(cache_creation_tokens)
+        .saturating_add(cache_read_tokens)
+        .saturating_add(tokens_out)
+        .saturating_add(unfolded_reasoning)
 }
 
 /// The cost basis of a call's backend.
@@ -120,6 +127,11 @@ pub struct UsageEvent {
     /// Whether token counts are final, partial, or unavailable for this logical call.
     #[serde(default)]
     pub usage_completeness: UsageCompleteness,
+    /// Whether those counts were measured or estimated (TD-0013 D5). Orthogonal to
+    /// `usage_completeness`: an interrupted stream may carry real provider counts or a
+    /// byte-derived floor, and only this field tells a consumer which.
+    #[serde(default)]
+    pub usage_basis: UsageBasis,
     /// Number of upstream attempts made by the runtime for this logical call.
     #[serde(default = "one")]
     pub attempts: u32,
@@ -180,6 +192,7 @@ impl UsageEvent {
             cache_creation_tokens: 0,
             cache_read_tokens: 0,
             usage_completeness: UsageCompleteness::Unavailable,
+            usage_basis: UsageBasis::ProviderReported,
             attempts: 1,
             outcome: None,
             upstream_request_id: None,
@@ -296,6 +309,17 @@ impl UsageEvent {
         self.attempts = attempts.max(1);
         self.outcome = outcome;
         self.upstream_request_id = upstream_request_id;
+        self
+    }
+
+    /// Record whether these counts were measured or estimated (TD-0013 D5).
+    ///
+    /// Separate from [`with_measurement`](Self::with_measurement) on purpose: every existing caller
+    /// reports provider-measured counts, which is the default, so adding a parameter there would
+    /// have made a hundred call sites restate a fact none of them had a choice about.
+    #[must_use]
+    pub fn with_basis(mut self, basis: UsageBasis) -> Self {
+        self.usage_basis = basis;
         self
     }
 
@@ -416,5 +440,19 @@ mod tests {
         assert_eq!(billable(&unfolded), 360);
         // Absent reasoning → no contribution.
         assert_eq!(billable(&usage(10, 100, 0, 0)), 110);
+    }
+
+    #[test]
+    fn billable_parts_saturates_instead_of_wrapping() {
+        // Four near-MAX dimensions summed with plain `+` overflow (debug panics, release wraps to
+        // a small number → silent under-charge). Saturating pins the total at u64::MAX.
+        assert_eq!(
+            billable_parts(u64::MAX / 2, u64::MAX / 2, u64::MAX / 2, u64::MAX / 2, 0),
+            u64::MAX
+        );
+        // Reasoning beyond tokens_out is added and saturates the same way.
+        assert_eq!(billable_parts(u64::MAX, 0, 0, 10, u64::MAX), u64::MAX);
+        // A single runaway dimension saturates rather than wrapping the rest away.
+        assert_eq!(billable_parts(u64::MAX, 1, 0, 0, 0), u64::MAX);
     }
 }

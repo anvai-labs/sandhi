@@ -7,11 +7,18 @@
 
 mod codec;
 pub mod ledger;
+pub mod metrics;
 pub mod operator;
+pub mod ratelimit;
+
+/// First-party OTel/OTLP export of `gen_ai.*` spans + metrics (Scope 5, TD-0011 P3). Feature-gated
+/// (`otel-otlp`, default off); provides no-op stubs when the feature is off so call sites compile
+/// identically either way.
+pub mod otel;
 
 // Re-export the admin API request/response types for the `sandhi` CLI client + the startup
 // rehydration helpers used by the `sandhi-proxy` binary.
-pub use ledger::{Admission, ProxyLedger};
+pub use ledger::{reclaim_sweep_at, Admission, ProxyLedger};
 pub use operator::{
     admin, build_provider_handle, rehydrate_alerts, rehydrate_budgets, rehydrate_live_keys,
 };
@@ -33,8 +40,9 @@ use serde_json::{json, Value};
 use time::OffsetDateTime;
 
 use sandhi_core::{
-    billable, AlertRegistry, Backend, ChatRequestV1, KeyStore, Policy, RequestMetadataV1,
-    Reservation, Sink, UsageCompleteness, UsageEvent, UsageV2, VirtualKey,
+    billable, AlertRegistry, Backend, ChatRequestV1, FinishReasonV1, KeyStore, ParsedUsage, Policy,
+    RequestMetadataV1, Reservation, Sink, UsageBasis, UsageCompleteness, UsageEvent, UsageV2,
+    VirtualKey,
 };
 use sandhi_providers::{ProviderError, ProviderFamily, ProviderHandle, ProviderRuntime};
 use sandhi_store::{hash_secret, AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
@@ -97,6 +105,15 @@ pub struct ProxyState {
     /// self-hosted deployments into the full ProviderErrorV1 (bounded upstream body in
     /// `details.upstream_body`). Server-side logs always carry the full error either way.
     pub error_detail_full: bool,
+    /// TD-0011 P2 metric registry, served at `/metrics` (gated like the dashboard).
+    pub metrics: Arc<metrics::Metrics>,
+    /// Scope 5 (TD-0011 P3): OTLP export of `gen_ai.*` spans + metrics, when the `otel-otlp`
+    /// feature is compiled in **and** `SANDHI_OTEL_EXPORT=otlp` is set. `None` otherwise — the
+    /// default prerequisite-free `/metrics` path is unaffected. Built by `otel::init` in `main`.
+    pub otel: Option<Arc<otel::OtelRecorder>>,
+    /// TD-0012 per-virtual-key request rate limiting. In-memory: with N replicas the effective
+    /// limit is N × the configured value (D2).
+    pub rate_limiter: Arc<ratelimit::RateLimiter>,
 }
 
 impl ProxyState {
@@ -126,6 +143,9 @@ impl ProxyState {
             alert_store: None,
             dashboard_public: false,
             error_detail_full: false,
+            metrics: Arc::new(metrics::Metrics::new()),
+            rate_limiter: Arc::new(ratelimit::RateLimiter::new()),
+            otel: None,
         }
     }
 }
@@ -144,6 +164,9 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         .route("/dashboard/api/keys", get(dashboard_keys))
         .route("/dashboard/api/budgets", get(dashboard_budgets))
         .route("/dashboard/api/alerts", get(dashboard_alerts))
+        // TD-0011 D5: /metrics reveals traffic shape and model mix, so it reuses the dashboard's
+        // gate rather than inventing a second policy.
+        .route("/metrics", get(metrics_endpoint))
         .route("/v1/chat/completions", post(handle_openai))
         .route("/v1/messages", post(handle_anthropic))
         .route("/v1/responses", post(handle_responses))
@@ -523,6 +546,22 @@ async fn handle_responses(
     handle(state, headers, body, IngressDialect::Responses, None).await
 }
 
+/// `GET /metrics` — Prometheus text exposition (TD-0011 P2).
+async fn metrics_endpoint(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -> Response {
+    if let Err(denied) = require_dashboard_access(&state, &headers) {
+        return denied;
+    }
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        state.metrics.render(),
+    )
+        .into_response()
+}
+
 /// `GET /v1/models` — OpenAI and Anthropic discovery (TD-0010 D3).
 ///
 /// The listing is the key's *permitted* models: the upstream catalog intersected with the virtual
@@ -822,6 +861,48 @@ async fn handle(
     //    scope where the client left the output unbounded, we also set that bound on the upstream
     //    request so the provider caps output — making the reservation enforceable. The measured
     //    `billable()` (cache split included, D4) replaces the reservation after completion.
+    // Plane selection (ADR-0004 D1 / TD-0006): when the client's ingress dialect and the resolved
+    // upstream are the SAME family, forward the client's bytes verbatim (transparent metering) —
+    // no `ChatRequestV1` re-encode, so prompt-cache prefixes and provider-specific fields survive,
+    // and usage is metered at the source. Cross-family (or a handle with no raw forwarder) falls
+    // back to the typed translation path.
+    //
+    // Decided here, before enforcement, so the plane is a metric dimension for every outcome —
+    // including the calls that get refused below and never reach a provider.
+    let transparent_eligible =
+        ingress_family(dialect) == provider.family() && provider.raw_forwarder().is_some();
+    // Preliminary plane label for the rate-limit metric (a throttled call never reaches a provider,
+    // so its plane is nominal). The final plane is recomputed below once we know whether the cap
+    // forces the translation plane.
+    let plane = if transparent_eligible {
+        metrics::Plane::Transparent
+    } else {
+        metrics::Plane::Translation
+    };
+
+    // TD-0012 D5: rate limit AFTER the allowlist and BEFORE the budget reservation. It is the
+    // cheap check (an in-memory bucket) and the reservation is the expensive one (a durable
+    // write), and — more importantly — a throttled request must consume no lease, record no
+    // spend, and emit no usage event. It never reached a provider.
+    if let ratelimit::Decision::Limited { retry_after_secs } =
+        state.rate_limiter.check(&vk.id, vk.rate_limit_per_min)
+    {
+        tracing::warn!(
+            provider = provider.slug(),
+            limit_per_min = vk.rate_limit_per_min,
+            retry_after_secs,
+            "request rate-limited"
+        );
+        state.metrics.record_rate_limited(&metrics::Labels {
+            provider: provider.slug().into(),
+            model: request.model.clone(),
+            dialect: dialect_label(dialect),
+            plane,
+            outcome: "rate_limited",
+        });
+        return rate_limited_error(dialect, retry_after_secs);
+    }
+
     let scope = budget_scope(&vk);
     let policy = scope_policy(&state, &scope);
     // A scope is "capped" (for output-bounding) only under a hard `Block` cap: a `Warn` soft cap
@@ -835,14 +916,46 @@ async fn handle(
             .and_then(|ledger| ledger.limit(&scope))
             .is_some();
     let (ceiling, effective_max) = reservation_ceiling(&request);
-    if capped && request.max_output_tokens.is_none() {
+    let inject_output_bound = capped && request.max_output_tokens.is_none();
+    if inject_output_bound {
         request.max_output_tokens = Some(effective_max);
     }
+    // A Block cap is an enforcement boundary. When the client left output unbounded we inject
+    // `effective_max` above — but only the translation plane re-encodes `request`, so only it can
+    // carry that bound to the upstream (`max_tokens`). The transparent plane forwards the raw body
+    // verbatim and would stream unbounded output past the cap (ADR-0005 D1). So a capped,
+    // otherwise-same-family call with unbounded output must NOT take the transparent plane.
+    let transparent = transparent_eligible && !inject_output_bound;
+    let plane = if transparent {
+        metrics::Plane::Transparent
+    } else {
+        metrics::Plane::Translation
+    };
     let reservation = match reserve_budget(&state, &scope, ceiling, policy) {
         Admission::Leased(reservation) => Some(reservation),
         // Fail-open (Warn on a backend error): admit without a lease; the usage event still emits.
-        Admission::Unmetered => None,
+        Admission::Unmetered => {
+            // ADR-0005 D6. Admitting unmetered is correct under a Warn policy but must never be
+            // invisible: without this, a ledger outage looks like normal traffic.
+            tracing::warn!(scope = %scope, "admitted WITHOUT a lease (fail-open)");
+            state.metrics.record_admitted_unmetered();
+            None
+        }
         Admission::Denied => {
+            // A denial is the one enforcement outcome an operator must be able to see without
+            // reading the sink; `scope` is an operator-set budget name, not caller-supplied.
+            tracing::warn!(
+                scope = %scope,
+                ceiling,
+                provider = provider.slug(),
+                "reservation denied: budget exhausted"
+            );
+            // Labelled by POLICY, never by scope: a scope may be `vk:<id>`, which is per-key and
+            // therefore unbounded (TD-0011 D2).
+            state.metrics.record_denied(match policy {
+                Policy::Block => "block",
+                Policy::Warn => "warn",
+            });
             return ingress_error(dialect, StatusCode::TOO_MANY_REQUESTS, "budget exhausted");
         }
     };
@@ -853,15 +966,18 @@ async fn handle(
         reservation,
         provider.slug().into(),
         &request,
+        dialect_label(dialect),
+        plane,
     );
-
-    // Plane selection (ADR-0004 D1 / TD-0006): when the client's ingress dialect and the resolved
-    // upstream are the SAME family, forward the client's bytes verbatim (transparent metering) —
-    // no `ChatRequestV1` re-encode, so prompt-cache prefixes and provider-specific fields survive,
-    // and usage is metered at the source. Cross-family (or a handle with no raw forwarder) falls
-    // back to the typed translation path. Enforcement (reserve/settle via `accounting`) wraps both.
-    let transparent =
-        ingress_family(dialect) == provider.family() && provider.raw_forwarder().is_some();
+    // TD-0011 D6: which plane served the call is the ADR-0004 adoption signal — how much traffic
+    // still re-encodes. Bounded fields only (D2): provider slug and model, never subject/session.
+    tracing::debug!(
+        provider = provider.slug(),
+        model = %request.model,
+        plane = if transparent { "transparent" } else { "translation" },
+        stream = wants_stream,
+        "plane selected"
+    );
     let full_error_detail = state.error_detail_full;
     match (transparent, wants_stream) {
         (true, true) => {
@@ -892,6 +1008,16 @@ async fn handle(
         (false, false) => {
             complete_response(provider, request, dialect, accounting, full_error_detail).await
         }
+    }
+}
+
+/// Ingress dialect → a bounded metric label (TD-0011 D2). Four values, fixed by the code.
+fn dialect_label(dialect: IngressDialect) -> &'static str {
+    match dialect {
+        IngressDialect::OpenAi => "openai",
+        IngressDialect::Anthropic => "anthropic",
+        IngressDialect::Responses => "responses",
+        IngressDialect::Gemini => "gemini",
     }
 }
 
@@ -940,14 +1066,21 @@ struct GeminiRoute {
     stream: bool,
 }
 
-/// Rebuild an axum response from a raw upstream response: status + curated header allowlist + body
-/// bytes, forwarded verbatim (the transparent plane never re-serializes the response).
+/// Rebuild an axum response from a raw upstream response: status + the curated header allowlist +
+/// body bytes, forwarded verbatim (the transparent plane never re-serializes the response body).
+///
+/// The provider layer already filters headers at construction
+/// ([`filter_response_headers`][sandhi_providers::raw::filter_response_headers]); this enforces
+/// the **same** allowlist at the egress boundary too — defense-in-depth, so a `RawResponse` that
+/// one day bypassed that constructor still cannot surface a non-allowlisted header (an upstream
+/// `openai-organization`, `server`, or credential header) to a client.
 fn raw_response_to_axum(
     raw: sandhi_providers::raw::RawResponse,
     dialect: IngressDialect,
 ) -> Response {
+    let headers = sandhi_providers::raw::filter_response_headers(&raw.headers);
     let mut builder = Response::builder().status(raw.status);
-    for (name, value) in raw.headers.iter() {
+    for (name, value) in headers.iter() {
         builder = builder.header(name, value);
     }
     builder.body(Body::from(raw.body)).unwrap_or_else(|_| {
@@ -1046,10 +1179,14 @@ async fn transparent_stream_response(
                         accounting.observe(&usage);
                         seen_usage = true;
                     } else if !chunk.data.is_empty() {
-                        // Running byte-approximate Partial so a disconnect settles accrued spend.
+                        // Running Partial so a disconnect settles accrued spend. `usage_running`
+                        // carries whatever the family has already announced — for Anthropic that
+                        // is input plus the full cache split from `message_start`, which is the
+                        // dominant term on a cached prompt and used to be settled as zero
+                        // (TD-0013 D4).
                         delta_bytes = delta_bytes.saturating_add(chunk.data.len() as u64);
                         if !seen_usage {
-                            accounting.observe(&partial_usage(delta_bytes));
+                            accounting.observe(&partial_usage(chunk.usage_running, delta_bytes));
                         }
                     }
                     if !chunk.data.is_empty() {
@@ -1102,6 +1239,9 @@ fn reserve_budget(state: &ProxyState, scope: &str, ceiling: u64, policy: Policy)
 /// Owns the reservation and guarantees one terminal usage observation even when an HTTP body is
 /// abandoned. Counts are always measured; an unavailable observation releases the reservation.
 struct RequestAccounting {
+    /// Bounded metric dimensions for this call (TD-0011 D2) — set once at dispatch.
+    dialect: &'static str,
+    plane: metrics::Plane,
     state: Arc<ProxyState>,
     scope: String,
     /// The held lease to settle by id (ADR-0005 D2). `None` when the scope admitted fail-open with
@@ -1113,6 +1253,14 @@ struct RequestAccounting {
     usage: Option<UsageV2>,
     outcome: &'static str,
     finalized: bool,
+    /// Scope 5 OTel recorder (a clone of `state.otel`); `None` when the feature is off or
+    /// unconfigured. Held per-call so finalize records without touching `state` again.
+    otel: Option<Arc<otel::OtelRecorder>>,
+    /// The gen_ai operation span opened at dispatch, closed (with usage attrs) in finalize.
+    otel_span: Option<otel::SpanHandle>,
+    /// The response finish reason, captured on the typed translation plane (complete/stream) for
+    /// `gen_ai.response.finish_reasons`. `None` on the transparent byte paths (no ChatResponseV1).
+    finish_reason: Option<FinishReasonV1>,
 }
 
 impl RequestAccounting {
@@ -1122,7 +1270,19 @@ impl RequestAccounting {
         reservation: Option<Reservation>,
         provider: String,
         request: &ChatRequestV1,
+        dialect: &'static str,
+        plane: metrics::Plane,
     ) -> Self {
+        // Scope 5: open the gen_ai operation span at dispatch if OTel export is on. Request-time
+        // attributes only (system + request.model + operation); usage/response attrs are added when
+        // the span is closed in finalize. None of the attribute keys come from the request body.
+        let (otel, otel_span) = match state.otel.as_ref() {
+            Some(recorder) => (
+                Some(Arc::clone(recorder)),
+                Some(recorder.start_span(&provider, &request.model)),
+            ),
+            None => (None, None),
+        };
         Self {
             state,
             scope,
@@ -1133,6 +1293,22 @@ impl RequestAccounting {
             usage: None,
             outcome: "cancelled",
             finalized: false,
+            dialect,
+            plane,
+            otel,
+            otel_span,
+            finish_reason: None,
+        }
+    }
+
+    /// The bounded label set for this call (TD-0011 D2).
+    fn metric_labels(&self) -> metrics::Labels {
+        metrics::Labels {
+            provider: self.provider.clone(),
+            model: self.model.clone(),
+            dialect: self.dialect,
+            plane: self.plane,
+            outcome: self.outcome,
         }
     }
 
@@ -1178,6 +1354,27 @@ impl RequestAccounting {
         // ledger and the emitted usage event count the same quantity. An unmeasured (failed /
         // cancelled) call settles `0`, which releases the lease without recording spend.
         let actual = if measured { billable(&usage) } else { 0 };
+        // TD-0013 D6: the settled quantity is the measured one, even when it exceeds the ceiling
+        // the call was admitted against — but the overshoot is counted.
+        //
+        // Clamping was the obvious move and is wrong. A ceiling is built from `input_estimate`,
+        // which is bytes/4 of the request; a provider's tokenization of the same prompt can exceed
+        // it (notably for scripts averaging ~3 bytes/char). Clamping would silently discard the
+        // difference — recreating, one layer down, exactly the defect this TD exists to remove.
+        //
+        // You cannot simultaneously guarantee "spend never exceeds the cap" and "a real
+        // measurement is never lost", once the provider can report more than was reserved.
+        // Sandhi's product is the measurement, and the count feeds a downstream ledger it must not
+        // lie to; the cap is a control that recovers on its own, because the overshoot is bounded
+        // by one call and the *next* reservation is refused. So: record the truth, and make the
+        // under-reservation visible instead of paying for it in silence.
+        if let Some(reservation) = &self.reservation {
+            if actual > reservation.ceiling {
+                self.state
+                    .metrics
+                    .observe_settle_overshoot(actual - reservation.ceiling);
+            }
+        }
         // Settle the lease by id (idempotent, ADR-0005 D2), then capture the post-settle spent for
         // the alert subsystem. Alerts evaluate only on a measured call.
         let mut spent_after: Option<u64> = None;
@@ -1200,6 +1397,34 @@ impl RequestAccounting {
                 .ok()
                 .and_then(|budgets| budgets.get(&self.scope).map(|spec| spec.limit_tokens));
             self.fire_alerts(spent, limit);
+        }
+        // TD-0011 D3: `actual` is exactly what the ledger settled, so the metric cannot disagree
+        // with the charge. Recording here (not at observe) means one sample per logical call.
+        self.state.metrics.observe_call(
+            &self.metric_labels(),
+            metrics::CallMeasurements {
+                fresh_input: usage.tokens_in,
+                cache_creation: usage.cache_creation_tokens,
+                cache_read: usage.cache_read_tokens,
+                output: usage.tokens_out,
+                reasoning: usage.reasoning_tokens.unwrap_or(0),
+                billable: actual,
+                estimated: usage.basis == UsageBasis::Estimated,
+                duration_ms: usage.duration_ms,
+                ttft_ms: usage.time_to_first_token_ms,
+            },
+        );
+        // Scope 5 (TD-0011 P3): record the gen_ai span + metrics from the same settled usage, one
+        // OTel sample per logical call — the same single-emission discipline as `observe_call`.
+        // Best-effort like the metric path: OTel must never fail the request.
+        if let (Some(recorder), Some(span)) = (self.otel.as_ref(), self.otel_span.as_mut()) {
+            recorder.record_usage(
+                span,
+                &self.provider,
+                &self.model,
+                &usage,
+                self.finish_reason,
+            );
         }
         self.state.sink.emit(&usage_event(
             &self.provider,
@@ -1231,6 +1456,7 @@ async fn complete_response(
                 .outcome
                 .get_or_insert_with(|| "success".into());
             accounting.observe(&response.usage);
+            accounting.finish_reason = response.finish_reason;
             accounting.set_outcome("success");
             accounting.finalize();
             Json(encode_response(dialect, &response)).into_response()
@@ -1261,11 +1487,26 @@ async fn stream_response(
 
     let body = async_stream::stream! {
         let mut last_usage: Option<UsageV2> = None;
+        // What the family has reported so far, for families that report before the end
+        // (TD-0013 D3). `None` for a terminal-only family, for the whole stream.
+        let mut running_reported: Option<ParsedUsage> = None;
+        // A non-final `Usage` event is accounting-only and must not reach the client (TD-0013 D7):
+        // the ingress wire shape is a TD-0010 parity guarantee, and a metering improvement that
+        // adds frames to a caller's stream has broken something more important than it fixed.
+        let mut accounting_only;
         let mut delta_out_bytes: u64 = 0;
         while let Some(item) = upstream.next().await {
             match item {
                 Ok(event) => {
+                    accounting_only = false;
                     match &event {
+                        sandhi_core::ChatStreamEventV1::Usage { usage }
+                            if usage.completeness != UsageCompleteness::Final =>
+                        {
+                            // Progress, not a verdict: it must not supersede the terminal frame.
+                            running_reported = Some(reported_parts(usage));
+                            accounting_only = true;
+                        }
                         sandhi_core::ChatStreamEventV1::Usage { usage } => {
                             // Terminal, authoritative usage — replaces any running partial estimate.
                             accounting.observe(usage);
@@ -1280,15 +1521,23 @@ async fn stream_response(
                         sandhi_core::ChatStreamEventV1::Error { .. } => {
                             accounting.set_outcome("error");
                         }
+                        sandhi_core::ChatStreamEventV1::Finish { reason } => {
+                            // Scope 5: capture the finish reason for `gen_ai.response.finish_reasons`.
+                            accounting.finish_reason = Some(*reason);
+                        }
                         _ => {}
                     }
-                    // ADR-0005 D1: hold a running `Partial` estimate from the output deltas until the
-                    // terminal usage arrives, so a mid-stream disconnect (which fires the Drop
-                    // finalizer, not the code below) settles the accumulated spend instead of
-                    // releasing to zero — closing the open-stream / read-a-lot / disconnect
-                    // metering-evasion hole. Approximate (bytes/4); the terminal frame overrides it.
+                    // ADR-0005 D1: hold a running `Partial` until the terminal usage arrives, so a
+                    // mid-stream disconnect (which fires the Drop finalizer, not the code below)
+                    // settles the accumulated spend instead of releasing to zero — closing the
+                    // open-stream / read-a-lot / disconnect metering-evasion hole. Per-category:
+                    // real numbers where the family has reported them, the byte estimate only for
+                    // output and only as far as it must (TD-0013 D4). The terminal frame overrides.
                     if last_usage.is_none() {
-                        accounting.observe(&partial_usage(delta_out_bytes));
+                        accounting.observe(&partial_usage(running_reported, delta_out_bytes));
+                    }
+                    if accounting_only {
+                        continue;
                     }
                     for (event_name, value) in
                         encode_stream_event(dialect, &event, last_usage.as_ref())
@@ -1357,12 +1606,80 @@ fn header_str(headers: &HeaderMap, name: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
-/// A best-effort `Partial` usage synthesized from accumulated output-delta bytes, used to settle an
-/// interrupted stream (ADR-0005 D1) rather than releasing the reservation to zero.
-fn partial_usage(delta_out_bytes: u64) -> UsageV2 {
+/// The running `Partial` usage for a stream that has not delivered its terminal frame, used to
+/// settle an interrupted stream (ADR-0005 D1) rather than releasing the reservation to zero.
+///
+/// Only reached when a stream ends early — a client disconnect or a mid-stream transport error. The
+/// provider's terminal frame carries the real numbers and a `Final` observation always supersedes
+/// this.
+///
+/// **The fallback is per-category, not per-call** (TD-0013 D4). `reported` is whatever the family
+/// has actually announced so far ([`StreamChunk::usage_running`]), and it is used wherever it
+/// exists:
+///
+/// - **Input, cache-creation and cache-read are taken or zero — never estimated.** No byte count
+///   observed on the *response* can stand in for the tokenization of a prompt, and inventing one
+///   would make Sandhi a second meter disagreeing with the provider. Anthropic announces all three
+///   on `message_start`, before a single content byte, so for that family they are exact here.
+/// - **Output is `max(reported, byte estimate)`.** Anthropic's `message_delta` lags the text it
+///   describes, so between `message_start` and the first delta the reported output is legitimately
+///   `0` while real output has flowed. Taking the max never settles below the byte-only behaviour
+///   this replaced.
+///
+/// **The byte factor is 4 bytes per token, and its bias depends on the plane.** On the transparent
+/// plane the bytes are wire bytes — SSE framing, JSON punctuation and field names included — so the
+/// estimate runs *above* the true count, which is the safe direction for enforcement. On the typed
+/// plane the caller counts *decoded* delta strings, which is near-neutral for English and a
+/// substantial **under**-count for scripts averaging ~3 bytes/char (e.g. CJK). The result is tagged
+/// [`UsageCompleteness::Partial`] either way, so a consumer can always tell an interrupted call
+/// from a completed one.
+///
+/// For the families that report nothing until the end (OpenAI Chat and Responses, Cohere, Ollama)
+/// `reported` is `None` and the estimate stands alone. That is a policy call, not an accuracy one:
+/// settling zero would be the honest measurement and would let a caller stream-and-abort
+/// repeatedly for free.
+/// Narrow a typed `Usage` event back to the raw per-category counts.
+///
+/// The typed plane carries `UsageV2` while the transparent plane carries [`ParsedUsage`]; reducing
+/// to the latter lets both planes share one fallback rule (TD-0013 D4) rather than growing two that
+/// can drift. Only the categories a family reports mid-stream survive the narrowing, which is
+/// exactly the set the fallback is allowed to use.
+fn reported_parts(usage: &UsageV2) -> ParsedUsage {
+    ParsedUsage {
+        tokens_in: usage.tokens_in,
+        tokens_out: usage.tokens_out,
+        cache_creation_tokens: usage.cache_creation_tokens,
+        cache_read_tokens: usage.cache_read_tokens,
+        reasoning_tokens: usage.reasoning_tokens.unwrap_or(0),
+    }
+}
+
+fn partial_usage(reported: Option<ParsedUsage>, delta_out_bytes: u64) -> UsageV2 {
+    let estimated_out = delta_out_bytes.saturating_add(3) / 4;
+    let Some(reported) = reported else {
+        return UsageV2 {
+            tokens_out: estimated_out,
+            completeness: UsageCompleteness::Partial,
+            basis: UsageBasis::Estimated,
+            ..UsageV2::default()
+        };
+    };
     UsageV2 {
-        tokens_out: delta_out_bytes.saturating_add(3) / 4,
+        tokens_in: reported.tokens_in,
+        cache_creation_tokens: reported.cache_creation_tokens,
+        cache_read_tokens: reported.cache_read_tokens,
+        tokens_out: reported.tokens_out.max(estimated_out),
+        reasoning_tokens: (reported.reasoning_tokens > 0).then_some(reported.reasoning_tokens),
         completeness: UsageCompleteness::Partial,
+        // `Estimated` means "at least one category came from the byte fallback" — so the label
+        // tracks whether the estimate actually contributed, not merely whether one was available.
+        // A disconnect after `message_delta`, where every category is the provider's, is a real
+        // measurement of an incomplete call and must not be tarred as a guess.
+        basis: if estimated_out > reported.tokens_out {
+            UsageBasis::Estimated
+        } else {
+            UsageBasis::ProviderReported
+        },
         ..UsageV2::default()
     }
 }
@@ -1418,6 +1735,7 @@ fn usage_event(
         usage.outcome.clone(),
         usage.upstream_request_id.clone(),
     )
+    .with_basis(usage.basis)
 }
 
 fn now_rfc3339() -> String {
@@ -1531,6 +1849,23 @@ fn google_status(status: StatusCode) -> &'static str {
     }
 }
 
+/// A dialect-shaped 429 carrying `Retry-After` (TD-0012 D4).
+///
+/// The header is the point: both the OpenAI and Anthropic SDKs honour it for backoff, and a 429
+/// without one makes a well-behaved client retry immediately — turning a throttle into a hot loop
+/// that costs more than the traffic it was meant to bound.
+fn rate_limited_error(dialect: IngressDialect, retry_after_secs: u64) -> Response {
+    let mut response = ingress_error(
+        dialect,
+        StatusCode::TOO_MANY_REQUESTS,
+        &format!("rate limit exceeded; retry in {retry_after_secs}s"),
+    );
+    if let Ok(value) = retry_after_secs.to_string().parse() {
+        response.headers_mut().insert("retry-after", value);
+    }
+    response
+}
+
 fn ingress_error(dialect: IngressDialect, status: StatusCode, msg: &str) -> Response {
     let typed = json!({
         "code":"invalid_request",
@@ -1601,6 +1936,325 @@ mod error_detail_tests {
                 .unwrap_or("")
                 .contains("call_9"),
             "full mode must forward the bounded body: {value}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod header_egress_tests {
+    use super::*;
+    use axum::http::{HeaderName, HeaderValue};
+    use bytes::Bytes;
+    use sandhi_providers::raw::RawResponse;
+
+    /// Build a `RawResponse` bypassing `filter_response_headers`, so the egress filter is what is
+    /// under test (not the provider-layer constructor).
+    fn raw_with(headers: &[(&str, &str)]) -> RawResponse {
+        let mut map = HeaderMap::new();
+        for (k, v) in headers {
+            map.insert(
+                HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        RawResponse {
+            status: 200,
+            body: Bytes::from_static(b"{}"),
+            headers: map,
+        }
+    }
+
+    #[test]
+    fn raw_response_enforces_allowlist_at_egress() {
+        // A RawResponse that bypassed the provider-layer filter still cannot leak a
+        // non-allowlisted header to the client (defense-in-depth at the egress boundary).
+        let raw = raw_with(&[
+            ("content-type", "application/json"), // allowlisted → forwarded
+            ("x-should-retry", "true"),           // allowlisted → forwarded
+            ("openai-organization", "org_x"),     // NOT allowlisted → stripped
+            ("server", "cloudflare"),             // NOT allowlisted → stripped
+            ("set-cookie", "session=secret"),     // NOT allowlisted → stripped
+        ]);
+        let resp = raw_response_to_axum(raw, IngressDialect::OpenAi);
+        let h = resp.headers();
+        assert_eq!(h.get("content-type").unwrap(), "application/json");
+        assert_eq!(h.get("x-should-retry").unwrap(), "true");
+        for leaked in ["openai-organization", "server", "set-cookie"] {
+            assert!(
+                h.get(leaked).is_none(),
+                "egress leaked upstream header {leaked}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod partial_accounting_tests {
+    use super::*;
+
+    /// The counts a real Anthropic `message_start` announces before any content streams —
+    /// the numbers taken verbatim from `tests/fixtures/anthropic/stream_cache_split.sse`.
+    const AT_MESSAGE_START: ParsedUsage = ParsedUsage {
+        tokens_in: 1024,
+        tokens_out: 0,
+        cache_creation_tokens: 2048,
+        cache_read_tokens: 4096,
+        reasoning_tokens: 0,
+    };
+
+    /// The audit flagged this factor as unverified. It is an estimate by construction; what must be
+    /// true is that it is tagged as one and biased in the safe direction.
+    #[test]
+    fn the_byte_estimate_is_marked_partial_and_biased_high() {
+        // Roughly a small SSE frame's worth of wire bytes, with nothing reported (the
+        // terminal-only families: OpenAI Chat and Responses, Cohere, Ollama).
+        let usage = partial_usage(None, 400);
+        assert_eq!(
+            usage.completeness,
+            UsageCompleteness::Partial,
+            "an estimate must never be indistinguishable from a measured call"
+        );
+        assert_eq!(usage.tokens_out, 100, "4 wire bytes per token");
+        // Wire bytes include SSE framing and JSON punctuation, so on the transparent plane the
+        // estimate exceeds the true token count — over-consuming an abandoned stream's budget
+        // rather than leaking capacity that was genuinely used.
+        assert!(
+            usage.tokens_out >= 400 / 4,
+            "the estimate must not round below the byte-derived floor"
+        );
+        // Nothing is invented on the input side: with nothing reported, a disconnect says nothing
+        // about prompt tokens, and guessing would make Sandhi a second meter.
+        assert_eq!(usage.tokens_in, 0);
+        assert_eq!(usage.cache_read_tokens, 0);
+    }
+
+    #[test]
+    fn an_empty_stream_estimates_nothing() {
+        let usage = partial_usage(None, 0);
+        assert_eq!(
+            usage.tokens_out, 0,
+            "no bytes delivered means no output to charge"
+        );
+    }
+
+    /// The defect TD-0013 exists to fix. Anthropic announces input and the whole cache split on
+    /// `message_start`, before a single content byte — so at a disconnect there those numbers are
+    /// exact, and the old byte-only fallback recorded all three as zero.
+    #[test]
+    fn reported_input_and_cache_are_settled_not_estimated_away() {
+        // A disconnect right after `message_start`: 40 bytes of output have flowed, nothing more.
+        let usage = partial_usage(Some(AT_MESSAGE_START), 40);
+
+        assert_eq!(usage.tokens_in, 1024, "reported input must survive");
+        assert_eq!(usage.cache_creation_tokens, 2048);
+        assert_eq!(usage.cache_read_tokens, 4096);
+
+        // `billable()` counts all four categories (ADR-0005 D4). The byte-only fallback would have
+        // settled 10 here; the real exposure is three orders of magnitude larger, which is what
+        // made this an evasion vector rather than a rounding error.
+        let billed = billable(&usage);
+        assert_eq!(billed, 1024 + 2048 + 4096 + 10);
+        assert!(
+            billed > 100 * (40 / 4),
+            "settling the byte estimate alone would discard the dominant term"
+        );
+    }
+
+    /// `max`, not "reported wins": Anthropic's `message_delta` lags the text it describes, so
+    /// between `message_start` and the first delta the reported output is legitimately 0 while real
+    /// output has flowed. Taking the reported value alone would settle *less* than the byte-only
+    /// fallback this replaced — a regression disguised as an accuracy fix.
+    #[test]
+    fn output_never_settles_below_the_byte_floor() {
+        let usage = partial_usage(Some(AT_MESSAGE_START), 400);
+        assert_eq!(
+            usage.tokens_out, 100,
+            "reported output of 0 must not erase 400 bytes of streamed text"
+        );
+
+        // Once the provider does report output, and it exceeds the byte guess, the real number
+        // wins — the estimate is a floor, never a ceiling.
+        let after_delta = ParsedUsage {
+            tokens_out: 256,
+            ..AT_MESSAGE_START
+        };
+        assert_eq!(partial_usage(Some(after_delta), 400).tokens_out, 256);
+    }
+
+    /// D5 — the label tracks whether the estimate actually contributed, not merely whether one
+    /// was available. Laundering a guess into an authoritative-looking number is the failure mode
+    /// this field exists to prevent; so is tarring a real measurement as a guess.
+    #[test]
+    fn basis_distinguishes_a_measurement_from_a_guess() {
+        // Nothing reported: the output number is purely byte-derived.
+        assert_eq!(
+            partial_usage(None, 400).basis,
+            UsageBasis::Estimated,
+            "a byte-derived count must never present as provider-reported"
+        );
+
+        // Reported input and cache, but output still estimated (the message_start window).
+        assert_eq!(
+            partial_usage(Some(AT_MESSAGE_START), 400).basis,
+            UsageBasis::Estimated
+        );
+
+        // Every category reported, and the provider's output exceeds the byte floor: this is a
+        // real measurement of an incomplete call, not a guess.
+        let after_delta = ParsedUsage {
+            tokens_out: 4_000,
+            ..AT_MESSAGE_START
+        };
+        let usage = partial_usage(Some(after_delta), 400);
+        assert_eq!(usage.basis, UsageBasis::ProviderReported);
+        assert_eq!(
+            usage.completeness,
+            UsageCompleteness::Partial,
+            "still incomplete — `basis` and `completeness` are independent axes"
+        );
+    }
+
+    /// The default must match what every pre-TD-0013 code path actually did, or adding the field
+    /// silently relabels historical events.
+    #[test]
+    fn the_default_basis_is_provider_reported() {
+        assert_eq!(UsageV2::default().basis, UsageBasis::ProviderReported);
+        assert_eq!(
+            sandhi_core::UsageEvent::new("r", "t", "p", "m", Backend::External).usage_basis,
+            UsageBasis::ProviderReported
+        );
+    }
+
+    /// The narrowing that lets both planes share one fallback rule must not silently drop a
+    /// category, or the typed plane would quietly meter less than the transparent one.
+    #[test]
+    fn narrowing_a_typed_usage_preserves_every_category() {
+        let typed = UsageV2 {
+            tokens_in: 11,
+            tokens_out: 22,
+            cache_creation_tokens: 33,
+            cache_read_tokens: 44,
+            reasoning_tokens: Some(55),
+            ..UsageV2::default()
+        };
+        let parts = reported_parts(&typed);
+        assert_eq!(parts.tokens_in, 11);
+        assert_eq!(parts.tokens_out, 22);
+        assert_eq!(parts.cache_creation_tokens, 33);
+        assert_eq!(parts.cache_read_tokens, 44);
+        assert_eq!(parts.reasoning_tokens, 55);
+    }
+}
+
+#[cfg(all(test, feature = "otel-otlp"))]
+mod otel_wiring_tests {
+    //! The chokepoint integration: a request whose metadata carries the full attribution set
+    //! (`subject_id`/`group_id`/`session_id`/`virtual_key_id`) flows through
+    //! `RequestAccounting::new` → `finalize`, and the exported gen_ai span carries the token
+    //! values but NONE of that attribution. This is the guarantee the recorder unit tests (in
+    //! `otel::tests`) cannot give alone — they drive the recorder in isolation, not through the
+    //! one path that actually has the attribution in hand.
+    use super::*;
+    use crate::metrics::Plane;
+    use crate::otel::OtelRecorder;
+    use opentelemetry::metrics::MeterProvider as _;
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_sdk::metrics::SdkMeterProvider;
+    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+    use sandhi_core::{InMemorySink, KeyStore, RequestMetadataV1, UsageCompleteness, UsageV2};
+
+    /// Strings that must never reach the exported span — both the forbidden attribute *keys* and
+    /// the actual attribution *values* present on this request's metadata.
+    const FORBIDDEN: &[&str] = &[
+        "subject_id",
+        "group_id",
+        "session_id",
+        "virtual_key_id",
+        "request_id",
+        "alice",
+        "platform",
+        "sess-42",
+        "vk_demo",
+        "cost",
+        "price",
+        "usd",
+    ];
+
+    #[test]
+    fn finalize_exports_genai_span_with_no_request_attribution() {
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        // A readerless meter is fine — this test inspects the span, not metrics (covered in
+        // `otel::tests`); the instruments just no-op.
+        let meter = SdkMeterProvider::builder().build().meter("test");
+        let recorder = Arc::new(OtelRecorder::new(meter, provider.tracer("test")));
+
+        let mut state = ProxyState::new(
+            KeyStore::new(),
+            ProxyLedger::in_memory(),
+            Arc::new(InMemorySink::new()),
+            HashMap::new(),
+            None,
+        );
+        state.otel = Some(recorder);
+        let state = Arc::new(state);
+
+        // A request whose metadata carries the full attribution set — exactly what must NEVER
+        // reach the exported span.
+        let mut request: ChatRequestV1 =
+            serde_json::from_str(r#"{"model":"gpt-otel","messages":[]}"#).unwrap();
+        request.metadata = RequestMetadataV1 {
+            subject_id: Some("alice".into()),
+            group_id: Some("platform".into()),
+            session_id: Some("sess-42".into()),
+            virtual_key_id: Some("vk_demo".into()),
+            ..Default::default()
+        };
+
+        let mut acc = RequestAccounting::new(
+            Arc::clone(&state),
+            "vk:alice".into(),
+            None,
+            "openai".into(),
+            &request,
+            "openai",
+            Plane::Translation,
+        );
+        acc.observe(&UsageV2 {
+            tokens_in: 40,
+            cache_read_tokens: 60,
+            tokens_out: 20,
+            upstream_request_id: Some("resp_upstream_9".into()),
+            completeness: UsageCompleteness::Final,
+            ..Default::default()
+        });
+        // complete_response / the stream `Finish` event set this on the typed plane.
+        acc.finish_reason = Some(FinishReasonV1::Stop);
+        acc.set_outcome("success");
+        acc.finalize();
+        drop(acc);
+
+        let spans = exporter.get_finished_spans().expect("span exported");
+        assert_eq!(spans.len(), 1, "one gen_ai span per finalized call");
+        let span = &spans[0];
+        let blob = format!("{} {:?}", span.name, span.attributes);
+        for f in FORBIDDEN {
+            assert!(
+                !blob.contains(f),
+                "attribution/cost `{f}` leaked into the exported span: {blob}"
+            );
+        }
+        // The trustworthy numbers DID make it through: input = fresh(40) + cache_read(60) = 100,
+        // and gen_ai.response.id is the UPSTREAM id (never Sandhi's request_id).
+        assert!(blob.contains("gen_ai.usage.input_tokens"));
+        assert!(blob.contains("gen_ai.system"));
+        assert!(blob.contains("resp_upstream_9"));
+        // gen_ai.response.finish_reasons carries the mapped reason (string[]).
+        assert!(
+            blob.contains("gen_ai.response.finish_reasons") && blob.contains("stop"),
+            "finish_reason did not land on the span: {blob}"
         );
     }
 }

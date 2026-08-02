@@ -166,17 +166,26 @@ impl JsProviderRuntime {
     ) -> Result<TypedProvider> {
         let normalized = provider.trim().to_ascii_lowercase();
         let protocol = parse_openai_protocol(protocol.as_deref())?;
-        if auth_scheme
+        // Contract principle (TD-0008): `authScheme: "bearer"` is a no-op for
+        // families whose default IS Bearer — accepted family-agnostically for
+        // gateway callers; only a contradictory scheme is rejected. Parity with
+        // the Python binding.
+        if let Some(scheme) = auth_scheme
             .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-            && !matches!(
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let scheme_families = matches!(
                 normalized.as_str(),
                 "anthropic" | "claude" | "gemini" | "google"
-            )
-        {
-            return Err(Error::from_reason(
-                "authScheme is only valid for the Anthropic or Gemini protocol",
-            ));
+            );
+            if !scheme_families && scheme != "bearer" {
+                return Err(Error::from_reason(format!(
+                    "authScheme {scheme:?} is only valid for the Anthropic or Gemini \
+protocol; other families always authenticate with 'Authorization: Bearer' \
+(authScheme=\"bearer\" is accepted there as a no-op)"
+                )));
+            }
         }
         let handle = if protocol != OpenAiProtocol::ChatCompletions {
             let resolved_base_url = if let Some(base_url) = base_url {
@@ -431,6 +440,14 @@ pub fn chat_contract_version() -> String {
     sandhi_core::chat::CHAT_SCHEMA_VERSION_V1.to_string()
 }
 
+/// Additive growth counter within the v1 chat contract (W3c). Consumers
+/// feature-detect this export — an older binding without it reads as minor 0
+/// — and gate trust in newer additive fields on a minimum minor.
+#[napi]
+pub fn chat_contract_minor() -> u32 {
+    sandhi_core::chat::CHAT_CONTRACT_MINOR
+}
+
 /// Resolve an OpenAI-compatible provider spec (slug, aliases, base_url) as JSON.
 /// Parity with the Python binding's `provider_spec` (TD-0008 P4); JSON here
 /// because napi objects would otherwise diverge from the schema'd facades.
@@ -539,31 +556,32 @@ impl Gateway {
         });
     }
 
-    /// Set a token budget on a scope (e.g. `group:platform`).
+    /// Set a token budget on a scope (e.g. `group:platform`). Exposed as a 64-bit `bigint` (napi
+    /// has no bare `u64`); negatives clamp to 0 — a budget is a non-negative token count.
     #[napi]
-    pub fn set_budget(&self, scope: String, tokens: u32) {
+    pub fn set_budget(&self, scope: String, tokens: i64) {
         self.inner
             .lock()
             .unwrap()
             .ledger
-            .set_limit(scope, Budget::tokens(u64::from(tokens)));
+            .set_limit(scope, Budget::tokens(tokens.max(0) as u64));
     }
 
     /// Would `add` more tokens be within the scope's budget?
     #[napi]
-    pub fn check_budget(&self, scope: String, add: u32) -> bool {
+    pub fn check_budget(&self, scope: String, add: i64) -> bool {
         self.inner
             .lock()
             .unwrap()
             .ledger
-            .check(&scope, u64::from(add))
+            .check(&scope, add.max(0) as u64)
             .is_ok()
     }
 
     /// Tokens spent so far on a scope.
     #[napi]
-    pub fn spent(&self, scope: String) -> u32 {
-        self.inner.lock().unwrap().ledger.spent(&scope) as u32
+    pub fn spent(&self, scope: String) -> i64 {
+        i64::try_from(self.inner.lock().unwrap().ledger.spent(&scope)).unwrap_or(i64::MAX)
     }
 
     /// Meter one completed call: parse usage from `responseJson` (built-in parser for `provider`),

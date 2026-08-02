@@ -13,11 +13,42 @@ use std::sync::Arc;
 
 use sandhi_core::{InMemorySink, KeyStore, Sink, VirtualKey};
 use sandhi_providers::{AnthropicAuthScheme, GeminiAuthScheme, ProviderHandle, ProviderRuntime};
-use sandhi_proxy::{rehydrate_alerts, rehydrate_budgets, serve, ProxyLedger, ProxyState};
+use sandhi_proxy::{
+    reclaim_sweep_at, rehydrate_alerts, rehydrate_budgets, serve, ProxyLedger, ProxyState,
+};
 use sandhi_store::{AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
 
 #[tokio::main]
 async fn main() {
+    // TD-0011 D1: the BINARY installs the subscriber; the libraries only emit through the
+    // `tracing` facade. That is what lets an in-process host (Victor) capture Sandhi's spans in
+    // its own logging without Sandhi imposing a runtime or a second subscriber.
+    //
+    // `SANDHI_LOG` (falling back to `RUST_LOG`) controls filtering; the default keeps the
+    // operator-relevant events — denials, fail-open admissions, reclaims, settle failures —
+    // without the per-request debug chatter.
+    let filter = std::env::var("SANDHI_LOG")
+        .or_else(|_| std::env::var("RUST_LOG"))
+        .unwrap_or_else(|_| "sandhi_proxy=info,sandhi_core=info,sandhi_providers=info,warn".into());
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
+        .with_target(true)
+        // stderr, not the default stdout: a server's diagnostics must not interleave with
+        // anything a caller might pipe, and operators expect logs on fd 2.
+        .with_writer(std::io::stderr)
+        .init();
+
+    // Scope 5 (TD-0011 P3): OTLP export of gen_ai.* spans + metrics. `init()` returns None unless
+    // the `otel-otlp` feature is compiled in AND `SANDHI_OTEL_EXPORT=otlp` is set — so the default
+    // build is unaffected. The guard must outlive `serve()` so the OTel providers flush on shutdown.
+    let (otel_recorder, _otel_guard) = sandhi_proxy::otel::init().unzip();
+    if otel_recorder.is_some() {
+        eprintln!(
+            "sandhi-proxy: OTLP export ON — gen_ai.* spans + metrics to {} (feature `otel-otlp`, TD-0011 P3)",
+            std::env::var("SANDHI_OTEL_ENDPOINT").unwrap_or_else(|_| "http://localhost:4318".into())
+        );
+    }
+
     let runtime = ProviderRuntime::new();
     let keys = KeyStore::new();
     let mut providers: HashMap<String, ProviderHandle> = HashMap::new();
@@ -180,13 +211,43 @@ async fn main() {
     // ADR-0004 D4: dashboard read endpoints follow the admin token unless explicitly re-opened.
     state.dashboard_public = std::env::var("SANDHI_DASHBOARD_PUBLIC").as_deref() == Ok("1");
     state.error_detail_full = std::env::var("SANDHI_ERROR_DETAIL").as_deref() == Ok("full");
+    // ADR-0004 D4 footgun: with no admin token, the /dashboard/api/* read endpoints (subject/group
+    // usage aggregates, masked vkey metadata) stay open. That is the documented single-node dev
+    // trust posture, but it must not be silent when a real store is configured — surface it loudly
+    // rather than fail-closed (which would break every dev who sets SANDHI_STORE without a token).
+    if state.store.is_some() && state.admin_token.is_none() && !state.dashboard_public {
+        eprintln!(
+            "sandhi-proxy: WARNING: SANDHI_STORE is set without SANDHI_ADMIN_TOKEN — the \
+             /dashboard/api/* read endpoints (subject/group usage, masked vkey metadata) are open \
+             to any caller. Set SANDHI_ADMIN_TOKEN to gate them, or SANDHI_DASHBOARD_PUBLIC=1 to \
+             acknowledge the open single-node posture."
+        );
+    }
     // Recover the operator budget metadata (policy / window / limit) persisted in the durable
     // ledger, so caps set before a restart keep their policy lookup + dashboard + alert thresholds.
     {
         let ledger = state.ledger.lock().expect("ledger poisoned");
         rehydrate_budgets(&ledger, &state.budgets);
     }
+    // Scope 5: attach the OTLP recorder (None unless feature-on + configured). The `_otel_guard`
+    // captured above flushes the providers when main returns.
+    state.otel = otel_recorder;
     let state = Arc::new(state);
+
+    // ADR-0005 D2: reclaim leases left dangling by a crash on a timer, so an abandoned scope's
+    // held capacity is released without waiting for its next request (`reserve` also reclaims
+    // opportunistically per scope; this covers scopes that go quiet). Best-effort by design.
+    {
+        let sweep_state = Arc::clone(&state);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            tick.tick().await; // discard the immediate first tick
+            loop {
+                tick.tick().await;
+                reclaim_sweep_at(&sweep_state.ledger, time::OffsetDateTime::now_utc());
+            }
+        });
+    }
 
     let addr: SocketAddr = std::env::var("SANDHI_BIND")
         .unwrap_or_else(|_| "127.0.0.1:8787".into())

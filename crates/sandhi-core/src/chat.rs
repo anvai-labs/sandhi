@@ -7,6 +7,17 @@ use std::collections::BTreeMap;
 
 pub const CHAT_SCHEMA_VERSION_V1: &str = "1";
 
+/// Additive growth counter within v1 (W3c). Bumped whenever the contract
+/// gains fields — machine-enforced by `contract_minor_ratchets_with_schema_
+/// changes`, which fails when the rendered schemas change without a bump.
+/// History: 1 = usage latency/reasoning on UsageEvent (#68), 2 =
+/// `include_native_response` request gate (#90), 3 = wire-truth latency on
+/// `UsageV2` (#97), 4 = `reasoning_effort` + `thinking` typed request fields
+/// (W3d/G7), 5 = `UsageV2::basis` — measured vs estimated counts (TD-0013 D5).
+/// Consumers feature-detect the binding export and treat an absent fn as
+/// minor 0.
+pub const CHAT_CONTRACT_MINOR: u32 = 5;
+
 fn schema_v1() -> String {
     CHAT_SCHEMA_VERSION_V1.to_owned()
 }
@@ -169,6 +180,20 @@ pub struct ChatRequestV1 {
     pub seed: Option<i64>,
     #[serde(default)]
     pub metadata: RequestMetadataV1,
+    /// Reasoning effort budget (W3d/G7). OpenAI o-series/GPT-5 and Moonshot
+    /// kimi-k3 take it as a top-level `reasoning_effort`; the Responses codec
+    /// maps it to `reasoning.effort`. Promoted from `extensions["openai"]` so
+    /// it is portable across families instead of visible only to the openai
+    /// encoder. Vocabulary is the OpenAI one (`low`/`medium`/`high`); other
+    /// encoders that lack an effort concept ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    /// Extended-thinking request (W3d/G7). Neutral shape; each encoder maps it
+    /// to its family-native form (Anthropic `thinking`, Gemini
+    /// `thinkingConfig`, OpenAI-compat/ZAI `thinking`). Promoted from
+    /// `extensions[<family>]` so it reaches every family through one field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingV1>,
     /// Whether adapters re-embed the full native provider response body under
     /// `extensions[<endpoint family>]` on the response. Defaults to true for
     /// compatibility; clients that consume only the neutral contract can opt
@@ -178,6 +203,17 @@ pub struct ChatRequestV1 {
     pub include_native_response: bool,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extensions: BTreeMap<String, Value>,
+}
+
+/// Neutral extended-thinking request (W3d/G7). `enabled` toggles reasoning;
+/// `budget_tokens` optionally caps the reasoning allowance (honored by
+/// families that support a budget — Anthropic, Gemini — and ignored by those
+/// that only take a boolean).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ThinkingV1 {
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<u64>,
 }
 
 fn default_true() -> bool {
@@ -224,6 +260,28 @@ pub enum UsageCompleteness {
     Unavailable,
 }
 
+/// Where a usage number came from (TD-0013 D5).
+///
+/// Orthogonal to [`UsageCompleteness`], which answers *how complete* the counts are.
+/// This answers *whether they were measured at all* — and the two are genuinely independent:
+/// an interrupted stream can carry real provider counts (`Partial` + `ProviderReported`) or a
+/// byte-derived floor (`Partial` + `Estimated`), and today nothing on the wire tells them apart.
+///
+/// Deliberately a separate field rather than a fourth `UsageCompleteness` variant: redefining what
+/// `Partial` means would retroactively change the meaning of rows already written to operators'
+/// stores, without changing a single byte of schema. Adding a field does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageBasis {
+    /// Every category came from the provider. The default, because it is what every code path
+    /// that existed before this discriminator was introduced actually did.
+    #[default]
+    ProviderReported,
+    /// At least one category was derived from a byte count rather than reported. Reached only when
+    /// a stream ends before the family had reported that category — never on a completed call.
+    Estimated,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 pub struct UsageV2 {
     pub tokens_in: u64,
@@ -242,12 +300,23 @@ pub struct UsageV2 {
     pub rejected_prediction_tokens: Option<u64>,
     #[serde(default)]
     pub completeness: UsageCompleteness,
+    /// Whether these counts were measured or estimated (TD-0013 D5).
+    #[serde(default)]
+    pub basis: UsageBasis,
     #[serde(default = "one")]
     pub attempts: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_request_id: Option<String>,
+    /// Wall-clock call duration measured at the typed boundary (W3b) — wire
+    /// truth, so clients stop self-measuring around the FFI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// Time from request dispatch to the first streamed event (streaming
+    /// only; W3b). Absent on non-streaming calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_to_first_token_ms: Option<u64>,
 }
 
 const fn one() -> u32 {
@@ -566,6 +635,29 @@ pub fn contract_schema_documents() -> BTreeMap<&'static str, String> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn usage_latency_fields_are_absent_by_default() {
+        // Old usage JSON (fields absent) round-trips; absent stays absent so
+        // pre-W3b consumers see byte-identical documents.
+        let usage: UsageV2 = serde_json::from_value(serde_json::json!({
+            "tokens_in": 1, "tokens_out": 2,
+            "cache_creation_tokens": 0, "cache_read_tokens": 0
+        }))
+        .unwrap();
+        assert!(usage.duration_ms.is_none());
+        assert!(usage.time_to_first_token_ms.is_none());
+        let wire = serde_json::to_value(&usage).unwrap();
+        assert!(wire.get("duration_ms").is_none());
+        assert!(wire.get("time_to_first_token_ms").is_none());
+
+        let mut stamped = usage.clone();
+        stamped.duration_ms = Some(120);
+        stamped.time_to_first_token_ms = Some(45);
+        let wire = serde_json::to_value(&stamped).unwrap();
+        assert_eq!(wire["duration_ms"], 120);
+        assert_eq!(wire["time_to_first_token_ms"], 45);
+    }
+
+    #[test]
     fn include_native_response_defaults_true_and_stays_off_the_wire() {
         // Old request JSON (field absent) keeps today's behavior: include.
         let req: ChatRequestV1 = serde_json::from_value(serde_json::json!({
@@ -627,6 +719,35 @@ mod tests {
                 .unwrap_or_else(|error| panic!("read checked schema {filename}: {error}"));
             assert_eq!(checked, generated, "regenerate {filename}");
         }
+    }
+
+    #[test]
+    fn contract_minor_ratchets_with_schema_changes() {
+        // Additive-only within v1 is policy (TD-0002); this makes the growth
+        // signal machine-enforced: any change to the rendered contract
+        // schemas must come with a CHAT_CONTRACT_MINOR bump and a digest
+        // update here. Consumers gate feature trust on the minor.
+        fn fnv1a(bytes: &[u8]) -> u64 {
+            let mut hash: u64 = 0xcbf29ce484222325;
+            for byte in bytes {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+            hash
+        }
+        let mut concatenated = String::new();
+        for (filename, generated) in contract_schema_documents() {
+            concatenated.push_str(filename);
+            concatenated.push('\n');
+            concatenated.push_str(&generated);
+        }
+        let digest = fnv1a(concatenated.as_bytes());
+        assert_eq!(
+            (CHAT_CONTRACT_MINOR, digest),
+            (5, 0x585a1d7e8b06ba3a_u64),
+            "contract schemas changed: bump CHAT_CONTRACT_MINOR and update this digest \
+             (new digest = {digest:#x})"
+        );
     }
 
     #[test]

@@ -332,6 +332,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn w3d_fields_are_ignored_no_leak() {
+        // Consumer-decision row: Cohere honors neither field — they must not
+        // leak into the native body under any key.
+        let request: ChatRequestV1 = serde_json::from_value(json!({
+            "model": "command-r",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "high",
+            "thinking": {"enabled": true, "budget_tokens": 512}
+        }))
+        .unwrap();
+        let body = encode_cohere_request(&request).unwrap();
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("thinking").is_none());
+    }
+
+    #[test]
     fn request_and_response_codecs_preserve_text_tools_and_usage() {
         let request: ChatRequestV1 = serde_json::from_value(json!({
             "model":"command-r", "max_output_tokens":64,

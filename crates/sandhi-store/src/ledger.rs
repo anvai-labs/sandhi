@@ -52,8 +52,16 @@ impl SqliteLedger {
     /// Open (creating if needed) a ledger at `path` (`:memory:` for a volatile one).
     pub fn open(path: &str) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
-        Self::init(&conn)?;
+        Self::setup(&conn)?;
         Ok(Self { conn })
+    }
+
+    fn setup(conn: &Connection) -> rusqlite::Result<()> {
+        // FULL: a cap/lease commit must survive a power loss (ADR-0005 C2/C3). WAL + busy_timeout
+        // also stop the concurrent store writes from colliding with reserve/settle on the same file
+        // (the proxy opens both against one store path).
+        crate::apply_durable_pragmas(conn, crate::Synchronous::Full)?;
+        Self::init(conn)
     }
 
     fn init(conn: &Connection) -> rusqlite::Result<()> {
@@ -601,5 +609,22 @@ mod tests {
                 .unwrap(),
             ReserveOutcome::Denied(_)
         ));
+    }
+}
+
+#[cfg(test)]
+mod conformance {
+    use super::SqliteLedger;
+
+    /// TD-0007 C1–C6 against the backend we actually ship durably.
+    ///
+    /// The suite lives in `sandhi-core` so any backend — including a future shared one — is held to
+    /// the same executable bar rather than to a prose description. Until this existed, the durable
+    /// ledger's conformance was asserted only by the design doc that specified it.
+    #[test]
+    fn sqlite_ledger_is_conformant() {
+        sandhi_core::conformance::assert_enforcement_conformance("SqliteLedger", || {
+            SqliteLedger::open(":memory:").expect("an in-memory SQLite ledger")
+        });
     }
 }

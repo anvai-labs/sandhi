@@ -42,7 +42,7 @@ jobs:
           - { os: macos-latest, target: aarch64-apple-darwin }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Set version from tag
         run: |
@@ -64,7 +64,7 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Set version from tag
         shell: bash
@@ -76,7 +76,7 @@ jobs:
           command: build
           args: --release -m bindings/python/Cargo.toml --out dist
           manylinux: auto
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.os }}
           path: dist
@@ -88,7 +88,7 @@ jobs:
     permissions:
       id-token: write # OIDC — no stored token
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: wheels-*
           merge-multiple: true
@@ -101,7 +101,7 @@ jobs:
   crates:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Publish in dependency order
         env:
@@ -133,9 +133,9 @@ jobs:
           - { os: macos-latest, target: aarch64-apple-darwin }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
       - name: Build native addon
@@ -144,7 +144,7 @@ jobs:
           npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version --allow-same-version
           npm install
           npx napi build --platform --release
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: napi-${{ matrix.target }}
           path: bindings/node/*.node
@@ -153,12 +153,12 @@ jobs:
     needs: npm-build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: napi-*
           merge-multiple: true
@@ -177,3 +177,25 @@ jobs:
           npx napi artifacts --dir artifacts
           npx napi prepublish -t npm --skip-gh-release
           npm publish --access public
+
+  # ── 5. Verify the artifacts actually landed ───────────────────────────────────────────────
+  #        The publish steps above `exit 0` when their credential is absent, so a job can report
+  #        success while shipping nothing. That is intentional for an unconfigured target, but the
+  #        same guard would hide a genuinely broken publish — and a green release run is exactly
+  #        when nobody looks. This checks the registry, not the job.
+  verify:
+    needs: [create-release, pypi-publish, crates, npm-publish]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Verify every expected registry received this tag
+        env:
+          # Expectation is derived from configuration, never assumed: a target with no credential
+          # is reported as an intentional skip instead of silently passing.
+          EXPECT_CRATES: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
+          EXPECT_NPM: ${{ secrets.NPM_TOKEN != '' }}
+        run: python3 scripts/verify-release.py "${GITHUB_REF_NAME}"

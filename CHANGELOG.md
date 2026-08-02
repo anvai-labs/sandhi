@@ -17,7 +17,124 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- _Nothing yet._
+
+## [0.1.5] — 2026-08-02
+
+The observability + meter-trust release: first-party **OTel/OTLP export** of the GenAI semantic
+conventions (TD-0011 P3) completes the telemetry story atop a **hardened, drift-defended meter**
+(scopes 1–4), and per-key rate limiting is enforced (TD-0012).
+
+### Fixed
+
+- **Docs no longer claim rate limits are unenforced** (TD-0012 P2). Six places still said "stored,
+  not enforced" after P1 shipped — README (twice), SECURITY.md's out-of-scope list, CLAUDE.md, the
+  `sandhi keys share --rate` help, and the `VirtualKey::rate_limit_per_min` field doc. All corrected,
+  and each now carries the caveat that matters operationally: the limiter is **per process**, so with
+  N replicas the effective limit is N × the configured value. An operator reads that in `--help` at
+  the moment they set the limit, not afterwards in a design doc.
+- **`rate_limit_per_min` is enforced** (TD-0012 P1). It had been accepted by `sandhi vkeys share`,
+  persisted, and returned by the admin API since TD-0003 — and read nowhere in the request path. An
+  operator could set a limit, see it echoed back, and be told nothing when it did not apply.
+
+  Enforcement is a per-key **token bucket** (refill `limit/60` per second, capacity `limit`), not a
+  per-minute counter — a fixed window admits `2 ×` the limit across a boundary. A throttled request
+  is refused **before** the budget reservation, so it consumes no lease, records no spend and emits
+  no usage event; the 429 is rendered in the caller's dialect and carries **`Retry-After`**, without
+  which a well-behaved SDK retries immediately and turns a throttle into a hot loop. Buckets are
+  evicted after 10 idle minutes — an order of magnitude past a full refill, so eviction can never
+  grant extra headroom.
+
+  **Single-node semantics:** the limiter is in-memory, so with N replicas the effective limit is
+  `N × limit` — the same limitation the enforcement ledger has, and it shares TD-0007's eventual
+  shared backend rather than inventing a second story.
+
+- **Metering-correctness hardening (scopes 1–4, #134–#140)** — the meter the observability story
+  rests on was made trustworthy. `billable_parts` saturates and a `u64_at` clamp bounds the
+  reservation ceiling; the DeepSeek/Anthropic prompt-cache split is read at the source and an
+  observable guards `cached > prompt`; `ParsedUsage::apply` is non-destructive so a partial can no
+  longer overwrite a final; Cohere stops emitting zero-valued fields. Virtual-key expiry compares
+  RFC-3339 instants, not strings. The durable store gained per-connection `busy_timeout` + WAL,
+  observable emit-failure counters, and a background lease-reclaim sweep. A Block-capped scope's
+  unbounded output is routed through the translation plane instead of passing through
+  transparently. The Node budget API is widened u32 → i64. `hash_secret` is documented as a
+  high-entropy index and the dashboard warns on its exposure. #141 aligns the decision log with
+  what shipped.
+
+### Added
+
+- **Operator guidance for telemetry** (TD-0011 P4) — README gains an "Operating it" section: log
+  filtering via `SANDHI_LOG`, a Prometheus scrape config including the admin bearer the endpoint
+  requires, and the four alerts worth having (capacity leaking via settle failures, enforcement
+  silently off via fail-open admissions, callers being refused, and upstream latency degrading).
+  Each expression was checked against a series the code actually emits, rather than written from
+  memory.
+
+- **Release verification** — `scripts/verify-release.py` plus a `verify` job that runs after the
+  publish steps and checks each **registry** for the tag's version rather than trusting job status.
+  The publish steps `exit 0` when their credential is absent, so a job can report success while
+  shipping nothing; that is intentional for an unconfigured target (npm, pending a Node client) but
+  the same guard would hide a broken publish. Expectation is derived from which secrets are
+  configured, so an intentional skip is *reported* rather than silently passing. Two failure modes
+  it exists to prevent, both of which already produced wrong conclusions: crates.io rejects requests
+  without a `User-Agent` and returns an error that reads like "not published", and PyPI's JSON API
+  lags an upload by up to a minute — so the script sends a UA and retries before reporting absence.
+
+- **`GET /metrics`** (TD-0011 P2) — Prometheus text exposition for the gateway's own behaviour:
+  calls by provider/model/dialect/**plane**/outcome, neutral token counters per kind (including the
+  settled `billable` quantity), duration and TTFT histograms with buckets chosen for model calls,
+  and enforcement counters for denials, fail-open admissions, lease reclaims and durable-settle
+  failures. Gated exactly like the dashboard (ADR-0004 D4) — admin bearer when a token is
+  configured — because traffic shape and model mix are commercially interesting.
+
+  Two deliberate properties: the label set is a **type**, so an unbounded dimension
+  (`subject_id`, `session_id`, a `vk:*` budget scope) is *unrepresentable* rather than merely
+  discouraged; and the `billable` counter is handed the same quantity the ledger settled rather
+  than recomputed, so a dashboard cannot disagree with a charge. The registry is hand-rolled — a
+  few atomics and a text formatter — adding **no new dependency**.
+- **First-party telemetry** (TD-0011 P1) — `sandhi-core`, `-providers` and `-store` now emit through
+  the `tracing` facade and install **no** subscriber; the `sandhi-proxy` binary installs one
+  (stderr, filtered by `SANDHI_LOG` / `RUST_LOG`). A host that links the libraries in-process
+  captures Sandhi's events in its own logging with no Sandhi-side configuration and no second
+  runtime, which is what the boundary is for — a compile-time test asserts the libraries cannot
+  depend on `tracing-subscriber`, so a future patch cannot hijack a host's logging.
+
+  The events are chosen for what no sidecar could compute: **plane selection**
+  (transparent vs translation — the ADR-0004 adoption signal), **reservation denials**,
+  **fail-open admissions** (a `Warn`-policy admit during a ledger outage previously looked like
+  ordinary traffic), **lease reclaims** (the crash-recovery signal), and **durable-settle
+  failures** (which leave capacity reserved until the lease expires).
+
+  Telemetry deliberately does **not** repeat caller attribution: per-subject accounting has a
+  bounded home in the usage aggregate, and a test asserts the request path logs no virtual key,
+  no upstream credential, and no `subject_id`/`session_id`/`virtual_key_id`.
+
+- **OTLP export of `gen_ai.*` spans + metrics** (TD-0011 P3, #143) — a default-off `otel-otlp`
+  cargo feature pushes the OpenTelemetry GenAI semantic conventions to a collector over OTLP/HTTP
+  (opentelemetry 0.32): one `gen_ai` operation span per chat call (input / output /
+  cache-creation / cache-read / reasoning tokens, provider, model, **finish reason**) plus the
+  `gen_ai.client.token.usage`, `gen_ai.client.operation.duration`, and
+  `gen_ai.server.time_to_first_token` metrics. It layers beside `/metrics` (both can run at once).
+  Only the proxy binary takes the OpenTelemetry deps — the D1 compile-time guard now forbids them
+  in the library crates, and a CI guard asserts the default build's `cargo tree` stays free of
+  them.
+
+  The attribution boundary is **stricter than `/metrics`**: exported spans and metrics never carry
+  `subject_id`/`group_id`/`session_id`/`virtual_key_id`/`request_id` (OTLP sends them off-process,
+  past the trust boundary), and never a cost. The `gen_ai` span is built directly via the OTel
+  Tracer API through a closed attribute allowlist — the `tracing_opentelemetry` bridge is
+  deliberately **not** installed, since it would bridge the proxy's `tracing::` events (which carry
+  `scope` = `vk:<id>`) into exported spans. A red test drives a request carrying the full
+  attribution set through the dispatch→finalize chokepoint and asserts none of it leaks. #144 adds
+  the operator guidance + a collector config; #145 adds `gen_ai.response.finish_reasons`.
+
+- **Live parser-conformance harness** (#142) — `#[ignore]`d, env-gated tests that make one real
+  call per provider and run the result through the *shipped* parser, asserting the counts are
+  sane. The drift detector: it surfaces a provider renaming or moving a usage field before users
+  see wrong bills — the complement to the captured-corpus mock tests, which pin known shapes but
+  cannot detect drift.
 
 ## [0.1.4] — 2026-07-26
 
