@@ -465,6 +465,117 @@ async fn unknown_virtual_key_is_401() {
 }
 
 #[tokio::test]
+async fn spoofed_attribution_headers_are_rejected_for_a_bound_key() {
+    // Attribution is key-authoritative (ADR-0004 D4): a client presenting vk_demo (bound to
+    // alice/platform) must not be able to claim another subject or group — that would poison
+    // per-subject aggregates and, once a group-keyed cache namespace ships (ADR-0001 §4),
+    // cross cache namespaces. Fail-loud 403, before any lease or usage event.
+    let upstream = MockServer::start().await; // no mounts: reaching it would 404
+    let sink = Arc::new(InMemorySink::new());
+    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    let app = build_app(state.clone());
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("authorization", "Bearer vk_demo")
+        .header("content-type", "application/json")
+        .header("x-sandhi-subject-id", "mallory")
+        .body(Body::from(r#"{"model":"gpt-x","messages":[]}"#))
+        .unwrap();
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    // Rejected before dispatch: no usage event, no lease, no spend, upstream untouched.
+    assert_eq!(sink.len(), 0);
+    assert_eq!(state.ledger.lock().unwrap().reserved("group:platform"), 0);
+    assert_eq!(state.ledger.lock().unwrap().spent("group:platform"), 0);
+    assert!(upstream.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn matching_attribution_headers_are_admitted() {
+    // Echoing the key's own binding is an idempotent confirmation, not a spoof.
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{ "message": { "content": "hi" } }],
+            "usage": { "prompt_tokens": 5, "completion_tokens": 2 }
+        })))
+        .mount(&upstream)
+        .await;
+    let sink = Arc::new(InMemorySink::new());
+    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    let app = build_app(state);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("authorization", "Bearer vk_demo")
+        .header("content-type", "application/json")
+        .header("x-sandhi-subject-id", "alice")
+        .header("x-sandhi-group-id", "platform")
+        .body(Body::from(r#"{"model":"gpt-x","messages":[]}"#))
+        .unwrap();
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let events = sink.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].subject_id.as_deref(), Some("alice"));
+    assert_eq!(events[0].group_id.as_deref(), Some("platform"));
+}
+
+#[tokio::test]
+async fn attribution_headers_on_an_unbound_key_are_rejected() {
+    // An unbound key + attribution headers is still a 403: the proxy never adopts
+    // client-supplied identity (any key holder could pollute another group's aggregates).
+    // These headers were never read before this check, so nothing conforming breaks.
+    let upstream = MockServer::start().await;
+    let keys = KeyStore::new();
+    keys.insert(VirtualKey {
+        id: "vk_unbound".into(),
+        upstream_ref: "up1".into(),
+        ..Default::default()
+    });
+    let mut providers: HashMap<String, sandhi_providers::ProviderHandle> = HashMap::new();
+    providers.insert(
+        "up1".into(),
+        ProviderRuntime::new().openai_compat(
+            "openai",
+            upstream.uri(),
+            "REAL-KEY",
+            Default::default(),
+            Some(0),
+            None,
+            None,
+        ),
+    );
+    let sink = Arc::new(InMemorySink::new());
+    let state = Arc::new(ProxyState::new(
+        keys,
+        ProxyLedger::in_memory(),
+        sink.clone(),
+        providers,
+        None,
+    ));
+    let app = build_app(state);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("authorization", "Bearer vk_unbound")
+        .header("content-type", "application/json")
+        .header("x-sandhi-group-id", "someone-elses-team")
+        .body(Body::from(r#"{"model":"gpt-x","messages":[]}"#))
+        .unwrap();
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(sink.len(), 0);
+    assert!(upstream.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn exhausted_budget_is_429_before_calling_upstream() {
     let sink = Arc::new(InMemorySink::new());
     let mut ledger = ProxyLedger::in_memory();

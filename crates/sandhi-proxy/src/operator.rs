@@ -160,18 +160,14 @@ pub(crate) fn require_admin(state: &ProxyState, headers: &HeaderMap) -> Result<(
     }
 }
 
-/// Constant-time byte comparison for the admin token (ADR-0004 D4): the accumulator visits
-/// every byte regardless of where the first mismatch is, so response timing does not leak a
-/// prefix-match oracle. Length is compared by folding it into the accumulator (token length
-/// is not a secret, but this keeps the shape branch-free).
+/// Constant-time byte comparison for the admin token (ADR-0004 D4): every byte is visited
+/// regardless of where the first mismatch is, so response timing does not leak a prefix-match
+/// oracle. Delegates to `subtle::ConstantTimeEq`, which carries optimizer barriers a
+/// hand-rolled `|=` loop lacks (LLVM is permitted to short-circuit one). `ct_eq` on slices
+/// returns early on a length mismatch — acceptable, the token length is not a secret.
 pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    let mut acc = u8::from(a.len() != b.len());
-    let max = a.len().max(b.len());
-    for i in 0..max {
-        // Out-of-range indexes fold in a constant; both slices are always walked to `max`.
-        acc |= a.get(i).copied().unwrap_or(0) ^ b.get(i).copied().unwrap_or(0);
-    }
-    acc == 0
+    use subtle::ConstantTimeEq;
+    a.ct_eq(b).into()
 }
 
 fn err(status: StatusCode, msg: &str) -> Response {
