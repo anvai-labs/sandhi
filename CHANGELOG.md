@@ -21,6 +21,29 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 
 - _Nothing yet._
 
+## [0.1.6] — 2026-08-05
+
+Maintenance release: placeholder-version hygiene and repo cleanup. No API, wire-contract, or
+runtime behavior change — the chat contract minor is unchanged from 0.1.5.
+
+### Changed
+
+- Reset the committed placeholder versions from `0.1.2` to `0.0.0` across the workspace package,
+  both bindings, and the internal crate-dependency requirements (#153). Versions are derived from
+  the git tag at release (`cargo set-version`), per [RELEASING.md](RELEASING.md); `0.0.0` is the
+  documented set-at-release placeholder, so this aligns the code with the docs and stops local/dev
+  builds from reporting a misleading `0.1.2`.
+
+### Fixed
+
+- Reconciled `bindings/python/Cargo.lock` with the manifests (the already-declared `tracing`
+  dependency) so `--locked` builds stay green (#153).
+
+### Housekeeping
+
+- Ignore the runtime `usage.db` SQLite artifact (`usage.db*`) so it cannot be accidentally
+  committed (#154).
+
 ## [0.1.5] — 2026-08-02
 
 The observability + meter-trust release: first-party **OTel/OTLP export** of the GenAI semantic
