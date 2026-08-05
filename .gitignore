@@ -36,3 +36,6 @@ bindings/node/npm/
 
 # Local audit trail written by tooling; not repo content.
 audit/
+
+# Runtime metering DB written by the sandhi store at the cwd; not repo content.
+usage.db*
