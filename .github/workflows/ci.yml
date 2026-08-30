@@ -4,11 +4,38 @@ on:
   push:
     branches: [main, develop]
   pull_request:
+  # Protected-base definition for owner-authored, same-repository PRs only.
+  # Every job below independently routes this event through the approval gate
+  # before any pull-request code reaches the private runner pool.
+  pull_request_target:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
+  authorize-owner:
+    name: Authorize owner private CI
+    if: >-
+      github.event_name == 'pull_request_target' &&
+      vars.OWNER_PRIVATE_CI_ENABLED == 'true' &&
+      github.actor_id == '5168752' &&
+      github.event.pull_request.user.id == 5168752 &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    environment: owner-private-ci
+    steps:
+      - name: Verify immutable owner and same-repository head
+        env:
+          ACTOR_ID: ${{ github.actor_id }}
+          AUTHOR_ID: ${{ github.event.pull_request.user.id }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          test "$ACTOR_ID" = "5168752"
+          test "$AUTHOR_ID" = "5168752"
+          test "$HEAD_REPOSITORY" = "$REPOSITORY"
+
   # Detect what changed so a docs-only change (docs/**, README, etc.) skips
   # compilation / coverage / bindings and runs only the always-on audit
   # (attribution) + the aggregate gate. Each heavy job is gated on these
@@ -16,7 +43,21 @@ jobs:
   # check still reports on docs-only PRs. A change to this workflow itself
   # re-runs everything (it is listed in every filter).
   changes:
-    runs-on: ubuntu-latest
+    needs: authorize-owner
+    if: >-
+      always() && (
+        github.event_name == 'push' ||
+        (github.event_name == 'pull_request' && (
+          vars.OWNER_PRIVATE_CI_ENABLED != 'true' ||
+          github.actor_id != '5168752' ||
+          github.event.pull_request.user.id != 5168752 ||
+          github.event.pull_request.head.repo.full_name != github.repository
+        )) ||
+        (github.event_name == 'pull_request_target' &&
+          vars.OWNER_PRIVATE_CI_ENABLED == 'true' &&
+          needs.authorize-owner.result == 'success')
+      )
+    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       python: ${{ steps.filter.outputs.python }}
@@ -25,8 +66,11 @@ jobs:
       sdk_conformance: ${{ steps.filter.outputs.sdk_conformance }}
       codegen: ${{ steps.filter.outputs.codegen }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dorny/paths-filter@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.0
         id: filter
         with:
           filters: |
@@ -72,11 +116,14 @@ jobs:
 
   rust:
     needs: changes
-    if: ${{ needs.changes.outputs.rust == 'true' }}
-    runs-on: ubuntu-latest
+    if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.rust == 'true' }}
+    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable 2026-08-30
         with:
           components: rustfmt, clippy
       - run: cargo fmt --all --check
@@ -98,11 +145,14 @@ jobs:
 
   schema:
     needs: changes
-    if: ${{ needs.changes.outputs.schema == 'true' }}
-    runs-on: ubuntu-latest
+    if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.schema == 'true' }}
+    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - run: pip install check-jsonschema
@@ -114,15 +164,18 @@ jobs:
 
   python-binding:
     needs: changes
-    if: ${{ needs.changes.outputs.python == 'true' }}
-    runs-on: ubuntu-latest
+    if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.python == 'true' }}
+    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable 2026-08-30
         with:
           components: rustfmt, clippy, llvm-tools-preview
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: actions/setup-python@v7
+      - uses: taiki-e/install-action@ea647c55f74bb153499600c054578c0d83fa19d5 # cargo-llvm-cov 2026-08-30
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: fmt + clippy (the binding is its own workspace)
@@ -144,15 +197,32 @@ jobs:
         run: bash scripts/coverage-bindings.sh python
 
   attribution:
-    runs-on: ubuntu-latest
+    needs: authorize-owner
+    if: >-
+      always() && (
+        github.event_name == 'push' ||
+        (github.event_name == 'pull_request' && (
+          vars.OWNER_PRIVATE_CI_ENABLED != 'true' ||
+          github.actor_id != '5168752' ||
+          github.event.pull_request.user.id != 5168752 ||
+          github.event.pull_request.head.repo.full_name != github.repository
+        )) ||
+        (github.event_name == 'pull_request_target' &&
+          vars.OWNER_PRIVATE_CI_ENABLED == 'true' &&
+          needs.authorize-owner.result == 'success')
+      )
+    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
           fetch-depth: 0
       - name: No AI-agent authorship attribution in commit messages
         run: |
           set -e
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
+          if [ "${{ github.event_name }}" = "pull_request" ] || \
+             [ "${{ github.event_name }}" = "pull_request_target" ]; then
             python3 scripts/check_no_agent_attribution.py \
               --range "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
           elif echo "${{ github.event.before }}" | grep -qE '^0{40}$'; then
@@ -174,16 +244,19 @@ jobs:
     # (see Phase 2). cargo-deny advisories already covers vuln-detection across the whole tree,
     # so dependency-review is a fast-follow once the dependency graph is turned on, not a blocker.
     needs: changes
-    if: ${{ needs.changes.outputs.rust == 'true' }}
-    runs-on: ubuntu-latest
+    if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.rust == 'true' }}
+    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
       - name: cargo-deny advisories (known vulnerabilities + yanked crates)
         # cargo-deny-action@v2 composes `cargo-deny <arguments> <command> <command-arguments>`,
         # so the check-target (advisories) goes in `command-arguments`, NOT `arguments` — putting it
         # in `arguments` yields `cargo-deny advisories check`, which clap rejects ("unrecognized
         # subcommand 'advisories'"). `command` defaults to `check`; left explicit for readability.
-        uses: embarkstudios/cargo-deny-action@v2
+        uses: embarkstudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.0.15
         with:
           command: check
           command-arguments: advisories
@@ -191,10 +264,22 @@ jobs:
   lint-title:
     # Conventional-commit PR title gate. Dependabot PRs are prefixed `chore:`
     # (.github/dependabot.yml) so they pass too. PR-only (the action errors on push events).
-    if: ${{ github.event_name == 'pull_request' }}
-    runs-on: ubuntu-latest
+    needs: authorize-owner
+    if: >-
+      always() && (
+        (github.event_name == 'pull_request' && (
+          vars.OWNER_PRIVATE_CI_ENABLED != 'true' ||
+          github.actor_id != '5168752' ||
+          github.event.pull_request.user.id != 5168752 ||
+          github.event.pull_request.head.repo.full_name != github.repository
+        )) ||
+        (github.event_name == 'pull_request_target' &&
+          vars.OWNER_PRIVATE_CI_ENABLED == 'true' &&
+          needs.authorize-owner.result == 'success')
+      )
+    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
     steps:
-      - uses: amannn/action-semantic-pull-request@v6
+      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -213,15 +298,18 @@ jobs:
 
   node-binding:
     needs: changes
-    if: ${{ needs.changes.outputs.node == 'true' }}
-    runs-on: ubuntu-latest
+    if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.node == 'true' }}
+    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable 2026-08-30
         with:
           components: rustfmt, clippy, llvm-tools-preview
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: actions/setup-node@v7
+      - uses: taiki-e/install-action@ea647c55f74bb153499600c054578c0d83fa19d5 # cargo-llvm-cov 2026-08-30
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"
       - name: fmt + clippy (the node binding is its own workspace)
@@ -231,7 +319,7 @@ jobs:
       - name: build + test (release platform artifact)
         working-directory: bindings/node
         run: |
-          npm install
+          npm ci
           npx napi build --platform
           npm test
       - name: binding glue coverage (fail under 85% lines)
@@ -241,14 +329,17 @@ jobs:
 
   coverage:
     needs: changes
-    if: ${{ needs.changes.outputs.rust == 'true' }}
-    runs-on: ubuntu-latest
+    if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.rust == 'true' }}
+    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable 2026-08-30
         with:
           components: llvm-tools-preview
-      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@ea647c55f74bb153499600c054578c0d83fa19d5 # cargo-llvm-cov 2026-08-30
       - name: Line coverage must stay above 75%
         # Exclude generated code (typify output) — you test the generator's schema, not the
         # generated builder/error surface, so its coverage is meaningless (ADR-0003 §2/§4).
@@ -258,11 +349,14 @@ jobs:
   # byte-pinned schemas and assert the committed output is unchanged. Guards the no-hand-edit rule.
   codegen-drift:
     needs: changes
-    if: ${{ needs.changes.outputs.codegen == 'true' }}
-    runs-on: ubuntu-latest
+    if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.codegen == 'true' }}
+    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable 2026-08-30
         with:
           components: rustfmt
       - name: Regenerate models and assert no drift
@@ -280,13 +374,16 @@ jobs:
   sdk-conformance:
     name: SDK conformance (real vendor SDKs)
     needs: changes
-    if: ${{ needs.changes.outputs.sdk_conformance == 'true' }}
-    runs-on: ubuntu-latest
+    if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.sdk_conformance == 'true' }}
+    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable 2026-08-30
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.8.2
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
       # The vendors' own clients decide how a request is shaped. Pinning majors keeps a vendor
@@ -298,9 +395,21 @@ jobs:
 
   ci-success:
     name: CI Success
-    runs-on: ubuntu-latest
-    if: ${{ always() }}
-    needs: [changes, rust, schema, python-binding, node-binding, attribution, coverage, codegen-drift, sdk-conformance, security, lint-title]
+    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
+    if: >-
+      always() && (
+        github.event_name == 'push' ||
+        (github.event_name == 'pull_request' && (
+          vars.OWNER_PRIVATE_CI_ENABLED != 'true' ||
+          github.actor_id != '5168752' ||
+          github.event.pull_request.user.id != 5168752 ||
+          github.event.pull_request.head.repo.full_name != github.repository
+        )) ||
+        (github.event_name == 'pull_request_target' &&
+          vars.OWNER_PRIVATE_CI_ENABLED == 'true' &&
+          needs.authorize-owner.result == 'success')
+      )
+    needs: [authorize-owner, changes, rust, schema, python-binding, node-binding, attribution, coverage, codegen-drift, sdk-conformance, security, lint-title]
     steps:
       - name: Verify no required job failed (skipped is OK for docs-only)
         env:
