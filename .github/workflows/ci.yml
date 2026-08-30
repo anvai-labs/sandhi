@@ -116,7 +116,7 @@ jobs:
 
   rust:
     needs: changes
-    if: ${{ needs.changes.outputs.rust == 'true' }}
+    if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.rust == 'true' }}
     runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -145,7 +145,7 @@ jobs:
 
   schema:
     needs: changes
-    if: ${{ needs.changes.outputs.schema == 'true' }}
+    if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.schema == 'true' }}
     runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -164,7 +164,7 @@ jobs:
 
   python-binding:
     needs: changes
-    if: ${{ needs.changes.outputs.python == 'true' }}
+    if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.python == 'true' }}
     runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -244,7 +244,7 @@ jobs:
     # (see Phase 2). cargo-deny advisories already covers vuln-detection across the whole tree,
     # so dependency-review is a fast-follow once the dependency graph is turned on, not a blocker.
     needs: changes
-    if: ${{ needs.changes.outputs.rust == 'true' }}
+    if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.rust == 'true' }}
     runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -298,7 +298,7 @@ jobs:
 
   node-binding:
     needs: changes
-    if: ${{ needs.changes.outputs.node == 'true' }}
+    if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.node == 'true' }}
     runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -329,7 +329,7 @@ jobs:
 
   coverage:
     needs: changes
-    if: ${{ needs.changes.outputs.rust == 'true' }}
+    if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.rust == 'true' }}
     runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -349,7 +349,7 @@ jobs:
   # byte-pinned schemas and assert the committed output is unchanged. Guards the no-hand-edit rule.
   codegen-drift:
     needs: changes
-    if: ${{ needs.changes.outputs.codegen == 'true' }}
+    if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.codegen == 'true' }}
     runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -374,7 +374,7 @@ jobs:
   sdk-conformance:
     name: SDK conformance (real vendor SDKs)
     needs: changes
-    if: ${{ needs.changes.outputs.sdk_conformance == 'true' }}
+    if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.sdk_conformance == 'true' }}
     runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
