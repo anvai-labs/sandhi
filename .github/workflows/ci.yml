@@ -18,6 +18,7 @@ jobs:
     name: Authorize owner private CI
     if: >-
       github.event_name == 'pull_request_target' &&
+      vars.OWNER_PRIVATE_CI_ENABLED == 'true' &&
       github.actor_id == '5168752' &&
       github.event.pull_request.user.id == 5168752 &&
       github.event.pull_request.head.repo.full_name == github.repository
@@ -47,11 +48,13 @@ jobs:
       always() && (
         github.event_name == 'push' ||
         (github.event_name == 'pull_request' && (
+          vars.OWNER_PRIVATE_CI_ENABLED != 'true' ||
           github.actor_id != '5168752' ||
           github.event.pull_request.user.id != 5168752 ||
           github.event.pull_request.head.repo.full_name != github.repository
         )) ||
         (github.event_name == 'pull_request_target' &&
+          vars.OWNER_PRIVATE_CI_ENABLED == 'true' &&
           needs.authorize-owner.result == 'success')
       )
     runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
@@ -199,11 +202,13 @@ jobs:
       always() && (
         github.event_name == 'push' ||
         (github.event_name == 'pull_request' && (
+          vars.OWNER_PRIVATE_CI_ENABLED != 'true' ||
           github.actor_id != '5168752' ||
           github.event.pull_request.user.id != 5168752 ||
           github.event.pull_request.head.repo.full_name != github.repository
         )) ||
         (github.event_name == 'pull_request_target' &&
+          vars.OWNER_PRIVATE_CI_ENABLED == 'true' &&
           needs.authorize-owner.result == 'success')
       )
     runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
@@ -263,11 +268,13 @@ jobs:
     if: >-
       always() && (
         (github.event_name == 'pull_request' && (
+          vars.OWNER_PRIVATE_CI_ENABLED != 'true' ||
           github.actor_id != '5168752' ||
           github.event.pull_request.user.id != 5168752 ||
           github.event.pull_request.head.repo.full_name != github.repository
         )) ||
         (github.event_name == 'pull_request_target' &&
+          vars.OWNER_PRIVATE_CI_ENABLED == 'true' &&
           needs.authorize-owner.result == 'success')
       )
     runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
@@ -393,11 +400,13 @@ jobs:
       always() && (
         github.event_name == 'push' ||
         (github.event_name == 'pull_request' && (
+          vars.OWNER_PRIVATE_CI_ENABLED != 'true' ||
           github.actor_id != '5168752' ||
           github.event.pull_request.user.id != 5168752 ||
           github.event.pull_request.head.repo.full_name != github.repository
         )) ||
         (github.event_name == 'pull_request_target' &&
+          vars.OWNER_PRIVATE_CI_ENABLED == 'true' &&
           needs.authorize-owner.result == 'success')
       )
     needs: [authorize-owner, changes, rust, schema, python-binding, node-binding, attribution, coverage, codegen-drift, sdk-conformance, security, lint-title]
