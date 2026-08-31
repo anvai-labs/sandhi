@@ -23,22 +23,34 @@
 /// Accumulates stream bytes and yields complete newline-terminated lines.
 pub(crate) struct LineSplitter {
     buf: Vec<u8>,
-    /// How far into `buf` we have already looked for a `\n`. Only newly-arrived bytes are
-    /// searched on each call, which is what makes a newline-free stream O(n) rather than O(n²).
+    /// Bytes at the head of `buf` already returned as lines. Advancing an offset instead of
+    /// draining is what makes this genuinely O(n): `Vec::drain` from the head memmoves the whole
+    /// remainder on **every** line, so a chunk holding k lines cost O(k · len) — quadratic in
+    /// lines-per-chunk, which is the common case for small SSE deltas. The head is reclaimed by
+    /// an amortised compaction below.
+    consumed: usize,
+    /// Absolute index into `buf` up to which we have already looked for a `\n`. Only newly-arrived
+    /// bytes are searched, which is what makes a newline-*free* stream O(n) rather than O(n²).
     searched_to: usize,
     budget: usize,
     /// Bytes examined by newline searches. Not used in production logic — it exists so the O(n)
     /// property can be asserted deterministically instead of by timing, which would flake.
     scanned: usize,
+    /// Bytes moved by compaction, for the same reason. Together with `scanned` these cover both
+    /// halves of the cost; an earlier version tracked only the search and certified a linearity
+    /// the code did not have.
+    compacted: usize,
 }
 
 impl LineSplitter {
     pub(crate) fn new(budget: usize) -> Self {
         Self {
             buf: Vec::new(),
+            consumed: 0,
             searched_to: 0,
             budget,
             scanned: 0,
+            compacted: 0,
         }
     }
 
@@ -49,9 +61,6 @@ impl LineSplitter {
 
     /// Drain the next complete line, **including** its trailing `\n`, or `None` when the buffer
     /// holds no further line boundary.
-    ///
-    /// Searches only the bytes not yet examined. After a drain the buffer shifts, so the cursor
-    /// restarts at the new head — the same discipline the raw plane has used since TD-0006.
     pub(crate) fn next_line(&mut self) -> Option<Vec<u8>> {
         if self.searched_to >= self.buf.len() {
             return None;
@@ -67,8 +76,10 @@ impl LineSplitter {
         match found {
             Some(rel) => {
                 let newline = self.searched_to + rel;
-                let line: Vec<u8> = self.buf.drain(..=newline).collect();
-                self.searched_to = 0;
+                let line = self.buf[self.consumed..=newline].to_vec();
+                self.consumed = newline + 1;
+                self.searched_to = self.consumed;
+                self.compact_if_worthwhile();
                 Some(line)
             }
             None => {
@@ -78,33 +89,48 @@ impl LineSplitter {
         }
     }
 
+    /// Reclaim the consumed head once it is at least half the buffer, so the memmove is paid at
+    /// most once per byte overall rather than once per line.
+    fn compact_if_worthwhile(&mut self) {
+        if self.consumed >= 4096 && self.consumed * 2 >= self.buf.len() {
+            self.compacted = self
+                .compacted
+                .saturating_add(self.buf.len() - self.consumed);
+            self.buf.drain(..self.consumed);
+            self.searched_to -= self.consumed;
+            self.consumed = 0;
+        }
+    }
+
     /// Whether the pending (still incomplete) line has outgrown the configured budget. The caller
     /// owns the response — see the module docs.
     pub(crate) fn over_budget(&self) -> bool {
-        self.buf.len() > self.budget
+        self.buf.len() - self.consumed > self.budget
     }
 
     /// Discard the pending line and keep going (the raw plane's drop-and-continue policy).
     pub(crate) fn reset(&mut self) {
         self.buf.clear();
+        self.consumed = 0;
         self.searched_to = 0;
     }
 
     /// The trailing bytes that never got a newline, for an end-of-stream flush.
     pub(crate) fn remainder(&self) -> &[u8] {
-        &self.buf
+        &self.buf[self.consumed..]
     }
 
     /// Bytes currently buffered — the quantity the budget bounds.
     #[cfg(test)]
     pub(crate) fn buffered_len(&self) -> usize {
-        self.buf.len()
+        self.buf.len() - self.consumed
     }
 
-    /// Total bytes examined by newline searches, so complexity is assertable without timing.
+    /// Total bytes examined by newline searches plus bytes moved by compaction — the whole cost,
+    /// so complexity is assertable without timing.
     #[cfg(test)]
-    pub(crate) fn bytes_scanned(&self) -> usize {
-        self.scanned
+    pub(crate) fn work_done(&self) -> usize {
+        self.scanned + self.compacted
     }
 }
 
@@ -240,14 +266,14 @@ mod tests {
         let total = chunks * chunk.len();
         assert_eq!(splitter.buffered_len(), total);
         assert!(
-            splitter.bytes_scanned() <= total,
+            splitter.work_done() <= total,
             "scanned {} bytes for {total} received — the search cursor is not holding",
-            splitter.bytes_scanned()
+            splitter.work_done()
         );
     }
 
     #[test]
-    fn many_lines_in_one_chunk_do_not_rescan_consumed_bytes() {
+    fn many_lines_in_one_chunk_stay_linear_in_total_work() {
         let mut splitter = LineSplitter::new(usize::MAX);
         let wire: Vec<u8> = std::iter::repeat(b"line\n".as_slice())
             .take(5_000)
@@ -256,10 +282,17 @@ mod tests {
             .collect();
         splitter.push(&wire);
         assert_eq!(lines(&mut splitter).len(), 5_000);
-        assert_eq!(
-            splitter.bytes_scanned(),
-            wire.len(),
-            "each byte should be examined exactly once"
+        // Total work — search plus compaction memmove — must stay a small multiple of the input.
+        // This is the assertion an earlier version got wrong: it counted only the SEARCH, which is
+        // linear by construction, and so certified a linearity the code did not have. Draining
+        // per line memmoves the remainder every time, which is O(k · len) for k lines in one
+        // buffer; adversarial review measured 4x input -> 8.5x time. The head offset plus
+        // amortised compaction is what actually makes this linear.
+        assert!(
+            splitter.work_done() <= 3 * wire.len(),
+            "5k lines in one chunk cost {} for {} bytes — a per-line drain would be quadratic",
+            splitter.work_done(),
+            wire.len()
         );
     }
 

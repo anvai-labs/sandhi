@@ -509,9 +509,9 @@ async fn aggregate_stream(mut stream: ChatEventStream) -> Result<ChatResponseV1,
 fn decode_responses_stream(mut raw: ByteStream, requested_model: String) -> ChatEventStream {
     use futures_util::StreamExt;
     let stream = async_stream::try_stream! {
-        // TD-0014 P1: the shared bounded/O(n) splitter. The ceiling is the typed one, not
-        // the raw plane's sniff budget — see MAX_TYPED_LINE_BYTES for why they differ.
-        let mut splitter = crate::linesplit::LineSplitter::new(crate::MAX_TYPED_LINE_BYTES);
+        // TD-0014 P1: the shared bounded splitter. One ceiling across both planes; only the
+        // over-budget POLICY differs, and it is applied below. See MAX_STREAM_LINE_BYTES.
+        let mut splitter = crate::linesplit::LineSplitter::new(crate::MAX_STREAM_LINE_BYTES);
         let mut started = false;
         let mut open_tools = BTreeMap::<u32, ()>::new();
         let mut emitted_usage = false;
@@ -602,15 +602,16 @@ fn decode_responses_stream(mut raw: ByteStream, requested_model: String) -> Chat
                         _ => {}
                     }
                 }
-                // TD-0014 P1 (gap G01): a line past the budget means the upstream sent no
-                // boundary in 64 KiB. The raw plane may drop it and keep streaming — its
-                // bytes were already forwarded, so only usage suffers. A typed decoder
-                // emits decoded CONTENT, so dropping silently would corrupt the response
-                // with no signal. Fail loudly instead; mid-stream errors are never retried.
+                // TD-0014 P1 (gap G01): past MAX_STREAM_LINE_BYTES the upstream has sent no
+                // line boundary at all, which no real provider does. The raw plane drops the
+                // pending line and keeps streaming — its bytes were already forwarded, so
+                // only usage suffers. A typed decoder emits decoded CONTENT, so dropping
+                // silently would corrupt the response with no signal. Fail loudly instead;
+                // mid-stream errors are never retried.
                 if splitter.over_budget() {
                     Err(ProviderError::Transport(format!(
                         "upstream stream exceeded {} bytes with no line boundary",
-                        crate::MAX_TYPED_LINE_BYTES
+                        crate::MAX_STREAM_LINE_BYTES
                     )))?;
                 }
             }
@@ -642,7 +643,7 @@ mod tests {
     ///
     /// Sharing the raw plane's 64 KiB sniff budget as the typed hard bound therefore killed a
     /// working stream AND destroyed its metering. Caught by adversarial review before merge; the
-    /// fix is `MAX_TYPED_LINE_BYTES`, a ceiling real traffic cannot reach. Note this only
+    /// fix is `MAX_STREAM_LINE_BYTES`, a ceiling real traffic cannot reach. Note this only
     /// reproduces with CHUNKED delivery — a single-chunk delivery drains the complete line before
     /// the budget is ever consulted, which is why the first attempt at this test passed.
     #[tokio::test]
@@ -656,7 +657,6 @@ mod tests {
              \"output\":[{{\"type\":\"message\",\"text\":\"{long_text}\"}}],\
              \"usage\":{{\"input_tokens\":5,\"output_tokens\":32000}}}}}}\n\n"
         );
-        eprintln!("terminal line is {} bytes", wire.len());
         // Delivered the way a real socket delivers it: 16 KB reads, so the terminal frame is
         // still in flight across many chunks before its newline arrives.
         let bytes = wire.into_bytes();
@@ -682,6 +682,18 @@ mod tests {
             !errored,
             "a long but entirely legitimate generation must not be killed by the line budget"
         );
+        // The docstring says the old bound killed the stream AND destroyed its metering. Asserting
+        // only `!errored` would pass for an implementation that silently dropped the over-budget
+        // line — the exact failure the module docs argue against — so assert the usage too.
+        let usage_out = results.iter().flatten().find_map(|event| match event {
+            sandhi_core::ChatStreamEventV1::Usage { usage } => Some(usage.tokens_out),
+            _ => None,
+        });
+        assert_eq!(
+            usage_out,
+            Some(32_000),
+            "the terminal frame carries the usage; losing it is the metering half of the defect"
+        );
     }
 
     /// TD-0014 P1 (gap G01): a newline-free upstream stream must stay BOUNDED and fail loudly.
@@ -693,7 +705,7 @@ mod tests {
     #[tokio::test]
     async fn a_newline_free_stream_is_bounded_and_errors_rather_than_growing() {
         use futures_util::StreamExt;
-        // 16 MiB with no line boundary anywhere — past MAX_TYPED_LINE_BYTES (8 MiB). The bound
+        // 16 MiB with no line boundary anywhere — past MAX_STREAM_LINE_BYTES (8 MiB). The bound
         // exists to stop unbounded growth, so the test input has to be genuinely pathological;
         // a merely LARGE frame is legitimate and is covered by the regression test above.
         let filler = bytes::Bytes::from(vec![b'x'; 64 * 1024]);
