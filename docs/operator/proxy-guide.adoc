@@ -499,6 +499,16 @@ any other value (including on a key minted without a subject/group) is refused w
 dialect-shaped **403** before any budget lease. To change attribution, re-mint the key.
 ====
 
+[NOTE]
+====
+**Session identity is derived, not required.** An explicit `x-sandhi-session` request
+header always wins; otherwise the proxy derives a stable per-conversation key from the
+wire body's standard signals — OpenAI `user`, Anthropic `metadata.user_id`, then a hash of
+the cacheable system+tools prefix (ADR-0005 D7). A drop-in SDK client therefore gets
+session-grouped usage (`sandhi usage --by session`) and vendor cache affinity
+(ADR-0008 D3) without any sandhi-specific header.
+====
+
 === Operator CLI (`sandhi`) command map
 
 [cols="1,3"]
