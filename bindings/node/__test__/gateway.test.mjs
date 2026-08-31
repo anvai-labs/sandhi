@@ -250,6 +250,8 @@ test("catalog surface serves curated model data (TD-0004)", async () => {
   assert.ok(grok.some((m) => m.id === "grok-4"));
   // Aggregators stay empty (dynamic hosting catalogs — live discovery).
   assert.deepEqual(JSON.parse(providerModelsJson("openrouter")), []);
+  // Self-hosted InferFlux: model ids are operator config server-side, never vendor facts.
+  assert.deepEqual(JSON.parse(providerModelsJson("inferflux")), []);
   assert.throws(() => providerModelsJson("unknown-provider"));
 });
 
@@ -316,6 +318,11 @@ test("provider() routes the openai-compat + responses escape hatches", () => {
   // Known catalog provider WITHOUT a base_url → known_openai_compat resolves the spec.
   const known = runtime.provider("deepseek", "deepseek-chat", "key", undefined, undefined, 0);
   assert.equal(known.provider, "deepseek");
+
+  // Self-hosted InferFlux is a first-class catalog slug (ADR-0008): no base_url needed, the
+  // spec's default (http://127.0.0.1:8080/v1) resolves.
+  const inferflux = runtime.provider("inferflux", "llama3-8b", "local-key", undefined, undefined, 0);
+  assert.equal(inferflux.provider, "inferflux");
 
   // openaiResponses() direct factory (Responses API bearer form).
   const responses = runtime.openaiResponses("openai", "https://example.test/v1", "token", undefined, 0);

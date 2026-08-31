@@ -384,6 +384,190 @@ async fn responses_ingress_same_family_forwards_transparently() {
     assert_eq!(state.ledger.lock().unwrap().reserved("group:platform"), 0);
 }
 
+// ───────────────────────── InferFlux (ADR-0008) ─────────────────────────
+//
+// OpenAI-dialect ingress → an InferFlux (OpenAiCompat) upstream is same-family, so the call
+// rides the transparent plane; the catalog-declared `x-inferflux-session-id` affinity header
+// carries the neutral session key to the upstream's KV/prefix-cache lease layer.
+
+const INFERFLUX_SSE: &str = concat!(
+    "data: {\"choices\":[{\"delta\":{\"content\":\"Hello \"},\"finish_reason\":null,\"index\":0}]}\n\n",
+    "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0}]}\n\n",
+    "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":250,\"total_tokens\":1250}}\n\n",
+    "data: [DONE]\n\n"
+);
+
+/// A proxy fronting a mocked **InferFlux** upstream. The header matchers ARE the assertions:
+/// the mock would not answer (and the call would fail) without the real upstream key and the
+/// injected session-affinity header.
+async fn inferflux_state(upstream: &MockServer, sink: Arc<InMemorySink>) -> Arc<ProxyState> {
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(header("authorization", "Bearer local-key"))
+        .and(header("x-inferflux-session-id", "conv_1"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(INFERFLUX_SSE, "text/event-stream"))
+        .mount(upstream)
+        .await;
+
+    let keys = KeyStore::new();
+    keys.insert(VirtualKey {
+        id: "vk_demo".into(),
+        subject_id: Some("alice".into()),
+        group_id: Some("platform".into()),
+        upstream_ref: "up1".into(),
+        ..Default::default()
+    });
+    let mut providers = HashMap::new();
+    providers.insert(
+        "up1".into(),
+        ProviderRuntime::new().openai_compat(
+            "inferflux",
+            upstream.uri(),
+            "local-key",
+            Default::default(),
+            Some(0),
+            None,
+            None,
+        ),
+    );
+    Arc::new(ProxyState::new(
+        keys,
+        ProxyLedger::in_memory(),
+        sink,
+        providers,
+        None,
+    ))
+}
+
+#[tokio::test]
+async fn inferflux_transparent_stream_forwards_verbatim_and_injects_session_header() {
+    let upstream = MockServer::start().await;
+    let sink = Arc::new(InMemorySink::new());
+    let state = inferflux_state(&upstream, sink.clone()).await;
+
+    let response = build_app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("authorization", "Bearer vk_demo")
+                .header("content-type", "application/json")
+                // The neutral conversation key the proxy maps onto x-inferflux-session-id.
+                .header("x-sandhi-session", "conv_1")
+                .body(Body::from(
+                    r#"{"model":"llama3-8b","messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Transparent plane: the upstream's SSE bytes arrive byte-exact, including the
+    // InferFlux-shaped terminal usage frame (`choices: []`) and `[DONE]`.
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(body, INFERFLUX_SSE.as_bytes());
+
+    // One metered event, key-authoritative attribution, InferFlux's no-split usage.
+    let events = sink.events();
+    assert_eq!(events.len(), 1);
+    let ev = &events[0];
+    assert_eq!(ev.provider, "inferflux");
+    assert_eq!(ev.session_id.as_deref(), Some("conv_1"));
+    assert_eq!(ev.subject_id.as_deref(), Some("alice"));
+    assert_eq!(ev.tokens_in, 1000);
+    assert_eq!(ev.tokens_out, 250);
+    assert_eq!(ev.cache_read_tokens, 0);
+    assert_eq!(ev.billable_tokens(), 1250);
+    assert_eq!(state.ledger.lock().unwrap().reserved("group:platform"), 0);
+}
+
+#[tokio::test]
+async fn inferflux_attribution_never_reaches_the_upstream() {
+    // ADR-0001 §4 at the egress boundary: only the neutral session key crosses to the
+    // upstream. The virtual key's subject/group live in the metering event, nowhere else.
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(INFERFLUX_SSE, "text/event-stream"))
+        .mount(&upstream)
+        .await;
+
+    let sink = Arc::new(InMemorySink::new());
+    // Same provider topology as `inferflux_state`, but a permissive upstream mock so the
+    // received request can be inspected rather than matcher-gated.
+    let keys = KeyStore::new();
+    keys.insert(VirtualKey {
+        id: "vk_demo".into(),
+        subject_id: Some("alice".into()),
+        group_id: Some("platform".into()),
+        upstream_ref: "up1".into(),
+        ..Default::default()
+    });
+    let mut providers = HashMap::new();
+    providers.insert(
+        "up1".into(),
+        ProviderRuntime::new().openai_compat(
+            "inferflux",
+            upstream.uri(),
+            "local-key",
+            Default::default(),
+            Some(0),
+            None,
+            None,
+        ),
+    );
+    let state = Arc::new(ProxyState::new(
+        keys,
+        ProxyLedger::in_memory(),
+        sink.clone(),
+        providers,
+        None,
+    ));
+
+    let response = build_app(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("authorization", "Bearer vk_demo")
+                .header("content-type", "application/json")
+                .header("x-sandhi-session", "conv_1")
+                .body(Body::from(
+                    r#"{"model":"llama3-8b","messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let _ = axum::body::to_bytes(response.into_body(), usize::MAX).await;
+
+    let received = upstream.received_requests().await.unwrap();
+    assert_eq!(received.len(), 1);
+    let sent = &received[0];
+    for banned in [
+        "x-sandhi-subject-id",
+        "x-sandhi-group-id",
+        "x-sandhi-virtual-key",
+        "x-sandhi-run-id",
+    ] {
+        assert!(
+            !sent.headers.contains_key(banned),
+            "{banned} must never reach the upstream"
+        );
+    }
+    // And the session key rides the affinity header, never the body.
+    assert!(sent.headers.contains_key("x-inferflux-session-id"));
+    let body: serde_json::Value = serde_json::from_slice(&sent.body).unwrap();
+    assert!(
+        body.get("session_id").is_none() && body.get("subject_id").is_none(),
+        "the forwarded body must carry no session or attribution keys"
+    );
+}
+
 #[tokio::test]
 async fn block_capped_scope_with_unbounded_output_is_not_passed_through() {
     // A Block-capped same-family call with no max_output_tokens must NOT use the transparent plane:

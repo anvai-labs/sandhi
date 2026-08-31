@@ -54,6 +54,8 @@ def test_catalog_serves_curated_model_data():
         assert any(m["id"] == expected for m in models), slug
     # Aggregators stay empty (dynamic hosting catalogs -- live discovery).
     assert json.loads(sg.provider_models_json("openrouter")) == []
+    # Self-hosted InferFlux: model ids are operator config server-side, never vendor facts.
+    assert json.loads(sg.provider_models_json("inferflux")) == []
     with pytest.raises(KeyError):
         sg.provider_models_json("acme-unknown")
 
@@ -493,6 +495,11 @@ def test_provider_routes_openai_compat_and_responses_escape_hatches():
     # Known catalog provider WITHOUT a base_url → known_openai_compat resolves the spec.
     known = runtime.provider("deepseek", "deepseek-chat", "key", max_retries=0)
     assert known.provider == "deepseek"
+
+    # Self-hosted InferFlux is a first-class catalog slug (ADR-0008): no base_url needed,
+    # the spec default (http://127.0.0.1:8080/v1) resolves.
+    inferflux = runtime.provider("inferflux", "llama3-8b", "local-key", max_retries=0)
+    assert inferflux.provider == "inferflux"
 
     # openai_responses() direct factory.
     responses = runtime.openai_responses(

@@ -237,3 +237,54 @@ async fn ollama_stream_fixture_yields_expected_and_forwards_verbatim() {
         parse_expected(include_str!("fixtures/ollama/expected_usage.json"))
     );
 }
+
+// ───────────────────────── InferFlux (self-hosted OpenAI dialect, ADR-0008) ─────────────────────────
+//
+// InferFlux deviates from OpenAI's streaming shape in two tolerated ways (forward-compat,
+// not special cases): content chunks carry no `"usage": null` sibling and the first delta
+// has no `role`. The terminal usage frame reports NO cache split — the fixture pins that
+// the whole prompt meters as fresh input, not zero (the split lights up automatically if
+// InferFlux ever ships `prompt_tokens_details.cached_tokens` or DeepSeek-style hit/miss).
+
+#[tokio::test]
+async fn inferflux_complete_fixture_meters_full_prompt_as_fresh_input() {
+    let server = MockServer::start().await;
+    mock(
+        &server,
+        "/chat/completions",
+        "application/json",
+        include_str!("fixtures/inferflux/complete.json"),
+    )
+    .await;
+    let out = OpenAiCompat::new("inferflux", server.uri(), "local-key")
+        .complete(ProviderRequest::new(
+            "llama3-8b",
+            serde_json::json!({ "messages": [] }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        out.usage,
+        parse_expected(include_str!("fixtures/inferflux/expected_usage.json"))
+    );
+}
+
+#[tokio::test]
+async fn inferflux_stream_fixture_yields_expected_and_forwards_verbatim() {
+    let sse = include_str!("fixtures/inferflux/stream.sse");
+    let server = MockServer::start().await;
+    mock(&server, "/chat/completions", "text/event-stream", sse).await;
+    let stream = OpenAiCompat::new("inferflux", server.uri(), "local-key")
+        .stream(ProviderRequest::new(
+            "llama3-8b",
+            serde_json::json!({ "messages": [] }),
+        ))
+        .await
+        .unwrap();
+    let (forwarded, usage) = drain(stream).await;
+    assert_eq!(forwarded, sse.as_bytes());
+    assert_eq!(
+        usage,
+        parse_expected(include_str!("fixtures/inferflux/expected_usage.json"))
+    );
+}
