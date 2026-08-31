@@ -1820,6 +1820,7 @@ async fn handle(
             transparent_stream_response(
                 provider,
                 body,
+                request.metadata.session_id.clone(),
                 dialect,
                 accounting,
                 full_error_detail,
@@ -1832,6 +1833,7 @@ async fn handle(
             transparent_complete_response(
                 provider,
                 body,
+                request.metadata.session_id.clone(),
                 dialect,
                 accounting,
                 full_error_detail,
@@ -1949,9 +1951,11 @@ fn raw_response_to_axum(
 /// Transparent same-family non-streaming plane: forward the client's bytes verbatim, meter usage
 /// at the source, and return the upstream response unchanged (ADR-0004 D1). Enforcement rides on
 /// `accounting` exactly as on the typed path.
+#[allow(clippy::too_many_arguments)]
 async fn transparent_complete_response(
     provider: ProviderHandle,
     body: Bytes,
+    session: Option<String>,
     dialect: IngressDialect,
     mut accounting: RequestAccounting,
     full_error_detail: bool,
@@ -1970,8 +1974,16 @@ async fn transparent_complete_response(
             "transparent plane requires a raw forwarder",
         );
     };
+    // Only the neutral conversation key crosses this seam (ADR-0008 D3): it maps onto the
+    // catalog-declared vendor affinity header when one exists. Attribution (subject/group/
+    // virtual key) is key-authoritative metering input consumed by `usage_event`, never
+    // forwarded (ADR-0001 §4).
     match forwarder
-        .forward_metered(&upstream_path(provider.family(), gemini.as_ref()), body)
+        .forward_metered(
+            &upstream_path(provider.family(), gemini.as_ref()),
+            body,
+            session.as_deref(),
+        )
         .await
     {
         Ok((raw, mut usage)) => {
@@ -1994,9 +2006,11 @@ async fn transparent_complete_response(
 /// metered stream accumulates usage at the source; the terminal frame finalizes the reservation. A
 /// mid-stream disconnect settles the accrued (byte-approximate) partial via the `Drop` finalizer
 /// rather than releasing to zero (ADR-0005 D1), as on the typed streaming path.
+#[allow(clippy::too_many_arguments)]
 async fn transparent_stream_response(
     provider: ProviderHandle,
     body: Bytes,
+    session: Option<String>,
     dialect: IngressDialect,
     mut accounting: RequestAccounting,
     full_error_detail: bool,
@@ -2012,8 +2026,15 @@ async fn transparent_stream_response(
             "transparent plane requires a raw forwarder",
         );
     };
+    // Only the neutral conversation key crosses this seam (ADR-0008 D3): it maps onto the
+    // catalog-declared vendor affinity header when one exists. Attribution is metering
+    // input, never forwarded (ADR-0001 §4).
     let raw = match forwarder
-        .forward_stream_metered(&upstream_path(provider.family(), gemini.as_ref()), body)
+        .forward_stream_metered(
+            &upstream_path(provider.family(), gemini.as_ref()),
+            body,
+            session.as_deref(),
+        )
         .await
     {
         Ok(raw) => raw,

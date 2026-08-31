@@ -163,6 +163,9 @@ fn build_raw_forwarder(config: &ProviderTransportConfig) -> crate::raw::RawForwa
     .with_anthropic_auth(config.anthropic_auth_scheme)
     .with_gemini_auth(config.gemini_auth_scheme)
     .with_timeouts(timeouts.complete, timeouts.stream_setup, timeouts.idle)
+    .with_session_header(
+        crate::resolve_openai_compat_provider(&config.slug).and_then(|spec| spec.session_header),
+    )
 }
 
 #[derive(Clone)]

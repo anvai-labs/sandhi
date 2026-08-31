@@ -211,6 +211,24 @@ This stores the key in the vault under credential id **`anthropic:default`** and
 `keys list` shows registered credentials; `keys revoke <provider> <label>` removes one.
 ====
 
+[TIP]
+====
+**Self-hosted InferFlux** (ADR-0008) is a first-class OpenAI-compat slug with the default base
+`http://127.0.0.1:8080/v1`, so registration needs no `--base-url` on a default install:
+
+```bash
+# Keyless local server (InferFlux serves anonymous read+generate when no keys are configured):
+printf '\n' | cargo run -p sandhi-proxy --bin sandhi -- --admin-token admin-secret \
+  keys add inferflux default
+# Secured deployment: pipe the real key the same way as any provider.
+```
+
+Model ids are whatever you loaded in InferFlux's own `registry.yaml` — mint the vkey
+`--models` list against those. If the server runs with
+`runtime.scheduler.session_handles.enabled: true`, Sandhi's `x-sandhi-session` request header
+is mapped onto InferFlux's `x-inferflux-session-id` KV/prefix-cache affinity automatically.
+====
+
 
 == Step 3 — mint a virtual key
 

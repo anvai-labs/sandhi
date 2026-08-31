@@ -8,7 +8,7 @@ use crate::{
 };
 use crate::{parse_openai_usage, validate_openai_chat_messages};
 use async_trait::async_trait;
-use http::header::{HeaderMap, AUTHORIZATION, CONTENT_TYPE, HOST};
+use http::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE, HOST};
 use serde_json::{json, Value};
 
 /// An OpenAI-compatible provider. `base_url` is the API base (e.g. `https://api.openai.com/v1`);
@@ -22,6 +22,9 @@ pub struct OpenAiCompat {
     /// Vendor request-id header from the catalog spec (strategy-via-data): set for
     /// slugs whose id header deviates from the standard (e.g. moonshot).
     request_id_header: Option<&'static str>,
+    /// Vendor session-affinity request header from the catalog spec (strategy-via-data):
+    /// set for slugs that key KV/prefix-cache reuse per conversation (e.g. inferflux).
+    session_header: Option<&'static str>,
 }
 
 impl OpenAiCompat {
@@ -31,15 +34,15 @@ impl OpenAiCompat {
         api_key: impl Into<String>,
     ) -> Self {
         let slug = slug.into();
-        let request_id_header =
-            crate::resolve_openai_compat_provider(&slug).and_then(|spec| spec.request_id_header);
+        let spec = crate::resolve_openai_compat_provider(&slug);
         Self {
             client: crate::default_client(),
             slug,
             base_url: base_url.into(),
             api_key: api_key.into(),
             headers: HeaderMap::new(),
-            request_id_header,
+            request_id_header: spec.and_then(|spec| spec.request_id_header),
+            session_header: spec.and_then(|spec| spec.session_header),
         }
     }
 
@@ -62,6 +65,31 @@ impl OpenAiCompat {
     fn chat_url(&self) -> String {
         format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
     }
+
+    /// Per-request headers derived from the neutral `ProviderRequest`. Carries ONLY the
+    /// conversation-affinity key mapped onto the catalog-declared vendor header (ADR-0008 D3)
+    /// — `req.attribution` is deliberately unread: subject/group attribution rides outside
+    /// the cached prompt (ADR-0001 §4) and must never reach a provider header or body.
+    /// `try_from`, not `from_static`: catalog names are `&'static str` data, and a future
+    /// entry with invalid casing must be skipped, not panic the hot path.
+    fn affinity_headers(&self, req: &ProviderRequest) -> HeaderMap {
+        let mut out = self.headers.clone();
+        let Some(name) = self.session_header else {
+            return out;
+        };
+        let Some(value) = req
+            .session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return out;
+        };
+        if let (Ok(name), Ok(value)) = (HeaderName::try_from(name), HeaderValue::from_str(value)) {
+            out.insert(name, value);
+        }
+        out
+    }
 }
 
 #[async_trait]
@@ -72,6 +100,7 @@ impl Provider for OpenAiCompat {
 
     async fn complete(&self, req: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         validate_openai_chat_messages(&req.body)?;
+        let headers = self.affinity_headers(&req);
         let mut body = req.body;
         if let Some(obj) = body.as_object_mut() {
             obj.insert("stream".into(), Value::Bool(false));
@@ -80,7 +109,7 @@ impl Provider for OpenAiCompat {
             .client
             .post(self.chat_url())
             .bearer_auth(&self.api_key)
-            .headers(self.headers.clone())
+            .headers(headers)
             .json(&body)
             .send()
             .await
@@ -104,6 +133,7 @@ impl Provider for OpenAiCompat {
 
     async fn stream(&self, req: ProviderRequest) -> Result<ByteStream, ProviderError> {
         validate_openai_chat_messages(&req.body)?;
+        let headers = self.affinity_headers(&req);
         let mut body = req.body;
         if let Some(obj) = body.as_object_mut() {
             obj.insert("stream".into(), Value::Bool(true));
@@ -123,7 +153,7 @@ impl Provider for OpenAiCompat {
             .client
             .post(self.chat_url())
             .bearer_auth(&self.api_key)
-            .headers(self.headers.clone())
+            .headers(headers)
             .json(&body)
             .send()
             .await
@@ -332,6 +362,83 @@ mod tests {
         assert_eq!(
             sent["stream_options"]["show_usage_stats"], true,
             "the client's sibling field must survive — the raw plane already preserves it"
+        );
+    }
+
+    /// Session affinity (ADR-0008 D3): the catalog-declared vendor header carries the neutral
+    /// `session_id` — and only that. Attribution set on the request must never reach a header
+    /// or the body (ADR-0001 §4).
+    #[tokio::test]
+    async fn inferflux_session_header_rides_out_of_band() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(header("x-inferflux-session-id", "conv_42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+
+        let provider = OpenAiCompat::new("inferflux", server.uri(), "local-key");
+        let mut request = ProviderRequest::new("llama3-8b", json!({ "messages": [] }));
+        request.session_id = Some("conv_42".into());
+        request.attribution = crate::Attribution {
+            subject_id: Some("alice".into()),
+            group_id: Some("platform".into()),
+            ..Default::default()
+        };
+        provider.complete(request).await.unwrap();
+
+        let sent = &server.received_requests().await.unwrap()[0];
+        let body: serde_json::Value = serde_json::from_slice(&sent.body).unwrap();
+        assert!(
+            !sent.headers.contains_key("x-sandhi-subject-id")
+                && !sent.headers.contains_key("x-sandhi-group-id"),
+            "attribution must stay out-of-band"
+        );
+        assert!(
+            body.get("session_id").is_none()
+                && body.get("subject_id").is_none()
+                && body.get("group_id").is_none(),
+            "the wire body must carry no attribution or session keys"
+        );
+    }
+
+    #[tokio::test]
+    async fn slugs_without_a_session_header_fact_send_none() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+
+        let provider = OpenAiCompat::new("openai", server.uri(), "k");
+        let mut request = ProviderRequest::new("m", json!({ "messages": [] }));
+        request.session_id = Some("conv_42".into());
+        provider.complete(request).await.unwrap();
+
+        let sent = &server.received_requests().await.unwrap()[0];
+        assert!(
+            !sent.headers.contains_key("x-inferflux-session-id"),
+            "no vendor affinity header without a catalog fact"
+        );
+    }
+
+    #[tokio::test]
+    async fn blank_session_id_sends_no_header() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+
+        let provider = OpenAiCompat::new("inferflux", server.uri(), "local-key");
+        let mut request = ProviderRequest::new("llama3-8b", json!({ "messages": [] }));
+        request.session_id = Some("   ".into());
+        provider.complete(request).await.unwrap();
+
+        let sent = &server.received_requests().await.unwrap()[0];
+        assert!(
+            !sent.headers.contains_key("x-inferflux-session-id"),
+            "a blank session id must not produce an empty header"
         );
     }
 
