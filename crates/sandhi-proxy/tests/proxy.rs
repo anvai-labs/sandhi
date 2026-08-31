@@ -829,17 +829,24 @@ async fn inferflux_attribution_never_reaches_the_upstream() {
     let received = upstream.received_requests().await.unwrap();
     assert_eq!(received.len(), 1);
     let sent = &received[0];
-    for banned in [
-        "x-sandhi-subject-id",
-        "x-sandhi-group-id",
-        "x-sandhi-virtual-key",
-        "x-sandhi-run-id",
-    ] {
+    // Class-wide pin (ADR-0008 D4): NO sandhi-internal header reaches the upstream — not
+    // just today's known names, so a future x-sandhi-* addition (step ids, tenant ids, …)
+    // cannot cross the provider seam unnoticed (ADR-0001 §4).
+    for name in sent.headers.keys() {
         assert!(
-            !sent.headers.contains_key(banned),
-            "{banned} must never reach the upstream"
+            !name.as_str().starts_with("x-sandhi-"),
+            "{name} must never reach the upstream"
         );
     }
+    // The virtual key is sandhi-internal identity: the upstream sees only the
+    // operator-configured provider credential.
+    assert_eq!(
+        sent.headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer local-key"),
+        "the client's virtual key must be swapped for the provider key at the seam"
+    );
     // And the session key rides the affinity header, never the body.
     assert!(sent.headers.contains_key("x-inferflux-session-id"));
     let body: serde_json::Value = serde_json::from_slice(&sent.body).unwrap();

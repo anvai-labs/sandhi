@@ -82,8 +82,17 @@ The header carries the conversation key and nothing else. `subject_id`/`group_id
 identity is key-authoritative metering input consumed by `usage_event()`, and adapters never
 read `ProviderRequest::attribution` — enforced by construction, and pinned by a proxy
 negative test (`inferflux_attribution_never_reaches_the_upstream`) that fails if any
-`x-sandhi-*` attribution header or body key reaches the upstream. This is ADR-0001 §4 applied
+`x-sandhi-*` header or body key reaches the upstream (asserted class-wide over the egress
+header set, plus the credential swap). This is ADR-0001 §4 applied
 at the egress boundary.
+
+One privacy consequence of the design, accepted: on translation routes the conversation key
+may be a *declared* end-user id (OpenAI `user` / Anthropic `metadata.user_id`, ADR-0005 D7),
+so a client-chosen string rides the vendor affinity header and is visible to the upstream
+operator. It carries no sandhi attribution — the value is the client's own — but operators
+fronting third parties should treat affinity values as client-chosen, not secret. Declared
+and explicit ids are sanitized to RFC 9110 header-safe form before crossing (control bytes
+become `-`) so a malformed id can never silently disable session affinity.
 
 ### D5. Sandhi sends the header unconditionally; InferFlux's flag stays server-side.
 

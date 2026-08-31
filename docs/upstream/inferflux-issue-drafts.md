@@ -19,8 +19,9 @@ posting. Drafts below are ready to paste.
 
 InferFlux's radix prefix cache already accounts hits (per-request, internally —
 `RadixPrefixCache` / `InferenceResult`), but the response body's `usage` reports only
-`prompt_tokens` / `completion_tokens` / `total_tokens`
-(`server/http/http_server.cpp`, `BuildUsageBody`). The per-request split is currently
+`prompt_tokens` / `completion_tokens` / `total_tokens` (built inline in `BuildCompletionBody`,
+`server/http/http_server.cpp` ~728, and the streaming terminal usage frame ~3284). The
+per-request split is currently
 visible only as server-global aggregates on `GET /v1/admin/cache` (`hits`, `misses`,
 `matched_tokens`, `kv_reuse_tokens`), which cannot be attributed to a single call.
 

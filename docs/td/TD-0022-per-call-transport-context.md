@@ -34,11 +34,16 @@ is the discipline the trait change buys over a default-ignoring `…_with` defau
 ### D2 — One merge, single-sourced, transport-owned names untouchable.
 
 `merge_call_headers(base, call)` overlays the call's headers on the transport's static set;
-`strip_transport_owned` removes `Authorization`, `Host`, `Content-Type`, `Accept-Encoding`
+`strip_transport_owned` removes `Authorization`, `Host`, `Content-Type`, `Accept-Encoding`,
+and the family credential headers `x-api-key`, `x-goog-api-key`, and `anthropic-version`
+(the full single-sourced list is `TRANSPORT_OWNED_HEADERS` in `sandhi-providers/src/lib.rs`)
 from any caller-supplied set (static or per-call). A library consumer can never override the
-vaulted credential or the framing. In the OpenAI-compat adapter the catalog-declared session
+vaulted credential or the framing — reqwest appends same-named values added after a header
+map, so an unstripped credential name would put a second, attacker-supplied credential on
+the wire. In the OpenAI-compat adapter the catalog-declared session
 affinity header (ADR-0008 D3) is inserted **after** the merge, so the authoritative
-per-request affinity value also survives per-call spoofs.
+per-request affinity value also survives per-call spoofs (pinned by
+`per_call_spoof_cannot_override_the_affinity_header` in `openai.rs`).
 
 ### D3 — The four families that dropped static headers now honor them.
 

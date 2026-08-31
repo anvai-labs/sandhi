@@ -34,8 +34,12 @@ regenerate byte-identical). No agent attribution in commits (hook + CI enforced)
 
 **S2 · Cut the release** *(gated by S1)*
 Follow the 0.2.0 runbook: CHANGELOG PR → tag → crates.io + PyPI + npm + GH binaries,
-`scripts/verify-release.py`. Version stamping is external (workspace is `0.0.0`); pick
-the next patch/minor per the runbook. Note for consumers: **`CHAT_CONTRACT_MINOR` is
+`scripts/verify-release.py`. Version stamping is external (workspace is `0.0.0`); the bump
+**must be a minor** (0.3.0), never a patch: the stack makes compile-breaking changes to
+`sandhi-providers`' public Rust API (`ChatProvider::complete`/`stream` gained a mandatory
+`call_headers` parameter, `ProviderRequest` gained the public `extra_headers` field, and
+`RawForwarder::forward_metered`/`forward_stream_metered` widened), so a consumer pinned to
+`^0.2` must not auto-upgrade into it. Note for consumers: **`CHAT_CONTRACT_MINOR` is
 unchanged** (zero schema drift) — no contract-handshake bumps needed downstream.
 *Done when:* the wheel/carrier the consumers pin is live. **Unblocks V1, V2, P2.**
 

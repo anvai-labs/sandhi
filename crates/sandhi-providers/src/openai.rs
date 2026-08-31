@@ -79,15 +79,19 @@ impl OpenAiCompat {
         let Some(name) = self.session_header else {
             return out;
         };
+        // Sanitized, not skipped: a session id carrying a control byte (raw FFI input that
+        // bypassed core derivation) must still engage the affinity header — silently
+        // dropping it would disable session affinity for the whole conversation.
         let Some(value) = req
             .session_id
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
+            .map(sandhi_core::sanitize_affinity_value)
         else {
             return out;
         };
-        if let (Ok(name), Ok(value)) = (HeaderName::try_from(name), HeaderValue::from_str(value)) {
+        if let (Ok(name), Ok(value)) = (HeaderName::try_from(name), HeaderValue::from_str(&value)) {
             out.insert(name, value);
         }
         out
@@ -503,6 +507,73 @@ mod tests {
         assert!(
             !sent.headers.contains_key("x-inferflux-session-id"),
             "a blank session id must not produce an empty header"
+        );
+    }
+
+    /// TD-0022 D2 + ADR-0008 D3: the affinity header is inserted AFTER the per-call merge,
+    /// so a per-call spoof of the vendor affinity name (any FFI `wire_headers_json` caller)
+    /// must never win over the authoritative session value.
+    #[tokio::test]
+    async fn per_call_spoof_cannot_override_the_affinity_header() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(header("x-inferflux-session-id", "conv_42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+
+        let provider = OpenAiCompat::new("inferflux", server.uri(), "local-key");
+        let mut request = ProviderRequest::new("llama3-8b", json!({ "messages": [] }));
+        request.session_id = Some("conv_42".into());
+        let mut call = http::HeaderMap::new();
+        call.insert(
+            HeaderName::from_static("x-inferflux-session-id"),
+            HeaderValue::from_static("spoofed-session"),
+        );
+        request.extra_headers = call;
+        provider.complete(request).await.unwrap();
+
+        let sent = &server.received_requests().await.unwrap()[0];
+        assert_eq!(
+            sent.headers
+                .get("x-inferflux-session-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("conv_42"),
+            "the session-derived affinity value must survive per-call spoofs"
+        );
+        assert_eq!(
+            sent.headers
+                .get_all("x-inferflux-session-id")
+                .iter()
+                .count(),
+            1,
+            "exactly one affinity header, no spoofed duplicate"
+        );
+    }
+
+    /// A session id carrying a control byte (raw FFI input that bypassed core derivation)
+    /// still engages the affinity header: the value is sanitized, never silently dropped.
+    #[tokio::test]
+    async fn control_bytes_in_session_id_still_send_the_affinity_header() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(header("x-inferflux-session-id", "acct-42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+
+        let provider = OpenAiCompat::new("inferflux", server.uri(), "local-key");
+        let mut request = ProviderRequest::new("llama3-8b", json!({ "messages": [] }));
+        request.session_id = Some("acct\n42".into());
+        provider.complete(request).await.unwrap();
+
+        let sent = &server.received_requests().await.unwrap()[0];
+        assert_eq!(
+            sent.headers
+                .get("x-inferflux-session-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("acct-42"),
+            "control bytes are mapped to '-', not used to silently disable affinity"
         );
     }
 

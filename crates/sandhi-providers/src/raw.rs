@@ -341,13 +341,18 @@ impl RawForwarder {
             }
         }
         // Session affinity LAST, so it stays authoritative over any caller-supplied copy of
-        // the declared name — the same ordering as the typed plane's request_headers.
+        // the declared name — the same ordering as the typed plane's request_headers. The
+        // value is sanitized like the typed plane: a control byte must not silently disable
+        // affinity by making the header unbuildable.
         if let (Some(name), Some(value)) = (
             self.session_header,
-            session.map(str::trim).filter(|value| !value.is_empty()),
+            session
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(sandhi_core::sanitize_affinity_value),
         ) {
             if let (Ok(name), Ok(value)) =
-                (HeaderName::try_from(name), HeaderValue::from_str(value))
+                (HeaderName::try_from(name), HeaderValue::from_str(&value))
             {
                 headers.insert(name, value);
             }
