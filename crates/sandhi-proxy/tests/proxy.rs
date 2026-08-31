@@ -985,6 +985,10 @@ async fn streaming_passes_through_and_emits_usage() {
                 .set_body_raw(sse, "text/event-stream")
                 .insert_header("x-request-id", "req-stream-abc")
                 .insert_header("x-ratelimit-remaining-requests", "42")
+                .insert_header(
+                    "traceparent",
+                    "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+                )
                 .insert_header("server", "must-not-leak"),
         )
         .mount(&upstream)
@@ -1008,6 +1012,12 @@ async fn streaming_passes_through_and_emits_usage() {
     assert_eq!(
         response.headers().get("x-request-id").unwrap(),
         "req-stream-abc"
+    );
+    // The child W3C trace context the upstream echoed survives the transparent plane —
+    // response-to-span linkage (InferFlux echoes one on every generation response).
+    assert_eq!(
+        response.headers().get("traceparent").unwrap(),
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
     );
     assert_eq!(
         response
