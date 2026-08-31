@@ -256,8 +256,9 @@ fn decode_finish_reason(reason: &str) -> FinishReasonV1 {
 fn decode_cohere_stream(mut raw: ByteStream, requested_model: String) -> ChatEventStream {
     use futures_util::StreamExt;
     let stream = async_stream::try_stream! {
-        // TD-0014 P1: the shared bounded/O(n) splitter, same one the raw plane uses.
-        let mut splitter = crate::linesplit::LineSplitter::new(crate::LINE_SNIFF_BUDGET);
+        // TD-0014 P1: the shared bounded/O(n) splitter. The ceiling is the typed one, not
+        // the raw plane's sniff budget — see MAX_TYPED_LINE_BYTES for why they differ.
+        let mut splitter = crate::linesplit::LineSplitter::new(crate::MAX_TYPED_LINE_BYTES);
         let mut started = false;
         let mut open_tools = BTreeSet::<u32>::new();
         let mut emitted_usage = false;
@@ -319,7 +320,7 @@ fn decode_cohere_stream(mut raw: ByteStream, requested_model: String) -> ChatEve
                 if splitter.over_budget() {
                     Err(ProviderError::Transport(format!(
                         "upstream stream exceeded {} bytes with no line boundary",
-                        crate::LINE_SNIFF_BUDGET
+                        crate::MAX_TYPED_LINE_BYTES
                     )))?;
                 }
             }
@@ -350,9 +351,11 @@ mod tests {
     #[tokio::test]
     async fn a_newline_free_stream_is_bounded_and_errors_rather_than_growing() {
         use futures_util::StreamExt;
-        // 4 MiB with no line boundary anywhere — comfortably past LINE_SNIFF_BUDGET (64 KiB).
+        // 16 MiB with no line boundary anywhere — past MAX_TYPED_LINE_BYTES (8 MiB). The bound
+        // exists to stop unbounded growth, so the test input has to be genuinely pathological;
+        // a merely LARGE frame is legitimate and is covered by the regression test above.
         let filler = bytes::Bytes::from(vec![b'x'; 64 * 1024]);
-        let chunks: Vec<_> = (0..64)
+        let chunks: Vec<_> = (0..256)
             .map(|_| {
                 Ok(crate::StreamChunk {
                     data: filler.clone(),

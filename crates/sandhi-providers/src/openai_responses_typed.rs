@@ -509,8 +509,9 @@ async fn aggregate_stream(mut stream: ChatEventStream) -> Result<ChatResponseV1,
 fn decode_responses_stream(mut raw: ByteStream, requested_model: String) -> ChatEventStream {
     use futures_util::StreamExt;
     let stream = async_stream::try_stream! {
-        // TD-0014 P1: the shared bounded/O(n) splitter, same one the raw plane uses.
-        let mut splitter = crate::linesplit::LineSplitter::new(crate::LINE_SNIFF_BUDGET);
+        // TD-0014 P1: the shared bounded/O(n) splitter. The ceiling is the typed one, not
+        // the raw plane's sniff budget — see MAX_TYPED_LINE_BYTES for why they differ.
+        let mut splitter = crate::linesplit::LineSplitter::new(crate::MAX_TYPED_LINE_BYTES);
         let mut started = false;
         let mut open_tools = BTreeMap::<u32, ()>::new();
         let mut emitted_usage = false;
@@ -609,7 +610,7 @@ fn decode_responses_stream(mut raw: ByteStream, requested_model: String) -> Chat
                 if splitter.over_budget() {
                     Err(ProviderError::Transport(format!(
                         "upstream stream exceeded {} bytes with no line boundary",
-                        crate::LINE_SNIFF_BUDGET
+                        crate::MAX_TYPED_LINE_BYTES
                     )))?;
                 }
             }
@@ -634,6 +635,55 @@ fn decode_responses_stream(mut raw: ByteStream, requested_model: String) -> Chat
 #[cfg(test)]
 mod tests {
 
+    /// TD-0014 P1 regression. OpenAI Responses puts the COMPLETE response object — all generated
+    /// output included — in the single `response.completed` SSE line, and that is also the line
+    /// carrying the usage. A long generation makes it ~130 KB, which arrives across many socket
+    /// reads, so the decoder buffers past 64 KiB before the newline lands.
+    ///
+    /// Sharing the raw plane's 64 KiB sniff budget as the typed hard bound therefore killed a
+    /// working stream AND destroyed its metering. Caught by adversarial review before merge; the
+    /// fix is `MAX_TYPED_LINE_BYTES`, a ceiling real traffic cannot reach. Note this only
+    /// reproduces with CHUNKED delivery — a single-chunk delivery drains the complete line before
+    /// the budget is ever consulted, which is why the first attempt at this test passed.
+    #[tokio::test]
+    async fn a_long_generation_terminal_frame_is_not_killed_by_the_line_bound() {
+        use futures_util::StreamExt;
+        // ~32k output tokens of text ≈ 128 KB in ONE data: line. Nothing pathological.
+        let long_text = "word ".repeat(26_000);
+        let wire = format!(
+            "data: {{\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}}\n\n\
+             data: {{\"type\":\"response.completed\",\"response\":{{\"status\":\"completed\",\
+             \"output\":[{{\"type\":\"message\",\"text\":\"{long_text}\"}}],\
+             \"usage\":{{\"input_tokens\":5,\"output_tokens\":32000}}}}}}\n\n"
+        );
+        eprintln!("terminal line is {} bytes", wire.len());
+        // Delivered the way a real socket delivers it: 16 KB reads, so the terminal frame is
+        // still in flight across many chunks before its newline arrives.
+        let bytes = wire.into_bytes();
+        let chunks: Vec<_> = bytes
+            .chunks(16 * 1024)
+            .map(|c| {
+                Ok(crate::StreamChunk {
+                    data: bytes::Bytes::copy_from_slice(c),
+                    usage: None,
+                    usage_running: None,
+                    attempts: 1,
+                })
+            })
+            .collect();
+        let raw: crate::ByteStream = Box::pin(futures_util::stream::iter(chunks));
+        let results: Vec<_> = super::decode_responses_stream(raw, "gpt-x".into())
+            .collect::<Vec<_>>()
+            .await;
+        let errored = results
+            .iter()
+            .any(|r| matches!(r, Err(crate::ProviderError::Transport(_))));
+        assert!(
+            !errored,
+            "a long but entirely legitimate generation must not be killed by the line budget"
+        );
+    }
+
     /// TD-0014 P1 (gap G01): a newline-free upstream stream must stay BOUNDED and fail loudly.
     ///
     /// The raw plane may drop an over-budget line and keep going — its bytes were already
@@ -643,9 +693,11 @@ mod tests {
     #[tokio::test]
     async fn a_newline_free_stream_is_bounded_and_errors_rather_than_growing() {
         use futures_util::StreamExt;
-        // 4 MiB with no line boundary anywhere — comfortably past LINE_SNIFF_BUDGET (64 KiB).
+        // 16 MiB with no line boundary anywhere — past MAX_TYPED_LINE_BYTES (8 MiB). The bound
+        // exists to stop unbounded growth, so the test input has to be genuinely pathological;
+        // a merely LARGE frame is legitimate and is covered by the regression test above.
         let filler = bytes::Bytes::from(vec![b'x'; 64 * 1024]);
-        let chunks: Vec<_> = (0..64)
+        let chunks: Vec<_> = (0..256)
             .map(|_| {
                 Ok(crate::StreamChunk {
                     data: filler.clone(),

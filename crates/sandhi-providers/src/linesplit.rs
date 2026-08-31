@@ -155,6 +155,59 @@ mod tests {
     }
 
     #[test]
+    fn a_large_but_complete_line_survives_chunked_delivery() {
+        // The distinction the budget must respect: "one line larger than typical, still
+        // terminated" is legitimate traffic — OpenAI Responses puts the whole final response,
+        // usage included, in one SSE line. "No line boundary at all" is pathological.
+        //
+        // Note what `over_budget` actually means: it is true whenever the PENDING line exceeds
+        // the budget, which for a large line is true mid-delivery, before its newline lands. The
+        // decoders consult it after every chunk, so the only thing keeping legitimate traffic
+        // alive is that the ceiling sits far above any real frame. This test therefore models
+        // production — ceiling well above the line — and asserts the bound never fires at ANY
+        // point during delivery, not merely at the end.
+        let budget = 8 * 1024 * 1024;
+        let mut splitter = LineSplitter::new(budget);
+        let mut wire = vec![b'a'; 130 * 1024]; // a realistic long-generation terminal frame
+        wire.push(b'\n');
+        let mut lines = Vec::new();
+        for chunk in wire.chunks(16 * 1024) {
+            splitter.push(chunk);
+            while let Some(line) = splitter.next_line() {
+                lines.push(line);
+            }
+            assert!(
+                !splitter.over_budget(),
+                "the bound must not fire part-way through a legitimate frame"
+            );
+        }
+        assert_eq!(lines.len(), 1, "the complete line must be delivered");
+        assert_eq!(
+            lines[0].len(),
+            wire.len(),
+            "delivered intact, not truncated"
+        );
+    }
+
+    #[test]
+    fn over_budget_tracks_the_pending_line_and_clears_when_it_completes() {
+        // Pins the semantics the test above depends on, so nobody has to infer them: the bound is
+        // about bytes held with no boundary, and a completed line releases them.
+        let mut splitter = LineSplitter::new(1024);
+        splitter.push(&vec![b'a'; 2048]);
+        assert!(
+            splitter.over_budget(),
+            "2 KiB pending against a 1 KiB budget"
+        );
+        splitter.push(b"\n");
+        assert!(splitter.next_line().is_some());
+        assert!(
+            !splitter.over_budget(),
+            "delivering the line clears the pending bytes"
+        );
+    }
+
+    #[test]
     fn a_newline_free_stream_is_reported_over_budget() {
         // The bound that did not exist in the typed decoders (gap G01).
         let mut splitter = LineSplitter::new(BUDGET);

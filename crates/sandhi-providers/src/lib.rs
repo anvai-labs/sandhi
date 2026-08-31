@@ -302,6 +302,22 @@ pub trait Provider: Send + Sync {
 /// keeping the worst-case buffer small.
 const LINE_SNIFF_BUDGET: usize = 64 * 1024;
 
+/// Hard ceiling on a single line in the **typed** decoders (TD-0014 P1). Deliberately far larger
+/// than [`LINE_SNIFF_BUDGET`], because the two bounds do different jobs and the consequences of
+/// hitting them are not comparable.
+///
+/// `LINE_SNIFF_BUDGET` bounds *sniffing*: past it the raw plane stops looking for usage but keeps
+/// forwarding bytes, so the cost is usage accuracy. A typed decoder emits decoded **content**, so
+/// its bound can only be a last-resort guard against unbounded growth — never a threshold real
+/// traffic can reach.
+///
+/// Real traffic reaches 64 KiB easily. OpenAI's Responses API puts the **entire final response
+/// object**, all generated output included, in the single `response.completed` SSE line: a long
+/// generation is comfortably past 128 KiB, and that is the line carrying the usage. Gemini's
+/// `inlineData` parts can be larger still. 8 MiB sits far above any legitimate frame and far
+/// below unbounded; worst-case memory is this times the concurrent typed streams.
+pub(crate) const MAX_TYPED_LINE_BYTES: usize = 8 * 1024 * 1024;
+
 /// Wrap a provider's byte stream in the metered pass-through: forward every upstream chunk
 /// verbatim (O(1) forwarding, ADR-0047 D9) while running `sniff` over each complete newline-
 /// delimited line to accumulate usage; the terminal item carries the finalized usage.
