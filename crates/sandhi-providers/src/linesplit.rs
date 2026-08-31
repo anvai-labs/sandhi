@@ -33,12 +33,14 @@ pub(crate) struct LineSplitter {
     /// bytes are searched, which is what makes a newline-*free* stream O(n) rather than O(n²).
     searched_to: usize,
     budget: usize,
-    /// Bytes examined by newline searches. Not used in production logic — it exists so the O(n)
+    /// Bytes examined by newline searches. Compiled out of release builds — it exists so the O(n)
     /// property can be asserted deterministically instead of by timing, which would flake.
+    #[cfg(test)]
     scanned: usize,
     /// Bytes moved by compaction, for the same reason. Together with `scanned` these cover both
     /// halves of the cost; an earlier version tracked only the search and certified a linearity
     /// the code did not have.
+    #[cfg(test)]
     compacted: usize,
 }
 
@@ -49,7 +51,9 @@ impl LineSplitter {
             consumed: 0,
             searched_to: 0,
             budget,
+            #[cfg(test)]
             scanned: 0,
+            #[cfg(test)]
             compacted: 0,
         }
     }
@@ -68,11 +72,14 @@ impl LineSplitter {
         let found = self.buf[self.searched_to..]
             .iter()
             .position(|byte| *byte == b'\n');
-        let examined = match found {
-            Some(rel) => rel + 1,
-            None => self.buf.len() - self.searched_to,
-        };
-        self.scanned = self.scanned.saturating_add(examined);
+        #[cfg(test)]
+        {
+            let examined = match found {
+                Some(rel) => rel + 1,
+                None => self.buf.len() - self.searched_to,
+            };
+            self.scanned = self.scanned.saturating_add(examined);
+        }
         match found {
             Some(rel) => {
                 let newline = self.searched_to + rel;
@@ -93,9 +100,12 @@ impl LineSplitter {
     /// most once per byte overall rather than once per line.
     fn compact_if_worthwhile(&mut self) {
         if self.consumed >= 4096 && self.consumed * 2 >= self.buf.len() {
-            self.compacted = self
-                .compacted
-                .saturating_add(self.buf.len() - self.consumed);
+            #[cfg(test)]
+            {
+                self.compacted = self
+                    .compacted
+                    .saturating_add(self.buf.len() - self.consumed);
+            }
             self.buf.drain(..self.consumed);
             self.searched_to -= self.consumed;
             self.consumed = 0;
