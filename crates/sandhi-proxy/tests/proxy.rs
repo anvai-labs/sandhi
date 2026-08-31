@@ -2159,3 +2159,321 @@ async fn translation_plane_streams_hold_admission_slots_too() {
     let _ = shutdown_tx.send(());
     let _ = tokio::time::timeout(std::time::Duration::from_secs(3), server).await;
 }
+
+// ---------------------------------------------------------------------------
+// TD-0014 P3 (gaps G03, G19): connection-level limits, slowloris defence,
+// drain that actually closes connections.
+// ---------------------------------------------------------------------------
+
+/// Like `hanging_sse_upstream`, but reports when the proxy side closes the
+/// upstream connection — the observable for "drain actually aborts streams".
+async fn hanging_sse_upstream_watch() -> (String, Arc<std::sync::atomic::AtomicBool>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let closed2 = closed.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let closed = closed2.clone();
+            tokio::spawn(async move {
+                let mut buf = [0u8; 8192];
+                let _ = sock.read(&mut buf).await;
+                let _ = sock
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n\
+                          data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n",
+                    )
+                    .await;
+                let _ = sock.flush().await;
+                // Hold the stream open, but notice EOF when the proxy aborts us.
+                loop {
+                    match sock.read(&mut buf).await {
+                        Ok(0) | Err(_) => {
+                            closed.store(true, std::sync::atomic::Ordering::SeqCst);
+                            return;
+                        }
+                        Ok(_) => {}
+                    }
+                }
+            });
+        }
+    });
+    (format!("http://{addr}"), closed)
+}
+
+/// Stand up the proxy on an ephemeral port with explicit connection limits.
+#[allow(clippy::too_many_arguments)]
+async fn serve_with_limits(
+    upstream_uri: String,
+    max_connections: usize,
+    max_connections_per_ip: usize,
+    header_read_timeout_secs: u64,
+    grace: std::time::Duration,
+) -> (
+    std::net::SocketAddr,
+    reqwest::Client,
+    tokio::task::JoinHandle<std::io::Result<()>>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let sink = Arc::new(InMemorySink::new());
+    let mut inner = ProxyState::new(
+        {
+            let keys = KeyStore::new();
+            keys.insert(VirtualKey {
+                id: "vk_demo".into(),
+                subject_id: Some("alice".into()),
+                group_id: Some("platform".into()),
+                upstream_ref: "up1".into(),
+                ..Default::default()
+            });
+            keys
+        },
+        ProxyLedger::in_memory(),
+        sink,
+        {
+            let mut providers = HashMap::new();
+            providers.insert(
+                "up1".into(),
+                ProviderRuntime::new().openai_compat(
+                    "openai",
+                    upstream_uri,
+                    "REAL-KEY",
+                    Default::default(),
+                    Some(0),
+                    None,
+                    None,
+                ),
+            );
+            providers
+        },
+        None,
+    );
+    inner.max_connections = max_connections;
+    inner.max_connections_per_ip = max_connections_per_ip;
+    inner.header_read_timeout_secs = header_read_timeout_secs;
+    inner.max_in_flight_ai_requests = max_connections * 4; // keep AI admission out of the way
+    let state = Arc::new(inner);
+
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = probe.local_addr().unwrap();
+    drop(probe);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(sandhi_proxy::serve_with_shutdown_timeout(
+        state,
+        addr,
+        async {
+            let _ = shutdown_rx.await;
+        },
+        grace,
+    ));
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    (addr, reqwest::Client::new(), server, shutdown_tx)
+}
+
+/// A shed connection ends as EOF (clean close) or ECONNRESET (close with the
+/// request still unread in the kernel buffer) — both mean "closed without a
+/// response", which is what the cap promises.
+fn assert_shed_without_response(result: &std::io::Result<usize>, buf: &[u8]) {
+    let shed = match result {
+        Ok(0) => buf.is_empty(),
+        Err(e) => e.kind() == std::io::ErrorKind::ConnectionReset && buf.is_empty(),
+        Ok(_) => false,
+    };
+    assert!(
+        shed,
+        "over-cap connection must be closed without a response (got {result:?}, {} bytes)",
+        buf.len()
+    );
+}
+
+/// G03: at `max_connections`, new TCP connections are closed without a
+/// response; closing a held connection frees the slot. Held connections are
+/// raw sockets parked mid-request-head — deterministic, no keep-alive pools,
+/// no upstream.
+#[tokio::test]
+async fn connection_cap_sheds_new_connections_and_recovers_on_close() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (upstream, _closed) = hanging_sse_upstream_watch().await;
+    let (addr, _client, server, shutdown_tx) =
+        serve_with_limits(upstream, 2, 0, 30, std::time::Duration::from_secs(1)).await;
+
+    // Two connections parked mid-head: accepted, then holding the cap.
+    let park = |addr| async move {
+        let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
+        sock.write_all(b"GET /healthz HTTP/1.1\r\nhost: x\r\n") // no final CRLF
+            .await
+            .unwrap();
+        sock
+    };
+    let held1 = park(addr).await;
+    let held2 = park(addr).await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // Third connection: accepted at TCP then closed without a response.
+    let mut third = tokio::net::TcpStream::connect(addr).await.unwrap();
+    third
+        .write_all(b"GET /healthz HTTP/1.1\r\nhost: x\r\n\r\n")
+        .await
+        .unwrap();
+    let mut buf = Vec::new();
+    let result = third.read_to_end(&mut buf).await;
+    assert_shed_without_response(&result, &buf);
+
+    // Freeing a held slot admits the next connection.
+    drop(held1);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let mut fourth = tokio::net::TcpStream::connect(addr).await.unwrap();
+    fourth
+        .write_all(b"GET /healthz HTTP/1.1\r\nhost: x\r\nconnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    fourth.read_to_end(&mut response).await.unwrap();
+    assert!(
+        response.starts_with(b"HTTP/1.1 200"),
+        "freed slot must admit a real request, got: {}",
+        String::from_utf8_lossy(&response)
+    );
+
+    drop(held2);
+    let _ = shutdown_tx.send(());
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), server).await;
+}
+
+/// G03: a connection that never finishes its request head is closed after the
+/// header-read timeout (slowloris), while normal traffic flows.
+#[tokio::test]
+async fn slowloris_connections_are_closed_after_the_header_read_timeout() {
+    let (upstream, _closed) = hanging_sse_upstream_watch().await;
+    let (addr, client, server, shutdown_tx) =
+        serve_with_limits(upstream, 16, 64, 1, std::time::Duration::from_secs(1)).await;
+
+    // The slowloris: start the request head, then stall. (A connection that
+    // sends NOTHING is treated by hyper as idle keep-alive and is deliberately
+    // exempt from the header timeout; silent-idle conns are bounded by the
+    // connection caps instead. Documented in TD-0014.)
+    let mut loris = tokio::net::TcpStream::connect(addr).await.unwrap();
+    use tokio::io::AsyncWriteExt;
+    loris.write_all(b"G").await.unwrap();
+    let started = std::time::Instant::now();
+    let mut buf = [0u8; 16];
+    use tokio::io::AsyncReadExt;
+    let n = loris.read(&mut buf).await.unwrap_or(0);
+    let elapsed = started.elapsed();
+    assert_eq!(
+        n, 0,
+        "a silent connection must be closed by the header-read timeout"
+    );
+    assert!(
+        elapsed >= std::time::Duration::from_millis(500),
+        "closed too eagerly at {elapsed:?} — that is not the header timeout"
+    );
+
+    // Normal traffic is unaffected while the loris was parked.
+    let resp = client
+        .get(format!("http://{addr}/healthz"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let _ = shutdown_tx.send(());
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), server).await;
+}
+
+/// Adversarial-review finding 2 regression (#169): after the grace deadline the
+/// serve future must NOT leave hung streams attached — the upstream must see
+/// the connection close and the gauge must return to zero.
+#[tokio::test]
+async fn drain_at_grace_expiry_actually_closes_hung_connections() {
+    let (upstream, upstream_closed) = hanging_sse_upstream_watch().await;
+    let (addr, client, server, shutdown_tx) =
+        serve_with_limits(upstream, 16, 64, 30, std::time::Duration::from_secs(1)).await;
+    let url = format!("http://{addr}/v1/chat/completions");
+
+    let holder = tokio::spawn(async move {
+        let mut resp = client
+            .post(url)
+            .header("authorization", "Bearer vk_demo")
+            .json(&serde_json::json!({
+                "model": "gpt-4o",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": true
+            }))
+            .send()
+            .await
+            .expect("admitted");
+        let _ = resp.chunk().await.expect("chunk").expect("chunk");
+        std::future::pending::<()>().await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // Shutdown: grace is 1s; the hung stream does NOT finish inside it.
+    let _ = shutdown_tx.send(());
+    let drained = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+    assert!(
+        drained.is_ok(),
+        "serve did not return within the grace window"
+    );
+    if let Ok(Err(error)) = drained {
+        panic!("serve failed: {error}");
+    }
+
+    // The point of the test: the hung connection did not outlive the deadline.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(
+        upstream_closed.load(std::sync::atomic::Ordering::SeqCst),
+        "the upstream connection must be closed once the grace deadline passes — \
+         a detached task kept it (and its slot, lease and gauge) alive"
+    );
+    holder.abort();
+}
+
+/// G19: the per-IP cap sheds a second connection from the same peer.
+#[tokio::test]
+async fn per_ip_connection_cap_sheds_and_recovers() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (upstream, _closed) = hanging_sse_upstream_watch().await;
+    let (addr, _client, server, shutdown_tx) =
+        serve_with_limits(upstream, 16, 1, 30, std::time::Duration::from_secs(1)).await;
+
+    // First connection from 127.0.0.1 parks mid-head.
+    let mut held = tokio::net::TcpStream::connect(addr).await.unwrap();
+    held.write_all(b"GET /healthz HTTP/1.1\r\nhost: x\r\n")
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // Second connection from the SAME peer: shed.
+    let mut second = tokio::net::TcpStream::connect(addr).await.unwrap();
+    second
+        .write_all(b"GET /healthz HTTP/1.1\r\nhost: x\r\n\r\n")
+        .await
+        .unwrap();
+    let mut buf = Vec::new();
+    let result = second.read_to_end(&mut buf).await;
+    assert_shed_without_response(&result, &buf);
+
+    // Freeing the held connection admits the next one.
+    drop(held);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let mut third = tokio::net::TcpStream::connect(addr).await.unwrap();
+    third
+        .write_all(b"GET /healthz HTTP/1.1\r\nhost: x\r\nconnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    third.read_to_end(&mut response).await.unwrap();
+    assert!(
+        response.starts_with(b"HTTP/1.1 200"),
+        "freed per-IP slot must admit a real request, got: {}",
+        String::from_utf8_lossy(&response)
+    );
+
+    let _ = shutdown_tx.send(());
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), server).await;
+}

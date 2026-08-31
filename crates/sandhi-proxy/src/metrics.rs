@@ -185,6 +185,8 @@ pub struct Metrics {
     /// Open streaming response bodies. Outside the registry lock on purpose: touched twice per
     /// stream by the body's own lifetime. TD-0014 D6 — no bound ships unobservable.
     streams_open: AtomicI64,
+    /// Open TCP connections (TD-0014 P3). Same reasoning, same lifetime discipline.
+    connections_open: AtomicI64,
 }
 
 impl Metrics {
@@ -212,6 +214,16 @@ impl Metrics {
     pub fn stream_open_guard(self: &Arc<Self>) -> StreamOpenGuard {
         self.stream_opened();
         StreamOpenGuard {
+            metrics: Arc::clone(self),
+        }
+    }
+
+    /// Open a TCP connection and return the drop guard that closes its count.
+    /// Lifetime discipline identical to the streams gauge: the guard lives with
+    /// the connection task, so aborts and disconnects balance the count.
+    pub fn connection_open_guard(self: &Arc<Self>) -> ConnectionOpenGuard {
+        self.connections_open.fetch_add(1, Ordering::AcqRel);
+        ConnectionOpenGuard {
             metrics: Arc::clone(self),
         }
     }
@@ -347,6 +359,11 @@ impl Metrics {
         out.push_str("# HELP sandhi_streams_open Streaming response bodies currently open.\n");
         out.push_str("# TYPE sandhi_streams_open gauge\n");
         let _ = writeln!(out, "sandhi_streams_open {streams_open}");
+
+        let connections_open = self.connections_open.load(Ordering::Acquire);
+        out.push_str("# HELP sandhi_connections_open TCP connections currently served.\n");
+        out.push_str("# TYPE sandhi_connections_open gauge\n");
+        let _ = writeln!(out, "sandhi_connections_open {connections_open}");
 
         out.push_str(
             "# HELP sandhi_rate_limited_total Requests refused by the per-key rate limiter.\n",
@@ -590,5 +607,18 @@ pub struct StreamOpenGuard {
 impl Drop for StreamOpenGuard {
     fn drop(&mut self) {
         self.metrics.stream_closed();
+    }
+}
+
+/// Drop guard for one open TCP connection: decrements
+/// [`Metrics::connection_open_guard`] on drop.
+#[derive(Debug)]
+pub struct ConnectionOpenGuard {
+    metrics: Arc<Metrics>,
+}
+
+impl Drop for ConnectionOpenGuard {
+    fn drop(&mut self) {
+        self.metrics.connections_open.fetch_sub(1, Ordering::AcqRel);
     }
 }

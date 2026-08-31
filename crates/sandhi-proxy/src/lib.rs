@@ -27,7 +27,6 @@ pub use operator::{
 pub use persistence::BufferedAlertStore;
 
 use std::collections::HashMap;
-use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -84,6 +83,24 @@ pub const DEFAULT_MAX_IN_FLIGHT_AI_REQUESTS: usize = 128;
 
 /// Maximum time the server gives active responses to finish after shutdown begins.
 pub const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
+
+/// Maximum concurrent TCP connections (TD-0014 P3). 1024 is comfortably above any sane AI
+/// admission limit while keeping worst-case per-connection buffers bounded (see
+/// `CONNECTION_READ_BUF_BYTES`).
+pub const DEFAULT_MAX_CONNECTIONS: usize = 1024;
+
+/// Maximum concurrent TCP connections from one peer IP (TD-0014 P3, G19). Generous for a real
+/// client behind NAT, far below what a single-IP flood needs to matter.
+pub const DEFAULT_MAX_CONNECTIONS_PER_IP: usize = 64;
+
+/// Seconds a connection may spend transmitting its request head (TD-0014 P3, G03). Matches
+/// hyper's current default — but hyper documents it as "do not depend on that", so Sandhi now
+/// sets and guarantees it.
+pub const DEFAULT_HEADER_READ_TIMEOUT_SECS: u64 = 30;
+
+/// Per-connection HTTP read-buffer ceiling. hyper's default allows multi-megabyte growth per
+/// connection; 256 KiB is ample for header-heavy AI requests because bodies stream.
+const CONNECTION_READ_BUF_BYTES: usize = 256 * 1024;
 
 /// Shared server state: the virtual-key store, the budget ledger, the usage sink, and the
 /// registry of configured upstream providers (each already holding its real credential).
@@ -144,6 +161,20 @@ pub struct ProxyState {
     /// Concurrent AI requests allowed through the admission boundary. The concurrency layer wraps
     /// the routes outside body extraction, so queued calls do not each allocate a full body.
     pub max_in_flight_ai_requests: usize,
+    // --- TD-0014 P3: connection-level limits (pre-authentication blast-radius controls) ---
+    /// Maximum concurrent TCP connections served. At the cap, new accepts are closed without a
+    /// response — the AI admission path is where dialect-shaped shedding happens; this is the
+    /// cheaper, earlier backpressure.
+    pub max_connections: usize,
+    /// Maximum concurrent TCP connections from a single peer IP; **0 disables the cap**.
+    /// Counted at accept time, before headers — so behind a trusted proxy every connection
+    /// shares the proxy IP and this should be 0 (let the proxy enforce per-client limits).
+    pub max_connections_per_ip: usize,
+    /// Seconds a connection may spend sending its request head before timeout. Explicitly set
+    /// (hyper's default is documented as "do not depend on that") — this is the slowloris bound.
+    pub header_read_timeout_secs: u64,
+    /// CIDR ranges whose `X-Forwarded-For` header is believed. Empty = trust no one (default).
+    pub trusted_proxies: Vec<ipnet::IpNet>,
     /// TD-0011 P2 metric registry, served at `/metrics` (gated like the dashboard).
     pub metrics: Arc<metrics::Metrics>,
     /// Scope 5 (TD-0011 P3): OTLP export of `gen_ai.*` spans + metrics, when the `otel-otlp`
@@ -189,6 +220,10 @@ impl ProxyState {
             error_detail_full: false,
             max_request_body_bytes: DEFAULT_MAX_REQUEST_BODY_BYTES,
             max_in_flight_ai_requests: DEFAULT_MAX_IN_FLIGHT_AI_REQUESTS,
+            max_connections: DEFAULT_MAX_CONNECTIONS,
+            max_connections_per_ip: DEFAULT_MAX_CONNECTIONS_PER_IP,
+            header_read_timeout_secs: DEFAULT_HEADER_READ_TIMEOUT_SECS,
+            trusted_proxies: Vec::new(),
             metrics: Arc::new(metrics::Metrics::new()),
             rate_limiter: Arc::new(ratelimit::RateLimiter::new()),
             otel: None,
@@ -274,6 +309,119 @@ where
             inner.call(request).await
         })
     }
+}
+
+/// Connection-level admission policy, resolved once at startup from `ProxyState` (TD-0014 P3).
+#[derive(Clone)]
+pub(crate) struct ConnectionPolicy {
+    pub max_connections: usize,
+    /// 0 disables the per-IP cap. Behind a trusted proxy every connection
+    /// shares the proxy's IP at accept time (headers are not parsed yet), so
+    /// deployments behind one should disable this and let the proxy do it.
+    pub max_per_ip: usize,
+    pub header_read_timeout: Duration,
+    pub trusted_proxies: Vec<ipnet::IpNet>,
+    pub metrics: Arc<crate::metrics::Metrics>,
+}
+
+impl Default for ConnectionPolicy {
+    fn default() -> Self {
+        Self {
+            max_connections: DEFAULT_MAX_CONNECTIONS,
+            max_per_ip: DEFAULT_MAX_CONNECTIONS_PER_IP,
+            header_read_timeout: Duration::from_secs(DEFAULT_HEADER_READ_TIMEOUT_SECS),
+            trusted_proxies: Vec::new(),
+            metrics: Arc::new(crate::metrics::Metrics::new()),
+        }
+    }
+}
+
+impl ConnectionPolicy {
+    pub(crate) fn from_state(state: &ProxyState) -> Self {
+        Self {
+            max_connections: state.max_connections.max(1),
+            max_per_ip: state.max_connections_per_ip,
+            header_read_timeout: Duration::from_secs(state.header_read_timeout_secs.max(1)),
+            trusted_proxies: state.trusted_proxies.clone(),
+            metrics: Arc::clone(&state.metrics),
+        }
+    }
+}
+
+/// `Some(client_ip)` only when `peer` is a configured trusted proxy; the
+/// `X-Forwarded-For` header is otherwise attacker-controlled and never believed.
+/// With several hops, the FIRST address is the original client; callers behind
+/// exactly one trusted proxy is the supported shape.
+pub(crate) fn resolve_forwarded_for(
+    peer: std::net::IpAddr,
+    forwarded_for: Option<&str>,
+    trusted_proxies: &[ipnet::IpNet],
+) -> Option<std::net::IpAddr> {
+    let trusted = |ip: std::net::IpAddr| trusted_proxies.iter().any(|net| net.contains(&ip));
+    if !trusted(peer) {
+        return None;
+    }
+    forwarded_for
+        .and_then(|header| header.split(',').next())
+        .map(str::trim)
+        .and_then(|first| first.parse().ok())
+        .filter(|client| !trusted(*client))
+}
+
+/// Parse `SANDHI_TRUSTED_PROXIES` — comma-separated CIDRs; empty string → empty allowlist.
+/// A malformed entry is a startup panic (consistent with `SANDHI_BIND`): a typo that silently
+/// narrows the trust boundary is worse than refusing to start.
+pub fn parse_trusted_proxies(spec: &str) -> Vec<ipnet::IpNet> {
+    spec.split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            entry.parse().unwrap_or_else(|_| {
+                panic!(
+                    "SANDHI_TRUSTED_PROXIES entry {entry:?} is not a valid CIDR (e.g. 10.0.0.0/8)"
+                )
+            })
+        })
+        .collect()
+}
+
+/// Per-connection peer identity riding request extensions (TD-0014 P3, G19).
+/// Deliberately minimal: no protocol metadata beyond what admission needs, and
+/// it never reaches `RequestMetadataV1`, usage events, or metric labels
+/// (TD-0011 D2 — an IP is unbounded cardinality and personal data).
+/// Drop guard releasing one per-IP connection slot when its connection task
+/// ends. Deadlock note: created only while holding the map lock is NOT the
+/// case — the increment happens in the accept loop, the guard drops in the
+/// task, and each takes the lock briefly.
+struct PerIpSlot {
+    per_ip: Arc<std::sync::Mutex<HashMap<std::net::IpAddr, usize>>>,
+    ip: std::net::IpAddr,
+}
+
+impl Drop for PerIpSlot {
+    fn drop(&mut self) {
+        if let Ok(mut map) = self.per_ip.lock() {
+            if let Some(count) = map.get_mut(&self.ip) {
+                *count -= 1;
+                if *count == 0 {
+                    map.remove(&self.ip);
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ConnCtx {
+    // Read by future consumers (per-IP rate limits, TD-0020 gauges, TD-0017
+    // ALPN/SNI); P3 only populates it. #[allow] is the honest marker until a
+    // consumer exists — deleted the day one does.
+    #[allow(dead_code)]
+    pub peer: std::net::IpAddr,
+    /// Believed client IP — `peer` itself unless the peer is a trusted proxy
+    /// that supplied `X-Forwarded-For`.
+    #[allow(dead_code)]
+    pub client: std::net::IpAddr,
 }
 
 pub fn build_app(state: Arc<ProxyState>) -> Router {
@@ -389,44 +537,141 @@ async fn serve_listener_with_shutdown<F>(
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    serve_router_listener_with_shutdown(build_app(state), listener, shutdown, grace).await
+    let policy = ConnectionPolicy::from_state(&state);
+    serve_router_listener_with_shutdown(build_app(state), listener, shutdown, grace, policy).await
 }
 
+/// Serve until `shutdown` resolves, with TD-0014 P3 connection-level defence:
+/// a hard cap on concurrent connections and per-peer connections, a guaranteed
+/// header-read timeout, a bounded per-connection read buffer, and a drain that
+/// actually closes hung connections at the grace deadline (axum's own serve
+/// spawns connection tasks detached, so its grace deadline alone cannot).
 async fn serve_router_listener_with_shutdown<F>(
     app: Router,
     listener: tokio::net::TcpListener,
     shutdown: F,
     grace: Duration,
+    policy: ConnectionPolicy,
 ) -> std::io::Result<()>
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    let (draining_tx, draining_rx) = tokio::sync::oneshot::channel();
-    let shutdown = async move {
-        shutdown.await;
-        let _ = draining_tx.send(());
-    };
-    let server = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .into_future();
-    tokio::pin!(server);
+    use hyper_util::rt::{TokioExecutor, TokioTimer};
+    use hyper_util::server::conn::auto::Builder as HttpBuilder;
+    use hyper_util::service::TowerToHyperService;
+    use std::collections::HashMap;
 
-    tokio::select! {
-        result = &mut server => result,
-        draining = draining_rx => {
-            if draining.is_err() {
-                return server.await;
-            }
-            match tokio::time::timeout(grace, &mut server).await {
-                Ok(result) => result,
-                Err(_) => {
-                    tracing::warn!(grace_secs = grace.as_secs_f64(),
-                        "shutdown grace expired; cancelling remaining response streams");
-                    Ok(())
+    let slots = Arc::new(Semaphore::new(policy.max_connections));
+    let per_ip: Arc<std::sync::Mutex<HashMap<std::net::IpAddr, usize>>> = Default::default();
+    let graceful = Arc::new(hyper_util::server::graceful::GracefulShutdown::new());
+    let mut tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+    tokio::pin!(shutdown);
+
+    // Accept loop — ends on shutdown signal; connection tasks keep draining
+    // through the grace window below.
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => break,
+            accepted = listener.accept() => {
+                let (stream, peer) = match accepted {
+                    Ok(pair) => pair,
+                    Err(error) => {
+                        tracing::warn!(%error, "accept failed");
+                        continue;
+                    }
+                };
+
+                // Shed BEFORE any allocation or service build: over-cap and
+                // over-per-IP connections are closed without a response. The
+                // AI admission path is where dialect-shaped shedding happens;
+                // this is the cheaper, pre-authentication backpressure.
+                let Ok(permit) = slots.clone().try_acquire_owned() else {
+                    drop(stream);
+                    continue;
+                };
+                let mut ip_count = per_ip.lock().expect("per-ip connection map poisoned");
+                if policy.max_per_ip > 0
+                    && ip_count.get(&peer.ip()).copied().unwrap_or(0) >= policy.max_per_ip
+                {
+                    drop(ip_count);
+                    drop(permit);
+                    drop(stream);
+                    continue;
                 }
+                *ip_count.entry(peer.ip()).or_insert(0) += 1;
+                drop(ip_count);
+                let per_ip = Arc::clone(&per_ip);
+                let client = resolve_forwarded_for(
+                    peer.ip(),
+                    None,
+                    &policy.trusted_proxies,
+                )
+                .unwrap_or(peer.ip());
+                let ctx = Arc::new(ConnCtx { peer: peer.ip(), client });
+
+                let watcher = graceful.watcher();
+                let metrics = Arc::clone(&policy.metrics);
+                let app = app.clone();
+                // Builder, connection, watcher, guards: one task owns all of
+                // it, because the connection borrows its builder.
+                tasks.spawn(async move {
+                    let _permit = permit;
+                    let _conn_open = metrics.connection_open_guard();
+                    // The per-IP slot is released when the connection task
+                    // ends — completion, disconnect, or drain abort.
+                    let _per_ip_slot = PerIpSlot { per_ip, ip: peer.ip() };
+                    let service =
+                        TowerToHyperService::new(app.layer(axum::Extension(ctx)));
+                    // HTTP/1 knobs hang off the `http1()` sub-builder; the auto
+                    // builder still picks the protocol.
+                    // header_read_timeout (and every other timeout) requires a
+                    // Timer on the http1 builder — hyper panics without one.
+                    let mut builder = HttpBuilder::new(TokioExecutor::new());
+                    let mut http1 = builder.http1();
+                    http1.timer(TokioTimer::new());
+                    let conn = http1
+                        .header_read_timeout(Some(policy.header_read_timeout))
+                        .max_buf_size(CONNECTION_READ_BUF_BYTES)
+                        .serve_connection_with_upgrades(
+                            hyper_util::rt::TokioIo::new(stream),
+                            service,
+                        );
+                    let _ = watcher.watch(conn).await;
+                });
             }
         }
     }
+
+    // Grace window: signal every watched connection, wait until they finish or
+    // the deadline passes, then abort the stragglers. This is what makes the
+    // doc claim true — hung streams do not outlive `serve_with_shutdown_timeout`.
+    tracing::info!("shutdown received; draining connections");
+    // `shutdown(self)` consumes the helper: unwrap the Arc (watchers hold only
+    // the rx side) and hand the signal+wait to its own task.
+    // `shutdown(self)` consumes; unwrap the Arc (watchers hold only the rx
+    // side) and let the signal+wait run on its own task.
+    let _shutdown_task = Arc::try_unwrap(graceful)
+        .map(|g| tokio::spawn(g.shutdown()))
+        .ok();
+    let deadline = tokio::time::Instant::now() + grace;
+    let mut expired = false;
+    while !tasks.is_empty() {
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => { expired = true; break; }
+            _ = tasks.join_next() => {}
+        }
+    }
+    if expired {
+        tracing::warn!(
+            grace_secs = grace.as_secs_f64(),
+            "shutdown grace expired; cancelling remaining connections (and their response streams)"
+        );
+        tasks.abort_all();
+    }
+    // Await aborted tasks so their guards (permits, gauges, per-IP slots) drop
+    // before return.
+    while tasks.join_next().await.is_some() {}
+    Ok(())
 }
 
 #[cfg(test)]
@@ -488,6 +733,7 @@ mod server_lifecycle_tests {
                 let _ = shutdown_rx.await;
             },
             Duration::from_millis(25),
+            ConnectionPolicy::default(),
         ));
         let client_call = tokio::spawn(async move {
             let _ = reqwest::get(format!("http://{addr}/stuck")).await;
@@ -3222,6 +3468,57 @@ mod otel_wiring_tests {
         assert!(
             blob.contains("gen_ai.response.finish_reasons") && blob.contains("stop"),
             "finish_reason did not land on the span: {blob}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod connection_policy_tests {
+    use super::*;
+
+    #[test]
+    fn trusted_proxy_spec_parses_cidr_lists() {
+        assert!(parse_trusted_proxies("").is_empty());
+        assert!(parse_trusted_proxies("  ").is_empty());
+        let nets = parse_trusted_proxies("10.0.0.0/8, 192.168.1.0/24");
+        assert_eq!(nets.len(), 2);
+        assert_eq!(nets[0].to_string(), "10.0.0.0/8");
+    }
+
+    #[test]
+    #[should_panic(expected = "not a valid CIDR")]
+    fn trusted_proxy_spec_rejects_garbage_loudly() {
+        parse_trusted_proxies("10.0.0.0/8,bogus");
+    }
+
+    #[test]
+    fn forwarded_for_is_believed_only_from_trusted_proxies() {
+        let allowlist = parse_trusted_proxies("10.0.0.0/8");
+        let peer: std::net::IpAddr = "10.0.0.9".parse().unwrap();
+        let outsider: std::net::IpAddr = "203.0.113.7".parse().unwrap();
+
+        // Untrusted peer: the header is attacker-controlled, never believed.
+        assert_eq!(
+            resolve_forwarded_for(outsider, Some("1.2.3.4"), &allowlist),
+            None
+        );
+        // Trusted peer without a header: the peer IS the client.
+        assert_eq!(resolve_forwarded_for(peer, None, &allowlist), None);
+        // Trusted peer + header: the first hop is the original client.
+        assert_eq!(
+            resolve_forwarded_for(peer, Some("1.2.3.4, 10.0.0.1"), &allowlist),
+            Some("1.2.3.4".parse().unwrap())
+        );
+        // Trusted peer + garbage header: nothing to believe.
+        assert_eq!(
+            resolve_forwarded_for(peer, Some("not-an-ip"), &allowlist),
+            None
+        );
+        // A claimed client that is itself inside the trusted set is refused
+        // (multi-hop proxy chains are an explicit non-goal in P3).
+        assert_eq!(
+            resolve_forwarded_for(peer, Some("10.0.0.1"), &allowlist),
+            None
         );
     }
 }

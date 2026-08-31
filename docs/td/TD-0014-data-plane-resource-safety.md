@@ -1,6 +1,6 @@
 # TD-0014: Data-plane resource safety — the bounds the proxy claims but does not hold
 
-- **Status:** Draft (proposed), 2026-08-31. **P1 and P2 (+P2b) landed**; P3, P4 open. Owns gaps **G01, G02, G03, G04, G19, G28** (G01 ✅, G02 ✅).
+- **Status:** Draft (proposed), 2026-08-31. **P1, P2 (+P2b) and P3 landed**; P4 open. Owns gaps **G01, G02, G03, G04, G19, G28** (G01 ✅, G02 ✅, G03 ✅, G19 ✅).
 - **Relates to:** [ADR-0006](../adr/0006-layer-boundary-and-protocol-scope.md) (why these are fixed
   at L7 rather than by acquiring a transport layer), [TD-0006](TD-0006-two-plane-proxy-transparent-metering.md)
   (which fixed exactly G01 on the *raw* plane and never backported it), [TD-0012](TD-0012-rate-limit-enforcement.md)
@@ -172,7 +172,7 @@ not land a phase whose effect an operator cannot see.
 | **P1** ✅ | D1 — shared `LineSplitter` on all six typed decoders **and** the raw sniffer | A 16 MiB newline-free upstream stream is refused loudly on the typed plane (peak buffer ≤ `MAX_STREAM_LINE_BYTES` + one chunk) while a 200 KiB *terminated* frame passes intact on every decoder — both directions asserted, and the guards verified to fail against the old 64 KiB bound; total work (search **and** compaction) stays linear in bytes; a long `response.completed` frame still yields its usage on the raw plane; all existing per-family stream tests stay green byte-for-byte |
 | **P2** ✅ | D2 — permit held by the body, via a custom `AdmissionLayer` (tower's permit cannot be moved into a body) | An end-to-end test over real loopback HTTP with a hanging upstream: with the limit at 2, two streams open at first byte make a third request **wait**; aborting one client admits it. Shipped with the `sandhi_streams_open` gauge (D6) and the default raised 64 → 128 with the reasoning stated. Both planes pinned end-to-end — the review demonstrated the transparent-plane test alone stayed green under a first-byte-release mutation of the translation twin, so the translation plane got its own pin |
 | **P2b** ✅ | trailing-remainder flush (the asymmetry recorded in Still open, now closed) | Ollama's NDJSON `done` frame without a trailing newline yields `Finish`; every P1 byte-boundary and usage-ordering test stays green, pinning the restructure as behaviour-preserving for well-formed streams |
-| **P3** | D3 + D4 — connection limits and `ConnCtx` | C connections dribbling one header byte per second are closed after the configured timeout while a normal request succeeds concurrently; the (N+1)th connection from one IP is refused; `ConnCtx.forwarded_for` is `None` when the peer is not in the trusted-proxy allowlist, even when the header is present |
+| **P3** ✅ | D3 + D4 — connection limits and `ConnCtx`, via an explicit hyper-util accept loop (replacing `axum::serve`) | Slowloris connections are closed by a **guaranteed** header-read timeout (hyper's default was documented "do not depend on that"); the total and per-IP connection caps shed without a response and recover on close; `X-Forwarded-For` is believed only from CIDR-allowlisted peers; the drain at grace expiry **aborts** hung connections — closing the detached-task leak the #169 review surfaced, with an upstream-EOF regression test |
 | **P4** | D5 — per-tenant bulkheads + sharded limiter | Tenant A saturating its share leaves tenant B's admission latency within a recorded bound (fairness measured, not asserted qualitatively); the sharded limiter reproduces every TD-0012 P1 semantic test unchanged |
 
 P1 and P2 are independent and can land in either order. P3 depends on nothing here but touches the
@@ -231,12 +231,10 @@ already.
   gpt-image-1 PNG at roughly 5.5–6.7 MB, and Gemini native-audio `inlineData` runs ~64 KB/s, so two
   minutes of audio in one part is ~8 MB. This sharpens TD-0015 R5's deliverable: record the largest
   real frame per family *including multimodal* frames before trusting 8 MiB.
-- **Grace expiry does not cancel in-flight streams (review finding 2, embedder-facing).** axum
-  spawns connection tasks detached; when `serve_with_shutdown_timeout` returns at the deadline, a
-  hung body keeps being polled — holding its admission slot, gauge count, lease and upstream
-  connection. Invisible in the binary (the process exits) and a doc overclaim until this review;
-  the comments now say what actually happens. The fix is connection-task tracking, which belongs
-  with P3's connection limits, not a spot patch.
+- ~~Grace expiry does not cancel in-flight streams~~ **Closed in P3.** The explicit hyper-util
+  accept loop owns every connection task in a `JoinSet` and uses `GracefulShutdown` signalling: at
+  the grace deadline the stragglers are **aborted**, and an upstream-EOF regression test proves a
+  hung stream no longer outlives `serve_with_shutdown_timeout` (the #169 review's finding 2).
 - **`sandhi_streams_open` covers streams only (review finding 3).** Unary calls hold admission
   slots invisibly, so the semaphore can be exhausted at gauge 0. The gauge is honestly named; the
   complete answer — semaphore utilization plus wait-queue depth — is TD-0020 D2 scope.
