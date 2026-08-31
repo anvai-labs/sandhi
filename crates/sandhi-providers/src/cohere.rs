@@ -14,6 +14,7 @@ pub struct Cohere {
     client: reqwest::Client,
     base_url: String,
     api_key: String,
+    headers: http::HeaderMap,
 }
 
 impl Cohere {
@@ -22,7 +23,16 @@ impl Cohere {
             client: crate::default_client(),
             base_url: base_url.into(),
             api_key: api_key.into(),
+            headers: http::HeaderMap::new(),
         }
+    }
+
+    /// Caller-supplied provider headers, transport-owned names stripped (TD-0022 D3: this
+    /// family previously dropped `ProviderTransportConfig::headers` entirely).
+    #[must_use]
+    pub fn with_headers(mut self, headers: http::HeaderMap) -> Self {
+        self.headers = crate::strip_transport_owned(headers);
+        self
     }
 
     /// The hosted Cohere API (`https://api.cohere.com`).
@@ -50,6 +60,7 @@ impl Provider for Cohere {
             .client
             .post(self.chat_url())
             .bearer_auth(&self.api_key)
+            .headers(crate::merge_call_headers(&self.headers, &req.extra_headers))
             .json(&body)
             .send()
             .await
@@ -80,6 +91,7 @@ impl Provider for Cohere {
             .client
             .post(self.chat_url())
             .bearer_auth(&self.api_key)
+            .headers(crate::merge_call_headers(&self.headers, &req.extra_headers))
             .json(&body)
             .send()
             .await

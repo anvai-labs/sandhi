@@ -15,6 +15,7 @@ pub struct Ollama {
     client: reqwest::Client,
     base_url: String,
     api_key: Option<String>,
+    headers: http::HeaderMap,
 }
 
 impl Ollama {
@@ -23,6 +24,7 @@ impl Ollama {
             client: crate::default_client(),
             base_url: base_url.into(),
             api_key: None,
+            headers: http::HeaderMap::new(),
         }
     }
 
@@ -37,12 +39,24 @@ impl Ollama {
         self
     }
 
+    /// Caller-supplied provider headers, transport-owned names stripped (TD-0022 D3: this
+    /// family previously dropped `ProviderTransportConfig::headers` entirely).
+    #[must_use]
+    pub fn with_headers(mut self, headers: http::HeaderMap) -> Self {
+        self.headers = crate::strip_transport_owned(headers);
+        self
+    }
+
     fn chat_url(&self) -> String {
         format!("{}/api/chat", self.base_url.trim_end_matches('/'))
     }
 
-    fn post(&self, body: &Value) -> reqwest::RequestBuilder {
-        let mut rb = self.client.post(self.chat_url()).json(body);
+    fn post(&self, body: &Value, call_headers: &http::HeaderMap) -> reqwest::RequestBuilder {
+        let mut rb = self
+            .client
+            .post(self.chat_url())
+            .headers(crate::merge_call_headers(&self.headers, call_headers))
+            .json(body);
         if let Some(key) = &self.api_key {
             rb = rb.bearer_auth(key);
         }
@@ -57,12 +71,13 @@ impl Provider for Ollama {
     }
 
     async fn complete(&self, req: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        let call_headers = req.extra_headers.clone();
         let mut body = req.body;
         if let Some(obj) = body.as_object_mut() {
             obj.insert("stream".into(), Value::Bool(false));
         }
         let resp = self
-            .post(&body)
+            .post(&body, &call_headers)
             .send()
             .await
             .map_err(|e| ProviderError::Transport(e.to_string()))?;
@@ -84,12 +99,13 @@ impl Provider for Ollama {
     }
 
     async fn stream(&self, req: ProviderRequest) -> Result<ByteStream, ProviderError> {
+        let call_headers = req.extra_headers.clone();
         let mut body = req.body;
         if let Some(obj) = body.as_object_mut() {
             obj.insert("stream".into(), Value::Bool(true));
         }
         let resp = self
-            .post(&body)
+            .post(&body, &call_headers)
             .send()
             .await
             .map_err(|e| ProviderError::Transport(e.to_string()))?;

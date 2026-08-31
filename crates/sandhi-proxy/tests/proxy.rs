@@ -1115,12 +1115,14 @@ impl ChatProvider for AlwaysTimeout {
     async fn complete(
         &self,
         _req: sandhi_core::ChatRequestV1,
+        _call_headers: axum::http::HeaderMap,
     ) -> Result<sandhi_core::ChatResponseV1, ProviderError> {
         Err(ProviderError::Timeout(std::time::Duration::from_millis(50)))
     }
     async fn stream(
         &self,
         _req: sandhi_core::ChatRequestV1,
+        _call_headers: axum::http::HeaderMap,
     ) -> Result<ChatEventStream, ProviderError> {
         Err(ProviderError::Timeout(std::time::Duration::from_millis(50)))
     }

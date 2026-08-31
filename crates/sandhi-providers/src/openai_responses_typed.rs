@@ -36,12 +36,19 @@ impl ChatProvider for TypedOpenAiResponses {
         &self.slug
     }
 
-    async fn complete(&self, request: ChatRequestV1) -> Result<ChatResponseV1, ProviderError> {
+    async fn complete(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+    ) -> Result<ChatResponseV1, ProviderError> {
         if self.profile == OpenAiResponsesProfile::ChatGptCodex {
-            return aggregate_stream(self.stream(request).await?).await;
+            return aggregate_stream(self.stream(request, call_headers).await?).await;
         }
         let body = encode_responses_request_for_profile(&request, self.profile)?;
-        let response = self.raw.complete(provider_request(&request, body)).await?;
+        let response = self
+            .raw
+            .complete(provider_request(&request, body, call_headers))
+            .await?;
         let mut decoded = decode_responses_response(response.body, response.usage, &request.model)?;
         if !request.include_native_response {
             // G8: the native body is debug metadata, not contract. Decoded
@@ -52,9 +59,16 @@ impl ChatProvider for TypedOpenAiResponses {
         Ok(decoded)
     }
 
-    async fn stream(&self, request: ChatRequestV1) -> Result<ChatEventStream, ProviderError> {
+    async fn stream(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+    ) -> Result<ChatEventStream, ProviderError> {
         let body = encode_responses_request_for_profile(&request, self.profile)?;
-        let stream = self.raw.stream(provider_request(&request, body)).await?;
+        let stream = self
+            .raw
+            .stream(provider_request(&request, body, call_headers))
+            .await?;
         Ok(decode_responses_stream(stream, request.model))
     }
 }

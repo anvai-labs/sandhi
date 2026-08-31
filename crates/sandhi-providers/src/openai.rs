@@ -66,14 +66,16 @@ impl OpenAiCompat {
         format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
     }
 
-    /// Per-request headers derived from the neutral `ProviderRequest`. Carries ONLY the
-    /// conversation-affinity key mapped onto the catalog-declared vendor header (ADR-0008 D3)
-    /// — `req.attribution` is deliberately unread: subject/group attribution rides outside
-    /// the cached prompt (ADR-0001 §4) and must never reach a provider header or body.
-    /// `try_from`, not `from_static`: catalog names are `&'static str` data, and a future
-    /// entry with invalid casing must be skipped, not panic the hot path.
-    fn affinity_headers(&self, req: &ProviderRequest) -> HeaderMap {
-        let mut out = self.headers.clone();
+    /// Per-request headers derived from the neutral `ProviderRequest`: the transport's static
+    /// headers, overlaid with the call's wire headers (TD-0022 D2 — transport-owned names
+    /// stripped by the shared merge), overlaid last with the conversation-affinity key mapped
+    /// onto the catalog-declared vendor header (ADR-0008 D3) so the affinity value stays
+    /// authoritative. `req.attribution` is deliberately unread: subject/group attribution
+    /// rides outside the cached prompt (ADR-0001 §4) and must never reach a provider header
+    /// or body. `try_from`, not `from_static`: catalog names are `&'static str` data, and a
+    /// future entry with invalid casing must be skipped, not panic the hot path.
+    fn request_headers(&self, req: &ProviderRequest) -> HeaderMap {
+        let mut out = crate::merge_call_headers(&self.headers, &req.extra_headers);
         let Some(name) = self.session_header else {
             return out;
         };
@@ -100,7 +102,7 @@ impl Provider for OpenAiCompat {
 
     async fn complete(&self, req: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         validate_openai_chat_messages(&req.body)?;
-        let headers = self.affinity_headers(&req);
+        let headers = self.request_headers(&req);
         let mut body = req.body;
         if let Some(obj) = body.as_object_mut() {
             obj.insert("stream".into(), Value::Bool(false));
@@ -133,7 +135,7 @@ impl Provider for OpenAiCompat {
 
     async fn stream(&self, req: ProviderRequest) -> Result<ByteStream, ProviderError> {
         validate_openai_chat_messages(&req.body)?;
-        let headers = self.affinity_headers(&req);
+        let headers = self.request_headers(&req);
         let mut body = req.body;
         if let Some(obj) = body.as_object_mut() {
             obj.insert("stream".into(), Value::Bool(true));
@@ -400,6 +402,50 @@ mod tests {
                 && body.get("group_id").is_none(),
             "the wire body must carry no attribution or session keys"
         );
+    }
+
+    /// TD-0022 D2: per-call wire headers overlay the static set and transport-owned names are
+    /// stripped from the per-call side. (The affinity header's authority over per-call spoofs
+    /// is separate — `request_headers` inserts it after this merge — and is pinned by the
+    /// adapter-level session tests above.)
+    #[test]
+    fn merge_call_headers_overlays_and_strips_transport_owned_names() {
+        let mut base = HeaderMap::new();
+        base.insert(
+            HeaderName::from_static("http-referer"),
+            HeaderValue::from_static("https://victor.example"),
+        );
+        let mut call = HeaderMap::new();
+        call.insert(
+            HeaderName::from_static("x-sandhi-step-id"),
+            HeaderValue::from_static("step-7"),
+        );
+        // Attacker-controlled overrides must be dropped — the vaulted credential and the
+        // framing are not per-call state.
+        call.insert(AUTHORIZATION, HeaderValue::from_static("Bearer attacker"));
+        call.insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+        call.insert(HOST, HeaderValue::from_static("evil.example"));
+
+        let merged = crate::merge_call_headers(&base, &call);
+        assert_eq!(merged["http-referer"], "https://victor.example");
+        assert_eq!(merged["x-sandhi-step-id"], "step-7");
+        assert!(!merged.contains_key(AUTHORIZATION));
+        assert!(!merged.contains_key(CONTENT_TYPE));
+        assert!(!merged.contains_key(HOST));
+    }
+
+    #[test]
+    fn strip_transport_owned_removes_every_transport_owned_name() {
+        let mut headers = HeaderMap::new();
+        for name in [AUTHORIZATION, CONTENT_TYPE, HOST] {
+            headers.insert(name, HeaderValue::from_static("x"));
+        }
+        headers.insert(
+            HeaderName::from_static("x-custom"),
+            HeaderValue::from_static("kept"),
+        );
+        let stripped = crate::strip_transport_owned(headers);
+        assert!(stripped.len() == 1 && stripped["x-custom"] == "kept");
     }
 
     #[tokio::test]

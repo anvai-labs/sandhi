@@ -33,6 +33,52 @@ function localServer(responses) {
   });
 }
 
+test("per-call wire headers ride and cannot override the credential (TD-0022)", async () => {
+  const server = await localServer([
+    {
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: "r1",
+        model: "gpt-test",
+        choices: [{ message: { content: "hello" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 10, completion_tokens: 3 },
+      }),
+    },
+  ]);
+  try {
+    const runtime = new ProviderRuntime();
+    const provider = runtime.openaiCompat(
+      "openai",
+      server.baseUrl,
+      "real-key",
+      undefined,
+      0,
+    );
+    const request = JSON.stringify({
+      schema_version: "1",
+      model: "gpt-test",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const response = JSON.parse(
+      await provider.completeJson(
+        request,
+        JSON.stringify({
+          "x-sandhi-run-id": "run-9",
+          "x-sandhi-step-id": "step-7",
+          authorization: "Bearer attacker", // must be stripped
+        }),
+      ),
+    );
+    assert.equal(response.output.content, "hello");
+    const sent = server.lastHeaders();
+    assert.equal(sent["x-sandhi-run-id"], "run-9");
+    assert.equal(sent["x-sandhi-step-id"], "step-7");
+    assert.equal(sent.authorization, "Bearer real-key");
+  } finally {
+    await server.close();
+  }
+});
+
 test("persistent typed provider completes and streams neutral documents", async () => {
   const server = await localServer([
     {

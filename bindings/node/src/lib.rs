@@ -321,26 +321,41 @@ impl TypedProvider {
         &self.provider
     }
 
+    /// `wireHeadersJson` (optional, TD-0022 D1): per-call wire headers — a string map sent
+    /// with THIS call only, for gateway-path metadata that changes per turn (e.g.
+    /// `x-sandhi-step-id`). Transport-owned names are stripped and can never override the
+    /// credential.
     #[napi]
-    pub async fn complete_json(&self, request_json: String) -> Result<String> {
+    pub async fn complete_json(
+        &self,
+        request_json: String,
+        wire_headers_json: Option<String>,
+    ) -> Result<String> {
+        let call_headers = parse_headers_json(wire_headers_json)?;
         let request = parse_chat_request(&request_json)?;
         let response = self
             .handle
-            .complete(request)
+            .complete_with(request, call_headers)
             .await
             .map_err(|e| typed_provider_error(e, &self.provider))?;
         serde_json::to_string(&response).map_err(|e| Error::from_reason(e.to_string()))
     }
 
+    /// `wireHeadersJson` (optional, TD-0022 D1): per-call wire headers, as `completeJson`.
     #[napi]
-    pub fn stream_json(&self, request_json: String) -> Result<TypedEventStream> {
+    pub fn stream_json(
+        &self,
+        request_json: String,
+        wire_headers_json: Option<String>,
+    ) -> Result<TypedEventStream> {
+        let call_headers = parse_headers_json(wire_headers_json)?;
         let request = parse_chat_request(&request_json)?;
         let handle = self.handle.clone();
         let provider = self.provider.clone();
         let (tx, rx) = tokio::sync::mpsc::channel::<std::result::Result<String, String>>(64);
         tokio::spawn(async move {
             use futures_util::StreamExt;
-            match handle.stream(request).await {
+            match handle.stream_with(request, call_headers).await {
                 Ok(mut stream) => {
                     while let Some(event) = stream.next().await {
                         let (item, stop) = match event {

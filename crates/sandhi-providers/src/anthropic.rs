@@ -28,6 +28,7 @@ pub struct Anthropic {
     api_key: String,
     version: String,
     auth_scheme: AnthropicAuthScheme,
+    headers: http::HeaderMap,
 }
 
 impl Anthropic {
@@ -38,6 +39,7 @@ impl Anthropic {
             api_key: api_key.into(),
             version: ANTHROPIC_VERSION.to_string(),
             auth_scheme: AnthropicAuthScheme::ApiKey,
+            headers: http::HeaderMap::new(),
         }
     }
 
@@ -49,6 +51,15 @@ impl Anthropic {
     #[must_use]
     pub fn with_auth_scheme(mut self, auth_scheme: AnthropicAuthScheme) -> Self {
         self.auth_scheme = auth_scheme;
+        self
+    }
+
+    /// Caller-supplied provider headers, transport-owned names stripped (TD-0022 D3: this
+    /// family previously dropped `ProviderTransportConfig::headers` entirely, so gateway-path
+    /// wire headers never reached the upstream).
+    #[must_use]
+    pub fn with_headers(mut self, headers: http::HeaderMap) -> Self {
+        self.headers = crate::strip_transport_owned(headers);
         self
     }
 
@@ -79,6 +90,7 @@ impl Provider for Anthropic {
             .client
             .post(self.messages_url())
             .header("anthropic-version", &self.version)
+            .headers(crate::merge_call_headers(&self.headers, &req.extra_headers))
             .json(&body);
         let resp = self
             .authenticate(request)
@@ -111,6 +123,7 @@ impl Provider for Anthropic {
             .client
             .post(self.messages_url())
             .header("anthropic-version", &self.version)
+            .headers(crate::merge_call_headers(&self.headers, &req.extra_headers))
             .json(&body);
         let resp = self
             .authenticate(request)

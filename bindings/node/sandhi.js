@@ -71,9 +71,13 @@ if (native.TypedEventStream && !native.TypedEventStream.prototype[Symbol.asyncIt
 if (native.TypedProvider && !native.TypedProvider.prototype.__sandhiTypedErrors) {
   const rawCompleteJson = native.TypedProvider.prototype.completeJson;
   if (typeof rawCompleteJson === "function") {
-    native.TypedProvider.prototype.completeJson = async function completeJson(requestJson) {
+    // Variadic forward: the wrapper adds typed-error rewiring only — every call argument
+    // (incl. the optional per-call wireHeadersJson, TD-0022 D1) reaches the native method.
+    native.TypedProvider.prototype.completeJson = async function completeJson(
+      ...args
+    ) {
       try {
-        return await rawCompleteJson.call(this, requestJson);
+        return await rawCompleteJson.call(this, ...args);
       } catch (error) {
         throw toSandhiError(error);
       }

@@ -915,13 +915,21 @@ mod request_admission_tests {
             "stuck"
         }
 
-        async fn complete(&self, _request: ChatRequestV1) -> Result<ChatResponseV1, ProviderError> {
+        async fn complete(
+            &self,
+            _request: ChatRequestV1,
+            _call_headers: axum::http::HeaderMap,
+        ) -> Result<ChatResponseV1, ProviderError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.entered.notify_one();
             std::future::pending().await
         }
 
-        async fn stream(&self, _request: ChatRequestV1) -> Result<ChatEventStream, ProviderError> {
+        async fn stream(
+            &self,
+            _request: ChatRequestV1,
+            _call_headers: axum::http::HeaderMap,
+        ) -> Result<ChatEventStream, ProviderError> {
             let stream =
                 futures_util::stream::pending::<Result<ChatStreamEventV1, ProviderError>>();
             Ok(Box::pin(stream))
