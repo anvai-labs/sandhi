@@ -195,15 +195,17 @@ jobs:
           # Replace, never augment: a stale install of the same name must not survive.
           pip uninstall -y sandhi-gateway || true
           pip install --force-reinstall --no-deps dist/*.whl
-          # Fail loudly if anything else on sys.path still wins the import.
+          # Fail loudly if anything else on sys.path still wins the import. abi3 wheels
+          # with a platform tag install to platlib, which is a distinct directory from
+          # purelib on some layouts — accept either, reject everything else.
           python - <<'EOF'
           import sysconfig
           import sandhi_gateway
           loc = sandhi_gateway.__file__
-          purelib = sysconfig.get_paths()["purelib"]
-          assert loc.startswith(purelib), (
+          paths = sysconfig.get_paths()
+          assert loc.startswith(paths["purelib"]) or loc.startswith(paths["platlib"]), (
               f"stale sandhi_gateway shadows the freshly built wheel: {loc} "
-              f"(expected under {purelib})"
+              f"(expected under {paths['purelib']} or {paths['platlib']})"
           )
           EOF
       - name: run binding tests
