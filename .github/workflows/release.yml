@@ -50,7 +50,10 @@ jobs:
           cargo set-version "${GITHUB_REF_NAME#v}"
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
-          bin: sandhi-proxy
+          # Both workspace binaries: the server AND the `sandhi` operator CLI.
+          # The homebrew-tap formula installs both; the CLI was missing from
+          # archives before v0.2.1 (anvai-labs/homebrew-tap consumes these).
+          bin: sandhi-proxy, sandhi
           target: ${{ matrix.target }}
           archive: sandhi-proxy-$tag-$target
           token: ${{ secrets.GITHUB_TOKEN }}
