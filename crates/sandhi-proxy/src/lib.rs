@@ -29,20 +29,23 @@ pub use persistence::BufferedAlertStore;
 use std::collections::HashMap;
 use std::future::IntoFuture;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::Duration;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use axum::body::{Body, Bytes};
 use axum::extract::rejection::BytesRejection;
-use axum::extract::{DefaultBodyLimit, Query, State};
+use axum::extract::{DefaultBodyLimit, Extension, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{delete, get, post};
 use axum::Router;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
-use tower::limit::ConcurrencyLimitLayer;
+use tower::{Layer, Service as TowerService};
 
 use time::OffsetDateTime;
 
@@ -71,8 +74,13 @@ pub const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 2 * 1024 * 1024;
 
 /// Maximum AI calls admitted far enough to buffer and inspect their request bodies at once.
 /// Together with [`DEFAULT_MAX_REQUEST_BODY_BYTES`], this bounds application-owned request-body
-/// memory to roughly 128 MiB before JSON decoding and other per-request state.
-pub const DEFAULT_MAX_IN_FLIGHT_AI_REQUESTS: usize = 64;
+/// memory to roughly 256 MiB before JSON decoding and other per-request state.
+///
+/// 64 was calibrated when a slot was held only for the handler future — which for a stream
+/// meant *first byte*. Since TD-0014 P2 the slot is held for the whole response body, so the
+/// same number now bounds simultaneously open streams (upstream connection + lease + task
+/// each). Doubling the default keeps real SSE traffic flowing while still bounding memory.
+pub const DEFAULT_MAX_IN_FLIGHT_AI_REQUESTS: usize = 128;
 
 /// Maximum time the server gives active responses to finish after shutdown begins.
 pub const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
@@ -192,6 +200,82 @@ impl ProxyState {
 /// Build the axum app. Ingress paths mirror the provider wire formats (OpenAI Chat Completions,
 /// OpenAI Responses, Anthropic Messages); the presented virtual key selects the actual upstream.
 /// The `/admin/*` routes are the TD-0003 operator surface (authed by an admin token).
+/// An admission slot for one in-flight AI call.
+///
+/// Unlike `tower`'s `ConcurrencyLimit` — whose permit is a private field of its response future,
+/// released when the handler future resolves — this permit is an ordinary value the handlers can
+/// MOVE into a streaming response body (TD-0014 P2). That is the whole point: for SSE the handler
+/// future resolves at first byte, so a future-held permit bounds buffering but not the resource
+/// that actually dominates — simultaneously open streams, each holding an upstream connection, a
+/// lease, a task, and decoder buffers.
+#[derive(Debug)]
+pub(crate) struct AdmissionPermit {
+    _permit: OwnedSemaphorePermit,
+}
+
+/// Bounds concurrent AI calls, admitting in `call` so queued requests hold only transport-level
+/// buffers. The acquired permit rides in the request extensions; the handlers move it into the
+/// response body on the streaming paths and drop it at handler end on the unary paths.
+#[derive(Clone)]
+pub(crate) struct AdmissionLayer {
+    permits: Arc<Semaphore>,
+}
+
+impl AdmissionLayer {
+    pub(crate) fn new(max_in_flight: usize) -> Self {
+        Self {
+            permits: Arc::new(Semaphore::new(max_in_flight)),
+        }
+    }
+}
+
+impl<S> Layer<S> for AdmissionLayer {
+    type Service = AdmissionService<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        AdmissionService {
+            inner,
+            permits: self.permits.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct AdmissionService<S> {
+    inner: S,
+    permits: Arc<Semaphore>,
+}
+
+impl<S> TowerService<axum::http::Request<Body>> for AdmissionService<S>
+where
+    S: TowerService<axum::http::Request<Body>> + Clone + Send + 'static,
+    S::Future: Send + 'static,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future =
+        Pin<Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, mut request: axum::http::Request<Body>) -> Self::Future {
+        let permits = self.permits.clone();
+        let mut inner = self.inner.clone();
+        Box::pin(async move {
+            let permit = permits
+                .acquire_owned()
+                .await
+                .expect("admission semaphore must not be closed");
+            request
+                .extensions_mut()
+                .insert(Arc::new(AdmissionPermit { _permit: permit }));
+            inner.call(request).await
+        })
+    }
+}
+
 pub fn build_app(state: Arc<ProxyState>) -> Router {
     let max_request_body_bytes = state.max_request_body_bytes;
     let ai_routes = Router::new()
@@ -204,9 +288,7 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         .route("/v1beta/models/:model_method", post(handle_gemini))
         // Admission wraps extraction: waiting requests retain only transport-level buffers rather
         // than each allocating `SANDHI_MAX_REQUEST_BODY_BYTES` in application memory.
-        .layer(ConcurrencyLimitLayer::new(
-            state.max_in_flight_ai_requests.max(1),
-        ));
+        .layer(AdmissionLayer::new(state.max_in_flight_ai_requests.max(1)));
     Router::new()
         .route("/healthz", get(health))
         .route("/catalog/models", get(catalog_models))
@@ -1199,6 +1281,7 @@ loadUsage(); loadKeys(); loadBudgets(); loadAlerts(); loadConfig();
 
 async fn handle_openai(
     State(state): State<Arc<ProxyState>>,
+    permit: Extension<Arc<AdmissionPermit>>,
     headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
@@ -1206,11 +1289,12 @@ async fn handle_openai(
         Ok(body) => body,
         Err(response) => return *response,
     };
-    handle(state, headers, body, IngressDialect::OpenAi, None).await
+    handle(state, permit.0, headers, body, IngressDialect::OpenAi, None).await
 }
 
 async fn handle_anthropic(
     State(state): State<Arc<ProxyState>>,
+    permit: Extension<Arc<AdmissionPermit>>,
     headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
@@ -1218,11 +1302,20 @@ async fn handle_anthropic(
         Ok(body) => body,
         Err(response) => return *response,
     };
-    handle(state, headers, body, IngressDialect::Anthropic, None).await
+    handle(
+        state,
+        permit.0,
+        headers,
+        body,
+        IngressDialect::Anthropic,
+        None,
+    )
+    .await
 }
 
 async fn handle_responses(
     State(state): State<Arc<ProxyState>>,
+    permit: Extension<Arc<AdmissionPermit>>,
     headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
@@ -1230,7 +1323,15 @@ async fn handle_responses(
         Ok(body) => body,
         Err(response) => return *response,
     };
-    handle(state, headers, body, IngressDialect::Responses, None).await
+    handle(
+        state,
+        permit.0,
+        headers,
+        body,
+        IngressDialect::Responses,
+        None,
+    )
+    .await
 }
 
 /// `GET /metrics` — Prometheus text exposition (TD-0011 P2).
@@ -1386,6 +1487,7 @@ fn permitted_models(vk: &VirtualKey, slug: &str) -> Vec<String> {
 /// `POST /v1beta/models/{model}:{generateContent|streamGenerateContent}` (TD-0010 D4a).
 async fn handle_gemini(
     State(state): State<Arc<ProxyState>>,
+    permit: Extension<Arc<AdmissionPermit>>,
     axum::extract::Path(model_method): axum::extract::Path<String>,
     headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
@@ -1427,7 +1529,15 @@ async fn handle_gemini(
         model: model.to_string(),
         stream,
     };
-    handle(state, headers, body, IngressDialect::Gemini, Some(route)).await
+    handle(
+        state,
+        permit.0,
+        headers,
+        body,
+        IngressDialect::Gemini,
+        Some(route),
+    )
+    .await
 }
 
 /// Convert Axum's body-buffering rejection into the caller's native SDK error envelope. A body
@@ -1450,6 +1560,7 @@ fn request_body(
 
 async fn handle(
     state: Arc<ProxyState>,
+    permit: Arc<AdmissionPermit>,
     headers: HeaderMap,
     body: Bytes,
     dialect: IngressDialect,
@@ -1713,6 +1824,7 @@ async fn handle(
                 accounting,
                 full_error_detail,
                 gemini_route,
+                permit,
             )
             .await
         }
@@ -1724,14 +1836,31 @@ async fn handle(
                 accounting,
                 full_error_detail,
                 gemini_route,
+                permit,
             )
             .await
         }
         (false, true) => {
-            stream_response(provider, request, dialect, accounting, full_error_detail).await
+            stream_response(
+                provider,
+                request,
+                dialect,
+                accounting,
+                full_error_detail,
+                permit,
+            )
+            .await
         }
         (false, false) => {
-            complete_response(provider, request, dialect, accounting, full_error_detail).await
+            complete_response(
+                provider,
+                request,
+                dialect,
+                accounting,
+                full_error_detail,
+                permit,
+            )
+            .await
         }
     }
 }
@@ -1827,7 +1956,11 @@ async fn transparent_complete_response(
     mut accounting: RequestAccounting,
     full_error_detail: bool,
     gemini: Option<GeminiRoute>,
+    permit: Arc<AdmissionPermit>,
 ) -> Response {
+    // Unary path: the permit lives exactly as long as this handler future, which is the whole
+    // call. Held only so the compiler sees it alive to the last await.
+    let _permit = permit;
     let Some(forwarder) = provider.raw_forwarder() else {
         accounting.set_outcome("error");
         accounting.finalize();
@@ -1868,6 +2001,7 @@ async fn transparent_stream_response(
     mut accounting: RequestAccounting,
     full_error_detail: bool,
     gemini: Option<GeminiRoute>,
+    permit: Arc<AdmissionPermit>,
 ) -> Response {
     let Some(forwarder) = provider.raw_forwarder() else {
         accounting.set_outcome("error");
@@ -1892,6 +2026,11 @@ async fn transparent_stream_response(
     let mut upstream = raw.stream;
 
     let body_stream = async_stream::stream! {
+        // TD-0014 P2: the admission slot lives in the BODY, not the handler future. It is
+        // released whenever this generator drops — completion, client disconnect, or
+        // graceful-drain cancellation — and the gauge tracks exactly that lifetime.
+        let _permit = permit;
+        let _open = accounting.state.metrics.stream_open_guard();
         let mut seen_usage = false;
         let mut delta_bytes: u64 = 0;
         while let Some(item) = upstream.next().await {
@@ -2225,7 +2364,9 @@ async fn complete_response(
     dialect: IngressDialect,
     mut accounting: RequestAccounting,
     full_error_detail: bool,
+    permit: Arc<AdmissionPermit>,
 ) -> Response {
+    let _permit = permit; // unary: held by the handler future, which is the whole call
     match provider.complete(request).await {
         Ok(mut response) => {
             response.usage.completeness = UsageCompleteness::Final;
@@ -2253,6 +2394,7 @@ async fn stream_response(
     dialect: IngressDialect,
     mut accounting: RequestAccounting,
     full_error_detail: bool,
+    permit: Arc<AdmissionPermit>,
 ) -> Response {
     let mut upstream = match provider.stream(request).await {
         Ok(s) => s,
@@ -2264,6 +2406,9 @@ async fn stream_response(
     };
 
     let body = async_stream::stream! {
+        // TD-0014 P2: admission slot rides the body — see the transparent twin above.
+        let _permit = permit;
+        let _open = accounting.state.metrics.stream_open_guard();
         let mut last_usage: Option<UsageV2> = None;
         // What the family has reported so far, for families that report before the end
         // (TD-0013 D3). `None` for a terminal-only family, for the whole stream.

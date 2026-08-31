@@ -130,6 +130,32 @@ impl LineSplitter {
         &self.buf[self.consumed..]
     }
 
+    /// Terminate the trailing remainder so [`next_line`](Self::next_line) yields it once, then
+    /// report whether there was anything to flush. Called once at end of stream by the typed
+    /// decoders: a provider's final frame may lack its newline (Ollama's NDJSON `done` frame is
+    /// the motivating case), and dropping it silently lost the `Finish` — the asymmetry with the
+    /// raw plane's flush, recorded in TD-0014 and closed in P2b.
+    ///
+    /// A garbage remainder is harmless: it fails the caller's existing parse guards.
+    pub(crate) fn flush_newline(&mut self) -> bool {
+        // Callers drain before flushing, but don't rely on it: if a complete line is still
+        // pending, it needs no flush — signal that there is something to drain.
+        if self.searched_to < self.buf.len() {
+            if self.buf[self.searched_to..].contains(&b'\n') {
+                return true;
+            }
+            self.searched_to = self.buf.len();
+        }
+        if self.consumed >= self.buf.len() {
+            return false;
+        }
+        // The appended newline sits exactly at the unsearched edge, so the next next_line()
+        // finds it and yields the whole remainder as one line.
+        self.buf.push(b'\n');
+        self.searched_to = self.buf.len() - 1;
+        true
+    }
+
     /// Bytes currently buffered — the quantity the budget bounds.
     #[cfg(test)]
     pub(crate) fn buffered_len(&self) -> usize {
@@ -303,6 +329,26 @@ mod tests {
             "5k lines in one chunk cost {} for {} bytes — a per-line drain would be quadratic",
             splitter.work_done(),
             wire.len()
+        );
+    }
+
+    #[test]
+    fn flush_newline_terminates_the_remainder_exactly_once() {
+        let mut splitter = LineSplitter::new(BUDGET);
+        assert!(
+            !splitter.flush_newline(),
+            "nothing buffered: nothing to flush"
+        );
+        splitter.push(b"{\"done\":true}");
+        assert!(splitter.flush_newline());
+        assert_eq!(
+            lines(&mut splitter),
+            vec!["{\"done\":true}\n"],
+            "the flushed remainder must come back as one line"
+        );
+        assert!(
+            !splitter.flush_newline(),
+            "drained: a second flush must be a no-op"
         );
     }
 
