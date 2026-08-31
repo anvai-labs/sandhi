@@ -148,16 +148,37 @@ first, alone, and publish the number.
    objection 2. The committed baseline artefact means a 5% drift is still *visible* in the diff even
    when it does not fail the build.
 
-## Open questions
+## Resolved
 
-- Should the open-loop harness model arrivals as Poisson or as a fixed rate? Fixed is reproducible;
-  Poisson is realistic and exposes queueing behaviour that fixed-rate hides. Leaning: both, with
-  fixed-rate as the CI gate and Poisson as an on-demand mode.
-- What is the right SSE corpus? Recorded real provider streams are representative but risk embedding
-  content; synthetic streams are safe but may miss the frame shapes that break decoders. Leaning:
-  synthetic, with shapes derived from the existing `provider_corpus.rs` fixtures.
-- Does the load harness belong in `sandhi-proxy/benches/` or a separate unpublished crate? A
-  workspace member would be published to crates.io by the release workflow unless excluded, which is
-  an easy mistake to make once.
-- Should P4's fault suite run under `--test-threads=1`? Several faults are timing-sensitive and will
-  be flaky under contention; serialising them is slower but honest.
+**R1 — Both arrival models; fixed-rate is the CI gate, Poisson is on demand.** Fixed-rate is
+reproducible enough to diff against a committed baseline (D5); Poisson exposes the queueing
+behaviour that fixed-rate hides, which is exactly what the overload and fairness metrics are for.
+Neither substitutes for the other, and only one of them can be a merge gate.
+
+**R2 — The SSE corpus is synthetic, with frame shapes derived from
+`crates/sandhi-providers/tests/provider_corpus.rs`.** Recorded provider streams would embed real
+prompt and completion content in a public repository, which is not a trade this project should make
+for benchmark fidelity. Deriving the *shapes* from the existing fixtures keeps the corpus
+representative of what the decoders actually parse.
+
+**R3 — The harness lives in `crates/sandhi-proxy/benches/`, as a normal workspace member.** The
+earlier draft of this question warned that a workspace member "would be published to crates.io by
+the release workflow unless excluded." **That premise was false.** Both `.github/workflows/release.yml:117-120`
+and `.github/workflows/publish-crates.yml:35-38` publish an explicit four-crate allowlist
+(`-p sandhi-core`, `-providers`, `-store`, `-proxy`). A new member is not published unless someone
+adds it to both lists. No separate crate is needed.
+
+**R4 — The fault suite runs serialised; the rest of the suite does not.** Several faults are
+timing-sensitive (slowloris, slow consumer, drain-at-deadline) and would flake under contention.
+Serialising *only* that target keeps the honest signal without slowing the main suite; the repo
+already has `cargo-nextest`, which can express it as its own profile.
+
+**R5 — This TD also owns the measurements other TDs are gated on.** Three deferred questions
+elsewhere resolve to a number this harness can produce, and they should be explicit deliverables
+rather than incidental: the largest real frame per provider family (TD-0014's
+`MAX_TYPED_LINE_BYTES`), the right `pool_max_idle_per_host` (TD-0020), and the ledger commit
+breakdown (TD-0016 P0, already P1 here).
+
+## Still open
+
+Nothing. Every question this TD raised is decided above.

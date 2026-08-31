@@ -146,16 +146,35 @@ to the hot path that the current single-mutex ledger would serialise.
    One row already looks stale. A reference artefact that has quietly drifted from the code is worse
    than one that never existed, because people trust it.
 
-## Open questions
+## Resolved
 
-- Should the dedup key be `(vkey, idempotency-key)` or include the request body hash? Including the
-  hash catches a client reusing a key for a *different* call — but it also means hashing every body
-  on the hot path, and the failure it prevents is a client bug rather than a Sandhi one.
-- Does `GET /version` need the ADR-0004 D4 admin gate? It reveals which optional features are
-  enabled, which is mild reconnaissance. Leaning: ungated for versions, gated for the capability
-  detail — but that is two shapes for one endpoint, which is its own smell.
-- Should `x-sandhi-contract-version` appear on error responses too? Probably yes, since a version
-  mismatch is most likely to *present* as an error — which is exactly when a consumer most needs it.
-- If P1 finds TD-0008's scorecard has drifted in more than one row, is the right fix to amend it or
-  to add a conformance test that keeps it honest? The latter is more work and is the only version
-  that does not drift again.
+**R1 — The dedup key is `(virtual_key_id, idempotency-key)`, with no request-body hash.** A body
+hash would additionally catch a client reusing one key for a *different* call — but that is a client
+bug, and the cost of detecting it is hashing every request body on the hot path for every request
+that carries the header. Record the residual risk instead: a client that reuses an idempotency key
+across different calls will have the second call metered as the first. That is the client's error to
+fix, and the header's own semantics say so.
+
+**R2 — Two endpoints, not one shape with two gates.** Ungated `GET /version` returns the wire and
+chat contract versions; the capability detail (which optional features are enabled) goes behind the
+existing ADR-0004 D4 admin gate. The draft's instinct — "ungated for versions, gated for capability
+detail" — was right, and its own objection ("two shapes for one endpoint, which is its own smell")
+is answered by making them two endpoints rather than one endpoint with conditional content.
+
+**R3 — Yes, `x-sandhi-contract-version` appears on error responses too.** A version mismatch is most
+likely to *present* as an error, which is precisely when a consumer most needs to know which
+contract it is talking to. Omitting it there would withhold the header in the one case it exists
+for.
+
+**R4 — TD-0008's scorecard is kept honest by a conformance test, not a manual amend — and P1 now
+starts from a finding rather than a verification.** G22 was resolved while planning this pass:
+Python exposes a real exception class (`pyo3::create_exception!(… SandhiProviderError …)`,
+`bindings/python/src/lib.rs:73-86`), while Node's `typed_provider_error`
+(`bindings/node/src/lib.rs:76-79`) returns a generic `napi::Error::from_reason(json_string)` — no
+distinct class, so a JS consumer cannot `instanceof` it and must parse the message to branch. **The
+scorecard row is correct and the parity gap is real.** P1's job is therefore to close it and to add
+the test that stops the scorecard drifting again, rather than to re-check rows by hand.
+
+## Still open
+
+Nothing. Every question this TD raised is decided above.

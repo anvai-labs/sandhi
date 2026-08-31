@@ -139,16 +139,28 @@ P2 is the highest-value phase: both properties are security invariants the codeb
    six decoders directly. Treating upstream bytes as trusted is an assumption worth writing down
    before relying on it.
 
-## Open questions
+## Resolved
 
-- Should `proptest` generate `ChatRequestV1` values and encode *down* to a dialect, or generate
-  dialect JSON and decode *up*? Down-then-up tests the encoder's totality; up-then-down tests the
-  decoder's. Probably both, but they are different generators and different amounts of work.
-- Is a coverage-guided fuzzer worth the nightly runner time versus a longer `proptest` run? Leaning:
-  yes for the byte-level targets (D2) and no for the structured properties (D3).
-- Does the round-trip property need a per-dialect "known lossy fields" allowlist to be useful? Almost
-  certainly, and that allowlist is itself the valuable artefact — it is the first precise statement
-  of what cross-family translation costs.
-- Should the committed corpus be gitignored above some size? A large binary corpus in git is a real
-  cost; a corpus that lives only on a runner is not reproducible. Leaning: commit minimised
-  reproducers only, regenerate the rest.
+**R1 — Both proptest directions, decode-up first.** Generating dialect JSON and decoding *up* tests
+the untrusted direction — client bytes reaching `decode_request` — which is where an attacker
+actually is. Encoding *down* from generated `ChatRequestV1` values tests encoder totality and comes
+second. They are different generators and different amounts of work, so sequencing them matters.
+
+**R2 — Coverage-guided fuzzing for the byte-level targets only.** D2's targets take arbitrary bytes,
+where a coverage-guided fuzzer earns its runner time. D3's structured properties explore a space
+`proptest` already covers more cheaply and deterministically; running libFuzzer against them would
+buy little for the nightly budget.
+
+**R3 — Yes to a per-dialect "known lossy fields" allowlist, and it is the deliverable.** Framing
+matters here: it is not a workaround for a property that will not pass. ADR-0004 D1 already concedes
+the translation plane can drop provider-specific extras but has never said *which*. The allowlist is
+the first precise statement of what cross-family translation costs, and is valuable even if it turns
+out to be long.
+
+**R4 — Commit minimised reproducers only; regenerate the rest.** A large binary corpus in git is a
+real, permanent cost; a corpus that exists only on a runner is not reproducible. Minimised
+reproducers are small, reviewable, and are what a regression test needs anyway (D4).
+
+## Still open
+
+Nothing. Every question this TD raised is decided above.

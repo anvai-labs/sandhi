@@ -135,16 +135,27 @@ P0 is 30 minutes and gates P4 entirely. P1 is the P0-severity item and should no
    and names TLS as the example. Terminating TLS is not acquiring a data plane; it is closing the
    hole that forces someone else to.
 
-## Open questions
+## Resolved
 
-- Should TLS config live in `SANDHI_CONFIG` (the declarative file) rather than env vars? The file is
-  git-committed and must not carry secrets (`config.rs` module docs) — but a certificate *path* is
-  not a secret, and the key path is not either. Leaning: paths in the config file, consistent with
-  the `secret_env` pattern already established there.
-- Does D3's rotation need to handle a key that no longer matches the certificate mid-swap? An atomic
-  read of both files, validated as a pair before the swap, or the resolver serves a broken chain.
-- Is a file-mtime watch worth the dependency, or is SIGHUP sufficient? SIGHUP is simpler and
-  composes with cert-manager sidecars; the watcher is friendlier for bare-metal.
-- If P0 finds h2c already works, is enabling `axum/http2` explicitly a *behaviour* change or merely a
-  declaration? It may alter the `auto::Builder` path subtly; the P4 parity matrix has to run
-  regardless of which way P0 lands.
+**R1 — TLS certificate and key *paths* live in `SANDHI_CONFIG`, not env vars.** The file is
+git-committed and must never carry secrets (`sandhi-proxy/src/config.rs` module docs), and a path is
+not a secret — the same reasoning that already puts `secret_env` *names* in the file while the
+secrets themselves stay outside it. This also makes TLS reviewable in the same change as the rest of
+the declarative operator surface.
+
+**R2 — Certificate and key are loaded and validated as a pair before any swap.** A rotation that
+reads the two files independently can observe a new certificate against an old key mid-write and
+serve a chain that no client will accept. Load both, verify they match, then swap — or keep the
+previous pair and log loudly. A rotation must never be able to make things worse than not rotating.
+
+**R3 — SIGHUP in P2; the file-mtime watcher is deferred and optional.** SIGHUP is simpler, has no
+new dependency, and composes with the cert-manager sidecar pattern that most deployments already
+use. The watcher is friendlier for bare-metal and can be added behind the same reload path once
+something asks for it.
+
+## Still open
+
+- **If P0 finds h2c already works, is declaring `axum/http2` a behaviour change or a formality?**
+  Gated on P0 itself — the experiment has to run before this can be answered, and the P4 parity
+  matrix runs either way. This is the single remaining unresolved question in
+  [ADR-0006](../adr/0006-layer-boundary-and-protocol-scope.md).

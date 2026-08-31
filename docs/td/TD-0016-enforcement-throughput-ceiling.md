@@ -158,15 +158,42 @@ tests.
    is the fallback if the answer is no. Leaving a cost-sensitive tenant silently downgraded to the
    slower, cache-missing plane is a product defect regardless of which resolution wins.
 
-## Open questions
+## Resolved
 
-- What batch window does group commit use, and is it adaptive? A fixed window penalises low load; an
-  adaptive one is another tuning surface to get wrong.
-- Does sharding by scope create a pathological case when nearly all traffic is one scope (a single
-  large tenant)? Probably yes, and probably acceptable — but P1 should measure it rather than assume.
-- If D5's two-process test passes, what exactly does the relaxed assert allow? "Multiple processes,
-  one host, one file" is defensible; "multiple hosts on NFS" is not, and SQLite's own documentation
-  is explicit about that. The knob must not let an operator express the second.
-- Should `input_estimate` become model-aware (per-family bytes-per-token ratios from the catalog) or
-  merely script-aware? Model-aware is more accurate and couples the estimator to catalog governance
-  (TD-0004); script-aware is cruder and free of that coupling.
+**R1 — The relaxed replica assert is expressed as a topology *enum*, never a replica count.**
+"Multiple processes, one host, one file" is defensible if the conformance suite passes it; "multiple
+hosts over a network filesystem" is not, and SQLite's own documentation is explicit that locking is
+unreliable there. A numeric `SANDHI_REPLICA_COUNT=3` cannot distinguish the two, so the knob must
+not be numeric — the unsafe topology has to be **inexpressible**, not merely discouraged.
+
+**R2 — `input_estimate` becomes script-aware, not model-aware.** `ModelDescriptorV1`
+(`crates/sandhi-core/src/chat.rs:414-430`) carries `max_input_tokens`, `max_output_tokens`,
+`default_temperature` and `capabilities` — but **no bytes-per-token ratio**. Model-aware therefore
+means adding a new catalog field *and* taking on a per-model data-governance obligation under
+TD-0004, for an estimator whose documented defect (CJK undercount, `sandhi-proxy/src/lib.rs:2359-2373`)
+a script-aware ratio already fixes at zero coupling. Revisit only if `sandhi_settle_overshoot_total`
+stays non-zero after the change — which is the point of having that counter.
+
+**D9 — The reservation *output* ceiling should be model-aware, and that is free.** The inverse of
+R2, discovered while resolving it: `DEFAULT_OUTPUT_CEILING` (`sandhi-proxy/src/lib.rs:64`) is a flat
+4096 applied to any capped scope whose client left output unbounded, while the catalog already
+carries the real per-model `max_output_tokens`. Using it needs **no new catalog data** and no new
+governance — only a lookup. A flat 4096 is simultaneously too low for a long-form model (it silently
+truncates a capped tenant's output) and too high for a small one (it over-reserves and refuses
+admissible calls). Lands as P6.
+
+## Phase addendum
+
+| Phase | Scope | Acceptance |
+|---|---|---|
+| **P6** | D9 — model-aware output ceiling | A capped scope on a long-context model reserves against that model's real `max_output_tokens`, not 4096; a model absent from the catalog falls back to the flat default; no capped call is truncated below the model's own limit |
+
+## Still open
+
+- **What batch window does group commit use, and is it adaptive?** Gated on P0's measurement. A
+  fixed window penalises low load, an adaptive one is another tuning surface to get wrong, and
+  neither can be chosen before the commit cost is known.
+- **Does sharding by scope degrade when nearly all traffic is one scope?** Gated on P1, which must
+  *measure* the single-large-tenant case rather than assume it is acceptable. The likely answer is
+  that it degrades to today's behaviour, which would be fine — but "likely" is how the P1 line-budget
+  defect happened.

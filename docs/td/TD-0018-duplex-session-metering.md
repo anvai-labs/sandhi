@@ -147,15 +147,31 @@ one phase that improves the code even if voice never ships.
    ingress already works, a bidirectional h2 stream is a legitimate alternative framing to evaluate
    in P0. The accounting model in D2–D5 is framing-independent by design, which is the point.
 
-## Open questions
+## Resolved
 
-- What is a "turn" for a provider whose realtime protocol interleaves audio, text, and tool calls
-  continuously? The unit boundary may be provider-defined rather than protocol-defined, which would
-  push per-family logic into the session layer — the coupling this TD most wants to avoid.
-- Should an idle session hold its budget headroom? Holding it is conservative and can starve other
-  tenants; releasing it means a resumed session can be refused mid-conversation.
-- Does `RunCostTreeV1` need a new shape for sessions, or is a session just a `run_id` with many
-  steps? Leaning: the latter, which would mean D5 needs no new query surface at all.
-- If P0 stops this TD, what is the fallback answer for a customer asking for voice? Probably "meter
-  it out-of-band from the provider's own usage reporting" — which is a different product and should
-  be named as such rather than improvised.
+**R1 — An idle session holds no budget headroom, because D3 already settled it.** This was recorded
+as an open question, but per-turn leases (D3) mean a lease exists only for the turn in flight;
+between turns there is nothing held. The question presupposed a session-scoped lease, which D3
+explicitly rejected. An internal inconsistency in this TD, not a design choice — resolved, not
+answered.
+
+**R2 — A session needs no new query surface.** Verified against `RunCostTreeV1`
+(`crates/sandhi-core/src/stats.rs:206-215`): the tree is a `run_id`, a total, and roots of nodes
+keyed by `(step_id, parent_id)`. A session is therefore just a run whose steps are turns, and D5's
+`session_id` preservation is sufficient. `GET /admin/usage/run/{run_id}` renders a voice session as
+a cost tree with no change at all.
+
+## Still open — product decisions, not engineering ones
+
+Both need an owner outside this document. Neither blocks anything today, because the TD is already
+spike-gated on P0.
+
+- **What is a billable "turn" for a realtime protocol that interleaves audio, text and tool calls
+  continuously?** The unit boundary may be provider-defined rather than protocol-defined, which
+  would push per-family logic into the session layer — the coupling this TD most wants to avoid.
+  Worth noting the shape of a good answer: the turn is most likely *the unit at which the provider
+  itself reports usage*, since Sandhi's measurement can be no finer than its source. That is a
+  hypothesis for P0 to test, not a decision.
+- **If P0 stops this TD, what is offered to a customer asking for voice?** Probably "meter it
+  out-of-band from the provider's own usage reporting" — which is a different product with a
+  different accuracy claim, and should be named as such rather than improvised under pressure.

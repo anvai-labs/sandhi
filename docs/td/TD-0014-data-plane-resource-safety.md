@@ -197,18 +197,27 @@ be meaningful.
    G19 and none of G01, G02, G04, G28 — those are internal to Sandhi's own accounting and memory
    behaviour. It also cannot be assumed: the single-node dev posture is a supported deployment.
 
-## Open questions
+## Resolved
 
-- Should the per-IP connection cap key on `ConnCtx.peer` or on `forwarded_for` when trusted?
-  Leaning: `forwarded_for` when present and trusted, else `peer` — but that makes the cap's meaning
-  deployment-dependent, which needs saying in the operator guide.
-- Does D2's permit-holding body interact badly with the graceful-drain path
-  (`lib.rs:301-347`), where the server future is dropped at grace expiry? The permit is released on
-  drop, so probably not — but the drain test must assert it, or a shutdown could leak permits into a
-  process that then never exits.
-- ~~Is `LINE_SNIFF_BUDGET` (64 KiB) still right once it also bounds the *typed* decoders?~~
-  **Resolved by D1a during P1: no.** The typed path errors loudly (the policy that draft predicted)
-  but against its own, much larger ceiling. Remaining question: is 8 MiB the right number? It was
-  chosen to sit far above the largest frame we can name rather than measured against a corpus of
-  real provider traffic, which [TD-0015](TD-0015-performance-baseline-and-fault-injection.md) could
-  supply.
+**R1 — Per-IP caps key on `peer`; `forwarded_for` is honoured only from an allowlisted peer.**
+Never trust a header you cannot attribute: `x-forwarded-for` is caller-controlled, so keying a cap
+on it unconditionally lets any client evict every other client's budget by rotating a header. There
+is no trusted-proxy configuration anywhere in the repo today, so D4 introduces the first one, and
+the cap's meaning is therefore deployment-dependent — that must be stated in
+`docs/operator/proxy-guide.adoc`, not left for an operator to infer.
+
+**R2 — D2's permit-holding body is safe across graceful drain, but P2 must assert it.** Drain drops
+the server future at grace expiry (`sandhi-proxy/src/lib.rs:301-347`), which drops response bodies,
+which drops the `OwnedSemaphorePermit` they hold. Safe by construction. It is nonetheless the P2
+acceptance criterion that must prove it: a leaked permit would leave a process that never finishes
+draining, and "safe by construction" is exactly the class of claim TD-0014 P1 falsified once
+already.
+
+## Still open
+
+- **Is `MAX_TYPED_LINE_BYTES` = 8 MiB the right number?** Gated on
+  [TD-0015](TD-0015-performance-baseline-and-fault-injection.md), which should record the largest
+  frame each provider family actually emits. 8 MiB was chosen to sit far above the largest frame we
+  can *name* (OpenAI Responses' `response.completed`, Gemini `inlineData`), not measured. The
+  direction of error is deliberate — too high merely delays an OOM that P2's stream bound also
+  guards, while too low kills working streams, which is the defect D1a exists to fix.

@@ -69,6 +69,10 @@ receive new traffic: `200` normally, `503` from the moment the shutdown signal f
 drain. Rejected: making `/healthz` drain-aware — some orchestrators restart on a failing liveness
 probe, which would kill a draining process mid-stream and settle every in-flight call as `Partial`.
 
+`/readyz` reflects **drain state only** — never ledger or upstream health (see R1). A readiness
+probe that failed on ledger error would override ADR-0005 D6's per-tier fail policy for every tier
+at once, turning a per-scope enforcement decision into a process-wide availability one.
+
 **D2 — A transport gauge set, all bounded-cardinality process aggregates.** Connections currently
 established; connections accepted (counter); streams currently open; requests waiting on the
 admission semaphore; admission wait time (histogram); file descriptors in use; upstream pool
@@ -140,15 +144,30 @@ blind.
    upstream. D6 is mostly about making the failure *distinguishable*, which is a precondition for
    anyone reporting it.
 
-## Open questions
+## Resolved
 
-- Should `/readyz` also fail when the ledger backend is unavailable? Arguably yes — a proxy that
-  cannot enforce should arguably not receive traffic. But ADR-0005 D6's fail-open/closed policy is
-  per-tier and deliberate, and a readiness probe that overrides it would silently change enforcement
-  semantics into an availability decision.
-- Is FD count portable enough to gauge? `/proc/self/fd` is Linux-only; macOS needs a different call.
-  Possibly a Linux-only gauge with a documented gap, rather than an abstraction over two syscalls.
-- What is the right default `pool_max_idle_per_host`? Too low and every request pays a handshake; too
-  high and idle FDs accumulate exactly as they do today. This wants a TD-0015 measurement.
-- Should drain progress be a metric, a log line, or both? Both is easiest to justify: the log serves
-  the operator watching a deploy, the metric serves the dashboard afterwards.
+**R1 — `/readyz` must NOT fail when the ledger backend is unavailable.** The tempting answer is that
+a proxy which cannot enforce should not receive traffic. It is wrong, and importantly so: ADR-0005
+D6 makes the fail policy **per-tier and deliberate** — a `Block` scope fails closed, a `Warn` scope
+fails open. A readiness probe that pulled the whole process out of rotation on ledger error would
+override that policy for every tier at once, silently converting a per-scope *enforcement* decision
+into a process-wide *availability* decision. Surface ledger health as a metric and let D6 keep
+owning admission. Recorded as an amendment to D1 rather than only here, because it is a decision
+about what `/readyz` means, not a footnote.
+
+**R2 — A Linux-only FD gauge with a documented gap, not an abstraction over two syscalls.**
+`/proc/self/fd` is Linux-only and macOS needs a different call. The gauge exists to answer "are we
+approaching the FD limit" in production, and production is Linux. A portability shim would add a
+platform abstraction to serve a development environment that does not need the number.
+
+**R3 — Drain progress is both a log line and a metric.** They serve different people at different
+times: the log serves the operator watching a deploy in real time, the metric serves the dashboard
+and the post-hoc question "how long do our drains actually take?" (which is also TD-0015's
+graceful-drain measurement). Neither is redundant.
+
+## Still open
+
+- **What is the right default `pool_max_idle_per_host`?** Gated on
+  [TD-0015](TD-0015-performance-baseline-and-fault-injection.md) R5. Too low and every request pays
+  a handshake; too high and idle FDs accumulate exactly as they do today under reqwest's unbounded
+  default. This is a measurement, not a preference.

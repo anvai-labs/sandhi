@@ -160,8 +160,10 @@ Do not build, and do not spike:
 - **Risk accepted.** If TD-0015 falsifies F1 — if byte movement, not the commit path, dominates —
   D1's first reason weakens and this ADR must be revised, not quietly ignored. That is why the
   status is Proposed.
-- **Unresolved.** Whether HTTP/2 ingress already works by Cargo feature unification is unknown; a
-  30-minute experiment in TD-0017 settles it.
+- **Unresolved.** Whether HTTP/2 ingress already works by Cargo feature unification is unknown; the
+  30-minute experiment in [TD-0017](../td/TD-0017-transport-security-and-ingress-protocol-breadth.md)
+  P0 settles it. This is the **only** open question in this ADR — every other item raised across
+  TD-0014…0021 has been resolved on evidence or explicitly gated on a named experiment or owner.
 
 ## Appendix — the gap register (G01–G30)
 
@@ -192,7 +194,7 @@ each gap has exactly one owning document, and each document is one branch and on
 | G19 | Peer address discarded — no L3/L4 identity, no pre-auth abuse control | R | P1 | TD-0014 |
 | G20 | `idempotency-key` captured and persisted but never used for dedup | R+C | P2 | TD-0021 |
 | G21 | No contract-version negotiation on the proxy HTTP path | C | P2 | TD-0021 |
-| G22 | Node typed-error parity: TD-0008 lists it open, code suggests otherwise — verify | C | P3 | TD-0021 |
+| G22 | Node typed-error parity is genuinely absent: Python has an exception class, Node returns a generic error carrying JSON | C | P3 | TD-0021 |
 | G23 | Embedding modality sits in indefinite limbo: a stale prototype branch, an ADR-0002 gate never formally applied | C | P1 | ADR-0007 |
 | G24 | `input_estimate` is bytes/4 — self-documented as wrong for CJK, and it sets the ceiling | R | P3 | TD-0016 |
 | G25 | `Warn` policy diverges between the in-memory and durable ledger arms | FP | P3 | TD-0016 |
