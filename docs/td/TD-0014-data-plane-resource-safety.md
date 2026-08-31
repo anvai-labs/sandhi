@@ -105,9 +105,35 @@ point of contention.
 ## Decisions
 
 **D1 — Extract the bounded line-splitter to one place and use it on both planes.** `metered_passthrough`'s
-buffer discipline (bounded by `LINE_SNIFF_BUDGET`, O(n) via a `searched_to` cursor) becomes a
+buffer discipline (O(n) via a `searched_to` cursor, bounded by a caller-supplied budget) becomes a
 reusable `LineSplitter` in `sandhi-providers`. All six typed decoders consume it. Rejected: patching
-six copies — that is how the drift happened. The budget stays shared, so raising it is one decision.
+six copies — that is how the drift happened.
+
+**D1a — Two ceilings, because the two planes fail differently.** An earlier draft of this decision
+said the budget stays shared "so raising it is one decision." Implementation review falsified that
+and the correction is worth recording, because the reasoning generalises:
+
+- `LINE_SNIFF_BUDGET` (64 KiB) bounds *sniffing* on the raw plane. Passing it costs only usage
+  accuracy — the bytes were already forwarded verbatim, so the stream is unharmed.
+- `MAX_TYPED_LINE_BYTES` (8 MiB) bounds *decoding*. A typed decoder emits content, so its bound can
+  only be a last-resort guard against unbounded growth, **never a threshold real traffic reaches**.
+
+64 KiB is a threshold real traffic reaches. OpenAI's Responses API puts the entire final response
+object — all generated output included — in the single `response.completed` SSE line, which is also
+the line carrying the usage; a long generation is comfortably past 128 KiB. Sharing the sniff budget
+would therefore have killed a working stream *and* destroyed its metering. Gemini's `inlineData`
+parts are larger still.
+
+Worst-case typed memory is `MAX_TYPED_LINE_BYTES` × concurrent typed streams, which is why P2's
+stream bound (D2) and this one are related knobs rather than independent ones.
+
+**D1b — Test the legitimate case, not only the pathological one.** The bug above survived a full
+green suite because every test used either tiny frames or multi-megabyte filler with no newline at
+all. Two properties are needed, and the second is the one that was missing: a stream with *no line
+boundary* must be refused, and a stream with *one very large but terminated line* must pass intact.
+The second only reproduces under **chunked** delivery — a single-chunk push drains the complete line
+before the budget is ever consulted — so any test of a size bound must feed bytes the way a socket
+does.
 
 **D2 — The concurrency permit is held by the response body, not the response future.** A small `Body`
 newtype owns the `OwnedSemaphorePermit` and releases it when the stream terminates (including on
@@ -180,7 +206,9 @@ be meaningful.
   (`lib.rs:301-347`), where the server future is dropped at grace expiry? The permit is released on
   drop, so probably not — but the drain test must assert it, or a shutdown could leak permits into a
   process that then never exits.
-- Is `LINE_SNIFF_BUDGET` (64 KiB) still right once it also bounds the *typed* decoders, which parse
-  rather than sniff? A tool-call delta larger than the budget is currently flushed unsniffed on the
-  raw plane; on the typed plane, dropping it would lose content, not just usage. D1 must decide
-  whether the typed path truncates, errors, or grows — and the answer is probably "errors loudly."
+- ~~Is `LINE_SNIFF_BUDGET` (64 KiB) still right once it also bounds the *typed* decoders?~~
+  **Resolved by D1a during P1: no.** The typed path errors loudly (the policy that draft predicted)
+  but against its own, much larger ceiling. Remaining question: is 8 MiB the right number? It was
+  chosen to sit far above the largest frame we can name rather than measured against a corpus of
+  real provider traffic, which [TD-0015](TD-0015-performance-baseline-and-fault-injection.md) could
+  supply.
