@@ -13,36 +13,68 @@ permissions:
   contents: read
   pull-requests: read
 
-# Pool discipline: a new push/PR update supersedes the previous run for that ref.
-# Event name keys the group so a PR's gated run and its plain mirror never cancel
-# each other. Keeps N stacked PRs from saturating the self-hosted pool.
+# Same-ref supersede: a new commit on a PR cancels that PR's previous runs (both the
+# gated run and its plain mirror — event name keys them apart, so a PR's two runs never
+# cancel each other). Trunk pushes are NEVER cancelled: back-to-back merges must not
+# permanently cancel a release verification on main/develop. Note this does NOT limit
+# how many DIFFERENT PRs run concurrently — groups are per-ref.
 concurrency:
   group: ci-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 jobs:
+  trust-route:
+    # Decides WHICH environment authorizes the privileged path — BEFORE any PR-head code
+    # runs anywhere. Runs on ubuntu-latest, touches no pool and no secrets beyond the
+    # read-only token, and only asks one question: does this PR edit the workflows that
+    # define CI's own trust conditions? Those PRs ("the gatekeepers") keep the human
+    # review; everything else takes the no-click path. Evaluated against the PR's file
+    # list via the API — the base-ref workflow (not the PR head) executes this job.
+    name: Route CI trust (gatekeeper detection)
+    if: >-
+      github.event_name == 'pull_request_target' &&
+      vars.OWNER_PRIVATE_CI_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      gatekeeper: ${{ steps.route.outputs.gatekeeper }}
+    steps:
+      - name: Does this PR edit the CI trust conditions?
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          files=$(gh api "repos/${{ github.repository }}/pulls/${PR_NUMBER}/files" --paginate             -q '[.[].filename] | join("\n")')
+          if grep -qE '^\.github/workflows/' <<<"$files"; then
+            echo "gatekeeper=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "gatekeeper=false" >> "$GITHUB_OUTPUT"
+          fi
+
   authorize-owner:
     name: Authorize owner private CI
+    # The trust predicate, evaluated in the base-ref workflow (a PR cannot relax these
+    # conditions for its own run — and see the base-ref restriction below, which also
+    # stops a workflow edited on an unprotected base branch from ever authorizing the
+    # privileged path). Population: the owner's own PRs, from same-repo heads, based on
+    # a PROTECTED trunk. The human approval this job used to require per run was never
+    # dual-control (its sole reviewer was the actor it screened), so routine runs —
+    # PRs that do not touch .github/workflows/** — route to ci-trusted (no reviewers):
+    # zero clicks, no capability change, because the predicate already bounds who and
+    # what runs. PRs that DO edit the workflows (the gatekeepers) keep owner-private-ci:
+    # a human stays between any change to CI's own trust conditions and the pool — the
+    # one place a stolen credential could otherwise rewrite the rules it runs under.
     if: >-
       github.event_name == 'pull_request_target' &&
       vars.OWNER_PRIVATE_CI_ENABLED == 'true' &&
       github.actor_id == '5168752' &&
-      github.event.pull_request.user.id == 5168752 &&
-      github.event.pull_request.head.repo.full_name == github.repository
+      github.event.pull_request.user.id == '5168752' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event.pull_request.base.ref == 'develop' ||
+       github.event.pull_request.base.ref == 'main')
+    needs: trust-route
     runs-on: ubuntu-latest
-    # Trust is decided by the predicate below, evaluated in the trusted base-ref
-    # workflow (pull_request_target runs the workflow from develop, never from the PR
-    # head — a PR cannot edit these conditions for its own run). For the population
-    # that passes (the owner's own same-repo PRs), the per-run human approval this
-    # job used to require was vacuous: the same principal it screened could open the
-    # PR AND approve the gate, so it defended nothing while taxing every run with a
-    # manual click. ci-trusted has no required reviewers; merging the PR that
-    # introduces it IS the activation decision. Real boundaries, unchanged:
-    #   workflow-from-base; non-owner/fork PRs never take this path (plain
-    #   `pull_request` mirror, ubuntu-latest, no pool, no secrets); read-only
-    #   GITHUB_TOKEN; protected develop + required CI Success + PR review;
-    #   vars.OWNER_PRIVATE_CI_ENABLED stays the org kill-switch.
-    environment: ci-trusted
+    environment: ${{ needs.trust-route.outputs.gatekeeper == 'true' && 'owner-private-ci' || 'ci-trusted' }}
     steps:
       - name: Verify immutable owner and same-repository head
         env:
