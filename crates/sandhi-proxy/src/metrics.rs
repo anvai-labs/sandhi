@@ -18,7 +18,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -185,6 +185,12 @@ pub struct Metrics {
     /// Open streaming response bodies. Outside the registry lock on purpose: touched twice per
     /// stream by the body's own lifetime. TD-0014 D6 — no bound ships unobservable.
     streams_open: AtomicI64,
+    /// Open TCP connections (TD-0014 P3). Same reasoning, same lifetime discipline.
+    connections_open: AtomicI64,
+    /// Connections refused by the total or per-IP connection caps (TD-0014 P3).
+    /// An operator seeing a pinned `sandhi_connections_open` plus a rising shed
+    /// counter is looking at finding-3's wedge or a genuine flood.
+    connections_shed: AtomicU64,
 }
 
 impl Metrics {
@@ -214,6 +220,21 @@ impl Metrics {
         StreamOpenGuard {
             metrics: Arc::clone(self),
         }
+    }
+
+    /// Open a TCP connection and return the drop guard that closes its count.
+    /// Lifetime discipline identical to the streams gauge: the guard lives with
+    /// the connection task, so aborts and disconnects balance the count.
+    pub fn connection_open_guard(self: &Arc<Self>) -> ConnectionOpenGuard {
+        self.connections_open.fetch_add(1, Ordering::AcqRel);
+        ConnectionOpenGuard {
+            metrics: Arc::clone(self),
+        }
+    }
+
+    /// One connection refused by a connection-level cap.
+    pub fn connection_shed(&self) {
+        self.connections_shed.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record one settled call. Called from the accounting path, which already holds the settled
@@ -347,6 +368,18 @@ impl Metrics {
         out.push_str("# HELP sandhi_streams_open Streaming response bodies currently open.\n");
         out.push_str("# TYPE sandhi_streams_open gauge\n");
         let _ = writeln!(out, "sandhi_streams_open {streams_open}");
+
+        let connections_open = self.connections_open.load(Ordering::Acquire);
+        out.push_str("# HELP sandhi_connections_open TCP connections currently served.\n");
+        out.push_str("# TYPE sandhi_connections_open gauge\n");
+        let _ = writeln!(out, "sandhi_connections_open {connections_open}");
+
+        let connections_shed = self.connections_shed.load(Ordering::Acquire);
+        out.push_str(
+            "# HELP sandhi_connections_shed_total Connections refused by the connection caps.\n",
+        );
+        out.push_str("# TYPE sandhi_connections_shed_total counter\n");
+        let _ = writeln!(out, "sandhi_connections_shed_total {connections_shed}");
 
         out.push_str(
             "# HELP sandhi_rate_limited_total Requests refused by the per-key rate limiter.\n",
@@ -590,5 +623,18 @@ pub struct StreamOpenGuard {
 impl Drop for StreamOpenGuard {
     fn drop(&mut self) {
         self.metrics.stream_closed();
+    }
+}
+
+/// Drop guard for one open TCP connection: decrements
+/// [`Metrics::connection_open_guard`] on drop.
+#[derive(Debug)]
+pub struct ConnectionOpenGuard {
+    metrics: Arc<Metrics>,
+}
+
+impl Drop for ConnectionOpenGuard {
+    fn drop(&mut self) {
+        self.metrics.connections_open.fetch_sub(1, Ordering::AcqRel);
     }
 }
