@@ -89,9 +89,12 @@ pub const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 /// `CONNECTION_READ_BUF_BYTES`).
 pub const DEFAULT_MAX_CONNECTIONS: usize = 1024;
 
-/// Maximum concurrent TCP connections from one peer IP (TD-0014 P3, G19). Generous for a real
-/// client behind NAT, far below what a single-IP flood needs to matter.
-pub const DEFAULT_MAX_CONNECTIONS_PER_IP: usize = 64;
+/// Maximum concurrent TCP connections from one peer IP (TD-0014 P3, G19); **0 (the default)
+/// disables the cap**. Opt-in on purpose (TD-0014 pressure-test 3): keyed on the peer at accept
+/// time, a proxy-fronted or NAT'd deployment shares one IP, so a default-on cap would shed the
+/// fronting proxy's connections. Enable it when directly exposed, or after configuring
+/// `SANDHI_TRUSTED_PROXIES` for the per-request client resolution.
+pub const DEFAULT_MAX_CONNECTIONS_PER_IP: usize = 0;
 
 /// Seconds a connection may spend transmitting its request head (TD-0014 P3, G03). Matches
 /// hyper's current default — but hyper documents it as "do not depend on that", so Sandhi now
@@ -452,6 +455,7 @@ pub(crate) async fn resolve_client_ip(
                 .get("x-forwarded-for")
                 .and_then(|value| value.to_str().ok());
             resolve_forwarded_for(peer, forwarded, &state.trusted_proxies)
+                .map(|ip: std::net::IpAddr| ip.to_canonical())
         })
         .or(peer);
     if let Some(client) = client {
@@ -460,8 +464,12 @@ pub(crate) async fn resolve_client_ip(
     next.run(request).await
 }
 
-pub fn build_app(state: Arc<ProxyState>) -> Router {
-    let max_request_body_bytes = state.max_request_body_bytes;
+/// The AI ingress routes with their connection-scoped layers: admission and
+/// per-request trusted-proxy resolution. A separate function so the layering
+/// itself is testable against the exact production wiring (the middleware was
+/// once absent from this chain while its pure logic stayed green — the wiring
+/// test exists because of that).
+fn ingress_routes(state: &Arc<ProxyState>) -> axum::Router<Arc<ProxyState>> {
     let ai_routes = Router::new()
         .route("/v1/chat/completions", post(handle_openai))
         .route("/v1/messages", post(handle_anthropic))
@@ -469,7 +477,17 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         // Gemini's path carries the model AND the method, colon-separated
         // (`/v1beta/models/gemini-2.5-flash:generateContent`), so it matches as ONE segment and
         // is split below — axum has no pattern for a colon-suffixed verb.
-        .route("/v1beta/models/:model_method", post(handle_gemini))
+        .route("/v1beta/models/:model_method", post(handle_gemini));
+    // Test-only observability probe: lets the wiring test confirm THIS
+    // function's middleware chain actually inserts ClientAddr.
+    #[cfg(test)]
+    let ai_routes = ai_routes.route(
+        "/__client_probe",
+        axum::routing::get(|Extension(client): Extension<ClientAddr>| async move {
+            client.client.to_string()
+        }),
+    );
+    ai_routes
         // Admission wraps extraction: waiting requests retain only transport-level buffers rather
         // than each allocating `SANDHI_MAX_REQUEST_BODY_BYTES` in application memory.
         .layer(AdmissionLayer::new(state.max_in_flight_ai_requests.max(1)))
@@ -478,7 +496,12 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             resolve_client_ip,
-        ));
+        ))
+}
+
+pub fn build_app(state: Arc<ProxyState>) -> Router {
+    let max_request_body_bytes = state.max_request_body_bytes;
+    let ai_routes = ingress_routes(&state);
     Router::new()
         .route("/healthz", get(health))
         .route("/catalog/models", get(catalog_models))
@@ -530,9 +553,13 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
 }
 
 /// Bind and serve until shutdown.
+///
+/// Delegates to [`serve_with_shutdown_timeout`] with a never-resolving
+/// shutdown, so embedders on this path get the SAME connection-level
+/// protections as the graceful path (an earlier form served via bare
+/// `axum::serve` and silently skipped every P3 defence — review finding 6).
 pub async fn serve(state: Arc<ProxyState>, addr: SocketAddr) -> std::io::Result<()> {
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, build_app(state)).await
+    serve_with_shutdown_timeout(state, addr, std::future::pending(), DEFAULT_SHUTDOWN_GRACE).await
 }
 
 /// Bind and serve until `shutdown` resolves, then stop accepting connections and drain every
@@ -3565,22 +3592,15 @@ mod connection_policy_tests {
         state.trusted_proxies = parse_trusted_proxies("10.0.0.0/8");
         let state = std::sync::Arc::new(state);
 
-        let app = Router::new()
-            .route(
-                "/probe",
-                axum::routing::get(|Extension(client): Extension<ClientAddr>| async move {
-                    client.client.to_string()
-                }),
-            )
-            .layer(axum::middleware::from_fn_with_state(
-                state.clone(),
-                resolve_client_ip,
-            ))
-            .with_state(state);
+        // Through the PRODUCTION ingress function, not a hand-built router —
+        // the reviewer's point: the middleware could vanish from build_app and
+        // a hand-built test would stay green. (build_app itself goes through
+        // ingress_routes too; the cfg(test) probe route lives there.)
+        let app = ingress_routes(&state).with_state(state);
 
         let probe = |peer: std::net::IpAddr, forwarded: Option<&str>| {
             let mut req = Request::builder()
-                .uri("/probe")
+                .uri("/__client_probe")
                 .body(axum::body::Body::empty())
                 .unwrap();
             req.extensions_mut().insert(PeerCtx { peer });

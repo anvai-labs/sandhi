@@ -50,7 +50,10 @@ tower = { version = "0.5", default-features = false }
 # slowloris defence (adversarial-review finding 3). Sandhi's listener is
 # HTTP/1-only until TD-0017 adds TLS/h2 with its own timeouts.
 hyper = { version = "1", features = ["http1", "server"] }
-hyper-util = { version = "0.1", features = ["server-graceful", "service", "tokio"] }
+# "http1" gates hyper-util's GracefulConnection impl for hyper's http1
+# Connection — the drain watcher needs it; declare it, don't inherit it from
+# reqwest's transitive feature unification.
+hyper-util = { version = "0.1", features = ["server-graceful", "http1", "service", "tokio"] }
 ipnet = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

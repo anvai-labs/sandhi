@@ -2347,7 +2347,7 @@ async fn connection_cap_sheds_new_connections_and_recovers_on_close() {
         .unwrap();
     let metrics_text = metrics.text().await.unwrap();
     assert!(
-        metrics_text.contains("sandhi_connections_shed_total 1"),
+        metrics_text.contains("sandhi_connections_shed_total 1\n"),
         "expected the shed counter at 1, got:\n{metrics_text}"
     );
 
@@ -2381,8 +2381,9 @@ async fn slowloris_connections_are_closed_after_the_header_read_timeout() {
         "a silent connection must be closed by the header-read timeout"
     );
     assert!(
-        elapsed >= std::time::Duration::from_millis(500),
-        "closed too eagerly at {elapsed:?} — that is not the header timeout"
+        elapsed >= std::time::Duration::from_millis(500)
+            && elapsed <= std::time::Duration::from_secs(5),
+        "closed at {elapsed:?} — not the configured 1s header timeout"
     );
 
     // Adversarial-review finding 3 regression: a connection that sends

@@ -241,10 +241,15 @@ async fn main() {
     );
     // TD-0014 P3: connection-level limits (see the field docs for semantics).
     state.max_connections = positive_usize_env("SANDHI_MAX_CONNECTIONS", DEFAULT_MAX_CONNECTIONS);
-    state.max_connections_per_ip = positive_usize_env(
-        "SANDHI_MAX_CONNECTIONS_PER_IP",
-        DEFAULT_MAX_CONNECTIONS_PER_IP,
-    );
+    // 0 is the DEFAULT and DISABLES the per-IP cap (opt-in control — see the
+    // field doc); positive_usize_env would panic on exactly the value the docs
+    // tell operators to set behind a proxy.
+    state.max_connections_per_ip = match std::env::var("SANDHI_MAX_CONNECTIONS_PER_IP") {
+        Ok(raw) => raw.parse::<usize>().unwrap_or_else(|_| {
+            panic!("SANDHI_MAX_CONNECTIONS_PER_IP must be a non-negative integer, got {raw:?}")
+        }),
+        Err(_) => DEFAULT_MAX_CONNECTIONS_PER_IP,
+    };
     state.header_read_timeout_secs = positive_u64_env(
         "SANDHI_HEADER_READ_TIMEOUT_SECS",
         DEFAULT_HEADER_READ_TIMEOUT_SECS,
