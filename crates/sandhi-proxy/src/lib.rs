@@ -1999,6 +1999,7 @@ async fn transparent_complete_response(
             &upstream_path(provider.family(), gemini.as_ref()),
             body,
             session.as_deref(),
+            Some(accounting.request_id.as_str()),
         )
         .await
     {
@@ -2050,6 +2051,7 @@ async fn transparent_stream_response(
             &upstream_path(provider.family(), gemini.as_ref()),
             body,
             session.as_deref(),
+            Some(accounting.request_id.as_str()),
         )
         .await
     {
@@ -2194,6 +2196,11 @@ struct RequestAccounting {
     reservation: Option<Reservation>,
     provider: String,
     model: String,
+    /// Sandhi's id for THIS call, minted at admission (not lazily at event assembly) so it can
+    /// be sent upstream on the vendor's declared correlation header and then become the usage
+    /// event's `request_id` — one string correlating the upstream's logs and sandhi's event
+    /// (ADR-0008 D6; also the seam TD-0021 G20's reconcile-once dedup wants).
+    request_id: String,
     metadata: RequestMetadataV1,
     usage: Option<UsageV2>,
     outcome: &'static str,
@@ -2234,6 +2241,7 @@ impl RequestAccounting {
             reservation,
             provider,
             model: request.model.clone(),
+            request_id: next_request_id(),
             metadata: request.metadata.clone(),
             usage: None,
             outcome: "cancelled",
@@ -2263,6 +2271,23 @@ impl RequestAccounting {
 
     fn set_outcome(&mut self, outcome: &'static str) {
         self.outcome = outcome;
+    }
+
+    /// Per-call wire headers carrying this call's minted id on the vendor's declared
+    /// correlation header (ADR-0008 D6) — caller-owned injection on the typed plane
+    /// (TD-0022 D1). Empty when the upstream declares no such header.
+    fn correlation_headers(&self) -> HeaderMap {
+        let mut out = HeaderMap::new();
+        let Some(name) = sandhi_providers::client_request_id_header(&self.provider) else {
+            return out;
+        };
+        if let (Ok(name), Ok(value)) = (
+            axum::http::HeaderName::try_from(name),
+            axum::http::HeaderValue::from_str(&self.request_id),
+        ) {
+            out.insert(name, value);
+        }
+        out
     }
 
     /// Evaluate threshold alerts against the reconciled spend. Best-effort: any failure (registry
@@ -2385,6 +2410,7 @@ impl RequestAccounting {
             &self.model,
             &self.metadata,
             &usage,
+            Some(self.request_id.as_str()),
         ));
     }
 }
@@ -2404,7 +2430,8 @@ async fn complete_response(
     permit: Arc<AdmissionPermit>,
 ) -> Response {
     let _permit = permit; // unary: held by the handler future, which is the whole call
-    match provider.complete(request).await {
+    let correlation = accounting.correlation_headers();
+    match provider.complete_with(request, correlation).await {
         Ok(mut response) => {
             response.usage.completeness = UsageCompleteness::Final;
             response
@@ -2433,7 +2460,8 @@ async fn stream_response(
     full_error_detail: bool,
     permit: Arc<AdmissionPermit>,
 ) -> Response {
-    let mut upstream = match provider.stream(request).await {
+    let correlation = accounting.correlation_headers();
+    let mut upstream = match provider.stream_with(request, correlation).await {
         Ok(s) => s,
         Err(error) => {
             accounting.set_outcome("error");
@@ -2662,12 +2690,18 @@ fn usage_event(
     model: &str,
     metadata: &RequestMetadataV1,
     usage: &UsageV2,
+    minted_request_id: Option<&str>,
 ) -> UsageEvent {
+    // Identity precedence: the upstream's own id when it gave one, else the id minted at
+    // admission (the same string sent upstream on the vendor's correlation header, ADR-0008
+    // D6), else a late mint for callers outside the accounting path.
+    let request_id = usage
+        .upstream_request_id
+        .clone()
+        .or_else(|| minted_request_id.map(str::to_string))
+        .unwrap_or_else(next_request_id);
     UsageEvent::new(
-        usage
-            .upstream_request_id
-            .clone()
-            .unwrap_or_else(next_request_id),
+        request_id,
         now_rfc3339(),
         provider,
         model,
@@ -2720,6 +2754,7 @@ mod usage_event_tests {
             "gpt-oss:20b",
             &RequestMetadataV1::default(),
             &usage,
+            None,
         );
         assert_eq!(event.duration_ms, Some(1234));
         assert_eq!(event.time_to_first_token_ms, Some(56));
@@ -2735,6 +2770,7 @@ mod usage_event_tests {
             "gpt-oss:20b",
             &RequestMetadataV1::default(),
             &usage,
+            None,
         );
         assert_eq!(event.duration_ms, None);
         assert_eq!(event.time_to_first_token_ms, None);

@@ -92,6 +92,23 @@ the flag off ignores the header. Sandhi does no capability gating — a per-requ
 lookup on the hot path for a header the server safely discards is not a trade. Operators who
 want KV reuse enable `scheduler.session_handles.enabled` on the InferFlux side.
 
+### D6. Upstream request correlation: a third spec fact, caller-owned injection.
+
+`client_request_id_header` (`x-inferflux-client-request-id` for InferFlux, `None` elsewhere)
+names the vendor's per-request correlation header. The value is the id the **proxy mints at
+admission** — no longer lazily at event assembly — so the same string is (a) sent upstream,
+where InferFlux keys its per-request logs/metrics on it, and (b) the usage event's
+`request_id` fallback. One id, two ledgers, 1:1 correlation.
+
+Two deliberate asymmetries with D3. First, **injection is caller-owned**: session affinity is
+adapter-injected because the conversation key lives in neutral request metadata, but the
+correlation id is *minted by the caller* (the proxy), so it rides TD-0022's per-call wire
+headers — the spec fact supplies only the vendor's header name. Second, **mint-early**
+changes timing, not value space: every successful event already got an id; minting it at
+admission is what makes it usable mid-flight, and it composes with TD-0021 G20 (the inert
+`idempotency-key`): the dedup lookup G20 wants needs exactly a per-call id minted before the
+upstream call. G20 itself remains that TD's item.
+
 ## Consequences
 
 - **Positive.** Admission cost one table row plus tests, and both planes gained a mechanism

@@ -65,6 +65,10 @@ pub struct RawForwarder {
     /// when declared, the per-request neutral session id is mapped onto it (ADR-0008 D3).
     /// Attribution never crosses this seam — only the conversation key does (ADR-0001 §4).
     session_header: Option<&'static str>,
+    /// Vendor per-request correlation header name from the catalog spec (ADR-0008 D6). The
+    /// VALUE is caller-minted (the proxy's admission id, which becomes the event's
+    /// `request_id`); this field supplies only the name.
+    client_request_id_header: Option<&'static str>,
     complete_timeout: Duration,
     stream_setup_timeout: Duration,
     stream_idle_timeout: Option<Duration>,
@@ -91,6 +95,7 @@ impl RawForwarder {
             gemini_auth: GeminiAuthScheme::ApiKey,
             extra_headers: HeaderMap::new(),
             session_header: None,
+            client_request_id_header: None,
             complete_timeout: Duration::from_secs(120),
             stream_setup_timeout: Duration::from_secs(30),
             stream_idle_timeout: Some(Duration::from_secs(90)),
@@ -117,6 +122,17 @@ impl RawForwarder {
     #[must_use]
     pub fn with_session_header(mut self, header: Option<&'static str>) -> Self {
         self.session_header = header;
+        self
+    }
+
+    /// Declare the vendor's per-request correlation header (a catalog spec fact, resolved by
+    /// [`build_raw_forwarder`]). The value arrives per call as the `correlation` argument of
+    /// the metered forwards.
+    ///
+    /// [`build_raw_forwarder`]: crate::build_raw_forwarder
+    #[must_use]
+    pub fn with_client_request_id_header(mut self, header: Option<&'static str>) -> Self {
+        self.client_request_id_header = header;
         self
     }
 
@@ -154,7 +170,7 @@ impl RawForwarder {
     /// Non-streaming forward: POST the (envelope-normalized) body bytes to `{base_url}{path}`,
     /// return the status + raw body bytes + curated headers.
     pub async fn forward(&self, path: &str, body: Bytes) -> Result<RawResponse, ProviderError> {
-        self.forward_with_session(path, body, None).await
+        self.forward_with_session(path, body, None, None).await
     }
 
     /// Session-aware core of [`Self::forward`]: `session` is the neutral conversation key
@@ -164,11 +180,14 @@ impl RawForwarder {
         path: &str,
         body: Bytes,
         session: Option<&str>,
+        correlation: Option<&str>,
     ) -> Result<RawResponse, ProviderError> {
         let url = self.url(path);
         let out_body = normalize_envelope(self.family, &body, false);
         match tokio::time::timeout(self.complete_timeout, async {
-            let resp = self.send_with_session(&url, out_body, session).await?;
+            let resp = self
+                .send_with_session(&url, out_body, session, correlation)
+                .await?;
             let status = resp.status().as_u16();
             if !resp.status().is_success() {
                 return Err(error_for_response(resp, None).await);
@@ -229,8 +248,11 @@ impl RawForwarder {
         path: &str,
         body: Bytes,
         session: Option<&str>,
+        correlation: Option<&str>,
     ) -> Result<(RawResponse, sandhi_core::UsageV2), ProviderError> {
-        let raw = self.forward_with_session(path, body, session).await?;
+        let raw = self
+            .forward_with_session(path, body, session, correlation)
+            .await?;
         let usage = serde_json::from_slice::<Value>(&raw.body)
             .ok()
             .and_then(|value| parse_usage_for_family(self.family, &value))
@@ -251,12 +273,13 @@ impl RawForwarder {
         path: &str,
         body: Bytes,
         session: Option<&str>,
+        correlation: Option<&str>,
     ) -> Result<RawMeteredStreamResponse, ProviderError> {
         let url = self.url(path);
         let out_body = normalize_envelope(self.family, &body, true);
         let resp = match tokio::time::timeout(
             self.stream_setup_timeout,
-            self.send_with_session(&url, out_body, session),
+            self.send_with_session(&url, out_body, session, correlation),
         )
         .await
         {
@@ -294,7 +317,7 @@ impl RawForwarder {
         url: &str,
         body: Bytes,
     ) -> impl std::future::Future<Output = Result<reqwest::Response, ProviderError>> {
-        self.send_with_session(url, body, None)
+        self.send_with_session(url, body, None, None)
     }
 
     /// Session-aware send: when a catalog-declared affinity header exists and the call
@@ -308,12 +331,22 @@ impl RawForwarder {
         url: &str,
         body: Bytes,
         session: Option<&str>,
+        correlation: Option<&str>,
     ) -> impl std::future::Future<Output = Result<reqwest::Response, ProviderError>> {
         let mut headers = self.extra_headers.clone();
         if let (Some(name), Some(value)) = (
             self.session_header,
             session.map(str::trim).filter(|value| !value.is_empty()),
         ) {
+            if let (Ok(name), Ok(value)) =
+                (HeaderName::try_from(name), HeaderValue::from_str(value))
+            {
+                headers.insert(name, value);
+            }
+        }
+        // ADR-0008 D6: the caller-minted correlation id rides the vendor's declared header —
+        // the same id that becomes the usage event's `request_id`.
+        if let (Some(name), Some(value)) = (self.client_request_id_header, correlation) {
             if let (Ok(name), Ok(value)) =
                 (HeaderName::try_from(name), HeaderValue::from_str(value))
             {
@@ -917,6 +950,7 @@ mod tests {
                 "/v1/chat/completions",
                 Bytes::from_static(body),
                 Some("conv_9"),
+                None,
             )
             .await
             .unwrap();
@@ -939,6 +973,7 @@ mod tests {
                 "/v1/chat/completions",
                 Bytes::from_static(b"{}"),
                 Some("conv_9"),
+                None,
             )
             .await
             .unwrap();
@@ -955,6 +990,7 @@ mod tests {
                 "/v1/chat/completions",
                 Bytes::from_static(b"{}"),
                 Some("   "),
+                None,
             )
             .await
             .unwrap();
@@ -981,6 +1017,7 @@ mod tests {
                 "/v1/chat/completions",
                 Bytes::from_static(body),
                 Some("conv_9"),
+                None,
             )
             .await
             .unwrap();
@@ -1006,7 +1043,12 @@ mod tests {
             .await;
         let forwarder = RawForwarder::new(ProviderFamily::OpenAiCompat, server.uri(), "k");
         let (resp, usage) = forwarder
-            .forward_metered("/v1/chat/completions", Bytes::from_static(b"{}"), None)
+            .forward_metered(
+                "/v1/chat/completions",
+                Bytes::from_static(b"{}"),
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(resp.status, 200);
@@ -1034,7 +1076,12 @@ data: [DONE]\n\n";
             .await;
         let forwarder = RawForwarder::new(ProviderFamily::OpenAiCompat, server.uri(), "k");
         let response = forwarder
-            .forward_stream_metered("/v1/chat/completions", Bytes::from_static(b"{}"), None)
+            .forward_stream_metered(
+                "/v1/chat/completions",
+                Bytes::from_static(b"{}"),
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(response.status, 200);
@@ -1108,7 +1155,12 @@ data: [DONE]\n\n";
             );
 
         let err = forwarder
-            .forward_stream_metered("/v1/chat/completions", Bytes::from_static(b"{}"), None)
+            .forward_stream_metered(
+                "/v1/chat/completions",
+                Bytes::from_static(b"{}"),
+                None,
+                None,
+            )
             .await
             .err()
             .expect("stream setup should time out");

@@ -138,6 +138,15 @@ impl ProviderRequest {
     }
 }
 
+/// The request header name this vendor uses for per-request correlation, when it declares
+/// one (ADR-0008 D6). The CALLER owns the value and the injection (per-call wire headers,
+/// TD-0022 D1): the proxy mints the id at admission and sends the same string that becomes
+/// the usage event's `request_id`, so upstream logs and sandhi events correlate 1:1.
+#[must_use]
+pub fn client_request_id_header(slug: &str) -> Option<&'static str> {
+    crate::resolve_openai_compat_provider(slug).and_then(|spec| spec.client_request_id_header)
+}
+
 /// Strip transport-owned header names (`Authorization`, `Host`, `Content-Type`,
 /// `Accept-Encoding`) from a caller-supplied set — the defense applied to both static
 /// (`with_headers`) and per-call headers, single-sourced here (TD-0022 D2).

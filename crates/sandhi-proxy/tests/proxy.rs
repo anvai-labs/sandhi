@@ -485,6 +485,200 @@ async fn inferflux_transparent_stream_forwards_verbatim_and_injects_session_head
 }
 
 #[tokio::test]
+async fn correlation_id_sent_upstream_equals_the_events_request_id() {
+    // ADR-0008 D6: the id minted at admission rides the vendor's declared correlation header
+    // AND becomes the usage event's request_id — one string, so InferFlux's per-request logs
+    // and sandhi's events correlate 1:1. Typed plane (translation) here; the transparent twin
+    // below exercises the raw forwarder's injection.
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "chatcmpl-upstream-1",
+            "model": "llama3-8b",
+            "choices": [{ "message": { "content": "hi" }, "finish_reason": "stop" }],
+            "usage": { "prompt_tokens": 10, "completion_tokens": 2 }
+        })))
+        .mount(&upstream)
+        .await;
+
+    let keys = KeyStore::new();
+    keys.insert(VirtualKey {
+        id: "vk_demo".into(),
+        upstream_ref: "up1".into(),
+        ..Default::default()
+    });
+    let mut providers = HashMap::new();
+    providers.insert(
+        "up1".into(),
+        ProviderRuntime::new().openai_compat(
+            "inferflux",
+            upstream.uri(),
+            "local-key",
+            Default::default(),
+            Some(0),
+            None,
+            None,
+        ),
+    );
+    let sink = Arc::new(InMemorySink::new());
+    let state = Arc::new(ProxyState::new(
+        keys,
+        ProxyLedger::in_memory(),
+        sink.clone(),
+        providers,
+        None,
+    ));
+
+    let response = build_app(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("authorization", "Bearer vk_demo")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"model":"llama3-8b","messages":[{"role":"user","content":"hi"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let received = upstream.received_requests().await.unwrap();
+    let sent = &received[0];
+    let correlation = sent
+        .headers
+        .get("x-inferflux-client-request-id")
+        .expect("the declared correlation header reaches the upstream")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let events = sink.events();
+    assert_eq!(events.len(), 1);
+    // The typed adapters carry no upstream request id on the success path (ids come from
+    // response headers, which the typed plane does not surface), so the event falls back to
+    // the admission-minted id — the same string the correlation header carried.
+    assert!(
+        correlation.starts_with("req_"),
+        "minted id format: {correlation}"
+    );
+    assert_eq!(correlation, events[0].request_id);
+}
+
+#[tokio::test]
+async fn transparent_plane_correlation_id_equals_the_events_request_id() {
+    // The 1:1 case: the upstream reports no id of its own (InferFlux emits no request-id
+    // header), so the event's request_id falls back to the admission-minted id — the very
+    // string the transparent plane already sent as x-inferflux-client-request-id.
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{ "message": { "content": "hi" }, "finish_reason": "stop" }],
+            "usage": { "prompt_tokens": 10, "completion_tokens": 2 }
+        })))
+        .mount(&upstream)
+        .await;
+
+    let keys = KeyStore::new();
+    keys.insert(VirtualKey {
+        id: "vk_demo".into(),
+        upstream_ref: "up1".into(),
+        ..Default::default()
+    });
+    let mut providers = HashMap::new();
+    providers.insert(
+        "up1".into(),
+        ProviderRuntime::new().openai_compat(
+            "inferflux",
+            upstream.uri(),
+            "local-key",
+            Default::default(),
+            Some(0),
+            None,
+            None,
+        ),
+    );
+    let sink = Arc::new(InMemorySink::new());
+    let state = Arc::new(ProxyState::new(
+        keys,
+        ProxyLedger::in_memory(),
+        sink.clone(),
+        providers,
+        None,
+    ));
+
+    let response = build_app(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("authorization", "Bearer vk_demo")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"model":"llama3-8b","messages":[{"role":"user","content":"hi"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let sent = &upstream.received_requests().await.unwrap()[0];
+    let correlation = sent
+        .headers
+        .get("x-inferflux-client-request-id")
+        .expect("transparent plane injects the declared correlation header")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let events = sink.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        correlation, events[0].request_id,
+        "one id: what the upstream logged is what the sandhi event records"
+    );
+}
+
+#[tokio::test]
+async fn providers_without_a_declared_correlation_header_send_none() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{ "message": { "content": "hi" } }],
+            "usage": { "prompt_tokens": 10, "completion_tokens": 2 }
+        })))
+        .mount(&upstream)
+        .await;
+
+    let sink = Arc::new(InMemorySink::new());
+    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    let response = build_app(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("authorization", "Bearer vk_demo")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"model":"gpt-x","messages":[{"role":"user","content":"hi"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let sent = &upstream.received_requests().await.unwrap()[0];
+    assert!(
+        !sent.headers.contains_key("x-inferflux-client-request-id"),
+        "no correlation header without a catalog fact — today's wire bytes preserved"
+    );
+}
+
+#[tokio::test]
 async fn inferflux_attribution_never_reaches_the_upstream() {
     // ADR-0001 §4 at the egress boundary: only the neutral session key crosses to the
     // upstream. The virtual key's subject/group live in the metering event, nowhere else.

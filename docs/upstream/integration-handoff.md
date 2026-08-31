@@ -48,13 +48,13 @@ affinity, no session-grouped usage. Wire the derive (explicit header wins, then 
 metadata, then derived). Tests for precedence + stability (mirror `chat.rs` unit tests).
 *ADR-0008 D3 follow-up; noted in the ADR's consequences.*
 
-**S4 · Request-correlation header fact** *(independent, small, optional)*
-Third strategy-via-data field: `client_request_id_header: Option<&'static str>` on
-`OpenAiCompatProviderSpec` (`Some("x-inferflux-client-request-id")` for inferflux), mapped
-from the ingress `idempotency-key` (or sandhi's minted request id) on both planes — exact
-same pattern as `session_header` (`openai.rs` affinity path + `raw.rs send_with_session` +
-`build_raw_forwarder`). Gives per-request correlation in InferFlux logs/metrics.
-*ADR-0008 lists this as a follow-up.*
+**S4 · Request-correlation header fact** — **DONE** (2026-08-31, PR #178, stacked):
+`client_request_id_header` catalog fact + caller-owned injection on both planes. The proxy
+now mints the request id **at admission** (RequestAccounting) instead of lazily at event
+assembly; the same string rides the vendor's declared header (`x-inferflux-client-request-id`)
+and becomes the event's `request_id` — upstream logs and sandhi events correlate 1:1
+(ADR-0008 D6). Decision recorded for the seam TD-0021 G20 shares: mint-early (uniform
+coverage) over idempotency-key-only; the G20 dedup lookup itself stays TD-0021's item.
 
 **S5 · `traceparent` response passthrough** *(independent, small; pre-existing gap, all providers)*
 `RawForwarder::filter_response_headers` (`raw.rs:404+`) drops the child `traceparent`

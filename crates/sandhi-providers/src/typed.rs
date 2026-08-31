@@ -180,6 +180,7 @@ fn build_raw_forwarder(config: &ProviderTransportConfig) -> crate::raw::RawForwa
     .with_session_header(
         crate::resolve_openai_compat_provider(&config.slug).and_then(|spec| spec.session_header),
     )
+    .with_client_request_id_header(crate::client_request_id_header(&config.slug))
 }
 
 #[derive(Clone)]
