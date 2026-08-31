@@ -19,7 +19,7 @@ absent one**, because the operator stops looking.
 ### G01 — the stream buffer fix was applied to one plane and not the other
 
 TD-0006 explicitly fixed an unbounded line buffer and an O(n²) rescan in the metered pass-through,
-and documented the fix at `sandhi-providers/src/lib.rs:299-312`:
+and documented the fix at `sandhi-providers/src/lib.rs:299-315`:
 
 > - **Bounded line buffer** — a single line exceeding `LINE_SNIFF_BUDGET` is flushed without
 >   sniffing so memory stays bounded. […]
@@ -42,14 +42,14 @@ so this is reachable by any client whose dialect differs from its upstream.
 
 ### G02 — `SANDHI_MAX_IN_FLIGHT_AI_REQUESTS` does not bound concurrent streams
 
-`ConcurrencyLimitLayer` wraps the AI routes (`sandhi-proxy/src/lib.rs:206-208`). In `tower 0.5.3`,
+`ConcurrencyLimitLayer` wraps the AI routes (`sandhi-proxy/src/lib.rs:207-209`). In `tower 0.5.3`,
 the permit is held by `ResponseFuture` and dropped when **that future** resolves
 (`tower-0.5.3/src/limit/concurrency/future.rs:14-22`). For a streaming call, `stream_response`
 resolves as soon as upstream headers arrive and the body stream is constructed
-(`sandhi-proxy/src/lib.rs:2345-2350`) — so the permit is released **at first byte** and the SSE body
+(`sandhi-proxy/src/lib.rs:2349-2353`) — so the permit is released **at first byte** and the SSE body
 runs outside the limit.
 
-The doc comment at `lib.rs:71-76` is accurate about *buffering*. The bound simply does not apply to
+The doc comment at `lib.rs:72-75` is accurate about *buffering*. The bound simply does not apply to
 the resource that dominates an SSE gateway: simultaneously open streams, each holding an upstream
 connection, a lease, a task, and per-stream buffers.
 
@@ -225,3 +225,14 @@ already.
   can *name* (OpenAI Responses' `response.completed`, Gemini `inlineData`), not measured. The
   direction of error is deliberate — too high merely delays an OOM that P2's stream bound also
   guards, while too low kills working streams, which is the defect D1a exists to fix.
+- **Frames near the ceiling are real, not hypothetical.** Review named a frame within ~1.5× of the
+  ceiling: OpenAI Responses' `response.image_generation_call.partial_image` carries a base64
+  gpt-image-1 PNG at roughly 5.5–6.7 MB, and Gemini native-audio `inlineData` runs ~64 KB/s, so two
+  minutes of audio in one part is ~8 MB. This sharpens TD-0015 R5's deliverable: record the largest
+  real frame per family *including multimodal* frames before trusting 8 MiB.
+- **Typed decoders discard a trailing newline-less remainder; the raw plane flushes it.** Pre-existing
+  on both sides — the old inline buffers behaved identically — but the shared splitter makes the
+  asymmetry visible: `remainder()` exists and six of seven callers ignore it. For Ollama NDJSON, a
+  `done` frame without a trailing newline would lose its `Finish`. Candidate small fix: flush the
+  remainder through the decode path at stream end. Deliberately not done in P1, whose acceptance was
+  behaviour-preservation.
