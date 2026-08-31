@@ -52,6 +52,7 @@ pub use local::Ollama;
 pub use openai::OpenAiCompat;
 pub use openai_responses::{OpenAiResponses, OpenAiResponsesProfile};
 pub use openai_roles::{validate_openai_chat_messages, OpenAiChatRole};
+mod linesplit;
 pub mod metering;
 pub use metering::MeteredProvider;
 pub use resilience::{CircuitBreaker, ResilientProvider, RetryConfig, TimeoutConfig};
@@ -334,28 +335,17 @@ where
 {
     use futures_util::StreamExt;
     let s = async_stream::try_stream! {
-        let mut line_buf: Vec<u8> = Vec::new();
-        // Position in line_buf up to which we've already searched for '\n'. Only bytes after
-        // this offset are rescanned on each new chunk — O(chunks) not O(chunks²).
-        let mut searched_to: usize = 0;
+        // The shared bounded/O(n) splitter (TD-0014 P1). The cursor and budget discipline this
+        // function pioneered now lives in one place, so the typed decoders cannot drift from it.
+        let mut splitter = crate::linesplit::LineSplitter::new(LINE_SNIFF_BUDGET);
         let mut usage = ParsedUsage::default();
         // Has any line moved the accumulator? Distinguishes "reported zero" from "reported
         // nothing" on the terminal item, and gates `usage_running` before it.
         let mut sniffed = false;
         while let Some(chunk) = upstream.next().await {
             let chunk = chunk.map_err(|e| ProviderError::Transport(e.to_string()))?;
-            line_buf.extend_from_slice(&chunk);
-            // Scan only the newly-arrived portion for line boundaries.
-            while searched_to < line_buf.len() {
-                let Some(rel) = line_buf[searched_to..].iter().position(|&b| b == b'\n') else {
-                    searched_to = line_buf.len();
-                    break;
-                };
-                let nl = searched_to + rel;
-                // Drain the complete line (including the newline) and sniff it.
-                let line: Vec<u8> = line_buf.drain(..=nl).collect();
-                // After draining the buffer shifts; reset the search cursor to the new start.
-                searched_to = 0;
+            splitter.push(&chunk);
+            while let Some(line) = splitter.next_line() {
                 // Guard: skip the JSON parse for lines that can't carry a usage object.
                 if line_contains_usage(&line) {
                     // The sniffer reports whether it recorded anything — comparing the accumulator
@@ -369,9 +359,8 @@ where
             // the current line is too large (a giant tool-call delta, or a single-JSON-array
             // without the `?alt=sse` flag). Flush it without sniffing so memory stays bounded.
             // The bytes were already forwarded verbatim via `chunk` above.
-            if line_buf.len() > LINE_SNIFF_BUDGET {
-                line_buf.clear();
-                searched_to = 0;
+            if splitter.over_budget() {
+                splitter.reset();
             }
             yield StreamChunk {
                 data: chunk,
@@ -384,11 +373,12 @@ where
         // NDJSON without a trailing newline and the single-JSON-array transport (Gemini's
         // non-`?alt=sse` stream). If within the budget, the sniff closure gets one final shot;
         // otherwise we degrade gracefully (default zero usage) rather than blowing memory.
-        if !line_buf.is_empty()
-            && line_buf.len() <= LINE_SNIFF_BUDGET
-            && line_contains_usage(&line_buf)
+        let remainder = splitter.remainder();
+        if !remainder.is_empty()
+            && remainder.len() <= LINE_SNIFF_BUDGET
+            && line_contains_usage(remainder)
         {
-            sniffed |= sniff(&line_buf, &mut usage);
+            sniffed |= sniff(remainder, &mut usage);
         }
         // `None` when nothing was ever sniffed. Previously this yielded `Some(default())`, an
         // all-zero *finalized* usage that overwrote whatever the caller had accrued — so a stream

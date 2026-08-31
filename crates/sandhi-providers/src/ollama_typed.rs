@@ -294,16 +294,16 @@ fn decode_done_reason(reason: &str) -> FinishReasonV1 {
 fn decode_ollama_stream(mut raw: ByteStream, requested_model: String) -> ChatEventStream {
     use futures_util::StreamExt;
     let stream = async_stream::try_stream! {
-        let mut buffer = Vec::<u8>::new();
+        // TD-0014 P1: the shared bounded/O(n) splitter, same one the raw plane uses.
+        let mut splitter = crate::linesplit::LineSplitter::new(crate::LINE_SNIFF_BUDGET);
         let mut started = false;
         let mut emitted_usage = false;
         while let Some(chunk) = raw.next().await {
             let chunk = chunk?;
             let attempts = chunk.attempts;
             if !chunk.data.is_empty() {
-                buffer.extend_from_slice(&chunk.data);
-                while let Some(pos) = buffer.iter().position(|byte| *byte == b'\n') {
-                    let line: Vec<u8> = buffer.drain(..=pos).collect();
+                splitter.push(&chunk.data);
+                while let Some(line) = splitter.next_line() {
                     let Ok(value) = serde_json::from_slice::<Value>(&line) else { continue; };
                     if !started {
                         yield ChatStreamEventV1::ResponseStart {
@@ -332,6 +332,17 @@ fn decode_ollama_stream(mut raw: ByteStream, requested_model: String) -> ChatEve
                         yield ChatStreamEventV1::Finish { reason: decode_done_reason(reason) };
                     }
                 }
+                // TD-0014 P1 (gap G01): a line past the budget means the upstream sent no
+                // boundary in 64 KiB. The raw plane may drop it and keep streaming — its
+                // bytes were already forwarded, so only usage suffers. A typed decoder
+                // emits decoded CONTENT, so dropping silently would corrupt the response
+                // with no signal. Fail loudly instead; mid-stream errors are never retried.
+                if splitter.over_budget() {
+                    Err(ProviderError::Transport(format!(
+                        "upstream stream exceeded {} bytes with no line boundary",
+                        crate::LINE_SNIFF_BUDGET
+                    )))?;
+                }
             }
             if let Some(usage) = chunk.usage {
                 if !emitted_usage {
@@ -350,7 +361,129 @@ fn decode_ollama_stream(mut raw: ByteStream, requested_model: String) -> ChatEve
 
 #[cfg(test)]
 mod tests {
+
+    /// TD-0014 P1 (gap G01): a newline-free upstream stream must stay BOUNDED and fail loudly.
+    ///
+    /// The raw plane may drop an over-budget line and keep going — its bytes were already
+    /// forwarded verbatim, so only *usage* is lost. A typed decoder drops decoded **content**,
+    /// so dropping silently would corrupt the response with no signal at all. It errors instead.
+    /// Mid-stream errors are never retried (`resilience.rs`), so this cannot loop.
+    #[tokio::test]
+    async fn a_newline_free_stream_is_bounded_and_errors_rather_than_growing() {
+        use futures_util::StreamExt;
+        // 4 MiB with no line boundary anywhere — comfortably past LINE_SNIFF_BUDGET (64 KiB).
+        let filler = bytes::Bytes::from(vec![b'x'; 64 * 1024]);
+        let chunks: Vec<_> = (0..64)
+            .map(|_| {
+                Ok(crate::StreamChunk {
+                    data: filler.clone(),
+                    usage: None,
+                    usage_running: None,
+                    attempts: 1,
+                })
+            })
+            .collect();
+        let raw: crate::ByteStream = Box::pin(futures_util::stream::iter(chunks));
+        let results: Vec<_> = super::decode_ollama_stream(raw, "m".into())
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            results
+                .iter()
+                .any(|item| matches!(item, Err(crate::ProviderError::Transport(_)))),
+            "a newline-free stream must terminate with a Transport error rather than \
+             buffering without bound"
+        );
+    }
     use super::*;
+
+    /// TD-0014 P1 characterisation net (gap G01). The decoder must yield identical events no
+    /// matter where the transport splits the byte stream. Written BEFORE the `LineSplitter`
+    /// refactor precisely so it can prove the refactor changed nothing: `ollama_typed` is one of the
+    /// three typed decoders that had no boundary-invariance test at all, so the refactor would
+    /// otherwise have had no net beneath it. Mirrors `anthropic_typed`'s equivalent.
+    #[tokio::test]
+    async fn stream_codec_is_invariant_across_arbitrary_byte_boundaries() {
+        use futures_util::StreamExt;
+        let wire = concat!(
+            "{\"created_at\":\"t1\",\"model\":\"llama3\",\"message\":{\"content\":\"he\"}}\n",
+            "{\"model\":\"llama3\",\"message\":{\"content\":\"llo\"}}\n",
+            "{\"model\":\"llama3\",\"message\":{\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\"}\n",
+        ).as_bytes();
+        for split in 0..=wire.len() {
+            let raw: crate::ByteStream = Box::pin(futures_util::stream::iter(vec![
+                Ok(crate::StreamChunk {
+                    data: bytes::Bytes::copy_from_slice(&wire[..split]),
+                    usage: None,
+                    usage_running: None,
+                    attempts: 1,
+                }),
+                Ok(crate::StreamChunk {
+                    data: bytes::Bytes::copy_from_slice(&wire[split..]),
+                    usage: None,
+                    usage_running: None,
+                    attempts: 1,
+                }),
+                Ok(crate::StreamChunk {
+                    data: bytes::Bytes::new(),
+                    usage: Some(crate::ParsedUsage {
+                        tokens_in: 2,
+                        tokens_out: 3,
+                        cache_creation_tokens: 0,
+                        cache_read_tokens: 0,
+                        reasoning_tokens: 0,
+                    }),
+                    usage_running: None,
+                    attempts: 1,
+                }),
+            ]));
+            let events = decode_ollama_stream(raw, "llama3".into())
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+
+            assert!(
+                matches!(
+                    events.first(),
+                    Some(sandhi_core::ChatStreamEventV1::ResponseStart { .. })
+                ),
+                "split {split}: first event must be ResponseStart"
+            );
+            // The load-bearing assertion for a line splitter: mis-split lines drop or duplicate
+            // text deltas, and concatenating them is what catches that.
+            let text: String = events
+                .iter()
+                .filter_map(|event| match event {
+                    sandhi_core::ChatStreamEventV1::TextDelta { delta } => Some(delta.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                text, "hello",
+                "split {split}: text deltas must reassemble exactly"
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, sandhi_core::ChatStreamEventV1::Finish { .. })),
+                "split {split}: Finish must survive any split"
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        sandhi_core::ChatStreamEventV1::Usage { usage }
+                            if usage.completeness == sandhi_core::UsageCompleteness::Final
+                    ))
+                    .count(),
+                1,
+                "split {split}: exactly one Final usage frame"
+            );
+        }
+    }
 
     #[test]
     fn w3d_fields_are_ignored_no_leak() {

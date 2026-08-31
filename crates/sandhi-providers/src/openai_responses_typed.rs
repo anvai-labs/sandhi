@@ -509,7 +509,8 @@ async fn aggregate_stream(mut stream: ChatEventStream) -> Result<ChatResponseV1,
 fn decode_responses_stream(mut raw: ByteStream, requested_model: String) -> ChatEventStream {
     use futures_util::StreamExt;
     let stream = async_stream::try_stream! {
-        let mut buffer = Vec::<u8>::new();
+        // TD-0014 P1: the shared bounded/O(n) splitter, same one the raw plane uses.
+        let mut splitter = crate::linesplit::LineSplitter::new(crate::LINE_SNIFF_BUDGET);
         let mut started = false;
         let mut open_tools = BTreeMap::<u32, ()>::new();
         let mut emitted_usage = false;
@@ -518,9 +519,8 @@ fn decode_responses_stream(mut raw: ByteStream, requested_model: String) -> Chat
             let chunk = chunk?;
             let attempts = chunk.attempts;
             if !chunk.data.is_empty() {
-                buffer.extend_from_slice(&chunk.data);
-                while let Some(pos) = buffer.iter().position(|byte| *byte == b'\n') {
-                    let line: Vec<u8> = buffer.drain(..=pos).collect();
+                splitter.push(&chunk.data);
+                while let Some(line) = splitter.next_line() {
                     let Some(event) = crate::sse_data_json(&line) else { continue; };
                     let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
                     if kind == "response.created" {
@@ -601,6 +601,17 @@ fn decode_responses_stream(mut raw: ByteStream, requested_model: String) -> Chat
                         _ => {}
                     }
                 }
+                // TD-0014 P1 (gap G01): a line past the budget means the upstream sent no
+                // boundary in 64 KiB. The raw plane may drop it and keep streaming — its
+                // bytes were already forwarded, so only usage suffers. A typed decoder
+                // emits decoded CONTENT, so dropping silently would corrupt the response
+                // with no signal. Fail loudly instead; mid-stream errors are never retried.
+                if splitter.over_budget() {
+                    Err(ProviderError::Transport(format!(
+                        "upstream stream exceeded {} bytes with no line boundary",
+                        crate::LINE_SNIFF_BUDGET
+                    )))?;
+                }
             }
             if let Some(parsed) = chunk.usage {
                 if !emitted_usage {
@@ -622,6 +633,40 @@ fn decode_responses_stream(mut raw: ByteStream, requested_model: String) -> Chat
 
 #[cfg(test)]
 mod tests {
+
+    /// TD-0014 P1 (gap G01): a newline-free upstream stream must stay BOUNDED and fail loudly.
+    ///
+    /// The raw plane may drop an over-budget line and keep going — its bytes were already
+    /// forwarded verbatim, so only *usage* is lost. A typed decoder drops decoded **content**,
+    /// so dropping silently would corrupt the response with no signal at all. It errors instead.
+    /// Mid-stream errors are never retried (`resilience.rs`), so this cannot loop.
+    #[tokio::test]
+    async fn a_newline_free_stream_is_bounded_and_errors_rather_than_growing() {
+        use futures_util::StreamExt;
+        // 4 MiB with no line boundary anywhere — comfortably past LINE_SNIFF_BUDGET (64 KiB).
+        let filler = bytes::Bytes::from(vec![b'x'; 64 * 1024]);
+        let chunks: Vec<_> = (0..64)
+            .map(|_| {
+                Ok(crate::StreamChunk {
+                    data: filler.clone(),
+                    usage: None,
+                    usage_running: None,
+                    attempts: 1,
+                })
+            })
+            .collect();
+        let raw: crate::ByteStream = Box::pin(futures_util::stream::iter(chunks));
+        let results: Vec<_> = super::decode_responses_stream(raw, "m".into())
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            results
+                .iter()
+                .any(|item| matches!(item, Err(crate::ProviderError::Transport(_)))),
+            "a newline-free stream must terminate with a Transport error rather than \
+             buffering without bound"
+        );
+    }
     use super::*;
     use bytes::Bytes;
     use futures_util::StreamExt;
