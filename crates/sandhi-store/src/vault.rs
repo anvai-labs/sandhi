@@ -165,14 +165,177 @@ impl Default for KeyringVault {
     }
 }
 
+/// SentinelPass daemon IPC backend. Speaks the native daemon protocol through the
+/// `sentinelpass-protocol` contract crate (Unix socket / named pipe) — no CLI spawn, one
+/// message per lookup, explicit locked vs not-found semantics, and write support via
+/// token-enforced `--write` grants.
+///
+/// Env: `SENTINELPASS_CLIENT_TOKEN` (per-client grant token), `SANDHI_SENTINELPASS_CLIENT_ID`
+/// (default `sandhi`), `SANDHI_SENTINELPASS_SOCKET` (socket path override).
+pub struct SentinelPassIpcVault {
+    client_id: String,
+    client_token: Option<String>,
+    socket_path: std::path::PathBuf,
+    /// Current-thread runtime used to drive the async IPC client from the sync
+    /// `Vault` trait. Built eagerly so failures surface at backend selection.
+    rt: tokio::runtime::Runtime,
+}
+
+impl SentinelPassIpcVault {
+    pub fn new() -> Result<Self, VaultError> {
+        let client_id =
+            std::env::var("SANDHI_SENTINELPASS_CLIENT_ID").unwrap_or_else(|_| "sandhi".into());
+        let client_token = std::env::var("SENTINELPASS_CLIENT_TOKEN")
+            .ok()
+            .filter(|t| !t.is_empty());
+        let socket_path = std::env::var("SANDHI_SENTINELPASS_SOCKET")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| sentinelpass_protocol::default_ipc_socket_path());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| VaultError::Backend(format!("sentinelpass ipc runtime: {e}")))?;
+        Ok(Self {
+            client_id,
+            client_token,
+            socket_path,
+            rt,
+        })
+    }
+
+    fn domain(provider: &str, label: &str) -> String {
+        format!("sandhi:{provider}:{label}")
+    }
+
+    fn send(
+        &self,
+        message: sentinelpass_protocol::IpcMessage,
+    ) -> Result<sentinelpass_protocol::IpcMessage, VaultError> {
+        let client = sentinelpass_protocol::IpcClient::new(self.socket_path.clone())
+            .map_err(|e| VaultError::Backend(format!("sentinelpass ipc client: {e}")))?
+            .with_context(
+                self.client_token.clone(),
+                Some(sentinelpass_protocol::Origin::Cli),
+            );
+        self.rt
+            .block_on(client.send(message))
+            .map_err(|e| VaultError::Backend(format!("sentinelpass ipc: {e}")))
+    }
+}
+
+impl Default for SentinelPassIpcVault {
+    /// Falls back to an empty backend on construction failure; the proxy logs backend
+    /// errors per lookup, so a degraded start stays observable without aborting boot.
+    fn default() -> Self {
+        Self::new().unwrap_or_else(|_| Self {
+            client_id: "sandhi".into(),
+            client_token: None,
+            socket_path: sentinelpass_protocol::default_ipc_socket_path(),
+            rt: tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio current-thread runtime"),
+        })
+    }
+}
+
+impl Vault for SentinelPassIpcVault {
+    fn name(&self) -> &'static str {
+        "sentinelpass-ipc"
+    }
+
+    fn get_secret(&self, provider: &str, label: &str) -> Result<Option<String>, VaultError> {
+        let response = self.send(sentinelpass_protocol::IpcMessage::GetExternalSecret {
+            client_id: self.client_id.clone(),
+            domain: Self::domain(provider, label),
+            field: sentinelpass_protocol::ExternalSecretField::Password,
+            purpose: Some("sandhi-vault".into()),
+        })?;
+        match response {
+            sentinelpass_protocol::IpcMessage::GetExternalSecretResponse {
+                value,
+                authorized: true,
+                error,
+                locked,
+            } => {
+                if locked == Some(true) {
+                    return Err(VaultError::Backend(
+                        "sentinelpass vault is locked (unlock it, then restart the proxy)".into(),
+                    ));
+                }
+                match (value, error) {
+                    (Some(value), _) => Ok(Some(value)),
+                    (None, Some(err)) => Err(VaultError::Backend(err)),
+                    (None, None) => Ok(None),
+                }
+            }
+            sentinelpass_protocol::IpcMessage::GetExternalSecretResponse {
+                authorized: false,
+                error,
+                ..
+            } => Err(VaultError::Backend(error.unwrap_or_else(|| {
+                "not authorized: run 'sentinelpass secret allow --client-id sandhi --domain                  sandhi:<provider>:<label> --field password' and set SENTINELPASS_CLIENT_TOKEN"
+                    .into()
+            }))),
+            _ => Err(VaultError::Backend(
+                "sentinelpass ipc: unexpected response".into(),
+            )),
+        }
+    }
+
+    fn set_secret(&self, provider: &str, label: &str, secret: &str) -> Result<(), VaultError> {
+        let response = self.send(sentinelpass_protocol::IpcMessage::SaveSecret {
+            client_id: self.client_id.clone(),
+            domain: Self::domain(provider, label),
+            value: secret.to_string(),
+            purpose: Some("sandhi-vault".into()),
+        })?;
+        match response {
+            sentinelpass_protocol::IpcMessage::SaveSecretResponse { success: true, .. } => Ok(()),
+            sentinelpass_protocol::IpcMessage::SaveSecretResponse {
+                success: false,
+                error,
+                ..
+            } => Err(VaultError::Backend(
+                error.unwrap_or_else(|| "sentinelpass save rejected".into()),
+            )),
+            _ => Err(VaultError::Backend(
+                "sentinelpass ipc: unexpected save response".into(),
+            )),
+        }
+    }
+
+    fn delete_secret(&self, provider: &str, label: &str) -> Result<bool, VaultError> {
+        // The daemon rejects external deletion by design (no entry ownership yet);
+        // revoking the grant is the supported off-boarding path.
+        let response = self.send(sentinelpass_protocol::IpcMessage::DeleteSecret {
+            client_id: self.client_id.clone(),
+            domain: Self::domain(provider, label),
+        })?;
+        match response {
+            sentinelpass_protocol::IpcMessage::DeleteSecretResponse {
+                deleted: false,
+                error,
+                ..
+            } => Err(VaultError::NotSupported(error.unwrap_or_else(|| {
+                "revoke the SentinelPass grant instead (sentinelpass secret revoke)".into()
+            }))),
+            _ => Err(VaultError::NotSupported(
+                "revoke the SentinelPass grant instead (sentinelpass secret revoke)".into(),
+            )),
+        }
+    }
+}
+
 /// SentinelPass password-manager backend. Talks to the SentinelPass daemon through its CLI
 /// (`sentinelpass secret get …`) to keep the coupling loose — there is intentionally **no path
 /// dependency on `sentinelpass-core`**. Read-only for now (the CLI exposes no `set`), so secrets
 /// are provisioned inside SentinelPass itself and granted to the `sandhi` client; `set_secret`
 /// returns [`VaultError::NotSupported`] with guidance.
 ///
-/// TODO(TD-0003): replace the CLI shell-out with native daemon IPC (socket + `IpcMessage`) once a
-/// narrow, stable IPC contract is promoted out of `sentinelpass-core`.
+/// Kept as an opt-in fallback (`SANDHI_SENTINELPASS_FALLBACK_CLI=1`); the default
+/// `SANDHI_VAULT_BACKEND=sentinelpass` now uses [`SentinelPassIpcVault`] (native daemon IPC,
+/// TD-0003 follow-up shipped via the `sentinelpass-protocol` contract crate).
 pub struct SentinelPassVault {
     client_id: String,
     /// Path/executable override; defaults to `sentinelpass`.
@@ -339,6 +502,9 @@ impl VaultStore {
     }
 
     /// Pick the backend named by `SANDHI_VAULT_BACKEND` (`keyring` default; `sentinelpass`).
+    ///
+    /// `sentinelpass` selects the native daemon-IPC backend; setting
+    /// `SANDHI_SENTINELPASS_FALLBACK_CLI=1` keeps the legacy CLI shell-out.
     pub fn backend_from_env() -> Box<dyn Vault> {
         match std::env::var("SANDHI_VAULT_BACKEND")
             .unwrap_or_else(|_| "keyring".into())
@@ -346,7 +512,13 @@ impl VaultStore {
             .to_ascii_lowercase()
             .as_str()
         {
-            "sentinelpass" => Box::new(SentinelPassVault::new()),
+            "sentinelpass" => {
+                if std::env::var("SANDHI_SENTINELPASS_FALLBACK_CLI").as_deref() == Ok("1") {
+                    Box::new(SentinelPassVault::new())
+                } else {
+                    Box::new(SentinelPassIpcVault::new().unwrap_or_default())
+                }
+            }
             _ => Box::new(KeyringVault),
         }
     }
@@ -429,8 +601,12 @@ impl VaultStore {
     }
 
     /// Revoke (soft-delete) a credential: marks metadata `revoked` and deletes the secret.
+    /// Backends that cannot delete (e.g. sentinelpass, where revoking the grant is the
+    /// off-boarding path) only fail the secret deletion — the metadata revocation proceeds.
     pub fn revoke(&self, provider: &str, label: &str) -> Result<bool, VaultError> {
-        let _ = self.backend.delete_secret(provider, label)?;
+        if let Err(e) = self.backend.delete_secret(provider, label) {
+            tracing::warn!(provider, label, %e, "vault secret deletion not performed; revoking metadata anyway");
+        }
         let conn = self.conn.lock().expect("vault conn poisoned");
         let changed = conn
             .execute(

@@ -8,7 +8,7 @@ use crate::{
 };
 use crate::{parse_openai_usage, validate_openai_chat_messages};
 use async_trait::async_trait;
-use reqwest::header::{HeaderMap, AUTHORIZATION, CONTENT_TYPE, HOST};
+use http::header::{HeaderMap, AUTHORIZATION, CONTENT_TYPE, HOST};
 use serde_json::{json, Value};
 
 /// An OpenAI-compatible provider. `base_url` is the API base (e.g. `https://api.openai.com/v1`);
@@ -242,7 +242,7 @@ mod tests {
 
     #[tokio::test]
     async fn forwards_custom_headers_but_not_transport_owned_headers() {
-        use reqwest::header::{HeaderName, HeaderValue};
+        use http::header::{HeaderName, HeaderValue};
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(header("authorization", "Bearer real-key"))

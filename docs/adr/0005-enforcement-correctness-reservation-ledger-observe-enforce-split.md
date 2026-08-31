@@ -109,15 +109,21 @@ the durable ledger less correct than today:
 
 Metering and enforcement stop sharing `finalize`:
 
-- **Enforce (synchronous, linearizable for `Block`).** The atomic reserve/settle above, on the
-  request's critical path, keyed by an **idempotency key** so a client/framework retry does not
-  double-charge. `Warn` scopes may use an eventually-consistent per-replica counter with async
-  rollup (cheaper, no hot-path round-trip) — CRDT/PN-counters are acceptable for `Warn` only, as
-  they can transiently exceed a cap.
-- **Observe (asynchronous, at-least-once).** `UsageEvent` emission moves off the hot path into a
-  buffered, at-least-once channel keyed by the idempotency/request id. A best-effort sink must
-  **not** be the ledger of record for a hard cap; for `Block` scopes the settle write and the
-  event write share one transaction.
+- **Enforce (synchronous, linearizable for `Block`).** The atomic reserve/settle above stays on the
+  request's critical path. Settlement is idempotent by Sandhi reservation id. A caller's
+  **idempotency key is correlation metadata, not an upstream replay guarantee**: safely returning
+  the first result to a client retry would require a durable response/stream replay cache and a
+  provider-specific idempotency contract. Until that exists, Sandhi defaults every inference
+  transport to zero retries; a positive `max_retries` is an explicit caller-owned opt-in. `Warn`
+  scopes may use an eventually-consistent per-replica counter with async rollup (cheaper, no
+  hot-path round-trip) — CRDT/PN-counters are acceptable for `Warn` only, as they can transiently
+  exceed a cap.
+- **Observe (asynchronous, bounded best-effort).** `UsageEvent` emission moves off the hot path
+  into a fixed-capacity single-writer queue. Accepted events drain on graceful shutdown; overflow
+  is dropped and counted rather than blocking the model response or allocating without bound. The
+  enforcement ledger remains the record of authority for a hard cap. Audit-grade at-least-once
+  delivery would require a durable outbox written in the same transaction as settlement; Sandhi
+  does not claim that stronger guarantee for its observational sink today.
 
 ### D4. One `billable()` definition, cache split preserved as dimensions
 

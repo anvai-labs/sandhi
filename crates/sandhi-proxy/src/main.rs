@@ -11,10 +11,12 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use sandhi_core::{InMemorySink, KeyStore, Sink, VirtualKey};
+use sandhi_core::{BufferedSink, InMemorySink, KeyStore, Sink, VirtualKey};
 use sandhi_providers::{AnthropicAuthScheme, GeminiAuthScheme, ProviderHandle, ProviderRuntime};
 use sandhi_proxy::{
-    reclaim_sweep_at, rehydrate_alerts, rehydrate_budgets, serve, ProxyLedger, ProxyState,
+    reclaim_sweep_at, rehydrate_alerts, rehydrate_budgets, serve_with_shutdown_timeout,
+    BufferedAlertStore, ProxyLedger, ProxyState, DEFAULT_MAX_IN_FLIGHT_AI_REQUESTS,
+    DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_SHUTDOWN_GRACE,
 };
 use sandhi_store::{AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
 
@@ -37,6 +39,11 @@ async fn main() {
         // anything a caller might pipe, and operators expect logs on fd 2.
         .with_writer(std::io::stderr)
         .init();
+
+    // The shipped enforcement ledger and request limiter are deliberately single-node. Refuse a
+    // declared multi-replica topology rather than silently multiplying rate limits or allowing
+    // separate processes to make independent hard-budget decisions.
+    validate_replica_topology();
 
     // Scope 5 (TD-0011 P3): OTLP export of gen_ai.* spans + metrics. `init()` returns None unless
     // the `otel-otlp` feature is compiled in AND `SANDHI_OTEL_EXPORT=otlp` is set — so the default
@@ -169,9 +176,23 @@ async fn main() {
             }
         })
         .unzip();
+    let buffered_alert_store = alert_store.as_ref().map(|store| {
+        Arc::new(BufferedAlertStore::new(
+            Arc::clone(store),
+            positive_usize_env("SANDHI_ALERT_BUFFER_CAPACITY", 256),
+        ))
+    });
 
+    let mut buffered_sink: Option<Arc<BufferedSink>> = None;
     let sink: Arc<dyn Sink> = match &store {
-        Some(s) => s.clone(),
+        Some(s) => {
+            let buffered = Arc::new(BufferedSink::new(
+                s.clone(),
+                positive_usize_env("SANDHI_USAGE_BUFFER_CAPACITY", 1024),
+            ));
+            buffered_sink = Some(Arc::clone(&buffered));
+            buffered
+        }
         None => Arc::new(InMemorySink::new()),
     };
 
@@ -205,12 +226,27 @@ async fn main() {
     state.vault = vault;
     state.vkeys = vkeys;
     state.alert_store = alert_store;
+    state.alert_writer = buffered_alert_store.clone();
     state.alerts = alerts;
     state.admin_token = admin_token;
     state.public_url = public_url;
     // ADR-0004 D4: dashboard read endpoints follow the admin token unless explicitly re-opened.
     state.dashboard_public = std::env::var("SANDHI_DASHBOARD_PUBLIC").as_deref() == Ok("1");
     state.error_detail_full = std::env::var("SANDHI_ERROR_DETAIL").as_deref() == Ok("full");
+    state.max_request_body_bytes = request_body_limit_from_env();
+    state.max_in_flight_ai_requests = positive_usize_env(
+        "SANDHI_MAX_IN_FLIGHT_AI_REQUESTS",
+        DEFAULT_MAX_IN_FLIGHT_AI_REQUESTS,
+    );
+    state.config_path = std::env::var("SANDHI_CONFIG")
+        .ok()
+        .map(std::path::PathBuf::from);
+    if let Some(path) = &state.config_path {
+        eprintln!(
+            "sandhi-proxy: declarative config at {} (GET/POST /admin/config*)",
+            path.display()
+        );
+    }
     // ADR-0004 D4 footgun: with no admin token, the /dashboard/api/* read endpoints (subject/group
     // usage aggregates, masked vkey metadata) stay open. That is the documented single-node dev
     // trust posture, but it must not be silent when a real store is configured — surface it loudly
@@ -237,17 +273,21 @@ async fn main() {
     // ADR-0005 D2: reclaim leases left dangling by a crash on a timer, so an abandoned scope's
     // held capacity is released without waiting for its next request (`reserve` also reclaims
     // opportunistically per scope; this covers scopes that go quiet). Best-effort by design.
-    {
+    let reclaim_task = {
         let sweep_state = Arc::clone(&state);
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
             tick.tick().await; // discard the immediate first tick
             loop {
                 tick.tick().await;
-                reclaim_sweep_at(&sweep_state.ledger, time::OffsetDateTime::now_utc());
+                let sweep = Arc::clone(&sweep_state);
+                let _ = tokio::task::spawn_blocking(move || {
+                    reclaim_sweep_at(&sweep.ledger, time::OffsetDateTime::now_utc())
+                })
+                .await;
             }
-        });
-    }
+        })
+    };
 
     let addr: SocketAddr = std::env::var("SANDHI_BIND")
         .unwrap_or_else(|_| "127.0.0.1:8787".into())
@@ -258,10 +298,113 @@ async fn main() {
         "sandhi-proxy listening on http://{addr}  \
          (POST /v1/chat/completions | /v1/messages, Authorization: Bearer vk_...)"
     );
-    if let Err(e) = serve(state, addr).await {
+    let shutdown_grace = shutdown_grace_from_env();
+    let serve_result =
+        serve_with_shutdown_timeout(state, addr, shutdown_signal(), shutdown_grace).await;
+    reclaim_task.abort();
+    let _ = reclaim_task.await;
+    if let Some(buffered) = buffered_alert_store {
+        if !buffered.close(shutdown_grace) {
+            tracing::error!(
+                dropped = buffered.dropped_updates(),
+                "alert writer did not drain before shutdown deadline"
+            );
+        }
+    }
+    if let Some(buffered) = buffered_sink {
+        if !buffered.close(shutdown_grace) {
+            tracing::error!(
+                dropped = buffered.dropped_events(),
+                "usage writer did not drain before shutdown deadline"
+            );
+        }
+    }
+    if let Err(e) = serve_result {
         eprintln!("sandhi-proxy error: {e}");
         std::process::exit(1);
     }
+}
+
+fn request_body_limit_from_env() -> usize {
+    positive_usize_env(
+        "SANDHI_MAX_REQUEST_BODY_BYTES",
+        DEFAULT_MAX_REQUEST_BODY_BYTES,
+    )
+}
+
+fn shutdown_grace_from_env() -> std::time::Duration {
+    std::time::Duration::from_secs(positive_u64_env(
+        "SANDHI_SHUTDOWN_GRACE_SECS",
+        DEFAULT_SHUTDOWN_GRACE.as_secs(),
+    ))
+}
+
+fn positive_usize_env(name: &str, default: usize) -> usize {
+    let Ok(raw) = std::env::var(name) else {
+        return default;
+    };
+    raw.parse::<usize>()
+        .ok()
+        .filter(|value| *value > 0)
+        .unwrap_or_else(|| panic!("{name} must be a positive integer, got {raw:?}"))
+}
+
+fn positive_u64_env(name: &str, default: u64) -> u64 {
+    let Ok(raw) = std::env::var(name) else {
+        return default;
+    };
+    raw.parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .unwrap_or_else(|| panic!("{name} must be a positive integer, got {raw:?}"))
+}
+
+fn validate_replica_topology() {
+    let replicas = positive_usize_env("SANDHI_REPLICA_COUNT", 1);
+    assert!(
+        replicas == 1,
+        "SANDHI_REPLICA_COUNT={replicas} is unsupported: the current budget ledger and rate \
+         limiter are single-node. Run one replica until a shared backend passes the enforcement \
+         conformance suite."
+    );
+}
+
+/// Resolve on the process signals used by terminals and container orchestrators. Axum then stops
+/// accepting new connections and waits for active model streams to finish, so their terminal
+/// usage frame can settle the enforcement lease before the OTel guard flushes on return from
+/// `main`.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::error!(%error, "failed to install Ctrl-C handler");
+            std::future::pending::<()>().await;
+        }
+    };
+
+    #[cfg(unix)]
+    {
+        let terminate = async {
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(mut signal) => {
+                    signal.recv().await;
+                }
+                Err(error) => {
+                    tracing::error!(%error, "failed to install SIGTERM handler");
+                    std::future::pending::<()>().await;
+                }
+            }
+        };
+
+        tokio::select! {
+            () = ctrl_c => {},
+            () = terminate => {},
+        }
+    }
+
+    #[cfg(not(unix))]
+    ctrl_c.await;
+
+    tracing::info!("shutdown signal received; draining in-flight requests");
 }
 
 /// Build + register an upstream handle for each active vault credential, so the request path can
