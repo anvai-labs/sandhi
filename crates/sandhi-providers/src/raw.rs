@@ -491,6 +491,10 @@ fn is_passthrough_header(name: &str) -> bool {
         || lower == "request-id"
         || lower == "x-request-id"
         || lower == "x-should-retry"
+        // W3C trace context: the child `traceparent` an upstream echoes links the response
+        // back to the caller's span (InferFlux does this on every generation response).
+        // Hop-by-hop `tracestate` stays stripped — it is per-hop routing state, not linkage.
+        || lower == "traceparent"
         || lower.starts_with("x-ratelimit-")
         || lower.starts_with("ratelimit-")
         || lower.starts_with("anthropic-ratelimit-")
@@ -582,6 +586,15 @@ mod tests {
         headers.insert("retry-after", "30".parse().unwrap());
         headers.insert("x-request-id", "req-123".parse().unwrap());
         headers.insert("x-ratelimit-remaining-requests", "100".parse().unwrap());
+        // W3C trace context linkage survives (the child span an upstream echoes); the
+        // per-hop `tracestate` does not.
+        headers.insert(
+            "traceparent",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+                .parse()
+                .unwrap(),
+        );
+        headers.insert("tracestate", "congo=t61rcWkgMzE".parse().unwrap());
         // These must be stripped:
         headers.insert("connection", "keep-alive".parse().unwrap());
         headers.insert("transfer-encoding", "chunked".parse().unwrap());
@@ -594,6 +607,8 @@ mod tests {
         assert!(filtered.contains_key("retry-after"));
         assert!(filtered.contains_key("x-request-id"));
         assert!(filtered.contains_key("x-ratelimit-remaining-requests"));
+        assert!(filtered.contains_key("traceparent"));
+        assert!(!filtered.contains_key("tracestate"));
         assert!(!filtered.contains_key("connection"));
         assert!(!filtered.contains_key("transfer-encoding"));
         assert!(!filtered.contains_key("keep-alive"));
