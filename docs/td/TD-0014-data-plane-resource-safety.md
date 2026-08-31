@@ -170,7 +170,7 @@ not land a phase whose effect an operator cannot see.
 | Phase | Scope | Acceptance (the failing test to write first) |
 |---|---|---|
 | **P1** ✅ | D1 — shared `LineSplitter` on all six typed decoders **and** the raw sniffer | A 16 MiB newline-free upstream stream is refused loudly on the typed plane (peak buffer ≤ `MAX_STREAM_LINE_BYTES` + one chunk) while a 200 KiB *terminated* frame passes intact on every decoder — both directions asserted, and the guards verified to fail against the old 64 KiB bound; total work (search **and** compaction) stays linear in bytes; a long `response.completed` frame still yields its usage on the raw plane; all existing per-family stream tests stay green byte-for-byte |
-| **P2** ✅ | D2 — permit held by the body, via a custom `AdmissionLayer` (tower's permit cannot be moved into a body) | An end-to-end test over real loopback HTTP with a hanging upstream: with the limit at 2, two streams open at first byte make a third request **wait**; aborting one client admits it. Shipped with the `sandhi_streams_open` gauge (D6) and the default raised 64 → 128 with the reasoning stated |
+| **P2** ✅ | D2 — permit held by the body, via a custom `AdmissionLayer` (tower's permit cannot be moved into a body) | An end-to-end test over real loopback HTTP with a hanging upstream: with the limit at 2, two streams open at first byte make a third request **wait**; aborting one client admits it. Shipped with the `sandhi_streams_open` gauge (D6) and the default raised 64 → 128 with the reasoning stated. Both planes pinned end-to-end — the review demonstrated the transparent-plane test alone stayed green under a first-byte-release mutation of the translation twin, so the translation plane got its own pin |
 | **P2b** ✅ | trailing-remainder flush (the asymmetry recorded in Still open, now closed) | Ollama's NDJSON `done` frame without a trailing newline yields `Finish`; every P1 byte-boundary and usage-ordering test stays green, pinning the restructure as behaviour-preserving for well-formed streams |
 | **P3** | D3 + D4 — connection limits and `ConnCtx` | C connections dribbling one header byte per second are closed after the configured timeout while a normal request succeeds concurrently; the (N+1)th connection from one IP is refused; `ConnCtx.forwarded_for` is `None` when the peer is not in the trusted-proxy allowlist, even when the header is present |
 | **P4** | D5 — per-tenant bulkheads + sharded limiter | Tenant A saturating its share leaves tenant B's admission latency within a recorded bound (fairness measured, not asserted qualitatively); the sharded limiter reproduces every TD-0012 P1 semantic test unchanged |
@@ -231,6 +231,15 @@ already.
   gpt-image-1 PNG at roughly 5.5–6.7 MB, and Gemini native-audio `inlineData` runs ~64 KB/s, so two
   minutes of audio in one part is ~8 MB. This sharpens TD-0015 R5's deliverable: record the largest
   real frame per family *including multimodal* frames before trusting 8 MiB.
+- **Grace expiry does not cancel in-flight streams (review finding 2, embedder-facing).** axum
+  spawns connection tasks detached; when `serve_with_shutdown_timeout` returns at the deadline, a
+  hung body keeps being polled — holding its admission slot, gauge count, lease and upstream
+  connection. Invisible in the binary (the process exits) and a doc overclaim until this review;
+  the comments now say what actually happens. The fix is connection-task tracking, which belongs
+  with P3's connection limits, not a spot patch.
+- **`sandhi_streams_open` covers streams only (review finding 3).** Unary calls hold admission
+  slots invisibly, so the semaphore can be exhausted at gauge 0. The gauge is honestly named; the
+  complete answer — semaphore utilization plus wait-queue depth — is TD-0020 D2 scope.
 - ~~Typed decoders discard a trailing newline-less remainder~~ **Closed in P2b.** `LineSplitter::flush_newline`
   terminates the remainder and each decoder pumps one synthetic empty chunk through its existing
   loop body, so per-chunk event ordering is preserved without duplicating the body. (An intermediate

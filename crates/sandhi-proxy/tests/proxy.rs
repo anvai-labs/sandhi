@@ -1966,7 +1966,7 @@ async fn open_streams_hold_admission_slots_until_the_body_completes() {
         .unwrap();
     let metrics_text = metrics.text().await.unwrap();
     assert!(
-        metrics_text.contains("sandhi_streams_open 2"),
+        metrics_text.contains("sandhi_streams_open 2\n"),
         "expected both streams gauged open, got:\n{metrics_text}"
     );
 
@@ -2012,7 +2012,7 @@ async fn open_streams_hold_admission_slots_until_the_body_completes() {
         .unwrap();
     let metrics_text = metrics.text().await.unwrap();
     assert!(
-        metrics_text.contains("sandhi_streams_open 2"),
+        metrics_text.contains("sandhi_streams_open 2\n"),
         "expected B plus the newly admitted stream = 2 open, got:\n{metrics_text}"
     );
 
@@ -2020,4 +2020,142 @@ async fn open_streams_hold_admission_slots_until_the_body_completes() {
     b.abort();
     let _ = shutdown_tx.send(());
     let _ = tokio::time::timeout(std::time::Duration::from_secs(6), server).await;
+}
+
+/// Adversarial-review finding 1: the test above drives only the TRANSPARENT plane (same-family).
+/// The translation plane's permit-holding is a separate code path (`stream_response`), and the
+/// reviewer demonstrated mutationally that reverting THAT twin to first-byte release keeps the
+/// whole suite green. This pins it: Anthropic ingress against an OpenAI-compat upstream is
+/// cross-family by family mismatch, so the stream runs translated.
+#[tokio::test]
+async fn translation_plane_streams_hold_admission_slots_too() {
+    let upstream_uri = hanging_sse_upstream().await;
+    let sink = Arc::new(InMemorySink::new());
+    let mut inner = ProxyState::new(
+        {
+            let keys = KeyStore::new();
+            keys.insert(VirtualKey {
+                id: "vk_demo".into(),
+                subject_id: Some("alice".into()),
+                group_id: Some("platform".into()),
+                upstream_ref: "up1".into(),
+                ..Default::default()
+            });
+            keys
+        },
+        ProxyLedger::in_memory(),
+        sink,
+        {
+            let mut providers = HashMap::new();
+            providers.insert(
+                "up1".into(),
+                ProviderRuntime::new().openai_compat(
+                    "openai",
+                    upstream_uri,
+                    "REAL-KEY",
+                    Default::default(),
+                    Some(0),
+                    None,
+                    None,
+                ),
+            );
+            providers
+        },
+        None,
+    );
+    inner.max_in_flight_ai_requests = 1;
+    let state = Arc::new(inner);
+
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = probe.local_addr().unwrap();
+    drop(probe);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(sandhi_proxy::serve_with_shutdown_timeout(
+        state,
+        addr,
+        async {
+            let _ = shutdown_rx.await;
+        },
+        std::time::Duration::from_secs(1),
+    ));
+
+    let client = reqwest::Client::new();
+    let url = format!("http://{addr}/v1/messages");
+    let body = serde_json::json!({
+        "model": "claude-x",
+        "max_tokens": 16,
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": true
+    });
+    let open_stream = |client: reqwest::Client, url: String| {
+        tokio::spawn(async move {
+            let mut resp = client
+                .post(url)
+                .header("x-api-key", "vk_demo")
+                .json(&body)
+                .send()
+                .await
+                .expect("streaming request admitted");
+            assert_eq!(resp.status(), 200);
+            let _ = resp.chunk().await.expect("first sse chunk").expect("chunk");
+            std::future::pending::<()>().await;
+        })
+    };
+
+    let a = open_stream(client.clone(), url.clone());
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let metrics = client
+        .get(format!("http://{addr}/metrics"))
+        .send()
+        .await
+        .unwrap();
+    let metrics_text = metrics.text().await.unwrap();
+    assert!(
+        metrics_text.contains("sandhi_streams_open 1\n"),
+        "expected the translation-plane stream gauged open, got:\n{metrics_text}"
+    );
+
+    let second = tokio::time::timeout(
+        std::time::Duration::from_millis(400),
+        client
+            .post(&url)
+            .header("x-api-key", "vk_demo")
+            .json(&serde_json::json!({
+                "model": "claude-x",
+                "max_tokens": 16,
+                "messages": [{"role": "user", "content": "ho"}],
+                "stream": true
+            }))
+            .send(),
+    )
+    .await;
+    assert!(
+        second.is_err(),
+        "second request was admitted while the translation-plane stream held the only slot"
+    );
+
+    a.abort();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let resp = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        client
+            .post(&url)
+            .header("x-api-key", "vk_demo")
+            .json(&serde_json::json!({
+                "model": "claude-x",
+                "max_tokens": 16,
+                "messages": [{"role": "user", "content": "ho"}],
+                "stream": true
+            }))
+            .send(),
+    )
+    .await
+    .expect("released slot must admit the waiting request")
+    .expect("proxied response");
+    assert_eq!(resp.status(), 200);
+
+    a.abort();
+    let _ = shutdown_tx.send(());
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), server).await;
 }
