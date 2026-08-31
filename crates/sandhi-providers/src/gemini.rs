@@ -27,6 +27,7 @@ pub struct Gemini {
     base_url: String,
     api_key: String,
     auth_scheme: GeminiAuthScheme,
+    headers: http::HeaderMap,
 }
 
 impl Gemini {
@@ -36,7 +37,16 @@ impl Gemini {
             base_url: base_url.into(),
             api_key: api_key.into(),
             auth_scheme: GeminiAuthScheme::ApiKey,
+            headers: http::HeaderMap::new(),
         }
+    }
+
+    /// Caller-supplied provider headers, transport-owned names stripped (TD-0022 D3: this
+    /// family previously dropped `ProviderTransportConfig::headers` entirely).
+    #[must_use]
+    pub fn with_headers(mut self, headers: http::HeaderMap) -> Self {
+        self.headers = crate::strip_transport_owned(headers);
+        self
     }
 
     /// The hosted Gemini API (`https://generativelanguage.googleapis.com/v1beta`).
@@ -75,6 +85,7 @@ impl Provider for Gemini {
         let request = self
             .client
             .post(self.url(&req.model, "generateContent"))
+            .headers(crate::merge_call_headers(&self.headers, &req.extra_headers))
             .json(&req.body);
         let resp = self
             .authenticate(request)
@@ -100,7 +111,11 @@ impl Provider for Gemini {
 
     async fn stream(&self, req: ProviderRequest) -> Result<ByteStream, ProviderError> {
         let url = format!("{}?alt=sse", self.url(&req.model, "streamGenerateContent"));
-        let request = self.client.post(url).json(&req.body);
+        let request = self
+            .client
+            .post(url)
+            .headers(crate::merge_call_headers(&self.headers, &req.extra_headers))
+            .json(&req.body);
         let resp = self
             .authenticate(request)
             .send()

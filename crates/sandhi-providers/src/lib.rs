@@ -84,6 +84,12 @@ pub struct ProviderRequest {
     pub model: String,
     pub body: serde_json::Value,
     pub session_id: Option<String>,
+    /// Per-call wire headers (TD-0022 D1) — gateway-path metadata that changes per turn
+    /// (`x-sandhi-run-id` / `-step-id`, vendor correlation ids), which cannot be fixed at
+    /// transport construction without rebuilding the handle every turn. Merged OVER the
+    /// transport's static headers by [`merge_call_headers`], which strips transport-owned
+    /// names. Never enters the wire body.
+    pub extra_headers: http::HeaderMap,
     /// Who this call is for (metering decorator input). Never enters the wire body —
     /// attribution rides outside the cached prompt (ADR-0001 §4); adapters ignore it.
     pub attribution: Attribution,
@@ -105,6 +111,7 @@ impl ProviderRequest {
             model: model.into(),
             body,
             session_id: None,
+            extra_headers: http::HeaderMap::new(),
             attribution: Attribution::default(),
         }
     }
@@ -115,11 +122,55 @@ impl ProviderRequest {
         self
     }
 
+    /// Per-call wire headers (TD-0022 D1). Transport-owned names are stripped by
+    /// [`merge_call_headers`] at send time, not here — the request is data, the strip is
+    /// transport defense.
+    #[must_use]
+    pub fn with_extra_headers(mut self, extra_headers: http::HeaderMap) -> Self {
+        self.extra_headers = extra_headers;
+        self
+    }
+
     #[must_use]
     pub fn with_attribution(mut self, attribution: Attribution) -> Self {
         self.attribution = attribution;
         self
     }
+}
+
+/// Strip transport-owned header names (`Authorization`, `Host`, `Content-Type`,
+/// `Accept-Encoding`) from a caller-supplied set — the defense applied to both static
+/// (`with_headers`) and per-call headers, single-sourced here (TD-0022 D2).
+#[must_use]
+pub fn strip_transport_owned(mut headers: http::HeaderMap) -> http::HeaderMap {
+    use http::header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_TYPE, HOST};
+
+    headers.remove(AUTHORIZATION);
+    headers.remove(HOST);
+    headers.remove(CONTENT_TYPE);
+    headers.remove(ACCEPT_ENCODING);
+    headers
+}
+
+/// Merge a call's per-request wire headers over the transport's static headers (TD-0022 D2).
+///
+/// Transport-owned names (`Authorization`, `Host`, `Content-Type`, `Accept-Encoding`) are
+/// stripped from the **per-call** set so a library consumer can never override the vaulted
+/// credential or framing — the same defense `OpenAiCompat::with_headers` applies to static
+/// headers, now uniform across every family. Per-call wins over static for every other name.
+#[must_use]
+pub fn merge_call_headers(base: &http::HeaderMap, call: &http::HeaderMap) -> http::HeaderMap {
+    use http::header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_TYPE, HOST};
+
+    let mut out = base.clone();
+    for (name, value) in call.iter() {
+        if name == AUTHORIZATION || name == HOST || name == CONTENT_TYPE || name == ACCEPT_ENCODING
+        {
+            continue; // transport-owned: the credential and framing are not caller-overridable
+        }
+        out.insert(name.clone(), value.clone());
+    }
+    out
 }
 
 /// A completed (non-streaming) response plus the usage measured **at the source**.

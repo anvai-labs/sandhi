@@ -139,8 +139,22 @@ pub type ChatEventStream =
 #[async_trait]
 pub trait ChatProvider: Send + Sync {
     fn slug(&self) -> &str;
-    async fn complete(&self, request: ChatRequestV1) -> Result<ChatResponseV1, ProviderError>;
-    async fn stream(&self, request: ChatRequestV1) -> Result<ChatEventStream, ProviderError>;
+    /// `call_headers` are per-call wire headers (TD-0022 D1): gateway-path metadata that
+    /// changes per turn (`x-sandhi-run-id` / `-step-id`, vendor correlation ids). They ride
+    /// the request, not the transport, because transports are cached per conversation —
+    /// fixing them at construction would force a handle rebuild every turn. Every
+    /// implementation must forward them; [`merge_call_headers`](crate::merge_call_headers)
+    /// is the single sanctioned merge (transport-owned names stripped).
+    async fn complete(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+    ) -> Result<ChatResponseV1, ProviderError>;
+    async fn stream(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+    ) -> Result<ChatEventStream, ProviderError>;
 }
 
 /// Build the same-family raw byte-forwarder for a handle, from the **same** transport config used
@@ -235,17 +249,36 @@ impl ProviderHandle {
     }
 
     pub async fn complete(&self, request: ChatRequestV1) -> Result<ChatResponseV1, ProviderError> {
+        self.complete_with(request, http::HeaderMap::new()).await
+    }
+
+    pub async fn stream(&self, request: ChatRequestV1) -> Result<ChatEventStream, ProviderError> {
+        self.stream_with(request, http::HeaderMap::new()).await
+    }
+
+    /// [`Self::complete`] with per-call wire headers (TD-0022 D1) — the FFI seam for
+    /// gateway-path metadata that changes per turn.
+    pub async fn complete_with(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+    ) -> Result<ChatResponseV1, ProviderError> {
         // Wire-truth latency, stamped once at the family-neutral typed
         // boundary (W3b) — the one seam every binding and the proxy call.
         let started = std::time::Instant::now();
-        let mut response = self.inner.complete(request).await?;
+        let mut response = self.inner.complete(request, call_headers).await?;
         response.usage.duration_ms = Some(elapsed_ms(started));
         Ok(response)
     }
 
-    pub async fn stream(&self, request: ChatRequestV1) -> Result<ChatEventStream, ProviderError> {
+    /// [`Self::stream`] with per-call wire headers (TD-0022 D1).
+    pub async fn stream_with(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+    ) -> Result<ChatEventStream, ProviderError> {
         let started = std::time::Instant::now();
-        let inner = self.inner.stream(request).await?;
+        let inner = self.inner.stream(request, call_headers).await?;
         Ok(stamp_stream_latency(inner, started))
     }
 }
@@ -315,17 +348,21 @@ impl ProviderRuntime {
             ),
             ProviderFamily::Anthropic => Arc::new(
                 Anthropic::new(config.base_url.clone(), config.api_key.clone())
-                    .with_auth_scheme(config.anthropic_auth_scheme),
+                    .with_auth_scheme(config.anthropic_auth_scheme)
+                    .with_headers(config.headers.clone()),
             ),
-            ProviderFamily::Cohere => {
-                Arc::new(Cohere::new(config.base_url.clone(), config.api_key.clone()))
-            }
+            ProviderFamily::Cohere => Arc::new(
+                Cohere::new(config.base_url.clone(), config.api_key.clone())
+                    .with_headers(config.headers.clone()),
+            ),
             ProviderFamily::Gemini => Arc::new(
                 Gemini::new(config.base_url.clone(), config.api_key.clone())
-                    .with_auth_scheme(config.gemini_auth_scheme),
+                    .with_auth_scheme(config.gemini_auth_scheme)
+                    .with_headers(config.headers.clone()),
             ),
             ProviderFamily::Ollama => {
-                let provider = Ollama::new(config.base_url.clone());
+                let provider =
+                    Ollama::new(config.base_url.clone()).with_headers(config.headers.clone());
                 if config.api_key.is_empty() {
                     Arc::new(provider)
                 } else {
@@ -600,10 +637,14 @@ impl ChatProvider for TypedOpenAiCompat {
         &self.slug
     }
 
-    async fn complete(&self, mut request: ChatRequestV1) -> Result<ChatResponseV1, ProviderError> {
+    async fn complete(
+        &self,
+        mut request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+    ) -> Result<ChatResponseV1, ProviderError> {
         self.apply_constraints(&mut request)?;
         request.validate().map_err(ProviderError::InvalidRequest)?;
-        let req = provider_request(&request, encode_openai_request(&request)?);
+        let req = provider_request(&request, encode_openai_request(&request)?, call_headers);
         let response = self.raw.complete(req).await?;
         let mut decoded = decode_openai_response(response.body, response.usage, &request.model)?;
         if !request.include_native_response {
@@ -616,10 +657,14 @@ impl ChatProvider for TypedOpenAiCompat {
         Ok(decoded)
     }
 
-    async fn stream(&self, mut request: ChatRequestV1) -> Result<ChatEventStream, ProviderError> {
+    async fn stream(
+        &self,
+        mut request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+    ) -> Result<ChatEventStream, ProviderError> {
         self.apply_constraints(&mut request)?;
         request.validate().map_err(ProviderError::InvalidRequest)?;
-        let req = provider_request(&request, encode_openai_request(&request)?);
+        let req = provider_request(&request, encode_openai_request(&request)?, call_headers);
         let raw = self.raw.stream(req).await?;
         Ok(decode_openai_stream(raw, request.model))
     }
@@ -648,9 +693,14 @@ impl TypedOpenAiCompat {
     }
 }
 
-pub(crate) fn provider_request(request: &ChatRequestV1, body: Value) -> ProviderRequest {
+pub(crate) fn provider_request(
+    request: &ChatRequestV1,
+    body: Value,
+    call_headers: http::HeaderMap,
+) -> ProviderRequest {
     ProviderRequest::new(request.model.clone(), body)
         .with_session(request.metadata.session_id.clone())
+        .with_extra_headers(call_headers)
         .with_attribution(Attribution {
             virtual_key_id: request.metadata.virtual_key_id.clone(),
             subject_id: request.metadata.subject_id.clone(),
@@ -1498,6 +1548,50 @@ mod tests {
         );
     }
 
+    /// TD-0022 D1 end to end: per-call wire headers entered at the handle cross the typed
+    /// codec and reach the adapter's HTTP request — the FFI seam for turn-scoped gateway
+    /// metadata (`x-sandhi-step-id`). The wiremock header matcher is the assertion.
+    #[tokio::test]
+    async fn complete_with_threads_per_call_headers_to_the_adapter() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header("x-sandhi-step-id", "step-7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "r1", "model": "m",
+                "choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 1}
+            })))
+            .mount(&server)
+            .await;
+
+        let handle = ProviderRuntime::new().openai_compat(
+            "openai",
+            server.uri(),
+            "k",
+            Default::default(),
+            Some(0),
+            None,
+            None,
+        );
+        let request: ChatRequestV1 = serde_json::from_value(serde_json::json!({
+            "schema_version": "1",
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .unwrap();
+        let mut call_headers = http::HeaderMap::new();
+        call_headers.insert(
+            http::HeaderName::from_static("x-sandhi-step-id"),
+            http::HeaderValue::from_static("step-7"),
+        );
+        let response = handle.complete_with(request, call_headers).await.unwrap();
+        assert_eq!(response.usage.tokens_in, 3);
+    }
+
     /// Canned raw provider for complete()-level tests of the native-body gate (G8).
     struct CannedRaw(Value);
     #[async_trait]
@@ -1532,7 +1626,10 @@ mod tests {
 
     #[tokio::test]
     async fn native_body_is_included_by_default() {
-        let out = canned_openai_provider().complete(request()).await.unwrap();
+        let out = canned_openai_provider()
+            .complete(request(), http::HeaderMap::new())
+            .await
+            .unwrap();
         assert!(out.extensions.contains_key("openai"));
     }
 
@@ -1540,7 +1637,10 @@ mod tests {
     async fn include_native_response_false_strips_the_native_body() {
         let mut req = request();
         req.include_native_response = false;
-        let out = canned_openai_provider().complete(req).await.unwrap();
+        let out = canned_openai_provider()
+            .complete(req, http::HeaderMap::new())
+            .await
+            .unwrap();
         assert!(!out.extensions.contains_key("openai"));
         // Neutral contract untouched.
         assert_eq!(out.output.content, Some(MessageContent::Text("hi".into())));
@@ -1554,7 +1654,11 @@ mod tests {
         fn slug(&self) -> &str {
             "canned"
         }
-        async fn complete(&self, _: ChatRequestV1) -> Result<ChatResponseV1, ProviderError> {
+        async fn complete(
+            &self,
+            _: ChatRequestV1,
+            _: http::HeaderMap,
+        ) -> Result<ChatResponseV1, ProviderError> {
             Ok(serde_json::from_value(json!({
                 "schema_version": "1",
                 "model": "m",
@@ -1564,7 +1668,11 @@ mod tests {
             }))
             .unwrap())
         }
-        async fn stream(&self, _: ChatRequestV1) -> Result<ChatEventStream, ProviderError> {
+        async fn stream(
+            &self,
+            _: ChatRequestV1,
+            _: http::HeaderMap,
+        ) -> Result<ChatEventStream, ProviderError> {
             let events: Vec<Result<ChatStreamEventV1, ProviderError>> = vec![
                 Ok(ChatStreamEventV1::TextDelta { delta: "hi".into() }),
                 Ok(ChatStreamEventV1::Usage {
@@ -1628,10 +1736,18 @@ mod tests {
         fn slug(&self) -> &str {
             "noop"
         }
-        async fn complete(&self, _: ChatRequestV1) -> Result<ChatResponseV1, ProviderError> {
+        async fn complete(
+            &self,
+            _: ChatRequestV1,
+            _: http::HeaderMap,
+        ) -> Result<ChatResponseV1, ProviderError> {
             unreachable!()
         }
-        async fn stream(&self, _: ChatRequestV1) -> Result<ChatEventStream, ProviderError> {
+        async fn stream(
+            &self,
+            _: ChatRequestV1,
+            _: http::HeaderMap,
+        ) -> Result<ChatEventStream, ProviderError> {
             unreachable!()
         }
     }

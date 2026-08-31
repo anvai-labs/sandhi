@@ -100,7 +100,7 @@ impl Provider for OpenAiResponses {
             .client
             .post(self.responses_url())
             .bearer_auth(&self.bearer_token)
-            .headers(self.headers.clone())
+            .headers(crate::merge_call_headers(&self.headers, &req.extra_headers))
             .json(&body)
             .send()
             .await
@@ -130,7 +130,7 @@ impl Provider for OpenAiResponses {
             .client
             .post(self.responses_url())
             .bearer_auth(&self.bearer_token)
-            .headers(self.headers.clone())
+            .headers(crate::merge_call_headers(&self.headers, &req.extra_headers))
             .json(&body)
             .send()
             .await

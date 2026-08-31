@@ -156,6 +156,67 @@ def test_persistent_typed_provider_complete_and_stream():
         server.shutdown()
 
 
+def test_per_call_wire_headers_ride_and_cannot_override_the_credential():
+    """TD-0022 D1: wire_headers_json is per-call (turn-scoped step ids) and stripped of
+    transport-owned names — an Authorization override attempt must never reach the wire."""
+
+    seen_headers: list[dict] = []
+    complete_body = json.dumps(
+        {
+            "id": "r1",
+            "model": "gpt-test",
+            "choices": [{"message": {"content": "hello"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 3},
+        }
+    ).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            seen_headers.append(dict(self.headers.items()))
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(complete_body)))
+            self.end_headers()
+            self.wfile.write(complete_body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        runtime = sg.ProviderRuntime()
+        provider = runtime.openai_compat(
+            "openai", f"http://127.0.0.1:{server.server_port}/v1", "real-key", max_retries=0
+        )
+        request = json.dumps(
+            {
+                "schema_version": "1",
+                "model": "gpt-test",
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+        )
+        wire_headers = {
+            "x-sandhi-run-id": "run-9",
+            "x-sandhi-step-id": "step-7",
+            "authorization": "Bearer attacker",  # must be stripped
+        }
+
+        async def run():
+            return json.loads(
+                await provider.complete_json(request, json.dumps(wire_headers))
+            )
+
+        response = asyncio.run(run())
+        assert response["output"]["content"] == "hello"
+        sent = {name.lower(): value for name, value in seen_headers[0].items()}
+        assert sent["x-sandhi-run-id"] == "run-9"
+        assert sent["x-sandhi-step-id"] == "step-7"
+        assert sent["authorization"] == "Bearer real-key"
+    finally:
+        server.shutdown()
+
+
 def test_typed_request_validation_fails_before_http():
     provider = sg.ProviderRuntime().openai_compat(
         "openai", "http://127.0.0.1:1/v1", "key"
