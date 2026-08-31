@@ -28,7 +28,7 @@ budget is exhausted.
 
 The transport gap is real but shallow: no route uses WebSocket and `axum`'s `ws` feature is off,
 though `axum::serve` already calls `serve_connection_with_upgrades`
-(`axum-0.7.9/src/serve.rs:256,425`), so HTTP/1.1 Upgrade is wired at the connection level. **The
+(`axum-0.7.9/src/serve.rs:256,424`), so HTTP/1.1 Upgrade is wired at the connection level. **The
 transport is a feature flag and a handler. The accounting model is the actual project.** ADR-0006 D3
 records this explicitly, and it is why this TD is about sessions rather than about sockets.
 

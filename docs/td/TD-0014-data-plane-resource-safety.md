@@ -109,23 +109,27 @@ buffer discipline (O(n) via a `searched_to` cursor, bounded by a caller-supplied
 reusable `LineSplitter` in `sandhi-providers`. All six typed decoders consume it. Rejected: patching
 six copies — that is how the drift happened.
 
-**D1a — Two ceilings, because the two planes fail differently.** An earlier draft of this decision
-said the budget stays shared "so raising it is one decision." Implementation review falsified that
-and the correction is worth recording, because the reasoning generalises:
+**D1a — One ceiling, two policies.** This decision has been corrected twice, and both corrections
+are recorded because the chain is the lesson:
 
-- `LINE_SNIFF_BUDGET` (64 KiB) bounds *sniffing* on the raw plane. Passing it costs only usage
-  accuracy — the bytes were already forwarded verbatim, so the stream is unharmed.
-- `MAX_TYPED_LINE_BYTES` (8 MiB) bounds *decoding*. A typed decoder emits content, so its bound can
-  only be a last-resort guard against unbounded growth, **never a threshold real traffic reaches**.
+1. The first draft shared the raw plane's 64 KiB sniff budget as the typed bound, "so raising it is
+   one decision." Implementation review falsified that: OpenAI's Responses API puts the entire final
+   response object — all generated output included — in the single `response.completed` SSE line,
+   and that is also the line carrying the usage. A long generation is ~130 KiB, so 64 KiB killed
+   working streams and destroyed their metering.
+2. The first correction split into two ceilings: a small sniff budget for the raw plane, an 8 MiB
+   ceiling for the typed plane. **A second adversarial review falsified that too** — by the same
+   argument, since the raw plane's drop-and-continue policy truncates that same 130 KiB usage frame
+   mid-line, after which nothing parses and the terminal item carries *no* usage at all. Reproduced:
+   the lease then settles on a byte estimate, silently undercharging every long generation on the
+   DEFAULT transparent plane. The small budget was wrong on both planes, for the same reason.
+3. The landing point: **one ceiling** — `MAX_STREAM_LINE_BYTES` (8 MiB), sized far above any frame
+   we can name — with the **policy chosen at the call site**: the raw plane drops the pending line
+   and keeps streaming (bytes were already forwarded; only usage accuracy is at risk), the typed
+   decoders raise `ProviderError::Transport` (they emit decoded content; dropping silently would
+   corrupt the response with no signal).
 
-64 KiB is a threshold real traffic reaches. OpenAI's Responses API puts the entire final response
-object — all generated output included — in the single `response.completed` SSE line, which is also
-the line carrying the usage; a long generation is comfortably past 128 KiB. Sharing the sniff budget
-would therefore have killed a working stream *and* destroyed its metering. Gemini's `inlineData`
-parts are larger still.
-
-Worst-case typed memory is `MAX_TYPED_LINE_BYTES` × concurrent typed streams, which is why P2's
-stream bound (D2) and this one are related knobs rather than independent ones.
+Two numbers never fixed anything here; one number and two policies did.
 
 **D1b — Test the legitimate case, not only the pathological one.** The bug above survived a full
 green suite because every test used either tiny frames or multi-megabyte filler with no newline at
@@ -165,7 +169,7 @@ not land a phase whose effect an operator cannot see.
 
 | Phase | Scope | Acceptance (the failing test to write first) |
 |---|---|---|
-| **P1** | D1 — shared `LineSplitter` on all six typed decoders | A 4 MiB newline-free upstream stream is forwarded with peak decoder buffer ≤ `LINE_SNIFF_BUDGET`; a 100k-chunk stream completes in time linear in chunk count (assert against a recorded bound, not wall-clock); all existing per-family stream tests stay green byte-for-byte |
+| **P1** ✅ | D1 — shared `LineSplitter` on all six typed decoders **and** the raw sniffer | A 16 MiB newline-free upstream stream is refused loudly on the typed plane (peak buffer ≤ `MAX_STREAM_LINE_BYTES` + one chunk) while a 200 KiB *terminated* frame passes intact on every decoder — both directions asserted, and the guards verified to fail against the old 64 KiB bound; total work (search **and** compaction) stays linear in bytes; a long `response.completed` frame still yields its usage on the raw plane; all existing per-family stream tests stay green byte-for-byte |
 | **P2** | D2 — permit held by the body | With `SANDHI_MAX_IN_FLIGHT_AI_REQUESTS=N`, N concurrent SSE streams held open at first byte cause request N+1 to **wait**; it is admitted only when a stream *terminates*. A client disconnecting mid-stream releases the permit (assert via the Drop path, alongside the existing `client_disconnect_mid_stream_still_meters` test at `tests/proxy.rs:797`) |
 | **P3** | D3 + D4 — connection limits and `ConnCtx` | C connections dribbling one header byte per second are closed after the configured timeout while a normal request succeeds concurrently; the (N+1)th connection from one IP is refused; `ConnCtx.forwarded_for` is `None` when the peer is not in the trusted-proxy allowlist, even when the header is present |
 | **P4** | D5 — per-tenant bulkheads + sharded limiter | Tenant A saturating its share leaves tenant B's admission latency within a recorded bound (fairness measured, not asserted qualitatively); the sharded limiter reproduces every TD-0012 P1 semantic test unchanged |

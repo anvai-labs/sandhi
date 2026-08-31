@@ -78,7 +78,9 @@ established; connections accepted (counter); streams currently open; requests wa
 admission semaphore; admission wait time (histogram); file descriptors in use; upstream pool
 connections per provider slug (bounded by the catalog, per TD-0011 D2); usage-sink and alert-writer
 queue depth and drop counts — the latter two exist as internal counters
-(`BufferedSink::dropped_events`, `BufferedAlertStore::dropped_updates`) and are **exported nowhere**.
+(`BufferedSink::dropped_events`, `BufferedAlertStore::dropped_updates`), are logged once on a failed
+drain (`main.rs:309,317`), and are **on no metrics surface at all**, so an operator cannot see a
+buffer filling until it is too late to act.
 
 **D3 — The gauges are gated exactly like `/metrics` is today.** `/readyz` is ungated — a load
 balancer cannot present an admin bearer, and readiness leaks nothing. Everything else follows the

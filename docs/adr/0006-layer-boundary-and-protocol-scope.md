@@ -39,26 +39,28 @@ the inferences are labelled.
 | Layer | What Sandhi owns | Evidence |
 |---|---|---|
 | L3 | Nothing. | — |
-| L4 | One `TcpListener`. `SANDHI_BIND` parses as `SocketAddr`, so no UDS. The peer address is available from axum's `IncomingStream` and **discarded** — `build_app` never calls `into_make_service_with_connect_info`. | `sandhi-proxy/src/lib.rs:262-265,296-299` |
-| L5 | A session *string* (`x-sandhi-session` → `RequestMetadataV1.session_id`), never a transport object. | `sandhi-proxy/src/lib.rs:1505-1509` |
-| L6 | **No TLS in the listener, at all.** `rustls` appears in `Cargo.lock` solely as a `reqwest` *client* dependency. No SNI, no ALPN, no cert loading, no rotation. | `Cargo.lock:1690`, `sandhi-providers/src/lib.rs:66-71` |
+| L4 | One `TcpListener`. `SANDHI_BIND` parses as `SocketAddr`, so no UDS. The peer address is available from axum's `IncomingStream` and **discarded** — `build_app` never calls `into_make_service_with_connect_info`. | `sandhi-proxy/src/lib.rs:262-263,296-299`; `main.rs:292-295` |
+| L5 | A session *string* (`x-sandhi-session` → `RequestMetadataV1.session_id`), never a transport object. | `sandhi-proxy/src/lib.rs:1507-1510` |
+| L6 | **No TLS in the listener, at all.** `rustls` appears solely as a `reqwest` *client* dependency (`cargo tree -i rustls -e no-dev` reaches it only via `reqwest → hyper-rustls/tokio-rustls`). No SNI, no ALPN, no cert loading, no rotation. | `Cargo.lock:1690` |
 | L7 | Everything: key resolution, allowlist, attribution binding, rate limit, budget lease, dialect transcoding, stream normalization, usage extraction, error redaction, admin API. | `sandhi-proxy/src/lib.rs:1451-1739` |
 
 Sandhi is not an L7 gateway *with* a thin lower stack. It is an L7 application that delegates all of
 L3–L6 to `hyper`/`reqwest` and to whatever fronts it. **There is no lower layer to evolve down
 from** — descending would mean building one.
 
-**F1 — The throughput ceiling is above L7, not below it.** Every request takes **two
-`fsync`-durable, globally-serialized SQLite write transactions** — reserve and settle — through
-**one mutex** over **one connection**:
+**F1 — The throughput ceiling is above L7, not below it.** **On the durable arm** — `SANDHI_STORE`
+set, which is every deployment that wants budgets to survive a restart — each request takes **two
+`fsync`-durable, globally-serialized SQLite write transactions**, reserve and settle, through **one
+mutex** over **one connection**. (Without `SANDHI_STORE` the ledger is `ProxyLedger::Memory` and
+touches no SQLite at all; that arm is not what this finding is about.)
 
 ```
-ProxyState.ledger : Mutex<ProxyLedger>       sandhi-proxy/src/lib.rs:85
+ProxyState.ledger : Mutex<ProxyLedger>       sandhi-proxy/src/lib.rs:86
 SqliteLedger      : one Connection           sandhi-store/src/ledger.rs:48
 synchronous=FULL  (fsync every commit)       sandhi-store/src/lib.rs:59-61
 BEGIN IMMEDIATE per reserve                  sandhi-store/src/ledger.rs:165-167
-reserve → spawn_blocking                     sandhi-proxy/src/lib.rs:1971
-settle  → block_in_place                     sandhi-proxy/src/lib.rs:1997-2007, 2178
+reserve → spawn_blocking                     sandhi-proxy/src/lib.rs:1969
+settle  → block_in_place                     sandhi-proxy/src/lib.rs:1997-2007, 2155-2159
 ```
 
 *Inference:* at 0.1–1 ms per `fsync`, this alone caps a budgeted deployment in the low thousands of
@@ -73,7 +75,7 @@ eliminate on the path that matters.
 
 **F3 — Every enforcement decision requires the JSON body.** Model allowlist, token estimate, budget
 ceiling, attribution binding, dialect transcoding, and usage extraction all read the decoded
-envelope (`sandhi-proxy/src/lib.rs:1494,1560-1586,2359-2380`). This is not incidental; it is the
+envelope (`sandhi-proxy/src/lib.rs:1504,1560-1586,2359-2380`). This is not incidental; it is the
 product.
 
 ## Decision
@@ -160,10 +162,13 @@ Do not build, and do not spike:
 - **Risk accepted.** If TD-0015 falsifies F1 — if byte movement, not the commit path, dominates —
   D1's first reason weakens and this ADR must be revised, not quietly ignored. That is why the
   status is Proposed.
-- **Unresolved.** Whether HTTP/2 ingress already works by Cargo feature unification is unknown; the
-  30-minute experiment in [TD-0017](../td/TD-0017-transport-security-and-ingress-protocol-breadth.md)
-  P0 settles it. This is the **only** open question in this ADR — every other item raised across
-  TD-0014…0021 has been resolved on evidence or explicitly gated on a named experiment or owner.
+- **Nothing unresolved in this ADR.** The last open question — whether HTTP/2 ingress was already
+  compiled in by feature unification — was **answered in the negative** during fact-check: the `h2`
+  crate is not in the non-dev dependency graph, and the `http2` feature's only enabler is the
+  `wiremock` dev-dependency, which `resolver = "2"` does not unify into normal builds. See
+  [TD-0017](../td/TD-0017-transport-security-and-ingress-protocol-breadth.md) D1. Every other item
+  raised across TD-0014…0021 is resolved on evidence, gated on a named experiment, or (TD-0018's two
+  product questions) awaiting an owner this document cannot assign.
 
 ## Appendix — the gap register (G01–G30)
 
@@ -178,7 +183,7 @@ each gap has exactly one owning document, and each document is one branch and on
 | G03 | No header-read timeout, no `max_buf_size`, no connection cap | R | P1 | TD-0014 |
 | G04 | No per-tenant bulkhead — three global locks on the request path | FP | P1 | TD-0014 |
 | G05 | No TLS termination anywhere in the listener | R | P0 | TD-0017 |
-| G06 | HTTP/2 ingress undeclared but possibly compiled in via feature unification | R | P2 | TD-0017 |
+| G06 | ~~HTTP/2 ingress possibly compiled in via feature unification~~ — **false; closed.** `h2` is not in the non-dev graph. HTTP/2 ingress is simply absent | R | P2 | TD-0017 (closed) |
 | G07 | Two `fsync`-durable serialized ledger writes per request through one mutex | R | P0 | TD-0016 |
 | G08 | `SANDHI_REPLICA_COUNT != 1` is a startup assert — no HA, no rolling deploy | R | P0 | TD-0016 |
 | G09 | No performance baseline of any kind | R | P0 | TD-0015 |
@@ -198,7 +203,7 @@ each gap has exactly one owning document, and each document is one branch and on
 | G23 | Embedding modality sits in indefinite limbo: a stale prototype branch, an ADR-0002 gate never formally applied | C | P1 | ADR-0007 |
 | G24 | `input_estimate` is bytes/4 — self-documented as wrong for CJK, and it sets the ceiling | R | P3 | TD-0016 |
 | G25 | `Warn` policy diverges between the in-memory and durable ledger arms | FP | P3 | TD-0016 |
-| G26 | A capped tenant is forced off the transparent plane, losing prompt-cache fidelity | FP | P2 | TD-0016 |
+| G26 | A `Block`-capped tenant **that left output unbounded** is forced off the transparent plane, losing prompt-cache fidelity | FP | P2 | TD-0016 |
 | G27 | No DNS cache or resolver tuning control | R | P3 | TD-0020 |
 | G28 | Rate limiter is a single global `Mutex<HashMap>` on the per-request path | R | P3 | TD-0014 |
 | G29 | Lower-layer proposals have no decision gate | FP | Gov | ADR-0006 (D4) |

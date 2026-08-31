@@ -21,17 +21,34 @@ the audit. Every deployment therefore has a mandatory fronting proxy — and tha
 currently *incidental* rather than documented, which means some deployment somewhere does not have
 one.
 
-The second half is smaller and stranger. **Nobody knows which HTTP versions Sandhi's ingress
-actually accepts.** `axum`'s enabled feature set is `form, http1, json, matched-path, original-uri,
-query, tokio, tower-log, tracing` — `http2` is **not** enabled. But `axum::serve` dispatches through
-`hyper_util::server::conn::auto::Builder` (`axum-0.7.9/src/serve.rs:254,423`), and `hyper-util`'s
-`http2` feature **is** globally enabled by Cargo feature unification, pulled in by `reqwest` on the
-client side. *Inference:* h2 prior-knowledge (h2c) ingress is probably compiled in and probably
-works, entirely by accident, and is tested by nothing.
+The second half was, until this TD was fact-checked, an open question — and the answer turned out
+to be the opposite of the draft's inference. **Sandhi's ingress speaks HTTP/1.1 only, and the `h2`
+crate is not linked into the binary at all.**
 
-Either answer is actionable. If h2c works, Sandhi has an undeclared, untested protocol surface —
-which is a correctness and security concern, not a feature. If it does not, the gap is real and
-named. What is unacceptable is not knowing.
+The draft claimed `hyper-util`'s `http2` feature was "globally enabled by Cargo feature unification,
+pulled in by `reqwest`," and inferred that h2 prior-knowledge (h2c) ingress probably worked by
+accident. That was wrong on both counts:
+
+```
+$ cargo tree -p sandhi-proxy -e features,no-dev
+hyper-util features: client, client-legacy, client-proxy, default, http1, server, service, tokio
+hyper       features: client, default, http1, server
+$ cargo tree -p sandhi-proxy -e normal | grep -c '^h2 v'
+0
+```
+
+`reqwest` does not enable `http2` (its resolved features are `json, stream, rustls-tls, blocking`
+plus the `__rustls` chain). The **only** enabler anywhere in the graph is `wiremock`, a
+*dev*-dependency — and the workspace declares `resolver = "2"` (`Cargo.toml:4`), under which
+dev-dependency features are not unified into normal builds.
+
+**This matters beyond the fact being wrong.** The draft's experiment proposed proving it with
+"`curl --http2-prior-knowledge` … plus an `h2` client request in a Rust test." A Rust *test* binary
+**does** get wiremock's features, so h2 would compile there while being absent from the shipped
+binary. The two halves would have disagreed, and the draft's own "h2c half-works" row — which it
+called "the worst case and the most likely to be sitting there unnoticed" — is exactly what a
+careless reading of that split result produces. The experiment as designed could have confirmed a
+surface that does not exist in production.
 
 ## First principles
 
@@ -63,15 +80,17 @@ named. What is unacceptable is not knowing.
 
 ## Decisions
 
-**D1 — Run the h2 experiment before writing any HTTP-version code.** A ~30-minute test:
-`curl --http2-prior-knowledge` against a running proxy, plus an `h2` client request in a Rust test.
-Three possible outcomes, each with a different consequence:
+**D1 — Settled: there is no undeclared h2 surface. HTTP/2 ingress is a deliberate feature, to be
+sequenced on merit.** The dependency graph answers this without a running proxy (see above), so the
+outcome the draft feared — a live, untested HPACK path — does not exist. Two consequences:
 
-| Outcome | Consequence |
-|---|---|
-| h2c works | An undeclared surface exists. Declare it (enable `axum/http2` explicitly), test it against every ingress dialect, and add it to the TD-0010 parity matrix |
-| h2c is cleanly refused | Enabling h2 is a deliberate, scoped feature, sequenced on merit |
-| h2c half-works (accepts the preface, then misbehaves) | The worst case and the most likely to be sitting there unnoticed. Treat as a defect and fix by explicitly disabling or explicitly supporting |
+- The TD-0010 parity matrix does **not** need an HTTP-version axis today.
+- If h2 ingress is later wanted, it is a scoped change (enable `axum/http2`, add the parity runs),
+  not a cleanup of something already reachable.
+
+Any future test of this must assert against a **non-dev** build. A Rust test binary links
+`wiremock`'s features and will happily speak h2 while the shipped binary cannot — the trap the
+draft's own experiment would have walked into.
 
 **D2 — TLS is opt-in configuration over `rustls`, never a reimplementation.** `SANDHI_TLS_CERT` /
 `SANDHI_TLS_KEY` enable it; absent, the listener stays plaintext exactly as today. Rejected: TLS on
@@ -103,7 +122,7 @@ silently, and do not fail-closed on a posture that many dev setups legitimately 
 
 | Phase | Scope | Acceptance (the failing test to write first) |
 |---|---|---|
-| **P0** | D1 — the h2 experiment | A committed test asserting the *actual* h2 prior-knowledge behaviour, whatever it turns out to be. Result recorded in this TD and, if a surface is undeclared, treated as a defect |
+| ~~**P0**~~ | ~~D1 — the h2 experiment~~ | **Done during fact-check, by dependency-graph inspection rather than a running proxy.** `h2` is not in the non-dev graph; there is no undeclared surface. No code needed |
 | **P1** | D2 + D6 — TLS termination, opt-in | With cert and key configured, a TLS client completes a full request and a full SSE stream; without them, behaviour is byte-identical to today; binding a non-loopback address without TLS emits the startup warning |
 | **P2** | D3 — rotation | A certificate is replaced while an SSE stream is in flight: the stream completes uninterrupted and settles `Final` (not `Partial`), and a *new* connection presents the new chain. This test is the whole point of the phase |
 | **P3** | D4 + D5 — ALPN and `ConnCtx` | ALPN offers exactly the tested set; a client negotiating each offered protocol completes a request on every ingress dialect; `ConnCtx` carries ALPN/SNI and they appear in no usage event and no metric label |
@@ -121,9 +140,12 @@ P0 is 30 minutes and gates P4 entirely. P1 is the P0-severity item and should no
    `Cargo.lock` and already covered by `cargo audit`/`cargo deny` in CI. ADR-0006 D5 draws the line
    at *implementing* cryptography, not depending on it — the h2 RUSTSEC response at `8bc9d20` shows
    the process works.
-3. **"The h2 experiment is a curiosity, not a gap."** An HTTP/2 implementation that is reachable but
-   never exercised is a security surface with zero test coverage. If h2c is live, a malformed HPACK
-   frame reaches a code path nothing in this repository has ever run. That is not a curiosity.
+3. **"The h2 experiment is a curiosity, not a gap."** It would have been a real gap had the draft's
+   inference held — an HPACK path reachable but never exercised. It did not hold, and the cost of
+   finding out was one `cargo tree` invocation. The lesson kept here is the *method*: a feature-tree
+   question is answered by querying the feature tree with `--no-dev`, not by reasoning about
+   unification rules from memory, and not by a test binary whose feature set differs from the
+   binary that ships.
 4. **"Certificate rotation without dropping connections is over-engineering for v1."** The
    alternative is that every rotation corrupts the metering record for every in-flight stream, in a
    product whose sole promise is accurate metering. It is cheap with `rustls`'s resolver hook and
@@ -155,7 +177,7 @@ something asks for it.
 
 ## Still open
 
-- **If P0 finds h2c already works, is declaring `axum/http2` a behaviour change or a formality?**
-  Gated on P0 itself — the experiment has to run before this can be answered, and the P4 parity
-  matrix runs either way. This is the single remaining unresolved question in
-  [ADR-0006](../adr/0006-layer-boundary-and-protocol-scope.md).
+- ~~Is declaring `axum/http2` a behaviour change or a formality?~~ **Moot.** There is no existing
+  h2 surface to declare, so enabling it would be a plain feature addition. This was the single
+  unresolved question in [ADR-0006](../adr/0006-layer-boundary-and-protocol-scope.md), and it is now
+  closed on evidence.

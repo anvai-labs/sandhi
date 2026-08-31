@@ -11,7 +11,9 @@
 
 Sandhi has no performance measurement of any kind. There is no `benches/` directory, no `criterion`,
 no `iai`, and no `[[bench]]` target in any manifest in the workspace. CI gates `fmt`, `clippy`,
-`test`, and line coverage, and nothing else.
+`test`, line coverage, schema and codegen drift, both bindings, SDK conformance, a security audit
+(`cargo deny check advisories`, `ci.yml:259`) and the attribution check — but nothing about
+performance.
 
 The consequence is not merely that performance is unknown. It is that **every architectural
 question is unanswerable**, and the project has been carrying at least one load-bearing belief with
@@ -59,8 +61,9 @@ bind — the three things Sandhi must never do.
 ## Decisions
 
 **D1 — Two tiers, split by reproducibility.** **Tier 1** is pure-Rust, deterministic, and runs in CI
-on every PR that touches the data path. **Tier 2** is kernel-level, runs on the existing private
-Linux runner on demand or nightly, and is never a merge gate. Rejected: one tier — either CI becomes
+on every PR that touches the data path. **Tier 2** is kernel-level, runs on the self-hosted Linux runner (label set
+`["self-hosted","Linux","X64","public-overflow"]`, `ci.yml:60`) on demand or nightly, and is never
+a merge gate. Rejected: one tier — either CI becomes
 flaky and slow, or the kernel questions never get asked.
 
 **D2 — The load generator is in-repo, not a dependency.** A ~150-line Tokio harness drives
@@ -170,8 +173,10 @@ adds it to both lists. No separate crate is needed.
 
 **R4 — The fault suite runs serialised; the rest of the suite does not.** Several faults are
 timing-sensitive (slowloris, slow consumer, drain-at-deadline) and would flake under contention.
-Serialising *only* that target keeps the honest signal without slowing the main suite; the repo
-already has `cargo-nextest`, which can express it as its own profile.
+Serialising *only* that target keeps the honest signal without slowing the main suite. `cargo-nextest`
+would express this as its own profile; note the repo does **not** currently use nextest (no
+`nextest.toml`, no CI step — it is only installed on some workstations), so adopting it is part of
+this phase's cost rather than a free ride.
 
 **R5 — This TD also owns the measurements other TDs are gated on.** Three deferred questions
 elsewhere resolve to a number this harness can produce, and they should be explicit deliverables

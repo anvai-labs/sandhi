@@ -40,27 +40,35 @@ It introduces `EmbeddingProvider`, `EmbedRequest`, `EmbedResponse`, `EmbedUsage`
 for OpenAI-compatible and Cohere, with wiremock tests for both. The code is competent and the usage
 extraction is source-measured and neutral, consistent with ADR-0001.
 
-**It predates the decorator refactor entirely.** `crates/sandhi-providers/src/metering.rs` does not
-exist on that branch:
+**It predates `MeteredProvider` — but not the whole decorator stack, and the distinction matters.**
+`crates/sandhi-providers/src/metering.rs` does not exist on that branch:
 
 ```
 $ git show feat/embedding-modality:crates/sandhi-providers/src/metering.rs
 fatal: path '...' exists on disk, but not in 'feat/embedding-modality'
 ```
 
-`resilience.rs` on the branch contains zero references to `EmbeddingProvider` or `embed`, and
-`embed.rs` assembles no `UsageEvent` and produces no `ParsedUsage`. The branch is the PR #13
-prototype from before `MeteredProvider`/`ResilientProvider` existed.
+`resilience.rs` **does exist on the branch** — `ResilientProvider` with its circuit breaker, retry
+and timeout is right there (`resilience.rs:89,138`) — but it contains zero references to
+`EmbeddingProvider` or `embed`, and `embed.rs` assembles no `UsageEvent` and produces no
+`ParsedUsage`. So the precise statement is: the branch predates `MeteredProvider` entirely, and was
+written without entering the resilience decorator that *did* exist. ADR-0002 itself corroborates the
+timeline — written the same week as PR #13, it describes the stack as "`ResilientProvider`, and the
+metering decorator to come." The verdict is unchanged; the earlier draft's stronger phrasing
+("the decorator stack did not exist") was wrong.
 
 ## Applying the ADR-0002 §2 gate
 
 | Criterion | Required | Actual | Verdict |
 |---|---|---|---|
 | **≥2 real consumers**, actual adopters not anticipated ones | 2 | 1, and anticipated. `embed.rs`'s own doc comment names "ProximaDB's embedding drainer (ADR-067)" as an in-process consumer; no second consumer is named anywhere, and the first is a design reference rather than a shipped adoption. | ❌ **Fails** |
-| **Enters the decorator stack** — metering (neutral-event assembly) + circuit breaker + retry + timeout, uniformly with chat | Yes | No, and not partially: the decorator stack did not exist when the branch was written. There is no `MeteredProvider` path, no `UsageEvent`, no resilience wrapping. ADR-0002 §1's test applies exactly — without the decorators this is "just an HTTP client," which a consumer can write locally. | ❌ **Fails** |
+| **Enters the decorator stack** — metering (neutral-event assembly) + circuit breaker + retry + timeout, uniformly with chat | Yes | No. `MeteredProvider` did not exist when the branch was written, and the branch was never wired into the `ResilientProvider` that did — `resilience.rs` has zero embedding references. No `UsageEvent`, no metering path at all. ADR-0002 §1's test applies exactly: this is "just an HTTP client," which a consumer can write locally. | ❌ **Fails** |
 | **Its own ADR**, naming the consumers and the routing shape | Yes | This document. | ✅ Satisfied by writing it |
 
-Two of three fail, and the second fails definitively rather than marginally.
+On the letter of the gate, all three fail — the third row's "satisfied" is satisfied only in the
+sense that this document now exists; ADR-0002 §2 requires it to *name the ≥2 consumers*, and there
+are none to name. The substantive failures are the first two: one anticipated consumer instead of
+two real ones, and no decorator participation at all.
 
 ## Decision
 

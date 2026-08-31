@@ -42,9 +42,10 @@ has no way to ask *which Sandhi contract am I talking to*.
 date or the parity is partial. Verify and correct the record — a scorecard that has drifted from the
 code is worse than no scorecard.
 
-**G30 — error construction is not single-sourced.** Three independent paths build client-facing
-errors: `provider_error` (`lib.rs:2616`), `ingress_error` (`:2691`), and the bare `error` helper
-(`:2710`), alongside the raw plane's own construction. TD-0010 D2 established that every error must
+**G30 — error construction is not single-sourced.** Four independent constructors build
+client-facing errors: `provider_error` (`lib.rs:2616`), `rate_limited_error` (`:2679`),
+`ingress_error` (`:2691`) and the bare `error` helper (`:2710`), alongside the raw plane's own
+construction. TD-0010 D2 established that every error must
 render in the caller's dialect and that is well-tested — but the *shape* is enforced by convention
 across several construction sites rather than by one.
 
@@ -103,7 +104,7 @@ OTLP). TD-0008's `hasattr` feature detection was the right instinct; this is its
 lets a consumer degrade deliberately instead of by trial and error.
 
 **D6 — Single-source error construction (G30).** One `IngressError` type owns status, code, dialect
-rendering, and the TD-0008 D redaction decision; the three current construction sites become
+rendering, and the TD-0008 D redaction decision; the four current construction sites become
 constructors on it. This is a refactor with no behaviour change, and its value is that the *next*
 error path cannot forget the redaction rule.
 

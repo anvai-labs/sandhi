@@ -14,16 +14,18 @@ ADR-0005 got enforcement *correct*: reserve a ceiling, settle by lease id, recla
 fail-open/closed per tier. The correctness argument is the strongest in the repository and none of
 it is in question here.
 
-What was never examined is the **cost of that correctness on the hot path**. Every model call takes
-two fully-durable, globally-serialized SQLite write transactions:
+What was never examined is the **cost of that correctness on the hot path**. On the durable arm
+(`SANDHI_STORE` set) every model call takes two fully-durable, globally-serialized SQLite write
+transactions — including for scopes with no configured limit, since `reserve_durable` writes the
+lease row regardless (`sandhi-store/src/ledger.rs:215-220`):
 
 ```
-ProxyState.ledger : Mutex<ProxyLedger>       sandhi-proxy/src/lib.rs:85
+ProxyState.ledger : Mutex<ProxyLedger>       sandhi-proxy/src/lib.rs:86
 SqliteLedger      : ONE Connection           sandhi-store/src/ledger.rs:48
 synchronous = FULL (fsync per commit)        sandhi-store/src/lib.rs:59-61
 BEGIN IMMEDIATE per reserve                  sandhi-store/src/ledger.rs:165-167
-reserve → spawn_blocking                     sandhi-proxy/src/lib.rs:1971
-settle  → block_in_place                     sandhi-proxy/src/lib.rs:1997-2007, 2178
+reserve → spawn_blocking                     sandhi-proxy/src/lib.rs:1969
+settle  → block_in_place                     sandhi-proxy/src/lib.rs:1997-2007, 2155-2159
 ```
 
 Three multipliers compound: `synchronous=FULL` means an `fsync` per commit; a single `Connection`
@@ -96,8 +98,11 @@ a real deployment shape (rolling restart on one host) that is currently forbidde
 is a concrete input to TD-0007.
 
 **D6 — Fix `input_estimate` (G24) as a correctness item, not an optimisation.** It is `bytes/4`
-(`lib.rs:2359-2373`) and self-documented as undercounting CJK. It sets the reservation *ceiling*, so
-an undercount means a cap is enforced one call later than intended — the exact class of defect
+(`lib.rs:2359-2373`) and self-documented as undercounting CJK. It is one addend of the reservation
+ceiling — `input_estimate + effective_max` (`lib.rs:2376-2377`) — and the function's own comment is
+explicit that "the *output* side, not this, is the load-bearing part" (`:2356-2358`). So an
+undercount here is the smaller of the two error terms, but it still means a cap is enforced one call
+later than intended — the exact class of defect
 ADR-0005 exists to remove. The `sandhi_settle_overshoot_total` counter (TD-0013 D6) already measures
 the symptom; this closes the cause. A byte-class-aware estimator is likely sufficient; a real
 tokenizer is a dependency this project should not take lightly.
@@ -110,7 +115,7 @@ run — which TD-0007 already specifies and which nothing has yet done.
 
 **D8 — Document G26 as an accepted trade, or fix it; do not leave it undescribed.** A `Block`-capped
 scope with unbounded output is forced off the transparent plane so the output bound can be injected
-(`lib.rs:1638-1647`). The enforcement reasoning is correct. The *consequence* — that capped tenants
+(`lib.rs:1653`). The enforcement reasoning is correct. The *consequence* — that capped tenants
 lose byte-exact forwarding and therefore prompt-cache fidelity, which is a real cost paid by exactly
 the cost-sensitive tenants who set caps — is stated nowhere an operator would see. Either inject the
 bound into the raw body (breaking envelope fidelity in a *different* way, and needing its own
@@ -168,10 +173,12 @@ not be numeric — the unsafe topology has to be **inexpressible**, not merely d
 
 **R2 — `input_estimate` becomes script-aware, not model-aware.** `ModelDescriptorV1`
 (`crates/sandhi-core/src/chat.rs:414-430`) carries `max_input_tokens`, `max_output_tokens`,
-`default_temperature` and `capabilities` — but **no bytes-per-token ratio**. Model-aware therefore
-means adding a new catalog field *and* taking on a per-model data-governance obligation under
-TD-0004, for an estimator whose documented defect (CJK undercount, `sandhi-proxy/src/lib.rs:2359-2373`)
-a script-aware ratio already fixes at zero coupling. Revisit only if `sandhi_settle_overshoot_total`
+`default_temperature` and `capabilities` — but **no bytes-per-token ratio**. It does carry a
+free-form `extensions: BTreeMap<String, Value>` (`:428-429`), so a ratio could be smuggled in
+without a schema change; that makes this a *governance* argument rather than a "new field" one.
+Either way a per-model ratio becomes catalog data somebody must curate and version under TD-0004,
+for an estimator whose documented defect (CJK undercount, `sandhi-proxy/src/lib.rs:2359-2373`) a
+script-aware ratio already fixes at zero coupling. Revisit only if `sandhi_settle_overshoot_total`
 stays non-zero after the change — which is the point of having that counter.
 
 **D9 — The reservation *output* ceiling should be model-aware, and that is free.** The inverse of
