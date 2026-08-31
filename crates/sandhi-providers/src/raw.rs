@@ -18,9 +18,10 @@ use crate::{
 };
 use bytes::Bytes;
 use futures_core::Stream;
-use reqwest::header::{HeaderMap, ACCEPT_ENCODING};
+use http::header::{HeaderMap, ACCEPT_ENCODING, AUTHORIZATION, HOST};
 use serde_json::Value;
 use std::pin::Pin;
+use std::time::Duration;
 
 /// Anthropic API version header value (mirrors the typed adapter).
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -40,6 +41,15 @@ pub struct RawResponse {
     pub headers: HeaderMap,
 }
 
+/// A successful metered streaming response. Unlike a bare [`ByteStream`](crate::ByteStream),
+/// this retains the upstream status and the curated response-header allowlist so the transparent
+/// proxy plane can preserve request IDs, rate-limit state, and content type on streaming calls.
+pub struct RawMeteredStreamResponse {
+    pub status: u16,
+    pub headers: HeaderMap,
+    pub stream: crate::ByteStream,
+}
+
 /// A content-faithful, envelope-normalized raw forwarder. One HTTP client (connection pool)
 /// per instance; thread-safe via `reqwest::Client`'s internal Arc.
 #[derive(Clone)]
@@ -51,6 +61,9 @@ pub struct RawForwarder {
     anthropic_auth: AnthropicAuthScheme,
     gemini_auth: GeminiAuthScheme,
     extra_headers: HeaderMap,
+    complete_timeout: Duration,
+    stream_setup_timeout: Duration,
+    stream_idle_timeout: Option<Duration>,
 }
 
 impl RawForwarder {
@@ -73,6 +86,9 @@ impl RawForwarder {
             anthropic_auth: AnthropicAuthScheme::ApiKey,
             gemini_auth: GeminiAuthScheme::ApiKey,
             extra_headers: HeaderMap::new(),
+            complete_timeout: Duration::from_secs(120),
+            stream_setup_timeout: Duration::from_secs(30),
+            stream_idle_timeout: Some(Duration::from_secs(90)),
         }
     }
 
@@ -82,9 +98,9 @@ impl RawForwarder {
     pub fn with_headers(mut self, headers: HeaderMap) -> Self {
         self.extra_headers = headers;
         // Defense-in-depth: never let caller-controlled headers override auth or encoding.
-        self.extra_headers.remove(reqwest::header::AUTHORIZATION);
+        self.extra_headers.remove(AUTHORIZATION);
         self.extra_headers.remove(ACCEPT_ENCODING);
-        self.extra_headers.remove(reqwest::header::HOST);
+        self.extra_headers.remove(HOST);
         self
     }
 
@@ -102,26 +118,50 @@ impl RawForwarder {
         self
     }
 
+    /// Apply the same per-call bounds as the typed resilience transport. The raw transparent
+    /// plane intentionally remains retry-free: replaying a provider POST after an ambiguous
+    /// timeout can duplicate a billed generation. Retry ownership requires a separate policy;
+    /// time bounds do not.
+    #[must_use]
+    pub fn with_timeouts(
+        mut self,
+        complete: Duration,
+        stream_setup: Duration,
+        stream_idle: Option<Duration>,
+    ) -> Self {
+        self.complete_timeout = complete;
+        self.stream_setup_timeout = stream_setup;
+        self.stream_idle_timeout = stream_idle;
+        self
+    }
+
     /// Non-streaming forward: POST the (envelope-normalized) body bytes to `{base_url}{path}`,
     /// return the status + raw body bytes + curated headers.
     pub async fn forward(&self, path: &str, body: Bytes) -> Result<RawResponse, ProviderError> {
         let url = self.url(path);
         let out_body = normalize_envelope(self.family, &body, false);
-        let resp = self.send(&url, out_body).await?;
-        let status = resp.status().as_u16();
-        if !resp.status().is_success() {
-            return Err(error_for_response(resp, None).await);
-        }
-        let headers = filter_response_headers(resp.headers());
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| ProviderError::Transport(e.to_string()))?;
-        Ok(RawResponse {
-            status,
-            body,
-            headers,
+        match tokio::time::timeout(self.complete_timeout, async {
+            let resp = self.send(&url, out_body).await?;
+            let status = resp.status().as_u16();
+            if !resp.status().is_success() {
+                return Err(error_for_response(resp, None).await);
+            }
+            let headers = filter_response_headers(resp.headers());
+            let body = resp
+                .bytes()
+                .await
+                .map_err(|e| ProviderError::Transport(e.to_string()))?;
+            Ok(RawResponse {
+                status,
+                body,
+                headers,
+            })
         })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(ProviderError::Timeout(self.complete_timeout)),
+        }
     }
 
     /// Streaming forward: POST the (envelope-normalized) body bytes and yield raw upstream
@@ -135,7 +175,12 @@ impl RawForwarder {
     ) -> Result<RawChunkStream, ProviderError> {
         let url = self.url(path);
         let out_body = normalize_envelope(self.family, &body, true);
-        let resp = self.send(&url, out_body).await?;
+        let resp = match tokio::time::timeout(self.stream_setup_timeout, self.send(&url, out_body))
+            .await
+        {
+            Ok(result) => result?,
+            Err(_) => return Err(ProviderError::Timeout(self.stream_setup_timeout)),
+        };
         if !resp.status().is_success() {
             return Err(error_for_response(resp, None).await);
         }
@@ -173,17 +218,26 @@ impl RawForwarder {
         &self,
         path: &str,
         body: Bytes,
-    ) -> Result<crate::ByteStream, ProviderError> {
+    ) -> Result<RawMeteredStreamResponse, ProviderError> {
         let url = self.url(path);
         let out_body = normalize_envelope(self.family, &body, true);
-        let resp = self.send(&url, out_body).await?;
+        let resp = match tokio::time::timeout(self.stream_setup_timeout, self.send(&url, out_body))
+            .await
+        {
+            Ok(result) => result?,
+            Err(_) => return Err(ProviderError::Timeout(self.stream_setup_timeout)),
+        };
         if !resp.status().is_success() {
             return Err(error_for_response(resp, None).await);
         }
-        Ok(crate::metered_passthrough(
-            resp.bytes_stream(),
-            sniff_for_family(self.family),
-        ))
+        let status = resp.status().as_u16();
+        let headers = filter_response_headers(resp.headers());
+        let stream = crate::metered_passthrough(resp.bytes_stream(), sniff_for_family(self.family));
+        Ok(RawMeteredStreamResponse {
+            status,
+            headers,
+            stream: with_idle_timeout(stream, self.stream_idle_timeout),
+        })
     }
 
     fn url(&self, path: &str) -> String {
@@ -254,6 +308,28 @@ impl RawForwarder {
         }
         builder
     }
+}
+
+/// Bound the gap between metered stream items without imposing a total generation timeout.
+/// Once response headers have arrived, this is the only timeout that is safe for long-running
+/// model streams. A timeout is surfaced in-stream and is never retried.
+fn with_idle_timeout(stream: crate::ByteStream, idle: Option<Duration>) -> crate::ByteStream {
+    let Some(idle) = idle else {
+        return stream;
+    };
+    Box::pin(async_stream::stream! {
+        let mut stream = stream;
+        loop {
+            match tokio::time::timeout(idle, futures_util::StreamExt::next(&mut stream)).await {
+                Ok(Some(item)) => yield item,
+                Ok(None) => break,
+                Err(_) => {
+                    yield Err(ProviderError::Timeout(idle));
+                    break;
+                }
+            }
+        }
+    })
 }
 
 /// Apply documented envelope normalizations for metering. These are the **only** mutations to
@@ -361,7 +437,7 @@ fn is_passthrough_header(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reqwest::header::{HeaderName, HeaderValue};
+    use http::header::{HeaderName, HeaderValue};
     use serde_json::{json, Value};
     use wiremock::matchers::{body_bytes, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -731,10 +807,7 @@ mod tests {
             HeaderValue::from_static("https://victor.example"),
         );
         // Attacker tries to override auth via extra headers — must be stripped.
-        headers.insert(
-            reqwest::header::AUTHORIZATION,
-            HeaderValue::from_static("Bearer attacker"),
-        );
+        headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer attacker"));
 
         let forwarder = RawForwarder::new(ProviderFamily::OpenAiCompat, server.uri(), "real-key")
             .with_headers(headers);
@@ -779,16 +852,26 @@ data: [DONE]\n\n";
             .and(path("/v1/chat/completions"))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .set_body_string(sse),
+                    .set_body_raw(sse, "text/event-stream")
+                    .insert_header("x-request-id", "req-stream-1"),
             )
             .mount(&server)
             .await;
         let forwarder = RawForwarder::new(ProviderFamily::OpenAiCompat, server.uri(), "k");
-        let mut stream = forwarder
+        let response = forwarder
             .forward_stream_metered("/v1/chat/completions", Bytes::from_static(b"{}"))
             .await
             .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.headers.get("content-type").unwrap(),
+            "text/event-stream"
+        );
+        assert_eq!(
+            response.headers.get("x-request-id").unwrap(),
+            "req-stream-1"
+        );
+        let mut stream = response.stream;
         let mut forwarded = Vec::new();
         let mut final_usage = None;
         while let Some(item) = stream.next().await {
@@ -804,5 +887,56 @@ data: [DONE]\n\n";
         assert_eq!(usage.tokens_in, 4); // 6 − 2 cached
         assert_eq!(usage.cache_read_tokens, 2);
         assert_eq!(usage.tokens_out, 5);
+    }
+
+    #[tokio::test]
+    async fn complete_timeout_applies_to_the_raw_plane() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(100))
+                    .set_body_json(json!({})),
+            )
+            .mount(&server)
+            .await;
+        let forwarder = RawForwarder::new(ProviderFamily::OpenAiCompat, server.uri(), "k")
+            .with_timeouts(
+                Duration::from_millis(10),
+                Duration::from_secs(1),
+                Some(Duration::from_secs(1)),
+            );
+
+        let err = forwarder
+            .forward("/v1/chat/completions", Bytes::from_static(b"{}"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ProviderError::Timeout(d) if d == Duration::from_millis(10)));
+    }
+
+    #[tokio::test]
+    async fn stream_setup_timeout_applies_to_the_raw_plane() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(100))
+                    .set_body_string("data: [DONE]\n\n"),
+            )
+            .mount(&server)
+            .await;
+        let forwarder = RawForwarder::new(ProviderFamily::OpenAiCompat, server.uri(), "k")
+            .with_timeouts(
+                Duration::from_secs(1),
+                Duration::from_millis(10),
+                Some(Duration::from_secs(1)),
+            );
+
+        let err = forwarder
+            .forward_stream_metered("/v1/chat/completions", Bytes::from_static(b"{}"))
+            .await
+            .err()
+            .expect("stream setup should time out");
+        assert!(matches!(err, ProviderError::Timeout(d) if d == Duration::from_millis(10)));
     }
 }

@@ -31,6 +31,16 @@ Implements: [ADR-0004](../adr/0004-two-plane-proxy-and-enforcement-boundary.md) 
 > - **Validate `model` against a strict charset** before it enters the Gemini upstream URL path.
 > - **Keep the `Drop`-based finalizer** and, per [ADR-0005](../adr/0005-enforcement-correctness-reservation-ledger-observe-enforce-split.md)
 >   D1, settle `Partial` (not zero) on mid-stream disconnect for `Block` scopes.
+> - **Raw resilience is explicit, not inherited.** The dedicated raw forwarder does not pass
+>   through `ResilientProvider`. It mirrors complete/setup/idle timeout configuration directly,
+>   but intentionally does not replay an ambiguous provider POST: a timeout after the upstream
+>   accepted the body can otherwise duplicate a billed generation. Circuit-breaker sharing and
+>   any retry policy require an explicit cross-plane ownership design.
+> - **Resolution (2026-08-30): inference replay is opt-in on both planes.** The typed resilience
+>   decorator now defaults to zero retries, matching the raw forwarder. A positive `max_retries`
+>   is an explicit caller assertion that the selected provider contract makes replay safe;
+>   timeouts and circuit breaking remain enabled independently. A caller-supplied idempotency key
+>   is recorded for reconciliation but does not, by itself, prove upstream at-most-once behavior.
 
 ## Goal
 
@@ -81,10 +91,11 @@ impl ProviderHandle {
 }
 ```
 
-These reuse the resilience decorator (retry/circuit-breaker/timeout) and `metered_passthrough`
-already wrapping the adapters. `typed.rs:97-99`'s comment ("raw transports intentionally do not
-cross this boundary") is revised: raw transport is allowed **when the caller has proven dialects
-match**, which the proxy does structurally.
+These reuse `metered_passthrough` but do **not** inherit the typed resilience decorator: the
+dedicated raw forwarder mirrors the configured complete/setup/idle timeouts itself and remains
+retry-free until replay ownership is explicit. `typed.rs:97-99`'s comment ("raw transports
+intentionally do not cross this boundary") is revised: raw transport is allowed **when the caller
+has proven dialects match**, which the proxy does structurally.
 
 ### Step 2 — a plane selector in the proxy handler
 

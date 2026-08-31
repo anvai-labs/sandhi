@@ -614,8 +614,10 @@ async fn streaming_passes_through_and_emits_usage() {
         .and(path("/chat/completions"))
         .respond_with(
             ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_string(sse),
+                .set_body_raw(sse, "text/event-stream")
+                .insert_header("x-request-id", "req-stream-abc")
+                .insert_header("x-ratelimit-remaining-requests", "42")
+                .insert_header("server", "must-not-leak"),
         )
         .mount(&upstream)
         .await;
@@ -635,6 +637,18 @@ async fn streaming_passes_through_and_emits_usage() {
 
     let response = app.oneshot(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("x-request-id").unwrap(),
+        "req-stream-abc"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-ratelimit-remaining-requests")
+            .unwrap(),
+        "42"
+    );
+    assert!(response.headers().get("server").is_none());
 
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
@@ -1820,4 +1834,328 @@ async fn a_settle_above_the_ceiling_is_recorded_in_full_and_counted() {
         metrics.contains("sandhi_settle_overshoot_tokens_total "),
         "how far past the ceiling it landed is the actionable part"
     );
+}
+
+// ---------------------------------------------------------------------------
+// TD-0014 P2 (gap G02): open streams hold admission slots until the BODY ends.
+// ---------------------------------------------------------------------------
+
+/// A fake OpenAI-compatible upstream that answers immediately and then holds the
+/// stream open forever. wiremock cannot trickle a stream, and the property under
+/// test needs the proxy's handler future to RESOLVE (headers at the client) while
+/// the body is still open — exactly the state in which the tower permit used to
+/// be released.
+async fn hanging_sse_upstream() -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                let mut buf = [0u8; 8192];
+                // Consume the request head; content is irrelevant to this fake.
+                let _ = sock.read(&mut buf).await;
+                let _ = sock
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n\
+                          data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n",
+                    )
+                    .await;
+                let _ = sock.flush().await;
+                // Hold the stream open well past any test timeout.
+                std::future::pending::<()>().await;
+            });
+        }
+    });
+    format!("http://{addr}")
+}
+
+/// With `max_in_flight_ai_requests = 2`, two streams open at first byte must make
+/// a third request WAIT, and aborting one client must admit it. Before P2 the
+/// slot was released at first byte, so the third request sailed straight through.
+#[tokio::test]
+async fn open_streams_hold_admission_slots_until_the_body_completes() {
+    let upstream_uri = hanging_sse_upstream().await;
+    let sink = Arc::new(InMemorySink::new());
+    let mut inner = ProxyState::new(
+        {
+            let keys = KeyStore::new();
+            keys.insert(VirtualKey {
+                id: "vk_demo".into(),
+                subject_id: Some("alice".into()),
+                group_id: Some("platform".into()),
+                upstream_ref: "up1".into(),
+                ..Default::default()
+            });
+            keys
+        },
+        ProxyLedger::in_memory(),
+        sink,
+        {
+            let mut providers = HashMap::new();
+            providers.insert(
+                "up1".into(),
+                ProviderRuntime::new().openai_compat(
+                    "openai",
+                    upstream_uri,
+                    "REAL-KEY",
+                    Default::default(),
+                    Some(0),
+                    None,
+                    None,
+                ),
+            );
+            providers
+        },
+        None,
+    );
+    inner.max_in_flight_ai_requests = 2;
+    let state = Arc::new(inner);
+
+    // Bind, learn the port, release, and serve on it (the serve fn binds itself).
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = probe.local_addr().unwrap();
+    drop(probe);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(sandhi_proxy::serve_with_shutdown_timeout(
+        state.clone(),
+        addr,
+        async {
+            let _ = shutdown_rx.await;
+        },
+        std::time::Duration::from_secs(5),
+    ));
+
+    let client = reqwest::Client::new();
+    let url = format!("http://{addr}/v1/chat/completions");
+    let body = serde_json::json!({
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": true
+    });
+
+    // Two clients hold streams open: headers received, one body chunk read, then HOLD.
+    let open_stream = |client: reqwest::Client, url: String, body: serde_json::Value| {
+        tokio::spawn(async move {
+            let mut resp = client
+                .post(url)
+                .header("authorization", "Bearer vk_demo")
+                .json(&body)
+                .send()
+                .await
+                .expect("streaming request admitted");
+            assert_eq!(resp.status(), 200);
+            // First body chunk: the handler future has resolved; the body is open.
+            let _ = resp.chunk().await.expect("first sse chunk").expect("chunk");
+            // Hold the response (and so the stream) open until the task is aborted.
+            std::future::pending::<()>().await;
+        })
+    };
+    let a = open_stream(client.clone(), url.clone(), body.clone());
+    let b = open_stream(client.clone(), url.clone(), body.clone());
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // The gauge sees both streams open (TD-0014 D6: no unobservable bound).
+    let metrics = client
+        .get(format!("http://{addr}/metrics"))
+        .send()
+        .await
+        .unwrap();
+    let metrics_text = metrics.text().await.unwrap();
+    assert!(
+        metrics_text.contains("sandhi_streams_open 2\n"),
+        "expected both streams gauged open, got:\n{metrics_text}"
+    );
+
+    // A third request must NOT be admitted while both streams are open.
+    let third = tokio::time::timeout(
+        std::time::Duration::from_millis(400),
+        client
+            .post(&url)
+            .header("authorization", "Bearer vk_demo")
+            .json(&body)
+            .send(),
+    )
+    .await;
+    assert!(
+        third.is_err(),
+        "third request was admitted while two streams were open — the admission \
+         slot was released at first byte instead of at body completion"
+    );
+
+    // Aborting one client drops its response body, which must release the slot.
+    a.abort();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let resp = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        client
+            .post(&url)
+            .header("authorization", "Bearer vk_demo")
+            .json(&body)
+            .send(),
+    )
+    .await
+    .expect("released slot must admit the waiting request")
+    .expect("proxied response");
+    assert_eq!(resp.status(), 200);
+
+    // The gauge tracks the abort AND the newly admitted stream: B (1) + the released-slot
+    // request (1) = 2. Arithmetic that tripped the first version of this very assertion.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let metrics = client
+        .get(format!("http://{addr}/metrics"))
+        .send()
+        .await
+        .unwrap();
+    let metrics_text = metrics.text().await.unwrap();
+    assert!(
+        metrics_text.contains("sandhi_streams_open 2\n"),
+        "expected B plus the newly admitted stream = 2 open, got:\n{metrics_text}"
+    );
+
+    a.abort();
+    b.abort();
+    let _ = shutdown_tx.send(());
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(6), server).await;
+}
+
+/// Adversarial-review finding 1: the test above drives only the TRANSPARENT plane (same-family).
+/// The translation plane's permit-holding is a separate code path (`stream_response`), and the
+/// reviewer demonstrated mutationally that reverting THAT twin to first-byte release keeps the
+/// whole suite green. This pins it: Anthropic ingress against an OpenAI-compat upstream is
+/// cross-family by family mismatch, so the stream runs translated.
+#[tokio::test]
+async fn translation_plane_streams_hold_admission_slots_too() {
+    let upstream_uri = hanging_sse_upstream().await;
+    let sink = Arc::new(InMemorySink::new());
+    let mut inner = ProxyState::new(
+        {
+            let keys = KeyStore::new();
+            keys.insert(VirtualKey {
+                id: "vk_demo".into(),
+                subject_id: Some("alice".into()),
+                group_id: Some("platform".into()),
+                upstream_ref: "up1".into(),
+                ..Default::default()
+            });
+            keys
+        },
+        ProxyLedger::in_memory(),
+        sink,
+        {
+            let mut providers = HashMap::new();
+            providers.insert(
+                "up1".into(),
+                ProviderRuntime::new().openai_compat(
+                    "openai",
+                    upstream_uri,
+                    "REAL-KEY",
+                    Default::default(),
+                    Some(0),
+                    None,
+                    None,
+                ),
+            );
+            providers
+        },
+        None,
+    );
+    inner.max_in_flight_ai_requests = 1;
+    let state = Arc::new(inner);
+
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = probe.local_addr().unwrap();
+    drop(probe);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(sandhi_proxy::serve_with_shutdown_timeout(
+        state,
+        addr,
+        async {
+            let _ = shutdown_rx.await;
+        },
+        std::time::Duration::from_secs(1),
+    ));
+
+    let client = reqwest::Client::new();
+    let url = format!("http://{addr}/v1/messages");
+    let body = serde_json::json!({
+        "model": "claude-x",
+        "max_tokens": 16,
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": true
+    });
+    let open_stream = |client: reqwest::Client, url: String| {
+        tokio::spawn(async move {
+            let mut resp = client
+                .post(url)
+                .header("x-api-key", "vk_demo")
+                .json(&body)
+                .send()
+                .await
+                .expect("streaming request admitted");
+            assert_eq!(resp.status(), 200);
+            let _ = resp.chunk().await.expect("first sse chunk").expect("chunk");
+            std::future::pending::<()>().await;
+        })
+    };
+
+    let a = open_stream(client.clone(), url.clone());
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let metrics = client
+        .get(format!("http://{addr}/metrics"))
+        .send()
+        .await
+        .unwrap();
+    let metrics_text = metrics.text().await.unwrap();
+    assert!(
+        metrics_text.contains("sandhi_streams_open 1\n"),
+        "expected the translation-plane stream gauged open, got:\n{metrics_text}"
+    );
+
+    let second = tokio::time::timeout(
+        std::time::Duration::from_millis(400),
+        client
+            .post(&url)
+            .header("x-api-key", "vk_demo")
+            .json(&serde_json::json!({
+                "model": "claude-x",
+                "max_tokens": 16,
+                "messages": [{"role": "user", "content": "ho"}],
+                "stream": true
+            }))
+            .send(),
+    )
+    .await;
+    assert!(
+        second.is_err(),
+        "second request was admitted while the translation-plane stream held the only slot"
+    );
+
+    a.abort();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let resp = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        client
+            .post(&url)
+            .header("x-api-key", "vk_demo")
+            .json(&serde_json::json!({
+                "model": "claude-x",
+                "max_tokens": 16,
+                "messages": [{"role": "user", "content": "ho"}],
+                "stream": true
+            }))
+            .send(),
+    )
+    .await
+    .expect("released slot must admit the waiting request")
+    .expect("proxied response");
+    assert_eq!(resp.status(), 200);
+
+    a.abort();
+    let _ = shutdown_tx.send(());
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), server).await;
 }

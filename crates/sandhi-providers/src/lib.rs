@@ -52,6 +52,7 @@ pub use local::Ollama;
 pub use openai::OpenAiCompat;
 pub use openai_responses::{OpenAiResponses, OpenAiResponsesProfile};
 pub use openai_roles::{validate_openai_chat_messages, OpenAiChatRole};
+mod linesplit;
 pub mod metering;
 pub use metering::MeteredProvider;
 pub use resilience::{CircuitBreaker, ResilientProvider, RetryConfig, TimeoutConfig};
@@ -140,7 +141,7 @@ pub struct StreamChunk {
     /// Present only on the terminal item: the finalized usage counts.
     ///
     /// `None` on the terminal item means the sniffer never matched anything — an upstream that
-    /// ignored `stream_options.include_usage`, or a usage frame past [`LINE_SNIFF_BUDGET`]. That
+    /// ignored `stream_options.include_usage`, or a usage frame past [`MAX_STREAM_LINE_BYTES`]. That
     /// is deliberately distinct from `Some(ParsedUsage::default())`: a caller must be able to tell
     /// "the provider reported zero" from "the provider reported nothing", because settling the
     /// latter as a finalized zero silently discards a whole response's worth of spend (TD-0013).
@@ -295,11 +296,30 @@ pub trait Provider: Send + Sync {
     async fn stream(&self, req: ProviderRequest) -> Result<ByteStream, ProviderError>;
 }
 
-/// Hard cap on the single-line buffer inside the metered pass-through sniffer (TD-0006). Past
-/// this bound the line is flushed (forwarded) without further sniffing — a giant tool-call delta
-/// cannot blow memory. 64 KiB is generous for SSE/NDJSON lines (typical delta ≈ 1–4 KiB) while
-/// keeping the worst-case buffer small.
-const LINE_SNIFF_BUDGET: usize = 64 * 1024;
+/// Hard cap on a single newline-delimited line while a stream is being decoded, on **both**
+/// planes (TD-0014 P1).
+///
+/// This started as a 64 KiB "sniff budget" on the raw plane and adversarial review showed 64 KiB
+/// was wrong on **both** planes for the same reason. OpenAI's Responses API puts the entire final
+/// response object — all generated output included — in the single `response.completed` SSE line,
+/// and that is also the line carrying the usage; a long generation is comfortably past 128 KiB.
+/// Gemini's `inlineData` parts are larger still. A budget real traffic reaches is not a guard, it
+/// is a bug: on the typed plane it killed working streams, and on the raw plane it silently
+/// dropped the only usage frame the stream would ever send, settling the lease on a byte estimate.
+///
+/// One size, because the failure is the same size on both planes. **Two policies**, because the
+/// consequence differs and that is decided at the call site, not here:
+///
+/// - **Raw plane** — drop the pending line and keep streaming. Bytes were already forwarded
+///   verbatim, so only usage accuracy is at risk, and only for a line this large.
+/// - **Typed decoders** — raise `ProviderError::Transport`. They emit decoded *content*, so
+///   dropping silently would corrupt the response with no signal at all.
+///
+/// 8 MiB sits above every frame we can name and far below unbounded. It is a ceiling, not an
+/// allocation: normal SSE carries newlines every few KB, so the buffer stays small. Worst-case
+/// memory is this plus one chunk, times the concurrent streams — see TD-0014 P2, which bounds
+/// the second factor. Sizing against a real corpus is TD-0015's job.
+pub(crate) const MAX_STREAM_LINE_BYTES: usize = 8 * 1024 * 1024;
 
 /// Wrap a provider's byte stream in the metered pass-through: forward every upstream chunk
 /// verbatim (O(1) forwarding, ADR-0047 D9) while running `sniff` over each complete newline-
@@ -307,9 +327,9 @@ const LINE_SNIFF_BUDGET: usize = 64 * 1024;
 ///
 /// **Improvements over the original O(n²) / unbounded implementation (TD-0006):**
 ///
-/// - **Bounded line buffer** — a single line exceeding [`LINE_SNIFF_BUDGET`] is flushed without
-///   sniffing so memory stays bounded. A huge tool-call delta or a single-JSON-array stream
-///   (Gemini non-`?alt=sse`) cannot exhaust memory.
+/// - **Bounded line buffer** — a single line exceeding [`MAX_STREAM_LINE_BYTES`] is flushed without
+///   sniffing so memory stays bounded. A single-JSON-array stream (Gemini non-`?alt=sse`) cannot
+///   exhaust memory. The bound is deliberately far above any real frame: see the constant.
 /// - **O(n) scan** — tracks the last-scanned position so only newly-arrived bytes are searched
 ///   for `\n` on each chunk. The original rescanned the entire accumulated buffer on every chunk
 ///   (O(chunks²)).
@@ -334,28 +354,17 @@ where
 {
     use futures_util::StreamExt;
     let s = async_stream::try_stream! {
-        let mut line_buf: Vec<u8> = Vec::new();
-        // Position in line_buf up to which we've already searched for '\n'. Only bytes after
-        // this offset are rescanned on each new chunk — O(chunks) not O(chunks²).
-        let mut searched_to: usize = 0;
+        // The shared bounded/O(n) splitter (TD-0014 P1). The cursor and budget discipline this
+        // function pioneered now lives in one place, so the typed decoders cannot drift from it.
+        let mut splitter = crate::linesplit::LineSplitter::new(MAX_STREAM_LINE_BYTES);
         let mut usage = ParsedUsage::default();
         // Has any line moved the accumulator? Distinguishes "reported zero" from "reported
         // nothing" on the terminal item, and gates `usage_running` before it.
         let mut sniffed = false;
         while let Some(chunk) = upstream.next().await {
             let chunk = chunk.map_err(|e| ProviderError::Transport(e.to_string()))?;
-            line_buf.extend_from_slice(&chunk);
-            // Scan only the newly-arrived portion for line boundaries.
-            while searched_to < line_buf.len() {
-                let Some(rel) = line_buf[searched_to..].iter().position(|&b| b == b'\n') else {
-                    searched_to = line_buf.len();
-                    break;
-                };
-                let nl = searched_to + rel;
-                // Drain the complete line (including the newline) and sniff it.
-                let line: Vec<u8> = line_buf.drain(..=nl).collect();
-                // After draining the buffer shifts; reset the search cursor to the new start.
-                searched_to = 0;
+            splitter.push(&chunk);
+            while let Some(line) = splitter.next_line() {
                 // Guard: skip the JSON parse for lines that can't carry a usage object.
                 if line_contains_usage(&line) {
                     // The sniffer reports whether it recorded anything — comparing the accumulator
@@ -369,9 +378,8 @@ where
             // the current line is too large (a giant tool-call delta, or a single-JSON-array
             // without the `?alt=sse` flag). Flush it without sniffing so memory stays bounded.
             // The bytes were already forwarded verbatim via `chunk` above.
-            if line_buf.len() > LINE_SNIFF_BUDGET {
-                line_buf.clear();
-                searched_to = 0;
+            if splitter.over_budget() {
+                splitter.reset();
             }
             yield StreamChunk {
                 data: chunk,
@@ -384,11 +392,12 @@ where
         // NDJSON without a trailing newline and the single-JSON-array transport (Gemini's
         // non-`?alt=sse` stream). If within the budget, the sniff closure gets one final shot;
         // otherwise we degrade gracefully (default zero usage) rather than blowing memory.
-        if !line_buf.is_empty()
-            && line_buf.len() <= LINE_SNIFF_BUDGET
-            && line_contains_usage(&line_buf)
+        let remainder = splitter.remainder();
+        if !remainder.is_empty()
+            && remainder.len() <= MAX_STREAM_LINE_BYTES
+            && line_contains_usage(remainder)
         {
-            sniffed |= sniff(&line_buf, &mut usage);
+            sniffed |= sniff(remainder, &mut usage);
         }
         // `None` when nothing was ever sniffed. Previously this yielded `Some(default())`, an
         // all-zero *finalized* usage that overwrote whatever the caller had accrued — so a stream
@@ -462,6 +471,46 @@ pub(crate) async fn accumulate_usage(
 mod metered_passthrough_tests {
     use super::*;
     use bytes::Bytes;
+
+    /// TD-0014 P1 regression, RAW plane (found by adversarial review of the typed fix).
+    ///
+    /// The typed ceiling was raised because OpenAI Responses puts the entire final response —
+    /// **and the usage** — in the single `response.completed` SSE line, which a long generation
+    /// pushes past 128 KiB. That reasoning applies identically here: this is the DEFAULT plane for
+    /// a same-family call (`/v1/responses` -> OpenAI), and dropping the over-budget line loses the
+    /// only usage frame the stream will ever send. The lease then settles on a byte estimate, so
+    /// spend is silently undercounted for any long generation.
+    ///
+    /// Dropping is still the right *policy* here (bytes are already forwarded, so content is
+    /// unharmed) — the budget was simply too small to ever reach the frame that matters.
+    #[tokio::test]
+    async fn a_long_terminal_frame_still_yields_usage_on_the_raw_plane() {
+        let long_text = "word ".repeat(26_000);
+        let wire = format!(
+            "data: {{\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}}\n\n\
+             data: {{\"type\":\"response.completed\",\"response\":{{\"status\":\"completed\",\
+             \"output\":[{{\"type\":\"message\",\"text\":\"{long_text}\"}}],\
+             \"usage\":{{\"input_tokens\":5,\"output_tokens\":32000}}}}}}\n\n"
+        );
+        assert!(
+            wire.len() > 64 * 1024,
+            "fixture must exceed the old 64 KiB budget"
+        );
+        // Chunked the way a socket delivers it — a single push would drain the complete line
+        // before the budget is ever consulted, which is how this class of bug hides.
+        let chunks: Vec<Bytes> = wire
+            .as_bytes()
+            .chunks(16 * 1024)
+            .map(Bytes::copy_from_slice)
+            .collect();
+        let usage =
+            accumulate_usage(chunks, crate::openai_responses::sniff_responses_usage_line).await;
+        assert_eq!(
+            usage.tokens_out, 32_000,
+            "the terminal usage frame must survive"
+        );
+        assert_eq!(usage.tokens_in, 5);
+    }
     use futures_util::StreamExt;
 
     /// Drive chunks through `metered_passthrough` and return (finalized usage, all forwarded data).
@@ -537,12 +586,12 @@ mod metered_passthrough_tests {
         assert_eq!(usage.cache_read_tokens, 3);
     }
 
-    /// Bounded-sniffer: a single SSE line exceeding LINE_SNIFF_BUDGET must not blow the buffer.
+    /// Bounded-sniffer: a single SSE line exceeding MAX_STREAM_LINE_BYTES must not blow the buffer.
     /// The line is flushed (forwarded) without sniffing — usage degrades gracefully to default.
     #[tokio::test]
     async fn huge_single_sse_line_does_not_blow_buffer() {
-        // Build a single SSE line far exceeding LINE_SNIFF_BUDGET (64 KiB).
-        let padding = "x".repeat(LINE_SNIFF_BUDGET + 10_000);
+        // Build a single SSE line far exceeding MAX_STREAM_LINE_BYTES (64 KiB).
+        let padding = "x".repeat(MAX_STREAM_LINE_BYTES + 10_000);
         let sse_line = format!(
             "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{padding}\"}}}}],\"usage\":{{\"prompt_tokens\":42,\"completion_tokens\":7}}}}\n"
         );

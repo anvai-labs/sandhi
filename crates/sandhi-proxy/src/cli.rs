@@ -339,13 +339,18 @@ fn fill_secret_from_stdin(mut command: Command) -> Command {
         action: KeysAction::Add { secret, .. },
     } = &mut command
     {
-        if secret.is_none() {
-            // Read one line from stdin (keeps the secret out of argv / shell history).
-            if !std::io::stdin().is_terminal() {
-                if let Some(Ok(line)) = std::io::stdin().lock().lines().next() {
-                    *secret = Some(line.trim().to_string());
-                }
-            }
+        if secret.is_none() && !std::io::stdin().is_terminal() {
+            // Read one line from stdin (keeps the secret out of argv / shell history). A
+            // piped-but-empty stdin (e.g. `printf '' | sandhi keys add ollama ...` for a
+            // keyless local upstream) yields zero lines, not an empty one — treat that as
+            // a deliberate empty secret rather than leaving `None`, which serializes as
+            // JSON `null` against the admin API's required `String` field and gets
+            // rejected with a non-JSON body (see `execute`'s parse-failure handling).
+            let line = match std::io::stdin().lock().lines().next() {
+                Some(Ok(line)) => line,
+                _ => String::new(),
+            };
+            *secret = Some(line.trim().to_string());
         }
     }
     command
@@ -368,7 +373,17 @@ fn execute(req: &AdminRequest, token: &str) -> Result<Value, String> {
     }
     let resp = builder.send().map_err(|e| format!("request failed: {e}"))?;
     let status = resp.status();
-    let json: Value = resp.json().unwrap_or(json!({}));
+    // Do NOT default a parse failure to `json!({})` — that shape has no "error" key, so
+    // main()'s `response.get("error")` check falls through and the CLI reports SUCCESS
+    // (exit 0) while silently discarding whatever the server actually said, including a
+    // non-JSON rejection body (e.g. Axum's plain-text 4xx for a malformed request). Surface
+    // the real body so a bad request is never mistaken for an empty-but-successful one.
+    let text = resp
+        .text()
+        .map_err(|e| format!("reading response body: {e}"))?;
+    let json: Value = serde_json::from_str(&text).map_err(|e| {
+        format!("server returned a non-JSON response (status {status}): {e}\nbody: {text}")
+    })?;
     if !status.is_success() {
         return Ok(json); // surfaced as an `error` by render()
     }

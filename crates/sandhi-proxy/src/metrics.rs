@@ -18,6 +18,8 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 use std::sync::Mutex;
 
 /// Which plane served a request (ADR-0004 D1) — the adoption signal.
@@ -180,12 +182,38 @@ struct Inner {
 #[derive(Debug, Default)]
 pub struct Metrics {
     inner: Mutex<Inner>,
+    /// Open streaming response bodies. Outside the registry lock on purpose: touched twice per
+    /// stream by the body's own lifetime. TD-0014 D6 — no bound ships unobservable.
+    streams_open: AtomicI64,
 }
 
 impl Metrics {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// One streaming response body opened. Paired with [`stream_closed`](Self::stream_closed) by
+    /// the body's drop — including client disconnects and graceful-drain cancellation, which is
+    /// the point: those are the exits a per-request counter never sees.
+    pub fn stream_opened(&self) {
+        self.streams_open.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub fn stream_closed(&self) {
+        self.streams_open.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    /// Open a stream and return the drop guard that closes it. Prefer this over the pair —
+    /// the guard is what makes disconnects and drain-cancellations balance the count.
+    ///
+    /// Takes `&Arc<Self>` and owns the Arc: the guard lives inside a streaming generator that
+    /// also mutates request accounting, so a borrow would alias.
+    pub fn stream_open_guard(self: &Arc<Self>) -> StreamOpenGuard {
+        self.stream_opened();
+        StreamOpenGuard {
+            metrics: Arc::clone(self),
+        }
     }
 
     /// Record one settled call. Called from the accounting path, which already holds the settled
@@ -314,6 +342,11 @@ impl Metrics {
             "Streams only: milliseconds to the first delivered item.",
             &inner.ttft,
         );
+
+        let streams_open = self.streams_open.load(Ordering::Acquire);
+        out.push_str("# HELP sandhi_streams_open Streaming response bodies currently open.\n");
+        out.push_str("# TYPE sandhi_streams_open gauge\n");
+        let _ = writeln!(out, "sandhi_streams_open {streams_open}");
 
         out.push_str(
             "# HELP sandhi_rate_limited_total Requests refused by the per-key rate limiter.\n",
@@ -545,5 +578,17 @@ mod tests {
         // A raw quote would break the exposition format and could inject a fake series.
         assert!(text.contains("weird\\\"provider"), "{text}");
         assert!(text.contains("model\\\\x"), "{text}");
+    }
+}
+
+/// Drop guard for one open streaming body: decrements [`Metrics::stream_closed`] on drop.
+#[derive(Debug)]
+pub struct StreamOpenGuard {
+    metrics: Arc<Metrics>,
+}
+
+impl Drop for StreamOpenGuard {
+    fn drop(&mut self) {
+        self.metrics.stream_closed();
     }
 }
