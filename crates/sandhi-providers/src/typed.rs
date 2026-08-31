@@ -97,7 +97,10 @@ pub struct ProviderTransportConfig {
     pub slug: String,
     pub base_url: String,
     pub api_key: String,
-    pub headers: reqwest::header::HeaderMap,
+    /// Extra provider headers expressed through the transport-neutral `http` contract.
+    pub headers: http::HeaderMap,
+    /// Extra attempts after the first. `None` and `Some(0)` are both retry-free; a positive value
+    /// is an explicit assertion by the caller that replay is safe for this provider contract.
     pub max_retries: Option<u32>,
     pub timeout_secs: Option<f64>,
     pub stream_idle_timeout_secs: Option<f64>,
@@ -119,7 +122,7 @@ impl ProviderTransportConfig {
             slug: slug.into(),
             base_url: base_url.into(),
             api_key: api_key.into(),
-            headers: reqwest::header::HeaderMap::new(),
+            headers: http::HeaderMap::new(),
             max_retries: None,
             timeout_secs: None,
             stream_idle_timeout_secs: None,
@@ -144,6 +147,13 @@ pub trait ChatProvider: Send + Sync {
 /// to build its typed provider (TD-0006). Auth and headers mirror the typed path exactly, so a
 /// transparent forward is credential- and header-identical to a translated one.
 fn build_raw_forwarder(config: &ProviderTransportConfig) -> crate::raw::RawForwarder {
+    let mut timeouts = TimeoutConfig::default();
+    if let Some(secs) = config.timeout_secs {
+        timeouts.complete = std::time::Duration::from_secs_f64(secs.max(0.001));
+    }
+    if let Some(secs) = config.stream_idle_timeout_secs {
+        timeouts.idle = Some(std::time::Duration::from_secs_f64(secs.max(0.001)));
+    }
     crate::raw::RawForwarder::new(
         config.family,
         config.base_url.clone(),
@@ -152,6 +162,7 @@ fn build_raw_forwarder(config: &ProviderTransportConfig) -> crate::raw::RawForwa
     .with_headers(config.headers.clone())
     .with_anthropic_auth(config.anthropic_auth_scheme)
     .with_gemini_auth(config.gemini_auth_scheme)
+    .with_timeouts(timeouts.complete, timeouts.stream_setup, timeouts.idle)
 }
 
 #[derive(Clone)]
@@ -329,10 +340,12 @@ impl ProviderRuntime {
         bare: Arc<dyn Provider>,
         config: &ProviderTransportConfig,
     ) -> Arc<dyn Provider> {
-        let mut resilient = ResilientProvider::new(bare);
-        if let Some(max_retries) = config.max_retries {
-            resilient = resilient.with_retry(max_retries, std::time::Duration::from_millis(200));
-        }
+        // Inference POST replay is opt-in. `None` must not inherit a retrying decorator default:
+        // an upstream may have accepted and billed a request before the transport timed out.
+        let resilient = ResilientProvider::new(bare).with_retry(
+            config.max_retries.unwrap_or(0),
+            std::time::Duration::from_millis(200),
+        );
         let mut timeouts = TimeoutConfig::default();
         if let Some(secs) = config.timeout_secs {
             timeouts.complete = std::time::Duration::from_secs_f64(secs.max(0.001));
@@ -349,7 +362,7 @@ impl ProviderRuntime {
         slug: impl Into<String>,
         base_url: impl Into<String>,
         api_key: impl Into<String>,
-        headers: reqwest::header::HeaderMap,
+        headers: http::HeaderMap,
         max_retries: Option<u32>,
         timeout_secs: Option<f64>,
         stream_idle_timeout_secs: Option<f64>,
@@ -382,7 +395,7 @@ impl ProviderRuntime {
         slug: impl Into<String>,
         base_url: impl Into<String>,
         bearer_token: impl Into<String>,
-        headers: reqwest::header::HeaderMap,
+        headers: http::HeaderMap,
         max_retries: Option<u32>,
         timeout_secs: Option<f64>,
         stream_idle_timeout_secs: Option<f64>,
@@ -419,7 +432,7 @@ impl ProviderRuntime {
         slug: impl Into<String>,
         base_url: impl Into<String>,
         bearer_token: impl Into<String>,
-        headers: reqwest::header::HeaderMap,
+        headers: http::HeaderMap,
         max_retries: Option<u32>,
         timeout_secs: Option<f64>,
         stream_idle_timeout_secs: Option<f64>,
@@ -553,7 +566,7 @@ impl ProviderRuntime {
         provider: &str,
         model: &str,
         api_key: impl Into<String>,
-        headers: reqwest::header::HeaderMap,
+        headers: http::HeaderMap,
         max_retries: Option<u32>,
         timeout_secs: Option<f64>,
         stream_idle_timeout_secs: Option<f64>,

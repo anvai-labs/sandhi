@@ -31,7 +31,7 @@ pub use chat::*;
 pub use event::{billable, billable_parts, Backend, UsageEvent};
 pub use keys::{KeyStore, VirtualKey};
 pub use ledger::{Denied, EnforcementLedger, InMemoryLedger, LedgerView, Reservation};
-pub use sink::{InMemorySink, JsonlSink, Sink};
+pub use sink::{BufferedSink, InMemorySink, JsonlSink, Sink};
 pub use stats::{
     Dimension, LatencySummary, RunCostTreeV1, RunUsageNodeV1, UsageAggregateV1, UsageAggregator,
     NONE_KEY, OVERFLOW_KEY, TOTAL_KEY,

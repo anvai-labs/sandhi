@@ -251,15 +251,12 @@ jobs:
         with:
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      - name: cargo-deny advisories (known vulnerabilities + yanked crates)
-        # cargo-deny-action@v2 composes `cargo-deny <arguments> <command> <command-arguments>`,
-        # so the check-target (advisories) goes in `command-arguments`, NOT `arguments` — putting it
-        # in `arguments` yields `cargo-deny advisories check`, which clap rejects ("unrecognized
-        # subcommand 'advisories'"). `command` defaults to `check`; left explicit for readability.
-        uses: embarkstudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.0.15
+      # Keep this binary-based: Docker container actions cannot run on every private-runner host.
+      - uses: taiki-e/install-action@ea647c55f74bb153499600c054578c0d83fa19d5 # 2026-08-30
         with:
-          command: check
-          command-arguments: advisories
+          tool: cargo-deny@0.20.2
+      - name: cargo-deny advisories (known vulnerabilities + yanked crates)
+        run: cargo deny check advisories
 
   lint-title:
     # Conventional-commit PR title gate. Dependabot PRs are prefixed `chore:`

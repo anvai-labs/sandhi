@@ -8,7 +8,7 @@ use crate::{
     ByteStream, ParsedUsage, Provider, ProviderError, ProviderRequest, ProviderResponse,
 };
 use async_trait::async_trait;
-use reqwest::header::{HeaderMap, AUTHORIZATION, CONTENT_TYPE, HOST};
+use http::header::{HeaderMap, AUTHORIZATION, CONTENT_TYPE, HOST};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

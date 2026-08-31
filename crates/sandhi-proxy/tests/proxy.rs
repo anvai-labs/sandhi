@@ -614,8 +614,10 @@ async fn streaming_passes_through_and_emits_usage() {
         .and(path("/chat/completions"))
         .respond_with(
             ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_string(sse),
+                .set_body_raw(sse, "text/event-stream")
+                .insert_header("x-request-id", "req-stream-abc")
+                .insert_header("x-ratelimit-remaining-requests", "42")
+                .insert_header("server", "must-not-leak"),
         )
         .mount(&upstream)
         .await;
@@ -635,6 +637,18 @@ async fn streaming_passes_through_and_emits_usage() {
 
     let response = app.oneshot(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("x-request-id").unwrap(),
+        "req-stream-abc"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-ratelimit-remaining-requests")
+            .unwrap(),
+        "42"
+    );
+    assert!(response.headers().get("server").is_none());
 
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
