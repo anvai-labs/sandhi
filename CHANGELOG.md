@@ -21,6 +21,20 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 
 - _Nothing yet._
 
+## [0.2.1] — 2026-08-31
+
+The packaging release. No product code changed: the binary release archives now ship **both**
+workspace binaries — the `sandhi-proxy` server and the `sandhi` operator CLI — under unchanged
+archive names, so [anvai-labs/homebrew-tap](https://github.com/anvai-labs/homebrew-tap) can
+install the operator CLI too.
+
+### Fixed
+
+- **Release archives include the `sandhi` operator CLI** (`bin: sandhi-proxy, sandhi` in the
+  archive job). Archives before this release carried only the server binary, which left the
+  tap formula unable to install the CLI.
+  ([#172](https://github.com/anvai-labs/sandhi/pull/172))
+
 ## [0.2.0] — 2026-08-31
 
 The resource-safety release. The proxy's runtime hardening ships — bounded request bodies,
@@ -664,7 +678,9 @@ inline reverse-proxy, the durable store, and both language bindings.
   ([#9](https://github.com/anvai-labs/sandhi/pull/9),
   [#10](https://github.com/anvai-labs/sandhi/pull/10))
 
-[Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/anvai-labs/sandhi/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/anvai-labs/sandhi/compare/v0.1.6...v0.2.0
 [0.1.4]: https://github.com/anvai-labs/sandhi/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/anvai-labs/sandhi/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/anvai-labs/sandhi/compare/v0.1.1...v0.1.2
