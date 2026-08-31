@@ -317,7 +317,9 @@ fn decode_stop_reason(reason: &str) -> FinishReasonV1 {
 fn decode_anthropic_stream(mut raw: ByteStream, requested_model: String) -> ChatEventStream {
     use futures_util::StreamExt;
     let stream = async_stream::try_stream! {
-        let mut buffer = Vec::<u8>::new();
+        // TD-0014 P1: the shared bounded splitter. One ceiling across both planes; only the
+        // over-budget POLICY differs, and it is applied below. See MAX_STREAM_LINE_BYTES.
+        let mut splitter = crate::linesplit::LineSplitter::new(crate::MAX_STREAM_LINE_BYTES);
         let mut started = false;
         let mut open_tools = BTreeSet::<u32>::new();
         let mut emitted_usage = false;
@@ -327,9 +329,8 @@ fn decode_anthropic_stream(mut raw: ByteStream, requested_model: String) -> Chat
             let chunk = chunk?;
             let attempts = chunk.attempts;
             if !chunk.data.is_empty() {
-                buffer.extend_from_slice(&chunk.data);
-                while let Some(pos) = buffer.iter().position(|byte| *byte == b'\n') {
-                    let line: Vec<u8> = buffer.drain(..=pos).collect();
+                splitter.push(&chunk.data);
+                while let Some(line) = splitter.next_line() {
                     let Some(value) = crate::sse_data_json(&line) else { continue; };
                     match value.get("type").and_then(Value::as_str) {
                         Some("message_start") if !started => {
@@ -384,6 +385,18 @@ fn decode_anthropic_stream(mut raw: ByteStream, requested_model: String) -> Chat
                         _ => {}
                     }
                 }
+                // TD-0014 P1 (gap G01): past MAX_STREAM_LINE_BYTES the upstream has sent no
+                // line boundary at all, which no real provider does. The raw plane drops the
+                // pending line and keeps streaming — its bytes were already forwarded, so
+                // only usage suffers. A typed decoder emits decoded CONTENT, so dropping
+                // silently would corrupt the response with no signal. Fail loudly instead;
+                // mid-stream errors are never retried.
+                if splitter.over_budget() {
+                    Err(ProviderError::Transport(format!(
+                        "upstream stream exceeded {} bytes with no line boundary",
+                        crate::MAX_STREAM_LINE_BYTES
+                    )))?;
+                }
             }
             if let Some(usage) = chunk.usage {
                 if !emitted_usage {
@@ -418,6 +431,86 @@ fn decode_anthropic_stream(mut raw: ByteStream, requested_model: String) -> Chat
 
 #[cfg(test)]
 mod tests {
+
+    /// TD-0014 P1, the opposing guard. The six `..._is_bounded_and_errors_...` tests pin the
+    /// ceiling from BELOW; on their own they would all still pass with the bound set to 1 KiB,
+    /// which would break every legitimate large frame. Adversarial review found five of six
+    /// decoders had no test in this direction — the same one-sidedness that let the original
+    /// 64 KiB ceiling ship. This pins it from above.
+    #[tokio::test]
+    async fn a_large_but_legitimate_frame_is_not_killed_by_the_line_bound() {
+        use futures_util::StreamExt;
+        // 200 KB in one terminated line: far past the old 64 KiB bound, far under the real one.
+        let big = "x".repeat(200 * 1024);
+        let wire = format!("data: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":\"{big}\"}}}}\n\n");
+        let chunks: Vec<_> = wire
+            .as_bytes()
+            .chunks(16 * 1024)
+            .map(|c| {
+                Ok(crate::StreamChunk {
+                    data: bytes::Bytes::copy_from_slice(c),
+                    usage: None,
+                    usage_running: None,
+                    attempts: 1,
+                })
+            })
+            .collect();
+        let raw: crate::ByteStream = Box::pin(futures_util::stream::iter(chunks));
+        let results: Vec<_> = super::decode_anthropic_stream(raw, "m".into())
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            !results
+                .iter()
+                .any(|r| matches!(r, Err(crate::ProviderError::Transport(_)))),
+            "a 200 KB terminated frame is legitimate traffic and must survive"
+        );
+        let text: usize = results
+            .iter()
+            .flatten()
+            .filter_map(|e| match e {
+                sandhi_core::ChatStreamEventV1::TextDelta { delta } => Some(delta.len()),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(text, big.len(), "the whole delta must arrive intact");
+    }
+
+    /// TD-0014 P1 (gap G01): a newline-free upstream stream must stay BOUNDED and fail loudly.
+    ///
+    /// The raw plane may drop an over-budget line and keep going — its bytes were already
+    /// forwarded verbatim, so only *usage* is lost. A typed decoder drops decoded **content**,
+    /// so dropping silently would corrupt the response with no signal at all. It errors instead.
+    /// Mid-stream errors are never retried (`resilience.rs`), so this cannot loop.
+    #[tokio::test]
+    async fn a_newline_free_stream_is_bounded_and_errors_rather_than_growing() {
+        use futures_util::StreamExt;
+        // 16 MiB with no line boundary anywhere — past MAX_STREAM_LINE_BYTES (8 MiB). The bound
+        // exists to stop unbounded growth, so the test input has to be genuinely pathological;
+        // a merely LARGE frame is legitimate and is covered by the regression test above.
+        let filler = bytes::Bytes::from(vec![b'x'; 64 * 1024]);
+        let chunks: Vec<_> = (0..256)
+            .map(|_| {
+                Ok(crate::StreamChunk {
+                    data: filler.clone(),
+                    usage: None,
+                    usage_running: None,
+                    attempts: 1,
+                })
+            })
+            .collect();
+        let raw: crate::ByteStream = Box::pin(futures_util::stream::iter(chunks));
+        let results: Vec<_> = super::decode_anthropic_stream(raw, "m".into())
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            results
+                .iter()
+                .any(|item| matches!(item, Err(crate::ProviderError::Transport(_)))),
+            "a newline-free stream must terminate with a Transport error rather than \
+             buffering without bound"
+        );
+    }
     #[test]
     fn native_body_gate_preserves_the_reasoning_extension() {
         // What complete() does under include_native_response=false: only the
