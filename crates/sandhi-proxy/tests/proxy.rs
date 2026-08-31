@@ -568,6 +568,190 @@ async fn inferflux_attribution_never_reaches_the_upstream() {
     );
 }
 
+// ───────────────────────── Session derivation (ADR-0005 D7 wiring, ADR-0008 D3) ─────────────────────────
+//
+// A drop-in OpenAI/Anthropic SDK client cannot set `x-sandhi-session`; core's
+// `derive_session_id` gives it a stable per-conversation key from standard wire signals.
+// The derived identity feeds the usage event AND the vendor affinity header — one value,
+// single-sourced.
+
+#[tokio::test]
+async fn openai_user_field_derives_the_session_identity() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{ "message": { "content": "hi" } }],
+            "usage": { "prompt_tokens": 10, "completion_tokens": 2 }
+        })))
+        .mount(&upstream)
+        .await;
+
+    let sink = Arc::new(InMemorySink::new());
+    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    let response = build_app(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("authorization", "Bearer vk_demo")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"model":"gpt-x","messages":[{"role":"user","content":"hi"}],"user":"end-user-42"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let events = sink.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].session_id.as_deref(), Some("end-user-42"));
+}
+
+#[tokio::test]
+async fn explicit_session_header_wins_over_derived_body_signals() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{ "message": { "content": "hi" } }],
+            "usage": { "prompt_tokens": 10, "completion_tokens": 2 }
+        })))
+        .mount(&upstream)
+        .await;
+
+    let sink = Arc::new(InMemorySink::new());
+    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    let response = build_app(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("authorization", "Bearer vk_demo")
+                .header("content-type", "application/json")
+                .header("x-sandhi-session", "operator-keyed")
+                .body(Body::from(
+                    r#"{"model":"gpt-x","messages":[{"role":"user","content":"hi"}],"user":"end-user-42"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        sink.events()[0].session_id.as_deref(),
+        Some("operator-keyed")
+    );
+}
+
+#[tokio::test]
+async fn stable_prefix_hash_groups_agent_conversations_without_explicit_identity() {
+    // Two turns of the same agent loop (identical system+tools prefix, different user
+    // messages, no user/session signal) derive the SAME conversation key — the cacheable
+    // prefix is the affinity key of last resort.
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{ "message": { "content": "hi" } }],
+            "usage": { "prompt_tokens": 10, "completion_tokens": 2 }
+        })))
+        .mount(&upstream)
+        .await;
+
+    let sink = Arc::new(InMemorySink::new());
+    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    let app = build_app(state);
+    for content in ["first turn", "second turn"] {
+        let body = format!(
+            r#"{{"model":"gpt-x","messages":[{{"role":"system","content":"you are victor"}},{{"role":"user","content":"{content}"}}],"tools":[{{"type":"function","function":{{"name":"calc"}}}}]}}"#
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("authorization", "Bearer vk_demo")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    let events = sink.events();
+    assert_eq!(events.len(), 2);
+    let (a, b) = (&events[0].session_id, &events[1].session_id);
+    assert!(a.is_some(), "the prefix hash must derive a key");
+    assert_eq!(a, b, "same cacheable prefix ⇒ same conversation key");
+}
+
+#[tokio::test]
+async fn inferflux_affinity_header_fires_for_a_derived_session_too() {
+    // The KV-reuse win is not limited to clients that know about `x-sandhi-session`: a
+    // stock SDK call with `user` set derives the identity, and the affinity header rides.
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(header("x-inferflux-session-id", "end-user-42"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(INFERFLUX_SSE, "text/event-stream"))
+        .mount(&upstream)
+        .await;
+
+    let keys = KeyStore::new();
+    keys.insert(VirtualKey {
+        id: "vk_demo".into(),
+        subject_id: Some("alice".into()),
+        group_id: Some("platform".into()),
+        upstream_ref: "up1".into(),
+        ..Default::default()
+    });
+    let mut providers = HashMap::new();
+    providers.insert(
+        "up1".into(),
+        ProviderRuntime::new().openai_compat(
+            "inferflux",
+            upstream.uri(),
+            "local-key",
+            Default::default(),
+            Some(0),
+            None,
+            None,
+        ),
+    );
+    let sink = Arc::new(InMemorySink::new());
+    let state = Arc::new(ProxyState::new(
+        keys,
+        ProxyLedger::in_memory(),
+        sink.clone(),
+        providers,
+        None,
+    ));
+
+    let response = build_app(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("authorization", "Bearer vk_demo")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"model":"llama3-8b","messages":[{"role":"user","content":"hi"}],"user":"end-user-42","stream":true}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let _ = axum::body::to_bytes(response.into_body(), usize::MAX).await;
+    // The header matcher above is the assertion: the mock would not have answered without
+    // the derived identity reaching the affinity header.
+    assert_eq!(sink.events()[0].session_id.as_deref(), Some("end-user-42"));
+}
+
 #[tokio::test]
 async fn block_capped_scope_with_unbounded_output_is_not_passed_through() {
     // A Block-capped same-family call with no max_output_tokens must NOT use the transparent plane:

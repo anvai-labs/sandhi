@@ -49,9 +49,9 @@ use tower::{Layer, Service as TowerService};
 use time::OffsetDateTime;
 
 use sandhi_core::{
-    billable, AlertRegistry, Backend, ChatRequestV1, FinishReasonV1, KeyStore, ParsedUsage, Policy,
-    RequestMetadataV1, Reservation, Sink, UsageBasis, UsageCompleteness, UsageEvent, UsageV2,
-    VirtualKey,
+    billable, derive_session_id, AlertRegistry, Backend, ChatRequestV1, FinishReasonV1, KeyStore,
+    ParsedUsage, Policy, RequestMetadataV1, Reservation, Sink, UsageBasis, UsageCompleteness,
+    UsageEvent, UsageV2, VirtualKey,
 };
 use sandhi_providers::{ProviderError, ProviderFamily, ProviderHandle, ProviderRuntime};
 use sandhi_store::{hash_secret, AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
@@ -1942,10 +1942,18 @@ async fn handle(
     let Ok(body_json) = serde_json::from_slice::<Value>(&body) else {
         return ingress_error(dialect, StatusCode::BAD_REQUEST, "body is not valid JSON");
     };
-    let session = headers
-        .get("x-sandhi-session")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
+    // ADR-0005 D7 + ADR-0008 D3: session identity is single-sourced in core. An explicit
+    // `x-sandhi-session` header wins; otherwise derive from the wire body's standard signals
+    // (OpenAI `user`, Anthropic `metadata.user_id`, then a stable hash of the cacheable
+    // system+tools prefix). A drop-in SDK client gets a stable per-conversation key — for
+    // usage grouping AND for the vendor affinity header — without setting any sandhi-specific
+    // header. Self-reported inputs only; never an identity assertion (the vkey binding is).
+    let session = derive_session_id(
+        headers
+            .get("x-sandhi-session")
+            .and_then(|v| v.to_str().ok()),
+        &body_json,
+    );
     let route = match dialect {
         IngressDialect::OpenAi => "/v1/chat/completions",
         IngressDialect::Anthropic => "/v1/messages",
