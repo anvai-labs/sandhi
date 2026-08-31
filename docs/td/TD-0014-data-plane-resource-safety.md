@@ -1,0 +1,186 @@
+# TD-0014: Data-plane resource safety — the bounds the proxy claims but does not hold
+
+- **Status:** Draft (proposed), 2026-08-31. Owns gaps **G01, G02, G03, G04, G19, G28**.
+- **Relates to:** [ADR-0006](../adr/0006-layer-boundary-and-protocol-scope.md) (why these are fixed
+  at L7 rather than by acquiring a transport layer), [TD-0006](TD-0006-two-plane-proxy-transparent-metering.md)
+  (which fixed exactly G01 on the *raw* plane and never backported it), [TD-0012](TD-0012-rate-limit-enforcement.md)
+  (the limiter this TD shards), [TD-0020](TD-0020-operational-readiness-and-transport-observability.md)
+  (the gauges that make every fix here observable — build them in parallel).
+
+## Why this exists
+
+The proxy advertises four resource bounds. Three of them do not bound what the operator would
+reasonably believe, and one class of bound is absent entirely. None of these is a design question;
+each is a defect with a known fix and a writable failing test.
+
+The pattern is the same one TD-0012 named: **a stated bound that does not bind is worse than an
+absent one**, because the operator stops looking.
+
+### G01 — the stream buffer fix was applied to one plane and not the other
+
+TD-0006 explicitly fixed an unbounded line buffer and an O(n²) rescan in the metered pass-through,
+and documented the fix at `sandhi-providers/src/lib.rs:299-312`:
+
+> - **Bounded line buffer** — a single line exceeding `LINE_SNIFF_BUDGET` is flushed without
+>   sniffing so memory stays bounded. […]
+> - **O(n) scan** — tracks the last-scanned position […] The original rescanned the entire
+>   accumulated buffer on every chunk (O(chunks²)).
+
+Both defects remain, unmodified, in **all six typed streaming decoders**:
+
+```
+anthropic_typed.rs:320,330,331        cohere_typed.rs:259,267,268
+gemini_typed.rs:304,313,314           ollama_typed.rs:297,304,305
+openai_responses_typed.rs:512,521,522 typed.rs:950,958,959
+```
+
+Each is `let mut buffer = Vec::<u8>::new()` … `buffer.extend_from_slice(&chunk.data)` …
+`while let Some(pos) = buffer.iter().position(|byte| *byte == b'\n')`. A newline-free upstream
+stream — hostile, buggy, or a single very large tool-call delta — grows a per-request `Vec` without
+bound, and the rescan is quadratic in chunk count. The translation plane is the *cross-family* path,
+so this is reachable by any client whose dialect differs from its upstream.
+
+### G02 — `SANDHI_MAX_IN_FLIGHT_AI_REQUESTS` does not bound concurrent streams
+
+`ConcurrencyLimitLayer` wraps the AI routes (`sandhi-proxy/src/lib.rs:206-208`). In `tower 0.5.3`,
+the permit is held by `ResponseFuture` and dropped when **that future** resolves
+(`tower-0.5.3/src/limit/concurrency/future.rs:14-22`). For a streaming call, `stream_response`
+resolves as soon as upstream headers arrive and the body stream is constructed
+(`sandhi-proxy/src/lib.rs:2345-2350`) — so the permit is released **at first byte** and the SSE body
+runs outside the limit.
+
+The doc comment at `lib.rs:71-76` is accurate about *buffering*. The bound simply does not apply to
+the resource that dominates an SSE gateway: simultaneously open streams, each holding an upstream
+connection, a lease, a task, and per-stream buffers.
+
+### G03 — no slowloris defence
+
+`axum::serve` is called with a default `hyper_util::server::conn::auto::Builder`
+(`axum-0.7.9/src/serve.rs:254,423`): no `header_read_timeout`, no `max_buf_size`, no connection cap.
+Idle and half-open connections are bounded only by the file-descriptor limit.
+
+### G04 — no per-tenant bulkhead
+
+Three global locks sit on the request path: the AI-route semaphore
+(`lib.rs:206`), the enforcement ledger `Mutex` (`lib.rs:85`), and the rate limiter's single
+`Mutex<HashMap>` (`ratelimit.rs:57-64`). A single tenant can saturate all three. Sandhi's product
+claim is per-subject attribution and per-subject budgets; per-subject *isolation* is the missing
+third leg.
+
+### G19 — the peer is invisible
+
+No `ConnectInfo`, `peer_addr`, or `x-forwarded-for` anywhere in `crates/`. Identity is entirely
+bearer-token, resolved **after** the connection, the TLS-less handshake, and the body read. There is
+no control that can act before a credential is presented.
+
+### G28 — the limiter's own lock
+
+`RateLimiter` is one `Mutex<HashMap<String, Bucket>>` taken on every request
+(`ratelimit.rs:57-64`). It is the cheapest check in the pipeline and, at scale, will be the first
+point of contention.
+
+## First principles
+
+1. **A bound that does not bind is a defect, not a gap** (TD-0012's framing). Every item here is
+   either fixed or the claim is withdrawn from the operator surface.
+2. **Bound the resource that dominates, not the one that is easy to count.** For an SSE gateway that
+   is open streams, not buffered request bodies.
+3. **Isolation is a product feature, not an implementation detail.** Sandhi already sells
+   per-subject attribution and budgets; per-subject blast-radius containment is the same promise.
+4. **The cheapest rejection first, and as early as possible.** A pre-authentication flood must be
+   refused before it can allocate. That requires knowing the peer (G19).
+5. **Fix it where TD-0006 already fixed it.** G01 has a correct, tested, in-repo implementation. The
+   answer is to extract and reuse it, not to re-derive it six times.
+
+## Non-goals
+
+- **Not an edge DoS defence.** As TD-0012 states, Sandhi is an egress gate; an internet-facing flood
+  is the fronting proxy's job. G19's per-IP cap is a blast-radius control for a *trusted* network,
+  not a WAF, and must not be described as one.
+- **No transport layer.** Per ADR-0006 D3, `ConnCtx` is a narrow metadata struct, not the seed of a
+  `sandhi-transport` crate. Protocol metadata must not leak past it.
+- **No cross-replica coordination.** Every limit here stays per-process, sharing TD-0007's eventual
+  shared-backend story rather than inventing a second one.
+
+## Decisions
+
+**D1 — Extract the bounded line-splitter to one place and use it on both planes.** `metered_passthrough`'s
+buffer discipline (bounded by `LINE_SNIFF_BUDGET`, O(n) via a `searched_to` cursor) becomes a
+reusable `LineSplitter` in `sandhi-providers`. All six typed decoders consume it. Rejected: patching
+six copies — that is how the drift happened. The budget stays shared, so raising it is one decision.
+
+**D2 — The concurrency permit is held by the response body, not the response future.** A small `Body`
+newtype owns the `OwnedSemaphorePermit` and releases it when the stream terminates (including on
+drop/cancellation). This makes `SANDHI_MAX_IN_FLIGHT_AI_REQUESTS` mean what its name says. Rejected:
+a second semaphore for streams — two knobs for one resource, and the arithmetic for operators gets
+worse, not better.
+
+**D3 — Explicit connection-level limits at the listener.** `header_read_timeout`, a maximum
+concurrent connection count, and a maximum per-IP connection count, each with an env knob and a
+documented default. Implemented by replacing bare `axum::serve` with an explicit accept loop over
+the same `auto::Builder`, so the change is additive and reversible.
+
+**D4 — `ConnCtx`, and nothing more.** Peer address, `forwarded_for` (populated **only** when the peer
+is in a configured trusted-proxy allowlist — otherwise the header is attacker-controlled and worse
+than nothing), and later ALPN/SNI from TD-0017. It is request-scoped metadata available to admission
+checks; it does not enter `RequestMetadataV1`, the usage event, or any metric label (TD-0011 D2 —
+an IP is unbounded cardinality *and* personal data).
+
+**D5 — Per-tenant bulkheads over the three global locks.** A per-scope semaphore with a per-scope
+cap alongside the global one (a tenant may not consume more than its share of in-flight capacity),
+and sharded maps for the limiter (G28). The ledger mutex is **out of scope here** — it is TD-0016's
+subject, and splitting it needs the ledger's own correctness argument.
+
+**D6 — Every bound added here ships with its gauge.** A limit that cannot be observed cannot be
+tuned, and today none of G02/G03/G04/G19 is visible at all. The gauges live in TD-0020; this TD does
+not land a phase whose effect an operator cannot see.
+
+## Phases
+
+| Phase | Scope | Acceptance (the failing test to write first) |
+|---|---|---|
+| **P1** | D1 — shared `LineSplitter` on all six typed decoders | A 4 MiB newline-free upstream stream is forwarded with peak decoder buffer ≤ `LINE_SNIFF_BUDGET`; a 100k-chunk stream completes in time linear in chunk count (assert against a recorded bound, not wall-clock); all existing per-family stream tests stay green byte-for-byte |
+| **P2** | D2 — permit held by the body | With `SANDHI_MAX_IN_FLIGHT_AI_REQUESTS=N`, N concurrent SSE streams held open at first byte cause request N+1 to **wait**; it is admitted only when a stream *terminates*. A client disconnecting mid-stream releases the permit (assert via the Drop path, alongside the existing `client_disconnect_mid_stream_still_meters` test at `tests/proxy.rs:797`) |
+| **P3** | D3 + D4 — connection limits and `ConnCtx` | C connections dribbling one header byte per second are closed after the configured timeout while a normal request succeeds concurrently; the (N+1)th connection from one IP is refused; `ConnCtx.forwarded_for` is `None` when the peer is not in the trusted-proxy allowlist, even when the header is present |
+| **P4** | D5 — per-tenant bulkheads + sharded limiter | Tenant A saturating its share leaves tenant B's admission latency within a recorded bound (fairness measured, not asserted qualitatively); the sharded limiter reproduces every TD-0012 P1 semantic test unchanged |
+
+P1 and P2 are independent and can land in either order. P3 depends on nothing here but touches the
+same `build_app`/serve path as P2 — sequence them to avoid a conflict. P4 wants TD-0020's gauges to
+be meaningful.
+
+## Pressure test
+
+1. **"G01 is theoretical — no real provider sends a newline-free stream."** Gemini's non-`alt=sse`
+   transport is a single JSON array with no line boundaries, which is why `metered_passthrough`'s
+   final-flush handling exists at all (`providers/src/lib.rs:383-390`). The raw plane handles it; the
+   typed plane, which is the *cross-family* path, does not. This is reachable today.
+2. **"D2 will reduce throughput — streams are long, so the semaphore will be held for seconds."**
+   Correct, and that is the point: the resource genuinely is held for seconds. The current behaviour
+   does not make the cost disappear, it makes it invisible. Operators will need to raise the default;
+   the default should therefore be raised in the same PR, with the reasoning stated.
+3. **"Per-IP limits break every deployment behind a load balancer."** Which is why D4 makes
+   `forwarded_for` conditional on a trusted-proxy allowlist and the per-IP cap opt-in with a
+   permissive default. A per-IP cap keyed on the LB's address would be a self-inflicted outage.
+4. **"Bulkheads add a lock to remove contention."** Per-scope semaphores are sharded by construction —
+   the contention that matters is *cross-tenant*, and that is what disappears. The measurement in P4
+   is the check on this claim; if it does not hold, P4 does not land.
+5. **"This is six unrelated fixes in one TD."** They share one failure mode (a claimed bound that
+   does not bind), one test harness, and one file footprint. Splitting them would serialise four
+   independent phases behind four review cycles.
+6. **"Why not just put a real proxy in front and skip all of it?"** A fronting proxy solves G03 and
+   G19 and none of G01, G02, G04, G28 — those are internal to Sandhi's own accounting and memory
+   behaviour. It also cannot be assumed: the single-node dev posture is a supported deployment.
+
+## Open questions
+
+- Should the per-IP connection cap key on `ConnCtx.peer` or on `forwarded_for` when trusted?
+  Leaning: `forwarded_for` when present and trusted, else `peer` — but that makes the cap's meaning
+  deployment-dependent, which needs saying in the operator guide.
+- Does D2's permit-holding body interact badly with the graceful-drain path
+  (`lib.rs:301-347`), where the server future is dropped at grace expiry? The permit is released on
+  drop, so probably not — but the drain test must assert it, or a shutdown could leak permits into a
+  process that then never exits.
+- Is `LINE_SNIFF_BUDGET` (64 KiB) still right once it also bounds the *typed* decoders, which parse
+  rather than sniff? A tool-call delta larger than the budget is currently flushed unsniffed on the
+  raw plane; on the typed plane, dropping it would lose content, not just usage. D1 must decide
+  whether the typed path truncates, errors, or grows — and the answer is probably "errors loudly."
