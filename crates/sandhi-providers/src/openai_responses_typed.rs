@@ -516,10 +516,36 @@ fn decode_responses_stream(mut raw: ByteStream, requested_model: String) -> Chat
         let mut open_tools = BTreeMap::<u32, ()>::new();
         let mut emitted_usage = false;
         let mut emitted_finish = false;
-        while let Some(chunk) = raw.next().await {
-            let chunk = chunk?;
+        // TD-0014 P2b: after the real chunks end, ONE synthetic empty chunk flushes any
+        // trailing remainder (a final frame without its newline — Ollama's `done` frame) through
+        // this same loop body, so per-chunk event ordering is preserved exactly and the body is
+        // not duplicated. `raw.next()` returning None terminates; a false flush breaks out.
+        let mut tail_pending = false;
+        let mut chunks_ended = false;
+        while !chunks_ended || tail_pending {
+            let chunk = if chunks_ended {
+                tail_pending = false;
+                crate::StreamChunk {
+                    data: bytes::Bytes::new(),
+                    usage: None,
+                    usage_running: None,
+                    attempts: 1,
+                }
+            } else {
+                match raw.next().await {
+                    Some(chunk) => chunk?,
+                    None => {
+                        chunks_ended = true;
+                        tail_pending = splitter.flush_newline();
+                        continue;
+                    }
+                }
+            };
             let attempts = chunk.attempts;
-            if !chunk.data.is_empty() {
+            // Unconditional: the synthetic tail chunk arrives with empty data and must still
+            // drain the flushed remainder; draining after no new bytes is a no-op scan.
+            // (The terminal usage-only chunk is likewise empty and previously skipped this.)
+            {
                 splitter.push(&chunk.data);
                 while let Some(line) = splitter.next_line() {
                     let Some(event) = crate::sse_data_json(&line) else { continue; };

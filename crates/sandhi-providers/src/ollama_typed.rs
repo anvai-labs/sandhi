@@ -299,10 +299,36 @@ fn decode_ollama_stream(mut raw: ByteStream, requested_model: String) -> ChatEve
         let mut splitter = crate::linesplit::LineSplitter::new(crate::MAX_STREAM_LINE_BYTES);
         let mut started = false;
         let mut emitted_usage = false;
-        while let Some(chunk) = raw.next().await {
-            let chunk = chunk?;
+        // TD-0014 P2b: after the real chunks end, ONE synthetic empty chunk flushes any
+        // trailing remainder (a final frame without its newline — Ollama's `done` frame) through
+        // this same loop body, so per-chunk event ordering is preserved exactly and the body is
+        // not duplicated. `raw.next()` returning None terminates; a false flush breaks out.
+        let mut tail_pending = false;
+        let mut chunks_ended = false;
+        while !chunks_ended || tail_pending {
+            let chunk = if chunks_ended {
+                tail_pending = false;
+                crate::StreamChunk {
+                    data: bytes::Bytes::new(),
+                    usage: None,
+                    usage_running: None,
+                    attempts: 1,
+                }
+            } else {
+                match raw.next().await {
+                    Some(chunk) => chunk?,
+                    None => {
+                        chunks_ended = true;
+                        tail_pending = splitter.flush_newline();
+                        continue;
+                    }
+                }
+            };
             let attempts = chunk.attempts;
-            if !chunk.data.is_empty() {
+            // Unconditional: the synthetic tail chunk arrives with empty data and must still
+            // drain the flushed remainder; draining after no new bytes is a no-op scan.
+            // (The terminal usage-only chunk is likewise empty and previously skipped this.)
+            {
                 splitter.push(&chunk.data);
                 while let Some(line) = splitter.next_line() {
                     let Ok(value) = serde_json::from_slice::<Value>(&line) else { continue; };
@@ -363,6 +389,56 @@ fn decode_ollama_stream(mut raw: ByteStream, requested_model: String) -> ChatEve
 
 #[cfg(test)]
 mod tests {
+
+    /// TD-0014 P2b: Ollama's NDJSON `done` frame may arrive WITHOUT its trailing newline. The
+    /// pre-P2b decoders dropped a newline-less remainder, so the `Finish` never yielded. The
+    /// synthetic tail chunk now flushes the remainder through the same loop body.
+    #[tokio::test]
+    async fn a_done_frame_without_a_trailing_newline_still_yields_finish() {
+        use futures_util::StreamExt;
+        let wire = concat!(
+            "{\"created_at\":\"t1\",\"model\":\"llama3\",\"message\":{\"content\":\"he\"}}\n",
+            "{\"model\":\"llama3\",\"message\":{\"content\":\"llo\"}}\n",
+            // No trailing newline on the final frame — the whole point.
+            "{\"model\":\"llama3\",\"done\":true,\"done_reason\":\"stop\"}"
+        );
+        let raw: crate::ByteStream =
+            Box::pin(futures_util::stream::iter(vec![Ok(crate::StreamChunk {
+                data: bytes::Bytes::from(wire),
+                usage: Some(crate::ParsedUsage {
+                    tokens_in: 1,
+                    tokens_out: 2,
+                    cache_creation_tokens: 0,
+                    cache_read_tokens: 0,
+                    reasoning_tokens: 0,
+                }),
+                usage_running: None,
+                attempts: 1,
+            })]));
+        let events = super::decode_ollama_stream(raw, "llama3".into())
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                sandhi_core::ChatStreamEventV1::Finish {
+                    reason: sandhi_core::FinishReasonV1::Stop
+                }
+            )),
+            "the newline-less done frame must still produce Finish, got: {events:?}"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, sandhi_core::ChatStreamEventV1::Usage { .. }))
+                .count(),
+            1,
+            "exactly one usage frame"
+        );
+    }
 
     /// TD-0014 P1, the opposing guard. The six `..._is_bounded_and_errors_...` tests pin the
     /// ceiling from BELOW; on their own they would all still pass with the bound set to 1 KiB,

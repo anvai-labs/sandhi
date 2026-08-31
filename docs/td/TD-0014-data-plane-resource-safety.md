@@ -1,6 +1,6 @@
 # TD-0014: Data-plane resource safety — the bounds the proxy claims but does not hold
 
-- **Status:** Draft (proposed), 2026-08-31. Owns gaps **G01, G02, G03, G04, G19, G28**.
+- **Status:** Draft (proposed), 2026-08-31. **P1 and P2 (+P2b) landed**; P3, P4 open. Owns gaps **G01, G02, G03, G04, G19, G28** (G01 ✅, G02 ✅).
 - **Relates to:** [ADR-0006](../adr/0006-layer-boundary-and-protocol-scope.md) (why these are fixed
   at L7 rather than by acquiring a transport layer), [TD-0006](TD-0006-two-plane-proxy-transparent-metering.md)
   (which fixed exactly G01 on the *raw* plane and never backported it), [TD-0012](TD-0012-rate-limit-enforcement.md)
@@ -170,7 +170,8 @@ not land a phase whose effect an operator cannot see.
 | Phase | Scope | Acceptance (the failing test to write first) |
 |---|---|---|
 | **P1** ✅ | D1 — shared `LineSplitter` on all six typed decoders **and** the raw sniffer | A 16 MiB newline-free upstream stream is refused loudly on the typed plane (peak buffer ≤ `MAX_STREAM_LINE_BYTES` + one chunk) while a 200 KiB *terminated* frame passes intact on every decoder — both directions asserted, and the guards verified to fail against the old 64 KiB bound; total work (search **and** compaction) stays linear in bytes; a long `response.completed` frame still yields its usage on the raw plane; all existing per-family stream tests stay green byte-for-byte |
-| **P2** | D2 — permit held by the body | With `SANDHI_MAX_IN_FLIGHT_AI_REQUESTS=N`, N concurrent SSE streams held open at first byte cause request N+1 to **wait**; it is admitted only when a stream *terminates*. A client disconnecting mid-stream releases the permit (assert via the Drop path, alongside the existing `client_disconnect_mid_stream_still_meters` test at `tests/proxy.rs:797`) |
+| **P2** ✅ | D2 — permit held by the body, via a custom `AdmissionLayer` (tower's permit cannot be moved into a body) | An end-to-end test over real loopback HTTP with a hanging upstream: with the limit at 2, two streams open at first byte make a third request **wait**; aborting one client admits it. Shipped with the `sandhi_streams_open` gauge (D6) and the default raised 64 → 128 with the reasoning stated |
+| **P2b** ✅ | trailing-remainder flush (the asymmetry recorded in Still open, now closed) | Ollama's NDJSON `done` frame without a trailing newline yields `Finish`; every P1 byte-boundary and usage-ordering test stays green, pinning the restructure as behaviour-preserving for well-formed streams |
 | **P3** | D3 + D4 — connection limits and `ConnCtx` | C connections dribbling one header byte per second are closed after the configured timeout while a normal request succeeds concurrently; the (N+1)th connection from one IP is refused; `ConnCtx.forwarded_for` is `None` when the peer is not in the trusted-proxy allowlist, even when the header is present |
 | **P4** | D5 — per-tenant bulkheads + sharded limiter | Tenant A saturating its share leaves tenant B's admission latency within a recorded bound (fairness measured, not asserted qualitatively); the sharded limiter reproduces every TD-0012 P1 semantic test unchanged |
 
@@ -230,9 +231,8 @@ already.
   gpt-image-1 PNG at roughly 5.5–6.7 MB, and Gemini native-audio `inlineData` runs ~64 KB/s, so two
   minutes of audio in one part is ~8 MB. This sharpens TD-0015 R5's deliverable: record the largest
   real frame per family *including multimodal* frames before trusting 8 MiB.
-- **Typed decoders discard a trailing newline-less remainder; the raw plane flushes it.** Pre-existing
-  on both sides — the old inline buffers behaved identically — but the shared splitter makes the
-  asymmetry visible: `remainder()` exists and six of seven callers ignore it. For Ollama NDJSON, a
-  `done` frame without a trailing newline would lose its `Finish`. Candidate small fix: flush the
-  remainder through the decode path at stream end. Deliberately not done in P1, whose acceptance was
-  behaviour-preservation.
+- ~~Typed decoders discard a trailing newline-less remainder~~ **Closed in P2b.** `LineSplitter::flush_newline`
+  terminates the remainder and each decoder pumps one synthetic empty chunk through its existing
+  loop body, so per-chunk event ordering is preserved without duplicating the body. (An intermediate
+  transform gated the drain on non-empty chunk data and silently skipped the synthetic chunk — the
+  motivating test caught it, which is why the test exists.)
