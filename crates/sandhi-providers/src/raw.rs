@@ -18,7 +18,7 @@ use crate::{
 };
 use bytes::Bytes;
 use futures_core::Stream;
-use http::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT_ENCODING, AUTHORIZATION, HOST};
+use http::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT_ENCODING};
 use serde_json::Value;
 use std::pin::Pin;
 use std::time::Duration;
@@ -106,11 +106,8 @@ impl RawForwarder {
     /// (`Authorization`, `Accept-Encoding`, `Host`) are stripped so the forwarder controls them.
     #[must_use]
     pub fn with_headers(mut self, headers: HeaderMap) -> Self {
-        self.extra_headers = headers;
-        // Defense-in-depth: never let caller-controlled headers override auth or encoding.
-        self.extra_headers.remove(AUTHORIZATION);
-        self.extra_headers.remove(ACCEPT_ENCODING);
-        self.extra_headers.remove(HOST);
+        // Single-sourced strip (TD-0022 D2) — same owned-name set as every family adapter.
+        self.extra_headers = crate::strip_transport_owned(headers);
         self
     }
 
@@ -334,19 +331,21 @@ impl RawForwarder {
         correlation: Option<&str>,
     ) -> impl std::future::Future<Output = Result<reqwest::Response, ProviderError>> {
         let mut headers = self.extra_headers.clone();
-        if let (Some(name), Some(value)) = (
-            self.session_header,
-            session.map(str::trim).filter(|value| !value.is_empty()),
-        ) {
+        // ADR-0008 D6: the caller-minted correlation id rides the vendor's declared header —
+        // the same id that becomes the usage event's `request_id`.
+        if let (Some(name), Some(value)) = (self.client_request_id_header, correlation) {
             if let (Ok(name), Ok(value)) =
                 (HeaderName::try_from(name), HeaderValue::from_str(value))
             {
                 headers.insert(name, value);
             }
         }
-        // ADR-0008 D6: the caller-minted correlation id rides the vendor's declared header —
-        // the same id that becomes the usage event's `request_id`.
-        if let (Some(name), Some(value)) = (self.client_request_id_header, correlation) {
+        // Session affinity LAST, so it stays authoritative over any caller-supplied copy of
+        // the declared name — the same ordering as the typed plane's request_headers.
+        if let (Some(name), Some(value)) = (
+            self.session_header,
+            session.map(str::trim).filter(|value| !value.is_empty()),
+        ) {
             if let (Ok(name), Ok(value)) =
                 (HeaderName::try_from(name), HeaderValue::from_str(value))
             {
@@ -373,7 +372,11 @@ impl RawForwarder {
             ProviderFamily::OpenAiCompat
             | ProviderFamily::OpenAiResponses
             | ProviderFamily::Cohere => {
-                builder = builder.bearer_auth(&self.api_key);
+                // Keyless local upstreams (empty secret) get NO Authorization header at all —
+                // an empty `Bearer ` 401s on servers that validate bearer shape (ADR-0008 D1).
+                if !self.api_key.is_empty() {
+                    builder = builder.bearer_auth(&self.api_key);
+                }
             }
             ProviderFamily::Anthropic => match self.anthropic_auth {
                 AnthropicAuthScheme::ApiKey => {
@@ -524,9 +527,12 @@ fn is_passthrough_header(name: &str) -> bool {
         || lower == "request-id"
         || lower == "x-request-id"
         || lower == "x-should-retry"
-        // W3C trace context: the child `traceparent` an upstream echoes links the response
-        // back to the caller's span (InferFlux does this on every generation response).
-        // Hop-by-hop `tracestate` stays stripped — it is per-hop routing state, not linkage.
+        // W3C trace context: an upstream's echoed `traceparent` passes through verbatim. On
+        // the typed plane the proxy forwards the caller's traceparent per call, so the echo
+        // is a genuine child span; the transparent plane rebuilds request headers from
+        // transport config and does NOT forward the caller's traceparent — its echo is the
+        // upstream's own root (a documented gap). `tracestate` stays stripped either way:
+        // per-hop routing state, not linkage.
         || lower == "traceparent"
         || lower.starts_with("x-ratelimit-")
         || lower.starts_with("ratelimit-")
@@ -917,7 +923,10 @@ mod tests {
             HeaderValue::from_static("https://victor.example"),
         );
         // Attacker tries to override auth via extra headers — must be stripped.
-        headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer attacker"));
+        headers.insert(
+            HeaderName::from_static("authorization"),
+            HeaderValue::from_static("Bearer attacker"),
+        );
 
         let forwarder = RawForwarder::new(ProviderFamily::OpenAiCompat, server.uri(), "real-key")
             .with_headers(headers);

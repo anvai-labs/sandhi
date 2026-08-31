@@ -109,6 +109,14 @@ admission is what makes it usable mid-flight, and it composes with TD-0021 G20 (
 `idempotency-key`): the dedup lookup G20 wants needs exactly a per-call id minted before the
 upstream call. G20 itself remains that TD's item.
 
+Two recorded caveats. The injection idiom lives at two altitudes (the proxy's
+`per_call_wire_headers` on the typed plane, the adapter's builder-resolved injection on the
+transparent plane) and must evolve in lockstep; a `ProviderRequest::correlation_id` field
+mirroring `session_id` would collapse them if a third consumer appears. And the event's id
+precedence prefers `upstream_request_id` when a provider supplies one — nothing populates it
+on the success path today, but a future wiring that does would break the 1:1 join for
+providers that *also* declare a correlation header, and must be reconsidered then.
+
 ## Consequences
 
 - **Positive.** Admission cost one table row plus tests, and both planes gained a mechanism

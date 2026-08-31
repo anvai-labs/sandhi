@@ -500,6 +500,24 @@ pub enum ChatStreamEventV1 {
 /// assertion (self-reported inputs — ADR-0005 D7 trust language).
 #[must_use]
 pub fn derive_session_id(explicit: Option<&str>, body: &Value) -> Option<String> {
+    derive_session_id_scoped(explicit, body, None)
+}
+
+/// [`derive_session_id`] with a caller-owned scope mixed into the prefix-hash branch
+/// (ADR-0005 D7; the proxy passes the virtual key id).
+///
+/// The unsalted prefix hash keys on prompt content alone, so two *different* callers (virtual
+/// keys) running the same agent prompt would land on one session id — flattening users to one
+/// session, which ADR-0001 §4 forbids. The scope salts ONLY the prefix-hash branch: declared
+/// identities (`user` / `metadata.user_id`) stay verbatim and readable, and an explicit
+/// session header is untouched (operator-declared continuity is an explicit choice; attribution
+/// remains key-authoritative either way).
+#[must_use]
+pub fn derive_session_id_scoped(
+    explicit: Option<&str>,
+    body: &Value,
+    scope: Option<&str>,
+) -> Option<String> {
     if let Some(session) = explicit.map(str::trim).filter(|s| !s.is_empty()) {
         return Some(session.to_string());
     }
@@ -520,10 +538,13 @@ pub fn derive_session_id(explicit: Option<&str>, body: &Value) -> Option<String>
         }
     }
     // Prefix hash: system prompt(s) + tool definitions, serialized deterministically. Covers
-    // both wire shapes — OpenAI (`messages[role=system|developer]`) and Anthropic (`system`).
+    // the wire shapes — OpenAI (`messages[role=system|developer]`), Anthropic (`system`),
+    // Gemini (`systemInstruction`), and Responses (`instructions`).
     let mut prefix: Vec<Value> = Vec::new();
-    if let Some(system) = body.get("system") {
-        prefix.push(system.clone());
+    for key in ["system", "systemInstruction", "instructions"] {
+        if let Some(system) = body.get(key) {
+            prefix.push(system.clone());
+        }
     }
     if let Some(messages) = body.get("messages").and_then(Value::as_array) {
         for message in messages {
@@ -540,7 +561,13 @@ pub fn derive_session_id(explicit: Option<&str>, body: &Value) -> Option<String>
         return None;
     }
     let canonical = serde_json::to_string(&prefix).ok()?;
-    Some(format!("prefix-{:016x}", fnv1a_64(canonical.as_bytes())))
+    // Mix the scope in before the canonical prefix so equal prompts under different scopes
+    // hash apart (never flatten users to one session).
+    let mut hash = fnv1a_64(canonical.as_bytes());
+    if let Some(scope) = scope.map(str::trim).filter(|s| !s.is_empty()) {
+        hash ^= fnv1a_64(scope.as_bytes());
+    }
+    Some(format!("prefix-{:016x}", hash))
 }
 
 /// FNV-1a 64-bit — a stable, dependency-free hash for affinity keys (not a security boundary).

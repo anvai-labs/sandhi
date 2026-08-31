@@ -184,6 +184,8 @@ mod tests {
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    use http::header::{HeaderName, HeaderValue};
+
     const EXPECTED: ParsedUsage = ParsedUsage {
         tokens_in: 1024,
         tokens_out: 256,
@@ -238,6 +240,69 @@ mod tests {
         assert_eq!(
             accumulate(vec![Bytes::copy_from_slice(sse)]).await,
             EXPECTED
+        );
+    }
+
+    /// TD-0022 D2/D3 + review finding: static and per-call headers ride for this family, and
+    /// the family credential header can NEVER be caller-supplied — reqwest appends same-named
+    /// values added after a header map, so an unstripped `x-api-key` would put a second,
+    /// attacker-supplied credential on the wire next to the real one.
+    #[tokio::test]
+    async fn headers_ride_and_the_credential_header_is_never_caller_suppliable() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(header("x-api-key", "REAL-KEY"))
+            .and(header("anthropic-version", "2023-06-01"))
+            .and(header("x-custom", "static-value"))
+            .and(header("x-sandhi-step-id", "step-7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msg_1", "type": "message", "role": "assistant",
+                "content": [{"type": "text", "text": "hi"}],
+                "usage": {"input_tokens": 3, "output_tokens": 1}
+            })))
+            .mount(&server)
+            .await;
+
+        let mut statics = http::HeaderMap::new();
+        statics.insert(
+            HeaderName::from_static("x-custom"),
+            HeaderValue::from_static("static-value"),
+        );
+        // Attacker-controlled attempts — all transport-owned, all must vanish.
+        statics.insert(
+            HeaderName::from_static("x-api-key"),
+            HeaderValue::from_static("attacker-static"),
+        );
+        let provider = Anthropic::new(server.uri(), "REAL-KEY").with_headers(statics);
+
+        let mut request = ProviderRequest::new(
+            "claude-test",
+            json!({ "messages": [{"role": "user", "content": "hi"}] }),
+        );
+        let mut call = http::HeaderMap::new();
+        call.insert(
+            HeaderName::from_static("x-sandhi-step-id"),
+            HeaderValue::from_static("step-7"),
+        );
+        call.insert(
+            HeaderName::from_static("x-api-key"),
+            HeaderValue::from_static("attacker-call"),
+        );
+        call.insert(
+            HeaderName::from_static("anthropic-version"),
+            HeaderValue::from_static("1999-01-01"),
+        );
+        request.extra_headers = call;
+        provider.complete(request).await.unwrap();
+
+        // The header matchers above are the positive assertions; this pins the negative one:
+        // exactly ONE x-api-key, and it is the transport's.
+        let sent = &server.received_requests().await.unwrap()[0];
+        assert_eq!(
+            sent.headers.get_all("x-api-key").iter().count(),
+            1,
+            "no second, caller-supplied credential header on the wire"
         );
     }
 

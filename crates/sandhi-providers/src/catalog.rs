@@ -797,6 +797,18 @@ mod tests {
                     "invalid request id header name: {name}"
                 );
             }
+            // The two injected request facts must never share a header name: the typed and
+            // transparent planes both insert the session fact LAST (authoritative), so a
+            // collision would make the planes emit different values for the same header.
+            if let (Some(session), Some(correlation)) =
+                (spec.session_header, spec.client_request_id_header)
+            {
+                assert_ne!(
+                    session, correlation,
+                    "{} declares one header name for both session affinity and correlation",
+                    spec.slug
+                );
+            }
         }
     }
 

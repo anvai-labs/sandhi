@@ -50,9 +50,9 @@ use tower::{Layer, Service as TowerService};
 use time::OffsetDateTime;
 
 use sandhi_core::{
-    billable, derive_session_id, AlertRegistry, Backend, ChatRequestV1, FinishReasonV1, KeyStore,
-    ParsedUsage, Policy, RequestMetadataV1, Reservation, Sink, UsageBasis, UsageCompleteness,
-    UsageEvent, UsageV2, VirtualKey,
+    billable, derive_session_id_scoped, AlertRegistry, Backend, ChatRequestV1, FinishReasonV1,
+    KeyStore, ParsedUsage, Policy, RequestMetadataV1, Reservation, Sink, UsageBasis,
+    UsageCompleteness, UsageEvent, UsageV2, VirtualKey,
 };
 use sandhi_providers::{ProviderError, ProviderFamily, ProviderHandle, ProviderRuntime};
 use sandhi_store::{hash_secret, AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
@@ -1629,11 +1629,12 @@ async fn handle(
     // system+tools prefix). A drop-in SDK client gets a stable per-conversation key — for
     // usage grouping AND for the vendor affinity header — without setting any sandhi-specific
     // header. Self-reported inputs only; never an identity assertion (the vkey binding is).
-    let session = derive_session_id(
+    let session = derive_session_id_scoped(
         headers
             .get("x-sandhi-session")
             .and_then(|v| v.to_str().ok()),
         &body_json,
+        Some(&vk.id),
     );
     let route = match dialect {
         IngressDialect::OpenAi => "/v1/chat/completions",
@@ -2273,19 +2274,35 @@ impl RequestAccounting {
         self.outcome = outcome;
     }
 
-    /// Per-call wire headers carrying this call's minted id on the vendor's declared
-    /// correlation header (ADR-0008 D6) — caller-owned injection on the typed plane
-    /// (TD-0022 D1). Empty when the upstream declares no such header.
-    fn correlation_headers(&self) -> HeaderMap {
+    /// Per-call wire headers for the typed plane (TD-0022 D1, caller-owned injection):
+    /// this call's minted id on the vendor's declared correlation header (ADR-0008 D6;
+    /// empty when the upstream declares none) plus the caller's W3C `traceparent`, so the
+    /// upstream can emit a *child* of the caller's span and the echoed trace context
+    /// genuinely links back. (The transparent plane rebuilds request headers from transport
+    /// config and does not forward the caller's traceparent — a known, documented gap.)
+    fn per_call_wire_headers(&self) -> HeaderMap {
         let mut out = HeaderMap::new();
-        let Some(name) = sandhi_providers::client_request_id_header(&self.provider) else {
-            return out;
-        };
-        if let (Ok(name), Ok(value)) = (
-            axum::http::HeaderName::try_from(name),
-            axum::http::HeaderValue::from_str(&self.request_id),
-        ) {
-            out.insert(name, value);
+        if let Some(name) = sandhi_providers::client_request_id_header(&self.provider) {
+            if let (Ok(name), Ok(value)) = (
+                axum::http::HeaderName::try_from(name),
+                axum::http::HeaderValue::from_str(&self.request_id),
+            ) {
+                out.insert(name, value);
+            }
+        }
+        if let Some(traceparent) = self
+            .metadata
+            .trace_context
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if let Ok(value) = axum::http::HeaderValue::from_str(traceparent) {
+                out.insert(
+                    axum::http::header::HeaderName::from_static("traceparent"),
+                    value,
+                );
+            }
         }
         out
     }
@@ -2430,7 +2447,7 @@ async fn complete_response(
     permit: Arc<AdmissionPermit>,
 ) -> Response {
     let _permit = permit; // unary: held by the handler future, which is the whole call
-    let correlation = accounting.correlation_headers();
+    let correlation = accounting.per_call_wire_headers();
     match provider.complete_with(request, correlation).await {
         Ok(mut response) => {
             response.usage.completeness = UsageCompleteness::Final;
@@ -2460,7 +2477,7 @@ async fn stream_response(
     full_error_detail: bool,
     permit: Arc<AdmissionPermit>,
 ) -> Response {
-    let correlation = accounting.correlation_headers();
+    let correlation = accounting.per_call_wire_headers();
     let mut upstream = match provider.stream_with(request, correlation).await {
         Ok(s) => s,
         Err(error) => {
