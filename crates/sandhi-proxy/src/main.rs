@@ -15,7 +15,8 @@ use sandhi_core::{BufferedSink, InMemorySink, KeyStore, Sink, VirtualKey};
 use sandhi_providers::{AnthropicAuthScheme, GeminiAuthScheme, ProviderHandle, ProviderRuntime};
 use sandhi_proxy::{
     reclaim_sweep_at, rehydrate_alerts, rehydrate_budgets, serve_with_shutdown_timeout,
-    BufferedAlertStore, ProxyLedger, ProxyState, DEFAULT_MAX_IN_FLIGHT_AI_REQUESTS,
+    BufferedAlertStore, ProxyLedger, ProxyState, DEFAULT_HEADER_READ_TIMEOUT_SECS,
+    DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_CONNECTIONS_PER_IP, DEFAULT_MAX_IN_FLIGHT_AI_REQUESTS,
     DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_SHUTDOWN_GRACE,
 };
 use sandhi_store::{AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
@@ -237,6 +238,24 @@ async fn main() {
     state.max_in_flight_ai_requests = positive_usize_env(
         "SANDHI_MAX_IN_FLIGHT_AI_REQUESTS",
         DEFAULT_MAX_IN_FLIGHT_AI_REQUESTS,
+    );
+    // TD-0014 P3: connection-level limits (see the field docs for semantics).
+    state.max_connections = positive_usize_env("SANDHI_MAX_CONNECTIONS", DEFAULT_MAX_CONNECTIONS);
+    // 0 is the DEFAULT and DISABLES the per-IP cap (opt-in control — see the
+    // field doc); positive_usize_env would panic on exactly the value the docs
+    // tell operators to set behind a proxy.
+    state.max_connections_per_ip = match std::env::var("SANDHI_MAX_CONNECTIONS_PER_IP") {
+        Ok(raw) => raw.parse::<usize>().unwrap_or_else(|_| {
+            panic!("SANDHI_MAX_CONNECTIONS_PER_IP must be a non-negative integer, got {raw:?}")
+        }),
+        Err(_) => DEFAULT_MAX_CONNECTIONS_PER_IP,
+    };
+    state.header_read_timeout_secs = positive_u64_env(
+        "SANDHI_HEADER_READ_TIMEOUT_SECS",
+        DEFAULT_HEADER_READ_TIMEOUT_SECS,
+    );
+    state.trusted_proxies = sandhi_proxy::parse_trusted_proxies(
+        &std::env::var("SANDHI_TRUSTED_PROXIES").unwrap_or_default(),
     );
     state.config_path = std::env::var("SANDHI_CONFIG")
         .ok()

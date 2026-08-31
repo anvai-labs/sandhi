@@ -140,8 +140,24 @@ sandhi-proxy listening on http://127.0.0.1:8787  (POST /v1/chat/completions | /v
 | Maximum request body buffered; AI ingress routes return their dialect-shaped `413` when exceeded. Raise deliberately for inline multimodal payloads (for example, `33554432` for 32 MiB). Application-owned request-body memory is bounded by this value multiplied by `SANDHI_MAX_IN_FLIGHT_AI_REQUESTS`.
 
 | `SANDHI_MAX_IN_FLIGHT_AI_REQUESTS`
-| `64`
-| Maximum AI requests admitted concurrently to body extraction and dispatch. Waiting calls remain outside the application body buffer; health, metrics, discovery, and admin routes do not consume this pool.
+| `128`
+| Maximum AI requests admitted concurrently to body extraction and dispatch; the slot is held for the whole response (streaming included), so this bounds simultaneously open model streams. Waiting calls remain outside the application body buffer; health, metrics, discovery, and admin routes do not consume this pool.
+
+| `SANDHI_MAX_CONNECTIONS`
+| `1024`
+| Maximum concurrent TCP connections. Connections beyond the cap are closed without a response (the AI admission path is where dialect-shaped shedding happens). Connections cannot spend their whole lifetime silent — see `SANDHI_HEADER_READ_TIMEOUT_SECS`.
+
+| `SANDHI_MAX_CONNECTIONS_PER_IP`
+| `0` (disabled)
+| Maximum concurrent TCP connections from one peer IP. **Off by default because it counts the peer at accept time**: behind a load balancer or NAT every connection shares one IP, and a default-on cap would shed the balancer's connections. Enable it when the proxy is directly exposed, or after configuring `SANDHI_TRUSTED_PROXIES` so request-level client resolution works.
+
+| `SANDHI_HEADER_READ_TIMEOUT_SECS`
+| `30`
+| Seconds a connection may take to transmit its complete request head; slowloris-style partial heads are closed at the deadline. A connection that sends nothing at all is closed by the same timer. Once the head is complete the timer stops — streaming responses are not killed by it.
+
+| `SANDHI_TRUSTED_PROXIES`
+| _(unset → trust no one)_
+| Comma-separated CIDR allowlist (for example `10.0.0.0/8,192.168.1.0/24`). `X-Forwarded-For` is believed only when the connection's peer is in this list; anything else is treated as the client. Never enable forwarding headers from peers you do not control.
 
 | `SANDHI_USAGE_BUFFER_CAPACITY`
 | `1024`
