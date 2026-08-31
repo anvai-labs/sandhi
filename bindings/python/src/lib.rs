@@ -307,7 +307,8 @@ impl TypedProvider {
     /// `wire_headers_json` (optional, TD-0022 D1): per-call wire headers — a string map sent
     /// with THIS call only, for gateway-path metadata that changes per turn (e.g.
     /// `x-sandhi-step-id`). Transport-owned names (Authorization, Host, Content-Type,
-    /// Accept-Encoding) are stripped server-side and can never override the credential.
+    /// Accept-Encoding, and the family credential headers x-api-key, x-goog-api-key,
+    /// anthropic-version) are stripped server-side and can never override the credential.
     #[pyo3(signature = (request_json, wire_headers_json=None))]
     fn complete_json<'py>(
         &self,

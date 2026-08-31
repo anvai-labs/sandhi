@@ -91,9 +91,11 @@ asyncio.run(main())
 ```
 
 `provider_spec()` exposes stable Rust-owned wire facts (canonical slug, aliases,
-base URL, and model endpoint routing), not a model/capability catalog. Custom
-`Authorization`, `Content-Type`, and `Host` values are ignored so callers cannot
-override transport-owned headers.
+base URL, and model endpoint routing), not a model/capability catalog. Custom values
+for the transport-owned names — `Authorization`, `Host`, `Content-Type`,
+`Accept-Encoding`, and the family credential headers `x-api-key`, `x-goog-api-key`,
+`anthropic-version` — are ignored (statically and per call) so callers cannot
+override transport framing or credentials.
 
 The OpenAI-compatible transport accepts the Chat Completions roles `developer`,
 `system`, `user`, `assistant`, `tool`, and legacy `function`. A `tool` result must

@@ -79,6 +79,58 @@ test("per-call wire headers ride and cannot override the credential (TD-0022)", 
   }
 });
 
+test("streamJson per-call wire headers ride and cannot override the credential (TD-0022)", async () => {
+  // Mirror of the python binding's stream pin: the stream seam must carry per-call wire
+  // headers exactly like completeJson, or node consumers silently lose them on streams.
+  const server = await localServer([
+    {
+      contentType: "text/event-stream",
+      body:
+        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{"content":"he"},"finish_reason":null}]}\n\n' +
+        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":3}}\n\n' +
+        "data: [DONE]\n\n",
+    },
+  ]);
+  try {
+    const runtime = new ProviderRuntime();
+    const provider = runtime.openaiCompat(
+      "openai",
+      server.baseUrl,
+      "real-key",
+      undefined,
+      0,
+    );
+    const request = JSON.stringify({
+      schema_version: "1",
+      model: "gpt-test",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const events = [];
+    for await (const event of provider.streamJson(
+      request,
+      JSON.stringify({
+        "x-sandhi-run-id": "run-9",
+        "x-sandhi-step-id": "step-7",
+        authorization: "Bearer attacker", // must be stripped
+      }),
+    )) {
+      events.push(JSON.parse(event));
+    }
+    assert.deepEqual(events.map((event) => event.event), [
+      "response_start",
+      "text_delta",
+      "usage",
+      "finish",
+    ]);
+    const sent = server.lastHeaders();
+    assert.equal(sent["x-sandhi-run-id"], "run-9");
+    assert.equal(sent["x-sandhi-step-id"], "step-7");
+    assert.equal(sent.authorization, "Bearer real-key");
+  } finally {
+    await server.close();
+  }
+});
+
 test("persistent typed provider completes and streams neutral documents", async () => {
   const server = await localServer([
     {

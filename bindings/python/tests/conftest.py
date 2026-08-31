@@ -6,8 +6,11 @@ The wheel `pip install dist/*.whl` just placed is the module under test — but 
 left by another job, a stray checkout) shadows it *silently*: the old module satisfies
 every pre-existing assertion and only newly admitted catalog slugs fail, which reads as a
 product bug instead of an environment bug. Force the interpreter's own site directories to
-the front of `sys.path` so the freshly installed wheel always wins, and drop any copy that
-was imported before pytest collected the tests.
+the front of `sys.path` so the wheel wins against PYTHONPATH and checkout copies, and drop
+any copy that was imported before pytest collected the tests. Scope note: this half pins
+`sysconfig` purelib/platlib only — a pip `--user` fallback install (non-writable
+site-packages) lands outside them, which the workflow-side half of the defense (PR #180:
+`PYTHONNOUSERSITE=1` plus a wheel-origin assertion) suppresses rather than this file.
 """
 
 import sys

@@ -169,15 +169,28 @@ def test_per_call_wire_headers_ride_and_cannot_override_the_credential():
             "usage": {"prompt_tokens": 10, "completion_tokens": 3},
         }
     ).encode()
+    stream_body = (
+        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{"content":"he"},"finish_reason":null}]}\n\n'
+        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{},"finish_reason":"stop"}],'
+        '"usage":{"prompt_tokens":10,"completion_tokens":3}}\n\n'
+        "data: [DONE]\n\n"
+    ).encode()
 
     class Handler(BaseHTTPRequestHandler):
+        calls = 0
+
         def do_POST(self):  # noqa: N802
+            Handler.calls += 1
             seen_headers.append(dict(self.headers.items()))
+            body = complete_body if Handler.calls == 1 else stream_body
+            content_type = (
+                "application/json" if Handler.calls == 1 else "text/event-stream"
+            )
             self.send_response(200)
-            self.send_header("content-type", "application/json")
-            self.send_header("content-length", str(len(complete_body)))
+            self.send_header("content-type", content_type)
+            self.send_header("content-length", str(len(body)))
             self.end_headers()
-            self.wfile.write(complete_body)
+            self.wfile.write(body)
 
         def log_message(self, *_args):
             pass
@@ -203,16 +216,29 @@ def test_per_call_wire_headers_ride_and_cannot_override_the_credential():
         }
 
         async def run():
-            return json.loads(
+            complete = json.loads(
                 await provider.complete_json(request, json.dumps(wire_headers))
             )
+            stream = [
+                json.loads(event)
+                async for event in provider.stream_json(request, json.dumps(wire_headers))
+            ]
+            return complete, stream
 
-        response = asyncio.run(run())
+        response, events = asyncio.run(run())
         assert response["output"]["content"] == "hello"
-        sent = {name.lower(): value for name, value in seen_headers[0].items()}
-        assert sent["x-sandhi-run-id"] == "run-9"
-        assert sent["x-sandhi-step-id"] == "step-7"
-        assert sent["authorization"] == "Bearer real-key"
+        assert [event["event"] for event in events] == [
+            "response_start",
+            "text_delta",
+            "usage",
+            "finish",
+        ]
+        # Both calls carried the per-call headers; the credential override never landed.
+        for sent in seen_headers[:2]:
+            sent = {name.lower(): value for name, value in sent.items()}
+            assert sent["x-sandhi-run-id"] == "run-9"
+            assert sent["x-sandhi-step-id"] == "step-7"
+            assert sent["authorization"] == "Bearer real-key"
     finally:
         server.shutdown()
 

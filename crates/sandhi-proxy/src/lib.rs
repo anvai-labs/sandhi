@@ -49,9 +49,9 @@ use tower::{Layer, Service as TowerService};
 use time::OffsetDateTime;
 
 use sandhi_core::{
-    billable, derive_session_id, AlertRegistry, Backend, ChatRequestV1, FinishReasonV1, KeyStore,
-    ParsedUsage, Policy, RequestMetadataV1, Reservation, Sink, UsageBasis, UsageCompleteness,
-    UsageEvent, UsageV2, VirtualKey,
+    billable, derive_session_id_scoped, AlertRegistry, Backend, ChatRequestV1, FinishReasonV1,
+    KeyStore, ParsedUsage, Policy, RequestMetadataV1, Reservation, Sink, UsageBasis,
+    UsageCompleteness, UsageEvent, UsageV2, VirtualKey,
 };
 use sandhi_providers::{ProviderError, ProviderFamily, ProviderHandle, ProviderRuntime};
 use sandhi_store::{hash_secret, AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
@@ -1956,11 +1956,12 @@ async fn handle(
     // system+tools prefix). A drop-in SDK client gets a stable per-conversation key — for
     // usage grouping AND for the vendor affinity header — without setting any sandhi-specific
     // header. Self-reported inputs only; never an identity assertion (the vkey binding is).
-    let session = derive_session_id(
+    let session = derive_session_id_scoped(
         headers
             .get("x-sandhi-session")
             .and_then(|v| v.to_str().ok()),
         &body_json,
+        Some(&vk.id),
     );
     let route = match dialect {
         IngressDialect::OpenAi => "/v1/chat/completions",
@@ -2326,6 +2327,7 @@ async fn transparent_complete_response(
             &upstream_path(provider.family(), gemini.as_ref()),
             body,
             session.as_deref(),
+            Some(accounting.request_id.as_str()),
         )
         .await
     {
@@ -2377,6 +2379,7 @@ async fn transparent_stream_response(
             &upstream_path(provider.family(), gemini.as_ref()),
             body,
             session.as_deref(),
+            Some(accounting.request_id.as_str()),
         )
         .await
     {
@@ -2521,6 +2524,11 @@ struct RequestAccounting {
     reservation: Option<Reservation>,
     provider: String,
     model: String,
+    /// Sandhi's id for THIS call, minted at admission (not lazily at event assembly) so it can
+    /// be sent upstream on the vendor's declared correlation header and then become the usage
+    /// event's `request_id` — one string correlating the upstream's logs and sandhi's event
+    /// (ADR-0008 D6; also the seam TD-0021 G20's reconcile-once dedup wants).
+    request_id: String,
     metadata: RequestMetadataV1,
     usage: Option<UsageV2>,
     outcome: &'static str,
@@ -2561,6 +2569,7 @@ impl RequestAccounting {
             reservation,
             provider,
             model: request.model.clone(),
+            request_id: next_request_id(),
             metadata: request.metadata.clone(),
             usage: None,
             outcome: "cancelled",
@@ -2590,6 +2599,39 @@ impl RequestAccounting {
 
     fn set_outcome(&mut self, outcome: &'static str) {
         self.outcome = outcome;
+    }
+
+    /// Per-call wire headers for the typed plane (TD-0022 D1, caller-owned injection):
+    /// this call's minted id on the vendor's declared correlation header (ADR-0008 D6;
+    /// empty when the upstream declares none) plus the caller's W3C `traceparent`, so the
+    /// upstream can emit a *child* of the caller's span and the echoed trace context
+    /// genuinely links back. (The transparent plane rebuilds request headers from transport
+    /// config and does not forward the caller's traceparent — a known, documented gap.)
+    fn per_call_wire_headers(&self) -> HeaderMap {
+        let mut out = HeaderMap::new();
+        if let Some(name) = sandhi_providers::client_request_id_header(&self.provider) {
+            if let (Ok(name), Ok(value)) = (
+                axum::http::HeaderName::try_from(name),
+                axum::http::HeaderValue::from_str(&self.request_id),
+            ) {
+                out.insert(name, value);
+            }
+        }
+        if let Some(traceparent) = self
+            .metadata
+            .trace_context
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if let Ok(value) = axum::http::HeaderValue::from_str(traceparent) {
+                out.insert(
+                    axum::http::header::HeaderName::from_static("traceparent"),
+                    value,
+                );
+            }
+        }
+        out
     }
 
     /// Evaluate threshold alerts against the reconciled spend. Best-effort: any failure (registry
@@ -2712,6 +2754,7 @@ impl RequestAccounting {
             &self.model,
             &self.metadata,
             &usage,
+            Some(self.request_id.as_str()),
         ));
     }
 }
@@ -2731,7 +2774,8 @@ async fn complete_response(
     permit: Arc<AdmissionPermit>,
 ) -> Response {
     let _permit = permit; // unary: held by the handler future, which is the whole call
-    match provider.complete(request).await {
+    let correlation = accounting.per_call_wire_headers();
+    match provider.complete_with(request, correlation).await {
         Ok(mut response) => {
             response.usage.completeness = UsageCompleteness::Final;
             response
@@ -2760,7 +2804,8 @@ async fn stream_response(
     full_error_detail: bool,
     permit: Arc<AdmissionPermit>,
 ) -> Response {
-    let mut upstream = match provider.stream(request).await {
+    let correlation = accounting.per_call_wire_headers();
+    let mut upstream = match provider.stream_with(request, correlation).await {
         Ok(s) => s,
         Err(error) => {
             accounting.set_outcome("error");
@@ -2989,12 +3034,18 @@ fn usage_event(
     model: &str,
     metadata: &RequestMetadataV1,
     usage: &UsageV2,
+    minted_request_id: Option<&str>,
 ) -> UsageEvent {
+    // Identity precedence: the upstream's own id when it gave one, else the id minted at
+    // admission (the same string sent upstream on the vendor's correlation header, ADR-0008
+    // D6), else a late mint for callers outside the accounting path.
+    let request_id = usage
+        .upstream_request_id
+        .clone()
+        .or_else(|| minted_request_id.map(str::to_string))
+        .unwrap_or_else(next_request_id);
     UsageEvent::new(
-        usage
-            .upstream_request_id
-            .clone()
-            .unwrap_or_else(next_request_id),
+        request_id,
         now_rfc3339(),
         provider,
         model,
@@ -3047,6 +3098,7 @@ mod usage_event_tests {
             "gpt-oss:20b",
             &RequestMetadataV1::default(),
             &usage,
+            None,
         );
         assert_eq!(event.duration_ms, Some(1234));
         assert_eq!(event.time_to_first_token_ms, Some(56));
@@ -3062,6 +3114,7 @@ mod usage_event_tests {
             "gpt-oss:20b",
             &RequestMetadataV1::default(),
             &usage,
+            None,
         );
         assert_eq!(event.duration_ms, None);
         assert_eq!(event.time_to_first_token_ms, None);

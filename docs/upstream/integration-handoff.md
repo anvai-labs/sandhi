@@ -3,6 +3,15 @@
 Date: 2026-08-31 · Companion to [ADR-0008](../adr/0008-inferflux-admission-and-session-affinity.md)
 and [inferflux-issue-drafts.md](inferflux-issue-drafts.md)
 
+> **Status snapshot, superseded by the landing stack.** This document describes the state
+> BEFORE the integration branch landed; its "today" claims are the pre-fix baseline, not the
+> current code. Superseded items: S3 (session derivation — landed as 4e5a35f), S5
+> (`traceparent` passthrough — e62dde8), S4/S6 (per-call wire headers and the correlation
+> id — 039f55f / f7a8c69, with FFI static-header parity for the four non-OpenAI families
+> still open, see TD-0022 D3's scope note), and the InferFlux-side I1-I3 usage/auth fixes
+> (inferflux PR #52). Still current: S1/S2 (land/release), S7, the victor and proximaDB
+> lanes, and the full-stack acceptance run.
+
 **Goal ("definition of done"):** a secured InferFlux with a loaded model, fronted by the
 sandhi proxy, driven by victor agents in gateway mode — with transparent-plane forwarding,
 session KV-reuse affinity, per-run cost trees, cache-split accounting, and the control-plane
@@ -34,8 +43,12 @@ regenerate byte-identical). No agent attribution in commits (hook + CI enforced)
 
 **S2 · Cut the release** *(gated by S1)*
 Follow the 0.2.0 runbook: CHANGELOG PR → tag → crates.io + PyPI + npm + GH binaries,
-`scripts/verify-release.py`. Version stamping is external (workspace is `0.0.0`); pick
-the next patch/minor per the runbook. Note for consumers: **`CHAT_CONTRACT_MINOR` is
+`scripts/verify-release.py`. Version stamping is external (workspace is `0.0.0`); the bump
+**must be a minor** (0.3.0), never a patch: the stack makes compile-breaking changes to
+`sandhi-providers`' public Rust API (`ChatProvider::complete`/`stream` gained a mandatory
+`call_headers` parameter, `ProviderRequest` gained the public `extra_headers` field, and
+`RawForwarder::forward_metered`/`forward_stream_metered` widened), so a consumer pinned to
+`^0.2` must not auto-upgrade into it. Note for consumers: **`CHAT_CONTRACT_MINOR` is
 unchanged** (zero schema drift) — no contract-handshake bumps needed downstream.
 *Done when:* the wheel/carrier the consumers pin is live. **Unblocks V1, V2, P2.**
 
@@ -48,13 +61,13 @@ affinity, no session-grouped usage. Wire the derive (explicit header wins, then 
 metadata, then derived). Tests for precedence + stability (mirror `chat.rs` unit tests).
 *ADR-0008 D3 follow-up; noted in the ADR's consequences.*
 
-**S4 · Request-correlation header fact** *(independent, small, optional)*
-Third strategy-via-data field: `client_request_id_header: Option<&'static str>` on
-`OpenAiCompatProviderSpec` (`Some("x-inferflux-client-request-id")` for inferflux), mapped
-from the ingress `idempotency-key` (or sandhi's minted request id) on both planes — exact
-same pattern as `session_header` (`openai.rs` affinity path + `raw.rs send_with_session` +
-`build_raw_forwarder`). Gives per-request correlation in InferFlux logs/metrics.
-*ADR-0008 lists this as a follow-up.*
+**S4 · Request-correlation header fact** — **DONE** (2026-08-31, PR #178, stacked):
+`client_request_id_header` catalog fact + caller-owned injection on both planes. The proxy
+now mints the request id **at admission** (RequestAccounting) instead of lazily at event
+assembly; the same string rides the vendor's declared header (`x-inferflux-client-request-id`)
+and becomes the event's `request_id` — upstream logs and sandhi events correlate 1:1
+(ADR-0008 D6). Decision recorded for the seam TD-0021 G20 shares: mint-early (uniform
+coverage) over idempotency-key-only; the G20 dedup lookup itself stays TD-0021's item.
 
 **S5 · `traceparent` response passthrough** *(independent, small; pre-existing gap, all providers)*
 `RawForwarder::filter_response_headers` (`raw.rs:404+`) drops the child `traceparent`

@@ -82,8 +82,18 @@ The header carries the conversation key and nothing else. `subject_id`/`group_id
 identity is key-authoritative metering input consumed by `usage_event()`, and adapters never
 read `ProviderRequest::attribution` — enforced by construction, and pinned by a proxy
 negative test (`inferflux_attribution_never_reaches_the_upstream`) that fails if any
-`x-sandhi-*` attribution header or body key reaches the upstream. This is ADR-0001 §4 applied
-at the egress boundary.
+`x-sandhi-*` header reaches the upstream (asserted class-wide over the egress header set,
+plus the credential swap) or the forwarded body carries any session/attribution key
+(`session_id`, `subject_id`, `group_id`, `virtual_key_id`, `run_id`, `step_id`,
+`parent_id`). This is ADR-0001 §4 applied at the egress boundary.
+
+One privacy consequence of the design, accepted: on translation routes the conversation key
+may be a *declared* end-user id (OpenAI `user` / Anthropic `metadata.user_id`, ADR-0005 D7),
+so a client-chosen string rides the vendor affinity header and is visible to the upstream
+operator. It carries no sandhi attribution — the value is the client's own — but operators
+fronting third parties should treat affinity values as client-chosen, not secret. Declared
+and explicit ids are sanitized to RFC 9110 header-safe form before crossing (control bytes
+become `-`) so a malformed id can never silently disable session affinity.
 
 ### D5. Sandhi sends the header unconditionally; InferFlux's flag stays server-side.
 
@@ -91,6 +101,31 @@ The session-handle layer is feature-flagged **off** upstream by default, and a s
 the flag off ignores the header. Sandhi does no capability gating — a per-request descriptor
 lookup on the hot path for a header the server safely discards is not a trade. Operators who
 want KV reuse enable `scheduler.session_handles.enabled` on the InferFlux side.
+
+### D6. Upstream request correlation: a third spec fact, caller-owned injection.
+
+`client_request_id_header` (`x-inferflux-client-request-id` for InferFlux, `None` elsewhere)
+names the vendor's per-request correlation header. The value is the id the **proxy mints at
+admission** — no longer lazily at event assembly — so the same string is (a) sent upstream,
+where InferFlux keys its per-request logs/metrics on it, and (b) the usage event's
+`request_id` fallback. One id, two ledgers, 1:1 correlation.
+
+Two deliberate asymmetries with D3. First, **injection is caller-owned**: session affinity is
+adapter-injected because the conversation key lives in neutral request metadata, but the
+correlation id is *minted by the caller* (the proxy), so it rides TD-0022's per-call wire
+headers — the spec fact supplies only the vendor's header name. Second, **mint-early**
+changes timing, not value space: every successful event already got an id; minting it at
+admission is what makes it usable mid-flight, and it composes with TD-0021 G20 (the inert
+`idempotency-key`): the dedup lookup G20 wants needs exactly a per-call id minted before the
+upstream call. G20 itself remains that TD's item.
+
+Two recorded caveats. The injection idiom lives at two altitudes (the proxy's
+`per_call_wire_headers` on the typed plane, the adapter's builder-resolved injection on the
+transparent plane) and must evolve in lockstep; a `ProviderRequest::correlation_id` field
+mirroring `session_id` would collapse them if a third consumer appears. And the event's id
+precedence prefers `upstream_request_id` when a provider supplies one — nothing populates it
+on the success path today, but a future wiring that does would break the 1:1 join for
+providers that *also* declare a correlation header, and must be reconsidered then.
 
 ## Consequences
 
