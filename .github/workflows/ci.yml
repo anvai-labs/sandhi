@@ -166,6 +166,12 @@ jobs:
     needs: changes
     if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.python == 'true' }}
     runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
+    env:
+      # Self-hosted runners persist user-site packages across jobs. A sandhi-gateway left
+      # there by any other work must never shadow the wheel this job just built — the
+      # failure mode is silent (tests run against the stale module) and only surfaces as
+      # confusing catalog misses on newly admitted providers.
+      PYTHONNOUSERSITE: 1
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -186,7 +192,20 @@ jobs:
       - name: build + install the wheel (release packaging path)
         run: |
           maturin build -m bindings/python/Cargo.toml --out dist
-          pip install dist/*.whl
+          # Replace, never augment: a stale install of the same name must not survive.
+          pip uninstall -y sandhi-gateway || true
+          pip install --force-reinstall --no-deps dist/*.whl
+          # Fail loudly if anything else on sys.path still wins the import.
+          python - <<'EOF'
+          import sysconfig
+          import sandhi_gateway
+          loc = sandhi_gateway.__file__
+          purelib = sysconfig.get_paths()["purelib"]
+          assert loc.startswith(purelib), (
+              f"stale sandhi_gateway shadows the freshly built wheel: {loc} "
+              f"(expected under {purelib})"
+          )
+          EOF
       - name: run binding tests
         run: |
           pip install pytest
