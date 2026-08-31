@@ -13,6 +13,13 @@ permissions:
   contents: read
   pull-requests: read
 
+# Pool discipline: a new push/PR update supersedes the previous run for that ref.
+# Event name keys the group so a PR's gated run and its plain mirror never cancel
+# each other. Keeps N stacked PRs from saturating the self-hosted pool.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   authorize-owner:
     name: Authorize owner private CI
@@ -23,7 +30,19 @@ jobs:
       github.event.pull_request.user.id == 5168752 &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    environment: owner-private-ci
+    # Trust is decided by the predicate below, evaluated in the trusted base-ref
+    # workflow (pull_request_target runs the workflow from develop, never from the PR
+    # head — a PR cannot edit these conditions for its own run). For the population
+    # that passes (the owner's own same-repo PRs), the per-run human approval this
+    # job used to require was vacuous: the same principal it screened could open the
+    # PR AND approve the gate, so it defended nothing while taxing every run with a
+    # manual click. ci-trusted has no required reviewers; merging the PR that
+    # introduces it IS the activation decision. Real boundaries, unchanged:
+    #   workflow-from-base; non-owner/fork PRs never take this path (plain
+    #   `pull_request` mirror, ubuntu-latest, no pool, no secrets); read-only
+    #   GITHUB_TOKEN; protected develop + required CI Success + PR review;
+    #   vars.OWNER_PRIVATE_CI_ENABLED stays the org kill-switch.
+    environment: ci-trusted
     steps:
       - name: Verify immutable owner and same-repository head
         env:
