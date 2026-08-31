@@ -884,9 +884,10 @@ mod tests {
     #[test]
     fn session_derivation_is_scoped_by_caller() {
         // The vkey scope salts the prefix hash so two callers running the same agent
-        // prompt never flatten onto one session (ADR-0001 §4). Regression pin: dropping
-        // the `hash ^= fnv1a_64(scope)` mixing, or the proxy no longer passing
-        // `Some(&vk.id)`, must fail these assertions.
+        // prompt never flatten onto one session (ADR-0001 §4). Regression pin for the
+        // salting itself: dropping the `hash ^= fnv1a_64(scope)` mixing must fail these
+        // assertions. The proxy wiring that passes `Some(&vk.id)` is pinned separately,
+        // end to end, by derived_sessions_are_scoped_by_virtual_key in the proxy tests.
         let body = serde_json::json!({
             "model": "gpt-5",
             "messages": [{"role": "system", "content": "You are helpful."}]

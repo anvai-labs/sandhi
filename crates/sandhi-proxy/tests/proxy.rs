@@ -851,7 +851,17 @@ async fn inferflux_attribution_never_reaches_the_upstream() {
     assert!(sent.headers.contains_key("x-inferflux-session-id"));
     let body: serde_json::Value = serde_json::from_slice(&sent.body).unwrap();
     assert!(
-        body.get("session_id").is_none() && body.get("subject_id").is_none(),
+        [
+            "session_id",
+            "subject_id",
+            "group_id",
+            "virtual_key_id",
+            "run_id",
+            "step_id",
+            "parent_id"
+        ]
+        .iter()
+        .all(|key| body.get(key).is_none()),
         "the forwarded body must carry no session or attribution keys"
     );
 }
@@ -975,6 +985,84 @@ async fn stable_prefix_hash_groups_agent_conversations_without_explicit_identity
     let (a, b) = (&events[0].session_id, &events[1].session_id);
     assert!(a.is_some(), "the prefix hash must derive a key");
     assert_eq!(a, b, "same cacheable prefix ⇒ same conversation key");
+}
+
+/// ADR-0005 D7 wiring pin (the part a core unit test cannot see): the proxy must pass the
+/// CALLER's virtual key into derivation, so the same agent prompt run by two tenants derives
+/// two different conversation keys — usage events never group across customers
+/// (ADR-0001 §4). If lib.rs stops threading `Some(&vk.id)`, this fails while the core test
+/// stays green.
+#[tokio::test]
+async fn derived_sessions_are_scoped_by_virtual_key() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{ "message": { "content": "hi" } }],
+            "usage": { "prompt_tokens": 10, "completion_tokens": 2 }
+        })))
+        .mount(&upstream)
+        .await;
+
+    let sink = Arc::new(InMemorySink::new());
+    let keys = KeyStore::new();
+    for id in ["vk_tenant_a", "vk_tenant_b"] {
+        keys.insert(VirtualKey {
+            id: id.into(),
+            subject_id: Some("alice".into()),
+            group_id: Some("platform".into()),
+            upstream_ref: "up1".into(),
+            ..Default::default()
+        });
+    }
+    let mut providers: HashMap<String, ProviderHandle> = HashMap::new();
+    providers.insert(
+        "up1".into(),
+        ProviderRuntime::new().openai_compat(
+            "openai",
+            upstream.uri(),
+            "REAL-KEY",
+            Default::default(),
+            Some(0),
+            None,
+            None,
+        ),
+    );
+    let app = build_app(Arc::new(ProxyState::new(
+        keys,
+        ProxyLedger::in_memory(),
+        sink.clone(),
+        providers,
+        None,
+    )));
+    let body = r#"{"model":"gpt-x","messages":[{"role":"system","content":"you are victor"},{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"calc"}}]}"#;
+    for key in ["Bearer vk_tenant_a", "Bearer vk_tenant_b"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("authorization", key)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    let events = sink.events();
+    assert_eq!(events.len(), 2);
+    let (a, b) = (&events[0].session_id, &events[1].session_id);
+    assert!(
+        a.is_some() && b.is_some(),
+        "the prefix hash must derive keys for both tenants"
+    );
+    assert_ne!(
+        a, b,
+        "the same prompt under two virtual keys must not share a session id"
+    );
 }
 
 #[tokio::test]

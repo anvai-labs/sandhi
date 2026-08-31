@@ -82,9 +82,10 @@ The header carries the conversation key and nothing else. `subject_id`/`group_id
 identity is key-authoritative metering input consumed by `usage_event()`, and adapters never
 read `ProviderRequest::attribution` — enforced by construction, and pinned by a proxy
 negative test (`inferflux_attribution_never_reaches_the_upstream`) that fails if any
-`x-sandhi-*` header or body key reaches the upstream (asserted class-wide over the egress
-header set, plus the credential swap). This is ADR-0001 §4 applied
-at the egress boundary.
+`x-sandhi-*` header reaches the upstream (asserted class-wide over the egress header set,
+plus the credential swap) or the forwarded body carries any session/attribution key
+(`session_id`, `subject_id`, `group_id`, `virtual_key_id`, `run_id`, `step_id`,
+`parent_id`). This is ADR-0001 §4 applied at the egress boundary.
 
 One privacy consequence of the design, accepted: on translation routes the conversation key
 may be a *declared* end-user id (OpenAI `user` / Anthropic `metadata.user_id`, ADR-0005 D7),

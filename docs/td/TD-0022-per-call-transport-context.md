@@ -53,11 +53,20 @@ transport-configured header — including gateway-mode `x-sandhi-run-id` — sil
 reached those upstreams. All four adapters gain `with_headers` + the per-call merge. This is
 a bug fix that falls out of D1's uniformity rather than a scope add.
 
+Scope of the fix, stated exactly: the adapters and the `transport()` seam now honor static
+headers, and the OpenAI-family runtime factories thread `headers` end to end. The four
+families' runtime factories and the FFI `provider()` constructors do NOT yet accept static
+headers (a `headers_json` passed there for those families is accepted and ignored) — static
+headers for them are reachable only programmatically via Rust `with_headers`. Turn-scoped
+gateway identity, the motivating case, rides the **per-call** path (D1) and reaches every
+family. FFI static-header parity for the four families is a follow-up, not a claim here.
+
 ## Consequences
 
 - **Positive.** Victor (and any FFI consumer) can send turn-scoped gateway identity without
   handle churn — the step-level cost tree becomes populatable, and the handle cache stays
-  per-conversation. Cross-family gateway routing now actually delivers its headers.
+  per-conversation. Per-call gateway identity now reaches every family, and static transport
+  headers reach the OpenAI family end to end (see D3's scope note for the four families).
 - **Positive.** The stripping rule is stated once (`strip_transport_owned`), tested at the
   merge level and end-to-end through both bindings against a live local server (the
   `authorization: Bearer attacker` case).
