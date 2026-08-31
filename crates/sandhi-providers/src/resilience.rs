@@ -28,7 +28,10 @@ pub struct RetryConfig {
 impl Default for RetryConfig {
     fn default() -> Self {
         Self {
-            max_retries: 2,
+            // Provider inference POSTs are not generally replay-safe: a timeout can happen after
+            // the upstream accepted and billed the generation. Retries therefore require an
+            // explicit caller opt-in through `with_retry`; the safe default is one attempt.
+            max_retries: 0,
             base_backoff: Duration::from_millis(200),
         }
     }
@@ -125,8 +128,8 @@ pub struct ResilientProvider {
 }
 
 impl ResilientProvider {
-    /// Sensible defaults: 2 retries (200ms base backoff), circuit opens after 5 consecutive
-    /// failures, 30s cooldown, timeouts per [`TimeoutConfig::default`].
+    /// Replay-safe defaults: no retries, circuit opens after 5 consecutive failures, 30s
+    /// cooldown, and timeouts per [`TimeoutConfig::default`].
     pub fn new(inner: Arc<dyn Provider>) -> Self {
         Self {
             inner,
@@ -137,6 +140,11 @@ impl ResilientProvider {
     }
 
     #[must_use]
+    /// Explicitly opt this transport into replaying retryable failures.
+    ///
+    /// The caller owns the provider-specific idempotency contract. In particular, a timeout does
+    /// not prove that an inference POST was rejected upstream, so enabling retries without such a
+    /// contract can duplicate generated work and billing.
     pub fn with_retry(mut self, max_retries: u32, base_backoff: Duration) -> Self {
         self.retry = RetryConfig {
             max_retries,
@@ -391,10 +399,22 @@ mod tests {
 
     #[test]
     fn timeout_error_is_retryable() {
-        // A timeout is definitionally a transient bet — same class as a 503.
+        // Classification and policy are separate: a timeout may succeed on replay, but the
+        // zero-retry default still refuses to make that replay bet implicitly.
         assert!(is_retryable(&ProviderError::Timeout(Duration::from_secs(
             30
         ))));
+    }
+
+    #[tokio::test]
+    async fn default_policy_never_replays_an_ambiguous_post() {
+        let flaky = Flaky::new(vec![
+            Err(ProviderError::Transport("ambiguous".into())),
+            Ok(ok_resp()),
+        ]);
+        let result = ResilientProvider::new(flaky.clone()).complete(req()).await;
+        assert!(matches!(result, Err(ProviderError::Transport(_))));
+        assert_eq!(flaky.calls(), 1);
     }
 
     /// Hangs forever for the first `hang_calls` calls, then succeeds.

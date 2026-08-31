@@ -6,9 +6,11 @@
 //! reconciles the budget. It is *in-path*, not a redirect: a client cannot bypass the meter.
 
 mod codec;
+pub mod config;
 pub mod ledger;
 pub mod metrics;
 pub mod operator;
+pub mod persistence;
 pub mod ratelimit;
 
 /// First-party OTel/OTLP export of `gen_ai.*` spans + metrics (Scope 5, TD-0011 P3). Feature-gated
@@ -22,20 +24,25 @@ pub use ledger::{reclaim_sweep_at, Admission, ProxyLedger};
 pub use operator::{
     admin, build_provider_handle, rehydrate_alerts, rehydrate_budgets, rehydrate_live_keys,
 };
+pub use persistence::BufferedAlertStore;
 
 use std::collections::HashMap;
+use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::body::{Body, Bytes};
-use axum::extract::{Query, State};
+use axum::extract::rejection::BytesRejection;
+use axum::extract::{DefaultBodyLimit, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{delete, get, post};
 use axum::Router;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
+use tower::limit::ConcurrencyLimitLayer;
 
 use time::OffsetDateTime;
 
@@ -55,6 +62,20 @@ pub use operator::BudgetSpec;
 /// is set on the upstream request so the provider bounds output — otherwise an unbounded stream
 /// overshoots the cap (the 100× soft-cap bug). Unlimited scopes are never modified.
 const DEFAULT_OUTPUT_CEILING: u64 = 4096;
+
+/// Axum's historical `Bytes` extractor default, now made an explicit Sandhi policy. AI requests
+/// can legitimately be much larger (notably inline media), so operators may raise this through
+/// `SANDHI_MAX_REQUEST_BODY_BYTES`; keeping the defensive default avoids silently multiplying
+/// buffered memory by concurrent requests.
+pub const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 2 * 1024 * 1024;
+
+/// Maximum AI calls admitted far enough to buffer and inspect their request bodies at once.
+/// Together with [`DEFAULT_MAX_REQUEST_BODY_BYTES`], this bounds application-owned request-body
+/// memory to roughly 128 MiB before JSON decoding and other per-request state.
+pub const DEFAULT_MAX_IN_FLIGHT_AI_REQUESTS: usize = 64;
+
+/// Maximum time the server gives active responses to finish after shutdown begins.
+pub const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 
 /// Shared server state: the virtual-key store, the budget ledger, the usage sink, and the
 /// registry of configured upstream providers (each already holding its real credential).
@@ -92,6 +113,9 @@ pub struct ProxyState {
     pub alerts: Option<Arc<Mutex<AlertRegistry>>>,
     /// Durable alert-rule store (rules + last_fired_at + ack), backs `/admin/alerts`.
     pub alert_store: Option<Arc<AlertStore>>,
+    /// Bounded background mirror for alert `last_fired_at` updates. The live registry remains the
+    /// request-time dedup authority; only its SQLite persistence leaves the async task.
+    pub alert_writer: Option<Arc<BufferedAlertStore>>,
     /// ADR-0004 D4: when `false` (default) and an admin token is configured, the
     /// `/dashboard/api/*` read endpoints require the admin bearer — they serve subject/group
     /// usage aggregates. `SANDHI_DASHBOARD_PUBLIC=1` restores the previous open, masked-only
@@ -105,6 +129,13 @@ pub struct ProxyState {
     /// self-hosted deployments into the full ProviderErrorV1 (bounded upstream body in
     /// `details.upstream_body`). Server-side logs always carry the full error either way.
     pub error_detail_full: bool,
+    /// Maximum buffered request body accepted by proxy/admin handlers. Sandhi must inspect the
+    /// complete JSON envelope for auth/model/budget/translation decisions, so this is an explicit
+    /// memory boundary rather than an accidental framework default.
+    pub max_request_body_bytes: usize,
+    /// Concurrent AI requests allowed through the admission boundary. The concurrency layer wraps
+    /// the routes outside body extraction, so queued calls do not each allocate a full body.
+    pub max_in_flight_ai_requests: usize,
     /// TD-0011 P2 metric registry, served at `/metrics` (gated like the dashboard).
     pub metrics: Arc<metrics::Metrics>,
     /// Scope 5 (TD-0011 P3): OTLP export of `gen_ai.*` spans + metrics, when the `otel-otlp`
@@ -114,6 +145,10 @@ pub struct ProxyState {
     /// TD-0012 per-virtual-key request rate limiting. In-memory: with N replicas the effective
     /// limit is N × the configured value (D2).
     pub rate_limiter: Arc<ratelimit::RateLimiter>,
+    /// Declarative desired-state config file (`SANDHI_CONFIG`) backing `/admin/config` +
+    /// `/admin/config/apply` — providers/budgets/alerts/vkeys as committable JSON, secrets
+    /// referenced by env-var name rather than inlined. `None` disables both routes (404).
+    pub config_path: Option<std::path::PathBuf>,
 }
 
 impl ProxyState {
@@ -141,11 +176,15 @@ impl ProxyState {
             public_url: "http://localhost:8787".into(),
             alerts: None,
             alert_store: None,
+            alert_writer: None,
             dashboard_public: false,
             error_detail_full: false,
+            max_request_body_bytes: DEFAULT_MAX_REQUEST_BODY_BYTES,
+            max_in_flight_ai_requests: DEFAULT_MAX_IN_FLIGHT_AI_REQUESTS,
             metrics: Arc::new(metrics::Metrics::new()),
             rate_limiter: Arc::new(ratelimit::RateLimiter::new()),
             otel: None,
+            config_path: None,
         }
     }
 }
@@ -154,6 +193,20 @@ impl ProxyState {
 /// OpenAI Responses, Anthropic Messages); the presented virtual key selects the actual upstream.
 /// The `/admin/*` routes are the TD-0003 operator surface (authed by an admin token).
 pub fn build_app(state: Arc<ProxyState>) -> Router {
+    let max_request_body_bytes = state.max_request_body_bytes;
+    let ai_routes = Router::new()
+        .route("/v1/chat/completions", post(handle_openai))
+        .route("/v1/messages", post(handle_anthropic))
+        .route("/v1/responses", post(handle_responses))
+        // Gemini's path carries the model AND the method, colon-separated
+        // (`/v1beta/models/gemini-2.5-flash:generateContent`), so it matches as ONE segment and
+        // is split below — axum has no pattern for a colon-suffixed verb.
+        .route("/v1beta/models/:model_method", post(handle_gemini))
+        // Admission wraps extraction: waiting requests retain only transport-level buffers rather
+        // than each allocating `SANDHI_MAX_REQUEST_BODY_BYTES` in application memory.
+        .layer(ConcurrencyLimitLayer::new(
+            state.max_in_flight_ai_requests.max(1),
+        ));
     Router::new()
         .route("/healthz", get(health))
         .route("/catalog/models", get(catalog_models))
@@ -167,13 +220,6 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         // TD-0011 D5: /metrics reveals traffic shape and model mix, so it reuses the dashboard's
         // gate rather than inventing a second policy.
         .route("/metrics", get(metrics_endpoint))
-        .route("/v1/chat/completions", post(handle_openai))
-        .route("/v1/messages", post(handle_anthropic))
-        .route("/v1/responses", post(handle_responses))
-        // Gemini's path carries the model AND the method, colon-separated
-        // (`/v1beta/models/gemini-2.5-flash:generateContent`), so it matches as ONE segment and
-        // is split below — axum has no pattern for a colon-suffixed verb.
-        .route("/v1beta/models/:model_method", post(handle_gemini))
         // TD-0010 D3 discovery. `/v1/models` is shared by the OpenAI and Anthropic SDKs, which
         // is resolvable because they authenticate differently: an `x-api-key` request is an
         // Anthropic client and gets Anthropic's envelope.
@@ -203,6 +249,11 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         )
         .route("/admin/alerts/:id/ack", post(operator::ack_alert))
         .route("/admin/alerts/:id", delete(operator::delete_alert))
+        // Declarative desired-state config (SANDHI_CONFIG) — additive-only apply, see config.rs.
+        .route("/admin/config", get(operator::config_preview))
+        .route("/admin/config/apply", post(operator::config_apply))
+        .merge(ai_routes)
+        .layer(DefaultBodyLimit::max(max_request_body_bytes))
         .with_state(state)
 }
 
@@ -210,6 +261,313 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
 pub async fn serve(state: Arc<ProxyState>, addr: SocketAddr) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, build_app(state)).await
+}
+
+/// Bind and serve until `shutdown` resolves, then stop accepting connections and drain every
+/// in-flight request/response stream before returning.
+///
+/// The standalone binary uses this for SIGINT/SIGTERM handling. Keeping the signal source as a
+/// caller-provided future also makes the lifecycle usable by embedders without imposing a process
+/// signal policy on them.
+pub async fn serve_with_shutdown<F>(
+    state: Arc<ProxyState>,
+    addr: SocketAddr,
+    shutdown: F,
+) -> std::io::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    serve_with_shutdown_timeout(state, addr, shutdown, DEFAULT_SHUTDOWN_GRACE).await
+}
+
+/// Bind and serve with an explicit maximum graceful-drain period.
+///
+/// Once `shutdown` resolves, new connections are refused. Active calls may finish and settle
+/// until `grace` expires; after that the server future is dropped, which cancels remaining
+/// response streams and runs their accounting finalizers as `Partial`/cancelled.
+pub async fn serve_with_shutdown_timeout<F>(
+    state: Arc<ProxyState>,
+    addr: SocketAddr,
+    shutdown: F,
+    grace: Duration,
+) -> std::io::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    serve_listener_with_shutdown(state, listener, shutdown, grace).await
+}
+
+async fn serve_listener_with_shutdown<F>(
+    state: Arc<ProxyState>,
+    listener: tokio::net::TcpListener,
+    shutdown: F,
+    grace: Duration,
+) -> std::io::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    serve_router_listener_with_shutdown(build_app(state), listener, shutdown, grace).await
+}
+
+async fn serve_router_listener_with_shutdown<F>(
+    app: Router,
+    listener: tokio::net::TcpListener,
+    shutdown: F,
+    grace: Duration,
+) -> std::io::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let (draining_tx, draining_rx) = tokio::sync::oneshot::channel();
+    let shutdown = async move {
+        shutdown.await;
+        let _ = draining_tx.send(());
+    };
+    let server = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .into_future();
+    tokio::pin!(server);
+
+    tokio::select! {
+        result = &mut server => result,
+        draining = draining_rx => {
+            if draining.is_err() {
+                return server.await;
+            }
+            match tokio::time::timeout(grace, &mut server).await {
+                Ok(result) => result,
+                Err(_) => {
+                    tracing::warn!(grace_secs = grace.as_secs_f64(),
+                        "shutdown grace expired; cancelling remaining response streams");
+                    Ok(())
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod server_lifecycle_tests {
+    use super::*;
+    use sandhi_core::{InMemorySink, KeyStore};
+
+    #[tokio::test]
+    async fn resolved_shutdown_stops_the_listener_and_returns() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let state = Arc::new(ProxyState::new(
+            KeyStore::new(),
+            ProxyLedger::in_memory(),
+            Arc::new(InMemorySink::new()),
+            HashMap::new(),
+            None,
+        ));
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            serve_listener_with_shutdown(
+                state,
+                listener,
+                async {},
+                // This path should finish immediately; the bound is still part of the contract.
+                DEFAULT_SHUTDOWN_GRACE,
+            ),
+        )
+        .await
+        .expect("graceful shutdown should not hang");
+
+        result.expect("server shutdown should succeed");
+    }
+
+    #[tokio::test]
+    async fn grace_expiry_forces_a_stuck_response_to_stop() {
+        use axum::extract::State;
+
+        async fn stuck(State(entered): State<Arc<tokio::sync::Notify>>) {
+            entered.notify_one();
+            std::future::pending::<()>().await;
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let app = Router::new()
+            .route("/stuck", get(stuck))
+            .with_state(Arc::clone(&entered));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(serve_router_listener_with_shutdown(
+            app,
+            listener,
+            async move {
+                let _ = shutdown_rx.await;
+            },
+            Duration::from_millis(25),
+        ));
+        let client_call = tokio::spawn(async move {
+            let _ = reqwest::get(format!("http://{addr}/stuck")).await;
+        });
+        entered.notified().await;
+        shutdown_tx.send(()).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .expect("bounded shutdown must return")
+            .expect("server task joined")
+            .expect("server returned successfully");
+        client_call.abort();
+    }
+}
+
+#[cfg(test)]
+mod request_body_limit_tests {
+    use super::*;
+    use axum::http::Request;
+    use sandhi_core::{InMemorySink, KeyStore};
+    use tower::ServiceExt;
+
+    fn limited_state(limit: usize) -> Arc<ProxyState> {
+        let mut state = ProxyState::new(
+            KeyStore::new(),
+            ProxyLedger::in_memory(),
+            Arc::new(InMemorySink::new()),
+            HashMap::new(),
+            None,
+        );
+        state.max_request_body_bytes = limit;
+        Arc::new(state)
+    }
+
+    #[tokio::test]
+    async fn oversized_ai_requests_return_each_sdks_error_shape() {
+        let cases = [
+            ("/v1/chat/completions", "openai"),
+            ("/v1/messages", "anthropic"),
+            ("/v1/responses", "responses"),
+            ("/v1beta/models/gemini-test:generateContent", "gemini"),
+        ];
+        for (path, dialect) in cases {
+            let response = build_app(limited_state(32))
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("content-type", "application/json")
+                        .body(Body::from(vec![b'x'; 33]))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "{dialect}"
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            match dialect {
+                "anthropic" => {
+                    assert_eq!(body["type"], "error");
+                    assert_eq!(body["error"]["http_status"], 413);
+                }
+                "gemini" => {
+                    assert_eq!(body["error"]["code"], 413);
+                    assert_eq!(body["error"]["status"], "RESOURCE_EXHAUSTED");
+                }
+                _ => assert_eq!(body["error"]["http_status"], 413),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod request_admission_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use axum::http::Request;
+    use sandhi_core::{ChatResponseV1, ChatStreamEventV1, InMemorySink, KeyStore};
+    use sandhi_providers::{ChatEventStream, ChatProvider};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tower::ServiceExt;
+
+    struct StuckProvider {
+        calls: AtomicUsize,
+        entered: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl ChatProvider for StuckProvider {
+        fn slug(&self) -> &str {
+            "stuck"
+        }
+
+        async fn complete(&self, _request: ChatRequestV1) -> Result<ChatResponseV1, ProviderError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.entered.notify_one();
+            std::future::pending().await
+        }
+
+        async fn stream(&self, _request: ChatRequestV1) -> Result<ChatEventStream, ProviderError> {
+            let stream =
+                futures_util::stream::pending::<Result<ChatStreamEventV1, ProviderError>>();
+            Ok(Box::pin(stream))
+        }
+    }
+
+    fn request() -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("authorization", "Bearer vk-test")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"model":"model","messages":[{"role":"user","content":"hi"}]}"#,
+            ))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn concurrency_boundary_precedes_body_extraction_and_dispatch() {
+        let keys = KeyStore::new();
+        keys.insert(VirtualKey {
+            id: "vk-test".into(),
+            upstream_ref: "stuck".into(),
+            ..Default::default()
+        });
+        let provider = Arc::new(StuckProvider {
+            calls: AtomicUsize::new(0),
+            entered: tokio::sync::Notify::new(),
+        });
+        let mut providers = HashMap::new();
+        providers.insert("stuck".into(), ProviderHandle::new(provider.clone()));
+        let mut state = ProxyState::new(
+            keys,
+            ProxyLedger::in_memory(),
+            Arc::new(InMemorySink::new()),
+            providers,
+            None,
+        );
+        state.max_in_flight_ai_requests = 1;
+        let app = build_app(Arc::new(state));
+
+        let first = tokio::spawn(app.clone().oneshot(request()));
+        provider.entered.notified().await;
+        let second = tokio::spawn(app.oneshot(request()));
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        assert_eq!(
+            provider.calls.load(Ordering::SeqCst),
+            1,
+            "the queued request must not reach decode/dispatch while the permit is held"
+        );
+        first.abort();
+        second.abort();
+    }
 }
 
 async fn health() -> &'static str {
@@ -373,53 +731,171 @@ const DASHBOARD_HTML: &str = r####"<!doctype html>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sandhi — operator dashboard</title>
 <style>
-  :root { color-scheme: light dark; }
-  body { font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; margin: 0; padding: 2rem;
-         max-width: 1000px; margin-inline: auto; }
-  h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
-  .sub { color: #6b7280; margin-bottom: 1.5rem; }
-  .cards { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.5rem; }
-  .card { border: 1px solid #8883; border-radius: 10px; padding: 1rem 1.25rem; min-width: 8rem; }
-  .card .n { font-size: 1.6rem; font-weight: 700; }
-  .card .l { color: #6b7280; font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
-  h2 { font-size: 1rem; margin: 1.75rem 0 .5rem; border-top: 1px solid #8882; padding-top: 1.25rem; }
-  h2:first-of-type { border-top: none; padding-top: 0; }
+  :root {
+    color-scheme: light dark;
+    --bg: #f7f7f8; --surface: #fff; --border: #e2e2e6; --border-soft: #ececef;
+    --text: #16161a; --muted: #6b7280; --accent: #2563eb; --accent-soft: #eff4ff;
+    --good: #047857; --good-soft: #ecfdf5; --warn: #b45309; --warn-soft: #fffbeb;
+    --bad: #b91c1c; --bad-soft: #fef2f2; --shadow: 0 1px 2px rgb(0 0 0 / 0.04);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --surface: #17191f; --border: #2a2d36; --border-soft: #23252c;
+      --text: #e7e8ea; --muted: #93949c; --accent: #5b8def; --accent-soft: #182236;
+      --good: #34d399; --good-soft: #0d2420; --warn: #f5a524; --warn-soft: #2b2110;
+      --bad: #f87171; --bad-soft: #2b1616; --shadow: 0 1px 2px rgb(0 0 0 / 0.4);
+    }
+  }
+  * { box-sizing: border-box; }
+  body { font: 14px/1.55 -apple-system, ui-sans-serif, system-ui, sans-serif; margin: 0;
+         background: var(--bg); color: var(--text); }
+  .wrap { max-width: 1120px; margin-inline: auto; padding: 0 1.5rem 3rem; }
+  header { position: sticky; top: 0; z-index: 10; background: var(--bg);
+           border-bottom: 1px solid var(--border); padding: 1rem 1.5rem;
+           display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+  header .brand { display: flex; align-items: baseline; gap: .5rem; margin-right: auto; }
+  h1 { font-size: 1.15rem; margin: 0; font-weight: 700; letter-spacing: -.01em; }
+  .tagline { color: var(--muted); font-size: .8rem; }
+  .token-box { display: flex; align-items: center; gap: .5rem; }
+  .token-box input { font: inherit; font-size: .8rem; padding: .4rem .6rem; border-radius: 7px;
+    border: 1px solid var(--border); background: var(--surface); color: var(--text); width: 15rem; }
+  .dot { width: .5rem; height: .5rem; border-radius: 50%; background: var(--border);
+         box-shadow: 0 0 0 3px transparent; transition: background .15s; }
+  .dot.on { background: var(--good); }
+  h2 { font-size: .95rem; margin: 2.25rem 0 .75rem; font-weight: 700; letter-spacing: -.005em;
+       display: flex; align-items: center; gap: .5rem; }
+  h2:first-of-type { margin-top: 1.75rem; }
+  h2 .hint { font-weight: 400; color: var(--muted); font-size: .78rem; }
+  h3 { color: var(--muted); font-size: .74rem; text-transform: uppercase; letter-spacing: .05em;
+       margin: 1.1rem 0 .4rem; font-weight: 600; }
+  h3:first-child { margin-top: 0; }
+  section.panel { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+                  padding: 1.1rem 1.25rem; box-shadow: var(--shadow); }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
+           gap: .75rem; margin-bottom: .5rem; }
+  .card { border: 1px solid var(--border); border-radius: 10px; padding: .9rem 1.1rem;
+          background: var(--surface); box-shadow: var(--shadow); }
+  .card .n { font-size: 1.5rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .card .l { color: var(--muted); font-size: .74rem; text-transform: uppercase; letter-spacing: .04em; }
   table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: .4rem .5rem; border-bottom: 1px solid #8882; vertical-align: top; }
-  th { color: #6b7280; font-weight: 600; font-size: .8rem; }
+  th, td { text-align: left; padding: .5rem .55rem; border-bottom: 1px solid var(--border-soft);
+           vertical-align: middle; }
+  th { color: var(--muted); font-weight: 600; font-size: .74rem; text-transform: uppercase;
+       letter-spacing: .03em; }
+  tbody tr:hover { background: var(--border-soft); }
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
-  .amber { color: #b45309; }
-  .muted { color: #6b7280; }
-  .badge { display: inline-block; padding: .05rem .4rem; border-radius: 6px; font-size: .72rem;
-           border: 1px solid #8883; }
-  .badge.active { color: #047857; border-color: #04785755; }
-  .badge.revoked { color: #b45309; border-color: #b4530955; }
-  .bar { background: #8882; border-radius: 6px; height: 8px; overflow: hidden; min-width: 6rem; }
-  .bar > span { display: block; height: 100%; background: #2563eb; }
-  .bar.warn > span { background: #b45309; }
-  .bar.over > span { background: #b91c1c; }
-  .json-link { float: right; font-weight: 400; font-size: .8rem; }
-  .fired { background: #b4530910; }
-  code { font-size: .85em; }
+  .muted { color: var(--muted); }
+  .badge { display: inline-block; padding: .1rem .5rem; border-radius: 999px; font-size: .7rem;
+           font-weight: 600; border: 1px solid transparent; }
+  .badge.active { color: var(--good); background: var(--good-soft); }
+  .badge.revoked { color: var(--bad); background: var(--bad-soft); }
+  .bar { background: var(--border-soft); border-radius: 6px; height: 7px; overflow: hidden; min-width: 6rem; }
+  .bar > span { display: block; height: 100%; background: var(--accent); }
+  .bar.warn > span { background: var(--warn); }
+  .bar.over > span { background: var(--bad); }
+  .fired { background: var(--warn-soft); }
+  code { font-size: .82em; background: var(--border-soft); padding: .05rem .35rem; border-radius: 4px; }
+  a { color: var(--accent); }
+  .btn { font: inherit; font-size: .76rem; font-weight: 600; padding: .3rem .65rem; border-radius: 7px;
+         border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer; }
+  .btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+  .btn.danger:hover:not(:disabled) { border-color: var(--bad); color: var(--bad); }
+  .btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .btn.primary:hover:not(:disabled) { opacity: .9; }
+  details.actions { margin-top: .9rem; border-top: 1px solid var(--border-soft); padding-top: .75rem; }
+  details.actions summary { cursor: pointer; font-size: .78rem; font-weight: 600; color: var(--muted); }
+  details.actions summary:hover { color: var(--text); }
+  .form-row { display: flex; gap: .6rem; flex-wrap: wrap; margin-top: .75rem; align-items: end; }
+  .field { display: flex; flex-direction: column; gap: .25rem; }
+  .field label { font-size: .72rem; color: var(--muted); }
+  .field input, .field select { font: inherit; font-size: .8rem; padding: .35rem .5rem;
+    border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
+  .callout { font-size: .78rem; padding: .5rem .7rem; border-radius: 8px; margin-top: .6rem; }
+  .callout.ok { background: var(--good-soft); color: var(--good); }
+  .callout.err { background: var(--bad-soft); color: var(--bad); }
+  .callout.info { background: var(--accent-soft); color: var(--accent); }
+  .toast-wrap { position: fixed; bottom: 1.25rem; right: 1.25rem; display: flex;
+                flex-direction: column; gap: .5rem; z-index: 50; }
+  .toast { padding: .6rem 1rem; border-radius: 9px; font-size: .82rem; box-shadow: var(--shadow);
+           border: 1px solid var(--border); background: var(--surface); animation: slidein .15s ease-out; }
+  .toast.ok { border-color: var(--good); color: var(--good); }
+  .toast.err { border-color: var(--bad); color: var(--bad); }
+  @keyframes slidein { from { transform: translateY(.4rem); opacity: 0; } to { transform: none; opacity: 1; } }
+  .tree { list-style: none; margin: 0; padding-left: 0; }
+  .tree li { margin: 0; }
+  .tree .node { display: flex; align-items: baseline; gap: .6rem; padding: .3rem .4rem;
+                border-radius: 6px; border-bottom: 1px solid var(--border-soft); }
+  .tree .node:hover { background: var(--border-soft); }
+  .tree ul { list-style: none; padding-left: 1.4rem; border-left: 1px dashed var(--border); margin-left: .4rem; }
+  .tree .step { font-weight: 600; }
+  .tree .stat { color: var(--muted); font-size: .76rem; }
+  footer { color: var(--muted); font-size: .76rem; margin-top: 2.5rem; padding-top: 1rem;
+           border-top: 1px solid var(--border-soft); }
 </style>
 </head>
 <body>
-<h1>Sandhi <span class="amber">— the metering layer for AI agents</span></h1>
-<div class="sub">Self-hosted operator dashboard · neutral token units (no pricing) ·
-  <a href="/dashboard/api/usage">usage</a> · <a href="/dashboard/api/keys">keys</a> ·
-  <a href="/dashboard/api/budgets">budgets</a> · <a href="/dashboard/api/alerts">alerts</a></div>
+<header>
+  <div class="brand">
+    <h1>Sandhi</h1>
+    <span class="tagline">the metering layer for AI agents — neutral units, no pricing</span>
+  </div>
+  <div class="token-box">
+    <span class="dot" id="token-dot" title="Admin actions locked until a token is set"></span>
+    <input id="admin-token" type="password" placeholder="Admin token — unlocks revoke / ack / add"
+           autocomplete="off">
+  </div>
+</header>
+<div class="wrap">
 
-<div class="cards" id="cards"></div>
+<h2>Overview</h2>
+<section class="panel"><div class="cards" id="cards"></div></section>
+
 <div id="tables"></div>
 
-<h2>Keys <span class="json-link"><a href="/dashboard/api/keys">JSON</a></span></h2>
-<div id="keys"></div>
+<h2>Declarative config <span class="hint">providers, budgets, alerts &amp; vkeys declared in a committed JSON file</span></h2>
+<section class="panel" id="config"></section>
 
-<h2>Budgets <span class="json-link"><a href="/dashboard/api/budgets">JSON</a></span></h2>
-<div id="budgets"></div>
+<h2>Virtual keys &amp; credentials <span class="hint">who has access, and where calls actually go</span></h2>
+<section class="panel" id="keys"></section>
 
-<h2>Alerts <span class="json-link"><a href="/dashboard/api/alerts">JSON</a></span></h2>
-<div id="alerts"></div>
+<h2>Budgets <span class="hint">neutral-token caps per scope</span></h2>
+<section class="panel">
+  <div id="budgets"></div>
+  <details class="actions"><summary>Set a budget</summary>
+    <div class="form-row">
+      <div class="field"><label>Scope</label><input id="b-scope" placeholder="group:platform"></div>
+      <div class="field"><label>Limit (tokens)</label><input id="b-limit" type="number" placeholder="1000000"></div>
+      <div class="field"><label>Window</label>
+        <select id="b-window"><option value="total">total</option><option value="daily">daily</option>
+          <option value="monthly" selected>monthly</option></select></div>
+      <div class="field"><label>Policy</label>
+        <select id="b-policy"><option value="block" selected>block</option><option value="warn">warn</option></select></div>
+      <button class="btn primary" onclick="setBudget()">Set budget</button>
+    </div>
+    <div id="b-result"></div>
+  </details>
+</section>
+
+<h2>Alerts <span class="hint">threshold rules on budget scopes</span></h2>
+<section class="panel" id="alerts"></section>
+
+<h2>Run cost tree <span class="hint">one agent run's spend, per step, own vs subtree</span></h2>
+<section class="panel">
+  <div class="form-row" style="margin-top:0">
+    <div class="field"><label>Run ID</label><input id="run-id" placeholder="run_01HK..." style="width:16rem"></div>
+    <button class="btn primary" onclick="lookupRun()">Look up</button>
+  </div>
+  <div id="run-tree" style="margin-top:.75rem"></div>
+</section>
+
+<footer>
+  Read-only data above loads without a token (self-hosted single-node trust; masked secrets only).
+  Mutating actions — revoke, acknowledge, mint, add, set — require the admin token and call the
+  same <code>/admin/*</code> API the <code>sandhi</code> CLI uses.
+</footer>
+</div>
+<div class="toast-wrap" id="toasts"></div>
 
 <script>
 const fmt = n => (n ?? 0).toLocaleString();
@@ -428,7 +904,45 @@ const esc = s => String(s ?? "").replace(/[&<>"]/g, c =>
 const orDash = s => (s === null || s === undefined || s === "") ? "—" : esc(s);
 // No latency is "—", never "0 ms": a call that never reported a duration is unknown, not fast.
 const lat = l => (!l || !l.samples) ? "—"
-  : `${fmt(l.p50_ms)} / ${fmt(l.p95_ms)} ms <span class="sub">(n=${fmt(l.samples)})</span>`;
+  : `${fmt(l.p50_ms)} / ${fmt(l.p95_ms)} ms <span class="muted">(n=${fmt(l.samples)})</span>`;
+
+// --- admin token: session-only, unlocks mutating actions -----------------------------------
+const tokenEl = document.getElementById("admin-token");
+const dotEl = document.getElementById("token-dot");
+tokenEl.value = sessionStorage.getItem("sandhi_admin_token") || "";
+function refreshTokenState() {
+  const on = tokenEl.value.length > 0;
+  dotEl.classList.toggle("on", on);
+  document.querySelectorAll("[data-needs-token]").forEach(b => b.disabled = !on);
+}
+tokenEl.addEventListener("input", () => {
+  sessionStorage.setItem("sandhi_admin_token", tokenEl.value);
+  refreshTokenState();
+  loadConfig();
+});
+
+function toast(msg, ok) {
+  const t = document.createElement("div");
+  t.className = "toast " + (ok ? "ok" : "err");
+  t.textContent = msg;
+  document.getElementById("toasts").appendChild(t);
+  setTimeout(() => t.remove(), 4000);
+}
+
+// Thin wrapper: attaches the admin bearer, surfaces non-2xx as a toast, returns parsed JSON or null.
+async function adminCall(method, path, body) {
+  const token = tokenEl.value;
+  if (!token) { toast("Enter the admin token first", false); return null; }
+  try {
+    const resp = await fetch(path, {
+      method, headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) { toast((data.error && data.error.message) || `request failed (${resp.status})`, false); return null; }
+    return data;
+  } catch (e) { toast("network error: " + e.message, false); return null; }
+}
 
 function tbl(title, rows) {
   const body = rows.map(r => `<tr><td>${esc(r.key)}</td><td class="num">${fmt(r.calls)}</td>`
@@ -436,7 +950,7 @@ function tbl(title, rows) {
     + `<td class="num">${fmt(r.cache_creation_tokens)}</td><td class="num">${fmt(r.cache_read_tokens)}</td>`
     + `<td class="num">${fmt(r.billable_tokens)}</td>`
     + `<td class="num">${lat(r.latency)}</td></tr>`).join("");
-  return `<h2>${title}</h2><table><thead><tr><th>key</th><th class="num">calls</th>`
+  return `<h3>${title}</h3><table><thead><tr><th>key</th><th class="num">calls</th>`
     + `<th class="num">in</th><th class="num">out</th><th class="num">cache write</th>`
     + `<th class="num">cache read</th><th class="num" title="ADR-0005 D4: the quantity budgets `
     + `are enforced on — fresh input + cache split + output (+ unfolded reasoning)">billable`
@@ -445,41 +959,109 @@ function tbl(title, rows) {
     + `<tbody>${body || '<tr><td colspan=8>no data yet</td></tr>'}</tbody></table>`;
 }
 
-fetch("/dashboard/api/usage").then(r => r.json()).then(d => {
-  const t = d.total || { calls: 0, tokens_in: 0, tokens_out: 0, cache_read_tokens: 0 };
-  document.getElementById("cards").innerHTML =
-    [["calls", t.calls], ["tokens in", t.tokens_in], ["tokens out", t.tokens_out],
-     ["cache read", t.cache_read_tokens]]
-    .map(([l, n]) => `<div class="card"><div class="n">${fmt(n)}</div><div class="l">${l}</div></div>`).join("");
-  document.getElementById("tables").innerHTML =
-    tbl("Attribution — by user (subject)", d.by_subject || [])
-    + tbl("Attribution — by team (group)", d.by_group || [])
-    + tbl("Attribution — by provider", d.by_provider || [])
-    + tbl("Attribution — by model", d.by_model || []);
-}).catch(() => { document.getElementById("tables").innerHTML =
-  '<p class="muted">usage store not configured (set SANDHI_STORE).</p>'; });
+function loadUsage() {
+  fetch("/dashboard/api/usage").then(r => r.json()).then(d => {
+    const t = d.total || { calls: 0, tokens_in: 0, tokens_out: 0, cache_read_tokens: 0, billable_tokens: 0 };
+    document.getElementById("cards").innerHTML =
+      [["calls", fmt(t.calls)], ["tokens in", fmt(t.tokens_in)], ["tokens out", fmt(t.tokens_out)],
+       ["cache read", fmt(t.cache_read_tokens)], ["billable", fmt(t.billable_tokens)],
+       ["latency p50/p95", lat(t.latency)]]
+      .map(([l, n]) => `<div class="card"><div class="n">${n}</div><div class="l">${l}</div></div>`).join("");
+    document.getElementById("tables").innerHTML =
+      `<h2>Attribution</h2><section class="panel">`
+      + tbl("By user (subject)", d.by_subject || [])
+      + tbl("By team (group)", d.by_group || [])
+      + tbl("By provider", d.by_provider || [])
+      + tbl("By model", d.by_model || [])
+      + `</section>`;
+  }).catch(() => { document.getElementById("tables").innerHTML =
+    '<p class="muted">usage store not configured (set SANDHI_STORE).</p>'; });
+}
 
-// Keys: masked virtual keys + vault entries. Never a secret.
+// Keys: masked virtual keys + vault entries. Never a secret. Revoke/add are admin-gated.
 function keysView(d) {
   const vkeys = (d.virtual_keys || []).map(k => {
     const status = k.revoked_at ? "revoked" : "active";
+    const disabled = status === "revoked" ? "disabled" : "";
     return `<tr><td><code>${esc(k.id)}</code></td><td>${orDash(k.subject)}</td><td>${orDash(k.group)}</td>`
       + `<td><code>${esc(k.upstream_ref)}</code></td><td>${(k.models||[]).map(esc).join(", ")||'<span class="muted">any</span>'}</td>`
-      + `<td><span class="badge ${status}">${status}</span></td><td>${orDash(k.expires_at)}</td></tr>`;
+      + `<td><span class="badge ${status}">${status}</span></td><td>${orDash(k.expires_at)}</td>`
+      + `<td><button class="btn danger" data-needs-token ${disabled} onclick="revokeVkey('${esc(k.id)}')">Revoke</button></td></tr>`;
   }).join("");
   const vault = (d.vault || []).map(e => `<tr><td><code>${esc(e.credential_id)}</code></td>`
     + `<td>${esc(e.scheme)}</td><td>${orDash(e.base_url)}</td>`
-    + `<td><span class="badge ${e.status}">${esc(e.status)}</span></td></tr>`).join("");
-  return `<h3 class="muted" style="font-size:.8rem;text-transform:uppercase;letter-spacing:.04em;margin-bottom:.25rem">Virtual keys (masked — secrets are never stored)</h3>`
-    + `<table><thead><tr><th>id</th><th>subject</th><th>group</th><th>upstream</th><th>models</th><th>status</th><th>expires</th></tr></thead>`
-    + `<tbody>${vkeys || '<tr><td colspan=7>no virtual keys</td></tr>'}</tbody></table>`
-    + `<h3 class="muted" style="font-size:.8rem;text-transform:uppercase;letter-spacing:.04em;margin:1rem 0 .25rem">Provider credentials (vault metadata)</h3>`
-    + `<table><thead><tr><th>credential</th><th>scheme</th><th>base url</th><th>status</th></tr></thead>`
-    + `<tbody>${vault || '<tr><td colspan=4>no provider credentials</td></tr>'}</tbody></table>`;
+    + `<td><span class="badge ${e.status}">${esc(e.status)}</span></td>`
+    + `<td><button class="btn danger" data-needs-token onclick="revokeCred('${esc(e.provider)}','${esc(e.label)}')">Revoke</button></td></tr>`).join("");
+  return `<h3>Virtual keys (masked — secrets are never stored)</h3>`
+    + `<table><thead><tr><th>id</th><th>subject</th><th>group</th><th>upstream</th><th>models</th><th>status</th><th>expires</th><th></th></tr></thead>`
+    + `<tbody>${vkeys || '<tr><td colspan=8>no virtual keys</td></tr>'}</tbody></table>`
+    + `<details class="actions"><summary>Mint a virtual key</summary>
+        <div class="form-row">
+          <div class="field"><label>Upstream</label><input id="v-upstream" placeholder="ollama:default" style="width:9rem"></div>
+          <div class="field"><label>Subject</label><input id="v-subject" placeholder="alice"></div>
+          <div class="field"><label>Group</label><input id="v-group" placeholder="platform"></div>
+          <div class="field"><label>Models (csv)</label><input id="v-models" placeholder="optional"></div>
+          <div class="field"><label>Rate/min</label><input id="v-rate" type="number" placeholder="60" style="width:5rem"></div>
+          <button class="btn primary" data-needs-token onclick="mintVkey()">Mint</button>
+        </div>
+        <div id="v-result"></div>
+      </details>`
+    + `<h3 style="margin-top:1.5rem">Provider credentials (vault metadata)</h3>`
+    + `<table><thead><tr><th>credential</th><th>scheme</th><th>base url</th><th>status</th><th></th></tr></thead>`
+    + `<tbody>${vault || '<tr><td colspan=5>no provider credentials</td></tr>'}</tbody></table>`
+    + `<details class="actions"><summary>Add a credential</summary>
+        <div class="form-row">
+          <div class="field"><label>Provider</label><input id="c-provider" placeholder="ollama" style="width:7rem"></div>
+          <div class="field"><label>Label</label><input id="c-label" placeholder="default" style="width:7rem"></div>
+          <div class="field"><label>Base URL</label><input id="c-baseurl" placeholder="http://host:11434" style="width:13rem"></div>
+          <div class="field"><label>Secret</label><input id="c-secret" type="password" placeholder="empty is fine for keyless" style="width:12rem"></div>
+          <button class="btn primary" data-needs-token onclick="addCredential()">Add</button>
+        </div>
+        <div id="c-result"></div>
+      </details>`;
 }
-fetch("/dashboard/api/keys").then(r => r.ok ? r.json() : null).then(d => {
-  document.getElementById("keys").innerHTML = d ? keysView(d) : "";
-}).catch(() => {});
+function loadKeys() {
+  fetch("/dashboard/api/keys").then(r => r.ok ? r.json() : null).then(d => {
+    document.getElementById("keys").innerHTML = d ? keysView(d) : "";
+    refreshTokenState();
+  }).catch(() => {});
+}
+async function revokeVkey(id) {
+  if (!(await adminCall("DELETE", `/admin/vkeys/${encodeURIComponent(id)}`))) return;
+  toast("Virtual key revoked", true); loadKeys();
+}
+async function revokeCred(provider, label) {
+  if (!(await adminCall("DELETE", `/admin/keys/${encodeURIComponent(provider)}/${encodeURIComponent(label)}`))) return;
+  toast("Credential revoked", true); loadKeys();
+}
+async function mintVkey() {
+  const models = document.getElementById("v-models").value.trim();
+  const rate = document.getElementById("v-rate").value;
+  const body = {
+    upstream: document.getElementById("v-upstream").value.trim(),
+    subject: document.getElementById("v-subject").value.trim() || null,
+    group: document.getElementById("v-group").value.trim() || null,
+    models: models ? models.split(",").map(s => s.trim()).filter(Boolean) : null,
+    rate_limit_per_min: rate ? Number(rate) : null,
+  };
+  const data = await adminCall("POST", "/admin/keys/share", body);
+  if (!data) return;
+  document.getElementById("v-result").innerHTML =
+    `<div class="callout ok">Minted — copy now, shown once: <code>${esc(data.virtual_key)}</code></div>`;
+  loadKeys();
+}
+async function addCredential() {
+  const body = {
+    provider: document.getElementById("c-provider").value.trim(),
+    label: document.getElementById("c-label").value.trim() || null,
+    base_url: document.getElementById("c-baseurl").value.trim() || null,
+    secret: document.getElementById("c-secret").value,
+  };
+  const data = await adminCall("POST", "/admin/keys", body);
+  if (!data) return;
+  document.getElementById("c-result").innerHTML = `<div class="callout ok">Registered ${esc(data.credential_id || "")}</div>`;
+  loadKeys();
+}
 
 // Budgets: spent-vs-limit bar + window + policy. Neutral tokens.
 function budgetsView(d) {
@@ -493,32 +1075,123 @@ function budgetsView(d) {
       + `<td>${esc(b.window)}</td><td>${esc(b.policy)}</td></tr>`;
   }).join("");
   return `<table><thead><tr><th>scope</th><th class="num">spent / limit (tokens)</th><th>utilization</th><th>window</th><th>policy</th></tr></thead>`
-    + `<tbody>${rows || '<tr><td colspan=5">no budgets configured</td></tr>'}</tbody></table>`;
+    + `<tbody>${rows || '<tr><td colspan=5>no budgets configured</td></tr>'}</tbody></table>`;
 }
-fetch("/dashboard/api/budgets").then(r => r.ok ? r.json() : { budgets: [] }).then(d => {
-  document.getElementById("budgets").innerHTML = budgetsView(d);
-}).catch(() => { document.getElementById("budgets").innerHTML = ""; });
+function loadBudgets() {
+  fetch("/dashboard/api/budgets").then(r => r.ok ? r.json() : { budgets: [] }).then(d => {
+    document.getElementById("budgets").innerHTML = budgetsView(d);
+  }).catch(() => { document.getElementById("budgets").innerHTML =
+    '<p class="muted">usage store not configured (set SANDHI_STORE).</p>'; });
+}
+async function setBudget() {
+  const body = {
+    scope: document.getElementById("b-scope").value.trim(),
+    limit_tokens: Number(document.getElementById("b-limit").value || 0),
+    window: document.getElementById("b-window").value,
+    policy: document.getElementById("b-policy").value,
+  };
+  const data = await adminCall("POST", "/admin/budget", body);
+  if (!data) return;
+  document.getElementById("b-result").innerHTML = `<div class="callout ok">Budget set for ${esc(body.scope)}</div>`;
+  loadBudgets();
+}
 
-// Alerts: fired first, then all configured rules.
 function alertRow(a) {
-  const fired = a.last_fired_at ? `<span class="badge active">fired</span> ${esc(a.last_fired_at)}` : '<span class="muted">—</span>';
+  const fired = a.last_fired_at
+    ? `<span style="color:var(--warn)">${esc(a.last_fired_at)}</span>` : '<span class="muted">never</span>';
+  const ackBtn = a.last_fired_at
+    ? `<button class="btn" data-needs-token onclick="ackAlert('${esc(a.id)}')">Ack</button>` : "";
   return `<tr ${a.last_fired_at ? 'class="fired"' : ''}><td><code>${esc(a.id)}</code></td>`
     + `<td><code>${esc(a.scope)}</code></td><td class="num">${esc(a.threshold_pct)}%</td>`
-    + `<td>${esc(a.channel)}</td><td>${fired}</td></tr>`;
+    + `<td>${esc(a.channel)}</td><td>${fired}</td><td>${ackBtn}</td></tr>`;
 }
 function alertsView(d) {
   const fired = (d.fired || []).map(alertRow).join("");
   const rules = (d.rules || []).map(alertRow).join("");
-  return `<h3 class="muted" style="font-size:.8rem;text-transform:uppercase;letter-spacing:.04em;margin-bottom:.25rem">Recently fired</h3>`
-    + `<table><thead><tr><th>id</th><th>scope</th><th class="num">threshold</th><th>channel</th><th>last fired</th></tr></thead>`
-    + `<tbody>${fired || '<tr><td colspan=5">none fired</td></tr>'}</tbody></table>`
-    + `<h3 class="muted" style="font-size:.8rem;text-transform:uppercase;letter-spacing:.04em;margin:1rem 0 .25rem">All configured rules</h3>`
-    + `<table><thead><tr><th>id</th><th>scope</th><th class="num">threshold</th><th>channel</th><th>last fired</th></tr></thead>`
-    + `<tbody>${rules || '<tr><td colspan=5">no rules configured</td></tr>'}</tbody></table>`;
+  return `<h3>Recently fired</h3>`
+    + `<table><thead><tr><th>id</th><th>scope</th><th class="num">threshold</th><th>channel</th><th>last fired</th><th></th></tr></thead>`
+    + `<tbody>${fired || '<tr><td colspan=6>none fired</td></tr>'}</tbody></table>`
+    + `<h3 style="margin-top:1.5rem">All configured rules</h3>`
+    + `<table><thead><tr><th>id</th><th>scope</th><th class="num">threshold</th><th>channel</th><th>last fired</th><th></th></tr></thead>`
+    + `<tbody>${rules || '<tr><td colspan=6>no rules configured</td></tr>'}</tbody></table>`;
 }
-fetch("/dashboard/api/alerts").then(r => r.ok ? r.json() : null).then(d => {
-  document.getElementById("alerts").innerHTML = d ? alertsView(d) : "";
-}).catch(() => {});
+function loadAlerts() {
+  fetch("/dashboard/api/alerts").then(r => r.ok ? r.json() : null).then(d => {
+    document.getElementById("alerts").innerHTML = d ? alertsView(d) : "";
+    refreshTokenState();
+  }).catch(() => {});
+}
+async function ackAlert(id) {
+  if (!(await adminCall("POST", `/admin/alerts/${encodeURIComponent(id)}/ack`))) return;
+  toast("Alert acknowledged", true); loadAlerts();
+}
+
+// Declarative config: preview needs the admin token just to READ (config_preview is
+// admin-gated, unlike the other read-only dashboard panels) since it reflects live vault/vkey
+// state, not just masked metadata. Apply is additive-only server-side — see config.rs.
+const actionBadge = a => {
+  const cls = a === "create" || a === "mint" ? "active" : (a === "update" ? "" : "revoked");
+  return `<span class="badge ${cls}" style="${cls ? '' : 'color:var(--muted);background:var(--border-soft)'}">${esc(a)}</span>`;
+};
+function configPlanTable(title, rows, cols) {
+  const body = rows.map(r => `<tr>${cols.map(c => `<td>${orDash(r[c])}</td>`).join("")}<td>${actionBadge(r.action)}</td></tr>`).join("");
+  return `<h3>${title}</h3><table><thead><tr>${cols.map(c => `<th>${c}</th>`).join("")}<th>plan</th></tr></thead>`
+    + `<tbody>${body || `<tr><td colspan=${cols.length + 1}>none declared</td></tr>`}</tbody></table>`;
+}
+async function loadConfig() {
+  const el = document.getElementById("config");
+  if (!tokenEl.value) {
+    el.innerHTML = '<p class="muted">Enter the admin token above to preview the declarative config (config_preview reflects live credential/vkey state, so it\'s admin-gated like everything else that isn\'t masked-only).</p>';
+    return;
+  }
+  const data = await adminCall("GET", "/admin/config");
+  if (!data) { el.innerHTML = '<p class="muted">no config configured (set SANDHI_CONFIG on the proxy)</p>'; return; }
+  el.innerHTML = `<p class="muted" style="margin:0 0 .75rem">${esc(data.path)}</p>`
+    + configPlanTable("Providers", data.providers, ["credential_id", "base_url"])
+    + configPlanTable("Budgets", data.budgets, ["scope", "limit_tokens"])
+    + configPlanTable("Alerts", data.alerts, ["scope", "threshold_pct"])
+    + configPlanTable("Virtual keys", data.vkeys, ["upstream", "subject", "group"])
+    + `<div class="form-row" style="margin-top:1rem"><button class="btn primary" data-needs-token onclick="applyConfig()">Apply config</button></div>`
+    + `<div id="config-result"></div>`;
+  refreshTokenState();
+}
+async function applyConfig() {
+  const data = await adminCall("POST", "/admin/config/apply");
+  if (!data) return;
+  const n = (x) => (x || []).length;
+  let summary = `<div class="callout ok">Applied — providers: ${n(data.providers.applied)}, `
+    + `budgets: ${n(data.budgets.applied)}, alerts: ${n(data.alerts.created)} created / ${n(data.alerts.skipped)} already satisfied, `
+    + `vkeys: ${n(data.vkeys.minted)} minted / ${n(data.vkeys.skipped)} already satisfied</div>`;
+  if (n(data.vkeys.minted)) {
+    summary += `<div class="callout info">New virtual keys — copy now, shown once:<br>`
+      + data.vkeys.minted.map(k => `<code>${esc(k.virtual_key)}</code> (${esc(k.upstream_ref)})`).join("<br>")
+      + `</div>`;
+  }
+  document.getElementById("config-result").innerHTML = summary;
+  loadConfig(); loadKeys(); loadBudgets(); loadAlerts();
+}
+
+// Run cost tree: recursive own-vs-rollup breakdown for one agentic run. Admin-gated (attribution
+// across a whole run can span multiple subjects, so it is treated like any other admin query).
+function renderNode(n) {
+  const kids = (n.children || []).map(renderNode).join("");
+  return `<li><div class="node"><span class="step">${esc(n.step_id)}</span>`
+    + `<span class="stat">own ${fmt(n.own && n.own.billable_tokens)} · subtree ${fmt(n.rollup && n.rollup.billable_tokens)} tok</span></div>`
+    + (kids ? `<ul>${kids}</ul>` : "") + `</li>`;
+}
+async function lookupRun() {
+  const id = document.getElementById("run-id").value.trim();
+  if (!id) return;
+  const data = await adminCall("GET", `/admin/usage/run/${encodeURIComponent(id)}`);
+  const el = document.getElementById("run-tree");
+  if (!data) { el.innerHTML = ""; return; }
+  const roots = (data.roots || []).map(renderNode).join("");
+  el.innerHTML = `<div class="callout info">Total: ${fmt(data.total && data.total.billable_tokens)} billable tokens across ${fmt(data.total && data.total.calls)} calls</div>`
+    + `<ul class="tree" style="margin-top:.6rem">${roots || '<li class="muted">no steps recorded for this run</li>'}</ul>`;
+}
+
+refreshTokenState();
+loadUsage(); loadKeys(); loadBudgets(); loadAlerts(); loadConfig();
 </script>
 </body>
 </html>
@@ -527,24 +1200,36 @@ fetch("/dashboard/api/alerts").then(r => r.ok ? r.json() : null).then(d => {
 async fn handle_openai(
     State(state): State<Arc<ProxyState>>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
+    let body = match request_body(body, IngressDialect::OpenAi) {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
     handle(state, headers, body, IngressDialect::OpenAi, None).await
 }
 
 async fn handle_anthropic(
     State(state): State<Arc<ProxyState>>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
+    let body = match request_body(body, IngressDialect::Anthropic) {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
     handle(state, headers, body, IngressDialect::Anthropic, None).await
 }
 
 async fn handle_responses(
     State(state): State<Arc<ProxyState>>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
+    let body = match request_body(body, IngressDialect::Responses) {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
     handle(state, headers, body, IngressDialect::Responses, None).await
 }
 
@@ -703,8 +1388,12 @@ async fn handle_gemini(
     State(state): State<Arc<ProxyState>>,
     axum::extract::Path(model_method): axum::extract::Path<String>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
+    let body = match request_body(body, IngressDialect::Gemini) {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
     // Split on the LAST colon: a model id may legitimately contain one (tuned models are
     // `tunedModels/x`), the method never does.
     let Some((model, method)) = model_method.rsplit_once(':') else {
@@ -739,6 +1428,24 @@ async fn handle_gemini(
         stream,
     };
     handle(state, headers, body, IngressDialect::Gemini, Some(route)).await
+}
+
+/// Convert Axum's body-buffering rejection into the caller's native SDK error envelope. A body
+/// limit enforced below the handler but rendered as plaintext is observable incompatibility for
+/// clients that otherwise see an OpenAI/Anthropic/Gemini-shaped API.
+fn request_body(
+    body: Result<Bytes, BytesRejection>,
+    dialect: IngressDialect,
+) -> Result<Bytes, Box<Response>> {
+    body.map_err(|rejection| {
+        let status = rejection.status();
+        let message = if status == StatusCode::PAYLOAD_TOO_LARGE {
+            "request body exceeds SANDHI_MAX_REQUEST_BODY_BYTES"
+        } else {
+            "could not read request body"
+        };
+        Box::new(ingress_error(dialect, status, message))
+    })
 }
 
 async fn handle(
@@ -930,14 +1637,10 @@ async fn handle(
     // A scope is "capped" (for output-bounding) only under a hard `Block` cap: a `Warn` soft cap
     // never rejects, so we do not shrink the client's request. Bounding output makes the ceiling
     // reservation enforceable when the client left `max_output_tokens` unset (ADR-0005 D1).
-    let capped = policy == Policy::Block
-        && state
-            .ledger
-            .lock()
-            .ok()
-            .and_then(|ledger| ledger.limit(&scope))
-            .is_some();
     let (ceiling, effective_max) = reservation_ceiling(&request);
+    // SQLite's transaction remains a synchronous correctness boundary, but it runs on Tokio's
+    // blocking pool so its busy timeout never parks an async scheduler worker.
+    let (capped, admission) = reserve_budget(&state, &scope, ceiling, policy).await;
     let inject_output_bound = capped && request.max_output_tokens.is_none();
     if inject_output_bound {
         request.max_output_tokens = Some(effective_max);
@@ -953,7 +1656,7 @@ async fn handle(
     } else {
         metrics::Plane::Translation
     };
-    let reservation = match reserve_budget(&state, &scope, ceiling, policy) {
+    let reservation = match admission {
         Admission::Leased(reservation) => Some(reservation),
         // Fail-open (Warn on a backend error): admit without a lease; the usage event still emits.
         Admission::Unmetered => {
@@ -1175,17 +1878,18 @@ async fn transparent_stream_response(
             "transparent plane requires a raw forwarder",
         );
     };
-    let mut upstream = match forwarder
+    let raw = match forwarder
         .forward_stream_metered(&upstream_path(provider.family(), gemini.as_ref()), body)
         .await
     {
-        Ok(stream) => stream,
+        Ok(raw) => raw,
         Err(err) => {
             accounting.set_outcome("error");
             accounting.finalize();
             return provider_error(&err, dialect, provider.slug(), full_error_detail);
         }
     };
+    let mut upstream = raw.stream;
 
     let body_stream = async_stream::stream! {
         let mut seen_usage = false;
@@ -1227,9 +1931,15 @@ async fn transparent_stream_response(
         accounting.finalize();
     };
 
-    Response::builder()
-        .status(StatusCode::OK)
-        .header("content-type", "text/event-stream")
+    let headers = sandhi_providers::raw::filter_response_headers(&raw.headers);
+    let mut builder = Response::builder().status(raw.status);
+    for (name, value) in headers.iter() {
+        builder = builder.header(name, value);
+    }
+    if !headers.contains_key("content-type") {
+        builder = builder.header("content-type", "text/event-stream");
+    }
+    builder
         .body(Body::from_stream(body_stream))
         .expect("valid streaming response")
 }
@@ -1248,13 +1958,50 @@ fn scope_policy(state: &ProxyState, scope: &str) -> Policy {
 /// Reserve a ceiling lease for one in-flight call (ADR-0005 D1). A poisoned ledger lock is treated
 /// as a backend failure and resolved by D6: `Warn` fails open (unmetered admit), `Block` fails
 /// closed (deny).
-fn reserve_budget(state: &ProxyState, scope: &str, ceiling: u64, policy: Policy) -> Admission {
-    match state.ledger.lock() {
-        Ok(mut ledger) => ledger.reserve(scope, ceiling, OffsetDateTime::now_utc(), policy),
-        Err(_) => match policy {
-            Policy::Warn => Admission::Unmetered,
-            Policy::Block => Admission::Denied,
-        },
+async fn reserve_budget(
+    state: &Arc<ProxyState>,
+    scope: &str,
+    ceiling: u64,
+    policy: Policy,
+) -> (bool, Admission) {
+    let state = Arc::clone(state);
+    let scope = scope.to_string();
+    match tokio::task::spawn_blocking(move || match state.ledger.lock() {
+        Ok(mut ledger) => {
+            let capped = policy == Policy::Block && ledger.limit(&scope).is_some();
+            let admission = ledger.reserve(&scope, ceiling, OffsetDateTime::now_utc(), policy);
+            (capped, admission)
+        }
+        Err(_) => (false, ledger_failure_admission(policy)),
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            tracing::error!(%error, "budget admission blocking task failed");
+            (false, ledger_failure_admission(policy))
+        }
+    }
+}
+
+fn ledger_failure_admission(policy: Policy) -> Admission {
+    match policy {
+        Policy::Warn => Admission::Unmetered,
+        Policy::Block => Admission::Denied,
+    }
+}
+
+/// Mark a synchronous correctness operation as blocking when running on Tokio's multithreaded
+/// runtime. Tests and embedders using a current-thread/no Tokio runtime execute inline instead;
+/// `block_in_place` would panic there.
+fn blocking_section<T>(operation: impl FnOnce() -> T) -> T {
+    let multithreaded = tokio::runtime::Handle::try_current()
+        .map(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+        .unwrap_or(false);
+    if multithreaded {
+        tokio::task::block_in_place(operation)
+    } else {
+        operation()
     }
 }
 
@@ -1354,7 +2101,13 @@ impl RequestAccounting {
         };
         if let Some(store) = &self.state.alert_store {
             for alert in &fired {
-                let _ = store.mark_fired(&alert.rule_id);
+                if let Some(writer) = &self.state.alert_writer {
+                    writer.mark_fired(alert.rule_id.clone());
+                } else {
+                    // In-process embeddings/tests may choose the direct store. The standalone
+                    // proxy always installs the bounded writer when persistence is configured.
+                    let _ = store.mark_fired(&alert.rule_id);
+                }
             }
         }
     }
@@ -1399,15 +2152,18 @@ impl RequestAccounting {
         }
         // Settle the lease by id (idempotent, ADR-0005 D2), then capture the post-settle spent for
         // the alert subsystem. Alerts evaluate only on a measured call.
-        let mut spent_after: Option<u64> = None;
-        if let Ok(mut ledger) = self.state.ledger.lock() {
-            if let Some(reservation) = &self.reservation {
-                ledger.settle(reservation, actual);
+        let spent_after = blocking_section(|| {
+            let mut spent_after: Option<u64> = None;
+            if let Ok(mut ledger) = self.state.ledger.lock() {
+                if let Some(reservation) = &self.reservation {
+                    ledger.settle(reservation, actual);
+                }
+                if measured {
+                    spent_after = Some(ledger.spent(&self.scope));
+                }
             }
-            if measured {
-                spent_after = Some(ledger.spent(&self.scope));
-            }
-        }
+            spent_after
+        });
         // P2: evaluate threshold alerts against the settled spend (best-effort — never breaks the
         // request). The configured limit comes from the budgets metadata map so a `Warn` scope (no
         // hard cap in the in-memory ledger) still has a threshold to measure against.
@@ -1758,6 +2514,49 @@ fn usage_event(
         usage.upstream_request_id.clone(),
     )
     .with_basis(usage.basis)
+    .with_latency(usage.duration_ms, usage.time_to_first_token_ms)
+}
+
+#[cfg(test)]
+mod usage_event_tests {
+    use super::*;
+    use sandhi_core::{RequestMetadataV1, UsageV2};
+
+    #[test]
+    fn latency_measured_at_the_adapter_boundary_survives_into_the_persisted_event() {
+        // TD-0009 P1's own acceptance criterion is "latency carries samples" — this was
+        // silently dropped because usage_event()'s builder chain never called
+        // .with_latency(), even though UsageV2 carries it (typed.rs stamps it
+        // unconditionally) and the store/query layer is fully built to consume it.
+        let usage = UsageV2 {
+            duration_ms: Some(1234),
+            time_to_first_token_ms: Some(56),
+            ..UsageV2::default()
+        };
+        let event = usage_event(
+            "ollama",
+            "gpt-oss:20b",
+            &RequestMetadataV1::default(),
+            &usage,
+        );
+        assert_eq!(event.duration_ms, Some(1234));
+        assert_eq!(event.time_to_first_token_ms, Some(56));
+    }
+
+    #[test]
+    fn absent_latency_stays_absent_not_zero() {
+        // Zero would read as "instant" on the dashboard's latency_cell(); None means
+        // "this provider/path never reported timing" and must render as "—" instead.
+        let usage = UsageV2::default();
+        let event = usage_event(
+            "ollama",
+            "gpt-oss:20b",
+            &RequestMetadataV1::default(),
+            &usage,
+        );
+        assert_eq!(event.duration_ms, None);
+        assert_eq!(event.time_to_first_token_ms, None);
+    }
 }
 
 fn now_rfc3339() -> String {
@@ -1864,6 +2663,7 @@ fn google_status(status: StatusCode) -> &'static str {
         StatusCode::FORBIDDEN => "PERMISSION_DENIED",
         StatusCode::NOT_FOUND => "NOT_FOUND",
         StatusCode::TOO_MANY_REQUESTS => "RESOURCE_EXHAUSTED",
+        StatusCode::PAYLOAD_TOO_LARGE => "RESOURCE_EXHAUSTED",
         StatusCode::NOT_IMPLEMENTED => "UNIMPLEMENTED",
         StatusCode::SERVICE_UNAVAILABLE => "UNAVAILABLE",
         StatusCode::GATEWAY_TIMEOUT => "DEADLINE_EXCEEDED",

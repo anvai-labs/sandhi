@@ -958,6 +958,276 @@ pub fn rehydrate_alerts(store: &AlertStore) -> AlertRegistry {
     registry
 }
 
+/// Read + parse the config file at `state.config_path`. Shared by the preview and apply routes
+/// so both ever see exactly the same parsed shape.
+#[allow(clippy::result_large_err)] // axum::Response is intentionally large; idiomatic shape.
+fn read_config_file(state: &ProxyState) -> Result<crate::config::SandhiFileConfig, Response> {
+    let Some(path) = &state.config_path else {
+        return Err(err(
+            StatusCode::NOT_FOUND,
+            "no config file configured (set SANDHI_CONFIG)",
+        ));
+    };
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("reading {}: {e}", path.display()),
+        )
+    })?;
+    serde_json::from_str(&text).map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("parsing {}: {e}", path.display()),
+        )
+    })
+}
+
+/// `GET /admin/config` — parse the declared config and report what `POST /admin/config/apply`
+/// would do, without doing it. Never returns secrets (the file never has them; this doesn't
+/// resolve `secret_env`/`webhook_env` at all — only whether each entry would be new or already
+/// satisfied).
+pub(crate) async fn config_preview(
+    State(state): State<Arc<ProxyState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(r) = require_admin(&state, &headers) {
+        return r;
+    }
+    let cfg = match read_config_file(&state) {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+
+    let existing_vault: Vec<Value> = state
+        .vault
+        .as_ref()
+        .and_then(|v| v.list().ok())
+        .unwrap_or_default()
+        .iter()
+        .map(|e| Value::String(e.credential_id()))
+        .collect();
+    let existing_budgets: std::collections::HashSet<String> = state
+        .budgets
+        .lock()
+        .expect("budgets poisoned")
+        .keys()
+        .cloned()
+        .collect();
+    let existing_alerts = state
+        .alert_store
+        .as_ref()
+        .and_then(|s| s.list().ok())
+        .unwrap_or_default();
+    let existing_vkeys = state
+        .vkeys
+        .as_ref()
+        .and_then(|s| s.list().ok())
+        .unwrap_or_default();
+
+    let providers_plan: Vec<Value> = cfg
+        .providers
+        .iter()
+        .map(|p| {
+            let id = format!("{}:{}", p.provider, p.label.as_deref().unwrap_or("default"));
+            let action = if existing_vault.contains(&Value::String(id.clone())) {
+                "update"
+            } else {
+                "create"
+            };
+            json!({ "credential_id": id, "base_url": p.base_url, "action": action })
+        })
+        .collect();
+    let budgets_plan: Vec<Value> = cfg
+        .budgets
+        .iter()
+        .map(|b| {
+            let action = if existing_budgets.contains(&b.scope) {
+                "update"
+            } else {
+                "create"
+            };
+            json!({ "scope": b.scope, "limit_tokens": b.limit_tokens, "action": action })
+        })
+        .collect();
+    let alerts_plan: Vec<Value> = cfg
+        .alerts
+        .iter()
+        .map(|a| {
+            // Preview can't know the resolved channel without reading env — compare against both
+            // possible shapes is overkill for a preview; report "pending" and let apply resolve it.
+            let action = if existing_alerts
+                .iter()
+                .any(|r| r.scope == a.scope && r.threshold_pct == a.threshold_pct)
+            {
+                "likely satisfied"
+            } else {
+                "create"
+            };
+            json!({ "scope": a.scope, "threshold_pct": a.threshold_pct, "action": action })
+        })
+        .collect();
+    let vkeys_plan: Vec<Value> = cfg
+        .vkeys
+        .iter()
+        .map(|v| {
+            let action = if crate::config::vkey_already_applied(&existing_vkeys, v) { "already satisfied" } else { "mint" };
+            json!({ "upstream": v.upstream, "subject": v.subject, "group": v.group, "action": action })
+        })
+        .collect();
+
+    Json(json!({
+        "path": state.config_path.as_ref().map(|p| p.display().to_string()),
+        "providers": providers_plan,
+        "budgets": budgets_plan,
+        "alerts": alerts_plan,
+        "vkeys": vkeys_plan,
+    }))
+    .into_response()
+}
+
+/// `POST /admin/config/apply` — additive-only: creates/updates everything declared, never
+/// deletes or revokes anything missing from the file (see `config` module docs for why).
+/// Secrets are resolved from THIS PROCESS's environment via `secret_env`/`webhook_env` — never
+/// read from the file, which never carries them.
+pub(crate) async fn config_apply(
+    State(state): State<Arc<ProxyState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(r) = require_admin(&state, &headers) {
+        return r;
+    }
+    let cfg = match read_config_file(&state) {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    let getenv = |k: &str| std::env::var(k).ok();
+
+    let mut providers_applied = Vec::new();
+    for p in &cfg.providers {
+        let secret = crate::config::resolve_secret(&p.secret_env, getenv);
+        let req = admin::AddKeyRequest {
+            provider: p.provider.clone(),
+            label: p.label.clone(),
+            scheme: p.scheme.clone(),
+            base_url: p.base_url.clone(),
+            secret,
+        };
+        let resp = add_key(State(state.clone()), headers.clone(), Json(req)).await;
+        if resp.status().is_success() {
+            providers_applied.push(json!({ "provider": p.provider, "label": p.label }));
+        }
+    }
+
+    let mut alerts_created = Vec::new();
+    let mut alerts_skipped = Vec::new();
+
+    let mut budgets_applied = Vec::new();
+    for b in &cfg.budgets {
+        let req = admin::SetBudgetRequest {
+            scope: b.scope.clone(),
+            limit_tokens: b.limit_tokens,
+            window: b.window.clone(),
+            policy: b.policy.clone(),
+            alert_thresholds: None, // handled below, so it shares the same dedup + reporting as cfg.alerts
+        };
+        let resp = set_budget(State(state.clone()), headers.clone(), Json(req)).await;
+        if resp.status().is_success() {
+            budgets_applied.push(json!({ "scope": b.scope, "limit_tokens": b.limit_tokens }));
+        }
+        for &pct in b.alert_thresholds.iter().flatten() {
+            match apply_one_alert(&state, &b.scope, pct, &None, getenv) {
+                Some(rec) => alerts_created.push(alert_rule_response(&rec)),
+                None => alerts_skipped.push(json!({ "scope": b.scope, "threshold_pct": pct })),
+            }
+        }
+    }
+
+    for a in &cfg.alerts {
+        match apply_one_alert(&state, &a.scope, a.threshold_pct, &a.webhook_env, getenv) {
+            Some(rec) => alerts_created.push(alert_rule_response(&rec)),
+            None => {
+                alerts_skipped.push(json!({ "scope": a.scope, "threshold_pct": a.threshold_pct }))
+            }
+        }
+    }
+
+    let mut vkeys_minted = Vec::new();
+    let mut vkeys_skipped = Vec::new();
+    for v in &cfg.vkeys {
+        let existing = state
+            .vkeys
+            .as_ref()
+            .and_then(|s| s.list().ok())
+            .unwrap_or_default();
+        if crate::config::vkey_already_applied(&existing, v) {
+            vkeys_skipped
+                .push(json!({ "upstream": v.upstream, "subject": v.subject, "group": v.group }));
+            continue;
+        }
+        let req = admin::ShareKeyRequest {
+            upstream: v.upstream.clone(),
+            subject: v.subject.clone(),
+            group: v.group.clone(),
+            models: v.models.clone(),
+            budget_scope: None,
+            expires_at: None,
+            rate_limit_per_min: v.rate_limit_per_min,
+        };
+        let resp = share_key(State(state.clone()), headers.clone(), Json(req)).await;
+        if resp.status().is_success() {
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap_or_default();
+            if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
+                // Shown once, same convention as a direct `keys share` call — the caller (dashboard
+                // or CLI) is responsible for capturing it; Sandhi never stores the plaintext.
+                vkeys_minted.push(val);
+            }
+        }
+    }
+
+    Json(json!({
+        "providers": { "applied": providers_applied },
+        "budgets": { "applied": budgets_applied },
+        "alerts": { "created": alerts_created, "skipped": alerts_skipped },
+        "vkeys": { "minted": vkeys_minted, "skipped": vkeys_skipped },
+    }))
+    .into_response()
+}
+
+/// Shared by both the top-level `alerts[]` config entries and a budget's inline
+/// `alert_thresholds`, so both paths get the same dedup (`POST /admin/alerts` has no upsert
+/// semantics — see `config::alert_already_applied`).
+fn apply_one_alert(
+    state: &ProxyState,
+    scope: &str,
+    threshold_pct: u8,
+    webhook_env: &Option<String>,
+    getenv: impl Fn(&str) -> Option<String> + Copy,
+) -> Option<AlertRuleRecord> {
+    let channel_str = crate::config::resolve_channel(webhook_env, getenv);
+    let existing = state
+        .alert_store
+        .as_ref()
+        .and_then(|s| s.list().ok())
+        .unwrap_or_default();
+    let entry = crate::config::AlertEntry {
+        scope: scope.to_string(),
+        threshold_pct,
+        webhook_env: webhook_env.clone(),
+    };
+    if crate::config::alert_already_applied(&existing, &entry, &channel_str) {
+        return None;
+    }
+    let channel = channel_str
+        .strip_prefix("webhook:")
+        .map(|url| AlertChannel::Webhook {
+            url: url.to_string(),
+        })
+        .unwrap_or(AlertChannel::Log);
+    create_alert_for_scope(state, scope, threshold_pct, channel)
+}
+
 #[cfg(test)]
 mod ct_tests {
     use super::constant_time_eq;

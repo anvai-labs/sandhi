@@ -103,9 +103,30 @@ pub fn encode_ollama_request(request: &ChatRequestV1) -> Result<Value, ProviderE
         body.insert("options".into(), Value::Object(options));
     }
     if let Some(format) = &request.response_format {
-        body.insert("format".into(), format.clone());
+        body.insert("format".into(), normalize_response_format(format));
     }
     Ok(Value::Object(body))
+}
+
+/// Normalize a client-supplied `response_format` into what Ollama's `format` field expects: a
+/// bare JSON schema object, or the string `"json"` for unstructured-but-valid-JSON mode.
+///
+/// `response_format` on `ChatRequestV1` is a raw passthrough of whatever the ingress dialect
+/// decoded (see `sandhi-proxy::codec`), so an OpenAI Chat Completions client arrives here still
+/// wrapped as `{"type":"json_schema","json_schema":{"name":..,"schema":{..}}}` — Ollama wants
+/// just the inner `schema`. OpenAI's schema-less `{"type":"json_object"}` mode has no equivalent
+/// shape; Ollama's analogous "valid JSON, no schema" mode is the bare string `"json"`. Any other
+/// value (already a bare schema, or an Ollama-native string) passes through untouched.
+fn normalize_response_format(format: &Value) -> Value {
+    match format.get("type").and_then(Value::as_str) {
+        Some("json_schema") => format
+            .get("json_schema")
+            .and_then(|j| j.get("schema"))
+            .cloned()
+            .unwrap_or_else(|| format.clone()),
+        Some("json_object") => Value::String("json".into()),
+        _ => format.clone(),
+    }
 }
 
 fn encode_message(message: &ChatMessageV1) -> Result<Value, ProviderError> {
@@ -383,5 +404,51 @@ mod tests {
         );
         assert_eq!(response.output.tool_calls[0].arguments, "{\"q\":1}");
         assert_eq!(response.usage.tokens_out, 3);
+    }
+
+    #[test]
+    fn openai_json_schema_wrapper_is_unwrapped_to_bare_schema() {
+        let request: ChatRequestV1 = serde_json::from_value(json!({
+            "model": "llama3",
+            "messages": [{"role": "user", "content": "hi"}],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "categorize",
+                    "schema": {"type": "object", "properties": {"category": {"type": "string"}}}
+                }
+            }
+        }))
+        .unwrap();
+        let body = encode_ollama_request(&request).unwrap();
+        assert_eq!(
+            body["format"],
+            json!({"type": "object", "properties": {"category": {"type": "string"}}})
+        );
+    }
+
+    #[test]
+    fn openai_json_object_mode_maps_to_ollama_json_string() {
+        let request: ChatRequestV1 = serde_json::from_value(json!({
+            "model": "llama3",
+            "messages": [{"role": "user", "content": "hi"}],
+            "response_format": {"type": "json_object"}
+        }))
+        .unwrap();
+        let body = encode_ollama_request(&request).unwrap();
+        assert_eq!(body["format"], json!("json"));
+    }
+
+    #[test]
+    fn bare_ollama_native_schema_passes_through_unchanged() {
+        let schema = json!({"type": "object", "properties": {"x": {"type": "string"}}});
+        let request: ChatRequestV1 = serde_json::from_value(json!({
+            "model": "llama3",
+            "messages": [{"role": "user", "content": "hi"}],
+            "response_format": schema
+        }))
+        .unwrap();
+        let body = encode_ollama_request(&request).unwrap();
+        assert_eq!(body["format"], schema);
     }
 }

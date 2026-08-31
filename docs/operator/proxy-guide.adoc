@@ -135,6 +135,30 @@ sandhi-proxy listening on http://127.0.0.1:8787  (POST /v1/chat/completions | /v
 | _(unset → redacted)_
 | Set to exactly `full` to surface full upstream errors to clients. Default redacts to code/status/request-id; server logs always carry the full error.
 
+| `SANDHI_MAX_REQUEST_BODY_BYTES`
+| `2097152` (2 MiB)
+| Maximum request body buffered; AI ingress routes return their dialect-shaped `413` when exceeded. Raise deliberately for inline multimodal payloads (for example, `33554432` for 32 MiB). Application-owned request-body memory is bounded by this value multiplied by `SANDHI_MAX_IN_FLIGHT_AI_REQUESTS`.
+
+| `SANDHI_MAX_IN_FLIGHT_AI_REQUESTS`
+| `64`
+| Maximum AI requests admitted concurrently to body extraction and dispatch. Waiting calls remain outside the application body buffer; health, metrics, discovery, and admin routes do not consume this pool.
+
+| `SANDHI_USAGE_BUFFER_CAPACITY`
+| `1024`
+| Bounded background queue for durable usage-event writes. A full queue drops and counts new observational events instead of blocking model responses or growing without bound; accepted events drain during graceful shutdown.
+
+| `SANDHI_ALERT_BUFFER_CAPACITY`
+| `256`
+| Bounded background queue for persisting alert `last_fired_at` dedup state. Live alert evaluation remains immediate; persistence drains during graceful shutdown.
+
+| `SANDHI_SHUTDOWN_GRACE_SECS`
+| `30`
+| Maximum drain time after SIGINT/SIGTERM. When it expires, remaining streams are cancelled and their accounting finalizers settle the best partial measurement available.
+
+| `SANDHI_REPLICA_COUNT`
+| `1`
+| Declared deployment topology. Values greater than `1` fail startup because the shipped enforcement ledger and rate limiter are single-node; this prevents an apparently valid multi-replica deployment from weakening hard caps or multiplying rate limits.
+
 | `SANDHI_LOG` (or `RUST_LOG`)
 | `sandhi_proxy=info,…`
 | tracing filter; logs go to stderr.
@@ -232,8 +256,9 @@ plaintext — if you lose it, `vkeys revoke <id>` the old one and mint a new one
 
 [NOTE]
 ====
-Per-minute rate limits are held **in-memory**. With N proxy replicas the effective limit is
-N × the configured value (a shared/HA ledger backend is the planned follow-up).
+Per-minute rate limits are held **in-memory**, and SQLite budget enforcement is durable but
+single-node. The binary refuses `SANDHI_REPLICA_COUNT > 1`; deploy one proxy replica until a
+shared backend satisfies the enforcement conformance suite.
 ====
 
 
