@@ -43,10 +43,14 @@ futures-util = "0.3"
 async-stream = "0.3"
 bytes = "1"
 tower = { version = "0.5", default-features = false }
-# Direct (not just transitive): the explicit accept loop builds its own
-# hyper-util auto::Builder per connection (TD-0014 P3), and the trusted-proxy
-# allowlist parses CIDRs.
-hyper-util = { version = "0.1", features = ["server", "server-auto", "server-graceful", "http1", "service", "tokio"] }
+# Direct (not just transitive): the explicit accept loop serves each
+# connection with hyper's http1 builder directly (TD-0014 P3) — deliberately
+# NOT hyper-util's auto builder, whose 24-byte h2c preface sniff buffers reads
+# before hyper's header timer starts, exempting silent connections from the
+# slowloris defence (adversarial-review finding 3). Sandhi's listener is
+# HTTP/1-only until TD-0017 adds TLS/h2 with its own timeouts.
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["server-graceful", "service", "tokio"] }
 ipnet = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -102,6 +102,11 @@ pub const DEFAULT_HEADER_READ_TIMEOUT_SECS: u64 = 30;
 /// connection; 256 KiB is ample for header-heavy AI requests because bodies stream.
 const CONNECTION_READ_BUF_BYTES: usize = 256 * 1024;
 
+/// Pause after a failed accept (TD-0014 P3): accept errors under overload fail
+/// instantly while the listener stays readable, so without a pause the loop
+/// busy-spins exactly when it should be shedding.
+const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
+
 /// Shared server state: the virtual-key store, the budget ledger, the usage sink, and the
 /// registry of configured upstream providers (each already holding its real credential).
 pub struct ProxyState {
@@ -318,9 +323,10 @@ pub(crate) struct ConnectionPolicy {
     /// 0 disables the per-IP cap. Behind a trusted proxy every connection
     /// shares the proxy's IP at accept time (headers are not parsed yet), so
     /// deployments behind one should disable this and let the proxy do it.
+    /// Trusted-proxy CIDRs are NOT here: `X-Forwarded-For` is per-request and
+    /// is resolved by the `resolve_client_ip` middleware from `ProxyState`.
     pub max_per_ip: usize,
     pub header_read_timeout: Duration,
-    pub trusted_proxies: Vec<ipnet::IpNet>,
     pub metrics: Arc<crate::metrics::Metrics>,
 }
 
@@ -330,7 +336,6 @@ impl Default for ConnectionPolicy {
             max_connections: DEFAULT_MAX_CONNECTIONS,
             max_per_ip: DEFAULT_MAX_CONNECTIONS_PER_IP,
             header_read_timeout: Duration::from_secs(DEFAULT_HEADER_READ_TIMEOUT_SECS),
-            trusted_proxies: Vec::new(),
             metrics: Arc::new(crate::metrics::Metrics::new()),
         }
     }
@@ -342,7 +347,6 @@ impl ConnectionPolicy {
             max_connections: state.max_connections.max(1),
             max_per_ip: state.max_connections_per_ip,
             header_read_timeout: Duration::from_secs(state.header_read_timeout_secs.max(1)),
-            trusted_proxies: state.trusted_proxies.clone(),
             metrics: Arc::clone(&state.metrics),
         }
     }
@@ -411,17 +415,49 @@ impl Drop for PerIpSlot {
     }
 }
 
+/// The connection's peer address, inserted per connection at accept time
+/// (TD-0014 P3, G19). Deliberately minimal: it never reaches
+/// `RequestMetadataV1`, usage events, or metric labels (TD-0011 D2 — an IP is
+/// unbounded cardinality and personal data).
 #[derive(Debug, Clone)]
-pub(crate) struct ConnCtx {
-    // Read by future consumers (per-IP rate limits, TD-0020 gauges, TD-0017
-    // ALPN/SNI); P3 only populates it. #[allow] is the honest marker until a
-    // consumer exists — deleted the day one does.
+pub(crate) struct PeerCtx {
     #[allow(dead_code)]
     pub peer: std::net::IpAddr,
-    /// Believed client IP — `peer` itself unless the peer is a trusted proxy
-    /// that supplied `X-Forwarded-For`.
+}
+
+/// The believed client IP for one REQUEST, inserted by the `resolve_client_ip`
+/// middleware after the trusted-proxy check. Distinct from [`PeerCtx`] because
+/// `X-Forwarded-For` is per-request: the accept loop cannot see headers, which
+/// is exactly how an earlier draft shipped dead wiring (adversarial review,
+/// finding 1).
+#[derive(Debug, Clone)]
+pub(crate) struct ClientAddr {
     #[allow(dead_code)]
     pub client: std::net::IpAddr,
+}
+
+/// Per-request trusted-proxy resolution: believe `X-Forwarded-For` only when
+/// the connection's peer is an allowlisted proxy. Middleware, not accept-loop
+/// logic, because headers do not exist at accept time.
+pub(crate) async fn resolve_client_ip(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ProxyState>>,
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let peer = request.extensions().get::<PeerCtx>().map(|peer| peer.peer);
+    let client = peer
+        .and_then(|peer| {
+            let forwarded = request
+                .headers()
+                .get("x-forwarded-for")
+                .and_then(|value| value.to_str().ok());
+            resolve_forwarded_for(peer, forwarded, &state.trusted_proxies)
+        })
+        .or(peer);
+    if let Some(client) = client {
+        request.extensions_mut().insert(ClientAddr { client });
+    }
+    next.run(request).await
 }
 
 pub fn build_app(state: Arc<ProxyState>) -> Router {
@@ -436,7 +472,13 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         .route("/v1beta/models/:model_method", post(handle_gemini))
         // Admission wraps extraction: waiting requests retain only transport-level buffers rather
         // than each allocating `SANDHI_MAX_REQUEST_BODY_BYTES` in application memory.
-        .layer(AdmissionLayer::new(state.max_in_flight_ai_requests.max(1)));
+        .layer(AdmissionLayer::new(state.max_in_flight_ai_requests.max(1)))
+        // TD-0014 P3 (G19): per-request trusted-proxy resolution —
+        // X-Forwarded-For believed only from SANDHI_TRUSTED_PROXIES peers.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            resolve_client_ip,
+        ));
     Router::new()
         .route("/healthz", get(health))
         .route("/catalog/models", get(catalog_models))
@@ -556,8 +598,8 @@ async fn serve_router_listener_with_shutdown<F>(
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    use hyper_util::rt::{TokioExecutor, TokioTimer};
-    use hyper_util::server::conn::auto::Builder as HttpBuilder;
+    use hyper::server::conn::http1;
+    use hyper_util::rt::TokioTimer;
     use hyper_util::service::TowerToHyperService;
     use std::collections::HashMap;
 
@@ -573,19 +615,27 @@ where
         tokio::select! {
             _ = &mut shutdown => break,
             accepted = listener.accept() => {
-                let (stream, peer) = match accepted {
+                let (stream, peer_addr) = match accepted {
                     Ok(pair) => pair,
                     Err(error) => {
+                        // Accept errors under overload (EMFILE) fail instantly
+                        // while the listener stays readable: without a pause
+                        // this loop hot-spins exactly when it should shed.
+                        tokio::time::sleep(ACCEPT_ERROR_BACKOFF).await;
                         tracing::warn!(%error, "accept failed");
                         continue;
                     }
                 };
+                // Canonicalize once: v4-mapped IPv6 peers must share buckets
+                // and allowlist entries with their v4 form.
+                let peer = std::net::SocketAddr::new(peer_addr.ip().to_canonical(), peer_addr.port());
 
                 // Shed BEFORE any allocation or service build: over-cap and
                 // over-per-IP connections are closed without a response. The
                 // AI admission path is where dialect-shaped shedding happens;
                 // this is the cheaper, pre-authentication backpressure.
                 let Ok(permit) = slots.clone().try_acquire_owned() else {
+                    policy.metrics.connection_shed();
                     drop(stream);
                     continue;
                 };
@@ -594,20 +644,20 @@ where
                     && ip_count.get(&peer.ip()).copied().unwrap_or(0) >= policy.max_per_ip
                 {
                     drop(ip_count);
+                    policy.metrics.connection_shed();
                     drop(permit);
                     drop(stream);
                     continue;
                 }
                 *ip_count.entry(peer.ip()).or_insert(0) += 1;
                 drop(ip_count);
-                let per_ip = Arc::clone(&per_ip);
-                let client = resolve_forwarded_for(
-                    peer.ip(),
-                    None,
-                    &policy.trusted_proxies,
-                )
-                .unwrap_or(peer.ip());
-                let ctx = Arc::new(ConnCtx { peer: peer.ip(), client });
+                // Built HERE, before the task exists: an aborted never-polled
+                // task would never run a guard constructed inside it, leaking
+                // the per-IP slot (adversarial review, finding 5).
+                let per_ip_slot = PerIpSlot {
+                    per_ip: Arc::clone(&per_ip),
+                    ip: peer.ip(),
+                };
 
                 let watcher = graceful.watcher();
                 let metrics = Arc::clone(&policy.metrics);
@@ -616,26 +666,30 @@ where
                 // it, because the connection borrows its builder.
                 tasks.spawn(async move {
                     let _permit = permit;
+                    let _per_ip_slot = per_ip_slot;
                     let _conn_open = metrics.connection_open_guard();
-                    // The per-IP slot is released when the connection task
-                    // ends — completion, disconnect, or drain abort.
-                    let _per_ip_slot = PerIpSlot { per_ip, ip: peer.ip() };
-                    let service =
-                        TowerToHyperService::new(app.layer(axum::Extension(ctx)));
-                    // HTTP/1 knobs hang off the `http1()` sub-builder; the auto
-                    // builder still picks the protocol.
-                    // header_read_timeout (and every other timeout) requires a
-                    // Timer on the http1 builder — hyper panics without one.
-                    let mut builder = HttpBuilder::new(TokioExecutor::new());
-                    let mut http1 = builder.http1();
-                    http1.timer(TokioTimer::new());
-                    let conn = http1
+                    let service = TowerToHyperService::new(
+                        app.layer(axum::Extension(PeerCtx { peer: peer.ip() })),
+                    );
+                    // hyper's http1 builder directly — NOT hyper-util's auto
+                    // builder, whose h2c preface sniff buffered reads before
+                    // the header timer armed, exempting silent connections from
+                    // the slowloris defence (review finding 3). See Cargo.toml.
+                    let mut builder = http1::Builder::new();
+                    builder
+                        .timer(TokioTimer::new())
                         .header_read_timeout(Some(policy.header_read_timeout))
-                        .max_buf_size(CONNECTION_READ_BUF_BYTES)
-                        .serve_connection_with_upgrades(
-                            hyper_util::rt::TokioIo::new(stream),
-                            service,
-                        );
+                        .max_buf_size(CONNECTION_READ_BUF_BYTES);
+                    // Upgrades (websocket-over-h1) would wrap this in
+                    // `.with_upgrades()` — but hyper-util's GracefulConnection
+                    // does not cover the upgradeable wrapper, and no route
+                    // upgrades today. TD-0017 (TLS/h2) reintroduces upgrades
+                    // WITH a pre-first-byte timeout, which is what the
+                    // auto-builder's silent sniffing removed (finding 3).
+                    let conn = builder.serve_connection(
+                        hyper_util::rt::TokioIo::new(stream),
+                        service,
+                    );
                     let _ = watcher.watch(conn).await;
                 });
             }
@@ -3489,6 +3543,76 @@ mod connection_policy_tests {
     #[should_panic(expected = "not a valid CIDR")]
     fn trusted_proxy_spec_rejects_garbage_loudly() {
         parse_trusted_proxies("10.0.0.0/8,bogus");
+    }
+
+    /// The WIRING test for the pure function above (adversarial review,
+    /// finding 1): the pure function was tested while the middleware was
+    /// shipped with a hard-coded `None` — dead wiring the pure tests could not
+    /// see. This drives the REAL `resolve_client_ip` middleware through a real
+    /// Router with a manual PeerCtx (as the accept loop inserts it).
+    #[tokio::test]
+    async fn client_ip_middleware_believes_xff_only_from_trusted_proxies() {
+        use axum::extract::Request;
+        use tower::ServiceExt;
+
+        let mut state = ProxyState::new(
+            KeyStore::new(),
+            crate::ProxyLedger::Memory(sandhi_core::InMemoryLedger::new()),
+            std::sync::Arc::new(sandhi_core::InMemorySink::new()),
+            HashMap::new(),
+            None,
+        );
+        state.trusted_proxies = parse_trusted_proxies("10.0.0.0/8");
+        let state = std::sync::Arc::new(state);
+
+        let app = Router::new()
+            .route(
+                "/probe",
+                axum::routing::get(|Extension(client): Extension<ClientAddr>| async move {
+                    client.client.to_string()
+                }),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                resolve_client_ip,
+            ))
+            .with_state(state);
+
+        let probe = |peer: std::net::IpAddr, forwarded: Option<&str>| {
+            let mut req = Request::builder()
+                .uri("/probe")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            req.extensions_mut().insert(PeerCtx { peer });
+            if let Some(header) = forwarded {
+                req.headers_mut()
+                    .insert("x-forwarded-for", header.parse().unwrap());
+            }
+            app.clone().oneshot(req)
+        };
+
+        // Untrusted peer: the header is attacker-controlled and NEVER believed.
+        let outsider: std::net::IpAddr = "203.0.113.7".parse().unwrap();
+        let resp = probe(outsider, Some("1.2.3.4")).await.unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&axum::body::to_bytes(resp.into_body(), 64).await.unwrap()),
+            "203.0.113.7"
+        );
+
+        // Trusted peer + header: the first hop is the client.
+        let trusted: std::net::IpAddr = "10.0.0.9".parse().unwrap();
+        let resp = probe(trusted, Some("1.2.3.4")).await.unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&axum::body::to_bytes(resp.into_body(), 64).await.unwrap()),
+            "1.2.3.4"
+        );
+
+        // Trusted peer, no header: the peer IS the client.
+        let resp = probe(trusted, None).await.unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&axum::body::to_bytes(resp.into_body(), 64).await.unwrap()),
+            "10.0.0.9"
+        );
     }
 
     #[test]

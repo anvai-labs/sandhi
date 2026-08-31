@@ -2339,6 +2339,18 @@ async fn connection_cap_sheds_new_connections_and_recovers_on_close() {
         String::from_utf8_lossy(&response)
     );
 
+    // TD-0014 D6: the shed is observable — one connection was refused by the cap.
+    let metrics = reqwest::Client::new()
+        .get(format!("http://{addr}/metrics"))
+        .send()
+        .await
+        .unwrap();
+    let metrics_text = metrics.text().await.unwrap();
+    assert!(
+        metrics_text.contains("sandhi_connections_shed_total 1"),
+        "expected the shed counter at 1, got:\n{metrics_text}"
+    );
+
     drop(held2);
     let _ = shutdown_tx.send(());
     let _ = tokio::time::timeout(std::time::Duration::from_secs(3), server).await;
@@ -2371,6 +2383,24 @@ async fn slowloris_connections_are_closed_after_the_header_read_timeout() {
     assert!(
         elapsed >= std::time::Duration::from_millis(500),
         "closed too eagerly at {elapsed:?} — that is not the header timeout"
+    );
+
+    // Adversarial-review finding 3 regression: a connection that sends
+    // NOTHING was previously exempt from every timeout (the auto builder's h2c
+    // sniff buffered before hyper's timer armed), letting zero-byte
+    // connections wedge the whole connection budget. hyper http1 arms the
+    // timer at head start, so silent connections close too.
+    let mut silent = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let silent_started = std::time::Instant::now();
+    let n = silent.read(&mut buf).await.unwrap_or(0);
+    assert_eq!(
+        n, 0,
+        "a fully silent connection must also be closed by the header timeout"
+    );
+    assert!(
+        silent_started.elapsed() < std::time::Duration::from_secs(10),
+        "silent close took too long: {:?}",
+        silent_started.elapsed()
     );
 
     // Normal traffic is unaffected while the loris was parked.
