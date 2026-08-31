@@ -102,8 +102,11 @@ impl RawForwarder {
         }
     }
 
-    /// Add caller-supplied provider headers. Transport-owned headers
-    /// (`Authorization`, `Accept-Encoding`, `Host`) are stripped so the forwarder controls them.
+    /// Add caller-supplied provider headers. Transport-owned names are stripped via
+    /// [`strip_transport_owned`][crate::strip_transport_owned] (the single-sourced
+    /// `TRANSPORT_OWNED_HEADERS` set: `Authorization`, `Host`, `Content-Type`,
+    /// `Accept-Encoding`, and the family credential headers `x-api-key`, `x-goog-api-key`,
+    /// `anthropic-version`) so the forwarder controls framing and credentials.
     #[must_use]
     pub fn with_headers(mut self, headers: HeaderMap) -> Self {
         // Single-sourced strip (TD-0022 D2) — same owned-name set as every family adapter.
