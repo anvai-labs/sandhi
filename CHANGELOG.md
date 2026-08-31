@@ -21,6 +21,100 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 
 - _Nothing yet._
 
+## [0.2.0] — 2026-08-31
+
+The resource-safety release. The proxy's runtime hardening ships — bounded request bodies,
+bounded background queues, graceful draining, explicit transport timeouts, and declarative
+desired-state configuration — and stream metering gets honest about its bounds: decoding is
+bounded and linear on **both** planes (TD-0014 P1), admission slots are now held for the whole
+stream body rather than released at first byte (TD-0014 P2), and three silent undercounting
+paths are fixed. The default `SANDHI_MAX_IN_FLIGHT_AI_REQUESTS` changes from **64 to 128**, with
+the reasoning recorded; operators who pinned the variable are unaffected by the default move.
+Design record: [ADR-0006](docs/adr/0006-layer-boundary-and-protocol-scope.md) (layer boundary +
+the G01–G30 gap register) and TD-0014…0021.
+
+### Added
+
+- **Declarative desired-state configuration** (#165). `SANDHI_CONFIG` points at a committed
+  `sandhi.json`; `GET /admin/config` previews the diff and `POST /admin/config/apply` executes
+  it. Additive-only by design — apply never deletes or revokes anything absent from the file —
+  and no secrets in the file: credentials and webhook URLs are referenced by *environment
+  variable name* (`secret_env`) and resolved at apply time. Ships with
+  [`config/sandhi.json`](config/sandhi.json) and `scripts/quickstart.sh`.
+- **Bounded background persistence** (#165): the usage sink and the alert `last_fired_at` mirror
+  each sit behind fixed-capacity, single-writer queues that drop and count under pressure
+  instead of allocating without bound or blocking a request task, with deadline-bounded drain
+  on shutdown.
+- **`sandhi_streams_open` gauge** (#169): streaming response bodies currently open, exported at
+  `/metrics`. TD-0014 D6 — no resource bound ships unobservable.
+- **Explicit transport timeout knobs** on the typed runtime and declarative config
+  (`timeout_secs`, `stream_idle_timeout_secs`; #165), alongside the existing decorator
+  resilience.
+- **Design record for the data plane** (#166): ADR-0006 settles the layer-boundary question
+  (Sandhi stays L7; breadth at L5/L6/L7, never L3/L4) and carries the **G01–G30 gap register**
+  — one owning document per gap — with ADR-0007 (embeddings not admitted; the branch formally
+  parked) and TD-0014…0021, each with phase tables written as failing tests.
+
+### Changed
+
+- **`SANDHI_MAX_IN_FLIGHT_AI_REQUESTS` now bounds what its name says** (TD-0014 P2, #169; gap
+  G02). The old tower concurrency limit released its slot when the handler future resolved —
+  at *first byte* for SSE — so every simultaneously open stream (upstream connection, budget
+  lease, task, decoder buffers) ran outside the limit. Admission slots are now held by the
+  response **body** via a custom admission layer, released on completion or client disconnect,
+  and refused calls hold no slot. **Default 64 → 128**: 64 was calibrated when a slot meant a
+  handler future; it now means a minutes-long stream. A refused call's failure mode is
+  unchanged (dialect-shaped 429-class error); an unpinned deployment that relied on unbounded
+  streams will now shed load at the limit instead of queueing without bound — which is the
+  fix, not a regression.
+- **Stream decoding is bounded and linear on both planes** (TD-0014 P1, #167; gap G01). The six
+  typed streaming decoders shared the raw plane's two pre-TD-0006 defects — an unbounded line
+  buffer and a quadratic rescan — so a newline-free upstream stream grew a per-request `Vec`
+  without bound. All decoders (and the raw sniffer) now share one `LineSplitter` with an
+  amortised-compaction head offset; total work per chunk is linear in bytes, asserted through
+  a work counter rather than timing.
+- **A hard ceiling on a single stream line**: a line exceeding `MAX_STREAM_LINE_BYTES` (8 MiB)
+  with no newline is a last-resort guard — the typed plane errors loudly
+  (`ProviderError::Transport`), the raw plane drops the pending line and keeps forwarding
+  (#167).
+- **Multi-replica topology is refused at startup** rather than silently multiplying limits
+  (#165): `SANDHI_REPLICA_COUNT != 1` asserts with the reasoning inline, until a shared ledger
+  backend passes the TD-0007 conformance suite.
+
+### Fixed
+
+- **Long generations were silently undercounted on the default transparent plane** (#167).
+  The 64 KiB sniff budget truncated OpenAI Responses' `response.completed` SSE frame — the
+  frame carrying the usage, which a long generation pushes past 128 KiB — after which nothing
+  parsed and the lease settled on a byte estimate. Reproduced and fixed: the raw plane now
+  shares the stream-line ceiling and still yields its usage. Any deployment metering long
+  generations on `/v1/responses` (and large-frame families generally) was affected.
+- **A newline-less upstream stream no longer grows memory without bound or scan quadratically**
+  (#167). Reachable on the cross-family translation path; operators can register arbitrary
+  `base_url`s through the vault, so upstream bytes are not trusted input.
+- **Ollama's NDJSON `done` frame without a trailing newline now yields `Finish`** (#169). The
+  trailing remainder was dropped silently; it is now flushed through the same decode path, with
+  per-chunk event ordering preserved.
+- **Streaming responses no longer escape the stream-line ceiling on the translation plane**
+  (#169) — the bound is pinned end-to-end on both the transparent and translation planes, after
+  adversarial review demonstrated the original test left the translation twin unpinned.
+
+### Security
+
+- `h2` updated for [RUSTSEC-2026-0258](https://github.com/advisories/GHSA) (#163).
+- The `security` (cargo-deny advisories) and `codegen-drift` CI gates actually run on the
+  self-hosted runners now — both had never executed there and failed on missing toolchain
+  (#168). Owner PRs route to the private runners with an owner-approved gate (#163, #160, #161).
+
+### Housekeeping
+
+- The gap register's open items are resolved against cited code, with factual corrections found
+  by an independent fact-check (#166): catalog scope in CLAUDE.md, the G22 node-error parity
+  row, and the h2 feature-unification claim (closed: `h2` is not in the non-dev graph).
+- Dependency bump: `time` 0.3.55, `async-trait`, `futures-core`, `futures-util` (#159).
+
+## [0.1.6] — 2026-08-05
+
 ## [0.1.6] — 2026-08-05
 
 Maintenance release: placeholder-version hygiene and repo cleanup. No API, wire-contract, or
