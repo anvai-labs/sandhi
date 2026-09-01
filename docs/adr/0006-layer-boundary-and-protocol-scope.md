@@ -4,11 +4,14 @@ Date: 2026-08-31
 
 ## Status
 
-**Proposed.** The verdict below is sound on the evidence available, but its load-bearing premise —
-that the enforcement ledger's commit path, not byte movement, is the throughput ceiling (§Context
-F1) — is an **inference from code, not a measurement**. Promote to **Accepted** when
-[TD-0015](../td/TD-0015-performance-baseline-and-fault-injection.md) publishes a baseline that
-confirms or falsifies it. Until then this ADR is binding as a *process* gate (§D4) and advisory as
+**Accepted** (promoted 2026-09-01). TD-0015 P1 published the ledger baseline
+and **confirmed** the load-bearing premise: at production durability
+(`synchronous=FULL`) a single admission carries ~0.5–0.9 ms of commit cost,
+and dropping only the durability pragma is worth **~17×** (881 µs → 50.9 µs
+median) — the commit path, not byte movement, is the throughput ceiling, and
+no transport-layer optimisation can touch it. Numbers and caveats
+(macOS/APFS, directional absolutes) in
+[TD-0015](../td/TD-0015-performance-baseline-and-fault-injection.md) P1. Until then this ADR is binding as a *process* gate (§D4) and advisory as
 a *verdict*.
 
 Relates to [ADR-0001](0001-sandhi-architecture-and-wire-contract.md) (what Sandhi measures),
