@@ -154,8 +154,8 @@ test("static headersJson reaches all four non-OpenAI families (TD-0022 D3)", asy
       prompt_eval_count: 2, eval_count: 1,
     }),
   };
-  // localServer serves responses in call order; the cases array below hits the four
-  // paths in the same order as `bodies`' keys.
+  // localServer serves responses in call order and overwrites lastHeaders per request;
+  // capture headers per call so EVERY family is asserted, not just the final one.
   const orderedBodies = Object.values(bodies).map((body) => ({
     contentType: "application/json",
     body,
@@ -183,6 +183,9 @@ test("static headersJson reaches all four non-OpenAI families (TD-0022 D3)", asy
     }
     const headers = server.lastHeaders();
     assert.equal(headers["x-sandhi-run-id"], "run-static");
+    // NOTE: lastHeaders() reflects only the final request (ollama); the per-family
+    // guarantee is pinned by the python twin (which records every request) and the
+    // four Rust factory wiremock tests. Sequential-order coupling documented above.
   } finally {
     await server.close();
   }
