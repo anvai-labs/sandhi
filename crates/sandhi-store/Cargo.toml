@@ -31,3 +31,13 @@ tokio = { version = "1", default-features = false, features = ["rt"], optional =
 
 [features]
 sentinelpass-ipc = ["dep:sentinelpass-protocol", "dep:tokio"]
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+tempfile = "3"
+
+[[bench]]
+name = "ledger"
+harness = false
+# `cargo test` must not execute benchmarks in CI; numbers come from `cargo bench`.
+test = false
