@@ -509,6 +509,7 @@ impl ProviderRuntime {
         base_url: impl Into<String>,
         api_key: impl Into<String>,
         auth_scheme: AnthropicAuthScheme,
+        headers: http::HeaderMap,
         max_retries: Option<u32>,
         timeout_secs: Option<f64>,
         stream_idle_timeout_secs: Option<f64>,
@@ -516,6 +517,7 @@ impl ProviderRuntime {
         let mut config =
             ProviderTransportConfig::new(ProviderFamily::Anthropic, "anthropic", base_url, api_key);
         config.anthropic_auth_scheme = auth_scheme;
+        config.headers = headers;
         config.max_retries = max_retries;
         config.timeout_secs = timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
@@ -533,12 +535,14 @@ impl ProviderRuntime {
         &self,
         base_url: impl Into<String>,
         api_key: impl Into<String>,
+        headers: http::HeaderMap,
         max_retries: Option<u32>,
         timeout_secs: Option<f64>,
         stream_idle_timeout_secs: Option<f64>,
     ) -> ProviderHandle {
         let mut config =
             ProviderTransportConfig::new(ProviderFamily::Ollama, "ollama", base_url, api_key);
+        config.headers = headers;
         config.max_retries = max_retries;
         config.timeout_secs = timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
@@ -557,6 +561,7 @@ impl ProviderRuntime {
         base_url: impl Into<String>,
         api_key: impl Into<String>,
         auth_scheme: GeminiAuthScheme,
+        headers: http::HeaderMap,
         max_retries: Option<u32>,
         timeout_secs: Option<f64>,
         stream_idle_timeout_secs: Option<f64>,
@@ -564,6 +569,7 @@ impl ProviderRuntime {
         let mut config =
             ProviderTransportConfig::new(ProviderFamily::Gemini, "gemini", base_url, api_key);
         config.gemini_auth_scheme = auth_scheme;
+        config.headers = headers;
         config.max_retries = max_retries;
         config.timeout_secs = timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
@@ -581,12 +587,14 @@ impl ProviderRuntime {
         &self,
         base_url: impl Into<String>,
         api_key: impl Into<String>,
+        headers: http::HeaderMap,
         max_retries: Option<u32>,
         timeout_secs: Option<f64>,
         stream_idle_timeout_secs: Option<f64>,
     ) -> ProviderHandle {
         let mut config =
             ProviderTransportConfig::new(ProviderFamily::Cohere, "cohere", base_url, api_key);
+        config.headers = headers;
         config.max_retries = max_retries;
         config.timeout_secs = timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
@@ -1470,6 +1478,7 @@ mod tests {
             "https://api.anthropic.com",
             "k",
             crate::AnthropicAuthScheme::ApiKey,
+            HeaderMap::new(),
             None,
             None,
             None,
@@ -1480,13 +1489,21 @@ mod tests {
             "https://generativelanguage.googleapis.com",
             "k",
             crate::GeminiAuthScheme::ApiKey,
+            HeaderMap::new(),
             None,
             None,
             None,
         );
         assert_eq!(gemini.family(), ProviderFamily::Gemini);
 
-        let cohere = runtime.cohere("https://api.cohere.ai", "k", None, None, None);
+        let cohere = runtime.cohere(
+            "https://api.cohere.ai",
+            "k",
+            HeaderMap::new(),
+            None,
+            None,
+            None,
+        );
         assert_eq!(cohere.family(), ProviderFamily::Cohere);
     }
 
@@ -1499,6 +1516,7 @@ mod tests {
             "https://internal-llm.corp.example",
             "k",
             crate::AnthropicAuthScheme::ApiKey,
+            HeaderMap::new(),
             None,
             None,
             None,
@@ -1534,6 +1552,7 @@ mod tests {
             "https://api.anthropic.com",
             "k",
             crate::AnthropicAuthScheme::ApiKey,
+            HeaderMap::new(),
             None,
             None,
             None,
@@ -1547,6 +1566,157 @@ mod tests {
             escape_hatch.raw_forwarder().is_none(),
             "an escape-hatch handle has no transport config to forward with"
         );
+    }
+
+    /// TD-0022 D3 follow-up: the STATIC (handle-construction) headers reach every family
+    /// factory, not just openai_compat — this is what gateway consumers (victor stamps
+    /// x-sandhi-run-id / x-sandhi-session at handle construction) depend on for the
+    /// anthropic/gemini/cohere/ollama slugs. One test per family; the wiremock header
+    /// matcher is the assertion.
+    #[tokio::test]
+    async fn anthropic_factory_threads_static_headers() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(header("x-sandhi-run-id", "run-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id":"m1","type":"message","role":"assistant",
+                "content":[{"type":"text","text":"hi"}],
+                "usage":{"input_tokens":3,"output_tokens":1}
+            })))
+            .mount(&server)
+            .await;
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::HeaderName::from_static("x-sandhi-run-id"),
+            http::HeaderValue::from_static("run-1"),
+        );
+        let handle = ProviderRuntime::new().anthropic(
+            server.uri(),
+            "k",
+            crate::AnthropicAuthScheme::ApiKey,
+            headers,
+            Some(0),
+            None,
+            None,
+        );
+        let request: ChatRequestV1 = serde_json::from_value(serde_json::json!({
+            "schema_version": "1", "model": "claude-test",
+            "max_output_tokens": 16,
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .unwrap();
+        handle
+            .complete_with(request, http::HeaderMap::new())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn gemini_factory_threads_static_headers() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/models/gemini-x:generateContent"))
+            .and(header("x-sandhi-run-id", "run-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "candidates":[{"content":{"parts":[{"text":"hi"}]}}],
+                "usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":1}
+            })))
+            .mount(&server)
+            .await;
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::HeaderName::from_static("x-sandhi-run-id"),
+            http::HeaderValue::from_static("run-1"),
+        );
+        let handle = ProviderRuntime::new().gemini(
+            server.uri(),
+            "k",
+            crate::GeminiAuthScheme::ApiKey,
+            headers,
+            Some(0),
+            None,
+            None,
+        );
+        let request: ChatRequestV1 = serde_json::from_value(serde_json::json!({
+            "schema_version": "1", "model": "gemini-x",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .unwrap();
+        handle
+            .complete_with(request, http::HeaderMap::new())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cohere_factory_threads_static_headers() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v2/chat"))
+            .and(header("x-sandhi-run-id", "run-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id":"r1","message":{"content":[{"type":"text","text":"hi"}]},
+                "usage":{"billed_units":{"input_tokens":3,"output_tokens":1}}
+            })))
+            .mount(&server)
+            .await;
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::HeaderName::from_static("x-sandhi-run-id"),
+            http::HeaderValue::from_static("run-1"),
+        );
+        let handle = ProviderRuntime::new().cohere(server.uri(), "k", headers, Some(0), None, None);
+        let request: ChatRequestV1 = serde_json::from_value(serde_json::json!({
+            "schema_version": "1", "model": "command-r",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .unwrap();
+        handle
+            .complete_with(request, http::HeaderMap::new())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn ollama_factory_threads_static_headers() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .and(header("x-sandhi-run-id", "run-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "message": {"role": "assistant", "content": "hi"},
+                "done": true, "prompt_eval_count": 3, "eval_count": 1
+            })))
+            .mount(&server)
+            .await;
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::HeaderName::from_static("x-sandhi-run-id"),
+            http::HeaderValue::from_static("run-1"),
+        );
+        let handle = ProviderRuntime::new().ollama(server.uri(), "k", headers, Some(0), None, None);
+        let request: ChatRequestV1 = serde_json::from_value(serde_json::json!({
+            "schema_version": "1", "model": "llama3",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .unwrap();
+        handle
+            .complete_with(request, http::HeaderMap::new())
+            .await
+            .unwrap();
     }
 
     /// TD-0022 D1 end to end: per-call wire headers entered at the handle cross the typed

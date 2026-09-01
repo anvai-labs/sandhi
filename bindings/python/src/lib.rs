@@ -230,6 +230,7 @@ protocol; other families always authenticate with 'Authorization: Bearer' \
                 base_url.unwrap_or_else(|| "https://api.anthropic.com".into()),
                 api_key,
                 parse_anthropic_auth_scheme(auth_scheme.as_deref())?,
+                parse_headers_json(headers_json)?,
                 max_retries,
                 timeout_secs,
                 stream_idle_timeout_secs,
@@ -240,6 +241,7 @@ protocol; other families always authenticate with 'Authorization: Bearer' \
                     .unwrap_or_else(|| "https://generativelanguage.googleapis.com/v1beta".into()),
                 api_key,
                 parse_gemini_auth_scheme(auth_scheme.as_deref())?,
+                parse_headers_json(headers_json)?,
                 max_retries,
                 timeout_secs,
                 stream_idle_timeout_secs,
@@ -248,6 +250,7 @@ protocol; other families always authenticate with 'Authorization: Bearer' \
             self.inner.cohere(
                 base_url.unwrap_or_else(|| "https://api.cohere.com".into()),
                 api_key,
+                parse_headers_json(headers_json)?,
                 max_retries,
                 timeout_secs,
                 stream_idle_timeout_secs,
@@ -256,6 +259,7 @@ protocol; other families always authenticate with 'Authorization: Bearer' \
             self.inner.ollama(
                 base_url.unwrap_or_else(|| "http://localhost:11434".into()),
                 api_key,
+                parse_headers_json(headers_json)?,
                 max_retries,
                 timeout_secs,
                 stream_idle_timeout_secs,

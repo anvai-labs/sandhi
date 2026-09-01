@@ -243,6 +243,78 @@ def test_per_call_wire_headers_ride_and_cannot_override_the_credential():
         server.shutdown()
 
 
+def test_static_headers_json_reaches_all_four_families():
+    """TD-0022 D3: the STATIC headers_json (handle construction) reaches the
+    anthropic/gemini/cohere/ollama dispatch branches too — gateway consumers stamp
+    x-sandhi-run-id/x-sandhi-session there. Before this, those four branches silently
+    dropped the argument (victor gateway mode lost run-tree attribution for every
+    non-OpenAI family)."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    seen: list[dict] = []
+    # Per-dialect minimal success bodies (path-keyed).
+    bodies = {
+        "/v1/messages": {"id": "m1", "type": "message", "role": "assistant",
+                         "content": [{"type": "text", "text": "ok"}],
+                         "usage": {"input_tokens": 2, "output_tokens": 1}},
+        "/models/gemini-x:generateContent": {
+            "candidates": [{"content": {"parts": [{"text": "ok"}]}}],
+            "usageMetadata": {"promptTokenCount": 2, "candidatesTokenCount": 1}},
+        "/v2/chat": {"id": "r1", "message": {"content": [{"type": "text", "text": "ok"}]},
+                     "usage": {"billed_units": {"input_tokens": 2, "output_tokens": 1}}},
+        "/api/chat": {"message": {"role": "assistant", "content": "ok"}, "done": True,
+                      "prompt_eval_count": 2, "eval_count": 1},
+    }
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            seen.append((self.path, {k.lower(): v for k, v in self.headers.items()}))
+            body = json.dumps(bodies[self.path]).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        runtime = sg.ProviderRuntime()
+        statics = json.dumps({"x-sandhi-run-id": "run-static"})
+        cases = [
+            ("anthropic", {"schema_version": "1", "model": "claude-test",
+                           "max_output_tokens": 8,
+                           "messages": [{"role": "user", "content": "hi"}]}),
+            ("gemini", {"schema_version": "1", "model": "gemini-x",
+                        "messages": [{"role": "user", "content": "hi"}]}),
+            ("cohere", {"schema_version": "1", "model": "command-r",
+                        "messages": [{"role": "user", "content": "hi"}]}),
+            ("ollama", {"schema_version": "1", "model": "llama3",
+                        "messages": [{"role": "user", "content": "hi"}]}),
+        ]
+        async def run_all():
+            for slug, request in cases:
+                provider = runtime.provider(
+                    slug, request["model"], "k", base_url=base,
+                    headers_json=statics, max_retries=0,
+                )
+                await provider.complete_json(json.dumps(request))
+
+        asyncio.run(run_all())
+        paths = [p for p, _ in seen]
+        for slug, path in [("anthropic", "/v1/messages"), ("gemini", "/models/gemini-x:generateContent"),
+                           ("cohere", "/v2/chat"), ("ollama", "/api/chat")]:
+            assert path in paths, f"{slug}: no request hit {path}"
+        for path, headers in seen:
+            assert headers.get("x-sandhi-run-id") == "run-static", f"{path}: static header missing"
+    finally:
+        server.shutdown()
+
+
 def test_typed_request_validation_fails_before_http():
     provider = sg.ProviderRuntime().openai_compat(
         "openai", "http://127.0.0.1:1/v1", "key"
