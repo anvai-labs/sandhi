@@ -21,7 +21,7 @@ gap** — a contract capability on one side with no counterpart on the other.
 
 Three concrete instances, plus one loose end.
 
-**G20 — `idempotency-key` is read, persisted, and never used.** It is extracted at
+**G20 — `idempotency-key` is read, persisted, and never used.** *(Design narrowed 2026-09-01: #179 now mints request ids at admission for every call, so the dedup record gains a stable correlation key for free — the G20 design no longer needs to choose an id source.)* It is extracted at
 `sandhi-proxy/src/lib.rs:1526`, carried on `RequestMetadataV1` (`sandhi-core/src/chat.rs:147`),
 stamped onto the usage event (`sandhi-core/src/event.rs:107`), and persisted. ADR-0005 D7 names its
 purpose as *"`idempotency-key` for reconcile-once."* There is no dedup lookup anywhere in the

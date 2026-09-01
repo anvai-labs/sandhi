@@ -1,6 +1,6 @@
 # TD-0012: Rate-limit enforcement — closing a promise the API already makes
 
-- **Status:** Accepted (2026-07-27). **P1 and P2 complete**; P3 (shared backend) waits on TD-0007.
+- **Status:** **Complete** (2026-09-01). P1 and P2 shipped; the shared-backend remainder (P3) is **owned by TD-0007**, where the rate limiter's shared story was always scoped to live.
 - **Relates to:** TD-0003 (operator surface: the field exists there), ADR-0005 (enforcement
   ordering and the lease ledger), TD-0007 (shared-backend contract), TD-0010 D2 (dialect-shaped
   errors), TD-0011 (bounded-label metrics)

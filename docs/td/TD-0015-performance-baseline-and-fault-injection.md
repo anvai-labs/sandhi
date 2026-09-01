@@ -1,6 +1,6 @@
 # TD-0015: Performance baseline and fault injection — the measurement every other decision is waiting on
 
-- **Status:** Draft (proposed), 2026-08-31. Owns gaps **G09, G10**.
+- **Status:** Draft (proposed), 2026-08-31. **P1 is the arc's critical path**: it gates ADR-0006's promotion and the TD-0016/TD-0014-P4/TD-0020 decisions that wait on measurements. Owns gaps **G09, G10**.
 - **Relates to:** [ADR-0006](../adr/0006-layer-boundary-and-protocol-scope.md) (whose **Proposed**
   status is gated on this TD's baseline), [TD-0016](TD-0016-enforcement-throughput-ceiling.md) (the
   hypothesis this TD tests), [TD-0014](TD-0014-data-plane-resource-safety.md) (whose fixes this TD
