@@ -26,7 +26,11 @@ hand-edited; see [RELEASING.md](RELEASING.md).
   form, while the manifest has carried a crates.io `version = "0.8.0"` pin since #188. Versions
   are now normalized bare at both sources and the script rewrites either shape it finds. The
   pre-push verification also gains `--features sentinelpass-ipc`: the pin is an optional
-  dependency, so the plain `cargo check -p sandhi-store` compiled none of it.
+  dependency, so the plain `cargo check -p sandhi-store` compiled none of it. Adversarial review
+  of the fix added two corrections: the check now runs *before* the commit and stages the
+  refreshed workspace `Cargo.lock` (the automated branch would otherwise ship a manifest/lock
+  mismatch), and the automated PR body lost its backticks — inside the double-quoted `--body`
+  they were shell command substitution, re-running the build mid-argument and emptying the body.
 
 ## [0.4.0] — 2026-09-01
 

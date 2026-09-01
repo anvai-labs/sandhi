@@ -68,13 +68,15 @@ jobs:
           git config user.email "pin-bot@anvai-labs.local"
           git checkout -b "$branch"
           python3 .github/scripts/bump_protocol_pin.py "$CURRENT" "$LATEST"
-          git add crates/sandhi-store/Cargo.toml
-          git commit -m "chore(store): bump sentinelpass-protocol pin to ${LATEST}"
           # A breaking protocol bump must never reach the remote or open a red PR
-          # silently: verify the build BEFORE the push. sentinelpass-protocol is an
-          # OPTIONAL dep behind the sentinelpass-ipc feature (post-#188) — a plain
-          # check compiles none of the pin, so the feature must be on.
+          # silently: verify the build BEFORE anything is committed or pushed.
+          # sentinelpass-protocol is an OPTIONAL dep behind the sentinelpass-ipc
+          # feature (post-#188) — a plain check compiles none of the pin, so the
+          # feature must be on. The check also re-resolves the tracked workspace
+          # Cargo.lock — stage it with the manifest or the branch ships a stale lock.
           cargo check -p sandhi-store --features sentinelpass-ipc
+          git add crates/sandhi-store/Cargo.toml Cargo.lock
+          git commit -m "chore(store): bump sentinelpass-protocol pin to ${LATEST}"
           # checkout runs with persist-credentials: false, so git has no token;
           # route the push through gh's credential helper.
           gh auth setup-git
@@ -90,5 +92,5 @@ jobs:
           branch="chore/sentinelpass-protocol-${LATEST}"
           gh pr create --base develop --head "$branch" \
             --title "chore(store): bump sentinelpass-protocol to ${LATEST}" \
-            --body "Automated pin bump: sentinelpass-protocol ${CURRENT} → ${LATEST} (crates.io latest). Build verified with `cargo check -p sandhi-store --features sentinelpass-ipc`. Review for breaking protocol changes before merging." \
+            --body "Automated pin bump: sentinelpass-protocol ${CURRENT} → ${LATEST} (crates.io latest). Build verified with cargo check -p sandhi-store --features sentinelpass-ipc before the push; Cargo.lock refreshed with the pin. Review for breaking protocol changes before merging." \
             || echo "::warning::PR create failed (may already exist)"
