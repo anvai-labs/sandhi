@@ -117,7 +117,7 @@ DNS stalls, and TLS rotation once TD-0017 lands.
 
 | Phase | Scope | Acceptance (the failing test to write first) |
 |---|---|---|
-| **P1** | D3(c) — the ledger bench, run first because ADR-0006 is blocked on it | A committed number for reserve+settle throughput at `FULL` vs `NORMAL` vs batched, single- and multi-threaded, with the serialized-commit hypothesis explicitly confirmed or falsified. The result is written back into ADR-0006's Status line either way |
+| **P1** ✅ | D3(c) — the ledger bench, run first because ADR-0006 is blocked on it | A committed number for reserve+settle throughput at `FULL` vs `NORMAL` vs batched, single- and multi-threaded, with the serialized-commit hypothesis explicitly confirmed or falsified. The result is written back into ADR-0006's Status line either way |
 | **P2** | D2 — the in-repo load harness, closed- and open-loop | The harness drives `build_app` at a fixed arrival rate and reports a latency histogram plus per-request allocation and CPU; running it twice on unchanged code produces results within the D5 noise threshold |
 | **P3** | D3(a)(b) — codec and stream-decoder criterion suites | `metered_passthrough` vs. each typed decoder is quantified over 1k/10k/100k-frame corpora, producing the number TD-0014 P1 must improve |
 | **P4** | D4 — the fault suite | Each fault asserts the three D4 invariants; the suite fails today on at least the slowloris and slow-consumer cases (TD-0014 G02/G03), which is the point — it is written to fail first |
@@ -125,6 +125,30 @@ DNS stalls, and TLS rotation once TD-0017 lands.
 
 P1 is the critical path for ADR-0006, TD-0016, and by extension the whole layer question. Land it
 first, alone, and publish the number.
+
+**P1 result (2026-09-01, `cargo bench -p sandhi-store`, benches/ledger.rs,
+macOS/APFS local machine — directional, not production-absolute):**
+
+| Measurement | Median | Throughput |
+|---|---|---|
+| reserve+settle, `synchronous=FULL` (production) | **881 µs** | ~1.1 K admissions/s |
+| reserve+settle, `synchronous=NORMAL` | **50.9 µs** | ~19.7 K admissions/s |
+| threaded, 1 thread (FULL) | — | (see caveat) |
+| threaded, 4 threads (FULL) | ~1.26× of 1 thread | (see caveat) |
+
+**F1 is confirmed: the durability cost dominates by an order of magnitude.**
+The FULL↔NORMAL delta is pure fsync cost (identical code, one pragma), and at
+production settings a single admission carries ~0.5–0.9 ms of it. Two further
+readings: 4 threads drive the shared-`Mutex` ledger only ~1.2–1.3× faster than
+one thread (the mutex + SQLite's write lock serialize exactly as the design
+predicted — sharding is the parallelism lever, TD-0016 P1), and the
+group-commit upper bound is **not yet measured** — a true K-per-transaction
+batch needs TD-0016 P3's API, which was deliberately not built speculatively
+(the first draft of this bench measured sequential round-trips under a
+batched label; removed as dishonest). Caveats: single macOS/APFS machine
+(fsync semantics differ from Linux production), absolute numbers directional —
+the 17× durability ratio and the poor thread scaling are the load-bearing
+results.
 
 ## Pressure test
 
