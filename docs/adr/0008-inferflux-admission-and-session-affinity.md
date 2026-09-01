@@ -5,6 +5,14 @@ Date: 2026-08-31
 ## Status
 
 **Accepted.** InferFlux is admitted as an OpenAI-compat catalog row — not a provider family —
+
+> **Update 2026-09-01.** The `sentinelpass-protocol` contract crate extracted
+> by #176 is now **published to crates.io (v0.8.0)**, and sandhi's
+> `sandhi-store` consumes it as a **version pin** behind the non-default
+> `sentinelpass-ipc` feature (#188, #74 — see
+> [TD-0023](../td/TD-0023-release-automation.md) for the publish-and-pin
+> automation). The "rev-pinned until v0.8.0 lands" caveat in the integration
+> work is resolved. InferFlux is admitted as an OpenAI-compat catalog row — not a provider family —
 and the catalog grows its second strategy-via-data header field, `session_header`, which both
 proxy planes map the neutral session id onto.
 

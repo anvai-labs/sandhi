@@ -226,6 +226,17 @@ already.
   can *name* (OpenAI Responses' `response.completed`, Gemini `inlineData`), not measured. The
   direction of error is deliberate — too high merely delays an OOM that P2's stream bound also
   guards, while too low kills working streams, which is the defect D1a exists to fix.
+- **Request bodies have no read timeout (pre-existing, surfaced by P3).** The
+  header deadline stops at head completion; a client that dribbles a 2 MiB
+  body at 1 B/s holds its connection slot, admission slot, and lease
+  indefinitely while staying under every timer shipped here. Bounded in
+  aggregate by the connection and admission caps; a per-body deadline is
+  TD-0020/TD-0017 scope if measurement shows it matters.
+- **`ClientAddr` has no production consumer yet.** The middleware resolves
+  and inserts it on every AI request (pinned by the wiring test), but no
+  handler or metric reads it — its consumers are per-IP rate limits (P4's
+  natural shape) and TD-0020's per-client visibility. The `#[allow(dead_code)]`
+  comes off the day a consumer lands.
 - **Frames near the ceiling are real, not hypothetical.** Review named a frame within ~1.5× of the
   ceiling: OpenAI Responses' `response.image_generation_call.partial_image` carries a base64
   gpt-image-1 PNG at roughly 5.5–6.7 MB, and Gemini native-audio `inlineData` runs ~64 KB/s, so two

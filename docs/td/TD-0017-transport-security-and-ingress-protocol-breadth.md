@@ -67,6 +67,19 @@ surface that does not exist in production.
    that kills in-flight streams would settle every one of them as `Partial` — turning a routine
    operational event into a metering anomaly.
 
+> **Update 2026-09-01 — the h2c question is resolved, and a listener decision
+> landed ahead of this TD.** TD-0014 P3 found that hyper-util's auto builder
+> (what `axum::serve` used) sniffs for an h2c preface before arming any
+> timeout, exempting zero-byte connections from every defence — demonstrated
+> as a full-traffic wedge. The listener now binds hyper's **http1 builder
+> directly** and cleartext h2c is refused outright: recorded as
+> [ADR-0009](../adr/0009-http1-only-listener.md). Consequence for this TD's
+> h2 path: h2 returns only over TLS/ALPN, and **its builder sets
+> `header_read_timeout`, `max_buf_size`, and a timer in the same commit** —
+> with the silent-connection regression test extended to the h2 path. The
+> P0 experiment below is retained as the record of how the question was
+> originally (wrongly) framed.
+
 ## Non-goals
 
 - **No HTTP/3 or QUIC.** No named use case, and it would add `quinn`/`h3` plus a UDP path to a
