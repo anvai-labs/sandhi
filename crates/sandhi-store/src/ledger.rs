@@ -56,6 +56,20 @@ impl SqliteLedger {
         Ok(Self { conn })
     }
 
+    /// Open with an explicit durability level — measurement and diagnostic
+    /// surface (TD-0015's ledger benchmark compares FULL against NORMAL), not
+    /// a product knob: production always uses `open`, which is FULL.
+    #[doc(hidden)]
+    pub fn open_with_synchronous(
+        path: &str,
+        synchronous: crate::Synchronous,
+    ) -> rusqlite::Result<Self> {
+        let conn = Connection::open(path)?;
+        crate::apply_durable_pragmas(&conn, synchronous)?;
+        Self::init(&conn)?;
+        Ok(Self { conn })
+    }
+
     fn setup(conn: &Connection) -> rusqlite::Result<()> {
         // FULL: a cap/lease commit must survive a power loss (ADR-0005 C2/C3). WAL + busy_timeout
         // also stop the concurrent store writes from colliding with reserve/settle on the same file

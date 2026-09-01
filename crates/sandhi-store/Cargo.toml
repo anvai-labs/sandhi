@@ -27,3 +27,13 @@ keyring = { version = "3", default-features = false, features = [
 #   sentinelpass-protocol = { path = "../../sentinelpass/sentinelpass-protocol" }
 sentinelpass-protocol = { git = "https://github.com/anvai-labs/sentinelpass", tag = "v0.8.0" }
 tokio = { version = "1", default-features = false, features = ["rt"] }
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+tempfile = "3"
+
+[[bench]]
+name = "ledger"
+harness = false
+# `cargo test` must not execute benchmarks in CI; numbers come from `cargo bench`.
+test = false
