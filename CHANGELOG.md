@@ -212,8 +212,6 @@ the G01–G30 gap register) and TD-0014…0021.
 
 ## [0.1.6] — 2026-08-05
 
-## [0.1.6] — 2026-08-05
-
 Maintenance release: placeholder-version hygiene and repo cleanup. No API, wire-contract, or
 runtime behavior change — the chat contract minor is unchanged from 0.1.5.
 
