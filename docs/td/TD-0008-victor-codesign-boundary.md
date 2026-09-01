@@ -51,7 +51,7 @@ neutral contract.
 | Event consumption completeness | Every variant has a consumer decision; refusal consumed; drift alarm + conformance suite | **Fixed** — victor#647/#654 (P1) |
 | Error transit shape | Typed `SandhiProviderError` (Python); payload unchanged, consumers can branch on class. Node parity pending (follow-up C) | **Fixed** — sandhi#69 (P2) |
 | Streaming FFI hot path | Measured 2.23 µs/event conservative; 0.01–0.04 % of wall clock at chat rates | **Closed** — not dominant (P3) |
-| Node binding parity | `provider_spec_json` + `chat_contract_schema_json` exported; typed-error class still pending (follow-up C) | **Fixed** — sandhi#70 (P4) |
+| Node binding parity | `provider_spec_json` + `chat_contract_schema_json` exported; typed-error class shipped and conformance-pinned on every path (completeJson, streamJson setup, stream read) | **Fixed** — sandhi#70 (P4); typed-error parity closed by TD-0021 P1 |
 | Anthropic/Google full typed-handle migration | Verified complete: SDK wire deleted, residual SDK use is discovery/credentials (Victor-owned by design) | **Closed** (P5) |
 | Cross-repo conformance | Victor conformance suite drives every variant; sandhi-side census guard (exhaustive-match + schema pin) forces the consumer-decision rule at compile time | **Fixed** — victor#654 + census guard (P1) |
 
@@ -103,8 +103,13 @@ handle). "Sandhi owns transport" is unconditional for both families.
 - **B. `request_id` capture** — populate `ProviderErrorV1.request_id` from upstream
   response headers (`x-request-id`, `anthropic-request-id`, `request-id`) in the
   adapter error paths; completes the sandhi#65 diagnosability story.
-- **C. Node typed error** — surface `SandhiProviderError` (or equivalent) from the
-  Node binding so Node consumers stop string-sniffing (parity with sandhi#69).
+- **C. Node typed error** — CLOSED by TD-0021 P1: `SandhiProviderError` ships in the
+  `sandhi.js` wrapper (declared in `sandhi.d.ts`), rewired on every provider-boundary
+  path (`completeJson`, `streamJson` setup, `TypedEventStream.read`), with a conformance
+  test asserting `instanceof` + typed fields so this row cannot drift again. Verified
+  boundary: binding-internal validation errors (e.g. malformed request JSON) deliberately
+  stay ordinary `Error`s — the distinction between provider failures and binding failures
+  is the point of the class.
 - **D. Proxy-plane error bodies** — `sandhi-proxy` still maps `Upstream {{ .. }}` to a
   static `BAD_GATEWAY "upstream error"`; forwarding bounded bodies/request ids to
   proxy CLIENTS needs a multi-tenant disclosure decision first (deliberately parked).
