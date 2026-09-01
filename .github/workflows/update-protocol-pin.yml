@@ -1,0 +1,84 @@
+name: Update sentinelpass-protocol pin
+
+on:
+  schedule:
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: protocol-pin
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Resolve the latest published sentinelpass-protocol
+        id: latest
+        run: |
+          set -euo pipefail
+          max=$(curl -s -A "sandhi-pin-bot" \
+            "https://crates.io/api/v1/crates/sentinelpass-protocol" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["crate"]["max_stable_version"])')
+          echo "version=$max" >> "$GITHUB_OUTPUT"
+
+      - name: Current pin in sandhi-store
+        id: current
+        run: |
+          set -euo pipefail
+          cur=$(python3 -c 'import pathlib,re; print(re.search(r"sentinelpass-protocol = \{ version = \"([^\"]+)\"", pathlib.Path("crates/sandhi-store/Cargo.toml").read_text()).group(1))')
+          echo "version=$cur" >> "$GITHUB_OUTPUT"
+
+      - name: Skip when the pin is already current
+        id: gate
+        env:
+          LATEST: ${{ steps.latest.outputs.version }}
+          CURRENT: ${{ steps.current.outputs.version }}
+        run: |
+          if [ "$LATEST" = "$CURRENT" ]; then
+            echo "pin already at $CURRENT"
+            echo "bump=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "bump=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Bump the pin and verify the build
+        if: ${{ steps.gate.outputs.bump == 'true' }}
+        env:
+          LATEST: ${{ steps.latest.outputs.version }}
+          CURRENT: ${{ steps.current.outputs.version }}
+        run: |
+          set -euo pipefail
+          branch="chore/sentinelpass-protocol-${LATEST}"
+          git config user.name "sandhi pin bot"
+          git config user.email "pin-bot@anvai-labs.local"
+          git checkout -b "$branch"
+          python3 .github/scripts/bump_protocol_pin.py "$CURRENT" "$LATEST"
+          git add crates/sandhi-store/Cargo.toml
+          git commit -m "chore(store): bump sentinelpass-protocol pin to ${LATEST}"
+          git push origin "$branch"
+          # A breaking protocol bump must not open a red PR silently: build
+          # with the IPC backend BEFORE the PR exists.
+          cargo build -p sandhi-store --features sentinelpass-ipc
+
+      - name: Open the pin-bump PR
+        if: ${{ steps.gate.outputs.bump == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LATEST: ${{ steps.latest.outputs.version }}
+          CURRENT: ${{ steps.current.outputs.version }}
+        run: |
+          branch="chore/sentinelpass-protocol-${LATEST}"
+          gh pr create --base develop --head "$branch" \
+            --title "chore(store): bump sentinelpass-protocol to ${LATEST}" \
+            --body "Automated pin bump: sentinelpass-protocol ${CURRENT} → ${LATEST} (crates.io latest). Build verified with the \`sentinelpass-ipc\` feature enabled. Review for breaking protocol changes before merging." \
+            || echo "::warning::PR create failed (may already exist)"
