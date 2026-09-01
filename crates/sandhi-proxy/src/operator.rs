@@ -194,13 +194,23 @@ pub fn build_provider_handle(
                 CredentialScheme::Bearer => AnthropicAuthScheme::Bearer,
                 _ => AnthropicAuthScheme::ApiKey,
             };
-            Some(runtime.anthropic(base, secret, auth, None, None, None))
+            Some(runtime.anthropic(base, secret, auth, HeaderMap::new(), None, None, None))
         }
-        ProviderFamily::Gemini => {
-            Some(runtime.gemini(base, secret, GeminiAuthScheme::ApiKey, None, None, None))
+        ProviderFamily::Gemini => Some(runtime.gemini(
+            base,
+            secret,
+            GeminiAuthScheme::ApiKey,
+            HeaderMap::new(),
+            None,
+            None,
+            None,
+        )),
+        ProviderFamily::Cohere => {
+            Some(runtime.cohere(base, secret, HeaderMap::new(), None, None, None))
         }
-        ProviderFamily::Cohere => Some(runtime.cohere(base, secret, None, None, None)),
-        ProviderFamily::Ollama => Some(runtime.ollama(base, secret, None, None, None)),
+        ProviderFamily::Ollama => {
+            Some(runtime.ollama(base, secret, HeaderMap::new(), None, None, None))
+        }
         ProviderFamily::OpenAiCompat => Some(runtime.openai_compat(
             provider,
             base,

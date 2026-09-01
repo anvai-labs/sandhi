@@ -61,6 +61,16 @@ headers for them are reachable only programmatically via Rust `with_headers`. Tu
 gateway identity, the motivating case, rides the **per-call** path (D1) and reaches every
 family. FFI static-header parity for the four families is a follow-up, not a claim here.
 
+> **Follow-up closed** (the FFI static-header parity PR): the four families' runtime
+> factories and both bindings' `provider()` dispatch now accept and thread static
+> `headers_json`. The consequence that motivated the fix: gateway consumers (victor)
+> preserve the provider slug while pointing `base_url` at the proxy, so the
+> anthropic/gemini/cohere/ollama dispatch branches were silently dropping
+> `x-sandhi-run-id`/`x-sandhi-session` — no run cost tree, no KV affinity, no error.
+> Pinned per family by factory-threading tests (Rust) and live-local-server tests
+> (python + node). The strip rule (D2) is the safety argument: transport-owned names
+> are removed before any caller-supplied header reaches the wire.
+
 ## Consequences
 
 - **Positive.** Victor (and any FFI consumer) can send turn-scoped gateway identity without
