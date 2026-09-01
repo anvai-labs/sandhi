@@ -19,6 +19,16 @@ tag at build time; you do not hand-edit versions.
 Each binding is its **own** Cargo workspace, so Rust / Python / TypeScript changes are isolated
 and fmt/clippy/build independently (see `.github/workflows/ci.yml`).
 
+## Crates.io publish mechanics
+
+The `release.yml` crates job publishes the four workspace crates in
+dependency order (core → providers → store → proxy) with skip-if-published
+guards (idempotent after a partial failure), and `cargo set-version` derives
+every version from the tag. **Published manifests must not carry git-source
+dependencies** — cross-repo contracts are consumed as crates.io version pins
+(see [TD-0023](docs/td/TD-0023-release-automation.md) for the full chain,
+including the automated `sentinelpass-protocol` publish and pin-bump loop).
+
 ## Branch flow
 
 ```

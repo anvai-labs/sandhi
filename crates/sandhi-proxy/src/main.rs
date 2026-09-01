@@ -7,6 +7,7 @@
 //! `SANDHI_VAULT_BACKEND=keyring|sentinelpass` (default `keyring`). Request handling lives in the
 //! `sandhi_proxy` library and is exercised by the integration tests.
 
+use axum::http::HeaderMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -86,7 +87,15 @@ async fn main() {
             .unwrap_or_else(|_| "https://api.anthropic.com".into());
         providers.insert(
             "anthropic".into(),
-            runtime.anthropic(base, key, AnthropicAuthScheme::ApiKey, None, None, None),
+            runtime.anthropic(
+                base,
+                key,
+                AnthropicAuthScheme::ApiKey,
+                HeaderMap::new(),
+                None,
+                None,
+                None,
+            ),
         );
         keys.insert(VirtualKey {
             id: "vk_anthropic_demo".into(),
@@ -103,7 +112,15 @@ async fn main() {
             .unwrap_or_else(|_| "https://generativelanguage.googleapis.com".into());
         providers.insert(
             "gemini".into(),
-            runtime.gemini(base, key, GeminiAuthScheme::ApiKey, None, None, None),
+            runtime.gemini(
+                base,
+                key,
+                GeminiAuthScheme::ApiKey,
+                HeaderMap::new(),
+                None,
+                None,
+                None,
+            ),
         );
         keys.insert(VirtualKey {
             id: "vk_gemini_demo".into(),

@@ -1,6 +1,6 @@
 # TD-0006: Implementation plan — the transparent-metering plane (byte-exact proxy passthrough)
 
-Status: Accepted; implemented (the transparent plane is live — `metered_passthrough` + the transparent complete/stream response paths). **Step 1 approach revised 2026-07-23 (see banner).**
+Status: **Complete** — the transparent plane and its enforcement boundary are shipped and pinned by tests; later layers (P1–P3 of TD-0014, ADR-0009) build on it without altering its decisions.
 Date: 2026-07-22
 Implements: [ADR-0004](../adr/0004-two-plane-proxy-and-enforcement-boundary.md) D1
 

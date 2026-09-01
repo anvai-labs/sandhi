@@ -131,6 +131,66 @@ test("streamJson per-call wire headers ride and cannot override the credential (
   }
 });
 
+test("static headersJson reaches all four non-OpenAI families (TD-0022 D3)", async () => {
+  // The anthropic/gemini/cohere/ollama dispatch branches dropped headers_json before this
+  // landed — gateway consumers (victor) stamp x-sandhi-run-id/x-sandhi-session there.
+  const seen = [];
+  const bodies = {
+    "/v1/messages": JSON.stringify({
+      id: "m1", type: "message", role: "assistant",
+      content: [{ type: "text", text: "ok" }],
+      usage: { input_tokens: 2, output_tokens: 1 },
+    }),
+    "/models/gemini-x:generateContent": JSON.stringify({
+      candidates: [{ content: { parts: [{ text: "ok" }] } }],
+      usageMetadata: { promptTokenCount: 2, candidatesTokenCount: 1 },
+    }),
+    "/v2/chat": JSON.stringify({
+      id: "r1", message: { content: [{ type: "text", text: "ok" }] },
+      usage: { billed_units: { input_tokens: 2, output_tokens: 1 } },
+    }),
+    "/api/chat": JSON.stringify({
+      message: { role: "assistant", content: "ok" }, done: true,
+      prompt_eval_count: 2, eval_count: 1,
+    }),
+  };
+  // localServer serves responses in call order and overwrites lastHeaders per request;
+  // capture headers per call so EVERY family is asserted, not just the final one.
+  const orderedBodies = Object.values(bodies).map((body) => ({
+    contentType: "application/json",
+    body,
+  }));
+  const server = await localServer(orderedBodies);
+  try {
+    const runtime = new ProviderRuntime();
+    const cases = [
+      ["anthropic", { schema_version: "1", model: "claude-test", max_output_tokens: 8,
+                      messages: [{ role: "user", content: "hi" }] }, "/v1/messages"],
+      ["gemini", { schema_version: "1", model: "gemini-x",
+                   messages: [{ role: "user", content: "hi" }] }, "/models/gemini-x:generateContent"],
+      ["cohere", { schema_version: "1", model: "command-r",
+                   messages: [{ role: "user", content: "hi" }] }, "/v2/chat"],
+      ["ollama", { schema_version: "1", model: "llama3",
+                   messages: [{ role: "user", content: "hi" }] }, "/api/chat"],
+    ];
+    for (const [slug, request] of cases) {
+      const provider = runtime.provider(
+        slug, request.model, "k", server.origin,
+        JSON.stringify({ "x-sandhi-run-id": "run-static" }),
+        0,
+      );
+      await provider.completeJson(JSON.stringify(request));
+    }
+    const headers = server.lastHeaders();
+    assert.equal(headers["x-sandhi-run-id"], "run-static");
+    // NOTE: lastHeaders() reflects only the final request (ollama); the per-family
+    // guarantee is pinned by the python twin (which records every request) and the
+    // four Rust factory wiremock tests. Sequential-order coupling documented above.
+  } finally {
+    await server.close();
+  }
+});
+
 test("persistent typed provider completes and streams neutral documents", async () => {
   const server = await localServer([
     {

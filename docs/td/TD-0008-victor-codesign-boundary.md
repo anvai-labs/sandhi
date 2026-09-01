@@ -1,6 +1,6 @@
 # TD-0008: Victor–Sandhi co-design boundary — cohesion/coupling review and hardening plan
 
-- **Status:** Active (2026-07-25)
+- **Status:** **Complete** (2026-09-01). The scorecard rows were verified against code during the v0.3.0 close-out; the remaining seam work (contract version on the proxy path, idempotent metering) continues in TD-0021.
 - **Relates to:** ADR-0001 (wire contract), ADR-0002 (transport scope), TD-0002 (typed runtime),
   TD-0004 (catalog governance), victor FEP-0020/ADR-018
 - **Companion changes:** sandhi#65 (upstream error body), victor#652 (wire handshake +

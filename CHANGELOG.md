@@ -21,6 +21,46 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 
 - _Nothing yet._
 
+## [0.4.0] — 2026-09-01
+
+The attribution-integrity patch. One user-facing fix — the FFI's `provider()` dispatch silently
+dropped `headers_json` for the four non-OpenAI families — plus the Rust API correction that fix
+required (a breaking change to a published crate, hence the minor bump). The InferFlux corpus
+also gains its cache-split regression fixtures, and the sentinelpass protocol-pin automation
+(reintroduced in #191) actually works now.
+
+### Fixed
+
+- **FFI static-header parity for the four families** (#196, TD-0022 D3 follow-up). Both bindings'
+  `provider()` dispatch accepted `headers_json` and silently dropped it on the
+  `anthropic`/`gemini`/`cohere`/`ollama` branches. That is not an abstract gap: gateway consumers
+  (victor) preserve the provider slug while pointing `base_url` at the proxy, so every non-OpenAI
+  family in gateway mode lost `x-sandhi-run-id`/`x-sandhi-session` — no run cost tree, no session
+  affinity, no error anywhere. Per-call headers (`wire_headers_json`) were never affected. Pinned
+  per family by Rust factory-threading wiremock tests and live-local-server tests in both bindings;
+  the `TRANSPORT_OWNED_HEADERS` strip (credential/framing names) still guards every
+  caller-supplied set, verified end to end. Scope unchanged: cohere/ollama still have no proxy
+  ingress dialect — this fixes header transport, not dialect admission.
+
+### Changed
+
+- **Breaking (Rust, `sandhi-providers`)**: `ProviderRuntime::{anthropic, gemini, cohere, ollama}`
+  now take a `headers: http::HeaderMap` parameter (mirroring `openai_compat`), and set it on the
+  transport config. `transport()` already applied `config.headers` to every adapter — only the
+  factories and the FFI seam dropped it. Workspace-internal callers updated mechanically; external
+  consumers pass `HeaderMap::new()`.
+
+### Internal
+
+- **InferFlux cache-split regression fixtures** (#195): real captures from a live `inferfluxd`
+  (whole prompt cached: fresh input 0, `cache_read_tokens` 50, billable 74) — the proof of
+  ADR-0008's "the split lights up automatically" claim, with zero runtime changes.
+- **Protocol-pin automation repaired** (#191 → #194): the scheduled job had never succeeded — the
+  regex expected a crates.io `version =` pin where the manifest carries a git `tag =` form (and the
+  v-prefix asymmetry would have corrupted the pin it bumped), the build step used a cargo feature
+  the crate never declared, and the push ran before verification with no git credentials. All
+  fixed; the bump script round-trips clean.
+
 ## [0.3.0] — 2026-08-31
 
 The connection-defence release. TD-0014 P3 lands the connection-level half of the data-plane
@@ -69,12 +109,10 @@ TD-0022 join ADR-0006/0007 + TD-0014…0021.
   speaks the daemon protocol natively through the published `sentinelpass-protocol` v0.8.0
   contract crate (replacing the CLI shell-out) — read + write support with explicit locked vs
   not-found errors; deletes stay unsupported by design until upstream entry ownership exists.
-  Shipped behind the `sentinelpass-ipc` cargo feature (default in release binaries).
+  Selected at runtime via `SANDHI_VAULT_BACKEND=sentinelpass` (no cargo feature; the backend compiles unconditionally).
 - **InferFlux admitted as OpenAI-compat catalog data** (ADR-0008, #173): the self-hosted
   inference server is reachable through the OpenAI codec — one catalog row plus its
   session-affinity header fact, not a new family — and the decision record ships with it.
-- **The `sandhi` operator CLI in every release archive** (#172): archives previously carried
-  only `sandhi-proxy`, leaving CLI users to build from source.
 - **Design record** (#166): ADR-0006 (layer boundary: Sandhi stays L7, with the G01–G30 gap
   register), ADR-0007 (embeddings not admitted; the prototype branch formally parked), and
   TD-0014…0021 with phase tables written as failing tests.
@@ -98,8 +136,6 @@ TD-0022 join ADR-0006/0007 + TD-0014…0021.
   coverage at all; the translation-plane half was itself caught by adversarial review).
 - **Hung streams survived the grace deadline** (TD-0014 P3, #181; found by adversarial review
   of #169): fixed by the connection-task ownership above, with an upstream-EOF regression test.
-- **The `sandhi` CLI was missing from release archives** (#172).
-
 ### Security
 
 - The security (cargo-deny advisories) and codegen-drift gates now actually execute on the
@@ -109,7 +145,7 @@ TD-0022 join ADR-0006/0007 + TD-0014…0021.
   user-site `sandhi-gateway` could shadow the freshly built wheel and fail only
   catalog-dependent tests.
 
-## [0.2.1] — 2026-08-31 _(never tagged — its content ships in [0.3.0])_
+## [0.2.1] — 2026-08-31
 
 The packaging release. No product code changed: the binary release archives now ship **both**
 workspace binaries — the `sandhi-proxy` server and the `sandhi` operator CLI — under unchanged
@@ -764,7 +800,9 @@ inline reverse-proxy, the durable store, and both language bindings.
   ([#9](https://github.com/anvai-labs/sandhi/pull/9),
   [#10](https://github.com/anvai-labs/sandhi/pull/10))
 
-[Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/anvai-labs/sandhi/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/anvai-labs/sandhi/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/anvai-labs/sandhi/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/anvai-labs/sandhi/compare/v0.1.6...v0.2.0
 [0.1.4]: https://github.com/anvai-labs/sandhi/compare/v0.1.3...v0.1.4

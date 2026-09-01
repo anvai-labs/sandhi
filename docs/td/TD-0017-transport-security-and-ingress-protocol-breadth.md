@@ -67,6 +67,19 @@ surface that does not exist in production.
    that kills in-flight streams would settle every one of them as `Partial` — turning a routine
    operational event into a metering anomaly.
 
+> **Update 2026-09-01 — the h2c question is resolved, and a listener decision
+> landed ahead of this TD.** TD-0014 P3 found that hyper-util's auto builder
+> (what `axum::serve` used) sniffs for an h2c preface before arming any
+> timeout, exempting zero-byte connections from every defence — demonstrated
+> as a full-traffic wedge. The listener now binds hyper's **http1 builder
+> directly** and cleartext h2c is refused outright: recorded as
+> [ADR-0009](../adr/0009-http1-only-listener.md). Consequence for this TD's
+> h2 path: h2 returns only over TLS/ALPN, and **its builder sets
+> `header_read_timeout`, `max_buf_size`, and a timer in the same commit** —
+> with the silent-connection regression test extended to the h2 path. The
+> P0 experiment below is retained as the record of how the question was
+> originally (wrongly) framed.
+
 ## Non-goals
 
 - **No HTTP/3 or QUIC.** No named use case, and it would add `quinn`/`h3` plus a UDP path to a
@@ -126,7 +139,7 @@ silently, and do not fail-closed on a posture that many dev setups legitimately 
 | **P1** | D2 + D6 — TLS termination, opt-in | With cert and key configured, a TLS client completes a full request and a full SSE stream; without them, behaviour is byte-identical to today; binding a non-loopback address without TLS emits the startup warning |
 | **P2** | D3 — rotation | A certificate is replaced while an SSE stream is in flight: the stream completes uninterrupted and settles `Final` (not `Partial`), and a *new* connection presents the new chain. This test is the whole point of the phase |
 | **P3** | D4 + D5 — ALPN and `ConnCtx` | ALPN offers exactly the tested set; a client negotiating each offered protocol completes a request on every ingress dialect; `ConnCtx` carries ALPN/SNI and they appear in no usage event and no metric label |
-| **P4** | HTTP/2 ingress, only if P0 says it is worth declaring | Every ingress dialect passes its full test suite over h2 as well as h1 — the TD-0010 parity matrix gains an HTTP-version axis |
+| **P4** | HTTP/2 ingress, only if P0 says it is worth declaring. **Carried requirement from ADR-0009:** the h2 builder sets `header_read_timeout`, `max_buf_size`, and a timer in the same commit, and the silent-connection regression test extends to the h2 path — the sniffing-bypass class must not return with the new protocol | Every ingress dialect passes its full test suite over h2 as well as h1 — the TD-0010 parity matrix gains an HTTP-version axis |
 
 P0 is 30 minutes and gates P4 entirely. P1 is the P0-severity item and should not wait for anything.
 
