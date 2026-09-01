@@ -139,7 +139,7 @@ silently, and do not fail-closed on a posture that many dev setups legitimately 
 | **P1** | D2 + D6 — TLS termination, opt-in | With cert and key configured, a TLS client completes a full request and a full SSE stream; without them, behaviour is byte-identical to today; binding a non-loopback address without TLS emits the startup warning |
 | **P2** | D3 — rotation | A certificate is replaced while an SSE stream is in flight: the stream completes uninterrupted and settles `Final` (not `Partial`), and a *new* connection presents the new chain. This test is the whole point of the phase |
 | **P3** | D4 + D5 — ALPN and `ConnCtx` | ALPN offers exactly the tested set; a client negotiating each offered protocol completes a request on every ingress dialect; `ConnCtx` carries ALPN/SNI and they appear in no usage event and no metric label |
-| **P4** | HTTP/2 ingress, only if P0 says it is worth declaring | Every ingress dialect passes its full test suite over h2 as well as h1 — the TD-0010 parity matrix gains an HTTP-version axis |
+| **P4** | HTTP/2 ingress, only if P0 says it is worth declaring. **Carried requirement from ADR-0009:** the h2 builder sets `header_read_timeout`, `max_buf_size`, and a timer in the same commit, and the silent-connection regression test extends to the h2 path — the sniffing-bypass class must not return with the new protocol | Every ingress dialect passes its full test suite over h2 as well as h1 — the TD-0010 parity matrix gains an HTTP-version axis |
 
 P0 is 30 minutes and gates P4 entirely. P1 is the P0-severity item and should not wait for anything.
 

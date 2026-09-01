@@ -1,6 +1,6 @@
 # TD-0009: Usage-visibility surfaces — one aggregate, many transports
 
-- **Status:** **Accepted** (2026-07-25). Revised from the Proposed draft after a first-principles
+- **Status:** **Complete** (2026-09-01). Revised from the Proposed draft after a first-principles
   pass: the draft prescribed three local patches, which reproduced the very defect it was written
   to fix. See *What the first draft got wrong*.
 - **Relates to:** ADR-0001 (wire contract, measure-vs-price), TD-0002 (typed runtime,

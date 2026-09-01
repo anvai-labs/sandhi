@@ -1,6 +1,6 @@
 # TD-0002: Typed provider runtime
 
-- Status: accepted; implementation in progress
+- Status: **Complete** (2026-09-01). The typed runtime shipped with the full decorator stack (metering + resilience), per-family codecs, and per-call transport context (TD-0022, #177).
 - Contract owner: `sandhi-core`
 - Runtime owner: `sandhi-providers`
 - First consumer: Victor
