@@ -54,6 +54,9 @@ jobs:
           # The homebrew-tap formula installs both; the CLI was missing from
           # archives before v0.2.1 (anvai-labs/homebrew-tap consumes these).
           bin: sandhi-proxy, sandhi
+          # The SentinelPass daemon-IPC vault backend is feature-gated so the
+          # crates.io publish carries no git dependency; binaries keep it.
+          features: sentinelpass-ipc
           target: ${{ matrix.target }}
           archive: sandhi-proxy-$tag-$target
           token: ${{ secrets.GITHUB_TOKEN }}

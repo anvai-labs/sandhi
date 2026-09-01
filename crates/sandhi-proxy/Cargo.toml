@@ -34,9 +34,9 @@ otel-otlp = [
 [dependencies]
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-sandhi-core = { path = "../sandhi-core", version = "0.0.0" }
-sandhi-providers = { path = "../sandhi-providers", version = "0.0.0" }
-sandhi-store = { path = "../sandhi-store", version = "0.0.0" }
+sandhi-core = { path = "../sandhi-core", version = "0.3.0" }
+sandhi-providers = { path = "../sandhi-providers", version = "0.3.0" }
+sandhi-store = { path = "../sandhi-store", version = "0.3.0" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 axum = "0.7"
 futures-util = "0.3"
