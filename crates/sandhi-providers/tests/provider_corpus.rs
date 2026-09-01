@@ -240,14 +240,19 @@ async fn ollama_stream_fixture_yields_expected_and_forwards_verbatim() {
 
 // ───────────────────────── InferFlux (self-hosted OpenAI dialect, ADR-0008) ─────────────────────────
 //
-// InferFlux deviates from OpenAI's streaming shape in two tolerated ways (forward-compat,
-// not special cases): content chunks carry no `"usage": null` sibling and the first delta
-// has no `role`. The terminal usage frame reports NO cache split — the fixture pins that
-// the whole prompt meters as fresh input, not zero (the split lights up automatically if
-// InferFlux ever ships `prompt_tokens_details.cached_tokens` or DeepSeek-style hit/miss).
+// Real captures from a live inferfluxd v0.1.0 (tinyllama, llama_cpp backend) running with
+// its prefix cache — the second identical prompt in a session reports the WHOLE prompt as
+// cached (`prompt_tokens_details.cached_tokens` == `prompt_tokens`, shipped upstream after
+// ADR-0008 was written). This is the regression proof of the ADR's "the split lights up
+// automatically" claim: `parse_openai_usage` needed ZERO changes, and the fixture pins the
+// exact neutral split — fresh input = prompt − cached = 0, cache_read = 50, billable = 74.
+// InferFlux's tolerated deviations from OpenAI's streaming shape remain visible (content
+// chunks carry no `"usage": null` sibling; first delta has no `role`) and the stream test
+// still asserts byte-exact passthrough of the real frame, timings included (I3 rides the
+// same usage frame; the typed boundary stamps its own latency separately, `typed.rs`).
 
 #[tokio::test]
-async fn inferflux_complete_fixture_meters_full_prompt_as_fresh_input() {
+async fn inferflux_complete_fixture_meters_the_cache_split() {
     let server = MockServer::start().await;
     mock(
         &server,
@@ -258,7 +263,7 @@ async fn inferflux_complete_fixture_meters_full_prompt_as_fresh_input() {
     .await;
     let out = OpenAiCompat::new("inferflux", server.uri(), "local-key")
         .complete(ProviderRequest::new(
-            "llama3-8b",
+            "tinyllama",
             serde_json::json!({ "messages": [] }),
         ))
         .await
@@ -266,6 +271,15 @@ async fn inferflux_complete_fixture_meters_full_prompt_as_fresh_input() {
     assert_eq!(
         out.usage,
         parse_expected(include_str!("fixtures/inferflux/expected_usage.json"))
+    );
+    // The split, spelled out: the whole prompt was a cache hit.
+    assert_eq!(out.usage.cache_read_tokens, 50);
+    assert_eq!(out.usage.tokens_in, 0);
+    assert_eq!(out.usage.tokens_out, 24);
+    // Billable = 0 fresh + 50 cache-read + 24 out (ADR-0005 D4 shape).
+    assert_eq!(
+        out.usage.tokens_in + out.usage.cache_read_tokens + out.usage.tokens_out,
+        74
     );
 }
 
@@ -276,7 +290,7 @@ async fn inferflux_stream_fixture_yields_expected_and_forwards_verbatim() {
     mock(&server, "/chat/completions", "text/event-stream", sse).await;
     let stream = OpenAiCompat::new("inferflux", server.uri(), "local-key")
         .stream(ProviderRequest::new(
-            "llama3-8b",
+            "tinyllama",
             serde_json::json!({ "messages": [] }),
         ))
         .await
@@ -287,4 +301,5 @@ async fn inferflux_stream_fixture_yields_expected_and_forwards_verbatim() {
         usage,
         parse_expected(include_str!("fixtures/inferflux/expected_usage.json"))
     );
+    assert_eq!(usage.cache_read_tokens, 50, "the stream split meters too");
 }
