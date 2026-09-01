@@ -1960,7 +1960,7 @@ dependencies = [
 
 [[package]]
 name = "sandhi-core"
-version = "0.0.0"
+version = "0.3.0"
 dependencies = [
  "schemars",
  "serde",
@@ -1971,7 +1971,7 @@ dependencies = [
 
 [[package]]
 name = "sandhi-providers"
-version = "0.0.0"
+version = "0.3.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1992,7 +1992,7 @@ dependencies = [
 
 [[package]]
 name = "sandhi-proxy"
-version = "0.0.0"
+version = "0.3.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2023,7 +2023,7 @@ dependencies = [
 
 [[package]]
 name = "sandhi-store"
-version = "0.0.0"
+version = "0.3.0"
 dependencies = [
  "getrandom 0.2.17",
  "keyring",
@@ -2120,7 +2120,8 @@ dependencies = [
 [[package]]
 name = "sentinelpass-protocol"
 version = "0.8.0"
-source = "git+https://github.com/anvai-labs/sentinelpass?tag=v0.8.0#027ee5ec8456f3581cad292e387162bab1ce831c"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fa963ac12de9eb4880ecdb7ff2e6689b9e400ca2f9bdebd02260755469972d87"
 dependencies = [
  "aes-gcm",
  "dirs",
