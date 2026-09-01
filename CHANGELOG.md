@@ -104,9 +104,7 @@ TD-0022 join ADR-0006/0007 + TD-0014…0021.
   user-site `sandhi-gateway` could shadow the freshly built wheel and fail only
   catalog-dependent tests.
 
-## [0.2.0] — 2026-08-31
-
-## [0.2.1] — 2026-08-31
+## [0.2.1] — 2026-08-31 _(never tagged — its content ships in [0.3.0])_
 
 The packaging release. No product code changed: the binary release archives now ship **both**
 workspace binaries — the `sandhi-proxy` server and the `sandhi` operator CLI — under unchanged
