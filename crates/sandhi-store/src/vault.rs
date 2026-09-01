@@ -172,6 +172,7 @@ impl Default for KeyringVault {
 ///
 /// Env: `SENTINELPASS_CLIENT_TOKEN` (per-client grant token), `SANDHI_SENTINELPASS_CLIENT_ID`
 /// (default `sandhi`), `SANDHI_SENTINELPASS_SOCKET` (socket path override).
+#[cfg(feature = "sentinelpass-ipc")]
 pub struct SentinelPassIpcVault {
     client_id: String,
     client_token: Option<String>,
@@ -181,6 +182,7 @@ pub struct SentinelPassIpcVault {
     rt: tokio::runtime::Runtime,
 }
 
+#[cfg(feature = "sentinelpass-ipc")]
 impl SentinelPassIpcVault {
     pub fn new() -> Result<Self, VaultError> {
         let client_id =
@@ -223,6 +225,7 @@ impl SentinelPassIpcVault {
     }
 }
 
+#[cfg(feature = "sentinelpass-ipc")]
 impl Default for SentinelPassIpcVault {
     /// Falls back to an empty backend on construction failure; the proxy logs backend
     /// errors per lookup, so a degraded start stays observable without aborting boot.
@@ -239,6 +242,7 @@ impl Default for SentinelPassIpcVault {
     }
 }
 
+#[cfg(feature = "sentinelpass-ipc")]
 impl Vault for SentinelPassIpcVault {
     fn name(&self) -> &'static str {
         "sentinelpass-ipc"
@@ -516,7 +520,18 @@ impl VaultStore {
                 if std::env::var("SANDHI_SENTINELPASS_FALLBACK_CLI").as_deref() == Ok("1") {
                     Box::new(SentinelPassVault::new())
                 } else {
-                    Box::new(SentinelPassIpcVault::new().unwrap_or_default())
+                    #[cfg(feature = "sentinelpass-ipc")]
+                    {
+                        Box::new(SentinelPassIpcVault::new().unwrap_or_default())
+                    }
+                    #[cfg(not(feature = "sentinelpass-ipc"))]
+                    {
+                        tracing::warn!(
+                            "SANDHI_VAULT_BACKEND=sentinelpass daemon IPC requires the \
+                             `sentinelpass-ipc` feature; falling back to the legacy CLI shell-out"
+                        );
+                        Box::new(SentinelPassVault::new())
+                    }
                 }
             }
             _ => Box::new(KeyringVault),

@@ -73,8 +73,6 @@ TD-0022 join ADR-0006/0007 + TD-0014…0021.
 - **InferFlux admitted as OpenAI-compat catalog data** (ADR-0008, #173): the self-hosted
   inference server is reachable through the OpenAI codec — one catalog row plus its
   session-affinity header fact, not a new family — and the decision record ships with it.
-- **The `sandhi` operator CLI in every release archive** (#172): archives previously carried
-  only `sandhi-proxy`, leaving CLI users to build from source.
 - **Design record** (#166): ADR-0006 (layer boundary: Sandhi stays L7, with the G01–G30 gap
   register), ADR-0007 (embeddings not admitted; the prototype branch formally parked), and
   TD-0014…0021 with phase tables written as failing tests.
@@ -98,8 +96,6 @@ TD-0022 join ADR-0006/0007 + TD-0014…0021.
   coverage at all; the translation-plane half was itself caught by adversarial review).
 - **Hung streams survived the grace deadline** (TD-0014 P3, #181; found by adversarial review
   of #169): fixed by the connection-task ownership above, with an upstream-EOF regression test.
-- **The `sandhi` CLI was missing from release archives** (#172).
-
 ### Security
 
 - The security (cargo-deny advisories) and codegen-drift gates now actually execute on the
@@ -109,7 +105,7 @@ TD-0022 join ADR-0006/0007 + TD-0014…0021.
   user-site `sandhi-gateway` could shadow the freshly built wheel and fail only
   catalog-dependent tests.
 
-## [0.2.1] — 2026-08-31 _(never tagged — its content ships in [0.3.0])_
+## [0.2.1] — 2026-08-31
 
 The packaging release. No product code changed: the binary release archives now ship **both**
 workspace binaries — the `sandhi-proxy` server and the `sandhi` operator CLI — under unchanged
