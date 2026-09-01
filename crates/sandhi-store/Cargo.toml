@@ -9,7 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 tracing = "0.1"
-sandhi-core = { path = "../sandhi-core", version = "0.0.0" }
+sandhi-core = { path = "../sandhi-core", version = "0.3.0" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -22,8 +22,12 @@ keyring = { version = "3", default-features = false, features = [
     "linux-native",
 ] }
 # Stable SentinelPass IPC contract (message types, envelope, client).
-# Pinned to the released v0.8.0 tag; use path+`[patch]` for local dev:
-#   [patch."https://github.com/anvai-labs/sentinelpass"]
-#   sentinelpass-protocol = { path = "../../sentinelpass/sentinelpass-protocol" }
-sentinelpass-protocol = { git = "https://github.com/anvai-labs/sentinelpass", tag = "v0.8.0" }
-tokio = { version = "1", default-features = false, features = ["rt"] }
+# Optional and NON-default: the IPC backend (and its tokio runtime) ships only
+# where the `sentinelpass-ipc` feature is enabled — release binary builds turn
+# it on; crates consumers may enable it themselves. sentinelpass-protocol
+# v0.8.0 is published to crates.io, so the published manifest stays clean.
+sentinelpass-protocol = { version = "0.8.0", optional = true }
+tokio = { version = "1", default-features = false, features = ["rt"], optional = true }
+
+[features]
+sentinelpass-ipc = ["dep:sentinelpass-protocol", "dep:tokio"]
