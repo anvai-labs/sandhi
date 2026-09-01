@@ -304,11 +304,19 @@ impl TypedProvider {
         &self.provider
     }
 
+    /// `wire_headers_json` (optional, TD-0022 D1): per-call wire headers — a string map sent
+    /// with THIS call only, for gateway-path metadata that changes per turn (e.g.
+    /// `x-sandhi-step-id`). Transport-owned names (Authorization, Host, Content-Type,
+    /// Accept-Encoding, and the family credential headers x-api-key, x-goog-api-key,
+    /// anthropic-version) are stripped server-side and can never override the credential.
+    #[pyo3(signature = (request_json, wire_headers_json=None))]
     fn complete_json<'py>(
         &self,
         py: Python<'py>,
         request_json: String,
+        wire_headers_json: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let call_headers = parse_headers_json(wire_headers_json)?;
         let request: sandhi_core::ChatRequestV1 = serde_json::from_str(&request_json)
             .map_err(|e| PyValueError::new_err(format!("invalid ChatRequestV1 JSON: {e}")))?;
         request
@@ -318,7 +326,7 @@ impl TypedProvider {
         let provider = self.provider.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let response = handle
-                .complete(request)
+                .complete_with(request, call_headers)
                 .await
                 .map_err(|e| typed_provider_err_to_py(e, &provider))?;
             serde_json::to_string(&response)
@@ -326,7 +334,14 @@ impl TypedProvider {
         })
     }
 
-    fn stream_json(&self, request_json: String) -> PyResult<TypedEventStreamIter> {
+    /// `wire_headers_json` (optional, TD-0022 D1): per-call wire headers, as `complete_json`.
+    #[pyo3(signature = (request_json, wire_headers_json=None))]
+    fn stream_json(
+        &self,
+        request_json: String,
+        wire_headers_json: Option<String>,
+    ) -> PyResult<TypedEventStreamIter> {
+        let call_headers = parse_headers_json(wire_headers_json)?;
         let request: sandhi_core::ChatRequestV1 = serde_json::from_str(&request_json)
             .map_err(|e| PyValueError::new_err(format!("invalid ChatRequestV1 JSON: {e}")))?;
         request
@@ -337,7 +352,7 @@ impl TypedProvider {
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, String>>(64);
         pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
             use futures_util::StreamExt;
-            match handle.stream(request).await {
+            match handle.stream_with(request, call_headers).await {
                 Ok(mut stream) => {
                     while let Some(event) = stream.next().await {
                         let (item, stop) = match event {

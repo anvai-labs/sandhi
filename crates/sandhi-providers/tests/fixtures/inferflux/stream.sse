@@ -1,0 +1,10 @@
+data: {"choices":[{"delta":{"content":"Hello "},"finish_reason":null,"index":0}],"created":1770000000,"id":"chatcmpl-1770000000","model":"llama3-8b","object":"chat.completion.chunk"}
+
+data: {"choices":[{"delta":{"content":"world"},"finish_reason":null,"index":0}],"created":1770000000,"id":"chatcmpl-1770000000","model":"llama3-8b","object":"chat.completion.chunk"}
+
+data: {"choices":[{"delta":{},"finish_reason":"stop","index":0}],"created":1770000000,"id":"chatcmpl-1770000000","model":"llama3-8b","object":"chat.completion.chunk"}
+
+data: {"choices":[],"created":1770000000,"id":"chatcmpl-1770000000","model":"llama3-8b","object":"chat.completion.chunk","usage":{"completion_tokens":250,"prompt_tokens":1000,"total_tokens":1250}}
+
+data: [DONE]
+

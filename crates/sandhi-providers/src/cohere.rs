@@ -14,6 +14,7 @@ pub struct Cohere {
     client: reqwest::Client,
     base_url: String,
     api_key: String,
+    headers: http::HeaderMap,
 }
 
 impl Cohere {
@@ -22,7 +23,16 @@ impl Cohere {
             client: crate::default_client(),
             base_url: base_url.into(),
             api_key: api_key.into(),
+            headers: http::HeaderMap::new(),
         }
+    }
+
+    /// Caller-supplied provider headers, transport-owned names stripped (TD-0022 D3: this
+    /// family previously dropped `ProviderTransportConfig::headers` entirely).
+    #[must_use]
+    pub fn with_headers(mut self, headers: http::HeaderMap) -> Self {
+        self.headers = crate::strip_transport_owned(headers);
+        self
     }
 
     /// The hosted Cohere API (`https://api.cohere.com`).
@@ -50,6 +60,7 @@ impl Provider for Cohere {
             .client
             .post(self.chat_url())
             .bearer_auth(&self.api_key)
+            .headers(crate::merge_call_headers(&self.headers, &req.extra_headers))
             .json(&body)
             .send()
             .await
@@ -80,6 +91,7 @@ impl Provider for Cohere {
             .client
             .post(self.chat_url())
             .bearer_auth(&self.api_key)
+            .headers(crate::merge_call_headers(&self.headers, &req.extra_headers))
             .json(&body)
             .send()
             .await
@@ -113,6 +125,7 @@ pub(crate) fn sniff_usage_line(line: &[u8], usage: &mut ParsedUsage) -> bool {
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use http::header::{HeaderName, HeaderValue};
     use wiremock::matchers::{header, method, path};
 
     const EXPECTED: ParsedUsage = ParsedUsage {
@@ -180,5 +193,56 @@ mod tests {
             .unwrap();
         assert_eq!(out.usage.tokens_in, 42);
         assert_eq!(out.usage.tokens_out, 9);
+    }
+
+    /// TD-0022 D3: this family previously dropped transport headers entirely. Static and
+    /// per-call headers must ride, transport-owned names (incl. the family credential) must
+    /// never be caller-suppliable.
+    #[tokio::test]
+    async fn headers_ride_and_the_credential_is_never_caller_suppliable() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v2/chat"))
+            .and(header("authorization", "Bearer co-real"))
+            .and(header("x-custom", "static-value"))
+            .and(header("x-sandhi-step-id", "step-7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "message": { "content": [{ "text": "hi" }] },
+                "usage": { "billed_units": { "input_tokens": 1, "output_tokens": 1 } }
+            })))
+            .mount(&server)
+            .await;
+
+        let mut statics = http::HeaderMap::new();
+        statics.insert(
+            HeaderName::from_static("x-custom"),
+            HeaderValue::from_static("static-value"),
+        );
+        statics.insert(
+            HeaderName::from_static("authorization"),
+            HeaderValue::from_static("Bearer attacker-static"),
+        );
+        let provider = Cohere::new(server.uri(), "co-real").with_headers(statics);
+
+        let mut request = ProviderRequest::new("command-r", json!({ "messages": [] }));
+        let mut call = http::HeaderMap::new();
+        call.insert(
+            HeaderName::from_static("x-sandhi-step-id"),
+            HeaderValue::from_static("step-7"),
+        );
+        call.insert(
+            HeaderName::from_static("authorization"),
+            HeaderValue::from_static("Bearer attacker-call"),
+        );
+        request.extra_headers = call;
+        provider.complete(request).await.unwrap();
+
+        // The matchers gate the positive behavior; this pins exactly one credential value.
+        let sent = &server.received_requests().await.unwrap()[0];
+        assert_eq!(
+            sent.headers.get_all("authorization").iter().count(),
+            1,
+            "no attacker-supplied Authorization may ride alongside the real key"
+        );
     }
 }

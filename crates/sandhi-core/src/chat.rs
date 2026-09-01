@@ -500,13 +500,36 @@ pub enum ChatStreamEventV1 {
 /// assertion (self-reported inputs — ADR-0005 D7 trust language).
 #[must_use]
 pub fn derive_session_id(explicit: Option<&str>, body: &Value) -> Option<String> {
+    derive_session_id_scoped(explicit, body, None)
+}
+
+/// [`derive_session_id`] with a caller-owned scope mixed into the prefix-hash branch
+/// (ADR-0005 D7; the proxy passes the virtual key id).
+///
+/// The unsalted prefix hash keys on prompt content alone, so two *different* callers (virtual
+/// keys) running the same agent prompt would land on one session id — flattening users to one
+/// session, which ADR-0001 §4 forbids. The scope salts ONLY the prefix-hash branch: declared
+/// identities (`user` / `metadata.user_id`) stay readable (modulo header sanitization below),
+/// and an explicit session header is untouched apart from sanitization (operator-declared
+/// continuity is an explicit choice; attribution remains key-authoritative either way).
+///
+/// Declared and explicit ids are external input that crosses the seam as a header value
+/// (e.g. `x-inferflux-session-id`, ADR-0008 D3), so they are passed through
+/// [`sanitize_affinity_value`]: a control byte would otherwise make the header unbuildable on
+/// both planes and silently disable session affinity for the whole conversation.
+#[must_use]
+pub fn derive_session_id_scoped(
+    explicit: Option<&str>,
+    body: &Value,
+    scope: Option<&str>,
+) -> Option<String> {
     if let Some(session) = explicit.map(str::trim).filter(|s| !s.is_empty()) {
-        return Some(session.to_string());
+        return Some(sanitize_affinity_value(session));
     }
     if let Some(user) = body.get("user").and_then(Value::as_str) {
         let user = user.trim();
         if !user.is_empty() {
-            return Some(user.to_string());
+            return Some(sanitize_affinity_value(user));
         }
     }
     if let Some(user_id) = body
@@ -516,14 +539,17 @@ pub fn derive_session_id(explicit: Option<&str>, body: &Value) -> Option<String>
     {
         let user_id = user_id.trim();
         if !user_id.is_empty() {
-            return Some(user_id.to_string());
+            return Some(sanitize_affinity_value(user_id));
         }
     }
     // Prefix hash: system prompt(s) + tool definitions, serialized deterministically. Covers
-    // both wire shapes — OpenAI (`messages[role=system|developer]`) and Anthropic (`system`).
+    // the wire shapes — OpenAI (`messages[role=system|developer]`), Anthropic (`system`),
+    // Gemini (`systemInstruction`), and Responses (`instructions`).
     let mut prefix: Vec<Value> = Vec::new();
-    if let Some(system) = body.get("system") {
-        prefix.push(system.clone());
+    for key in ["system", "systemInstruction", "instructions"] {
+        if let Some(system) = body.get(key) {
+            prefix.push(system.clone());
+        }
     }
     if let Some(messages) = body.get("messages").and_then(Value::as_array) {
         for message in messages {
@@ -540,7 +566,26 @@ pub fn derive_session_id(explicit: Option<&str>, body: &Value) -> Option<String>
         return None;
     }
     let canonical = serde_json::to_string(&prefix).ok()?;
-    Some(format!("prefix-{:016x}", fnv1a_64(canonical.as_bytes())))
+    // Mix the scope in before the canonical prefix so equal prompts under different scopes
+    // hash apart (never flatten users to one session).
+    let mut hash = fnv1a_64(canonical.as_bytes());
+    if let Some(scope) = scope.map(str::trim).filter(|s| !s.is_empty()) {
+        hash ^= fnv1a_64(scope.as_bytes());
+    }
+    Some(format!("prefix-{:016x}", hash))
+}
+
+/// Maps an affinity value onto RFC 9110 field-value-safe form: every control character
+/// (LF, NUL, DEL, C1, …) becomes `-`. Affinity ids cross the seam as HTTP header values
+/// (`x-inferflux-session-id` and kin, ADR-0008 D3), where control bytes make
+/// `HeaderValue::from_str` fail — which would otherwise silently drop the header for the
+/// whole conversation on both planes.
+#[must_use]
+pub fn sanitize_affinity_value(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| if c.is_control() { '-' } else { c })
+        .collect()
 }
 
 /// FNV-1a 64-bit — a stable, dependency-free hash for affinity keys (not a security boundary).
@@ -833,6 +878,80 @@ mod tests {
         assert_eq!(
             derive_session_id(Some("  "), &anthropic_body).as_deref(),
             Some("acct-42")
+        );
+    }
+
+    #[test]
+    fn session_derivation_is_scoped_by_caller() {
+        // The vkey scope salts the prefix hash so two callers running the same agent
+        // prompt never flatten onto one session (ADR-0001 §4). Regression pin for the
+        // salting itself: dropping the `hash ^= fnv1a_64(scope)` mixing must fail these
+        // assertions. The proxy wiring that passes `Some(&vk.id)` is pinned separately,
+        // end to end, by derived_sessions_are_scoped_by_virtual_key in the proxy tests.
+        let body = serde_json::json!({
+            "model": "gpt-5",
+            "messages": [{"role": "system", "content": "You are helpful."}]
+        });
+        let tenant_a = derive_session_id_scoped(None, &body, Some("vk-a")).unwrap();
+        let tenant_b = derive_session_id_scoped(None, &body, Some("vk-b")).unwrap();
+        assert_ne!(
+            tenant_a, tenant_b,
+            "same prompt under different virtual keys must not share a session id"
+        );
+        // Stable within one caller across the conversation's turns...
+        assert_eq!(
+            derive_session_id_scoped(None, &body, Some("vk-a")).unwrap(),
+            tenant_a
+        );
+        // ...and the unscoped form is its own scope.
+        assert_ne!(
+            derive_session_id_scoped(None, &body, None).unwrap(),
+            tenant_a
+        );
+        // Declared identities stay readable — the scope must not perturb them.
+        let declared = serde_json::json!({ "model": "m", "user": "acct-42", "messages": [] });
+        assert_eq!(
+            derive_session_id_scoped(None, &declared, Some("vk-a")).as_deref(),
+            Some("acct-42")
+        );
+    }
+
+    #[test]
+    fn session_derivation_covers_gemini_and_responses_prefix_keys() {
+        // Gemini (`systemInstruction`) and Responses (`instructions`) are first-class
+        // prefix signals. Regression pin: narrowing the key loop back to `system`, or a
+        // key typo, silently derives None for those dialects — losing session-grouped
+        // usage and upstream KV affinity with no signal.
+        let gemini = serde_json::json!({
+            "systemInstruction": {"parts": [{"text": "You are helpful."}]},
+            "contents": []
+        });
+        let responses = serde_json::json!({ "instructions": "You are helpful.", "input": [] });
+        assert!(derive_session_id(None, &gemini).is_some());
+        assert!(derive_session_id(None, &responses).is_some());
+        assert_ne!(
+            derive_session_id(None, &gemini),
+            derive_session_id(None, &responses)
+        );
+    }
+
+    #[test]
+    fn declared_session_ids_are_sanitized_to_header_safe_form() {
+        // A control byte in a declared id would make HeaderValue::from_str fail on both
+        // planes and silently drop the vendor affinity header for the whole conversation.
+        let body = serde_json::json!({ "model": "m", "user": "acct\n42", "messages": [] });
+        assert_eq!(derive_session_id(None, &body).as_deref(), Some("acct-42"));
+        assert_eq!(
+            derive_session_id(Some("a\u{0}b"), &body).as_deref(),
+            Some("a-b")
+        );
+        // The prefix-hash branch emits hex by construction and needs no sanitizing.
+        let prefixed = serde_json::json!({ "messages": [{"role": "system", "content": "s"}] });
+        let derived = derive_session_id(None, &prefixed).unwrap();
+        let hash = derived.strip_prefix("prefix-").expect("hash form");
+        assert!(
+            !hash.is_empty() && hash.chars().all(|c| c.is_ascii_hexdigit()),
+            "unexpected prefix-hash shape: {derived}"
         );
     }
 

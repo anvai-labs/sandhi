@@ -8,7 +8,7 @@ use crate::{
     ByteStream, ParsedUsage, Provider, ProviderError, ProviderRequest, ProviderResponse,
 };
 use async_trait::async_trait;
-use http::header::{HeaderMap, AUTHORIZATION, CONTENT_TYPE, HOST};
+use http::header::HeaderMap;
 use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -46,11 +46,9 @@ impl OpenAiResponses {
     }
 
     #[must_use]
-    pub fn with_headers(mut self, mut headers: HeaderMap) -> Self {
-        headers.remove(AUTHORIZATION);
-        headers.remove(CONTENT_TYPE);
-        headers.remove(HOST);
-        self.headers = headers;
+    pub fn with_headers(mut self, headers: HeaderMap) -> Self {
+        // Single-sourced strip (TD-0022 D2), mirroring OpenAiCompat::with_headers.
+        self.headers = crate::strip_transport_owned(headers);
         self
     }
 
@@ -96,11 +94,15 @@ impl Provider for OpenAiResponses {
         Self::validate(&req.body)?;
         let mut body = req.body;
         body["stream"] = Value::Bool(false);
-        let response = self
+        let mut request = self
             .client
             .post(self.responses_url())
-            .bearer_auth(&self.bearer_token)
-            .headers(self.headers.clone())
+            .headers(crate::merge_call_headers(&self.headers, &req.extra_headers));
+        if !self.bearer_token.is_empty() {
+            // Keyless local upstreams get no Authorization header (ADR-0008 D1).
+            request = request.bearer_auth(&self.bearer_token);
+        }
+        let response = request
             .json(&body)
             .send()
             .await
@@ -126,11 +128,15 @@ impl Provider for OpenAiResponses {
         Self::validate(&req.body)?;
         let mut body = req.body;
         body["stream"] = Value::Bool(true);
-        let response = self
+        let mut request = self
             .client
             .post(self.responses_url())
-            .bearer_auth(&self.bearer_token)
-            .headers(self.headers.clone())
+            .headers(crate::merge_call_headers(&self.headers, &req.extra_headers));
+        if !self.bearer_token.is_empty() {
+            // Keyless local upstreams get no Authorization header (ADR-0008 D1).
+            request = request.bearer_auth(&self.bearer_token);
+        }
+        let response = request
             .json(&body)
             .send()
             .await

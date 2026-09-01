@@ -21,7 +21,90 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 
 - _Nothing yet._
 
-## [0.2.1] — 2026-08-31
+## [0.3.0] — 2026-08-31
+
+The connection-defence release. TD-0014 P3 lands the connection-level half of the data-plane
+design: a hard cap on concurrent connections, a slowloris deadline that is guaranteed rather
+than incidental, and a graceful drain that actually closes hung streams. Alongside it, the
+co-design asks from the InferFlux integration (ADR-0008) ship: session identity derived from
+standard SDK signals, per-call transport context on the typed seam (TD-0022), upstream
+traceparent passthrough, and request-id correlation minted at admission. The `sandhi` operator
+CLI now ships in every release archive. Design record: ADR-0008 (InferFlux admission) and
+TD-0022 join ADR-0006/0007 + TD-0014…0021.
+
+### Added
+
+- **Connection-level defence** (TD-0014 P3, #181; gaps G03, G19). The proxy now bounds its
+  transport surface explicitly: `SANDHI_MAX_CONNECTIONS` (default 1024) sheds concurrent
+  connections beyond the cap, `SANDHI_HEADER_READ_TIMEOUT_SECS` (default 30, previously
+  whatever hyper's current default happened to be) closes slowloris partial-heads, and the
+  per-connection read buffer is bounded at 256 KiB. Served with hyper's HTTP/1 builder
+  directly — hyper-util's auto builder sniffs for an h2c preface before arming any timer,
+  which exempted silent connections from every timeout (an adversarial-review finding,
+  demonstrated as a full-traffic wedge). Cleartext h2c ingress is therefore refused until
+  TD-0017 introduces h2 with its own timeouts.
+- **`ConnCtx` + trusted-proxy resolution** (#181): `SANDHI_TRUSTED_PROXIES` (CIDR allowlist;
+  default empty — trust no one). `X-Forwarded-For` is believed only for connections from
+  allowlisted peers, resolved per request; peers are canonicalized so v4-mapped IPv6 shares
+  buckets and allowlist entries with their v4 form.
+- **A drain that closes** (#181): connection tasks are owned (JoinSet + hyper-util
+  GracefulShutdown); at the grace deadline hung streams are aborted instead of lingering as
+  detached tasks holding slots, leases, and upstream connections. `serve()` embedders get the
+  same protections — the plain path now delegates to the graceful one.
+- **Observability for all of it** (#181): `sandhi_connections_open` (gauge) and
+  `sandhi_connections_shed_total` (counter) at `/metrics`.
+- **Session identity from standard SDK signals** (ADR-0005 D7, #174): a drop-in OpenAI or
+  Anthropic SDK client now gets session attribution without sending `x-sandhi-session` —
+  explicit header, then OpenAI `user`, then Anthropic `metadata.user_id`, then a stable hash
+  of the cacheable prefix.
+- **Per-call wire headers on the typed seam** (TD-0022, #177): transport context can be
+  attached per call instead of per cached handle, which unblocks step-level cost-tree nodes
+  (`x-sandhi-step-id`) for FFI consumers.
+- **Request-id correlation** (ADR-0008 D6, #179): request ids are minted at admission (every
+  call, not only clients that send `idempotency-key`) and correlated with the upstream.
+- **Upstream `traceparent` passthrough** (#175): the transparent plane's header allowlist
+  passes an upstream-echoed W3C traceparent, restoring response-to-span linkage (`tracestate`
+  stays stripped).
+- **InferFlux admitted as OpenAI-compat catalog data** (ADR-0008, #173): the self-hosted
+  inference server is reachable through the OpenAI codec — one catalog row plus its
+  session-affinity header fact, not a new family — and the decision record ships with it.
+- **The `sandhi` operator CLI in every release archive** (#172): archives previously carried
+  only `sandhi-proxy`, leaving CLI users to build from source.
+- **Design record** (#166): ADR-0006 (layer boundary: Sandhi stays L7, with the G01–G30 gap
+  register), ADR-0007 (embeddings not admitted; the prototype branch formally parked), and
+  TD-0014…0021 with phase tables written as failing tests.
+
+### Changed
+
+- **`SANDHI_MAX_IN_FLIGHT_AI_REQUESTS` bounds streams, not just handler futures** (TD-0014 P2,
+  #169): the admission slot is held for the whole response body — released on completion,
+  client disconnect, or drain abort — so simultaneously open model streams are finally capped
+  by the knob named after them. Default raised 64 → 128 with the reasoning recorded.
+- **`SANDHI_MAX_CONNECTIONS_PER_IP` is opt-in (default off)** (#181): it counts the peer at
+  accept time, so behind a load balancer or NAT every connection shares one IP. Set it when
+  directly exposed (or after configuring `SANDHI_TRUSTED_PROXIES`); `0` disables.
+
+### Fixed
+
+- **Long generations were silently undercounted** (TD-0014 P1, #167): the 64 KiB sniff budget
+  truncated OpenAI Responses' `response.completed` frame — the frame carrying the usage — so
+  leases settled on byte estimates. The stream-line ceiling is now sized above real frames on
+  both planes, with tests written red first (three of six decoders had no boundary-invariance
+  coverage at all; the translation-plane half was itself caught by adversarial review).
+- **Hung streams survived the grace deadline** (TD-0014 P3, #181; found by adversarial review
+  of #169): fixed by the connection-task ownership above, with an upstream-EOF regression test.
+- **The `sandhi` CLI was missing from release archives** (#172).
+
+### Security
+
+- The security (cargo-deny advisories) and codegen-drift gates now actually execute on the
+  self-hosted runners (#168) — both had never run there and failed on a missing toolchain,
+  which is better than the silent skip that preceded it.
+- The python-binding job isolates its import on self-hosted runners (#180): a stale
+  user-site `sandhi-gateway` could shadow the freshly built wheel and fail only
+  catalog-dependent tests.
+
+## [0.2.1] — 2026-08-31 _(never tagged — its content ships in [0.3.0])_
 
 The packaging release. No product code changed: the binary release archives now ship **both**
 workspace binaries — the `sandhi-proxy` server and the `sandhi` operator CLI — under unchanged
@@ -126,8 +209,6 @@ the G01–G30 gap register) and TD-0014…0021.
   by an independent fact-check (#166): catalog scope in CLAUDE.md, the G22 node-error parity
   row, and the h2 feature-unification claim (closed: `h2` is not in the non-dev graph).
 - Dependency bump: `time` 0.3.55, `async-trait`, `futures-core`, `futures-util` (#159).
-
-## [0.1.6] — 2026-08-05
 
 ## [0.1.6] — 2026-08-05
 

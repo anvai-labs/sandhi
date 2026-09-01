@@ -28,10 +28,17 @@ impl ChatProvider for TypedGemini {
         "gemini"
     }
 
-    async fn complete(&self, request: ChatRequestV1) -> Result<ChatResponseV1, ProviderError> {
+    async fn complete(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+    ) -> Result<ChatResponseV1, ProviderError> {
         request.validate().map_err(ProviderError::InvalidRequest)?;
         let body = encode_gemini_request(&request)?;
-        let response = self.raw.complete(provider_request(&request, body)).await?;
+        let response = self
+            .raw
+            .complete(provider_request(&request, body, call_headers))
+            .await?;
         let mut decoded = decode_gemini_response(response.body, response.usage, &request.model)?;
         if !request.include_native_response {
             // G8: the native body is debug metadata, not contract. Decoded
@@ -43,10 +50,17 @@ impl ChatProvider for TypedGemini {
         Ok(decoded)
     }
 
-    async fn stream(&self, request: ChatRequestV1) -> Result<ChatEventStream, ProviderError> {
+    async fn stream(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+    ) -> Result<ChatEventStream, ProviderError> {
         request.validate().map_err(ProviderError::InvalidRequest)?;
         let body = encode_gemini_request(&request)?;
-        let raw = self.raw.stream(provider_request(&request, body)).await?;
+        let raw = self
+            .raw
+            .stream(provider_request(&request, body, call_headers))
+            .await?;
         Ok(decode_gemini_stream(raw, request.model))
     }
 }

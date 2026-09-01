@@ -18,7 +18,7 @@ use crate::{
 };
 use bytes::Bytes;
 use futures_core::Stream;
-use http::header::{HeaderMap, ACCEPT_ENCODING, AUTHORIZATION, HOST};
+use http::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT_ENCODING};
 use serde_json::Value;
 use std::pin::Pin;
 use std::time::Duration;
@@ -61,6 +61,14 @@ pub struct RawForwarder {
     anthropic_auth: AnthropicAuthScheme,
     gemini_auth: GeminiAuthScheme,
     extra_headers: HeaderMap,
+    /// Vendor session-affinity request header from the catalog spec (strategy-via-data):
+    /// when declared, the per-request neutral session id is mapped onto it (ADR-0008 D3).
+    /// Attribution never crosses this seam — only the conversation key does (ADR-0001 §4).
+    session_header: Option<&'static str>,
+    /// Vendor per-request correlation header name from the catalog spec (ADR-0008 D6). The
+    /// VALUE is caller-minted (the proxy's admission id, which becomes the event's
+    /// `request_id`); this field supplies only the name.
+    client_request_id_header: Option<&'static str>,
     complete_timeout: Duration,
     stream_setup_timeout: Duration,
     stream_idle_timeout: Option<Duration>,
@@ -86,21 +94,45 @@ impl RawForwarder {
             anthropic_auth: AnthropicAuthScheme::ApiKey,
             gemini_auth: GeminiAuthScheme::ApiKey,
             extra_headers: HeaderMap::new(),
+            session_header: None,
+            client_request_id_header: None,
             complete_timeout: Duration::from_secs(120),
             stream_setup_timeout: Duration::from_secs(30),
             stream_idle_timeout: Some(Duration::from_secs(90)),
         }
     }
 
-    /// Add caller-supplied provider headers. Transport-owned headers
-    /// (`Authorization`, `Accept-Encoding`, `Host`) are stripped so the forwarder controls them.
+    /// Add caller-supplied provider headers. Transport-owned names are stripped via
+    /// [`strip_transport_owned`][crate::strip_transport_owned] (the single-sourced
+    /// `TRANSPORT_OWNED_HEADERS` set: `Authorization`, `Host`, `Content-Type`,
+    /// `Accept-Encoding`, and the family credential headers `x-api-key`, `x-goog-api-key`,
+    /// `anthropic-version`) so the forwarder controls framing and credentials.
     #[must_use]
     pub fn with_headers(mut self, headers: HeaderMap) -> Self {
-        self.extra_headers = headers;
-        // Defense-in-depth: never let caller-controlled headers override auth or encoding.
-        self.extra_headers.remove(AUTHORIZATION);
-        self.extra_headers.remove(ACCEPT_ENCODING);
-        self.extra_headers.remove(HOST);
+        // Single-sourced strip (TD-0022 D2) — same owned-name set as every family adapter.
+        self.extra_headers = crate::strip_transport_owned(headers);
+        self
+    }
+
+    /// Declare the vendor's session-affinity request header (a catalog spec fact, resolved by
+    /// the typed runtime's [`build_raw_forwarder`]). `None` (the default) sends no affinity
+    /// header, preserving today's wire bytes for every other provider.
+    ///
+    /// [`build_raw_forwarder`]: crate::build_raw_forwarder
+    #[must_use]
+    pub fn with_session_header(mut self, header: Option<&'static str>) -> Self {
+        self.session_header = header;
+        self
+    }
+
+    /// Declare the vendor's per-request correlation header (a catalog spec fact, resolved by
+    /// [`build_raw_forwarder`]). The value arrives per call as the `correlation` argument of
+    /// the metered forwards.
+    ///
+    /// [`build_raw_forwarder`]: crate::build_raw_forwarder
+    #[must_use]
+    pub fn with_client_request_id_header(mut self, header: Option<&'static str>) -> Self {
+        self.client_request_id_header = header;
         self
     }
 
@@ -138,10 +170,24 @@ impl RawForwarder {
     /// Non-streaming forward: POST the (envelope-normalized) body bytes to `{base_url}{path}`,
     /// return the status + raw body bytes + curated headers.
     pub async fn forward(&self, path: &str, body: Bytes) -> Result<RawResponse, ProviderError> {
+        self.forward_with_session(path, body, None, None).await
+    }
+
+    /// Session-aware core of [`Self::forward`]: `session` is the neutral conversation key
+    /// mapped onto the catalog-declared vendor affinity header, when one exists.
+    async fn forward_with_session(
+        &self,
+        path: &str,
+        body: Bytes,
+        session: Option<&str>,
+        correlation: Option<&str>,
+    ) -> Result<RawResponse, ProviderError> {
         let url = self.url(path);
         let out_body = normalize_envelope(self.family, &body, false);
         match tokio::time::timeout(self.complete_timeout, async {
-            let resp = self.send(&url, out_body).await?;
+            let resp = self
+                .send_with_session(&url, out_body, session, correlation)
+                .await?;
             let status = resp.status().as_u16();
             if !resp.status().is_success() {
                 return Err(error_for_response(resp, None).await);
@@ -194,13 +240,19 @@ impl RawForwarder {
     /// Non-streaming forward **that also meters**: forwards the body verbatim and parses the
     /// family's usage from the response, so the proxy gets both the raw response and a `UsageV2`
     /// from one call. Usage parsing is single-sourced in `sandhi-core` (the public per-family
-    /// parsers) — the transparent plane meters exactly as the typed adapter would.
+    /// parsers) — the transparent plane meters exactly as the typed adapter would. `session` is
+    /// the neutral conversation key, mapped onto the catalog-declared vendor affinity header
+    /// when one exists (ADR-0008 D3); it never carries attribution (ADR-0001 §4).
     pub async fn forward_metered(
         &self,
         path: &str,
         body: Bytes,
+        session: Option<&str>,
+        correlation: Option<&str>,
     ) -> Result<(RawResponse, sandhi_core::UsageV2), ProviderError> {
-        let raw = self.forward(path, body).await?;
+        let raw = self
+            .forward_with_session(path, body, session, correlation)
+            .await?;
         let usage = serde_json::from_slice::<Value>(&raw.body)
             .ok()
             .and_then(|value| parse_usage_for_family(self.family, &value))
@@ -214,15 +266,22 @@ impl RawForwarder {
     /// accumulates usage with the family's own sniffer (so Anthropic's split input/output usage,
     /// etc. are handled identically to the typed path); the terminal
     /// [`StreamChunk`][crate::StreamChunk] carries the finalized [`ParsedUsage`][crate::ParsedUsage].
+    /// `session` is the neutral conversation key, mapped onto the catalog-declared vendor
+    /// affinity header when one exists (ADR-0008 D3); it never carries attribution.
     pub async fn forward_stream_metered(
         &self,
         path: &str,
         body: Bytes,
+        session: Option<&str>,
+        correlation: Option<&str>,
     ) -> Result<RawMeteredStreamResponse, ProviderError> {
         let url = self.url(path);
         let out_body = normalize_envelope(self.family, &body, true);
-        let resp = match tokio::time::timeout(self.stream_setup_timeout, self.send(&url, out_body))
-            .await
+        let resp = match tokio::time::timeout(
+            self.stream_setup_timeout,
+            self.send_with_session(&url, out_body, session, correlation),
+        )
+        .await
         {
             Ok(result) => result?,
             Err(_) => return Err(ProviderError::Timeout(self.stream_setup_timeout)),
@@ -258,11 +317,54 @@ impl RawForwarder {
         url: &str,
         body: Bytes,
     ) -> impl std::future::Future<Output = Result<reqwest::Response, ProviderError>> {
+        self.send_with_session(url, body, None, None)
+    }
+
+    /// Session-aware send: when a catalog-declared affinity header exists and the call
+    /// carries a conversation key, the key rides the declared header — inserted into a
+    /// clone of the extra headers so the authoritative per-request value overwrites any
+    /// stale caller-supplied copy (same defense-in-depth as [`Self::with_headers`]
+    /// stripping `Authorization`). `try_from`, not `from_static`: catalog names are
+    /// `&'static str` data, and an invalid entry must be skipped, not panic the hot path.
+    fn send_with_session(
+        &self,
+        url: &str,
+        body: Bytes,
+        session: Option<&str>,
+        correlation: Option<&str>,
+    ) -> impl std::future::Future<Output = Result<reqwest::Response, ProviderError>> {
+        let mut headers = self.extra_headers.clone();
+        // ADR-0008 D6: the caller-minted correlation id rides the vendor's declared header —
+        // the same id that becomes the usage event's `request_id`.
+        if let (Some(name), Some(value)) = (self.client_request_id_header, correlation) {
+            if let (Ok(name), Ok(value)) =
+                (HeaderName::try_from(name), HeaderValue::from_str(value))
+            {
+                headers.insert(name, value);
+            }
+        }
+        // Session affinity LAST, so it stays authoritative over any caller-supplied copy of
+        // the declared name — the same ordering as the typed plane's request_headers. The
+        // value is sanitized like the typed plane: a control byte must not silently disable
+        // affinity by making the header unbuildable.
+        if let (Some(name), Some(value)) = (
+            self.session_header,
+            session
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(sandhi_core::sanitize_affinity_value),
+        ) {
+            if let (Ok(name), Ok(value)) =
+                (HeaderName::try_from(name), HeaderValue::from_str(&value))
+            {
+                headers.insert(name, value);
+            }
+        }
         let builder = self
             .client
             .post(url)
             .header(ACCEPT_ENCODING, "identity")
-            .headers(self.extra_headers.clone())
+            .headers(headers)
             .body(body);
         let builder = self.apply_auth(builder);
         async move {
@@ -278,7 +380,11 @@ impl RawForwarder {
             ProviderFamily::OpenAiCompat
             | ProviderFamily::OpenAiResponses
             | ProviderFamily::Cohere => {
-                builder = builder.bearer_auth(&self.api_key);
+                // Keyless local upstreams (empty secret) get NO Authorization header at all —
+                // an empty `Bearer ` 401s on servers that validate bearer shape (ADR-0008 D1).
+                if !self.api_key.is_empty() {
+                    builder = builder.bearer_auth(&self.api_key);
+                }
             }
             ProviderFamily::Anthropic => match self.anthropic_auth {
                 AnthropicAuthScheme::ApiKey => {
@@ -429,6 +535,13 @@ fn is_passthrough_header(name: &str) -> bool {
         || lower == "request-id"
         || lower == "x-request-id"
         || lower == "x-should-retry"
+        // W3C trace context: an upstream's echoed `traceparent` passes through verbatim. On
+        // the typed plane the proxy forwards the caller's traceparent per call, so the echo
+        // is a genuine child span; the transparent plane rebuilds request headers from
+        // transport config and does NOT forward the caller's traceparent — its echo is the
+        // upstream's own root (a documented gap). `tracestate` stays stripped either way:
+        // per-hop routing state, not linkage.
+        || lower == "traceparent"
         || lower.starts_with("x-ratelimit-")
         || lower.starts_with("ratelimit-")
         || lower.starts_with("anthropic-ratelimit-")
@@ -520,6 +633,15 @@ mod tests {
         headers.insert("retry-after", "30".parse().unwrap());
         headers.insert("x-request-id", "req-123".parse().unwrap());
         headers.insert("x-ratelimit-remaining-requests", "100".parse().unwrap());
+        // W3C trace context linkage survives (the child span an upstream echoes); the
+        // per-hop `tracestate` does not.
+        headers.insert(
+            "traceparent",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+                .parse()
+                .unwrap(),
+        );
+        headers.insert("tracestate", "congo=t61rcWkgMzE".parse().unwrap());
         // These must be stripped:
         headers.insert("connection", "keep-alive".parse().unwrap());
         headers.insert("transfer-encoding", "chunked".parse().unwrap());
@@ -532,6 +654,8 @@ mod tests {
         assert!(filtered.contains_key("retry-after"));
         assert!(filtered.contains_key("x-request-id"));
         assert!(filtered.contains_key("x-ratelimit-remaining-requests"));
+        assert!(filtered.contains_key("traceparent"));
+        assert!(!filtered.contains_key("tracestate"));
         assert!(!filtered.contains_key("connection"));
         assert!(!filtered.contains_key("transfer-encoding"));
         assert!(!filtered.contains_key("keep-alive"));
@@ -807,7 +931,10 @@ mod tests {
             HeaderValue::from_static("https://victor.example"),
         );
         // Attacker tries to override auth via extra headers — must be stripped.
-        headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer attacker"));
+        headers.insert(
+            HeaderName::from_static("authorization"),
+            HeaderValue::from_static("Bearer attacker"),
+        );
 
         let forwarder = RawForwarder::new(ProviderFamily::OpenAiCompat, server.uri(), "real-key")
             .with_headers(headers);
@@ -815,6 +942,108 @@ mod tests {
             .forward("/v1/chat/completions", Bytes::from_static(b"{}"))
             .await
             .unwrap();
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Session affinity (ADR-0008 D3): the declared vendor header carries the neutral
+    // conversation key — and nothing else.
+    // ---------------------------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn session_header_rides_when_the_spec_declares_one() {
+        let server = MockServer::start().await;
+        let body = br#"{"model":"llama3-8b","messages":[]}"#;
+        Mock::given(method("POST"))
+            .and(header("x-inferflux-session-id", "conv_9"))
+            .and(body_bytes(Bytes::from_static(body)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+
+        let forwarder = RawForwarder::new(ProviderFamily::OpenAiCompat, server.uri(), "local-key")
+            .with_session_header(Some("x-inferflux-session-id"));
+        forwarder
+            .forward_metered(
+                "/v1/chat/completions",
+                Bytes::from_static(body),
+                Some("conv_9"),
+                None,
+            )
+            .await
+            .unwrap();
+        // The header matcher above is the positive assertion: the mock would not have
+        // responded (and the call failed) without it. The body matcher pins that affinity
+        // rides the header, never the body.
+    }
+
+    #[tokio::test]
+    async fn no_session_header_when_undeclared_or_blank() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+
+        // (a) No catalog fact + a session id → no header.
+        RawForwarder::new(ProviderFamily::OpenAiCompat, server.uri(), "k")
+            .forward_metered(
+                "/v1/chat/completions",
+                Bytes::from_static(b"{}"),
+                Some("conv_9"),
+                None,
+            )
+            .await
+            .unwrap();
+        let sent = &server.received_requests().await.unwrap()[0];
+        assert!(
+            !sent.headers.contains_key("x-inferflux-session-id"),
+            "no affinity header without a declared fact"
+        );
+
+        // (b) Declared fact + blank session id → no empty header.
+        RawForwarder::new(ProviderFamily::OpenAiCompat, server.uri(), "k")
+            .with_session_header(Some("x-inferflux-session-id"))
+            .forward_metered(
+                "/v1/chat/completions",
+                Bytes::from_static(b"{}"),
+                Some("   "),
+                None,
+            )
+            .await
+            .unwrap();
+        let sent = &server.received_requests().await.unwrap()[1];
+        assert!(
+            !sent.headers.contains_key("x-inferflux-session-id"),
+            "a blank session id must not produce an empty header"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_header_leaves_the_forwarded_body_byte_identical() {
+        let server = MockServer::start().await;
+        let body = br#"{"model":"llama3-8b","messages":[{"role":"user","content":"hi"}]}"#;
+        Mock::given(method("POST"))
+            .and(body_bytes(Bytes::from_static(body)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+
+        RawForwarder::new(ProviderFamily::OpenAiCompat, server.uri(), "k")
+            .with_session_header(Some("x-inferflux-session-id"))
+            .forward_metered(
+                "/v1/chat/completions",
+                Bytes::from_static(body),
+                Some("conv_9"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let sent = &server.received_requests().await.unwrap()[0];
+        assert_eq!(
+            &sent.body, body,
+            "affinity is a header, never a body mutation — the cached prompt must stay byte-stable"
+        );
     }
 
     #[tokio::test]
@@ -831,7 +1060,12 @@ mod tests {
             .await;
         let forwarder = RawForwarder::new(ProviderFamily::OpenAiCompat, server.uri(), "k");
         let (resp, usage) = forwarder
-            .forward_metered("/v1/chat/completions", Bytes::from_static(b"{}"))
+            .forward_metered(
+                "/v1/chat/completions",
+                Bytes::from_static(b"{}"),
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(resp.status, 200);
@@ -859,7 +1093,12 @@ data: [DONE]\n\n";
             .await;
         let forwarder = RawForwarder::new(ProviderFamily::OpenAiCompat, server.uri(), "k");
         let response = forwarder
-            .forward_stream_metered("/v1/chat/completions", Bytes::from_static(b"{}"))
+            .forward_stream_metered(
+                "/v1/chat/completions",
+                Bytes::from_static(b"{}"),
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(response.status, 200);
@@ -933,7 +1172,12 @@ data: [DONE]\n\n";
             );
 
         let err = forwarder
-            .forward_stream_metered("/v1/chat/completions", Bytes::from_static(b"{}"))
+            .forward_stream_metered(
+                "/v1/chat/completions",
+                Bytes::from_static(b"{}"),
+                None,
+                None,
+            )
             .await
             .err()
             .expect("stream setup should time out");

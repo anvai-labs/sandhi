@@ -84,6 +84,12 @@ pub struct ProviderRequest {
     pub model: String,
     pub body: serde_json::Value,
     pub session_id: Option<String>,
+    /// Per-call wire headers (TD-0022 D1) — gateway-path metadata that changes per turn
+    /// (`x-sandhi-run-id` / `-step-id`, vendor correlation ids), which cannot be fixed at
+    /// transport construction without rebuilding the handle every turn. Merged OVER the
+    /// transport's static headers by [`merge_call_headers`], which strips transport-owned
+    /// names. Never enters the wire body.
+    pub extra_headers: http::HeaderMap,
     /// Who this call is for (metering decorator input). Never enters the wire body —
     /// attribution rides outside the cached prompt (ADR-0001 §4); adapters ignore it.
     pub attribution: Attribution,
@@ -105,6 +111,7 @@ impl ProviderRequest {
             model: model.into(),
             body,
             session_id: None,
+            extra_headers: http::HeaderMap::new(),
             attribution: Attribution::default(),
         }
     }
@@ -115,11 +122,75 @@ impl ProviderRequest {
         self
     }
 
+    /// Per-call wire headers (TD-0022 D1). Transport-owned names are stripped by
+    /// [`merge_call_headers`] at send time, not here — the request is data, the strip is
+    /// transport defense.
+    #[must_use]
+    pub fn with_extra_headers(mut self, extra_headers: http::HeaderMap) -> Self {
+        self.extra_headers = extra_headers;
+        self
+    }
+
     #[must_use]
     pub fn with_attribution(mut self, attribution: Attribution) -> Self {
         self.attribution = attribution;
         self
     }
+}
+
+/// The request header name this vendor uses for per-request correlation, when it declares
+/// one (ADR-0008 D6). The CALLER owns the value and the injection (per-call wire headers,
+/// TD-0022 D1): the proxy mints the id at admission and sends the same string that becomes
+/// the usage event's `request_id`, so upstream logs and sandhi events correlate 1:1.
+#[must_use]
+pub fn client_request_id_header(slug: &str) -> Option<&'static str> {
+    crate::resolve_openai_compat_provider(slug).and_then(|spec| spec.client_request_id_header)
+}
+
+/// Transport-owned header names, single-sourced (TD-0022 D2): the generic credential/framing
+/// set plus the family credential headers and the Anthropic protocol version. A caller-supplied
+/// set (static `with_headers` or per-call) can never override any of these — for the family
+/// credential headers the stakes are the vaulted key itself: reqwest **appends** values for
+/// names added after a header map, so an unstripped `x-api-key` in a caller set would put a
+/// second, attacker-supplied credential header on the wire next to the real one.
+const TRANSPORT_OWNED_HEADERS: [&str; 7] = [
+    "authorization",
+    "host",
+    "content-type",
+    "accept-encoding",
+    // Family credential headers (Anthropic / Gemini) — never caller-suppliable.
+    "x-api-key",
+    "x-goog-api-key",
+    // Protocol version is transport-owned by the Anthropic adapter.
+    "anthropic-version",
+];
+
+/// Strip transport-owned header names from a caller-supplied set — the defense applied to
+/// both static (`with_headers`) and per-call headers, single-sourced here (TD-0022 D2).
+#[must_use]
+pub fn strip_transport_owned(mut headers: http::HeaderMap) -> http::HeaderMap {
+    for name in TRANSPORT_OWNED_HEADERS {
+        headers.remove(name);
+    }
+    headers
+}
+
+/// Merge a call's per-request wire headers over the transport's static headers (TD-0022 D2).
+///
+/// Transport-owned names (see [`TRANSPORT_OWNED_HEADERS`]) are stripped from the **per-call**
+/// set so a library consumer can never override the vaulted credential or framing. Per-call
+/// wins over static for every other name (single-valued: the FFI's string-map form cannot
+/// express multi-value headers).
+#[must_use]
+pub fn merge_call_headers(base: &http::HeaderMap, call: &http::HeaderMap) -> http::HeaderMap {
+    let mut out = base.clone();
+    for (name, value) in call.iter() {
+        if TRANSPORT_OWNED_HEADERS.contains(&name.as_str()) {
+            continue; // transport-owned: the credential and framing are not caller-overridable
+        }
+        out.insert(name.clone(), value.clone());
+    }
+    out
 }
 
 /// A completed (non-streaming) response plus the usage measured **at the source**.

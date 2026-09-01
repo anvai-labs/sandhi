@@ -33,6 +33,104 @@ function localServer(responses) {
   });
 }
 
+test("per-call wire headers ride and cannot override the credential (TD-0022)", async () => {
+  const server = await localServer([
+    {
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: "r1",
+        model: "gpt-test",
+        choices: [{ message: { content: "hello" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 10, completion_tokens: 3 },
+      }),
+    },
+  ]);
+  try {
+    const runtime = new ProviderRuntime();
+    const provider = runtime.openaiCompat(
+      "openai",
+      server.baseUrl,
+      "real-key",
+      undefined,
+      0,
+    );
+    const request = JSON.stringify({
+      schema_version: "1",
+      model: "gpt-test",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const response = JSON.parse(
+      await provider.completeJson(
+        request,
+        JSON.stringify({
+          "x-sandhi-run-id": "run-9",
+          "x-sandhi-step-id": "step-7",
+          authorization: "Bearer attacker", // must be stripped
+        }),
+      ),
+    );
+    assert.equal(response.output.content, "hello");
+    const sent = server.lastHeaders();
+    assert.equal(sent["x-sandhi-run-id"], "run-9");
+    assert.equal(sent["x-sandhi-step-id"], "step-7");
+    assert.equal(sent.authorization, "Bearer real-key");
+  } finally {
+    await server.close();
+  }
+});
+
+test("streamJson per-call wire headers ride and cannot override the credential (TD-0022)", async () => {
+  // Mirror of the python binding's stream pin: the stream seam must carry per-call wire
+  // headers exactly like completeJson, or node consumers silently lose them on streams.
+  const server = await localServer([
+    {
+      contentType: "text/event-stream",
+      body:
+        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{"content":"he"},"finish_reason":null}]}\n\n' +
+        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":3}}\n\n' +
+        "data: [DONE]\n\n",
+    },
+  ]);
+  try {
+    const runtime = new ProviderRuntime();
+    const provider = runtime.openaiCompat(
+      "openai",
+      server.baseUrl,
+      "real-key",
+      undefined,
+      0,
+    );
+    const request = JSON.stringify({
+      schema_version: "1",
+      model: "gpt-test",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const events = [];
+    for await (const event of provider.streamJson(
+      request,
+      JSON.stringify({
+        "x-sandhi-run-id": "run-9",
+        "x-sandhi-step-id": "step-7",
+        authorization: "Bearer attacker", // must be stripped
+      }),
+    )) {
+      events.push(JSON.parse(event));
+    }
+    assert.deepEqual(events.map((event) => event.event), [
+      "response_start",
+      "text_delta",
+      "usage",
+      "finish",
+    ]);
+    const sent = server.lastHeaders();
+    assert.equal(sent["x-sandhi-run-id"], "run-9");
+    assert.equal(sent["x-sandhi-step-id"], "step-7");
+    assert.equal(sent.authorization, "Bearer real-key");
+  } finally {
+    await server.close();
+  }
+});
+
 test("persistent typed provider completes and streams neutral documents", async () => {
   const server = await localServer([
     {
@@ -250,6 +348,8 @@ test("catalog surface serves curated model data (TD-0004)", async () => {
   assert.ok(grok.some((m) => m.id === "grok-4"));
   // Aggregators stay empty (dynamic hosting catalogs — live discovery).
   assert.deepEqual(JSON.parse(providerModelsJson("openrouter")), []);
+  // Self-hosted InferFlux: model ids are operator config server-side, never vendor facts.
+  assert.deepEqual(JSON.parse(providerModelsJson("inferflux")), []);
   assert.throws(() => providerModelsJson("unknown-provider"));
 });
 
@@ -316,6 +416,11 @@ test("provider() routes the openai-compat + responses escape hatches", () => {
   // Known catalog provider WITHOUT a base_url → known_openai_compat resolves the spec.
   const known = runtime.provider("deepseek", "deepseek-chat", "key", undefined, undefined, 0);
   assert.equal(known.provider, "deepseek");
+
+  // Self-hosted InferFlux is a first-class catalog slug (ADR-0008): no base_url needed, the
+  // spec's default (http://127.0.0.1:8080/v1) resolves.
+  const inferflux = runtime.provider("inferflux", "llama3-8b", "local-key", undefined, undefined, 0);
+  assert.equal(inferflux.provider, "inferflux");
 
   // openaiResponses() direct factory (Responses API bearer form).
   const responses = runtime.openaiResponses("openai", "https://example.test/v1", "token", undefined, 0);

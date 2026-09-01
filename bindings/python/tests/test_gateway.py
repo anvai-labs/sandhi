@@ -54,6 +54,8 @@ def test_catalog_serves_curated_model_data():
         assert any(m["id"] == expected for m in models), slug
     # Aggregators stay empty (dynamic hosting catalogs -- live discovery).
     assert json.loads(sg.provider_models_json("openrouter")) == []
+    # Self-hosted InferFlux: model ids are operator config server-side, never vendor facts.
+    assert json.loads(sg.provider_models_json("inferflux")) == []
     with pytest.raises(KeyError):
         sg.provider_models_json("acme-unknown")
 
@@ -150,6 +152,93 @@ def test_persistent_typed_provider_complete_and_stream():
             "finish",
         ]
         assert Handler.calls == 2
+    finally:
+        server.shutdown()
+
+
+def test_per_call_wire_headers_ride_and_cannot_override_the_credential():
+    """TD-0022 D1: wire_headers_json is per-call (turn-scoped step ids) and stripped of
+    transport-owned names — an Authorization override attempt must never reach the wire."""
+
+    seen_headers: list[dict] = []
+    complete_body = json.dumps(
+        {
+            "id": "r1",
+            "model": "gpt-test",
+            "choices": [{"message": {"content": "hello"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 3},
+        }
+    ).encode()
+    stream_body = (
+        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{"content":"he"},"finish_reason":null}]}\n\n'
+        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{},"finish_reason":"stop"}],'
+        '"usage":{"prompt_tokens":10,"completion_tokens":3}}\n\n'
+        "data: [DONE]\n\n"
+    ).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        calls = 0
+
+        def do_POST(self):  # noqa: N802
+            Handler.calls += 1
+            seen_headers.append(dict(self.headers.items()))
+            body = complete_body if Handler.calls == 1 else stream_body
+            content_type = (
+                "application/json" if Handler.calls == 1 else "text/event-stream"
+            )
+            self.send_response(200)
+            self.send_header("content-type", content_type)
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        runtime = sg.ProviderRuntime()
+        provider = runtime.openai_compat(
+            "openai", f"http://127.0.0.1:{server.server_port}/v1", "real-key", max_retries=0
+        )
+        request = json.dumps(
+            {
+                "schema_version": "1",
+                "model": "gpt-test",
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+        )
+        wire_headers = {
+            "x-sandhi-run-id": "run-9",
+            "x-sandhi-step-id": "step-7",
+            "authorization": "Bearer attacker",  # must be stripped
+        }
+
+        async def run():
+            complete = json.loads(
+                await provider.complete_json(request, json.dumps(wire_headers))
+            )
+            stream = [
+                json.loads(event)
+                async for event in provider.stream_json(request, json.dumps(wire_headers))
+            ]
+            return complete, stream
+
+        response, events = asyncio.run(run())
+        assert response["output"]["content"] == "hello"
+        assert [event["event"] for event in events] == [
+            "response_start",
+            "text_delta",
+            "usage",
+            "finish",
+        ]
+        # Both calls carried the per-call headers; the credential override never landed.
+        for sent in seen_headers[:2]:
+            sent = {name.lower(): value for name, value in sent.items()}
+            assert sent["x-sandhi-run-id"] == "run-9"
+            assert sent["x-sandhi-step-id"] == "step-7"
+            assert sent["authorization"] == "Bearer real-key"
     finally:
         server.shutdown()
 
@@ -493,6 +582,11 @@ def test_provider_routes_openai_compat_and_responses_escape_hatches():
     # Known catalog provider WITHOUT a base_url → known_openai_compat resolves the spec.
     known = runtime.provider("deepseek", "deepseek-chat", "key", max_retries=0)
     assert known.provider == "deepseek"
+
+    # Self-hosted InferFlux is a first-class catalog slug (ADR-0008): no base_url needed,
+    # the spec default (http://127.0.0.1:8080/v1) resolves.
+    inferflux = runtime.provider("inferflux", "llama3-8b", "local-key", max_retries=0)
+    assert inferflux.provider == "inferflux"
 
     # openai_responses() direct factory.
     responses = runtime.openai_responses(

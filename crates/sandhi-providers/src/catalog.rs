@@ -35,6 +35,21 @@ pub struct OpenAiCompatProviderSpec {
     /// `base_url` — vendor differences are DATA on the spec, not code branches
     /// (e.g. Moonshot's `Msh-Request-Id`).
     pub request_id_header: Option<&'static str>,
+    /// The request header carrying this vendor's per-conversation affinity key, when it has
+    /// one. Sandhi maps the neutral `ProviderRequest::session_id` onto it — and onto nothing
+    /// else: attribution (`subject_id`/`group_id`/`virtual_key_id`) is metering input and
+    /// stays out-of-band by construction (ADR-0001 §4). A transport fact like
+    /// [`Self::request_id_header`] — vendor differences are DATA on the spec, not code branches
+    /// (e.g. InferFlux's `x-inferflux-session-id`, ADR-0008).
+    pub session_header: Option<&'static str>,
+    /// The request header carrying this vendor's per-request correlation id, when it has one.
+    /// Unlike `session_header` (adapter-injected — the key lives in neutral metadata), the
+    /// correlation id is MINTED by the caller (the proxy mints it at admission, TD-0021/G20
+    /// seam), so injection is caller-owned via per-call wire headers (TD-0022 D1); this fact
+    /// supplies only the vendor's header NAME. The value sandhi sends is the same id that
+    /// becomes the usage event's `request_id` — upstream logs and sandhi events correlate 1:1
+    /// (e.g. InferFlux's `x-inferflux-client-request-id`, ADR-0008).
+    pub client_request_id_header: Option<&'static str>,
 }
 
 impl OpenAiCompatProviderSpec {
@@ -61,6 +76,8 @@ pub const OPENAI_COMPAT_PROVIDER_SPECS: &[OpenAiCompatProviderSpec] = &[
         header_options: &[],
         endpoint_options: &[],
         request_id_header: None,
+        session_header: None,
+        client_request_id_header: None,
     },
     OpenAiCompatProviderSpec {
         slug: "moonshot",
@@ -70,6 +87,8 @@ pub const OPENAI_COMPAT_PROVIDER_SPECS: &[OpenAiCompatProviderSpec] = &[
         header_options: &[],
         endpoint_options: &[],
         request_id_header: Some("msh-request-id"),
+        session_header: None,
+        client_request_id_header: None,
     },
     OpenAiCompatProviderSpec {
         slug: "together",
@@ -79,6 +98,8 @@ pub const OPENAI_COMPAT_PROVIDER_SPECS: &[OpenAiCompatProviderSpec] = &[
         header_options: &[],
         endpoint_options: &[],
         request_id_header: None,
+        session_header: None,
+        client_request_id_header: None,
     },
     OpenAiCompatProviderSpec {
         slug: "groq",
@@ -88,6 +109,8 @@ pub const OPENAI_COMPAT_PROVIDER_SPECS: &[OpenAiCompatProviderSpec] = &[
         header_options: &[],
         endpoint_options: &[],
         request_id_header: None,
+        session_header: None,
+        client_request_id_header: None,
     },
     OpenAiCompatProviderSpec {
         slug: "cerebras",
@@ -97,6 +120,8 @@ pub const OPENAI_COMPAT_PROVIDER_SPECS: &[OpenAiCompatProviderSpec] = &[
         header_options: &[],
         endpoint_options: &[],
         request_id_header: None,
+        session_header: None,
+        client_request_id_header: None,
     },
     OpenAiCompatProviderSpec {
         slug: "fireworks",
@@ -106,6 +131,8 @@ pub const OPENAI_COMPAT_PROVIDER_SPECS: &[OpenAiCompatProviderSpec] = &[
         header_options: &[],
         endpoint_options: &[],
         request_id_header: None,
+        session_header: None,
+        client_request_id_header: None,
     },
     OpenAiCompatProviderSpec {
         slug: "openrouter",
@@ -115,6 +142,8 @@ pub const OPENAI_COMPAT_PROVIDER_SPECS: &[OpenAiCompatProviderSpec] = &[
         header_options: &[("site_url", "HTTP-Referer"), ("site_name", "X-Title")],
         endpoint_options: &[],
         request_id_header: None,
+        session_header: None,
+        client_request_id_header: None,
     },
     OpenAiCompatProviderSpec {
         slug: "xai",
@@ -124,6 +153,8 @@ pub const OPENAI_COMPAT_PROVIDER_SPECS: &[OpenAiCompatProviderSpec] = &[
         header_options: &[],
         endpoint_options: &[],
         request_id_header: None,
+        session_header: None,
+        client_request_id_header: None,
     },
     OpenAiCompatProviderSpec {
         slug: "mistral",
@@ -133,6 +164,8 @@ pub const OPENAI_COMPAT_PROVIDER_SPECS: &[OpenAiCompatProviderSpec] = &[
         header_options: &[],
         endpoint_options: &[],
         request_id_header: None,
+        session_header: None,
+        client_request_id_header: None,
     },
     OpenAiCompatProviderSpec {
         slug: "deepseek",
@@ -142,6 +175,8 @@ pub const OPENAI_COMPAT_PROVIDER_SPECS: &[OpenAiCompatProviderSpec] = &[
         header_options: &[],
         endpoint_options: &[],
         request_id_header: None,
+        session_header: None,
+        client_request_id_header: None,
     },
     OpenAiCompatProviderSpec {
         slug: "zai",
@@ -165,6 +200,8 @@ pub const OPENAI_COMPAT_PROVIDER_SPECS: &[OpenAiCompatProviderSpec] = &[
             ),
         ],
         request_id_header: None,
+        session_header: None,
+        client_request_id_header: None,
     },
     OpenAiCompatProviderSpec {
         slug: "qwen",
@@ -181,6 +218,29 @@ pub const OPENAI_COMPAT_PROVIDER_SPECS: &[OpenAiCompatProviderSpec] = &[
             ("coding", "https://coding.dashscope.aliyuncs.com/v1"),
         ],
         request_id_header: None,
+        session_header: None,
+        client_request_id_header: None,
+    },
+    OpenAiCompatProviderSpec {
+        slug: "inferflux",
+        aliases: &[],
+        // Self-hosted InferFlux (inferfluxd, v0.1.0) binds 0.0.0.0:8080 by default and speaks
+        // the OpenAI Chat Completions dialect at /v1. With no API keys configured server-side
+        // it serves anonymous read+generate, so a placeholder bearer is accepted, never
+        // rejected; a secured deployment resolves its real key from the vault as usual.
+        base_url: "http://127.0.0.1:8080/v1",
+        model_routes: &[],
+        header_options: &[],
+        endpoint_options: &[],
+        // InferFlux emits no request-id response header (only a child `traceparent`).
+        request_id_header: None,
+        // InferFlux's optional stateful KV/prefix-cache lease layer reads this header on
+        // generation requests (`runtime.scheduler.session_handles.enabled`, default false,
+        // TTL 300s, max 1024 sessions). Sandhi sends it whenever a session id is present;
+        // a server with the feature off ignores it (ADR-0008 D5).
+        session_header: Some("x-inferflux-session-id"),
+        // InferFlux logs/metrics key on this per-request id (body field or header).
+        client_request_id_header: Some("x-inferflux-client-request-id"),
     },
 ];
 
@@ -678,6 +738,78 @@ mod tests {
             .unwrap()
             .models
             .is_empty());
+    }
+
+    #[test]
+    fn inferflux_is_a_self_hosted_compat_slug_with_no_curated_lineup() {
+        let spec = resolve_openai_compat_provider("inferflux").expect("inferflux spec");
+        assert_eq!(spec.slug, "inferflux");
+        assert_eq!(spec.base_url, "http://127.0.0.1:8080/v1");
+        // Model ids are operator config on the InferFlux side (its registry.yaml), not
+        // vendor facts — the catalog deliberately carries no lineup, same stance as the
+        // aggregators above.
+        let descriptor = provider_descriptor("inferflux").unwrap();
+        assert_eq!(descriptor.slug, "inferflux");
+        assert_eq!(
+            descriptor.endpoint_family,
+            EndpointFamilyV1::OpenaiChatCompletions
+        );
+        assert!(descriptor.models.is_empty());
+    }
+
+    #[test]
+    fn session_affinity_header_names_are_owned_by_the_wire_catalog() {
+        let inferflux = resolve_openai_compat_provider("inferflux").unwrap();
+        assert_eq!(inferflux.session_header, Some("x-inferflux-session-id"));
+        assert_eq!(
+            inferflux.client_request_id_header,
+            Some("x-inferflux-client-request-id")
+        );
+        // No other admitted vendor declares one — both facts are InferFlux-only today.
+        for spec in OPENAI_COMPAT_PROVIDER_SPECS {
+            if spec.slug != "inferflux" {
+                assert_eq!(
+                    spec.session_header, None,
+                    "{} must not declare a session header",
+                    spec.slug
+                );
+                assert_eq!(
+                    spec.client_request_id_header, None,
+                    "{} must not declare a correlation header",
+                    spec.slug
+                );
+            }
+            for name in [spec.session_header, spec.client_request_id_header]
+                .into_iter()
+                .flatten()
+            {
+                // Injection sites build headers at request time with `try_from`; pin that
+                // every catalog-declared name is valid (a future uppercase entry would
+                // otherwise be silently skipped per-request).
+                assert!(
+                    http::HeaderName::try_from(name).is_ok(),
+                    "invalid declared header name: {name}"
+                );
+            }
+            if let Some(name) = spec.request_id_header {
+                assert!(
+                    http::HeaderName::try_from(name).is_ok(),
+                    "invalid request id header name: {name}"
+                );
+            }
+            // The two injected request facts must never share a header name: the typed and
+            // transparent planes both insert the session fact LAST (authoritative), so a
+            // collision would make the planes emit different values for the same header.
+            if let (Some(session), Some(correlation)) =
+                (spec.session_header, spec.client_request_id_header)
+            {
+                assert_ne!(
+                    session, correlation,
+                    "{} declares one header name for both session affinity and correlation",
+                    spec.slug
+                );
+            }
+        }
     }
 
     #[test]
