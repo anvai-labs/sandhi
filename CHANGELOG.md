@@ -65,6 +65,11 @@ TD-0022 join ADR-0006/0007 + TD-0014…0021.
 - **Upstream `traceparent` passthrough** (#175): the transparent plane's header allowlist
   passes an upstream-echoed W3C traceparent, restoring response-to-span linkage (`tracestate`
   stays stripped).
+- **Native SentinelPass daemon IPC vault backend** (#176): `SANDHI_VAULT_BACKEND=sentinelpass`
+  speaks the daemon protocol natively through the published `sentinelpass-protocol` v0.8.0
+  contract crate (replacing the CLI shell-out) — read + write support with explicit locked vs
+  not-found errors; deletes stay unsupported by design until upstream entry ownership exists.
+  Shipped behind the `sentinelpass-ipc` cargo feature (default in release binaries).
 - **InferFlux admitted as OpenAI-compat catalog data** (ADR-0008, #173): the self-hosted
   inference server is reachable through the OpenAI codec — one catalog row plus its
   session-affinity header fact, not a new family — and the decision record ships with it.
