@@ -35,7 +35,7 @@ jobs:
         id: current
         run: |
           set -euo pipefail
-          cur=$(python3 -c 'import pathlib,re; print(re.search(r"sentinelpass-protocol = \{ version = \"([^\"]+)\"", pathlib.Path("crates/sandhi-store/Cargo.toml").read_text()).group(1))')
+          cur=$(python3 -c 'import pathlib,re; print(re.search(r"sentinelpass-protocol = \{[^}]*?tag = \"(v[^\"+]+)\"", pathlib.Path("crates/sandhi-store/Cargo.toml").read_text()).group(1))')
           echo "version=$cur" >> "$GITHUB_OUTPUT"
 
       - name: Skip when the pin is already current
@@ -66,9 +66,11 @@ jobs:
           git add crates/sandhi-store/Cargo.toml
           git commit -m "chore(store): bump sentinelpass-protocol pin to ${LATEST}"
           git push origin "$branch"
-          # A breaking protocol bump must not open a red PR silently: build
-          # with the IPC backend BEFORE the PR exists.
-          cargo build -p sandhi-store --features sentinelpass-ipc
+          # A breaking protocol bump must not open a red PR silently: compile
+          # the crate BEFORE the PR exists. (The IPC backend is selected at
+          # runtime via SANDHI_VAULT_BACKEND, not a cargo feature — the crate
+          # has no [features] table, so a plain check builds everything.)
+          cargo check -p sandhi-store
 
       - name: Open the pin-bump PR
         if: ${{ steps.gate.outputs.bump == 'true' }}
