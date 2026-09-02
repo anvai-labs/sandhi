@@ -425,14 +425,31 @@ fn listener_tls_from_config(path: Option<&std::path::Path>) -> Result<Option<Tls
     };
     let text = std::fs::read_to_string(path)
         .map_err(|error| format!("reading {}: {error}", path.display()))?;
-    let config: sandhi_proxy::config::SandhiFileConfig = serde_json::from_str(&text)
-        .map_err(|error| format!("parsing {}: {error}", path.display()))?;
-    config
-        .tls
+    listener_tls_entry_from_json(&text, path)?
         .map(|tls| {
             TlsConfig::from_pem_files(&tls.cert, &tls.key).map_err(|error| error.to_string())
         })
         .transpose()
+}
+
+/// Bootstrap needs only the transport projection. Deserializing the complete
+/// operator desired-state schema here would make an unrelated provider or
+/// budget validation error newly fatal to the data plane. The admin endpoints
+/// continue to parse and validate the complete schema when it is previewed or
+/// applied.
+fn listener_tls_entry_from_json(
+    text: &str,
+    path: &std::path::Path,
+) -> Result<Option<sandhi_proxy::config::TlsEntry>, String> {
+    #[derive(serde::Deserialize)]
+    struct ListenerConfigProjection {
+        #[serde(default)]
+        tls: Option<sandhi_proxy::config::TlsEntry>,
+    }
+
+    serde_json::from_str::<ListenerConfigProjection>(text)
+        .map(|config| config.tls)
+        .map_err(|error| format!("parsing {}: {error}", path.display()))
 }
 
 fn shutdown_grace_from_env() -> std::time::Duration {
@@ -532,5 +549,32 @@ fn rehydrate_providers_from_vault(
                 providers.insert(entry.credential_id(), handle);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::listener_tls_entry_from_json;
+    use std::path::Path;
+
+    #[test]
+    fn tls_bootstrap_does_not_validate_unrelated_operator_sections() {
+        let config = r#"{
+            "providers": "validated by the operator API, not bootstrap",
+            "tls": null
+        }"#;
+        assert!(
+            listener_tls_entry_from_json(config, Path::new("sandhi.json"))
+                .expect("valid JSON without TLS remains a plaintext bootstrap")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn tls_bootstrap_rejects_an_incomplete_present_identity() {
+        let config = r#"{"tls":{"cert":"/run/tls/fullchain.pem"}}"#;
+        let error = listener_tls_entry_from_json(config, Path::new("sandhi.json"))
+            .expect_err("a present TLS identity is an atomic certificate/key pair");
+        assert!(error.contains("missing field `key`"), "unexpected: {error}");
     }
 }

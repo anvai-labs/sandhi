@@ -79,6 +79,9 @@ async fn tls_listener_serves_full_requests_and_complete_sse_streams() {
     .ok()
     .expect("test owns the only ProxyState reference");
     state.header_read_timeout_secs = 1;
+    // A silent handshake must release the sole connection slot before the
+    // health and streaming requests below can be admitted.
+    state.max_connections = 1;
     let state = Arc::new(state);
     let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = probe.local_addr().unwrap();

@@ -104,10 +104,10 @@ Any future test of this must assert against a **non-dev** build. A Rust test bin
 `wiremock`'s features and will happily speak h2 while the shipped binary cannot — the trap the
 draft's own experiment would have walked into.
 
-**D2 — TLS is opt-in configuration over `rustls`, never a reimplementation.** `SANDHI_TLS_CERT` /
-`SANDHI_TLS_KEY` enable it; absent, the listener stays plaintext exactly as today. Rejected: TLS on
-by default with a self-signed certificate — it trains operators to ignore certificate errors, which
-is a worse security outcome than plaintext on a trusted network.
+**D2 — TLS is opt-in configuration over `rustls`, never a reimplementation.** The `tls.cert` and
+`tls.key` paths in `SANDHI_CONFIG` enable it; absent, the listener stays plaintext exactly as today.
+Rejected: TLS on by default with a self-signed certificate — it trains operators to ignore
+certificate errors, which is a worse security outcome than plaintext on a trusted network.
 
 **D3 — Certificate rotation reloads without dropping connections.** Rotation swaps the
 `rustls::ServerConfig`'s certificate resolver behind an `ArcSwap`-style handle, so new handshakes use

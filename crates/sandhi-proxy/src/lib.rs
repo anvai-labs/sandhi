@@ -864,8 +864,6 @@ where
     // the deadline passes, then abort the stragglers. This is what makes the
     // doc claim true — hung streams do not outlive `serve_with_shutdown_timeout`.
     tracing::info!("shutdown received; draining connections");
-    // `shutdown(self)` consumes the helper: unwrap the Arc (watchers hold only
-    // the rx side) and hand the signal+wait to its own task.
     // `shutdown(self)` consumes; unwrap the Arc (watchers hold only the rx
     // side) and let the signal+wait run on its own task.
     let _shutdown_task = Arc::try_unwrap(graceful)
@@ -949,6 +947,74 @@ mod server_lifecycle_tests {
             fixture.join("localhost-key.pem"),
         )
         .expect("the configured file-loading path accepts a valid identity");
+
+        let mismatch = TlsConfig::from_pem_files(
+            fixture.join("localhost-cert.pem"),
+            fixture.join("mismatched-key.pem"),
+        )
+        .err()
+        .expect("a valid but unrelated private key must be rejected");
+        assert_eq!(mismatch.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[tokio::test]
+    async fn shutdown_bounds_a_stalled_tls_handshake_by_the_grace_deadline() {
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("test listener address");
+        let mut state = ProxyState::new(
+            KeyStore::new(),
+            ProxyLedger::in_memory(),
+            Arc::new(InMemorySink::new()),
+            HashMap::new(),
+            None,
+        );
+        // Keep the handshake timeout well beyond the shutdown grace. The
+        // server must still return at the grace deadline, not at this timer.
+        state.header_read_timeout_secs = 30;
+
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tls");
+        let tls = TlsConfig::from_pem_files(
+            fixture.join("localhost-cert.pem"),
+            fixture.join("localhost-key.pem"),
+        )
+        .expect("valid test identity");
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(serve_listener_with_shutdown(
+            Arc::new(state),
+            listener,
+            async {
+                let _ = shutdown_rx.await;
+            },
+            Duration::from_millis(50),
+            Some(tls.acceptor),
+        ));
+
+        let mut stalled = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect silent TLS peer");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        let started = std::time::Instant::now();
+        shutdown_tx.send(()).expect("signal shutdown");
+        tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .expect("stalled TLS handshake must not outlive the grace deadline")
+            .expect("server task joins")
+            .expect("server exits cleanly");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "shutdown waited for the 30-second handshake timeout"
+        );
+
+        let mut byte = [0u8; 1];
+        let closed = tokio::time::timeout(Duration::from_secs(1), stalled.read(&mut byte))
+            .await
+            .expect("aborted handshake closes its transport")
+            .unwrap_or(0);
+        assert_eq!(closed, 0, "stalled handshake transport remained open");
     }
 
     #[tokio::test]
