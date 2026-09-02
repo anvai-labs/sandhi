@@ -32,6 +32,11 @@ hand-edited; see [RELEASING.md](RELEASING.md).
   **counted**, never dropped. The key is the `(vkey, idempotency-key)` pair with no request-body
   hash; expired dedup rows are pruned by the reclaim sweep, not only on sight. ADR-0005 D7's
   "reconcile-once" promise is honoured for the meter.
+- **Opt-in listener TLS** (TD-0017 P1): `SANDHI_CONFIG` accepts a `tls` object containing PEM
+  certificate-chain and private-key paths. The pair is read and validated before bind, HTTPS uses
+  the same HTTP/1 admission, timeout, accounting, and drain path as plaintext, and a silent TLS
+  handshake is bounded by the configured header-read deadline. Plaintext remains the compatible
+  loopback default; a non-loopback plaintext bind now emits a credential-exposure warning.
 - **HTTP contract discovery** (TD-0021 P2, #204): ungated `GET /version` returns the wire
   and chat contract versions and the wired ingress dialects; `GET /admin/version` (behind the
   admin gate) adds the capability booleans (transparent plane, durable ledger, alerts, admin

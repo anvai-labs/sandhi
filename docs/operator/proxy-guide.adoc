@@ -111,6 +111,10 @@ sandhi-proxy listening on http://127.0.0.1:8787  (POST /v1/chat/completions | /v
 | `127.0.0.1:8787`
 | Listen socket. Must parse as a `SocketAddr`.
 
+| `SANDHI_CONFIG`
+| _(unset)_
+| Declarative JSON configuration. In addition to the operator desired state, its optional `tls.cert` and `tls.key` paths enable listener TLS. Invalid or unreadable configured TLS fails startup.
+
 | `SANDHI_STORE`
 | _(unset → in-memory)_
 | SQLite path. When set, metering + vkeys + budgets + the enforcement ledger are **durable and crash-safe**; survive a restart.
@@ -120,8 +124,8 @@ sandhi-proxy listening on http://127.0.0.1:8787  (POST /v1/chat/completions | /v
 | The admin bearer. **Setting it enables `/admin/*`** and (by default) gates `/dashboard` and `/metrics`.
 
 | `SANDHI_PUBLIC_URL`
-| `http://localhost:8787`
-| Externally-reachable URL returned to callers when a vkey is minted.
+| `http://localhost:8787` (`https://...` when TLS is configured)
+| Externally-reachable URL returned to callers when a vkey is minted. Set explicitly when the public host/port differs from the listener.
 
 | `SANDHI_VAULT_BACKEND`
 | `keyring`
@@ -192,10 +196,40 @@ keys. Set it now — steps 2–4 depend on it.
 
 [CAUTION]
 ====
-The proxy serves **plain HTTP only** (no built-in TLS). The virtual key is a bearer token
-sent in cleartext, so terminate TLS in front of it (a reverse proxy / load balancer) for
-anything beyond localhost.
+Plain HTTP is appropriate only for loopback or a trusted hop behind a TLS terminator. A
+non-loopback plaintext listener warns at startup because virtual keys are bearer credentials.
 ====
+
+=== Optional listener TLS
+
+TLS is configured declaratively by path; the private-key bytes do not belong in the JSON file:
+
+[source,json]
+----
+{
+  "tls": {
+    "cert": "/run/sandhi/tls/fullchain.pem",
+    "key": "/run/sandhi/tls/privkey.pem"
+  },
+  "providers": [],
+  "budgets": [],
+  "alerts": [],
+  "vkeys": []
+}
+----
+
+[source,bash]
+----
+SANDHI_CONFIG=/etc/sandhi/config.json \
+SANDHI_BIND=0.0.0.0:8787 \
+cargo run -p sandhi-proxy --bin sandhi-proxy
+----
+
+The certificate file may contain a leaf-first chain. The key may be PKCS#1, PKCS#8, or SEC1 PEM.
+Sandhi validates the complete pair before accepting traffic and serves `https://` when it is valid;
+an incomplete, unreadable, malformed, or mismatched pair fails startup. Without the `tls` object,
+the listener remains byte-compatible plain HTTP. Certificate reload without interrupting existing
+streams is tracked separately; restart the process to replace the identity in this phase.
 
 
 == Step 2 — register the real upstream credential

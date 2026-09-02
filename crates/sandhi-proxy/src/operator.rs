@@ -1115,13 +1115,16 @@ pub(crate) async fn config_preview(
             json!({ "upstream": v.upstream, "subject": v.subject, "group": v.group, "action": action })
         })
         .collect();
-
     Json(json!({
         "path": state.config_path.as_ref().map(|p| p.display().to_string()),
         "providers": providers_plan,
         "budgets": budgets_plan,
         "alerts": alerts_plan,
         "vkeys": vkeys_plan,
+        // Listener TLS is the one startup-only section (see `config` module docs): desired-state
+        // apply cannot activate it, so it is reported as `restart required` — never silently
+        // ignored. Live replacement is TD-0017 P2.
+        "tls": if cfg.tls.is_some() { "restart required" } else { "not configured" },
     }))
     .into_response()
 }
@@ -1232,6 +1235,9 @@ pub(crate) async fn config_apply(
         "budgets": { "applied": budgets_applied },
         "alerts": { "created": alerts_created, "skipped": alerts_skipped },
         "vkeys": { "minted": vkeys_minted, "skipped": vkeys_skipped },
+        // Same acknowledgement as preview: the `tls` section parsed but was NOT applied —
+        // listener TLS activates only at process bootstrap (TD-0017 P1), never mid-flight.
+        "tls": if cfg.tls.is_some() { "restart required" } else { "not configured" },
     }))
     .into_response()
 }

@@ -15,7 +15,7 @@ use sandhi_core::{InMemorySink, KeyStore, Policy, VirtualKey, Window};
 use sandhi_providers::{
     ChatEventStream, ChatProvider, ProviderError, ProviderHandle, ProviderRuntime,
 };
-use sandhi_proxy::{build_app, ProxyLedger, ProxyState};
+use sandhi_proxy::{build_app, ProxyLedger, ProxyState, TlsConfig};
 
 fn state_with(
     upstream_uri: String,
@@ -44,6 +44,120 @@ fn state_with(
         ),
     );
     Arc::new(ProxyState::new(keys, ledger, sink, providers, None))
+}
+
+const TEST_TLS_CERT: &[u8] = include_bytes!("fixtures/tls/localhost-cert.pem");
+const TEST_TLS_KEY: &[u8] = include_bytes!("fixtures/tls/localhost-key.pem");
+
+/// TD-0017 P1: TLS wraps the listener, not the application. A normal request
+/// and a complete metered SSE response must therefore retain their existing
+/// status, bytes, and accounting semantics over HTTPS.
+#[tokio::test]
+async fn tls_listener_serves_full_requests_and_complete_sse_streams() {
+    let upstream = MockServer::start().await;
+    let sse = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2}}\n\n",
+        "data: [DONE]\n\n"
+    );
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse),
+        )
+        .mount(&upstream)
+        .await;
+
+    let sink = Arc::new(InMemorySink::new());
+    let mut state = Arc::try_unwrap(state_with(
+        upstream.uri(),
+        sink.clone(),
+        ProxyLedger::in_memory(),
+    ))
+    .ok()
+    .expect("test owns the only ProxyState reference");
+    state.header_read_timeout_secs = 1;
+    // A silent handshake must release the sole connection slot before the
+    // health and streaming requests below can be admitted.
+    state.max_connections = 1;
+    let state = Arc::new(state);
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = probe.local_addr().unwrap();
+    drop(probe);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let tls = TlsConfig::from_pem(TEST_TLS_CERT, TEST_TLS_KEY).unwrap();
+    let server = tokio::spawn(sandhi_proxy::serve_with_tls_shutdown_timeout(
+        state,
+        addr,
+        async {
+            let _ = shutdown_rx.await;
+        },
+        std::time::Duration::from_secs(2),
+        tls,
+    ));
+
+    let root = reqwest::Certificate::from_pem(TEST_TLS_CERT).unwrap();
+    let client = reqwest::Client::builder()
+        .add_root_certificate(root)
+        .build()
+        .unwrap();
+    let health_url = format!("https://{addr}/healthz");
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // The HTTP timer starts only after TLS. A peer that never sends a
+    // ClientHello must still release its connection slot at the same bound.
+    use tokio::io::AsyncReadExt;
+    let mut silent = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut one = [0u8; 1];
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(3), silent.read(&mut one))
+        .await
+        .expect("silent TLS handshake must be bounded")
+        .unwrap_or(0);
+    assert_eq!(
+        closed, 0,
+        "silent TLS handshake must close without a response"
+    );
+
+    let health = client
+        .get(&health_url)
+        .send()
+        .await
+        .unwrap_or_else(|error| panic!("TLS health request failed: {error:?}"));
+    assert_eq!(health.status(), StatusCode::OK);
+
+    let response = client
+        .post(format!("https://{addr}/v1/chat/completions"))
+        .header("authorization", "Bearer vk_demo")
+        .json(&serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": true
+        }))
+        .send()
+        .await
+        .expect("HTTPS streaming request");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.text().await.expect("complete SSE body");
+    assert!(body.contains("hello"));
+    assert!(body.contains("[DONE]"));
+
+    let events = sink.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].tokens_in, 4);
+    assert_eq!(events[0].tokens_out, 2);
+    assert_eq!(
+        events[0].usage_completeness,
+        sandhi_core::UsageCompleteness::Final
+    );
+
+    let _ = shutdown_tx.send(());
+    tokio::time::timeout(std::time::Duration::from_secs(3), server)
+        .await
+        .expect("TLS server drains")
+        .expect("TLS server task joins")
+        .expect("TLS server exits cleanly");
 }
 
 #[tokio::test]
@@ -133,6 +247,99 @@ async fn version_endpoint_is_unauthenticated_and_reports_the_contract() {
             "dialect {expected} advertised"
         );
     }
+}
+
+#[tokio::test]
+async fn config_preview_and_apply_acknowledge_the_startup_only_tls_section() {
+    // Adversarial-review finding on the TLS PR: the config module's doc promised that
+    // preview/apply would report the startup-only `tls` section as `restart required`, but the
+    // responses never mentioned it — an operator applying a TLS edit got silent ignorance of a
+    // security-relevant section. Both responses carry the acknowledgement, and it reads
+    // "not configured" when the section is absent.
+    let keys = KeyStore::new();
+    let mut state = ProxyState::new(
+        keys,
+        ProxyLedger::in_memory(),
+        Arc::new(InMemorySink::new()),
+        HashMap::new(),
+        None,
+    );
+    state.admin_token = Some("admin".into());
+    let cfg_path = std::env::temp_dir().join(format!("sandhi-tls-ack-{}.json", std::process::id()));
+    std::fs::write(
+        &cfg_path,
+        r#"{"tls": {"cert": "/nonexistent/cert.pem", "key": "/nonexistent/key.pem"}}"#,
+    )
+    .unwrap();
+    state.config_path = Some(cfg_path.clone());
+    let app = build_app(Arc::new(state));
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/admin/config")
+                .header("authorization", "Bearer admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let preview: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        preview["tls"], "restart required",
+        "preview must acknowledge the startup-only section, not ignore it"
+    );
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/config/apply")
+                .header("authorization", "Bearer admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let apply: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        apply["tls"], "restart required",
+        "apply must acknowledge that it did NOT activate listener TLS"
+    );
+
+    std::fs::write(&cfg_path, r#"{"providers": []}"#).unwrap();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/config")
+                .header("authorization", "Bearer admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let preview: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(preview["tls"], "not configured");
+    let _ = std::fs::remove_file(&cfg_path);
 }
 
 #[tokio::test]
