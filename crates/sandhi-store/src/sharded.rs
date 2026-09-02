@@ -177,6 +177,15 @@ impl ShardedLedger {
 
     /// TD-0021 P4: record a settlement for dedup. Routes by `vkey` — the dedup key's
     /// own scope, so repeats land on the same shard as the original.
+    ///
+    /// SHARDING INVARIANT (review finding, forward-looking): dedup routes by
+    /// `shard_for(vkey)` while its settlement routes by `shard_for(scope)` — different
+    /// inner shards. Today the proxy's single outer `Mutex<ProxyLedger>` serializes
+    /// settle+seen+record, so the check-then-act is atomic ACROSS those shards. When
+    /// TD-0016 P2+ removes that outer lock, this two-shard window reopens — the dedup
+    /// must then either route by the SAME key as settlement or take a per-record
+    /// advisory lock. Removing the outer lock without addressing this is a correctness
+    /// regression; this comment is the tripwire.
     pub fn record_durable(
         &self,
         vkey: &str,

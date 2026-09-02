@@ -67,6 +67,11 @@ impl ProxyLedger {
         Duration::seconds(RESERVATION_TTL_SECS)
     }
 
+    /// Whether this ledger is the volatile in-memory arm (dedup unavailable, TD-0021 P4 D3).
+    pub fn is_volatile(&self) -> bool {
+        matches!(self, Self::Memory(_))
+    }
+
     /// TD-0021 P4 (D1): has this `(vkey, idem_key)` already been settled inside the
     /// window? `Some((reservation, actual))` lets the caller reuse the original
     /// settlement — the repeat is the SAME logical call, metered once. `None` means

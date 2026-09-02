@@ -384,11 +384,19 @@ impl SqliteLedger {
     }
 
     pub fn reclaim_expired_durable(&mut self, now: OffsetDateTime) -> rusqlite::Result<usize> {
+        let now_ts = now.unix_timestamp();
         let n = self.conn.execute(
             "DELETE FROM budget_reservation WHERE settled = 0 AND expires_at <= ?1",
-            params![now.unix_timestamp()],
+            params![now_ts],
         )?;
-        Ok(n)
+        // TD-0021 P4 review finding: the dedup table is not prune-on-sight only —
+        // without this, a key used once and never retried lives forever, and the
+        // table's growth tracks call volume (the TD-0024 retention class).
+        let d = self.conn.execute(
+            "DELETE FROM idempotency_dedup WHERE expires_at <= ?1",
+            params![now_ts],
+        )?;
+        Ok(n + d)
     }
 
     pub fn limit_durable(&self, scope: &str) -> rusqlite::Result<Option<u64>> {
@@ -672,6 +680,31 @@ mod tests {
 
         // And the row is gone — a third call inside a fresh window is also new.
         assert!(l.seen_durable("vk_1", "idem_a", later).unwrap().is_none());
+    }
+
+    #[test]
+    fn reclaim_sweep_also_prunes_expired_dedup_rows() {
+        let mut l = mem();
+        let now = OffsetDateTime::now_utc();
+        // Two records: one inside its window, one long past.
+        l.record_durable("vk_keep", "k1", 1, 10, now, Duration::seconds(900))
+            .unwrap();
+        l.record_durable(
+            "vk_gone",
+            "k2",
+            2,
+            20,
+            now - Duration::seconds(2000),
+            Duration::seconds(900),
+        )
+        .unwrap();
+
+        let pruned = l.reclaim_expired_durable(now).unwrap();
+        assert!(pruned >= 1, "the expired dedup row is swept");
+
+        // The live record survives; the expired one is gone even without a sight.
+        assert!(l.seen_durable("vk_keep", "k1", now).unwrap().is_some());
+        assert!(l.seen_durable("vk_gone", "k2", now).unwrap().is_none());
     }
 
     #[test]

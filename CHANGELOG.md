@@ -22,13 +22,16 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 - **Idempotent metering** (TD-0021 P4, D1/D2/D3): a retried call carrying the same
   `(virtual key, idempotency-key)` inside the dedup window — whose TTL matches the 15-minute
   lease TTL and whose storage shares the enforcement ledger's own SQLite, so it survives exactly
-  the restart a crash-retry makes most likely — reuses the original settlement: **one lease, one
-  usage event**. The client's retry still happens upstream (this deduplicates the *meter*, never
-  the response); a repeat outside the window is a new logical call; and when dedup is unavailable
-  (volatile in-memory ledger, or a store error) the call is **counted**, not dropped — the
-  measurement is never lost to uncertainty. The key is the `(vkey, idempotency-key)` pair with no
-  request-body hash (a reused key across different calls meters as the first; that is the
-  client's contract to honour). ADR-0005 D7's "reconcile-once" promise is now honoured.
+  the restart a crash-retry makes most likely — has its duplicate usage event dropped: **the
+  meter records the logical call once**. Semantics stated exactly: *the meter counts logical
+  calls; enforcement counts physical calls* — the retry's lease still settles into spent, because
+  the retry really consumed upstream tokens. Both sides visible: `sandhi_idempotent_replays_total`
+  (reused settlements) and `sandhi_idempotent_fallbacks_total` (keys metered without dedup).
+  The client's retry still happens upstream (this deduplicates the *meter*, never the response);
+  a repeat outside the window is a new logical call; when dedup is unavailable the call is
+  **counted**, never dropped. The key is the `(vkey, idempotency-key)` pair with no request-body
+  hash; expired dedup rows are pruned by the reclaim sweep, not only on sight. ADR-0005 D7's
+  "reconcile-once" promise is honoured for the meter.
 - **HTTP contract discovery** (TD-0021 P2, #204): ungated `GET /version` returns the wire
   and chat contract versions and the wired ingress dialects; `GET /admin/version` (behind the
   admin gate) adds the capability booleans (transparent plane, durable ledger, alerts, admin

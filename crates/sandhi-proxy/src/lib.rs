@@ -2194,11 +2194,13 @@ async fn handle(
         dialect_label(dialect),
         plane,
     );
-    // TD-0021 P4 (D1): the meter records the LOGICAL call once. A repeat of a settled
-    // `(vkey, idempotency-key)` inside the window reuses the original settlement — no
-    // second lease, no second event. The client's retry still happens upstream (this is
-    // not response caching); only the meter deduplicates. Unavailable/expired dedup
-    // falls through to counting (D3) — the measurement is never lost to uncertainty.
+    // TD-0021 P4 (D1): the METER records the LOGICAL call once — a repeat of a settled
+    // `(vkey, idempotency-key)` inside the window has its duplicate usage event dropped
+    // (the original stands). ENFORCEMENT still counts the physical call: the retry really
+    // consumed upstream tokens, so its lease settles into spent too. Meter counts logical
+    // calls, enforcement counts physical calls — both true, both visible. The client's
+    // retry still happens upstream (this is not response caching). Unavailable/expired
+    // dedup falls through to counting (D3) — the measurement is never lost to uncertainty.
     if let Some(idem_key) = request.metadata.idempotency_key.clone() {
         accounting.dedup = Some((
             request.metadata.virtual_key_id.clone().unwrap_or_default(),
@@ -2662,6 +2664,11 @@ impl RequestAccounting {
         self.outcome = outcome;
     }
 
+    /// Whether this call's ledger was the volatile in-memory arm (dedup unavailable).
+    fn reservation_is_volatile(&self) -> bool {
+        matches!(self.state.ledger.lock().map(|l| l.is_volatile()), Ok(true))
+    }
+
     /// Per-call wire headers for the typed plane (TD-0022 D1, caller-owned injection):
     /// this call's minted id on the vendor's declared correlation header (ADR-0008 D6;
     /// empty when the upstream declares none) plus the caller's W3C `traceparent`, so the
@@ -2783,12 +2790,17 @@ impl RequestAccounting {
             spent_after
         });
         if dedup_reused {
-            // D1: the repeat is the same logical call — its measurement is a duplicate
-            // and is DROPPED here (the original event stands). Made visible per D3's
-            // "uncertainty is counted, reuse is certain" asymmetry.
-            tracing::debug!("idempotent retry settled against the original call");
+            // D1: the repeat is the same LOGICAL call — its usage event is a duplicate
+            // and is DROPPED here (the original event stands). Visible, never silent.
+            tracing::debug!("idempotent retry metered against the original logical call");
+            self.state.metrics.record_idempotent_replay();
             self.finalized = true;
             return;
+        }
+        if self.dedup.is_some() && self.reservation_is_volatile() {
+            // D3's acceptance criterion: a counted fallback is a METRIC, not just a
+            // log line. (The volatile arm cannot dedup; the call counts.)
+            self.state.metrics.record_idempotent_fallback();
         }
         // P2: evaluate threshold alerts against the settled spend (best-effort — never breaks the
         // request). The configured limit comes from the budgets metadata map so a `Warn` scope (no
