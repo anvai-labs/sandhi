@@ -39,11 +39,14 @@ hand-edited; see [RELEASING.md](RELEASING.md).
   A4). The reservation ceiling's input side re-serialized `messages` + `tools` to JSON on every
   request — a second full prompt materialization (on top of body → `Value` → `ChatRequestV1` →
   native re-encode) purely to divide its byte length by four. The estimate now divides the
-  ingress body's length, which is a superset of the neutral serialization it decodes to — so the
-  ceiling stays conservative (ADR-0005 D1: ceilings may grow, never shrink), pinned per dialect
-  by a new test that fails if any future codec lets the wire body stop dominating the content it
-  carried. Accuracy semantics unchanged (still bytes/4; the script-aware estimator remains
-  TD-0016 R2's).
+  ingress body's length. Adversarial review of this change falsified the first-draft "wire body
+  is a superset" claim — the decoders inject a default `{"type":"object"}` schema for schema-less
+  tools, so Anthropic's bare tool form and Responses' flat form can carry less wire than their
+  neutral serialization — so the pinned contract is the honest one: approximately-conservative
+  with a **bounded deficit** of ~8 tokens per schema-less tool (31 injected bytes ÷ 4), measured
+  and pinned per dialect including the adversarial shapes, and marginal against the
+  output-ceiling-dominated reservation (ADR-0005 D1; accuracy semantics otherwise unchanged —
+  still bytes/4, the script-aware estimator remains TD-0016 R2's).
 
 - **Single source for family default base URLs** (design audit A1, the #196 drift class). The
   proxy's own hard-coded defaults had drifted from the catalog: Gemini without `/v1beta` — in

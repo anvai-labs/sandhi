@@ -2952,15 +2952,18 @@ async fn stream_response(
         .expect("valid streaming response")
 }
 
-/// Coarse input-token estimate: bytes of the ingress request body / 4. The wire body is a
-/// superset of the neutral `messages`+`tools` it decodes to (every dialect envelope carries the
-/// same content wrapped in its own field names — pinned per dialect by
-/// `body_length_dominates_the_serialized_prompt`), so dividing the body length is at least as
-/// conservative as re-serializing the decoded request, and costs zero allocations on a path that
-/// runs before every reservation (design audit A4 — this used to re-serialize the prompt twice).
-/// A known lower-bound approximation either way (undercounts CJK, overcounts verbose tool
-/// schemas); a model-aware/tokenizer estimator is the follow-up (ADR-0005 D1). The *output*
-/// side, not this, is the load-bearing part of the ceiling.
+/// Coarse input-token estimate: bytes of the ingress request body / 4. This replaces a full
+/// re-serialization of the decoded `messages`+`tools` on every request (design audit A4) with a
+/// zero-allocation length read. Direction vs the old formula: dialect envelopes wrap the same
+/// content in their own field names, so for everything except schema-less tools the wire body
+/// dominates the neutral serialization — the exception is the decoders' injected default tool
+/// schema (`{"type":"object"}`, +31 bytes of neutral with no wire counterpart per schema-less
+/// tool), which can make the estimate up to ~8 tokens *lower* per schema-less tool than the old
+/// formula. That deficit is bounded, measured, and pinned by
+/// `body_length_estimate_stays_within_a_bounded_deficit` — and marginal against the
+/// `DEFAULT_OUTPUT_CEILING`-dominated ceiling, the load-bearing term (ADR-0005 D1); the /4
+/// heuristic's own accuracy error dwarfs it either way (undercounts CJK, overcounts verbose
+/// schemas). A model-aware/tokenizer estimator remains the follow-up.
 fn input_estimate(body_len: usize) -> u64 {
     (body_len as u64).saturating_add(3) / 4
 }
@@ -3793,12 +3796,17 @@ mod connection_policy_tests {
     }
 
     /// Design audit A4: `input_estimate` divides the ingress body length instead of
-    /// re-serializing the decoded prompt. That is conservative (ADR-0005 D1 — a ceiling may
-    /// grow, never shrink) only while every dialect's wire body dominates the neutral
-    /// serialization of the content it carried; this pins that domination per dialect so a
-    /// future codec cannot silently invert the direction.
+    /// re-serializing the decoded prompt. Adversarial review of this change falsified the
+    /// original "wire body is a superset" claim: all three non-Gemini decoders inject a default
+    /// `{"type":"object"}` schema for schema-less tools (+31 bytes of neutral with no wire
+    /// counterpart), so Anthropic's bare tool form and Responses' flat form can carry LESS wire
+    /// than their neutral serialization. What actually holds — and what this pins — is a
+    /// **bounded deficit**: generous shapes dominate outright; the adversarial shapes
+    /// (schema-less tools, bare-string system, empty messages) stay within ~8 tokens of the old
+    /// formula per schema-less tool, noise against the DEFAULT_OUTPUT_CEILING-dominated
+    /// ceiling (ADR-0005 D1). A codec that widens the deficit beyond that bound fails here.
     #[test]
-    fn body_length_dominates_the_serialized_prompt() {
+    fn body_length_estimate_stays_within_a_bounded_deficit() {
         const TEXT: &str = "You are a careful assistant that explains reservation ceilings, \
              lease semantics, and the difference between what the meter counts and what the \
              ledger settles, at length and with examples.";
@@ -3886,6 +3894,72 @@ mod connection_policy_tests {
             );
             // And the estimate itself: body/4 covers the old serialized/4 formula.
             assert!(input_estimate(wire_len) >= (serialized as u64).saturating_add(3) / 4);
+        }
+
+        // Adversarial shapes (from the review that falsified the superset claim): schema-less
+        // tools inject a default schema into the neutral form with no wire counterpart, a
+        // bare-string system adds a role wrapper the wire never carried, and an empty messages
+        // array is accepted. These may legitimately sit BELOW the neutral serialization — the
+        // pin is that the estimate's deficit vs the old formula stays bounded by the injected
+        // schemas (~8 tokens per schema-less tool = 31 bytes / 4, rounded up).
+        let bare_tool = |i: usize| serde_json::json!({"name": format!("a{i}")});
+        let adversarial: &[(&str, IngressDialect, serde_json::Value, usize)] = &[
+            (
+                "anthropic-schemaless-tools",
+                IngressDialect::Anthropic,
+                serde_json::json!({
+                    "model": "claude-x",
+                    "system": "be terse",
+                    "messages": [],
+                    "tools": [bare_tool(0), bare_tool(1), bare_tool(2), bare_tool(3), bare_tool(4)]
+                }),
+                5,
+            ),
+            (
+                "responses-flat-schemaless-tools",
+                IngressDialect::Responses,
+                serde_json::json!({
+                    "model": "gpt-x",
+                    "input": [],
+                    "tools": [
+                        {"type": "function", "name": "a0"},
+                        {"type": "function", "name": "a1"},
+                        {"type": "function", "name": "a2"}
+                    ]
+                }),
+                3,
+            ),
+            (
+                "openai-schemaless-tools",
+                IngressDialect::OpenAi,
+                serde_json::json!({
+                    "model": "gpt-x",
+                    "messages": [],
+                    "tools": [
+                        {"type": "function", "function": {"name": "a0"}},
+                        {"type": "function", "function": {"name": "a1"}}
+                    ]
+                }),
+                2,
+            ),
+        ];
+        for (name, dialect, body, schema_less) in adversarial {
+            let wire_len = serde_json::to_string(body).unwrap().len();
+            let (request, _) =
+                crate::codec::decode_request(*dialect, body.clone(), RequestMetadataV1::default())
+                    .unwrap_or_else(|e| panic!("{name} fixture failed to decode: {e}"));
+            let serialized = serde_json::to_vec(&request.messages).unwrap().len()
+                + serde_json::to_vec(&request.tools).unwrap().len();
+            let old_estimate = (serialized as u64).saturating_add(3) / 4;
+            let new_estimate = input_estimate(wire_len);
+            let deficit = old_estimate.saturating_sub(new_estimate);
+            assert!(
+                deficit <= (schema_less * 8) as u64,
+                "{name}: deficit {deficit} tokens exceeds the injected-schema bound \
+                 ({} schema-less tools x ~8 tokens) — the estimate stopped being \
+                 approximately conservative",
+                schema_less
+            );
         }
     }
 }
