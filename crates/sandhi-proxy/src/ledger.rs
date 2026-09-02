@@ -67,6 +67,44 @@ impl ProxyLedger {
         Duration::seconds(RESERVATION_TTL_SECS)
     }
 
+    /// Whether this ledger is the volatile in-memory arm (dedup unavailable, TD-0021 P4 D3).
+    pub fn is_volatile(&self) -> bool {
+        matches!(self, Self::Memory(_))
+    }
+
+    /// TD-0021 P4 (D1): has this `(vkey, idem_key)` already been settled inside the
+    /// window? `Some(_)` means yes — the repeat is the SAME logical call, so the caller
+    /// drops its duplicate usage event (the meter counts logical calls; enforcement
+    /// still settles the retry's own lease, because the retry physically consumed
+    /// tokens). `None` means unseen or dedup-unavailable; the caller counts the call
+    /// (D3). The returned ids are diagnostic, not a settlement handle.
+    pub fn seen(&mut self, vkey: &str, idem_key: &str) -> Option<(u64, u64)> {
+        let now = OffsetDateTime::now_utc();
+        match self {
+            Self::Memory(_) => None, // no dedup in the volatile arm — count (D3)
+            Self::Durable(l) => l.seen_durable(vkey, idem_key, now).ok().flatten(),
+        }
+    }
+
+    /// TD-0021 P4 (D1): record the settlement of a logical call. Expiry mirrors the
+    /// lease TTL (D2) so the dedup window matches the settlement it protects.
+    pub fn record(&mut self, vkey: &str, idem_key: &str, reservation: u64, actual: u64) {
+        let now = OffsetDateTime::now_utc();
+        match self {
+            Self::Memory(_) => {} // volatile arm: nothing durable to protect
+            Self::Durable(l) => {
+                if let Err(e) =
+                    l.record_durable(vkey, idem_key, reservation, actual, now, Self::ttl())
+                {
+                    tracing::warn!(
+                        %e,
+                        "idempotency record failed — a retry of this call will be metered again (D3 fail-toward-counting)"
+                    );
+                }
+            }
+        }
+    }
+
     /// Set (or clear, with `limit = None`) a scope's budget: cap + window + policy.
     ///
     /// The durable arm stores the real limit + policy, so it enforces `Block` vs. `Warn` natively

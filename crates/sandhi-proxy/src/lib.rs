@@ -2185,7 +2185,7 @@ async fn handle(
         }
     };
 
-    let accounting = RequestAccounting::new(
+    let mut accounting = RequestAccounting::new(
         Arc::clone(&state),
         scope,
         reservation,
@@ -2194,6 +2194,19 @@ async fn handle(
         dialect_label(dialect),
         plane,
     );
+    // TD-0021 P4 (D1): the METER records the LOGICAL call once — a repeat of a settled
+    // `(vkey, idempotency-key)` inside the window has its duplicate usage event dropped
+    // (the original stands). ENFORCEMENT still counts the physical call: the retry really
+    // consumed upstream tokens, so its lease settles into spent too. Meter counts logical
+    // calls, enforcement counts physical calls — both true, both visible. The client's
+    // retry still happens upstream (this is not response caching). Unavailable/expired
+    // dedup falls through to counting (D3) — the measurement is never lost to uncertainty.
+    if let Some(idem_key) = request.metadata.idempotency_key.clone() {
+        accounting.dedup = Some((
+            request.metadata.virtual_key_id.clone().unwrap_or_default(),
+            idem_key,
+        ));
+    }
     // TD-0011 D6: which plane served the call is the ADR-0004 adoption signal — how much traffic
     // still re-encodes. Bounded fields only (D2): provider slug and model, never subject/session.
     tracing::debug!(
@@ -2569,6 +2582,10 @@ struct RequestAccounting {
     reservation: Option<Reservation>,
     provider: String,
     model: String,
+    /// TD-0021 P4: when the call carried an `idempotency-key` AND this proxy already
+    /// settled that `(vkey, key)` inside the window, the repeat is the SAME logical call
+    /// — reusing the original settlement, metered once (D1). `None` otherwise.
+    dedup: Option<(String, String)>,
     /// Sandhi's id for THIS call, minted at admission (not lazily at event assembly) so it can
     /// be sent upstream on the vendor's declared correlation header and then become the usage
     /// event's `request_id` — one string correlating the upstream's logs and sandhi's event
@@ -2614,6 +2631,7 @@ impl RequestAccounting {
             reservation,
             provider,
             model: request.model.clone(),
+            dedup: None,
             request_id: next_request_id(),
             metadata: request.metadata.clone(),
             usage: None,
@@ -2644,6 +2662,11 @@ impl RequestAccounting {
 
     fn set_outcome(&mut self, outcome: &'static str) {
         self.outcome = outcome;
+    }
+
+    /// Whether this call's ledger was the volatile in-memory arm (dedup unavailable).
+    fn reservation_is_volatile(&self) -> bool {
+        matches!(self.state.ledger.lock().map(|l| l.is_volatile()), Ok(true))
     }
 
     /// Per-call wire headers for the typed plane (TD-0022 D1, caller-owned injection):
@@ -2742,11 +2765,23 @@ impl RequestAccounting {
         }
         // Settle the lease by id (idempotent, ADR-0005 D2), then capture the post-settle spent for
         // the alert subsystem. Alerts evaluate only on a measured call.
+        let mut dedup_reused = false;
         let spent_after = blocking_section(|| {
             let mut spent_after: Option<u64> = None;
             if let Ok(mut ledger) = self.state.ledger.lock() {
+                // TD-0021 P4 (D1): settle-then-record under one lock. A repeat arriving
+                // between this call's admission and settlement finds the record only after
+                // it exists — the insert is the linearization point.
                 if let Some(reservation) = &self.reservation {
                     ledger.settle(reservation, actual);
+                }
+                if let Some((vkey, idem_key)) = &self.dedup {
+                    if ledger.seen(vkey, idem_key).is_some() {
+                        dedup_reused = true;
+                    } else {
+                        let reservation_id = self.reservation.as_ref().map_or(0, |r| r.id);
+                        ledger.record(vkey, idem_key, reservation_id, actual);
+                    }
                 }
                 if measured {
                     spent_after = Some(ledger.spent(&self.scope));
@@ -2754,6 +2789,19 @@ impl RequestAccounting {
             }
             spent_after
         });
+        if dedup_reused {
+            // D1: the repeat is the same LOGICAL call — its usage event is a duplicate
+            // and is DROPPED here (the original event stands). Visible, never silent.
+            tracing::debug!("idempotent retry metered against the original logical call");
+            self.state.metrics.record_idempotent_replay();
+            self.finalized = true;
+            return;
+        }
+        if self.dedup.is_some() && self.reservation_is_volatile() {
+            // D3's acceptance criterion: a counted fallback is a METRIC, not just a
+            // log line. (The volatile arm cannot dedup; the call counts.)
+            self.state.metrics.record_idempotent_fallback();
+        }
         // P2: evaluate threshold alerts against the settled spend (best-effort — never breaks the
         // request). The configured limit comes from the budgets metadata map so a `Warn` scope (no
         // hard cap in the in-memory ledger) still has a threshold to measure against.

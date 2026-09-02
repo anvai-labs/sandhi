@@ -171,6 +171,12 @@ struct Inner {
     /// Billable tokens settled from an estimate rather than a provider measurement.
     estimated_tokens: BTreeMap<Labels, u64>,
     admitted_unmetered: u64,
+    /// TD-0021 P4: a retry whose (vkey, idempotency-key) matched the window —
+    /// the logical call was metered once; the duplicate event was dropped.
+    idempotent_replays: u64,
+    /// TD-0021 P4: a call carried an idempotency-key but dedup was unavailable
+    /// (volatile arm) — counted, per D3's fail-toward-counting, and visible here.
+    idempotent_fallbacks: u64,
     leases_reclaimed: u64,
     settle_failures: u64,
     settle_overshoot: u64,
@@ -297,6 +303,22 @@ impl Metrics {
         }
     }
 
+    /// TD-0021 P4 D1: a retry matched the dedup window — its duplicate usage event
+    /// was dropped; the logical call was metered once (visible, not silent).
+    pub fn record_idempotent_replay(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.idempotent_replays += 1;
+        }
+    }
+
+    /// TD-0021 P4 D3: dedup unavailable — the call was counted (the fallback the
+    /// TD's acceptance criterion requires "counted in a metric").
+    pub fn record_idempotent_fallback(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.idempotent_fallbacks += 1;
+        }
+    }
+
     /// Expired leases reclaimed — the crash-recovery signal.
     pub fn record_leases_reclaimed(&self, count: u64) {
         if let Ok(mut inner) = self.inner.lock() {
@@ -419,6 +441,16 @@ impl Metrics {
 
         for (name, help, value) in [
             (
+                "sandhi_idempotent_replays_total",
+                "Retries whose (vkey, idempotency-key) matched the window: one logical call, one event (TD-0021 P4 D1).",
+                inner.idempotent_replays,
+            ),
+            (
+                "sandhi_idempotent_fallbacks_total",
+                "Calls carrying an idempotency-key metered without dedup (volatile arm): counted per D3, not dropped.",
+                inner.idempotent_fallbacks,
+            ),
+            (
                 "sandhi_admitted_unmetered_total",
                 "Calls admitted without a lease after a ledger error under a Warn policy (fail-open).",
                 inner.admitted_unmetered,
@@ -496,6 +528,17 @@ mod tests {
 
     /// TD-0011 D2's second line of defence. The first is that `Labels` has no field for a forbidden
     /// dimension, so this cannot regress without someone adding one — at which point this fails.
+    #[test]
+    fn idempotency_counters_render() {
+        let m = Metrics::new();
+        m.record_idempotent_replay();
+        m.record_idempotent_replay();
+        m.record_idempotent_fallback();
+        let out = m.render();
+        assert!(out.contains("sandhi_idempotent_replays_total 2"));
+        assert!(out.contains("sandhi_idempotent_fallbacks_total 1"));
+    }
+
     #[test]
     fn rendered_output_contains_no_unbounded_label() {
         let metrics = Metrics::new();

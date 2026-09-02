@@ -164,6 +164,45 @@ impl ShardedLedger {
     }
 
     /// Reclaim expired leases on every shard; returns the total reclaimed.
+    pub fn seen_durable(
+        &self,
+        vkey: &str,
+        idem_key: &str,
+        now: OffsetDateTime,
+    ) -> rusqlite::Result<Option<(u64, u64)>> {
+        // SHARDING INVARIANT: see the tripwire comment on `record_durable` — same
+        // two-shard window (vkey here vs scope at settlement), same outer-lock
+        // dependency, same TD-0016 P2+ precondition.
+        let shard = self.shard_for(vkey);
+        let mut ledger = shard.lock().expect("shard poisoned");
+        ledger.seen_durable(vkey, idem_key, now)
+    }
+
+    /// TD-0021 P4: record a settlement for dedup. Routes by `vkey` — the dedup key's
+    /// own scope, so repeats land on the same shard as the original.
+    ///
+    /// SHARDING INVARIANT (review finding, forward-looking): dedup routes by
+    /// `shard_for(vkey)` while its settlement routes by `shard_for(scope)` — different
+    /// inner shards. Today the proxy's single outer `Mutex<ProxyLedger>` serializes
+    /// settle+seen+record, so the check-then-act is atomic ACROSS those shards. When
+    /// TD-0016 P2+ removes that outer lock, this two-shard window reopens — the dedup
+    /// must then either route by the SAME key as settlement or take a per-record
+    /// advisory lock. Removing the outer lock without addressing this is a correctness
+    /// regression; this comment is the tripwire.
+    pub fn record_durable(
+        &self,
+        vkey: &str,
+        idem_key: &str,
+        reservation: u64,
+        actual: u64,
+        now: OffsetDateTime,
+        ttl: time::Duration,
+    ) -> rusqlite::Result<()> {
+        let shard = self.shard_for(vkey);
+        let mut ledger = shard.lock().expect("shard poisoned");
+        ledger.record_durable(vkey, idem_key, reservation, actual, now, ttl)
+    }
+
     pub fn reclaim_expired_durable(&self, now: OffsetDateTime) -> rusqlite::Result<usize> {
         let mut total = 0;
         for shard in &self.shards {

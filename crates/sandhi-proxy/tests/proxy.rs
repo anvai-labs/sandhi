@@ -250,6 +250,156 @@ async fn every_response_carries_the_contract_version_header_including_errors() {
     );
 }
 
+// ───────────────────────── Idempotent metering (TD-0021 P4) ─────────────────────────
+
+#[tokio::test]
+async fn same_idempotency_key_inside_the_window_meters_once() {
+    // D1 acceptance: two requests with the same (virtual_key_id, idempotency-key)
+    // inside the window produce ONE lease and ONE usage event — the repeat reuses
+    // the original settlement. The proxy needs a DURABLE ledger for dedup; the
+    // state_with default is in-memory (which correctly counts, D3).
+    let upstream = MockServer::start().await;
+    let resp = serde_json::json!({
+        "choices": [{ "message": { "content": "hi" } }],
+        "usage": { "prompt_tokens": 10, "completion_tokens": 2 }
+    });
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(resp))
+        .mount(&upstream)
+        .await;
+
+    // Durable ledger in a temp file → dedup active.
+    let dir = std::env::temp_dir().join(format!("sandhi-p4-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let store_path = dir.join("usage.db");
+
+    let sink = Arc::new(InMemorySink::new());
+    let keys2 = KeyStore::new();
+    keys2.insert(VirtualKey {
+        id: "vk_demo".into(),
+        subject_id: Some("alice".into()),
+        group_id: Some("platform".into()),
+        upstream_ref: "up1".into(),
+        ..Default::default()
+    });
+    let mut providers2 = HashMap::new();
+    providers2.insert(
+        "up1".into(),
+        ProviderRuntime::new().openai_compat(
+            "openai",
+            upstream.uri(),
+            "REAL-KEY",
+            Default::default(),
+            Some(0),
+            None,
+            None,
+        ),
+    );
+    let ledger2 = ProxyLedger::durable(store_path.to_str().unwrap(), 1).expect("ledger reopen");
+    let state = Arc::new(ProxyState::new(
+        keys2,
+        ledger2,
+        sink.clone(),
+        providers2,
+        None,
+    ));
+    let app = build_app(state);
+
+    for _ in 0..2 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("authorization", "Bearer vk_demo")
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "retry-1")
+                    .body(Body::from(r#"{"model":"gpt-x","messages":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = axum::body::to_bytes(response.into_body(), usize::MAX).await;
+    }
+
+    // ONE usage event: the repeat's duplicate event was dropped (the logical
+    // call metered once; the retry's own lease still settled — physical call).
+    let events = sink.events();
+    assert_eq!(
+        events.len(),
+        1,
+        "TD-0021 P4 D1: one lease, one event for a repeated (vkey, idempotency-key)"
+    );
+
+    // A DIFFERENT key is a new logical call.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("authorization", "Bearer vk_demo")
+                .header("content-type", "application/json")
+                .header("idempotency-key", "retry-2")
+                .body(Body::from(r#"{"model":"gpt-x","messages":[]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let _ = axum::body::to_bytes(response.into_body(), usize::MAX).await;
+    assert_eq!(
+        sink.events().len(),
+        2,
+        "a different key is a new logical call"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn in_memory_ledger_counts_repeats_d3_fail_toward_counting() {
+    // D3: dedup unavailable (volatile arm) → count the call. The measurement is
+    // never lost to uncertainty.
+    let upstream = MockServer::start().await;
+    let resp = serde_json::json!({
+        "choices": [{ "message": { "content": "hi" } }],
+        "usage": { "prompt_tokens": 10, "completion_tokens": 2 }
+    });
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(resp))
+        .mount(&upstream)
+        .await;
+
+    let sink = Arc::new(InMemorySink::new());
+    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    let app = build_app(state);
+
+    for _ in 0..2 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("authorization", "Bearer vk_demo")
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "retry-1")
+                    .body(Body::from(r#"{"model":"gpt-x","messages":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = axum::body::to_bytes(response.into_body(), usize::MAX).await;
+    }
+
+    assert_eq!(sink.events().len(), 2, "volatile arm counts (D3)");
+}
+
 /// A proxy fronting a mocked **Anthropic** upstream that answers `/v1/messages` once.
 async fn anthropic_state(upstream: &MockServer, sink: Arc<InMemorySink>) -> Arc<ProxyState> {
     Mock::given(method("POST"))
