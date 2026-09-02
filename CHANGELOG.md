@@ -17,9 +17,20 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
-### Added
+### Internal
 
-- _Nothing yet._
+- **Pin automation takes its no-op path** (follow-up to the #194 repair, caught by the post-merge
+  verification dispatch): the gate compared a v-prefixed crates.io latest (`v0.8.0`) against the
+  bare manifest pin (`0.8.0`) — never equal, so an already-current pin fell through to the bump
+  branch and failed there; and the bump script only rewrote the historical git `tag = "vX.Y.Z"`
+  form, while the manifest has carried a crates.io `version = "0.8.0"` pin since #188. Versions
+  are now normalized bare at both sources and the script rewrites either shape it finds. The
+  pre-push verification also gains `--features sentinelpass-ipc`: the pin is an optional
+  dependency, so the plain `cargo check -p sandhi-store` compiled none of it. Adversarial review
+  of the fix added two corrections: the check now runs *before* the commit and stages the
+  refreshed workspace `Cargo.lock` (the automated branch would otherwise ship a manifest/lock
+  mismatch), and the automated PR body lost its backticks — inside the double-quoted `--body`
+  they were shell command substitution, re-running the build mid-argument and emptying the body.
 
 ## [0.4.0] — 2026-09-01
 

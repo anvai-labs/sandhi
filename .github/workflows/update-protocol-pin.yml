@@ -28,7 +28,7 @@ jobs:
           set -euo pipefail
           max=$(curl -s -A "sandhi-pin-bot" \
             "https://crates.io/api/v1/crates/sentinelpass-protocol" \
-            | python3 -c 'import json,sys; v=json.load(sys.stdin)["crate"]["max_stable_version"]; print("v"+v if not v.startswith("v") else v)')
+            | python3 -c 'import json,sys; v=json.load(sys.stdin)["crate"]["max_stable_version"]; print(v.removeprefix("v"))')
           echo "version=$max" >> "$GITHUB_OUTPUT"
 
       - name: Current pin in sandhi-store
@@ -36,8 +36,10 @@ jobs:
         run: |
           set -euo pipefail
           # The manifest may pin by VERSION (main, post-#188) or by GIT TAG
-          # (historical branches) — read whichever shape is present.
-          cur=$(python3 -c 'import pathlib,re; t=pathlib.Path("crates/sandhi-store/Cargo.toml").read_text(); m=re.search(r"sentinelpass-protocol = \{[^}]*(?:version = \"([^\"+]+)\"|tag = \"(v[^\"+]+)\")", t); print((m.group(1) or m.group(2)) if m else "")')
+          # (historical branches) — read whichever shape is present. Both are
+          # normalized BARE (no "v" prefix) so the gate compares like-for-like
+          # against the crates.io latest above.
+          cur=$(python3 -c 'import pathlib,re; t=pathlib.Path("crates/sandhi-store/Cargo.toml").read_text(); m=re.search(r"sentinelpass-protocol = \{[^}]*(?:version = \"([^\"+]+)\"|tag = \"(v[^\"+]+)\")", t); s=(m.group(1) or m.group(2)) if m else ""; print(s.removeprefix("v"))')
           echo "version=$cur" >> "$GITHUB_OUTPUT"
 
       - name: Skip when the pin is already current
@@ -66,13 +68,15 @@ jobs:
           git config user.email "pin-bot@anvai-labs.local"
           git checkout -b "$branch"
           python3 .github/scripts/bump_protocol_pin.py "$CURRENT" "$LATEST"
-          git add crates/sandhi-store/Cargo.toml
-          git commit -m "chore(store): bump sentinelpass-protocol pin to ${LATEST}"
           # A breaking protocol bump must never reach the remote or open a red PR
-          # silently: verify the build BEFORE the push. (The IPC backend is selected
-          # at runtime via SANDHI_VAULT_BACKEND, not a cargo feature — the crate has
-          # no [features] table, so a plain check builds everything.)
-          cargo check -p sandhi-store
+          # silently: verify the build BEFORE anything is committed or pushed.
+          # sentinelpass-protocol is an OPTIONAL dep behind the sentinelpass-ipc
+          # feature (post-#188) — a plain check compiles none of the pin, so the
+          # feature must be on. The check also re-resolves the tracked workspace
+          # Cargo.lock — stage it with the manifest or the branch ships a stale lock.
+          cargo check -p sandhi-store --features sentinelpass-ipc
+          git add crates/sandhi-store/Cargo.toml Cargo.lock
+          git commit -m "chore(store): bump sentinelpass-protocol pin to ${LATEST}"
           # checkout runs with persist-credentials: false, so git has no token;
           # route the push through gh's credential helper.
           gh auth setup-git
@@ -88,5 +92,5 @@ jobs:
           branch="chore/sentinelpass-protocol-${LATEST}"
           gh pr create --base develop --head "$branch" \
             --title "chore(store): bump sentinelpass-protocol to ${LATEST}" \
-            --body "Automated pin bump: sentinelpass-protocol ${CURRENT} → ${LATEST} (crates.io latest). Build verified with `cargo check -p sandhi-store` (the IPC backend compiles unconditionally). Review for breaking protocol changes before merging." \
+            --body "Automated pin bump: sentinelpass-protocol ${CURRENT} → ${LATEST} (crates.io latest). Build verified with cargo check -p sandhi-store --features sentinelpass-ipc before the push; Cargo.lock refreshed with the pin. Review for breaking protocol changes before merging." \
             || echo "::warning::PR create failed (may already exist)"
