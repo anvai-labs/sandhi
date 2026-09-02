@@ -254,6 +254,47 @@ impl SqliteLedger {
 
     /// Reclaim every unsettled lease expired at or before `now` (crash/leak backstop); returns how
     /// many were reclaimed. A reclaimed lease releases its held ceiling without recording spend.
+    /// Migration-only (TD-0016 P1): insert a legacy budget row verbatim.
+    /// Companion to [`insert_migrated_reservation`](Self::insert_migrated_reservation).
+    #[doc(hidden)]
+    pub fn insert_migrated_limit(
+        &mut self,
+        scope: &str,
+        limit_tokens: Option<i64>,
+        window: &str,
+        policy: &str,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO budget_limit (scope, limit_tokens, window, policy)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![scope, limit_tokens, window, policy],
+        )?;
+        Ok(())
+    }
+
+    /// Migration-only (TD-0016 P1): insert a legacy reservation row verbatim,
+    /// preserving its id and settled state. Not used by the live reserve path.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_migrated_reservation(
+        &mut self,
+        id: i64,
+        scope: &str,
+        ceiling: i64,
+        actual: i64,
+        settled: i64,
+        expires_at: i64,
+        settled_at: Option<i64>,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO budget_reservation
+             (id, scope, ceiling, actual, settled, expires_at, settled_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![id, scope, ceiling, actual, settled, expires_at, settled_at],
+        )?;
+        Ok(())
+    }
+
     pub fn reclaim_expired_durable(&mut self, now: OffsetDateTime) -> rusqlite::Result<usize> {
         let n = self.conn.execute(
             "DELETE FROM budget_reservation WHERE settled = 0 AND expires_at <= ?1",

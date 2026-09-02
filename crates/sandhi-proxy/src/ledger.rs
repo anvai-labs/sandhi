@@ -20,7 +20,7 @@ use std::sync::Mutex;
 use time::{Duration, OffsetDateTime};
 
 use sandhi_core::{EnforcementLedger, InMemoryLedger, LedgerView, Policy, Reservation, Window};
-use sandhi_store::{ReserveOutcome, SqliteLedger};
+use sandhi_store::{ReserveOutcome, ShardedLedger};
 
 /// Lease TTL. Must exceed the longest legitimate call (a slow stream can run minutes) so a lease is
 /// only reclaimed well after the request could still be settling (ADR-0005 D2). The proxy settles
@@ -42,7 +42,10 @@ pub enum Admission {
 /// carries crash-safe leases + calendar windows.
 pub enum ProxyLedger {
     Memory(InMemoryLedger),
-    Durable(SqliteLedger),
+    /// The durable arm is scope-sharded (TD-0016 P1): N independent SQLite
+    /// files, so different tenants never serialize their durable commits.
+    /// `shards == 1` (the default) is the single legacy file.
+    Durable(ShardedLedger),
 }
 
 impl ProxyLedger {
@@ -54,8 +57,8 @@ impl ProxyLedger {
 
     /// Open a durable SQLite ledger at `path` (may share the usage-store file — its tables are
     /// disjoint). Returns the backend error as a string so callers need not depend on `rusqlite`.
-    pub fn durable(path: &str) -> Result<Self, String> {
-        SqliteLedger::open(path)
+    pub fn durable(path: &str, shards: usize) -> Result<Self, String> {
+        ShardedLedger::open_sharded(path, shards)
             .map(Self::Durable)
             .map_err(|e| e.to_string())
     }
@@ -124,7 +127,7 @@ impl ProxyLedger {
         match self {
             Self::Memory(l) => l.settle(reservation.id, actual),
             Self::Durable(l) => {
-                if let Err(e) = l.settle_durable(reservation.id, actual) {
+                if let Err(e) = l.settle_durable(&reservation.scope, reservation.id, actual) {
                     // A settle that does not land leaves the lease holding capacity until its TTL
                     // expires, so this is an operator-visible fault, not a debug detail.
                     tracing::error!(
@@ -273,7 +276,7 @@ mod tests {
         let path = path.to_str().unwrap();
 
         {
-            let mut l = ProxyLedger::durable(path).unwrap();
+            let mut l = ProxyLedger::durable(path, 1).unwrap();
             l.set_budget("g", Some(1000), Window::Daily, Policy::Block);
             let Admission::Leased(r) = l.reserve("g", 100, now(), Policy::Block) else {
                 panic!("fits under the 1000 cap");
@@ -283,7 +286,7 @@ mod tests {
             assert_eq!(l.reserved("g"), 0);
         } // connection dropped — simulate a proxy restart
 
-        let reopened = ProxyLedger::durable(path).unwrap();
+        let reopened = ProxyLedger::durable(path, 1).unwrap();
         assert_eq!(
             reopened.spent("g"),
             80,

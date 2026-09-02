@@ -126,7 +126,7 @@ argument) or document the trade in the operator guide. Silence is the only unacc
 | Phase | Scope | Acceptance (the failing test to write first) |
 |---|---|---|
 | **P0** | D1 — measure (executed as TD-0015 P1) | A published number for reserve+settle throughput and its breakdown across the three multipliers. **Gate:** if the commit path is not dominant, stop and rescope |
-| **P1** | D3 — shard by scope | Two scopes reserve concurrently with no cross-scope serialization (assert measured parallelism, not just correctness); the full C1–C6 suite green; single-scope behaviour bit-identical to today |
+| **P1** ✅ (structural; measured caveat) | D3 — shard by scope | Two scopes reserve concurrently with no cross-scope serialization (assert measured parallelism, not just correctness); the full C1–C6 suite green; single-scope behaviour bit-identical to today |
 | **P2** | D4 — read/write connection split | `spent()`/`limit()` no longer contend with `reserve`/`settle`; dashboard aggregate queries under load do not raise admission p99 beyond a recorded bound |
 | **P3** | D2 — group commit | N concurrent reservations complete in one `fsync`; **every** admitted caller observes a durable commit before admission (assert by crash-injection: kill after admit, restart, lease is present); C1–C6 green |
 | **P4** | D6 + D7 — estimator and arm parity | A CJK prompt reserves ≥ the provider's measured input tokens, and `sandhi_settle_overshoot_total` stays at zero across the corpus; the shared conformance harness passes identically against both ledger arms |

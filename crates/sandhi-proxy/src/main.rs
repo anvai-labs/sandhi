@@ -217,10 +217,20 @@ async fn main() {
     // ADR-0005 step 2: the enforcement ledger is durable (crash-safe leases, calendar windows,
     // restart-surviving spend) when SANDHI_STORE is set — sharing that SQLite file, its tables are
     // disjoint from the usage store's — and volatile in-memory otherwise.
+    // TD-0016 P1: scope-shard the durable ledger so different tenants never
+    // serialize their durable commits. 1 (default) = the single legacy file.
+    let ledger_shards = positive_usize_env("SANDHI_LEDGER_SHARDS", 1);
+    assert!(
+        (1..=64).contains(&ledger_shards),
+        "SANDHI_LEDGER_SHARDS must be between 1 and 64, got {ledger_shards}"
+    );
     let ledger = match std::env::var("SANDHI_STORE") {
-        Ok(path) => match ProxyLedger::durable(&path) {
+        Ok(path) => match ProxyLedger::durable(&path, ledger_shards) {
             Ok(l) => {
-                eprintln!("sandhi-proxy: durable enforcement ledger at {path}");
+                eprintln!(
+                    "sandhi-proxy: durable enforcement ledger at {path} ({ledger_shards} shard{})",
+                    if ledger_shards == 1 { "" } else { "s" }
+                );
                 l
             }
             Err(e) => {
