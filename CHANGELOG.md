@@ -65,6 +65,19 @@ hand-edited; see [RELEASING.md](RELEASING.md).
   constructors are redacted and full detail is the explicit named opt-in, so a future error
   path cannot leak an upstream body by omission. All 29 call sites and the existing
   dialect-shaping tests unchanged.
+- **Store/stats hygiene bundle** (design audit A5/A6/A7; zero behavior change): the ledger's
+  settled-spend and reserved SUMs are now index-only scans — a covering index
+  `(scope, settled, settled_at, actual, ceiling, expires_at)` replaces the two-column
+  `(scope, settled)` index whose matching rows each cost a table fetch, so admission work no
+  longer grows with the scope's settled history (row retention itself stays TD-0024's);
+  asserted by an `EXPLAIN QUERY PLAN` test, not by trusting the DDL. `RunCostTreeV1` assembly is
+  linear (a parent→children index replaces the per-node full-key rescan — the O(n²) in steps);
+  the assembled tree is byte-identical, pinned by the existing orphan/cycle/double-count tests.
+  `idx_vkeys_hash` is dropped (the `secret_hash UNIQUE` constraint already maintains that index —
+  it was pure write amplification), `hex_encode` is table-driven instead of per-byte `format!`
+  with a FIPS known-answer vector pinning the encoding, and `MeteredProvider`'s doc now states
+  its audience (embedders via the bindings) and its deliberately different no-estimate semantics
+  vs the proxy's `RequestAccounting`.
 - **Pin automation takes its no-op path** (follow-up to the #194 repair, caught by the post-merge
   verification dispatch): the gate compared a v-prefixed crates.io latest (`v0.8.0`) against the
   bare manifest pin (`0.8.0`) — never equal, so an already-current pin fell through to the bump

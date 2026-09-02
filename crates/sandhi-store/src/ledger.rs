@@ -79,6 +79,12 @@ impl SqliteLedger {
     }
 
     fn init(conn: &Connection) -> rusqlite::Result<()> {
+        // `spent`/`reserved` are SUMs over (scope, settled) whose payloads are actual/ceiling —
+        // the old two-column index still paid a row fetch per matching row, so admission cost
+        // grew with the scope's settled history (design audit A5). The covering index makes both
+        // reads index-only scans; predicates are untouched (the COALESCE(settled_at, 0) guard
+        // stays defensive) and its (scope, settled) prefix serves everything the old index did.
+        // Settled-row retention itself is TD-0024's, not the index's.
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS budget_limit (
                  scope        TEXT PRIMARY KEY,
@@ -95,8 +101,9 @@ impl SqliteLedger {
                  settled_at INTEGER,
                  expires_at INTEGER NOT NULL
              );
-             CREATE INDEX IF NOT EXISTS idx_reservation_scope
-                 ON budget_reservation (scope, settled);",
+             DROP INDEX IF EXISTS idx_reservation_scope;
+             CREATE INDEX IF NOT EXISTS idx_reservation_scope_covering
+                 ON budget_reservation (scope, settled, settled_at, actual, ceiling, expires_at);",
         )
     }
 
@@ -447,6 +454,51 @@ mod tests {
             l.reserve_durable(scope, ceiling, t0(), ttl()).unwrap(),
             ReserveOutcome::Denied(_)
         )
+    }
+
+    #[test]
+    fn reservation_sums_are_index_only_scans() {
+        // Design audit A5: `spent`/`reserved` are SUMs over (scope, settled) whose payloads are
+        // actual/ceiling. With the old two-column index every matching row cost a table fetch,
+        // so admission work grew with the scope's settled history. The covering index must
+        // serve the hot reads without touching the table — asserted via the query planner, not
+        // by trusting the DDL.
+        let l = mem();
+        let plan: Vec<String> = {
+            let mut stmt = l
+                .conn
+                .prepare(
+                    "EXPLAIN QUERY PLAN \
+                     SELECT COALESCE(SUM(actual), 0) FROM budget_reservation \
+                     WHERE scope = ?1 AND settled = 1 AND COALESCE(settled_at, 0) >= ?2",
+                )
+                .unwrap();
+            let rows = stmt.query_map(["g", "0"], |row| {
+                let detail: String = row.get(3)?;
+                Ok(detail)
+            });
+            rows.unwrap().map(Result::unwrap).collect()
+        };
+        assert!(
+            plan.iter().any(|d| d.contains("USING COVERING INDEX")),
+            "the settled-spend SUM must be an index-only scan, plan was: {plan:?}"
+        );
+        let mut stmt = l
+            .conn
+            .prepare(
+                "SELECT name FROM sqlite_master \
+                 WHERE type = 'index' AND tbl_name = 'budget_reservation'",
+            )
+            .unwrap();
+        let indexes: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            indexes.iter().all(|name| name != "idx_reservation_scope"),
+            "the superseded two-column index must be dropped, found: {indexes:?}"
+        );
     }
 
     #[test]

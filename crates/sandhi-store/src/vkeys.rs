@@ -110,7 +110,11 @@ impl VirtualKeyStore {
                 created_at         TEXT NOT NULL,
                 revoked_at         TEXT
             );
-            CREATE INDEX IF NOT EXISTS idx_vkeys_hash ON virtual_keys(secret_hash);",
+            -- idx_vkeys_hash is intentionally NOT created: `secret_hash TEXT NOT NULL UNIQUE`
+            -- already maintains an implicit unique index on the same column, so a second index
+            -- was pure write amplification (design audit A7). The DROP keeps existing stores
+            -- from carrying it forever.
+            DROP INDEX IF EXISTS idx_vkeys_hash;",
         )
     }
 
@@ -280,6 +284,36 @@ mod tests {
             expires_at: None,
             rate_limit_per_min: Some(60),
         }
+    }
+
+    #[test]
+    fn secret_hash_lookup_uses_only_the_unique_index() {
+        // Design audit A7: `secret_hash TEXT NOT NULL UNIQUE` already maintains an implicit
+        // unique index; `idx_vkeys_hash` duplicated it and cost a second index write per mint
+        // and revoke. The lookup must stay index-served after the drop.
+        let store = VirtualKeyStore::open(":memory:").unwrap();
+        let conn = store.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT name FROM sqlite_master \
+                 WHERE type = 'index' AND tbl_name = 'virtual_keys'",
+            )
+            .unwrap();
+        let indexes: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            indexes.iter().all(|name| name != "idx_vkeys_hash"),
+            "the redundant duplicate of the UNIQUE index must be dropped, found: {indexes:?}"
+        );
+        assert!(
+            indexes
+                .iter()
+                .any(|name| name.starts_with("sqlite_autoindex")),
+            "the UNIQUE constraint's implicit index must remain, found: {indexes:?}"
+        );
     }
 
     #[test]
