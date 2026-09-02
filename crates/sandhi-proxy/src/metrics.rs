@@ -40,11 +40,15 @@ impl Plane {
 
 /// The complete, closed set of metric dimensions (TD-0011 D2).
 ///
-/// Every field here is bounded by the catalog or by the code — never by traffic. There is
-/// deliberately no field for `subject_id`, `group_id`, `session_id`, `virtual_key_id`,
-/// `request_id`, or a budget scope: a scope may be `vk:<id>`, which is per-key and therefore
-/// unbounded, so it is excluded for the same reason as the rest. Per-subject attribution lives in
-/// the usage aggregate (TD-0009), which is bounded by an explicit cap with an overflow bucket.
+/// Every field here is bounded by the catalog, by the code, or by an explicit cap — never by raw
+/// traffic. There is deliberately no field for `subject_id`, `group_id`, `session_id`,
+/// `virtual_key_id`, `request_id`, or a budget scope: a scope may be `vk:<id>`, which is
+/// per-key and therefore unbounded, so it is excluded for the same reason as the rest.
+/// `model` is a deliberate *dimension*, but its values are caller-supplied on the typed plane
+/// (the allowlist is optional), so the registry caps distinct label series at
+/// [`DEFAULT_MAX_METRIC_SERIES`] — beyond the cap, new series fold into one `(overflow)` model,
+/// exactly the [`UsageAggregator`][core::stats::UsageAggregator] precedent (TD-0009 D2).
+/// Per-subject attribution lives in the usage aggregate (TD-0009).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Labels {
     pub provider: String,
@@ -159,7 +163,18 @@ pub struct CallMeasurements {
     pub ttft_ms: Option<u64>,
 }
 
-#[derive(Debug, Default)]
+/// Default cap on distinct label series (design audit A2). Without it, any holder of a valid
+/// virtual key could grow the `Labels`-keyed maps without bound by rotating model strings — an
+/// authenticated memory-DoS wearing the badge of a dimension. 1024 matches
+/// `DEFAULT_CARDINALITY_CAP` in the usage aggregator; operators with genuinely larger model
+/// fleets raise it via `SANDHI_METRICS_MAX_SERIES` in the binary.
+pub const DEFAULT_MAX_METRIC_SERIES: usize = 1024;
+
+/// The model value excess series fold into — the stats fold's [`OVERFLOW_KEY`][core::stats::OVERFLOW_KEY]
+/// spelling, kept consistent so "(overflow)" means the same thing everywhere it appears.
+const OVERFLOW_MODEL: &str = "(overflow)";
+
+#[derive(Debug)]
 struct Inner {
     requests: BTreeMap<Labels, u64>,
     tokens: BTreeMap<(Labels, TokenKind), u64>,
@@ -181,11 +196,58 @@ struct Inner {
     settle_failures: u64,
     settle_overshoot: u64,
     settle_overshoot_tokens: u64,
+    /// Every distinct label series ever recorded, for the cardinality cap. Never shrunk:
+    /// eviction would trade a bounded map for per-series totals that silently move.
+    series: std::collections::BTreeSet<Labels>,
+    max_series: usize,
+}
+
+impl Inner {
+    fn new(max_series: usize) -> Self {
+        Self {
+            requests: BTreeMap::new(),
+            tokens: BTreeMap::new(),
+            duration: BTreeMap::new(),
+            ttft: BTreeMap::new(),
+            denied: BTreeMap::new(),
+            rate_limited: BTreeMap::new(),
+            estimated_tokens: BTreeMap::new(),
+            admitted_unmetered: 0,
+            leases_reclaimed: 0,
+            settle_failures: 0,
+            settle_overshoot: 0,
+            settle_overshoot_tokens: 0,
+            idempotent_replays: 0,
+            idempotent_fallbacks: 0,
+            series: std::collections::BTreeSet::new(),
+            max_series: max_series.max(1),
+        }
+    }
+
+    /// The labels a call is recorded under, after the cardinality cap: a series already seen, or
+    /// one of the first `max_series`, passes through; anything later folds its model into the
+    /// shared overflow series. Existing series are never evicted and totals stay exact — the
+    /// failure mode is losing per-series detail past the cap, never losing the sum.
+    fn cap_labels(&mut self, labels: &Labels) -> Labels {
+        if self.series.contains(labels) {
+            return labels.clone();
+        }
+        if self.series.len() < self.max_series {
+            self.series.insert(labels.clone());
+            return labels.clone();
+        }
+        let mut folded = labels.clone();
+        folded.model = OVERFLOW_MODEL.to_string();
+        // The overflow series is one per distinct (provider, dialect, plane, outcome) combo —
+        // config-borne dimensions, never attacker-borne, so this stays bounded.
+        self.series.insert(folded.clone());
+        folded
+    }
 }
 
 /// The gateway's metric registry. Cheap to share: one mutex around a few maps, touched once per
 /// settled call rather than per byte.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Metrics {
     inner: Mutex<Inner>,
     /// Open streaming response bodies. Outside the registry lock on purpose: touched twice per
@@ -199,10 +261,28 @@ pub struct Metrics {
     connections_shed: AtomicU64,
 }
 
+impl Default for Metrics {
+    fn default() -> Self {
+        Self::with_max_series(DEFAULT_MAX_METRIC_SERIES)
+    }
+}
+
 impl Metrics {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A registry admitting at most `max_series` distinct label series before folding new ones
+    /// into the overflow series (design audit A2). Zero is promoted to one.
+    #[must_use]
+    pub fn with_max_series(max_series: usize) -> Self {
+        Self {
+            inner: Mutex::new(Inner::new(max_series)),
+            streams_open: AtomicI64::new(0),
+            connections_open: AtomicI64::new(0),
+            connections_shed: AtomicU64::new(0),
+        }
     }
 
     /// One streaming response body opened. Paired with [`stream_closed`](Self::stream_closed) by
@@ -249,6 +329,7 @@ impl Metrics {
         let Ok(mut inner) = self.inner.lock() else {
             return; // never let telemetry fail a request
         };
+        let labels = inner.cap_labels(labels);
         *inner.requests.entry(labels.clone()).or_default() += 1;
         for (kind, value) in [
             (TokenKind::FreshInput, m.fresh_input),
@@ -285,7 +366,8 @@ impl Metrics {
     /// label set — never the virtual key, which is unbounded.
     pub fn record_rate_limited(&self, labels: &Labels) {
         if let Ok(mut inner) = self.inner.lock() {
-            *inner.rate_limited.entry(labels.clone()).or_default() += 1;
+            let labels = inner.cap_labels(labels);
+            *inner.rate_limited.entry(labels).or_default() += 1;
         }
     }
 
@@ -523,6 +605,110 @@ mod tests {
             dialect: "openai",
             plane: Plane::Transparent,
             outcome: "success",
+        }
+    }
+
+    /// Design audit A2: `model` values are caller-supplied on the typed plane, so without a cap a
+    /// valid virtual key holder grows the label-keyed maps without bound by rotating model
+    /// strings. Past the cap, NEW series must fold into the overflow series while existing ones
+    /// keep counting — totals stay exact, only per-series detail degrades.
+    #[test]
+    fn series_growth_stops_at_the_cap_and_folds_new_models() {
+        let metrics = Metrics::with_max_series(4);
+        let call = |model: &str| {
+            metrics.observe_call(
+                &Labels {
+                    model: model.into(),
+                    ..labels()
+                },
+                CallMeasurements {
+                    fresh_input: 10,
+                    billable: 10,
+                    ..Default::default()
+                },
+            );
+        };
+        for i in 0..4 {
+            call(&format!("model-{i}"));
+        }
+        // Past the cap: three more distinct models must all fold into one overflow series.
+        for i in 4..7 {
+            call(&format!("model-{i}"));
+        }
+        // An existing series keeps its own counts even after the cap was hit.
+        call("model-0");
+
+        let inner = metrics.inner.lock().unwrap();
+        assert!(
+            inner.series.len() <= 4 + 1,
+            "at most cap distinct series plus the overflow series, got {}",
+            inner.series.len()
+        );
+        assert_eq!(inner.requests[&labels_with("model-0")], 2);
+        let overflow = labels_with("(overflow)");
+        assert_eq!(inner.requests[&overflow], 3, "excess calls fold, not drop");
+        let total: u64 = inner.requests.values().sum();
+        assert_eq!(total, 8, "no call is lost to the cap");
+        assert_eq!(
+            inner.tokens[&(labels_with("model-1"), TokenKind::Billable)],
+            10,
+            "token counters use the same canonical labels"
+        );
+    }
+
+    /// The rate-limited path folds too — and it is the CHEAPEST attack surface for the original
+    /// bug: its labels come straight from the (throttled) request, so rotating model strings
+    /// grows `rate_limited` without a single upstream call succeeding (adversarial-review
+    /// finding on this PR: one removed `cap_labels` line there would otherwise pass every test).
+    #[test]
+    fn rate_limited_labels_fold_past_the_cap() {
+        let metrics = Metrics::with_max_series(2);
+        for i in 0..5 {
+            metrics.record_rate_limited(&Labels {
+                model: format!("throttled-model-{i}"),
+                ..labels()
+            });
+        }
+        let inner = metrics.inner.lock().unwrap();
+        assert!(
+            inner.series.len() <= 3,
+            "growth stops at the cap plus overflow, got {}",
+            inner.series.len()
+        );
+        let total: u64 = inner.rate_limited.values().sum();
+        assert_eq!(total, 5, "every throttled call is counted");
+        assert!(
+            inner.rate_limited.contains_key(&labels_with("(overflow)")),
+            "excess throttled models fold into the overflow series"
+        );
+    }
+
+    /// The default constructor is capped too — the unbounded registry must not be reachable
+    /// from the default path the proxy constructs.
+    #[test]
+    fn default_registry_caps_series() {
+        let metrics = Metrics::new();
+        for i in 0..(DEFAULT_MAX_METRIC_SERIES + 50) {
+            metrics.observe_call(
+                &Labels {
+                    model: format!("attacker-model-{i}"),
+                    ..labels()
+                },
+                CallMeasurements::default(),
+            );
+        }
+        let inner = metrics.inner.lock().unwrap();
+        assert!(
+            inner.series.len() <= DEFAULT_MAX_METRIC_SERIES + 1,
+            "growth stops at the cap plus overflow, got {}",
+            inner.series.len()
+        );
+    }
+
+    fn labels_with(model: &str) -> Labels {
+        Labels {
+            model: model.into(),
+            ..labels()
         }
     }
 
