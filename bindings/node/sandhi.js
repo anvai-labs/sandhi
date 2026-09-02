@@ -83,6 +83,19 @@ if (native.TypedProvider && !native.TypedProvider.prototype.__sandhiTypedErrors)
       }
     };
   }
+  // streamJson: the SETUP call can itself fail (upstream 401/timeout at connect)
+  // before any iterator exists — those must be instanceof-checkable too, not just
+  // the per-event read() errors (TD-0021 P1 / G22 close-out).
+  const rawStreamJson = native.TypedProvider.prototype.streamJson;
+  if (typeof rawStreamJson === "function") {
+    native.TypedProvider.prototype.streamJson = function streamJson(...args) {
+      try {
+        return rawStreamJson.call(this, ...args);
+      } catch (error) {
+        throw toSandhiError(error);
+      }
+    };
+  }
   native.TypedProvider.prototype.__sandhiTypedErrors = true;
 }
 
