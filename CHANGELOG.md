@@ -26,6 +26,13 @@ hand-edited; see [RELEASING.md](RELEASING.md).
   carries `x-sandhi-contract-version`, so an HTTP consumer knows which contract it is talking
   to at the moment a mismatch presents. The HTTP form of the TD-0008 handshake.
 
+### Changed
+
+- **Rust (`sandhi-providers`)**: `FamilyFacts` gains a `default_base_url: &'static str` field (with
+  `ProviderFamily::default_base_url()`). Source-breaking for external consumers constructing
+  `FamilyFacts` by struct literal — the same class as 0.4.0's factory-signature change; in-workspace
+  and binding callers are unaffected (the only construction site is `facts()` itself).
+
 ### Fixed
 
 - **Single source for family default base URLs** (design audit A1, the #196 drift class). The
