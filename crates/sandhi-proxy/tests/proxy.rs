@@ -325,7 +325,8 @@ async fn same_idempotency_key_inside_the_window_meters_once() {
         let _ = axum::body::to_bytes(response.into_body(), usize::MAX).await;
     }
 
-    // ONE usage event: the repeat reused the original settlement.
+    // ONE usage event: the repeat's duplicate event was dropped (the logical
+    // call metered once; the retry's own lease still settled — physical call).
     let events = sink.events();
     assert_eq!(
         events.len(),
