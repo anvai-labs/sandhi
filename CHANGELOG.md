@@ -44,6 +44,13 @@ hand-edited; see [RELEASING.md](RELEASING.md).
   (`ProviderFamily::default_base_url()`), consumed by the proxy's `default_base_url`, the
   standalone env registrations, and both bindings' `provider()` dispatch, with a new test
   pinning them to the catalog descriptors so the copies cannot drift silently again.
+- **The default no-store sink is bounded** (design audit A3). When `SANDHI_STORE` is unset, the
+  standalone proxy's usage sink was an unbounded `Mutex<Vec<UsageEvent>>` — the default
+  no-config deployment grew memory monotonically (~19 allocations per event, forever).
+  `InMemorySink` is now a ring retaining the newest events (default 10 000, tunable via
+  `SANDHI_MEMORY_SINK_MAX`), counting evictions and logging them at powers of two exactly like
+  `BufferedSink` — no bound ships unobservable (TD-0014's rule). `InMemorySink::new()` keeps its
+  signature; `with_capacity` is additive.
 
 ### Internal
 
