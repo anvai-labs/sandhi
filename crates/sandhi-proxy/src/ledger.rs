@@ -67,6 +67,37 @@ impl ProxyLedger {
         Duration::seconds(RESERVATION_TTL_SECS)
     }
 
+    /// TD-0021 P4 (D1): has this `(vkey, idem_key)` already been settled inside the
+    /// window? `Some((reservation, actual))` lets the caller reuse the original
+    /// settlement — the repeat is the SAME logical call, metered once. `None` means
+    /// unseen or dedup-unavailable; the caller counts the call (D3).
+    pub fn seen(&mut self, vkey: &str, idem_key: &str) -> Option<(u64, u64)> {
+        let now = OffsetDateTime::now_utc();
+        match self {
+            Self::Memory(_) => None, // no dedup in the volatile arm — count (D3)
+            Self::Durable(l) => l.seen_durable(vkey, idem_key, now).ok().flatten(),
+        }
+    }
+
+    /// TD-0021 P4 (D1): record the settlement of a logical call. Expiry mirrors the
+    /// lease TTL (D2) so the dedup window matches the settlement it protects.
+    pub fn record(&mut self, vkey: &str, idem_key: &str, reservation: u64, actual: u64) {
+        let now = OffsetDateTime::now_utc();
+        match self {
+            Self::Memory(_) => {} // volatile arm: nothing durable to protect
+            Self::Durable(l) => {
+                if let Err(e) =
+                    l.record_durable(vkey, idem_key, reservation, actual, now, Self::ttl())
+                {
+                    tracing::warn!(
+                        %e,
+                        "idempotency record failed — a retry of this call will be metered again (D3 fail-toward-counting)"
+                    );
+                }
+            }
+        }
+    }
+
     /// Set (or clear, with `limit = None`) a scope's budget: cap + window + policy.
     ///
     /// The durable arm stores the real limit + policy, so it enforces `Block` vs. `Warn` natively

@@ -2185,7 +2185,7 @@ async fn handle(
         }
     };
 
-    let accounting = RequestAccounting::new(
+    let mut accounting = RequestAccounting::new(
         Arc::clone(&state),
         scope,
         reservation,
@@ -2194,6 +2194,17 @@ async fn handle(
         dialect_label(dialect),
         plane,
     );
+    // TD-0021 P4 (D1): the meter records the LOGICAL call once. A repeat of a settled
+    // `(vkey, idempotency-key)` inside the window reuses the original settlement — no
+    // second lease, no second event. The client's retry still happens upstream (this is
+    // not response caching); only the meter deduplicates. Unavailable/expired dedup
+    // falls through to counting (D3) — the measurement is never lost to uncertainty.
+    if let Some(idem_key) = request.metadata.idempotency_key.clone() {
+        accounting.dedup = Some((
+            request.metadata.virtual_key_id.clone().unwrap_or_default(),
+            idem_key,
+        ));
+    }
     // TD-0011 D6: which plane served the call is the ADR-0004 adoption signal — how much traffic
     // still re-encodes. Bounded fields only (D2): provider slug and model, never subject/session.
     tracing::debug!(
@@ -2569,6 +2580,10 @@ struct RequestAccounting {
     reservation: Option<Reservation>,
     provider: String,
     model: String,
+    /// TD-0021 P4: when the call carried an `idempotency-key` AND this proxy already
+    /// settled that `(vkey, key)` inside the window, the repeat is the SAME logical call
+    /// — reusing the original settlement, metered once (D1). `None` otherwise.
+    dedup: Option<(String, String)>,
     /// Sandhi's id for THIS call, minted at admission (not lazily at event assembly) so it can
     /// be sent upstream on the vendor's declared correlation header and then become the usage
     /// event's `request_id` — one string correlating the upstream's logs and sandhi's event
@@ -2614,6 +2629,7 @@ impl RequestAccounting {
             reservation,
             provider,
             model: request.model.clone(),
+            dedup: None,
             request_id: next_request_id(),
             metadata: request.metadata.clone(),
             usage: None,
@@ -2742,11 +2758,23 @@ impl RequestAccounting {
         }
         // Settle the lease by id (idempotent, ADR-0005 D2), then capture the post-settle spent for
         // the alert subsystem. Alerts evaluate only on a measured call.
+        let mut dedup_reused = false;
         let spent_after = blocking_section(|| {
             let mut spent_after: Option<u64> = None;
             if let Ok(mut ledger) = self.state.ledger.lock() {
+                // TD-0021 P4 (D1): settle-then-record under one lock. A repeat arriving
+                // between this call's admission and settlement finds the record only after
+                // it exists — the insert is the linearization point.
                 if let Some(reservation) = &self.reservation {
                     ledger.settle(reservation, actual);
+                }
+                if let Some((vkey, idem_key)) = &self.dedup {
+                    if ledger.seen(vkey, idem_key).is_some() {
+                        dedup_reused = true;
+                    } else {
+                        let reservation_id = self.reservation.as_ref().map_or(0, |r| r.id);
+                        ledger.record(vkey, idem_key, reservation_id, actual);
+                    }
                 }
                 if measured {
                     spent_after = Some(ledger.spent(&self.scope));
@@ -2754,6 +2782,14 @@ impl RequestAccounting {
             }
             spent_after
         });
+        if dedup_reused {
+            // D1: the repeat is the same logical call — its measurement is a duplicate
+            // and is DROPPED here (the original event stands). Made visible per D3's
+            // "uncertainty is counted, reuse is certain" asymmetry.
+            tracing::debug!("idempotent retry settled against the original call");
+            self.finalized = true;
+            return;
+        }
         // P2: evaluate threshold alerts against the settled spend (best-effort — never breaks the
         // request). The configured limit comes from the budgets metadata map so a `Warn` scope (no
         // hard cap in the in-memory ledger) still has a threshold to measure against.

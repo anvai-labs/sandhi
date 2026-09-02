@@ -1,6 +1,6 @@
 # TD-0021: Co-design seam v2 — the promises the proxy path makes and does not keep
 
-- **Status:** Draft (proposed), 2026-08-31. Owns gaps **G20, G21, G22, G30**.
+- **Status:** Implemented (P1–P4), 2026-09-02.
 - **Relates to:** [TD-0008](TD-0008-victor-codesign-boundary.md) (the seam this extends from the
   in-process bindings to the HTTP path), [ADR-0005](../adr/0005-enforcement-correctness-reservation-ledger-observe-enforce-split.md) D7
   (the neutral identity fields, one of which is inert), [ADR-0001](../adr/0001-sandhi-architecture-and-wire-contract.md)
@@ -118,7 +118,7 @@ every other row while the file is open. Verification is the deliverable, whateve
 | **P1** | D7 — scorecard verification — **DONE** (2026-09-01): every row re-verified; G22 closed for real — `SandhiProviderError` rewired on all three Node paths with an instanceof conformance test | Each TD-0008 row is confirmed against code with a citation, or amended. Node typed-error parity is settled either way |
 | **P2** | D4 + D5 — version and capability discovery — **DONE** (2026-09-01): ungated `GET /version` (versions + dialects), gated `GET /admin/version` (capability booleans), `x-sandhi-contract-version` via one end-of-chain middleware (success AND errors, R3) | `GET /version` returns wire/chat contract versions, wired dialects, and active features; every proxied response carries `x-sandhi-contract-version`; an unmodified vendor SDK request is byte-identical apart from that header |
 | **P3** | D6 — single-source errors — **DONE** (2026-09-01): `IngressError` (codec.rs) owns status/code/dialect rendering + the redaction decision; `ingress_error`/`provider_error` are thin delegates (all 29 call sites unchanged); acceptance test drives the type directly across all four dialects | Every client-facing error is constructed through one type; the existing dialect-shaping tests (`tests/proxy.rs:1138`, `:247`) pass unchanged; a redaction test proves the *default* path cannot leak an upstream body regardless of construction site |
-| **P4** | D1 + D2 + D3 — idempotent metering | Two requests with the same `(vkey, idempotency-key)` inside the window produce **one** lease and **one** usage event; outside the window, two; with dedup unavailable, two (D3's fail-toward-counting), and the fallback is counted in a metric |
+| **P4** | D1 + D2 + D3 — idempotent metering — **DONE** (2026-09-02): `idempotency_dedup` table ledger-co-durable with the lease TTL, keyed `(vkey, idempotency-key)` (R1, no body hash); settle-then-record under one lock (the insert is the linearization point); window expiry prunes on sight; the volatile arm counts (D3) | Two requests with the same `(vkey, idempotency-key)` inside the window produce **one** lease and **one** usage event; outside the window, two; with dedup unavailable, two (D3's fail-toward-counting), and the fallback is counted in a metric |
 
 P1 is an afternoon and improves an artefact other sessions read. P4 is the substantive one and should
 follow [TD-0016](TD-0016-enforcement-throughput-ceiling.md) P1, since it adds a ledger-adjacent write

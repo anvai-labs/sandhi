@@ -103,7 +103,21 @@ impl SqliteLedger {
              );
              DROP INDEX IF EXISTS idx_reservation_scope;
              CREATE INDEX IF NOT EXISTS idx_reservation_scope_covering
-                 ON budget_reservation (scope, settled, settled_at, actual, ceiling, expires_at);",
+                 ON budget_reservation (scope, settled, settled_at, actual, ceiling, expires_at);
+             -- TD-0021 P4 (D2): dedup state lives WITH the ledger — the settlement it
+             -- protects is durable, so the dedup must be too. Key is the full
+             -- (virtual_key_id, idempotency_key) pair (R1 — no body hash); the row
+             -- carries the settled reservation so a repeat can reuse the original
+             -- settlement. Rows are pruned on sight when past the window.
+             CREATE TABLE IF NOT EXISTS idempotency_dedup (
+                 vkey        TEXT    NOT NULL,
+                 idem_key    TEXT    NOT NULL,
+                 reservation INTEGER NOT NULL,
+                 actual      INTEGER NOT NULL,
+                 seen_at     INTEGER NOT NULL,
+                 expires_at  INTEGER NOT NULL,
+                 PRIMARY KEY (vkey, idem_key)
+             );",
         )
     }
 
@@ -298,6 +312,73 @@ impl SqliteLedger {
              (id, scope, ceiling, actual, settled, expires_at, settled_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![id, scope, ceiling, actual, settled, expires_at, settled_at],
+        )?;
+        Ok(())
+    }
+
+    /// TD-0021 P4 (D1): have we already settled a call with this `(vkey, idem_key)`
+    /// inside the window? Returns the original settlement so the caller can reuse it.
+    /// A row past its window is pruned on sight and reports unseen (a retry an hour
+    /// later is a new logical call — D2's boundary is the feature, not a leak).
+    pub fn seen_durable(
+        &mut self,
+        vkey: &str,
+        idem_key: &str,
+        now: OffsetDateTime,
+    ) -> rusqlite::Result<Option<(u64, u64)>> {
+        let now_ts = now.unix_timestamp();
+        let row: Result<(i64, i64, i64), _> = self.conn.query_row(
+            "SELECT reservation, actual, expires_at FROM idempotency_dedup
+             WHERE vkey = ?1 AND idem_key = ?2",
+            params![vkey, idem_key],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        );
+        match row {
+            Ok((reservation, actual, expires_at)) => {
+                if expires_at <= now_ts {
+                    // Past the window: prune and report unseen (count the call, D3).
+                    self.conn.execute(
+                        "DELETE FROM idempotency_dedup WHERE vkey = ?1 AND idem_key = ?2",
+                        params![vkey, idem_key],
+                    )?;
+                    Ok(None)
+                } else {
+                    Ok(Some((reservation.max(0) as u64, actual.max(0) as u64)))
+                }
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Record the settlement of a logical call (TD-0021 P4 D1). Insert-or-replace keeps the
+    /// freshest settlement for the key; the expiry mirrors the lease TTL so the record's
+    /// lifetime matches the settlement it protects.
+    pub fn record_durable(
+        &mut self,
+        vkey: &str,
+        idem_key: &str,
+        reservation: u64,
+        actual: u64,
+        now: OffsetDateTime,
+        ttl: Duration,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO idempotency_dedup (vkey, idem_key, reservation, actual, seen_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(vkey, idem_key) DO UPDATE SET
+                 reservation = excluded.reservation,
+                 actual = excluded.actual,
+                 seen_at = excluded.seen_at,
+                 expires_at = excluded.expires_at",
+            params![
+                vkey,
+                idem_key,
+                reservation as i64,
+                actual as i64,
+                now.unix_timestamp(),
+                (now + ttl).unix_timestamp()
+            ],
         )?;
         Ok(())
     }
@@ -551,6 +632,61 @@ mod tests {
             "covering index must exist after migration, found: {indexes:?}"
         );
         assert_eq!(l.spent_durable("g").unwrap(), 7, "settled rows survive");
+    }
+
+    #[test]
+    fn idempotency_dedup_one_lease_one_event_inside_the_window() {
+        let mut l = mem();
+        let now = OffsetDateTime::now_utc();
+
+        // First call: unseen → record the settlement.
+        assert!(l.seen_durable("vk_1", "idem_a", now).unwrap().is_none());
+        l.record_durable("vk_1", "idem_a", 7, 120, now, Duration::seconds(900))
+            .unwrap();
+
+        // Repeat INSIDE the window: seen — the caller reuses the settlement.
+        assert_eq!(
+            l.seen_durable("vk_1", "idem_a", now).unwrap(),
+            Some((7, 120)),
+            "TD-0021 P4 D1: the repeat finds the original settlement"
+        );
+
+        // Different key or different vkey: independent logical calls.
+        assert!(l.seen_durable("vk_1", "idem_b", now).unwrap().is_none());
+        assert!(l.seen_durable("vk_2", "idem_a", now).unwrap().is_none());
+    }
+
+    #[test]
+    fn idempotency_dedup_window_expiry_counts_the_retry() {
+        let mut l = mem();
+        let now = OffsetDateTime::now_utc();
+        l.record_durable("vk_1", "idem_a", 7, 120, now, Duration::seconds(900))
+            .unwrap();
+
+        // Past the window: pruned on sight, reports unseen (D2/D3).
+        let later = now + Duration::seconds(901);
+        assert!(
+            l.seen_durable("vk_1", "idem_a", later).unwrap().is_none(),
+            "a retry after the window is a new logical call"
+        );
+
+        // And the row is gone — a third call inside a fresh window is also new.
+        assert!(l.seen_durable("vk_1", "idem_a", later).unwrap().is_none());
+    }
+
+    #[test]
+    fn idempotency_dedup_record_replaces_with_the_fresh_settlement() {
+        let mut l = mem();
+        let now = OffsetDateTime::now_utc();
+        l.record_durable("vk_1", "idem_a", 7, 120, now, Duration::seconds(900))
+            .unwrap();
+        // A second settlement for the same key: the freshest wins.
+        l.record_durable("vk_1", "idem_a", 9, 99, now, Duration::seconds(900))
+            .unwrap();
+        assert_eq!(
+            l.seen_durable("vk_1", "idem_a", now).unwrap(),
+            Some((9, 99))
+        );
     }
 
     #[test]

@@ -164,6 +164,33 @@ impl ShardedLedger {
     }
 
     /// Reclaim expired leases on every shard; returns the total reclaimed.
+    pub fn seen_durable(
+        &self,
+        vkey: &str,
+        idem_key: &str,
+        now: OffsetDateTime,
+    ) -> rusqlite::Result<Option<(u64, u64)>> {
+        let shard = self.shard_for(vkey);
+        let mut ledger = shard.lock().expect("shard poisoned");
+        ledger.seen_durable(vkey, idem_key, now)
+    }
+
+    /// TD-0021 P4: record a settlement for dedup. Routes by `vkey` — the dedup key's
+    /// own scope, so repeats land on the same shard as the original.
+    pub fn record_durable(
+        &self,
+        vkey: &str,
+        idem_key: &str,
+        reservation: u64,
+        actual: u64,
+        now: OffsetDateTime,
+        ttl: time::Duration,
+    ) -> rusqlite::Result<()> {
+        let shard = self.shard_for(vkey);
+        let mut ledger = shard.lock().expect("shard poisoned");
+        ledger.record_durable(vkey, idem_key, reservation, actual, now, ttl)
+    }
+
     pub fn reclaim_expired_durable(&self, now: OffsetDateTime) -> rusqlite::Result<usize> {
         let mut total = 0;
         for shard in &self.shards {
