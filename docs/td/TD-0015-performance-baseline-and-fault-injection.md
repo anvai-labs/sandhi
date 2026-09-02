@@ -131,24 +131,22 @@ macOS/APFS local machine — directional, not production-absolute):**
 
 | Measurement | Median | Throughput |
 |---|---|---|
-| reserve+settle, `synchronous=FULL` (production) | **881 µs** | ~1.1 K admissions/s |
-| reserve+settle, `synchronous=NORMAL` | **50.9 µs** | ~19.7 K admissions/s |
-| threaded, 1 thread (FULL) | — | (see caveat) |
-| threaded, 4 threads (FULL) | ~1.26× of 1 thread | (see caveat) |
+| reserve+settle, `synchronous=FULL` (production) | **195.6 µs** (first run: 881 µs — see caveat) | ~5.1 K admissions/s |
+| reserve+settle, `synchronous=NORMAL` | **43.2 µs** | ~23.2 K admissions/s |
+| threaded, single file: 1 thread → 4 threads | **~1.10×** | (retracted: see caveat) |
 
-**F1 is confirmed: the durability cost dominates by an order of magnitude.**
-The FULL↔NORMAL delta is pure fsync cost (identical code, one pragma), and at
-production settings a single admission carries ~0.5–0.9 ms of it. Two further
-readings: 4 threads drive the shared-`Mutex` ledger only ~1.2–1.3× faster than
-one thread (the mutex + SQLite's write lock serialize exactly as the design
-predicted — sharding is the parallelism lever, TD-0016 P1), and the
-group-commit upper bound is **not yet measured** — a true K-per-transaction
-batch needs TD-0016 P3's API, which was deliberately not built speculatively
-(the first draft of this bench measured sequential round-trips under a
-batched label; removed as dishonest). Caveats: single macOS/APFS machine
-(fsync semantics differ from Linux production), absolute numbers directional —
-the 17× durability ratio and the poor thread scaling are the load-bearing
-results.
+**F1 is confirmed: the durability cost is the dominant single lever.**
+The FULL↔NORMAL delta is pure fsync cost (identical code, one pragma).
+Corrections from the second, fixed-accounting run: the first run's 17×
+ratio and "4 threads ≈ 1.26×" were artifacts of broken accounting (each
+thread looped `iters` times while a fixed element count was declared, so
+reported times scaled with thread count). The corrected numbers: **FULL is
+~4.5× NORMAL**, and 4 threads on the shared-`Mutex` ledger deliver **~1.10×**
+of one thread — near-zero parallelism, which is the honest confirmation of
+the serialization premise. Two more caveats: the machine is a single
+macOS/APFS laptop shared with other builds (run-to-run FULL medians ranged
+196–881 µs — the RATIO direction is stable, absolutes are not), and the
+group-commit upper bound is still unmeasured pending TD-0016 P3's API.
 
 ## Pressure test
 

@@ -5,6 +5,8 @@
 
 pub mod alerts;
 pub mod ledger;
+pub mod sharded;
+pub use sharded::ShardedLedger;
 pub mod vault;
 pub mod vkeys;
 
