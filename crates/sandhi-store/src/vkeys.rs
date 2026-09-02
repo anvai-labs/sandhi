@@ -317,6 +317,61 @@ mod tests {
     }
 
     #[test]
+    fn existing_store_drops_the_redundant_hash_index_and_keeps_keys() {
+        // The migration DIRECTION (adversarial review of this PR): a store carrying the old
+        // idx_vkeys_hash must lose it on reopen while its keys stay readable — the fresh-
+        // `:memory:` test above cannot catch a silently-removed DROP INDEX.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vkeys.db");
+        {
+            let conn = Connection::open(&path).expect("open raw");
+            conn.execute_batch(
+                "CREATE TABLE virtual_keys (
+                    id                 TEXT PRIMARY KEY,
+                    subject_id         TEXT,
+                    group_id           TEXT,
+                    upstream_ref       TEXT NOT NULL,
+                    models             TEXT,
+                    budget_scope       TEXT,
+                    expires_at         TEXT,
+                    rate_limit_per_min INTEGER,
+                    secret_hash        TEXT NOT NULL UNIQUE,
+                    created_at         TEXT NOT NULL,
+                    revoked_at         TEXT
+                );
+                CREATE INDEX idx_vkeys_hash ON virtual_keys(secret_hash);
+                INSERT INTO virtual_keys (id, upstream_ref, secret_hash, created_at)
+                VALUES ('key_1', 'anthropic:default', 'abc', '2026-09-01T00:00:00Z');",
+            )
+            .expect("seed old schema");
+        }
+        let store = VirtualKeyStore::open(path.to_str().expect("utf8 path")).expect("reopen");
+        {
+            let conn = store.conn.lock().expect("conn");
+            let mut stmt = conn
+                .prepare(
+                    "SELECT name FROM sqlite_master \
+                     WHERE type = 'index' AND tbl_name = 'virtual_keys'",
+                )
+                .expect("prepare");
+            let indexes: Vec<String> = stmt
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            assert!(
+                indexes.iter().all(|name| name != "idx_vkeys_hash"),
+                "redundant index must be dropped on reopen, found: {indexes:?}"
+            );
+        }
+        assert_eq!(
+            store.find_by_hash("abc").unwrap().unwrap().id,
+            "key_1",
+            "keys survive the migration"
+        );
+    }
+
+    #[test]
     fn minted_secret_has_min_128_bits_of_entropy() {
         // A virtual-key secret is a LOOKUP INDEX, not a password (see `hash_secret`): its security
         // rests on being unguessable, so 128 bits of OS CSPRNG entropy is the floor. If this ever

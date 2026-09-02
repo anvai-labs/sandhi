@@ -77,7 +77,9 @@ hand-edited; see [RELEASING.md](RELEASING.md).
   it was pure write amplification), `hex_encode` is table-driven instead of per-byte `format!`
   with a FIPS known-answer vector pinning the encoding, and `MeteredProvider`'s doc now states
   its audience (embedders via the bindings) and its deliberately different no-estimate semantics
-  vs the proxy's `RequestAccounting`.
+  vs the proxy's `RequestAccounting`. One-time cost worth naming: the first open of a populated
+  store builds the covering index with a table scan proportional to lifetime reservations —
+  bounded, once, and exactly the growth TD-0024 exists to cap.
 - **Pin automation takes its no-op path** (follow-up to the #194 repair, caught by the post-merge
   verification dispatch): the gate compared a v-prefixed crates.io latest (`v0.8.0`) against the
   bare manifest pin (`0.8.0`) — never equal, so an already-current pin fell through to the bump

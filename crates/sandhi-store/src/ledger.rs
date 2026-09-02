@@ -502,6 +502,58 @@ mod tests {
     }
 
     #[test]
+    fn existing_store_loses_the_superseded_index_and_keeps_rows() {
+        // The migration DIRECTION, not just the fresh-schema state (adversarial review of this
+        // PR): a store carrying the old two-column index must lose it on reopen while its
+        // settled rows survive — otherwise a silently-removed DROP INDEX would pass every
+        // fresh-`:memory:` test while existing deployments keep both indexes forever.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ledger.db");
+        {
+            let conn = Connection::open(&path).expect("open raw");
+            conn.execute_batch(
+                "CREATE TABLE budget_reservation (
+                     id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                     scope      TEXT    NOT NULL,
+                     ceiling    INTEGER NOT NULL,
+                     actual     INTEGER NOT NULL DEFAULT 0,
+                     settled    INTEGER NOT NULL DEFAULT 0,
+                     settled_at INTEGER,
+                     expires_at INTEGER NOT NULL
+                 );
+                 CREATE INDEX idx_reservation_scope ON budget_reservation (scope, settled);
+                 INSERT INTO budget_reservation (scope, ceiling, actual, settled, settled_at, expires_at)
+                 VALUES ('g', 10, 7, 1, 5, 99);",
+            )
+            .expect("seed old schema");
+        }
+        let l = SqliteLedger::open(path.to_str().expect("utf8 path")).expect("reopen as ledger");
+        let mut stmt = l
+            .conn
+            .prepare(
+                "SELECT name FROM sqlite_master \
+                 WHERE type = 'index' AND tbl_name = 'budget_reservation'",
+            )
+            .expect("prepare");
+        let indexes: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            indexes.iter().all(|name| name != "idx_reservation_scope"),
+            "old index must be dropped on reopen, found: {indexes:?}"
+        );
+        assert!(
+            indexes
+                .iter()
+                .any(|name| name == "idx_reservation_scope_covering"),
+            "covering index must exist after migration, found: {indexes:?}"
+        );
+        assert_eq!(l.spent_durable("g").unwrap(), 7, "settled rows survive");
+    }
+
+    #[test]
     fn ceiling_reservation_prevents_overshoot() {
         let mut l = mem();
         l.set_limit_durable("g", Some(100), Window::Total, Policy::Block)
