@@ -69,7 +69,7 @@ pub(crate) enum IngressDialect {
 /// Status, machine code, dialect rendering, AND the TD-0008 D redaction decision live on
 /// this type — the value is that the *next* error path cannot forget the redaction rule:
 /// the default constructors strip upstream bodies and transport internals, and full detail
-/// is an explicit, named choice (`SandboxMode::FullDetail` / `from_provider_full`), never
+/// is an explicit, named choice (`from_provider_full`), never
 /// a default. Behaviour-identical to the four construction sites it absorbs
 /// (`ingress_error`, `provider_error`, the admin `error`/`err` pair stay as thin
 /// delegates so callers and the dialect-shaping tests are unchanged).
