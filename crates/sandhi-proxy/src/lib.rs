@@ -2384,7 +2384,7 @@ async fn handle(
     // A scope is "capped" (for output-bounding) only under a hard `Block` cap: a `Warn` soft cap
     // never rejects, so we do not shrink the client's request. Bounding output makes the ceiling
     // reservation enforceable when the client left `max_output_tokens` unset (ADR-0005 D1).
-    let (ceiling, effective_max) = reservation_ceiling(&request);
+    let (ceiling, effective_max) = reservation_ceiling(&request, body.len());
     // SQLite's transaction remains a synchronous correctness boundary, but it runs on Tokio's
     // blocking pool so its busy timeout never parks an async scheduler worker.
     let (capped, admission) = reserve_budget(&state, &scope, ceiling, policy).await;
@@ -3247,28 +3247,31 @@ async fn stream_response(
         .expect("valid streaming response")
 }
 
-/// Coarse input-token estimate: bytes of the prompt payload / 4. A known lower-bound approximation
-/// (undercounts CJK, overcounts verbose tool schemas); a model-aware/tokenizer estimator is the
-/// follow-up (ADR-0005 D1). The *output* side, not this, is the load-bearing part of the ceiling.
-fn input_estimate(request: &ChatRequestV1) -> u64 {
-    let bytes = serde_json::to_vec(&request.messages)
-        .map(|value| value.len() as u64)
-        .unwrap_or(0)
-        .saturating_add(
-            serde_json::to_vec(&request.tools)
-                .map(|value| value.len() as u64)
-                .unwrap_or(0),
-        );
-    bytes.saturating_add(3) / 4
+/// Coarse input-token estimate: bytes of the ingress request body / 4. This replaces a full
+/// re-serialization of the decoded `messages`+`tools` on every request (design audit A4) with a
+/// zero-allocation length read. Direction vs the old formula: dialect envelopes wrap the same
+/// content in their own field names, so for everything except schema-less tools the wire body
+/// dominates the neutral serialization — the exception is the decoders' injected default tool
+/// schema (`{"type":"object"}`, +31 bytes of neutral with no wire counterpart per schema-less
+/// tool), which can make the estimate up to ~8 tokens *lower* per schema-less tool than the old
+/// formula. That deficit is bounded, measured, and pinned by
+/// `body_length_estimate_stays_within_a_bounded_deficit` — and marginal against the
+/// `DEFAULT_OUTPUT_CEILING`-dominated ceiling, the load-bearing term (ADR-0005 D1); the /4
+/// heuristic's own accuracy error dwarfs it either way (undercounts CJK, overcounts verbose
+/// schemas). A model-aware/tokenizer estimator remains the follow-up.
+fn input_estimate(body_len: usize) -> u64 {
+    (body_len as u64).saturating_add(3) / 4
 }
 
 /// The reservation **ceiling** (ADR-0005 D1): input estimate + the effective output max (the
 /// client's `max_output_tokens`, or [`DEFAULT_OUTPUT_CEILING`] when unbounded). Returns the ceiling
 /// and the effective max so the caller can bound a capped scope's upstream request. This is a
 /// conservative upper bound, not the old `+ 1` lower-bound estimate that let streams overshoot.
-fn reservation_ceiling(request: &ChatRequestV1) -> (u64, u64) {
+fn reservation_ceiling(request: &ChatRequestV1, body_len: usize) -> (u64, u64) {
     let effective_max = request.max_output_tokens.unwrap_or(DEFAULT_OUTPUT_CEILING);
-    let ceiling = input_estimate(request).saturating_add(effective_max).max(1);
+    let ceiling = input_estimate(body_len)
+        .saturating_add(effective_max)
+        .max(1);
     (ceiling, effective_max)
 }
 
@@ -4085,5 +4088,173 @@ mod connection_policy_tests {
             resolve_forwarded_for(peer, Some("10.0.0.1"), &allowlist),
             None
         );
+    }
+
+    /// Design audit A4: `input_estimate` divides the ingress body length instead of
+    /// re-serializing the decoded prompt. Adversarial review of this change falsified the
+    /// original "wire body is a superset" claim: all three non-Gemini decoders inject a default
+    /// `{"type":"object"}` schema for schema-less tools (+31 bytes of neutral with no wire
+    /// counterpart), so Anthropic's bare tool form and Responses' flat form can carry LESS wire
+    /// than their neutral serialization. What actually holds — and what this pins — is a
+    /// **bounded deficit**: generous shapes dominate outright; the adversarial shapes
+    /// (schema-less tools, bare-string system, empty messages) stay within ~8 tokens of the old
+    /// formula per schema-less tool, noise against the DEFAULT_OUTPUT_CEILING-dominated
+    /// ceiling (ADR-0005 D1). A codec that widens the deficit beyond that bound fails here.
+    #[test]
+    fn body_length_estimate_stays_within_a_bounded_deficit() {
+        const TEXT: &str = "You are a careful assistant that explains reservation ceilings, \
+             lease semantics, and the difference between what the meter counts and what the \
+             ledger settles, at length and with examples.";
+        const USER: &str = "Please explain the reservation ceiling semantics in detail, \
+             covering the input estimate, the output bound, and the calendar window.";
+        let tool_schema: serde_json::Value = serde_json::json!({
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "the thing to look up"}}
+        });
+        let cases: &[(&str, IngressDialect, serde_json::Value)] = &[
+            (
+                "openai",
+                IngressDialect::OpenAi,
+                serde_json::json!({
+                    "model": "gpt-x",
+                    "messages": [
+                        {"role": "system", "content": TEXT},
+                        {"role": "user", "content": USER}
+                    ],
+                    "tools": [{"type": "function", "function": {
+                        "name": "lookup",
+                        "description": "Look something up in the shared index",
+                        "parameters": tool_schema
+                    }}]
+                }),
+            ),
+            (
+                "anthropic",
+                IngressDialect::Anthropic,
+                serde_json::json!({
+                    "model": "claude-x",
+                    "system": TEXT,
+                    "messages": [
+                        {"role": "user", "content": [{"type": "text", "text": USER}]}
+                    ],
+                    "tools": [{
+                        "name": "lookup",
+                        "description": "Look something up in the shared index",
+                        "input_schema": tool_schema
+                    }]
+                }),
+            ),
+            (
+                "responses",
+                IngressDialect::Responses,
+                serde_json::json!({
+                    "model": "gpt-x",
+                    "input": [
+                        {"role": "system", "content": [{"type": "input_text", "text": TEXT}]},
+                        {"role": "user", "content": [{"type": "input_text", "text": USER}]}
+                    ],
+                    "tools": [{"type": "function",
+                        "name": "lookup",
+                        "description": "Look something up in the shared index",
+                        "parameters": tool_schema
+                    }]
+                }),
+            ),
+            (
+                "gemini",
+                IngressDialect::Gemini,
+                serde_json::json!({
+                    "systemInstruction": {"parts": [{"text": TEXT}]},
+                    "contents": [{"role": "user", "parts": [{"text": USER}]}],
+                    "tools": [{"functionDeclarations": [{
+                        "name": "lookup",
+                        "description": "Look something up in the shared index",
+                        "parameters": {"type": "OBJECT",
+                            "properties": {"query": {"type": "STRING"}}}
+                    }]}]
+                }),
+            ),
+        ];
+        for (name, dialect, body) in cases {
+            let wire_len = serde_json::to_string(body).unwrap().len();
+            let (request, _) =
+                crate::codec::decode_request(*dialect, body.clone(), RequestMetadataV1::default())
+                    .unwrap_or_else(|e| panic!("{name} fixture failed to decode: {e}"));
+            let serialized = serde_json::to_vec(&request.messages).unwrap().len()
+                + serde_json::to_vec(&request.tools).unwrap().len();
+            assert!(
+                wire_len >= serialized,
+                "{name}: wire body {wire_len} bytes < neutral serialization {serialized} bytes \
+                 — the body-length estimate would not be conservative (ADR-0005 D1)"
+            );
+            // And the estimate itself: body/4 covers the old serialized/4 formula.
+            assert!(input_estimate(wire_len) >= (serialized as u64).saturating_add(3) / 4);
+        }
+
+        // Adversarial shapes (from the review that falsified the superset claim): schema-less
+        // tools inject a default schema into the neutral form with no wire counterpart, a
+        // bare-string system adds a role wrapper the wire never carried, and an empty messages
+        // array is accepted. These may legitimately sit BELOW the neutral serialization — the
+        // pin is that the estimate's deficit vs the old formula stays bounded by the injected
+        // schemas (~8 tokens per schema-less tool = 31 bytes / 4, rounded up).
+        let bare_tool = |i: usize| serde_json::json!({"name": format!("a{i}")});
+        let adversarial: &[(&str, IngressDialect, serde_json::Value, usize)] = &[
+            (
+                "anthropic-schemaless-tools",
+                IngressDialect::Anthropic,
+                serde_json::json!({
+                    "model": "claude-x",
+                    "system": "be terse",
+                    "messages": [],
+                    "tools": [bare_tool(0), bare_tool(1), bare_tool(2), bare_tool(3), bare_tool(4)]
+                }),
+                5,
+            ),
+            (
+                "responses-flat-schemaless-tools",
+                IngressDialect::Responses,
+                serde_json::json!({
+                    "model": "gpt-x",
+                    "input": [],
+                    "tools": [
+                        {"type": "function", "name": "a0"},
+                        {"type": "function", "name": "a1"},
+                        {"type": "function", "name": "a2"}
+                    ]
+                }),
+                3,
+            ),
+            (
+                "openai-schemaless-tools",
+                IngressDialect::OpenAi,
+                serde_json::json!({
+                    "model": "gpt-x",
+                    "messages": [],
+                    "tools": [
+                        {"type": "function", "function": {"name": "a0"}},
+                        {"type": "function", "function": {"name": "a1"}}
+                    ]
+                }),
+                2,
+            ),
+        ];
+        for (name, dialect, body, schema_less) in adversarial {
+            let wire_len = serde_json::to_string(body).unwrap().len();
+            let (request, _) =
+                crate::codec::decode_request(*dialect, body.clone(), RequestMetadataV1::default())
+                    .unwrap_or_else(|e| panic!("{name} fixture failed to decode: {e}"));
+            let serialized = serde_json::to_vec(&request.messages).unwrap().len()
+                + serde_json::to_vec(&request.tools).unwrap().len();
+            let old_estimate = (serialized as u64).saturating_add(3) / 4;
+            let new_estimate = input_estimate(wire_len);
+            let deficit = old_estimate.saturating_sub(new_estimate);
+            assert!(
+                deficit <= (schema_less * 8) as u64,
+                "{name}: deficit {deficit} tokens exceeds the injected-schema bound \
+                 ({} schema-less tools x ~8 tokens) — the estimate stopped being \
+                 approximately conservative",
+                schema_less
+            );
+        }
     }
 }

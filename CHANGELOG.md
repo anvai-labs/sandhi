@@ -53,6 +53,19 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 
 ### Fixed
 
+- **`input_estimate` reads the request body instead of re-serializing the prompt** (design audit
+  A4). The reservation ceiling's input side re-serialized `messages` + `tools` to JSON on every
+  request — a second full prompt materialization (on top of body → `Value` → `ChatRequestV1` →
+  native re-encode) purely to divide its byte length by four. The estimate now divides the
+  ingress body's length. Adversarial review of this change falsified the first-draft "wire body
+  is a superset" claim — the decoders inject a default `{"type":"object"}` schema for schema-less
+  tools, so Anthropic's bare tool form and Responses' flat form can carry less wire than their
+  neutral serialization — so the pinned contract is the honest one: approximately-conservative
+  with a **bounded deficit** of ~8 tokens per schema-less tool (31 injected bytes ÷ 4), measured
+  and pinned per dialect including the adversarial shapes, and marginal against the
+  output-ceiling-dominated reservation (ADR-0005 D1; accuracy semantics otherwise unchanged —
+  still bytes/4, the script-aware estimator remains TD-0016 R2's).
+
 - **Single source for family default base URLs** (design audit A1, the #196 drift class). The
   proxy's own hard-coded defaults had drifted from the catalog: Gemini without `/v1beta` — in
   `default_base_url`, the `SANDHI_GEMINI_KEY` env registration, and the typed-runtime fixtures —
