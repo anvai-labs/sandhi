@@ -217,6 +217,8 @@ impl Inner {
             settle_failures: 0,
             settle_overshoot: 0,
             settle_overshoot_tokens: 0,
+            idempotent_replays: 0,
+            idempotent_fallbacks: 0,
             series: std::collections::BTreeSet::new(),
             max_series: max_series.max(1),
         }
