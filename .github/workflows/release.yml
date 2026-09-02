@@ -1,7 +1,7 @@
 name: release
 
-# Unified version: one tag `vX.Y.Z` on `main` releases everything (binaries + PyPI + crates.io +
-# npm). See RELEASING.md for the develop→main→tag flow and the one-time publisher setup.
+# Unified version: one tag `vX.Y.Z` on `main` drives the binary/PyPI release and any configured
+# crates.io/npm publishers. See RELEASING.md for the develop→main→tag flow and publisher setup.
 on:
   push:
     tags: ["v*.*.*"]
@@ -103,7 +103,7 @@ jobs:
         with:
           packages-dir: dist
 
-  # ── 3. crates.io (sandhi-core → sandhi-providers → sandhi-proxy) ───────────────────────────
+  # ── 3. crates.io (core → providers → store → proxy) ───────────────────────────────────────
   crates:
     runs-on: ubuntu-latest
     steps:

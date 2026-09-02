@@ -1,16 +1,18 @@
 # TD-0015: Performance baseline and fault injection — the measurement every other decision is waiting on
 
-- **Status:** Draft (proposed), 2026-08-31. **P1 is the arc's critical path**: it gates ADR-0006's promotion and the TD-0016/TD-0014-P4/TD-0020 decisions that wait on measurements. Owns gaps **G09, G10**.
-- **Relates to:** [ADR-0006](../adr/0006-layer-boundary-and-protocol-scope.md) (whose **Proposed**
-  status is gated on this TD's baseline), [TD-0016](TD-0016-enforcement-throughput-ceiling.md) (the
+- **Status:** **In progress**, 2026-08-31. **P1 is complete** and promoted ADR-0006; P2–P5 remain
+  open. Owns gaps **G09, G10**.
+- **Relates to:** [ADR-0006](../adr/0006-layer-boundary-and-protocol-scope.md) (whose acceptance
+  rests on the P1 baseline), [TD-0016](TD-0016-enforcement-throughput-ceiling.md) (the
   hypothesis this TD tests), [TD-0014](TD-0014-data-plane-resource-safety.md) (whose fixes this TD
   measures), [TD-0020](TD-0020-operational-readiness-and-transport-observability.md) (the runtime
   gauges; this TD is the offline counterpart).
 
 ## Why this exists
 
-Sandhi has no performance measurement of any kind. There is no `benches/` directory, no `criterion`,
-no `iai`, and no `[[bench]]` target in any manifest in the workspace. CI gates `fmt`, `clippy`,
+At proposal time Sandhi had no performance measurement of any kind: no `benches/` directory,
+`criterion`, `iai`, or `[[bench]]` target. P1 has since added the durable-ledger Criterion benchmark
+and published its first result; the proxy/load/codec/fault harnesses in P2–P5 remain absent. CI gates `fmt`, `clippy`,
 `test`, line coverage, schema and codegen drift, both bindings, SDK conformance, a security audit
 (`cargo deny check advisories`, `ci.yml:259`) and the attribution check — but nothing about
 performance.
@@ -22,17 +24,18 @@ no evidence behind it:
 > *Inference (ADR-0006 §Context F1):* the enforcement ledger's two `fsync`-durable, globally
 > serialized SQLite commits per request are the throughput ceiling, and byte movement is not.
 
-If that is true, a large class of work (lower-layer transport, `io_uring`, `splice`, `kTLS`) is
-provably not worth doing, and TD-0016 is the highest-value project in the repository. If it is
-false, ADR-0006's first argument collapses and its verdict needs revision. **Nobody currently
-knows.** That is the gap.
+If that were true, a large class of work (lower-layer transport, `io_uring`, `splice`, `kTLS`) would
+not address the dominant cost, and TD-0016 would be the higher-value project. If false, ADR-0006's
+first argument would collapse. **At proposal time nobody knew; P1 has since confirmed the
+durability/serialization premise directionally.** End-to-end and production-representative
+measurements remain P2–P5 scope.
 
-The second half is fault behaviour. `tests/proxy.rs` covers one adverse case well —
-`client_disconnect_mid_stream_still_meters` (`:797`) — and the TD-0013 partial-settlement tests are
-genuinely good. But there is no coverage for slowloris, slow consumers, half-close, RST, upstream
-flapping, DNS stalls, cancellation storms, partial writes, queue saturation, or shutdown under load.
-Each of those is a path where a lease can leak, a usage event can be lost, or a bound can fail to
-bind — the three things Sandhi must never do.
+The second half is fault behaviour. Individual regressions now cover client disconnect during a
+stream, slowloris/silent connections, TLS-handshake stalls, and cancellation at the shutdown grace
+deadline; TD-0013 also pins partial settlement. There is still no unified matrix for slow consumers,
+half-close, RST, upstream flapping, DNS stalls, cancellation storms, partial writes, queue
+saturation, or shutdown under load. Each is a path where a lease can leak, a usage event can be
+lost, or a bound can fail to bind — the three things Sandhi must never do.
 
 ## First principles
 
@@ -77,8 +80,8 @@ behaviour is precisely at saturation.
 **D3 — `criterion` for the component benches, with the ledger as the first target.** Three suites:
 (a) `decode_request`/`encode_response` per dialect; (b) `metered_passthrough` versus each typed
 decoder over a recorded SSE corpus — this quantifies TD-0014 G01 directly; (c)
-`SqliteLedger::reserve_durable` at `synchronous=FULL` versus `NORMAL` versus a batched/group-commit
-variant. Suite (c) is the one ADR-0006 is waiting on.
+`SqliteLedger::reserve_durable` at `synchronous=FULL` versus `NORMAL`, single- and multi-threaded.
+The batched/group-commit comparison follows when TD-0016 P3 provides that API.
 
 **D4 — Fault tests are ordinary `#[tokio::test]`s that assert accounting invariants.** Every fault
 below is expressible with Tokio, a raw `TcpStream`, and `wiremock`; none needs `toxiproxy`. Each
@@ -111,20 +114,20 @@ copies, and flamegraphs.
 client half-close and RST mid-stream; upstream flapping; upstream that never sends a terminal usage
 frame; cancellation storm (10k spawn-then-abort); partial writes; queue saturation; shutdown under
 load at and past the grace deadline. **Tier 2 adds:** packet loss/latency/reordering via `netem`,
-DNS stalls, and TLS rotation once TD-0017 lands.
+DNS stalls, and TLS rotation once TD-0017 P2 lands.
 
 ## Phases
 
 | Phase | Scope | Acceptance (the failing test to write first) |
 |---|---|---|
-| **P1** ✅ | D3(c) — the ledger bench, run first because ADR-0006 is blocked on it | A committed number for reserve+settle throughput at `FULL` vs `NORMAL` vs batched, single- and multi-threaded, with the serialized-commit hypothesis explicitly confirmed or falsified. The result is written back into ADR-0006's Status line either way |
+| **P1** ✅ | D3(c) — the ledger bench, run first because ADR-0006 was blocked on it | A committed reserve+settle baseline at `FULL` vs `NORMAL`, single- and multi-threaded, with the result written into ADR-0006. Group-commit comparison transferred to TD-0016 P3 because no batching API exists yet |
 | **P2** | D2 — the in-repo load harness, closed- and open-loop | The harness drives `build_app` at a fixed arrival rate and reports a latency histogram plus per-request allocation and CPU; running it twice on unchanged code produces results within the D5 noise threshold |
 | **P3** | D3(a)(b) — codec and stream-decoder criterion suites | `metered_passthrough` vs. each typed decoder is quantified over 1k/10k/100k-frame corpora, producing the number TD-0014 P1 must improve |
-| **P4** | D4 — the fault suite | Each fault asserts the three D4 invariants; the suite fails today on at least the slowloris and slow-consumer cases (TD-0014 G02/G03), which is the point — it is written to fail first |
+| **P4** | D4 — the unified fault suite | Each remaining fault asserts the three D4 invariants; existing disconnect, slowloris, TLS-stall, and grace-expiry regressions are retained and the slow-consumer/half-close/RST/flapping/cancellation/queue cases are added failing-first |
 | **P5** | D5 + D6 — CI wiring, the committed baseline, `loom`/`miri` targets | A PR that regresses p99 by >25% fails CI with a diff against the committed baseline; `loom` covers `BufferedSink::close` shutdown ordering |
 
-P1 is the critical path for ADR-0006, TD-0016, and by extension the whole layer question. Land it
-first, alone, and publish the number.
+P1 was the critical path for ADR-0006 and TD-0016; it is complete. P2–P5 now extend that narrow
+ledger result into end-to-end load, codec, fault, and repeatable CI evidence.
 
 **P1 result (2026-09-01, `cargo bench -p sandhi-store`, benches/ledger.rs,
 macOS/APFS local machine — directional, not production-absolute):**
@@ -135,7 +138,7 @@ macOS/APFS local machine — directional, not production-absolute):**
 | reserve+settle, `synchronous=NORMAL` | **43.2 µs** | ~23.2 K admissions/s |
 | threaded, single file: 1 thread → 4 threads | **~1.10×** | (retracted: see caveat) |
 
-**F1 is confirmed: the durability cost is the dominant single lever.**
+**The ledger premise is confirmed: durability is its dominant measured lever.**
 The FULL↔NORMAL delta is pure fsync cost (identical code, one pragma).
 Corrections from the second, fixed-accounting run: the first run's 17×
 ratio and "4 threads ≈ 1.26×" were artifacts of broken accounting (each
@@ -158,10 +161,9 @@ group-commit upper bound is still unmeasured pending TD-0016 P3's API.
    deterministic Tier-1 work in CI, D5 sets a deliberately loose 25% gate rather than a tight one,
    and the kernel-sensitive measurements are explicitly not gates. A muted benchmark is worse than
    none; the design is aimed squarely at not being muted.
-3. **"P1 will just confirm what we already believe about `fsync`."** Possibly, and confirming it
-   converts ADR-0006 from Proposed to Accepted and retires a recurring architectural argument — that
-   alone pays for a day's work. If it does *not* confirm it, the project avoids building TD-0016
-   against a false premise.
+3. **"P1 will just confirm what we already believe about `fsync`."** It did confirm the directional
+   premise and converted ADR-0006 from Proposed to Accepted. The wide run-to-run absolute range is
+   retained above so that result is not overstated as a production SLO.
 4. **"Measuring before fixing delays the fixes."** TD-0014 is explicitly *not* blocked on this TD;
    its P1–P3 are unit-testable today. Only TD-0016, where the fix is expensive and the premise
    uncertain, is sequenced behind measurement.

@@ -32,8 +32,9 @@ model policy and user-facing discovery, credential resolution (keyring/OAuth), r
 neutral contract.
 
 **Deliberately loose couplings** (these are features, not gaps):
-- Version pin `sandhi-gateway==0.1.2` exact — a transport is a correctness dependency;
-  drift is opt-in, never accidental.
+- Consumers pin an exact, known-compatible `sandhi-gateway` version — a transport is a correctness
+  dependency; drift is opt-in, never accidental. The original audit used `0.1.2`; that historical
+  release number is not a recommendation for new integrations.
 - Feature detection (`hasattr`) for new binding surfaces — old bindings degrade to Victor's
   fallbacks (catalog → SDK/static lists) instead of crashing.
 - JSON-schema'd wire types with schema-sha256-pinned binding facades — the contract is data,
@@ -49,7 +50,7 @@ neutral contract.
 | Upstream error diagnostics | Body was structurally dropped → opaque 4xx | **Fixed** — sandhi#65 + victor#652 |
 | Contract-version handshake | `wire_contract_version()` existed, Victor never called it | **Fixed** — victor#652 |
 | Event consumption completeness | Every variant has a consumer decision; refusal consumed; drift alarm + conformance suite | **Fixed** — victor#647/#654 (P1) |
-| Error transit shape | Typed `SandhiProviderError` (Python); payload unchanged, consumers can branch on class. Node parity pending (follow-up C) | **Fixed** — sandhi#69 (P2) |
+| Error transit shape | Typed `SandhiProviderError` in Python and Node; payload unchanged, consumers branch on class rather than parse strings | **Fixed** — sandhi#69 (P2), TD-0021 P1 (Node) |
 | Streaming FFI hot path | Measured 2.23 µs/event conservative; 0.01–0.04 % of wall clock at chat rates | **Closed** — not dominant (P3) |
 | Node binding parity | `provider_spec_json` + `chat_contract_schema_json` exported; typed-error class shipped and conformance-pinned on every path (completeJson, streamJson setup, stream read) | **Fixed** — sandhi#70 (P4); typed-error parity closed by TD-0021 P1 |
 | Anthropic/Google full typed-handle migration | Verified complete: SDK wire deleted, residual SDK use is discovery/credentials (Victor-owned by design) | **Closed** (P5) |
@@ -95,14 +96,12 @@ only** (victor#632, catalog policy tier) and `google-genai` for **credential acq
 (victor#631, OAuth/ADC resolved Victor-side and passed as a bearer to the typed Gemini
 handle). "Sandhi owns transport" is unconditional for both families.
 
-## Remaining follow-ups (post-review, pre-release)
+## Follow-up closure
 
-- **A. Contract-governance guards** — `chat_contract_version()` exported from both
-  bindings; sandhi-core pins chat/usage version equality and the stream-event census
-  (this change).
-- **B. `request_id` capture** — populate `ProviderErrorV1.request_id` from upstream
-  response headers (`x-request-id`, `anthropic-request-id`, `request-id`) in the
-  adapter error paths; completes the sandhi#65 diagnosability story.
+- **A. Contract-governance guards — closed.** `chat_contract_version()` is exported from both
+  bindings; sandhi-core pins chat/usage version equality and the stream-event census.
+- **B. `request_id` capture — closed.** Adapter error paths populate
+  `ProviderErrorV1.request_id` from standard and declared provider response headers.
 - **C. Node typed error** — CLOSED by TD-0021 P1: `SandhiProviderError` ships in the
   `sandhi.js` wrapper (declared in `sandhi.d.ts`), rewired on every provider-boundary
   path (`completeJson`, `streamJson` setup, `TypedEventStream.read`), with a conformance
@@ -110,9 +109,9 @@ handle). "Sandhi owns transport" is unconditional for both families.
   boundary: binding-internal validation errors (e.g. malformed request JSON) deliberately
   stay ordinary `Error`s — the distinction between provider failures and binding failures
   is the point of the class.
-- **D. Proxy-plane error bodies** — `sandhi-proxy` still maps `Upstream {{ .. }}` to a
-  static `BAD_GATEWAY "upstream error"`; forwarding bounded bodies/request ids to
-  proxy CLIENTS needs a multi-tenant disclosure decision first (deliberately parked).
+- **D. Proxy-plane error disclosure — closed by TD-0021 P3.** Default responses retain
+  code/status/request-id and redact upstream bodies; `SANDHI_ERROR_DETAIL=full` is the explicit
+  single-tenant opt-in. One `IngressError` type owns the decision across all dialects.
 
 ## Operating rules going forward
 

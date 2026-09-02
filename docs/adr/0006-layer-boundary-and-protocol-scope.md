@@ -4,15 +4,16 @@ Date: 2026-08-31
 
 ## Status
 
-**Accepted** (promoted 2026-09-01). TD-0015 P1 published the ledger baseline
-and **confirmed** the load-bearing premise: at production durability
-(`synchronous=FULL`) a single admission carries ~0.5–0.9 ms of commit cost,
-and dropping only the durability pragma is worth **~17×** (881 µs → 50.9 µs
-median) — the commit path, not byte movement, is the throughput ceiling, and
-no transport-layer optimisation can touch it. Numbers and caveats
-(macOS/APFS, directional absolutes) in
-[TD-0015](../td/TD-0015-performance-baseline-and-fault-injection.md) P1. Until then this ADR is binding as a *process* gate (§D4) and advisory as
-a *verdict*.
+**Accepted** (promoted 2026-09-01). TD-0015 P1 confirmed the durable ledger's
+directional premise: in the corrected paired run, reserve-and-settle measured
+195.6 µs with `synchronous=FULL` versus 43.2 µs with `NORMAL` (~4.5×), while
+four threads sharing one ledger produced only ~1.10× the single-thread
+throughput. Absolute FULL results ranged from 196–881 µs on macOS/APFS, so
+these are architectural signals rather than production SLOs or an end-to-end
+throughput ceiling. Numbers and caveats are in
+[TD-0015](../td/TD-0015-performance-baseline-and-fault-injection.md) P1. They support prioritizing
+ledger and end-to-end measurement before lower-layer work; this ADR is binding as both a process
+gate (§D4) and a scope verdict.
 
 Relates to [ADR-0001](0001-sandhi-architecture-and-wire-contract.md) (what Sandhi measures),
 [ADR-0002](0002-provider-transport-scope-and-modality-admission.md) (the admission discipline this
@@ -36,6 +37,12 @@ cheap to look up and expensive to hand-wave past.
 
 A read-only audit of `bf8df6b` produced the following. Each is a repository fact with a citation;
 the inferences are labelled.
+
+> **Implementation reconciliation (2026-09-02).** The table below is the evidence baseline at
+> `bf8df6b`, not current-state documentation. TD-0014 P1–P3 subsequently added bounded linear
+> stream splitting, body-held admission permits, an explicit HTTP/1 accept loop, connection/header
+> limits, peer context, and trusted-proxy handling. TD-0017 P1 added opt-in TLS. The current delta
+> for every audit item is maintained in the gap register at the end of this ADR.
 
 **The OSI map is lopsided by construction.**
 
@@ -145,8 +152,8 @@ Do not build, and do not spike:
 2. A generic L4 load balancer or TLS-passthrough proxy. Commodity, and it cannot meter (F3).
 3. eBPF/XDP — requires an L4 concept Sandhi does not have, is Linux-only, and optimizes a cold path.
 4. `io_uring` / `splice` / `sendfile` — blocked behind TD-0015 showing `fsync` is *not* dominant.
-5. `kTLS` — presupposes TLS termination that does not exist; revisit only if TD-0017 ships and
-   profiling shows TLS CPU >15%.
+5. `kTLS` — native TLS termination has since shipped in TD-0017 P1, but profiling has not shown TLS
+   CPU above the 15% admission threshold; do not spike it without that evidence.
 6. A database-protocol proxy (Postgres/MySQL wire) or a Kafka/NATS/MQTT gateway. No token concept,
    no cache split, no provider dialect: zero reuse of the actual differentiator.
 7. A first-class `sandhi-transport` crate, before TD-0018 proves the *session* abstraction is the
@@ -156,15 +163,15 @@ Do not build, and do not spike:
 
 ## Consequences
 
-- **Positive.** The scope question stops consuming planning cycles. Effort concentrates on the P0/P1
-  gaps that actually block deployment — TLS, the ledger ceiling, resource safety, observability —
-  none of which are lower-layer. The gate (D4) keeps the door open on evidence.
-- **Negative.** Sandhi remains dependent on a fronting proxy until TD-0017 ships TLS, and this ADR
-  makes that dependency explicit rather than incidental. It also forecloses, for now, positioning
-  Sandhi against general-purpose service meshes.
-- **Risk accepted.** If TD-0015 falsifies F1 — if byte movement, not the commit path, dominates —
-  D1's first reason weakens and this ADR must be revised, not quietly ignored. That is why the
-  status is Proposed.
+- **Positive.** The scope question stops consuming planning cycles. Effort concentrates on measured
+  ledger, resource-safety, observability, and protocol-lifecycle gaps, none of which requires a
+  general L4 data plane. The gate (D4) keeps the door open on evidence.
+- **Negative.** Sandhi deliberately remains an application-layer gateway rather than a
+  general-purpose service mesh. The shipped listener is HTTP/1-only; protocol breadth and duplex
+  sessions remain explicit, separately tested work.
+- **Evidence result.** TD-0015 P1 confirmed the durability/serialization cost inside the ledger,
+  not system-wide dominance. The remaining end-to-end profile can still reopen the decision, but
+  lower-layer work must clear D4's quantitative gate rather than appeal to a presumed bottleneck.
 - **Nothing unresolved in this ADR.** The last open question — whether HTTP/2 ingress was already
   compiled in by feature unification — was **answered in the negative** during fact-check: the `h2`
   crate is not in the non-dev dependency graph, and the `http2` feature's only enabler is the
@@ -176,49 +183,48 @@ Do not build, and do not spike:
 ## Appendix — the gap register (G01–G32)
 
 The architecture audit produced thirty items; the 2026-09-01 design audit (patterns +
-data structures, adversarially verified) added G31–G32. This table is the **coordination index
-for concurrent sessions**:
-each gap has exactly one owning document, and each document is one branch and one PR. Sources:
+data structures, adversarially verified) added G31–G32. This table is the **coordination and status
+index**: each gap has exactly one owning document. Sources:
 **R** = architecture audit, **C** = co-design seam (TD-0008 / bindings), **FP** = first principles.
 
-| ID | Gap | Src | Sev | Owner |
-|---|---|---|---|---|
-| G01 | Six typed SSE decoders keep an unbounded `Vec<u8>` with an O(n²) rescan | R | P1 | TD-0014 |
-| G02 | `ConcurrencyLimit` permit released at first byte; SSE streams run outside the limit | R | P1 | TD-0014 |
-| G03 | No header-read timeout, no `max_buf_size`, no connection cap | R | P1 | TD-0014 |
-| G04 | No per-tenant bulkhead — three global locks on the request path | FP | P1 | TD-0014 |
-| G05 | No TLS termination anywhere in the listener | R | P0 | TD-0017 |
-| G06 | ~~HTTP/2 ingress possibly compiled in via feature unification~~ — **false; closed.** `h2` is not in the non-dev graph. HTTP/2 ingress is simply absent | R | P2 | TD-0017 (closed) |
-| G07 | Two `fsync`-durable serialized ledger writes per request through one mutex | R | P0 | TD-0016 |
-| G08 | `SANDHI_REPLICA_COUNT != 1` is a startup assert — no HA, no rolling deploy | R | P0 | TD-0016 |
-| G09 | No performance baseline of any kind | R | P0 | TD-0015 |
-| G10 | No fault-injection suite (slowloris, slow consumer, RST, cancel storm, drain) | R | P1 | TD-0015 |
-| G11 | No WebSocket ingress; realtime voice relay impossible | R | P2 | TD-0018 |
-| G12 | One-request:one-lease assumption blocks session-scoped metering | FP | P2 | TD-0018 |
-| G13 | Zero fuzz/property testing on 4 ingress + 6 stream decoders | R | P1 | TD-0019 |
-| G14 | Cross-dialect round-trip fidelity pinned by examples, not properties | FP | P2 | TD-0019 |
-| G15 | Only `/healthz`; a draining process still reports healthy to its load balancer | FP | P1 | TD-0020 |
-| G16 | No connection, stream, FD, or queue-depth metrics — G02/G03/G04/G19 unobservable | R | P1 | TD-0020 |
-| G17 | Two unshared `reqwest::Client` pools per handle, unbounded idle connections | R | P2 | TD-0020 |
-| G18 | No global load shedding on queue delay | FP | P2 | TD-0020 |
-| G19 | Peer address discarded — no L3/L4 identity, no pre-auth abuse control | R | P1 | TD-0014 |
-| G20 | `idempotency-key` captured and persisted but never used for dedup | R+C | P2 | TD-0021 |
-| G21 | No contract-version negotiation on the proxy HTTP path | C | P2 | TD-0021 |
-| G22 | Node typed-error parity is genuinely absent: Python has an exception class, Node returns a generic error carrying JSON | C | P3 | TD-0021 |
-| G23 | Embedding modality sits in indefinite limbo: a stale prototype branch, an ADR-0002 gate never formally applied | C | P1 | ADR-0007 |
-| G24 | `input_estimate` is bytes/4 — self-documented as wrong for CJK, and it sets the ceiling | R | P3 | TD-0016 |
-| G25 | `Warn` policy diverges between the in-memory and durable ledger arms | FP | P3 | TD-0016 |
-| G26 | A `Block`-capped tenant **that left output unbounded** is forced off the transparent plane, losing prompt-cache fidelity | FP | P2 | TD-0016 |
-| G27 | No DNS cache or resolver tuning control | R | P3 | TD-0020 |
-| G28 | Rate limiter is a single global `Mutex<HashMap>` on the per-request path | R | P3 | TD-0014 |
-| G29 | Lower-layer proposals have no decision gate | FP | Gov | ADR-0006 (D4) |
-| G30 | Cross-plane error taxonomy not unified | FP | P3 | TD-0021 |
-| G31 | Settled `budget_reservation` rows are never deleted — `Window::Total` spend is a SUM over every admission ever, per request (the covering index removed the row-fetch constant, not the growth) | R | P1 | TD-0024 |
-| G32 | Family↔codec binding is ≥13 co-edit `match` sites plus a ~315-line ingress funnel with the ordering contract in comments — the demonstrated #196 silent-divergence class | R | P2 | TD-0025 |
+| ID | Gap | State | Src | Sev | Owner |
+|---|---|---|---|---|---|
+| G01 | Typed stream decoders were unbounded and rescanned quadratically | **Complete** | R | P1 | TD-0014 |
+| G02 | Admission permit was released at first byte | **Complete** | R | P1 | TD-0014 |
+| G03 | Header timeout and connection bounds were absent | **Complete** | R | P1 | TD-0014 |
+| G04 | No per-tenant bulkhead | Open | FP | P1 | TD-0014 |
+| G05 | No TLS termination | **Complete** | R | P0 | TD-0017 |
+| G06 | Possible undeclared HTTP/2 ingress | **Closed: surface absent** | R | P2 | TD-0017 |
+| G07 | Durable writes serialize within one ledger shard | Partial: cross-scope sharding shipped | R | P0 | TD-0016 |
+| G08 | `SANDHI_REPLICA_COUNT != 1` prevents HA/rolling replicas | Open | R | P0 | TD-0016 |
+| G09 | No performance baseline | Partial: durable-ledger P1 published | R | P0 | TD-0015 |
+| G10 | No unified fault-injection suite | Partial: slowloris/drain regressions shipped | R | P1 | TD-0015 |
+| G11 | No WebSocket ingress | Open | R | P2 | TD-0018 |
+| G12 | One-request:one-lease assumption blocks session metering | Open | FP | P2 | TD-0018 |
+| G13 | No fuzz/property testing on ingress and stream decoders | Open | R | P1 | TD-0019 |
+| G14 | Cross-dialect fidelity is example-pinned, not property-pinned | Open | FP | P2 | TD-0019 |
+| G15 | No drain-aware `/readyz` | Open | FP | P1 | TD-0020 |
+| G16 | Missing resource/admission observability | Partial: connection/stream/connection-shed signals shipped | R | P1 | TD-0020 |
+| G17 | Provider handles create unshared client pools | Open | R | P2 | TD-0020 |
+| G18 | No queue-delay load shedding | Open | FP | P2 | TD-0020 |
+| G19 | Peer address was discarded | **Complete** | R | P1 | TD-0014 |
+| G20 | `idempotency-key` was inert | **Complete** | R+C | P2 | TD-0021 |
+| G21 | No HTTP contract-version discovery | **Complete** | C | P2 | TD-0021 |
+| G22 | Node lacked typed provider-error parity | **Complete** | C | P3 | TD-0021 |
+| G23 | Embedding modality was left in limbo | **Closed: not admitted** | C | P1 | ADR-0007 |
+| G24 | `input_estimate` undercounts CJK | Open | R | P3 | TD-0016 |
+| G25 | `Warn` metadata differs between memory and durable ledgers | Open | FP | P3 | TD-0016 |
+| G26 | An unbounded, hard-capped call loses transparent forwarding | Partial: operator trade documented | FP | P2 | TD-0016 |
+| G27 | No DNS cache/resolver tuning control | Open | R | P3 | TD-0020 |
+| G28 | Rate limiter is one global `Mutex<HashMap>` | Open | R | P3 | TD-0014 |
+| G29 | Lower-layer proposals lacked a decision gate | **Complete** | FP | Gov | ADR-0006 D4 |
+| G30 | Client-facing error construction was fragmented | **Complete** | FP | P3 | TD-0021 |
+| G31 | Settled reservation history grows without bound | Open | R | P1 | TD-0024 |
+| G32 | Family/codec binding has a broad co-edit surface | Open | R | P2 | TD-0025 |
 
-**Suggested parallelism.** ADR-0007, TD-0014, TD-0015, TD-0019, TD-0020 and TD-0021 have
-near-disjoint file footprints and can proceed simultaneously. TD-0016 wants the TD-0015 baseline
-first. TD-0018 wants TD-0017.
+**Current sequencing.** TD-0015's remaining measurements inform TD-0014 P4, TD-0016 P2–P6, and
+TD-0020. TD-0018 remains spike-gated and follows the relevant TD-0017 protocol/session context.
+TD-0019, TD-0024, and TD-0025 have independent starting points.
 
 ## Pressure test
 

@@ -105,9 +105,9 @@ typed path; proxy = normalized gateway route.
 |---|---|---:|---:|---:|---:|
 | OpenAI-compatible wave 1 | OpenAI, Together, Fireworks, OpenRouter, xAI, Mistral | [x] | [x] | [x] | [x] |
 | OpenAI-compatible specialized | DeepSeek, Moonshot, ZAI, Groq, Cerebras, Qwen | [x] | [x] | [x] | [x] |
-| Native typed | Anthropic, Gemini, Ollama, Cohere | [x] | [x] | Anthropic/Gemini/Ollama [x]; Cohere n/a | OpenAI/Anthropic ingress [x] |
+| Native typed | Anthropic, Gemini, Ollama, Cohere | [x] | [x] | Anthropic/Gemini/Ollama [x]; Cohere n/a | Anthropic/Gemini ingress [x]; Ollama/Cohere n/a |
 | OpenAI-compatible local | llama.cpp, vLLM, LM Studio | explicit endpoint | [x] | [x] | [x] |
-| OpenAI Responses | OpenAI API / ChatGPT subscription OAuth | explicit family | complete + stream [x] | FFI [x] | ingress pending |
+| OpenAI Responses | OpenAI API / ChatGPT subscription OAuth | explicit family | complete + stream [x] | FFI [x] | `/v1/responses` [x] |
 | Explicit Victor-native protocols | Azure, Hugging Face, Vertex, Bedrock, Replicate | outside 0.1.2 | outside 0.1.2 | explicit | n/a |
 | Host extensions | MLX and private providers | outside 0.1.2 | outside 0.1.2 | explicit | n/a |
 
@@ -150,7 +150,11 @@ Victor enforces that boundary in `sandhi_transport.resolve_transport_class`: eve
 provider must resolve to a Sandhi typed transport or appear in the explicit native-only alias set.
 An unclassified future provider fails closed. Third-party provider classes remain extensible.
 
-### Remaining Victor deletion ledger
+### Consumer cleanup ledger (historical, outside Sandhi's completion gate)
+
+The table below recorded follow-up work in the first consumer repository. Sandhi's typed-runtime
+scope is complete; TD-0008 later verified the admitted Anthropic/Gemini paths no longer own a
+parallel generation transport. Keep this table as migration history, not as Sandhi's active backlog.
 
 Transport selection is already fail-closed, so these Python methods are bypassed in normal
 registry construction. They are still source duplication and must be removed only after their

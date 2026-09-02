@@ -3,14 +3,15 @@
 Date: 2026-08-31 · Companion to [ADR-0008](../adr/0008-inferflux-admission-and-session-affinity.md)
 and [inferflux-issue-drafts.md](inferflux-issue-drafts.md)
 
-> **Status snapshot, superseded by the landing stack.** This document describes the state
-> BEFORE the integration branch landed; its "today" claims are the pre-fix baseline, not the
-> current code. Superseded items: S3 (session derivation — landed as 4e5a35f), S5
+> **Archived handoff — not a current backlog or runbook.** This document describes the state
+> BEFORE the integration branch landed; its "today," "still current," and "uncommitted" claims
+> are historical. Use the [documentation map](../README.md), owning TD status lines, and current
+> sibling-repository trackers for live scope. Superseded Sandhi items include S3 (session
+> derivation — landed as 4e5a35f), S5
 > (`traceparent` passthrough — e62dde8), S4/S6 (per-call wire headers and the correlation
 > id — 039f55f / f7a8c69, with FFI static-header parity for the four non-OpenAI families
-> still open, see TD-0022 D3's scope note), and the InferFlux-side I1-I3 usage/auth fixes
-> (inferflux PR #52). Still current: S1/S2 (land/release), S7, the victor and proximaDB
-> lanes, and the full-stack acceptance run.
+> left as a scope note in TD-0022 D3), and the InferFlux-side I1-I3 usage/auth fixes
+> (inferflux PR #52).
 
 **Goal ("definition of done"):** a secured InferFlux with a loaded model, fronted by the
 sandhi proxy, driven by victor agents in gateway mode — with transparent-plane forwarding,

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Verify that a release actually reached every registry it was supposed to.
 
-`release.yml`'s publish steps `exit 0` when their credential is absent, so a job can report
+The crates.io and npm publish steps `exit 0` when their credential is absent, so a job can report
 **success while publishing nothing**. That is intentional for a target with no credential
 configured — but the identical guard would hide a genuinely broken publish, and a green release run
 is the moment nobody looks closely. This checks the artifact, not the job.
@@ -17,8 +17,7 @@ So: send a User-Agent, and retry before concluding anything is absent.
 
 Which targets are *expected* is derived from configuration, not assumed. PyPI publishes via OIDC and
 is always expected; crates.io and npm are expected only when their token is configured, which is how
-a deliberately-unpublished package (npm, pending a Node client) stays green without weakening the
-check for the others.
+a deliberately-unpublished npm distribution stays green without weakening the check for the others.
 
 Usage:
     python3 scripts/verify-release.py v0.1.4
@@ -138,8 +137,8 @@ def main() -> int:
             failures.append(f"npm {NPM_PACKAGE} {version} missing")
             print(f"    FAIL {NPM_PACKAGE} {version} not published")
     else:
-        # Deliberate: there is no Node client yet, so NPM_TOKEN is unset on purpose. Said out loud
-        # so "npm is missing" is never mistaken for a regression.
+        # Deliberate: npm distribution is not enabled, so NPM_TOKEN is unset on purpose. Said out
+        # loud so "npm is missing" is never mistaken for a regression.
         print("    SKIP no NPM_TOKEN configured — intentionally unpublished")
 
     print()

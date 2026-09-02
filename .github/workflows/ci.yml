@@ -39,6 +39,7 @@ jobs:
       gatekeeper: ${{ steps.route.outputs.gatekeeper }}
     steps:
       - name: Does this PR edit the CI trust conditions?
+        id: route
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -186,6 +187,11 @@ jobs:
       # OpenTelemetry dependency tree (TD-0011 D1/D4: the feature must not move the default graph).
       - run: cargo clippy -p sandhi-proxy --features otel-otlp --all-targets -- -D warnings
       - run: cargo test -p sandhi-proxy --features otel-otlp
+      # Release binaries enable the store's native SentinelPass IPC through a
+      # proxy feature. Compile the exact public feature seam release.yml uses;
+      # otherwise a typo or missing forwarding edge survives normal workspace CI.
+      - run: cargo clippy -p sandhi-proxy --features sentinelpass-ipc --all-targets -- -D warnings
+      - run: cargo test -p sandhi-proxy --features sentinelpass-ipc
       - name: default build excludes the OTel dependency tree
         run: |
           cargo build -p sandhi-proxy

@@ -21,6 +21,11 @@ path = "src/cli.rs"
 
 [features]
 default = []
+# Release binaries opt into native SentinelPass daemon IPC. Keep the feature on
+# the binary crate because release.yml builds `sandhi-proxy --features
+# sentinelpass-ipc`; without this forwarding edge that documented release path
+# asks Cargo for a feature the package does not define.
+sentinelpass-ipc = ["sandhi-store/sentinelpass-ipc"]
 # TD-0011 P3 (Scope 5): first-party OTLP export of gen_ai.* spans + metrics. DEFAULT OFF —
 # disposable observability layered beside the prerequisite-free Prometheus `/metrics` path,
 # which stays the default. Only the binary takes these deps (TD-0011 D1: library crates must

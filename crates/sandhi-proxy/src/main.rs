@@ -383,7 +383,7 @@ async fn main() {
     let listener_scheme = if tls.is_some() { "https" } else { "http" };
     eprintln!(
         "sandhi-proxy listening on {listener_scheme}://{addr}  \
-         (POST /v1/chat/completions | /v1/messages, Authorization: Bearer vk_...)"
+         (OpenAI Chat/Responses | Anthropic Messages | Gemini, virtual-key auth)"
     );
     let shutdown_grace = shutdown_grace_from_env();
     let serve_result = match tls {
