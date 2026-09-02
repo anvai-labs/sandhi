@@ -227,12 +227,17 @@ impl Inner {
     /// shared overflow series. Existing series are never evicted and totals stay exact — the
     /// failure mode is losing per-series detail past the cap, never losing the sum.
     fn cap_labels(&mut self, labels: &Labels) -> Labels {
-        if self.series.contains(labels) || self.series.len() < self.max_series {
+        if self.series.contains(labels) {
+            return labels.clone();
+        }
+        if self.series.len() < self.max_series {
             self.series.insert(labels.clone());
             return labels.clone();
         }
         let mut folded = labels.clone();
         folded.model = OVERFLOW_MODEL.to_string();
+        // The overflow series is one per distinct (provider, dialect, plane, outcome) combo —
+        // config-borne dimensions, never attacker-borne, so this stays bounded.
         self.series.insert(folded.clone());
         folded
     }
@@ -646,6 +651,33 @@ mod tests {
             inner.tokens[&(labels_with("model-1"), TokenKind::Billable)],
             10,
             "token counters use the same canonical labels"
+        );
+    }
+
+    /// The rate-limited path folds too — and it is the CHEAPEST attack surface for the original
+    /// bug: its labels come straight from the (throttled) request, so rotating model strings
+    /// grows `rate_limited` without a single upstream call succeeding (adversarial-review
+    /// finding on this PR: one removed `cap_labels` line there would otherwise pass every test).
+    #[test]
+    fn rate_limited_labels_fold_past_the_cap() {
+        let metrics = Metrics::with_max_series(2);
+        for i in 0..5 {
+            metrics.record_rate_limited(&Labels {
+                model: format!("throttled-model-{i}"),
+                ..labels()
+            });
+        }
+        let inner = metrics.inner.lock().unwrap();
+        assert!(
+            inner.series.len() <= 3,
+            "growth stops at the cap plus overflow, got {}",
+            inner.series.len()
+        );
+        let total: u64 = inner.rate_limited.values().sum();
+        assert_eq!(total, 5, "every throttled call is counted");
+        assert!(
+            inner.rate_limited.contains_key(&labels_with("(overflow)")),
+            "excess throttled models fold into the overflow series"
         );
     }
 
