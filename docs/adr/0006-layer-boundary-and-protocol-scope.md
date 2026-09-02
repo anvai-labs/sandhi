@@ -4,11 +4,14 @@ Date: 2026-08-31
 
 ## Status
 
-**Proposed.** The verdict below is sound on the evidence available, but its load-bearing premise —
-that the enforcement ledger's commit path, not byte movement, is the throughput ceiling (§Context
-F1) — is an **inference from code, not a measurement**. Promote to **Accepted** when
-[TD-0015](../td/TD-0015-performance-baseline-and-fault-injection.md) publishes a baseline that
-confirms or falsifies it. Until then this ADR is binding as a *process* gate (§D4) and advisory as
+**Accepted** (promoted 2026-09-01). TD-0015 P1 published the ledger baseline
+and **confirmed** the load-bearing premise: at production durability
+(`synchronous=FULL`) a single admission carries ~0.5–0.9 ms of commit cost,
+and dropping only the durability pragma is worth **~17×** (881 µs → 50.9 µs
+median) — the commit path, not byte movement, is the throughput ceiling, and
+no transport-layer optimisation can touch it. Numbers and caveats
+(macOS/APFS, directional absolutes) in
+[TD-0015](../td/TD-0015-performance-baseline-and-fault-injection.md) P1. Until then this ADR is binding as a *process* gate (§D4) and advisory as
 a *verdict*.
 
 Relates to [ADR-0001](0001-sandhi-architecture-and-wire-contract.md) (what Sandhi measures),
@@ -170,9 +173,11 @@ Do not build, and do not spike:
   raised across TD-0014…0021 is resolved on evidence, gated on a named experiment, or (TD-0018's two
   product questions) awaiting an owner this document cannot assign.
 
-## Appendix — the gap register (G01–G30)
+## Appendix — the gap register (G01–G32)
 
-The audit produced thirty items. This table is the **coordination index for concurrent sessions**:
+The architecture audit produced thirty items; the 2026-09-01 design audit (patterns +
+data structures, adversarially verified) added G31–G32. This table is the **coordination index
+for concurrent sessions**:
 each gap has exactly one owning document, and each document is one branch and one PR. Sources:
 **R** = architecture audit, **C** = co-design seam (TD-0008 / bindings), **FP** = first principles.
 
@@ -208,6 +213,8 @@ each gap has exactly one owning document, and each document is one branch and on
 | G28 | Rate limiter is a single global `Mutex<HashMap>` on the per-request path | R | P3 | TD-0014 |
 | G29 | Lower-layer proposals have no decision gate | FP | Gov | ADR-0006 (D4) |
 | G30 | Cross-plane error taxonomy not unified | FP | P3 | TD-0021 |
+| G31 | Settled `budget_reservation` rows are never deleted — `Window::Total` spend is a SUM over every admission ever, per request (the covering index removed the row-fetch constant, not the growth) | R | P1 | TD-0024 |
+| G32 | Family↔codec binding is ≥13 co-edit `match` sites plus a ~315-line ingress funnel with the ordering contract in comments — the demonstrated #196 silent-divergence class | R | P2 | TD-0025 |
 
 **Suggested parallelism.** ADR-0007, TD-0014, TD-0015, TD-0019, TD-0020 and TD-0021 have
 near-disjoint file footprints and can proceed simultaneously. TD-0016 wants the TD-0015 baseline

@@ -110,6 +110,103 @@ const CONNECTION_READ_BUF_BYTES: usize = 256 * 1024;
 /// busy-spins exactly when it should be shedding.
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
 
+/// Validated TLS material for the inbound listener (TD-0017 P1).
+///
+/// Sandhi configures rustls; it does not implement any cryptographic primitive.
+/// Construction parses the complete certificate chain and private key together,
+/// and rustls rejects an invalid key or one that does not match the leaf
+/// certificate before the listener starts accepting traffic.
+#[derive(Clone)]
+pub struct TlsConfig {
+    acceptor: tokio_rustls::TlsAcceptor,
+}
+
+impl TlsConfig {
+    /// Load and validate a PEM certificate chain and matching private key.
+    pub fn from_pem_files(
+        cert_path: impl AsRef<std::path::Path>,
+        key_path: impl AsRef<std::path::Path>,
+    ) -> std::io::Result<Self> {
+        let cert_path = cert_path.as_ref();
+        let key_path = key_path.as_ref();
+        let cert_pem = std::fs::read(cert_path).map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("reading TLS certificate {}: {error}", cert_path.display()),
+            )
+        })?;
+        let key_pem = std::fs::read(key_path).map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("reading TLS private key {}: {error}", key_path.display()),
+            )
+        })?;
+        Self::from_pem(&cert_pem, &key_pem)
+    }
+
+    /// Parse in-memory PEM material. Public so embedders do not need temporary
+    /// files; the standalone binary uses [`Self::from_pem_files`].
+    pub fn from_pem(cert_pem: &[u8], key_pem: &[u8]) -> std::io::Result<Self> {
+        use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
+
+        let certs = CertificateDer::pem_slice_iter(cert_pem)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("parsing TLS certificate chain: {error}"),
+                )
+            })?;
+        if certs.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "TLS certificate file contains no CERTIFICATE entries",
+            ));
+        }
+        let key = PrivateKeyDer::from_pem_slice(key_pem).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("parsing TLS private key: {error}"),
+            )
+        })?;
+        // reqwest's feature graph can enable both rustls providers. Select one
+        // locally instead of mutating process-global provider state (an
+        // embedding application may already have made its own choice).
+        let server = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("selecting safe TLS protocol versions: {error}"),
+            )
+        })?
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("validating TLS certificate and private key: {error}"),
+            )
+        })?;
+        Ok(Self {
+            acceptor: tokio_rustls::TlsAcceptor::from(Arc::new(server)),
+        })
+    }
+}
+
+/// Warning emitted when bearer credentials would be accepted on a non-loopback
+/// plaintext listener. Loopback development remains quiet; TLS makes the
+/// warning unnecessary.
+#[must_use]
+pub fn plaintext_bind_warning(addr: SocketAddr, tls_enabled: bool) -> Option<&'static str> {
+    (!tls_enabled && !addr.ip().is_loopback()).then_some(
+        "WARNING: accepting bearer credentials over plaintext on a non-loopback listener; \
+         configure tls.cert/tls.key in SANDHI_CONFIG or terminate TLS at a trusted proxy",
+    )
+}
+
 /// Shared server state: the virtual-key store, the budget ledger, the usage sink, and the
 /// registry of configured upstream providers (each already holding its real credential).
 pub struct ProxyState {
@@ -502,8 +599,16 @@ fn ingress_routes(state: &Arc<ProxyState>) -> axum::Router<Arc<ProxyState>> {
 pub fn build_app(state: Arc<ProxyState>) -> Router {
     let max_request_body_bytes = state.max_request_body_bytes;
     let ai_routes = ingress_routes(&state);
+    // TD-0021 P2 (D4/R3): every response — success AND error, including ingress errors —
+    // carries the chat contract version, so a consumer hitting a mismatch knows which
+    // contract it is talking to at the moment it most needs to (R3: a mismatch presents
+    // as an error). One middleware layer is the single source; no builder can forget it.
     Router::new()
         .route("/healthz", get(health))
+        // TD-0021 P2 (D4/R2): the HTTP-path contract handshake. Ungated — versions
+        // and wired dialects are public facts; the capability detail (D5) lives
+        // behind the admin gate at /admin/version.
+        .route("/version", get(version))
         .route("/catalog/models", get(catalog_models))
         .route("/dashboard", get(dashboard_html))
         .route("/dashboard/api/usage", get(dashboard_api))
@@ -521,6 +626,9 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         .route("/v1/models", get(list_models))
         .route("/v1beta/models", get(list_models_gemini))
         // TD-0003 P1 operator (admin) API.
+        // TD-0021 P2 (D5/R2): capability detail — which optional features are on —
+        // is operator information, gated like the rest of /admin.
+        .route("/admin/version", get(operator::version_capabilities))
         .route(
             "/admin/keys",
             post(operator::add_key).get(operator::list_keys),
@@ -549,6 +657,7 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         .route("/admin/config/apply", post(operator::config_apply))
         .merge(ai_routes)
         .layer(DefaultBodyLimit::max(max_request_body_bytes))
+        .layer(axum::middleware::from_fn(contract_version_header))
         .with_state(state)
 }
 
@@ -594,7 +703,24 @@ where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    serve_listener_with_shutdown(state, listener, shutdown, grace).await
+    serve_listener_with_shutdown(state, listener, shutdown, grace, None).await
+}
+
+/// TLS counterpart to [`serve_with_shutdown_timeout`]. The HTTP application,
+/// admission controls, slowloris timeout, and drain semantics are identical;
+/// only the accepted byte stream is wrapped in a validated rustls session.
+pub async fn serve_with_tls_shutdown_timeout<F>(
+    state: Arc<ProxyState>,
+    addr: SocketAddr,
+    shutdown: F,
+    grace: Duration,
+    tls: TlsConfig,
+) -> std::io::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    serve_listener_with_shutdown(state, listener, shutdown, grace, Some(tls.acceptor)).await
 }
 
 async fn serve_listener_with_shutdown<F>(
@@ -602,12 +728,14 @@ async fn serve_listener_with_shutdown<F>(
     listener: tokio::net::TcpListener,
     shutdown: F,
     grace: Duration,
+    tls: Option<tokio_rustls::TlsAcceptor>,
 ) -> std::io::Result<()>
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
     let policy = ConnectionPolicy::from_state(&state);
-    serve_router_listener_with_shutdown(build_app(state), listener, shutdown, grace, policy).await
+    serve_router_listener_with_shutdown(build_app(state), listener, shutdown, grace, policy, tls)
+        .await
 }
 
 /// Serve until `shutdown` resolves, with TD-0014 P3 connection-level defence:
@@ -621,13 +749,11 @@ async fn serve_router_listener_with_shutdown<F>(
     shutdown: F,
     grace: Duration,
     policy: ConnectionPolicy,
+    tls: Option<tokio_rustls::TlsAcceptor>,
 ) -> std::io::Result<()>
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    use hyper::server::conn::http1;
-    use hyper_util::rt::TokioTimer;
-    use hyper_util::service::TowerToHyperService;
     use std::collections::HashMap;
 
     let slots = Arc::new(Semaphore::new(policy.max_connections));
@@ -689,35 +815,46 @@ where
                 let watcher = graceful.watcher();
                 let metrics = Arc::clone(&policy.metrics);
                 let app = app.clone();
+                let tls = tls.clone();
+                let header_read_timeout = policy.header_read_timeout;
                 // Builder, connection, watcher, guards: one task owns all of
                 // it, because the connection borrows its builder.
                 tasks.spawn(async move {
                     let _permit = permit;
                     let _per_ip_slot = per_ip_slot;
                     let _conn_open = metrics.connection_open_guard();
-                    let service = TowerToHyperService::new(
-                        app.layer(axum::Extension(PeerCtx { peer: peer.ip() })),
-                    );
-                    // hyper's http1 builder directly — NOT hyper-util's auto
-                    // builder, whose h2c preface sniff buffered reads before
-                    // the header timer armed, exempting silent connections from
-                    // the slowloris defence (review finding 3). See Cargo.toml.
-                    let mut builder = http1::Builder::new();
-                    builder
-                        .timer(TokioTimer::new())
-                        .header_read_timeout(Some(policy.header_read_timeout))
-                        .max_buf_size(CONNECTION_READ_BUF_BYTES);
-                    // Upgrades (websocket-over-h1) would wrap this in
-                    // `.with_upgrades()` — but hyper-util's GracefulConnection
-                    // does not cover the upgradeable wrapper, and no route
-                    // upgrades today. TD-0017 (TLS/h2) reintroduces upgrades
-                    // WITH a pre-first-byte timeout, which is what the
-                    // auto-builder's silent sniffing removed (finding 3).
-                    let conn = builder.serve_connection(
-                        hyper_util::rt::TokioIo::new(stream),
-                        service,
-                    );
-                    let _ = watcher.watch(conn).await;
+                    if let Some(acceptor) = tls {
+                        // TLS handshakes happen before hyper can arm its request-head
+                        // timer. Apply the same deadline here so a silent ClientHello
+                        // cannot recreate the pre-first-byte slowloris gap.
+                        match tokio::time::timeout(header_read_timeout, acceptor.accept(stream)).await {
+                            Ok(Ok(stream)) => {
+                                serve_http1_connection(
+                                    stream,
+                                    app,
+                                    peer.ip(),
+                                    header_read_timeout,
+                                    watcher,
+                                )
+                                .await;
+                            }
+                            Ok(Err(error)) => {
+                                tracing::debug!(%peer, %error, "TLS handshake rejected");
+                            }
+                            Err(_) => {
+                                tracing::debug!(%peer, "TLS handshake timed out");
+                            }
+                        }
+                    } else {
+                        serve_http1_connection(
+                            stream,
+                            app,
+                            peer.ip(),
+                            header_read_timeout,
+                            watcher,
+                        )
+                        .await;
+                    }
                 });
             }
         }
@@ -727,8 +864,6 @@ where
     // the deadline passes, then abort the stragglers. This is what makes the
     // doc claim true — hung streams do not outlive `serve_with_shutdown_timeout`.
     tracing::info!("shutdown received; draining connections");
-    // `shutdown(self)` consumes the helper: unwrap the Arc (watchers hold only
-    // the rx side) and hand the signal+wait to its own task.
     // `shutdown(self)` consumes; unwrap the Arc (watchers hold only the rx
     // side) and let the signal+wait run on its own task.
     let _shutdown_task = Arc::try_unwrap(graceful)
@@ -755,10 +890,132 @@ where
     Ok(())
 }
 
+/// Serve one already-admitted plaintext or TLS stream through the exact same
+/// HTTP/1 path. Keeping the protocol builder below the transport wrapper
+/// prevents TLS configuration from forking Sandhi's request semantics.
+async fn serve_http1_connection<IO>(
+    stream: IO,
+    app: Router,
+    peer: std::net::IpAddr,
+    header_read_timeout: Duration,
+    watcher: hyper_util::server::graceful::Watcher,
+) where
+    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    use hyper::server::conn::http1;
+    use hyper_util::rt::TokioTimer;
+    use hyper_util::service::TowerToHyperService;
+
+    let service = TowerToHyperService::new(app.layer(axum::Extension(PeerCtx { peer })));
+    // hyper's http1 builder directly — NOT hyper-util's auto builder, whose
+    // h2c preface sniff buffered reads before the header timer armed, exempting
+    // silent connections from the slowloris defence (review finding 3).
+    let mut builder = http1::Builder::new();
+    builder
+        .timer(TokioTimer::new())
+        .header_read_timeout(Some(header_read_timeout))
+        .max_buf_size(CONNECTION_READ_BUF_BYTES);
+    let conn = builder.serve_connection(hyper_util::rt::TokioIo::new(stream), service);
+    let _ = watcher.watch(conn).await;
+}
+
 #[cfg(test)]
 mod server_lifecycle_tests {
     use super::*;
     use sandhi_core::{InMemorySink, KeyStore};
+
+    #[test]
+    fn plaintext_warning_is_only_for_exposed_unencrypted_listeners() {
+        assert!(plaintext_bind_warning("127.0.0.1:8787".parse().unwrap(), false).is_none());
+        assert!(plaintext_bind_warning("[::1]:8787".parse().unwrap(), false).is_none());
+        assert!(plaintext_bind_warning("0.0.0.0:8787".parse().unwrap(), true).is_none());
+        let warning = plaintext_bind_warning("0.0.0.0:8787".parse().unwrap(), false)
+            .expect("non-loopback plaintext must be loud");
+        assert!(warning.contains("bearer credentials over plaintext"));
+    }
+
+    #[test]
+    fn tls_material_is_validated_before_listening() {
+        let error = TlsConfig::from_pem(b"not a certificate", b"not a key")
+            .err()
+            .expect("invalid identity must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tls");
+        TlsConfig::from_pem_files(
+            fixture.join("localhost-cert.pem"),
+            fixture.join("localhost-key.pem"),
+        )
+        .expect("the configured file-loading path accepts a valid identity");
+
+        let mismatch = TlsConfig::from_pem_files(
+            fixture.join("localhost-cert.pem"),
+            fixture.join("mismatched-key.pem"),
+        )
+        .err()
+        .expect("a valid but unrelated private key must be rejected");
+        assert_eq!(mismatch.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[tokio::test]
+    async fn shutdown_bounds_a_stalled_tls_handshake_by_the_grace_deadline() {
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("test listener address");
+        let mut state = ProxyState::new(
+            KeyStore::new(),
+            ProxyLedger::in_memory(),
+            Arc::new(InMemorySink::new()),
+            HashMap::new(),
+            None,
+        );
+        // Keep the handshake timeout well beyond the shutdown grace. The
+        // server must still return at the grace deadline, not at this timer.
+        state.header_read_timeout_secs = 30;
+
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tls");
+        let tls = TlsConfig::from_pem_files(
+            fixture.join("localhost-cert.pem"),
+            fixture.join("localhost-key.pem"),
+        )
+        .expect("valid test identity");
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(serve_listener_with_shutdown(
+            Arc::new(state),
+            listener,
+            async {
+                let _ = shutdown_rx.await;
+            },
+            Duration::from_millis(50),
+            Some(tls.acceptor),
+        ));
+
+        let mut stalled = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect silent TLS peer");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        let started = std::time::Instant::now();
+        shutdown_tx.send(()).expect("signal shutdown");
+        tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .expect("stalled TLS handshake must not outlive the grace deadline")
+            .expect("server task joins")
+            .expect("server exits cleanly");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "shutdown waited for the 30-second handshake timeout"
+        );
+
+        let mut byte = [0u8; 1];
+        let closed = tokio::time::timeout(Duration::from_secs(1), stalled.read(&mut byte))
+            .await
+            .expect("aborted handshake closes its transport")
+            .unwrap_or(0);
+        assert_eq!(closed, 0, "stalled handshake transport remained open");
+    }
 
     #[tokio::test]
     async fn resolved_shutdown_stops_the_listener_and_returns() {
@@ -781,6 +1038,7 @@ mod server_lifecycle_tests {
                 async {},
                 // This path should finish immediately; the bound is still part of the contract.
                 DEFAULT_SHUTDOWN_GRACE,
+                None,
             ),
         )
         .await
@@ -815,6 +1073,7 @@ mod server_lifecycle_tests {
             },
             Duration::from_millis(25),
             ConnectionPolicy::default(),
+            None,
         ));
         let client_call = tokio::spawn(async move {
             let _ = reqwest::get(format!("http://{addr}/stuck")).await;
@@ -989,6 +1248,39 @@ mod request_admission_tests {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+/// Append `x-sandhi-contract-version` to every response (TD-0021 P2, D4/R3).
+///
+/// A middleware, not per-builder calls: the header must appear on success bodies,
+/// upstream-forwarded bytes, streaming bodies, AND dialect-shaped errors — including
+/// future error paths that do not exist yet. One layer cannot be forgotten.
+async fn contract_version_header(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        axum::http::HeaderName::from_static("x-sandhi-contract-version"),
+        axum::http::HeaderValue::from_static(sandhi_core::CHAT_SCHEMA_VERSION_V1),
+    );
+    response
+}
+
+/// `GET /version` — the ungated HTTP form of the contract handshake (TD-0021 P2, D4).
+///
+/// What an HTTP consumer needs before its first call, with nothing an unauthenticated
+/// caller could use for anything else: the wire (usage-event) and chat contract
+/// versions, the additive minor round, and the wired ingress dialects. The capability
+/// detail (D5) is gated at `/admin/version` (R2).
+async fn version() -> Response {
+    let body = json!({
+        "wire_contract_version": sandhi_core::UsageEvent::SCHEMA_VERSION,
+        "chat_contract_version": sandhi_core::CHAT_SCHEMA_VERSION_V1,
+        "chat_contract_minor": sandhi_core::CHAT_CONTRACT_MINOR,
+        "dialects": ["openai", "anthropic", "responses", "gemini"],
+    });
+    Json(body).into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -2092,7 +2384,7 @@ async fn handle(
     // A scope is "capped" (for output-bounding) only under a hard `Block` cap: a `Warn` soft cap
     // never rejects, so we do not shrink the client's request. Bounding output makes the ceiling
     // reservation enforceable when the client left `max_output_tokens` unset (ADR-0005 D1).
-    let (ceiling, effective_max) = reservation_ceiling(&request);
+    let (ceiling, effective_max) = reservation_ceiling(&request, body.len());
     // SQLite's transaction remains a synchronous correctness boundary, but it runs on Tokio's
     // blocking pool so its busy timeout never parks an async scheduler worker.
     let (capped, admission) = reserve_budget(&state, &scope, ceiling, policy).await;
@@ -2140,7 +2432,7 @@ async fn handle(
         }
     };
 
-    let accounting = RequestAccounting::new(
+    let mut accounting = RequestAccounting::new(
         Arc::clone(&state),
         scope,
         reservation,
@@ -2149,6 +2441,19 @@ async fn handle(
         dialect_label(dialect),
         plane,
     );
+    // TD-0021 P4 (D1): the METER records the LOGICAL call once — a repeat of a settled
+    // `(vkey, idempotency-key)` inside the window has its duplicate usage event dropped
+    // (the original stands). ENFORCEMENT still counts the physical call: the retry really
+    // consumed upstream tokens, so its lease settles into spent too. Meter counts logical
+    // calls, enforcement counts physical calls — both true, both visible. The client's
+    // retry still happens upstream (this is not response caching). Unavailable/expired
+    // dedup falls through to counting (D3) — the measurement is never lost to uncertainty.
+    if let Some(idem_key) = request.metadata.idempotency_key.clone() {
+        accounting.dedup = Some((
+            request.metadata.virtual_key_id.clone().unwrap_or_default(),
+            idem_key,
+        ));
+    }
     // TD-0011 D6: which plane served the call is the ADR-0004 adoption signal — how much traffic
     // still re-encodes. Bounded fields only (D2): provider slug and model, never subject/session.
     tracing::debug!(
@@ -2524,6 +2829,10 @@ struct RequestAccounting {
     reservation: Option<Reservation>,
     provider: String,
     model: String,
+    /// TD-0021 P4: when the call carried an `idempotency-key` AND this proxy already
+    /// settled that `(vkey, key)` inside the window, the repeat is the SAME logical call
+    /// — reusing the original settlement, metered once (D1). `None` otherwise.
+    dedup: Option<(String, String)>,
     /// Sandhi's id for THIS call, minted at admission (not lazily at event assembly) so it can
     /// be sent upstream on the vendor's declared correlation header and then become the usage
     /// event's `request_id` — one string correlating the upstream's logs and sandhi's event
@@ -2569,6 +2878,7 @@ impl RequestAccounting {
             reservation,
             provider,
             model: request.model.clone(),
+            dedup: None,
             request_id: next_request_id(),
             metadata: request.metadata.clone(),
             usage: None,
@@ -2599,6 +2909,11 @@ impl RequestAccounting {
 
     fn set_outcome(&mut self, outcome: &'static str) {
         self.outcome = outcome;
+    }
+
+    /// Whether this call's ledger was the volatile in-memory arm (dedup unavailable).
+    fn reservation_is_volatile(&self) -> bool {
+        matches!(self.state.ledger.lock().map(|l| l.is_volatile()), Ok(true))
     }
 
     /// Per-call wire headers for the typed plane (TD-0022 D1, caller-owned injection):
@@ -2697,11 +3012,23 @@ impl RequestAccounting {
         }
         // Settle the lease by id (idempotent, ADR-0005 D2), then capture the post-settle spent for
         // the alert subsystem. Alerts evaluate only on a measured call.
+        let mut dedup_reused = false;
         let spent_after = blocking_section(|| {
             let mut spent_after: Option<u64> = None;
             if let Ok(mut ledger) = self.state.ledger.lock() {
+                // TD-0021 P4 (D1): settle-then-record under one lock. A repeat arriving
+                // between this call's admission and settlement finds the record only after
+                // it exists — the insert is the linearization point.
                 if let Some(reservation) = &self.reservation {
                     ledger.settle(reservation, actual);
+                }
+                if let Some((vkey, idem_key)) = &self.dedup {
+                    if ledger.seen(vkey, idem_key).is_some() {
+                        dedup_reused = true;
+                    } else {
+                        let reservation_id = self.reservation.as_ref().map_or(0, |r| r.id);
+                        ledger.record(vkey, idem_key, reservation_id, actual);
+                    }
                 }
                 if measured {
                     spent_after = Some(ledger.spent(&self.scope));
@@ -2709,6 +3036,19 @@ impl RequestAccounting {
             }
             spent_after
         });
+        if dedup_reused {
+            // D1: the repeat is the same LOGICAL call — its usage event is a duplicate
+            // and is DROPPED here (the original event stands). Visible, never silent.
+            tracing::debug!("idempotent retry metered against the original logical call");
+            self.state.metrics.record_idempotent_replay();
+            self.finalized = true;
+            return;
+        }
+        if self.dedup.is_some() && self.reservation_is_volatile() {
+            // D3's acceptance criterion: a counted fallback is a METRIC, not just a
+            // log line. (The volatile arm cannot dedup; the call counts.)
+            self.state.metrics.record_idempotent_fallback();
+        }
         // P2: evaluate threshold alerts against the settled spend (best-effort — never breaks the
         // request). The configured limit comes from the budgets metadata map so a `Warn` scope (no
         // hard cap in the in-memory ledger) still has a threshold to measure against.
@@ -2907,28 +3247,31 @@ async fn stream_response(
         .expect("valid streaming response")
 }
 
-/// Coarse input-token estimate: bytes of the prompt payload / 4. A known lower-bound approximation
-/// (undercounts CJK, overcounts verbose tool schemas); a model-aware/tokenizer estimator is the
-/// follow-up (ADR-0005 D1). The *output* side, not this, is the load-bearing part of the ceiling.
-fn input_estimate(request: &ChatRequestV1) -> u64 {
-    let bytes = serde_json::to_vec(&request.messages)
-        .map(|value| value.len() as u64)
-        .unwrap_or(0)
-        .saturating_add(
-            serde_json::to_vec(&request.tools)
-                .map(|value| value.len() as u64)
-                .unwrap_or(0),
-        );
-    bytes.saturating_add(3) / 4
+/// Coarse input-token estimate: bytes of the ingress request body / 4. This replaces a full
+/// re-serialization of the decoded `messages`+`tools` on every request (design audit A4) with a
+/// zero-allocation length read. Direction vs the old formula: dialect envelopes wrap the same
+/// content in their own field names, so for everything except schema-less tools the wire body
+/// dominates the neutral serialization — the exception is the decoders' injected default tool
+/// schema (`{"type":"object"}`, +31 bytes of neutral with no wire counterpart per schema-less
+/// tool), which can make the estimate up to ~8 tokens *lower* per schema-less tool than the old
+/// formula. That deficit is bounded, measured, and pinned by
+/// `body_length_estimate_stays_within_a_bounded_deficit` — and marginal against the
+/// `DEFAULT_OUTPUT_CEILING`-dominated ceiling, the load-bearing term (ADR-0005 D1); the /4
+/// heuristic's own accuracy error dwarfs it either way (undercounts CJK, overcounts verbose
+/// schemas). A model-aware/tokenizer estimator remains the follow-up.
+fn input_estimate(body_len: usize) -> u64 {
+    (body_len as u64).saturating_add(3) / 4
 }
 
 /// The reservation **ceiling** (ADR-0005 D1): input estimate + the effective output max (the
 /// client's `max_output_tokens`, or [`DEFAULT_OUTPUT_CEILING`] when unbounded). Returns the ceiling
 /// and the effective max so the caller can bound a capped scope's upstream request. This is a
 /// conservative upper bound, not the old `+ 1` lower-bound estimate that let streams overshoot.
-fn reservation_ceiling(request: &ChatRequestV1) -> (u64, u64) {
+fn reservation_ceiling(request: &ChatRequestV1, body_len: usize) -> (u64, u64) {
     let effective_max = request.max_output_tokens.unwrap_or(DEFAULT_OUTPUT_CEILING);
-    let ceiling = input_estimate(request).saturating_add(effective_max).max(1);
+    let ceiling = input_estimate(body_len)
+        .saturating_add(effective_max)
+        .max(1);
     (ceiling, effective_max)
 }
 
@@ -3181,56 +3524,14 @@ fn provider_error(
     provider: &str,
     full_detail: bool,
 ) -> Response {
-    let (status, redacted_msg) = match e {
-        ProviderError::InvalidRequest(_) => (StatusCode::BAD_REQUEST, "invalid provider request"),
-        ProviderError::Auth => (StatusCode::BAD_GATEWAY, "upstream auth failed"),
-        ProviderError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "upstream rate limited"),
-        ProviderError::Upstream { .. } => (StatusCode::BAD_GATEWAY, "upstream error"),
-        ProviderError::Transport(_) => (StatusCode::BAD_GATEWAY, "upstream transport error"),
-        ProviderError::CircuitOpen => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "circuit open (upstream failing)",
-        ),
-        ProviderError::Timeout(_) => (StatusCode::GATEWAY_TIMEOUT, "upstream timed out"),
-        // ProviderError is #[non_exhaustive]; unknown future variants degrade to 502.
-        _ => (StatusCode::BAD_GATEWAY, "upstream error"),
+    // TD-0021 P3 (D6): the redaction decision lives on the type — this wrapper exists so
+    // the seven call sites (and the dialect-shaping tests) read unchanged.
+    let error = if full_detail {
+        codec::IngressError::from_provider_full(e, provider)
+    } else {
+        codec::IngressError::from_provider_redacted(e, provider)
     };
-    let mut typed = e.as_typed(Some(provider));
-    if !full_detail {
-        // Multi-tenant-safe default (TD-0008 D): keep the support-escalation
-        // currency (code / http_status / request_id), drop upstream bodies and
-        // transport internals. SANDHI_ERROR_DETAIL=full restores everything.
-        typed.message = redacted_msg.to_owned();
-        typed.details.clear();
-    }
-    let body = match dialect {
-        IngressDialect::OpenAi | IngressDialect::Responses => json!({"error":typed}),
-        IngressDialect::Anthropic => json!({"type":"error","error":typed}),
-        // Google's shape: `error.code` is the HTTP status as a NUMBER and `error.status` is the
-        // canonical enum name — that is what a google-genai client reads to classify a failure.
-        IngressDialect::Gemini => json!({"error":{
-            "code": status.as_u16(),
-            "message": typed.message,
-            "status": google_status(status),
-        }}),
-    };
-    (status, Json(body)).into_response()
-}
-
-/// HTTP status → the canonical google.rpc status name a Gemini client expects in `error.status`.
-fn google_status(status: StatusCode) -> &'static str {
-    match status {
-        StatusCode::BAD_REQUEST => "INVALID_ARGUMENT",
-        StatusCode::UNAUTHORIZED => "UNAUTHENTICATED",
-        StatusCode::FORBIDDEN => "PERMISSION_DENIED",
-        StatusCode::NOT_FOUND => "NOT_FOUND",
-        StatusCode::TOO_MANY_REQUESTS => "RESOURCE_EXHAUSTED",
-        StatusCode::PAYLOAD_TOO_LARGE => "RESOURCE_EXHAUSTED",
-        StatusCode::NOT_IMPLEMENTED => "UNIMPLEMENTED",
-        StatusCode::SERVICE_UNAVAILABLE => "UNAVAILABLE",
-        StatusCode::GATEWAY_TIMEOUT => "DEADLINE_EXCEEDED",
-        _ => "INTERNAL",
-    }
+    error.render(dialect)
 }
 
 /// A dialect-shaped 429 carrying `Retry-After` (TD-0012 D4).
@@ -3251,22 +3552,8 @@ fn rate_limited_error(dialect: IngressDialect, retry_after_secs: u64) -> Respons
 }
 
 fn ingress_error(dialect: IngressDialect, status: StatusCode, msg: &str) -> Response {
-    let typed = json!({
-        "code":"invalid_request",
-        "message":msg,
-        "retryable":false,
-        "http_status":status.as_u16(),
-    });
-    let body = match dialect {
-        IngressDialect::OpenAi | IngressDialect::Responses => json!({"error":typed}),
-        IngressDialect::Anthropic => json!({"type":"error","error":typed}),
-        IngressDialect::Gemini => json!({"error":{
-            "code": status.as_u16(),
-            "message": msg,
-            "status": google_status(status),
-        }}),
-    };
-    (status, Json(body)).into_response()
+    // TD-0021 P3 (D6): one construction type owns rendering; the 22 call sites unchanged.
+    codec::IngressError::invalid(status, msg).render(dialect)
 }
 
 fn error(status: StatusCode, msg: &str) -> Response {
@@ -3304,6 +3591,53 @@ mod error_detail_tests {
             "redacted mode must not leak details: {error}"
         );
         assert!(!bytes.windows(9).any(|w| w == b"tool call"), "body leaked");
+    }
+
+    #[tokio::test]
+    async fn redaction_is_a_property_of_the_type_not_the_call_site() {
+        // TD-0021 P3 (D6) acceptance: the DEFAULT construction path cannot leak an
+        // upstream body regardless of which constructor a future error path reaches
+        // for. Drive the type directly — not the provider_error wrapper — so the pin
+        // holds even if every wrapper is deleted.
+        for dialect in [
+            IngressDialect::OpenAi,
+            IngressDialect::Responses,
+            IngressDialect::Anthropic,
+            IngressDialect::Gemini,
+        ] {
+            let response =
+                codec::IngressError::from_provider_redacted(&upstream_error(), "moonshot")
+                    .render(dialect);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert!(
+                !bytes.windows(9).any(|w| w == b"tool call"),
+                "{dialect:?}: redacted default leaked the upstream body"
+            );
+            assert!(
+                !bytes.windows(7).any(|w| w == b"call_9"),
+                "{dialect:?}: redacted default leaked the request-internal id"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn protocol_refusals_never_carry_upstream_bytes() {
+        // The invalid_request constructor is for operator/protocol refusals; it has no
+        // upstream payload to leak by construction, and renders identically to the old
+        // inline builder (the dialect-shaping contract).
+        let response =
+            codec::IngressError::invalid(StatusCode::UNAUTHORIZED, "invalid virtual key")
+                .render(IngressDialect::Anthropic);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["type"], "error");
+        assert_eq!(value["error"]["code"], "invalid_request");
+        assert_eq!(value["error"]["http_status"], 401);
+        assert_eq!(value["error"]["message"], "invalid virtual key");
     }
 
     #[tokio::test]
@@ -3754,5 +4088,173 @@ mod connection_policy_tests {
             resolve_forwarded_for(peer, Some("10.0.0.1"), &allowlist),
             None
         );
+    }
+
+    /// Design audit A4: `input_estimate` divides the ingress body length instead of
+    /// re-serializing the decoded prompt. Adversarial review of this change falsified the
+    /// original "wire body is a superset" claim: all three non-Gemini decoders inject a default
+    /// `{"type":"object"}` schema for schema-less tools (+31 bytes of neutral with no wire
+    /// counterpart), so Anthropic's bare tool form and Responses' flat form can carry LESS wire
+    /// than their neutral serialization. What actually holds — and what this pins — is a
+    /// **bounded deficit**: generous shapes dominate outright; the adversarial shapes
+    /// (schema-less tools, bare-string system, empty messages) stay within ~8 tokens of the old
+    /// formula per schema-less tool, noise against the DEFAULT_OUTPUT_CEILING-dominated
+    /// ceiling (ADR-0005 D1). A codec that widens the deficit beyond that bound fails here.
+    #[test]
+    fn body_length_estimate_stays_within_a_bounded_deficit() {
+        const TEXT: &str = "You are a careful assistant that explains reservation ceilings, \
+             lease semantics, and the difference between what the meter counts and what the \
+             ledger settles, at length and with examples.";
+        const USER: &str = "Please explain the reservation ceiling semantics in detail, \
+             covering the input estimate, the output bound, and the calendar window.";
+        let tool_schema: serde_json::Value = serde_json::json!({
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "the thing to look up"}}
+        });
+        let cases: &[(&str, IngressDialect, serde_json::Value)] = &[
+            (
+                "openai",
+                IngressDialect::OpenAi,
+                serde_json::json!({
+                    "model": "gpt-x",
+                    "messages": [
+                        {"role": "system", "content": TEXT},
+                        {"role": "user", "content": USER}
+                    ],
+                    "tools": [{"type": "function", "function": {
+                        "name": "lookup",
+                        "description": "Look something up in the shared index",
+                        "parameters": tool_schema
+                    }}]
+                }),
+            ),
+            (
+                "anthropic",
+                IngressDialect::Anthropic,
+                serde_json::json!({
+                    "model": "claude-x",
+                    "system": TEXT,
+                    "messages": [
+                        {"role": "user", "content": [{"type": "text", "text": USER}]}
+                    ],
+                    "tools": [{
+                        "name": "lookup",
+                        "description": "Look something up in the shared index",
+                        "input_schema": tool_schema
+                    }]
+                }),
+            ),
+            (
+                "responses",
+                IngressDialect::Responses,
+                serde_json::json!({
+                    "model": "gpt-x",
+                    "input": [
+                        {"role": "system", "content": [{"type": "input_text", "text": TEXT}]},
+                        {"role": "user", "content": [{"type": "input_text", "text": USER}]}
+                    ],
+                    "tools": [{"type": "function",
+                        "name": "lookup",
+                        "description": "Look something up in the shared index",
+                        "parameters": tool_schema
+                    }]
+                }),
+            ),
+            (
+                "gemini",
+                IngressDialect::Gemini,
+                serde_json::json!({
+                    "systemInstruction": {"parts": [{"text": TEXT}]},
+                    "contents": [{"role": "user", "parts": [{"text": USER}]}],
+                    "tools": [{"functionDeclarations": [{
+                        "name": "lookup",
+                        "description": "Look something up in the shared index",
+                        "parameters": {"type": "OBJECT",
+                            "properties": {"query": {"type": "STRING"}}}
+                    }]}]
+                }),
+            ),
+        ];
+        for (name, dialect, body) in cases {
+            let wire_len = serde_json::to_string(body).unwrap().len();
+            let (request, _) =
+                crate::codec::decode_request(*dialect, body.clone(), RequestMetadataV1::default())
+                    .unwrap_or_else(|e| panic!("{name} fixture failed to decode: {e}"));
+            let serialized = serde_json::to_vec(&request.messages).unwrap().len()
+                + serde_json::to_vec(&request.tools).unwrap().len();
+            assert!(
+                wire_len >= serialized,
+                "{name}: wire body {wire_len} bytes < neutral serialization {serialized} bytes \
+                 — the body-length estimate would not be conservative (ADR-0005 D1)"
+            );
+            // And the estimate itself: body/4 covers the old serialized/4 formula.
+            assert!(input_estimate(wire_len) >= (serialized as u64).saturating_add(3) / 4);
+        }
+
+        // Adversarial shapes (from the review that falsified the superset claim): schema-less
+        // tools inject a default schema into the neutral form with no wire counterpart, a
+        // bare-string system adds a role wrapper the wire never carried, and an empty messages
+        // array is accepted. These may legitimately sit BELOW the neutral serialization — the
+        // pin is that the estimate's deficit vs the old formula stays bounded by the injected
+        // schemas (~8 tokens per schema-less tool = 31 bytes / 4, rounded up).
+        let bare_tool = |i: usize| serde_json::json!({"name": format!("a{i}")});
+        let adversarial: &[(&str, IngressDialect, serde_json::Value, usize)] = &[
+            (
+                "anthropic-schemaless-tools",
+                IngressDialect::Anthropic,
+                serde_json::json!({
+                    "model": "claude-x",
+                    "system": "be terse",
+                    "messages": [],
+                    "tools": [bare_tool(0), bare_tool(1), bare_tool(2), bare_tool(3), bare_tool(4)]
+                }),
+                5,
+            ),
+            (
+                "responses-flat-schemaless-tools",
+                IngressDialect::Responses,
+                serde_json::json!({
+                    "model": "gpt-x",
+                    "input": [],
+                    "tools": [
+                        {"type": "function", "name": "a0"},
+                        {"type": "function", "name": "a1"},
+                        {"type": "function", "name": "a2"}
+                    ]
+                }),
+                3,
+            ),
+            (
+                "openai-schemaless-tools",
+                IngressDialect::OpenAi,
+                serde_json::json!({
+                    "model": "gpt-x",
+                    "messages": [],
+                    "tools": [
+                        {"type": "function", "function": {"name": "a0"}},
+                        {"type": "function", "function": {"name": "a1"}}
+                    ]
+                }),
+                2,
+            ),
+        ];
+        for (name, dialect, body, schema_less) in adversarial {
+            let wire_len = serde_json::to_string(body).unwrap().len();
+            let (request, _) =
+                crate::codec::decode_request(*dialect, body.clone(), RequestMetadataV1::default())
+                    .unwrap_or_else(|e| panic!("{name} fixture failed to decode: {e}"));
+            let serialized = serde_json::to_vec(&request.messages).unwrap().len()
+                + serde_json::to_vec(&request.tools).unwrap().len();
+            let old_estimate = (serialized as u64).saturating_add(3) / 4;
+            let new_estimate = input_estimate(wire_len);
+            let deficit = old_estimate.saturating_sub(new_estimate);
+            assert!(
+                deficit <= (schema_less * 8) as u64,
+                "{name}: deficit {deficit} tokens exceeds the injected-schema bound \
+                 ({} schema-less tools x ~8 tokens) — the estimate stopped being \
+                 approximately conservative",
+                schema_less
+            );
+        }
     }
 }

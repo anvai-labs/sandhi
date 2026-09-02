@@ -1,41 +1,60 @@
 #!/usr/bin/env python3
 """Rewrite the sentinelpass-protocol version pin in sandhi-store.
 
-Usage: bump_protocol_pin.py <current> <latest>. Fails loudly when the pin
-line is not found — a silent no-op here would strand the pin on an old
+Usage: bump_protocol_pin.py <current> <latest>. Both arguments are accepted
+with or without a leading "v", and whichever pin shape the manifest carries is
+rewritten in place: the crates.io ``version = "X.Y.Z"`` form (develop/main,
+post-#188) or the historical git ``tag = "vX.Y.Z"`` form. Fails loudly when
+the pin line is not found — a silent no-op here would strand the pin on an old
 protocol version while claiming success.
 """
 import pathlib
 import re
 import sys
 
+MANIFEST = pathlib.Path("crates/sandhi-store/Cargo.toml")
+
+# (attribute, prefix) — the replacement keeps the manifest's existing shape.
+FORMS = (
+    ("version", ""),
+    ("tag", "v"),
+)
+
+
+def bare(v: str) -> str:
+    return v.removeprefix("v")
+
 
 def main() -> None:
-    current, latest = sys.argv[1], sys.argv[2]
-    manifest = pathlib.Path("crates/sandhi-store/Cargo.toml")
-    text = manifest.read_text()
-    # The pin is a git dependency: `tag = "vX.Y.Z"` inside the sentinelpass-protocol
-    # dependency line (there is also a commented-out `path =` dev form at line 27 —
-    # the regex anchors on the tag attribute so it can never match that comment).
-    needle_re = re.compile(
-        r'(sentinelpass-protocol = \{[^}]*?tag = ")'
-        + re.escape(current)
-        + r'(")'
-    )
-    match = needle_re.search(text)
-    if match is None:
-        expected = f'sentinelpass-protocol = {{ ... tag = "{current}" ... }}'
-        sys.exit(
-            f"pin line not found: expected {expected!r} in "
-            "crates/sandhi-store/Cargo.toml — the pin format moved; "
-            "update this script"
+    current, latest = bare(sys.argv[1]), bare(sys.argv[2])
+    text = MANIFEST.read_text()
+    for attr, prefix in FORMS:
+        # The needle anchors on `sentinelpass-protocol = {` + the attribute so
+        # it can never match the commented-out `path =` dev form or the
+        # `dep:sentinelpass-protocol` entries in the [features] table.
+        needle = re.compile(
+            r"(sentinelpass-protocol = \{[^}]*?" + attr + ' = ")'
+            + re.escape(prefix + current)
+            + r'(")'
         )
-    # Lambda replacement: a plain string replacement would re-interpret
-    # backslashes in the version (re.escape is for PATTERNS, not replacements).
-    manifest.write_text(
-        needle_re.sub(lambda m: m.group(1) + latest + m.group(2), text, count=1)
+        if needle.search(text) is None:
+            continue
+        # Lambda replacement: a plain string replacement would re-interpret
+        # backslashes in the version (re.escape is for PATTERNS, not replacements).
+        MANIFEST.write_text(
+            needle.sub(lambda m: m.group(1) + prefix + latest + m.group(2), text, count=1)
+        )
+        print(f"pin ({attr} form): {prefix}{current} -> {prefix}{latest}")
+        return
+    expected = " or ".join(
+        f'sentinelpass-protocol = {{ ... {attr} = "{prefix}{current}" ... }}'
+        for attr, prefix in FORMS
     )
-    print(f"pin: {current} -> {latest}")
+    sys.exit(
+        f"pin line not found: expected {expected} in "
+        "crates/sandhi-store/Cargo.toml — the pin format moved; "
+        "update this script"
+    )
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ use sandhi_core::{InMemorySink, KeyStore, Policy, VirtualKey, Window};
 use sandhi_providers::{
     ChatEventStream, ChatProvider, ProviderError, ProviderHandle, ProviderRuntime,
 };
-use sandhi_proxy::{build_app, ProxyLedger, ProxyState};
+use sandhi_proxy::{build_app, ProxyLedger, ProxyState, TlsConfig};
 
 fn state_with(
     upstream_uri: String,
@@ -44,6 +44,120 @@ fn state_with(
         ),
     );
     Arc::new(ProxyState::new(keys, ledger, sink, providers, None))
+}
+
+const TEST_TLS_CERT: &[u8] = include_bytes!("fixtures/tls/localhost-cert.pem");
+const TEST_TLS_KEY: &[u8] = include_bytes!("fixtures/tls/localhost-key.pem");
+
+/// TD-0017 P1: TLS wraps the listener, not the application. A normal request
+/// and a complete metered SSE response must therefore retain their existing
+/// status, bytes, and accounting semantics over HTTPS.
+#[tokio::test]
+async fn tls_listener_serves_full_requests_and_complete_sse_streams() {
+    let upstream = MockServer::start().await;
+    let sse = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2}}\n\n",
+        "data: [DONE]\n\n"
+    );
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse),
+        )
+        .mount(&upstream)
+        .await;
+
+    let sink = Arc::new(InMemorySink::new());
+    let mut state = Arc::try_unwrap(state_with(
+        upstream.uri(),
+        sink.clone(),
+        ProxyLedger::in_memory(),
+    ))
+    .ok()
+    .expect("test owns the only ProxyState reference");
+    state.header_read_timeout_secs = 1;
+    // A silent handshake must release the sole connection slot before the
+    // health and streaming requests below can be admitted.
+    state.max_connections = 1;
+    let state = Arc::new(state);
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = probe.local_addr().unwrap();
+    drop(probe);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let tls = TlsConfig::from_pem(TEST_TLS_CERT, TEST_TLS_KEY).unwrap();
+    let server = tokio::spawn(sandhi_proxy::serve_with_tls_shutdown_timeout(
+        state,
+        addr,
+        async {
+            let _ = shutdown_rx.await;
+        },
+        std::time::Duration::from_secs(2),
+        tls,
+    ));
+
+    let root = reqwest::Certificate::from_pem(TEST_TLS_CERT).unwrap();
+    let client = reqwest::Client::builder()
+        .add_root_certificate(root)
+        .build()
+        .unwrap();
+    let health_url = format!("https://{addr}/healthz");
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // The HTTP timer starts only after TLS. A peer that never sends a
+    // ClientHello must still release its connection slot at the same bound.
+    use tokio::io::AsyncReadExt;
+    let mut silent = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut one = [0u8; 1];
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(3), silent.read(&mut one))
+        .await
+        .expect("silent TLS handshake must be bounded")
+        .unwrap_or(0);
+    assert_eq!(
+        closed, 0,
+        "silent TLS handshake must close without a response"
+    );
+
+    let health = client
+        .get(&health_url)
+        .send()
+        .await
+        .unwrap_or_else(|error| panic!("TLS health request failed: {error:?}"));
+    assert_eq!(health.status(), StatusCode::OK);
+
+    let response = client
+        .post(format!("https://{addr}/v1/chat/completions"))
+        .header("authorization", "Bearer vk_demo")
+        .json(&serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": true
+        }))
+        .send()
+        .await
+        .expect("HTTPS streaming request");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.text().await.expect("complete SSE body");
+    assert!(body.contains("hello"));
+    assert!(body.contains("[DONE]"));
+
+    let events = sink.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].tokens_in, 4);
+    assert_eq!(events[0].tokens_out, 2);
+    assert_eq!(
+        events[0].usage_completeness,
+        sandhi_core::UsageCompleteness::Final
+    );
+
+    let _ = shutdown_tx.send(());
+    tokio::time::timeout(std::time::Duration::from_secs(3), server)
+        .await
+        .expect("TLS server drains")
+        .expect("TLS server task joins")
+        .expect("TLS server exits cleanly");
 }
 
 #[tokio::test]
@@ -98,6 +212,399 @@ async fn complete_attributes_meters_and_records_budget() {
     // charged. (Unifying those two was the tracked follow-up this closes.)
     assert_eq!(state.ledger.lock().unwrap().spent("group:platform"), 120);
     assert_eq!(state.ledger.lock().unwrap().reserved("group:platform"), 0);
+}
+
+// ───────────────────────── Contract version discovery (TD-0021 P2) ─────────────────────────
+
+#[tokio::test]
+async fn version_endpoint_is_unauthenticated_and_reports_the_contract() {
+    let sink = Arc::new(InMemorySink::new());
+    let state = state_with("http://127.0.0.1:1".into(), sink, ProxyLedger::in_memory());
+    let app = build_app(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/version")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["wire_contract_version"], "1");
+    assert_eq!(value["chat_contract_version"], "1");
+    assert_eq!(value["chat_contract_minor"], 6);
+    let dialects = value["dialects"].as_array().unwrap();
+    for expected in ["openai", "anthropic", "responses", "gemini"] {
+        assert!(
+            dialects.iter().any(|d| d == expected),
+            "dialect {expected} advertised"
+        );
+    }
+}
+
+#[tokio::test]
+async fn config_preview_and_apply_acknowledge_the_startup_only_tls_section() {
+    // Adversarial-review finding on the TLS PR: the config module's doc promised that
+    // preview/apply would report the startup-only `tls` section as `restart required`, but the
+    // responses never mentioned it — an operator applying a TLS edit got silent ignorance of a
+    // security-relevant section. Both responses carry the acknowledgement, and it reads
+    // "not configured" when the section is absent.
+    let keys = KeyStore::new();
+    let mut state = ProxyState::new(
+        keys,
+        ProxyLedger::in_memory(),
+        Arc::new(InMemorySink::new()),
+        HashMap::new(),
+        None,
+    );
+    state.admin_token = Some("admin".into());
+    let cfg_path = std::env::temp_dir().join(format!("sandhi-tls-ack-{}.json", std::process::id()));
+    std::fs::write(
+        &cfg_path,
+        r#"{"tls": {"cert": "/nonexistent/cert.pem", "key": "/nonexistent/key.pem"}}"#,
+    )
+    .unwrap();
+    state.config_path = Some(cfg_path.clone());
+    let app = build_app(Arc::new(state));
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/admin/config")
+                .header("authorization", "Bearer admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let preview: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        preview["tls"], "restart required",
+        "preview must acknowledge the startup-only section, not ignore it"
+    );
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/config/apply")
+                .header("authorization", "Bearer admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let apply: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        apply["tls"], "restart required",
+        "apply must acknowledge that it did NOT activate listener TLS"
+    );
+
+    std::fs::write(&cfg_path, r#"{"providers": []}"#).unwrap();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/config")
+                .header("authorization", "Bearer admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let preview: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(preview["tls"], "not configured");
+    let _ = std::fs::remove_file(&cfg_path);
+}
+
+#[tokio::test]
+async fn admin_version_reports_capabilities_behind_the_gate() {
+    // state_with carries no admin token and no store — the endpoint must refuse;
+    // the capability detail is operator information (D5/R2).
+    // Admin-gated: a fresh state with an admin token set (state_with has none).
+    let keys = KeyStore::new();
+    let mut admin_state = ProxyState::new(
+        keys,
+        ProxyLedger::in_memory(),
+        Arc::new(InMemorySink::new()),
+        HashMap::new(),
+        None,
+    );
+    admin_state.admin_token = Some("admin".into());
+    let app = build_app(Arc::new(admin_state));
+
+    // Without the token: 403.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/admin/version")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    // With it: the capability booleans.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/admin/version")
+                .header("authorization", "Bearer admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let caps = &value["capabilities"];
+    assert_eq!(caps["transparent_plane"], true);
+    assert_eq!(caps["rate_limits"], true);
+    assert_eq!(caps["durable_ledger"], false); // no SANDHI_STORE in this state
+    assert_eq!(caps["otel_export"], false); // no recorder attached
+}
+
+#[tokio::test]
+async fn every_response_carries_the_contract_version_header_including_errors() {
+    // R3: a version mismatch most often PRESENTS as an error — the header must be
+    // there exactly then. D4: success responses carry it too. The middleware is the
+    // single source, so one success + one error pin the contract.
+    let upstream = MockServer::start().await;
+    let resp = serde_json::json!({
+        "choices": [{ "message": { "content": "hi" } }],
+        "usage": { "prompt_tokens": 5, "completion_tokens": 1 }
+    });
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(resp))
+        .mount(&upstream)
+        .await;
+
+    let sink = Arc::new(InMemorySink::new());
+    let state = state_with(upstream.uri(), sink, ProxyLedger::in_memory());
+    let app = build_app(state);
+
+    // Success path.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("authorization", "Bearer vk_demo")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"model":"gpt-x","messages":[]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("x-sandhi-contract-version").unwrap(),
+        "1"
+    );
+
+    // Error path: a bad virtual key produces a dialect-shaped 401.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("authorization", "Bearer vk_does_not_exist")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"model":"gpt-x","messages":[]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        response.headers().get("x-sandhi-contract-version").unwrap(),
+        "1",
+        "the header rides error responses too (R3)"
+    );
+}
+
+// ───────────────────────── Idempotent metering (TD-0021 P4) ─────────────────────────
+
+#[tokio::test]
+async fn same_idempotency_key_inside_the_window_meters_once() {
+    // D1 acceptance: two requests with the same (virtual_key_id, idempotency-key)
+    // inside the window produce ONE lease and ONE usage event — the repeat reuses
+    // the original settlement. The proxy needs a DURABLE ledger for dedup; the
+    // state_with default is in-memory (which correctly counts, D3).
+    let upstream = MockServer::start().await;
+    let resp = serde_json::json!({
+        "choices": [{ "message": { "content": "hi" } }],
+        "usage": { "prompt_tokens": 10, "completion_tokens": 2 }
+    });
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(resp))
+        .mount(&upstream)
+        .await;
+
+    // Durable ledger in a temp file → dedup active.
+    let dir = std::env::temp_dir().join(format!("sandhi-p4-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let store_path = dir.join("usage.db");
+
+    let sink = Arc::new(InMemorySink::new());
+    let keys2 = KeyStore::new();
+    keys2.insert(VirtualKey {
+        id: "vk_demo".into(),
+        subject_id: Some("alice".into()),
+        group_id: Some("platform".into()),
+        upstream_ref: "up1".into(),
+        ..Default::default()
+    });
+    let mut providers2 = HashMap::new();
+    providers2.insert(
+        "up1".into(),
+        ProviderRuntime::new().openai_compat(
+            "openai",
+            upstream.uri(),
+            "REAL-KEY",
+            Default::default(),
+            Some(0),
+            None,
+            None,
+        ),
+    );
+    let ledger2 = ProxyLedger::durable(store_path.to_str().unwrap(), 1).expect("ledger reopen");
+    let state = Arc::new(ProxyState::new(
+        keys2,
+        ledger2,
+        sink.clone(),
+        providers2,
+        None,
+    ));
+    let app = build_app(state);
+
+    for _ in 0..2 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("authorization", "Bearer vk_demo")
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "retry-1")
+                    .body(Body::from(r#"{"model":"gpt-x","messages":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = axum::body::to_bytes(response.into_body(), usize::MAX).await;
+    }
+
+    // ONE usage event: the repeat's duplicate event was dropped (the logical
+    // call metered once; the retry's own lease still settled — physical call).
+    let events = sink.events();
+    assert_eq!(
+        events.len(),
+        1,
+        "TD-0021 P4 D1: one lease, one event for a repeated (vkey, idempotency-key)"
+    );
+
+    // A DIFFERENT key is a new logical call.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("authorization", "Bearer vk_demo")
+                .header("content-type", "application/json")
+                .header("idempotency-key", "retry-2")
+                .body(Body::from(r#"{"model":"gpt-x","messages":[]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let _ = axum::body::to_bytes(response.into_body(), usize::MAX).await;
+    assert_eq!(
+        sink.events().len(),
+        2,
+        "a different key is a new logical call"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn in_memory_ledger_counts_repeats_d3_fail_toward_counting() {
+    // D3: dedup unavailable (volatile arm) → count the call. The measurement is
+    // never lost to uncertainty.
+    let upstream = MockServer::start().await;
+    let resp = serde_json::json!({
+        "choices": [{ "message": { "content": "hi" } }],
+        "usage": { "prompt_tokens": 10, "completion_tokens": 2 }
+    });
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(resp))
+        .mount(&upstream)
+        .await;
+
+    let sink = Arc::new(InMemorySink::new());
+    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    let app = build_app(state);
+
+    for _ in 0..2 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("authorization", "Bearer vk_demo")
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "retry-1")
+                    .body(Body::from(r#"{"model":"gpt-x","messages":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = axum::body::to_bytes(response.into_body(), usize::MAX).await;
+    }
+
+    assert_eq!(sink.events().len(), 2, "volatile arm counts (D3)");
 }
 
 /// A proxy fronting a mocked **Anthropic** upstream that answers `/v1/messages` once.

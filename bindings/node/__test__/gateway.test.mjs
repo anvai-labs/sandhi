@@ -387,6 +387,66 @@ test("ChatGPT Responses profile aggregates its required upstream stream", async 
   }
 });
 
+test("typed errors are instanceof SandhiProviderError on every path (TD-0021 P1)", async () => {
+  // G22 close-out conformance: a JS consumer must be able to branch on the class
+  // (code/httpStatus/retryable) instead of string-sniffing — on completeJson, on
+  // streamJson SETUP failures (before any iterator exists), and on read() failures.
+  const { SandhiProviderError, ProviderRuntime } = await import("../sandhi.js");
+  // localServer serves responses in call order; the three sub-cases below each
+  // make one request, so supply three identical 401s.
+  const unauthorized = {
+    status: 401,
+    contentType: "application/json",
+    body: JSON.stringify({ error: "bad key" }),
+  };
+  const server = await localServer([unauthorized, unauthorized, unauthorized]);
+  try {
+    const provider = new ProviderRuntime().openaiCompat(
+      "openai", server.baseUrl, "k", undefined, 0,
+    );
+    const request = JSON.stringify({
+      schema_version: "1", model: "gpt-test",
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    // 1. completeJson
+    let completeErr;
+    await provider.completeJson(request).catch((e) => (completeErr = e));
+    assert.ok(completeErr instanceof SandhiProviderError, "completeJson error is typed");
+    assert.equal(completeErr.code, "authentication_error");
+    assert.equal(completeErr.httpStatus, 401);
+    assert.equal(typeof completeErr.retryable, "boolean");
+
+    // 2. streamJson SETUP — a synchronous validation failure (malformed request
+    // JSON) throws from the setup call itself, before any iterator exists.
+    let setupErr;
+    try {
+      provider.streamJson("{}");
+    } catch (e) {
+      setupErr = e;
+    }
+    assert.ok(setupErr != null, "setup rejects synchronously on bad input");
+    // Binding-internal validation errors are deliberately NOT rewired to the
+    // provider class (toSandhiError passes non-typed payloads through) — the
+    // contract is that they surface as ordinary Errors, not crashes.
+    assert.ok(setupErr instanceof Error);
+
+    // 3. TypedEventStream.read — same stream seam via the async iterator.
+    let readErr;
+    try {
+      const stream = provider.streamJson(request);
+      for await (const _event of stream) {
+        /* drain */
+      }
+    } catch (e) {
+      readErr = e;
+    }
+    assert.ok(readErr instanceof SandhiProviderError, "read/iterator error is typed");
+  } finally {
+    await server.close();
+  }
+});
+
 test("raw provider transport exports are absent", async () => {
   const module = await import("../sandhi.js");
   for (const name of ["complete", "stream", "registerProvider", "ByteStream"])

@@ -21,6 +21,136 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 
 - _Nothing yet._
 
+## [0.5.0] — 2026-09-02
+
+The contract-discovery and transport-security release, carrying a full design audit's accepted
+set. TD-0021 completes end to end: an HTTP consumer can now ask which contract it is talking to
+(`GET /version`, the `x-sandhi-contract-version` response header), Node's typed errors reach
+parity with Python's, client-facing error construction is single-sourced with redaction by
+default, and idempotent metering makes **the meter count logical calls while enforcement counts
+physical calls** — semantics stated exactly, counters for both sides. The listener grows
+**opt-in TLS termination** (TD-0017 P1) over the same admission, timeout, accounting, and drain
+path as plaintext — no second protocol surface to drift. The design audit's fixes close a live
+default-config Gemini 404, two unbounded-growth paths in default deployments, and an
+authenticated metric-cardinality DoS, while making the ledger's hot reads index-only and the
+run-cost tree linear; its structural findings are registered as TD-0024/TD-0025 and the gap
+register now runs G01–G32.
+
+### Added
+
+- **Idempotent metering** (TD-0021 P4, D1/D2/D3): a retried call carrying the same
+  `(virtual key, idempotency-key)` inside the dedup window — whose TTL matches the 15-minute
+  lease TTL and whose storage shares the enforcement ledger's own SQLite, so it survives exactly
+  the restart a crash-retry makes most likely — has its duplicate usage event dropped: **the
+  meter records the logical call once**. Semantics stated exactly: *the meter counts logical
+  calls; enforcement counts physical calls* — the retry's lease still settles into spent, because
+  the retry really consumed upstream tokens. Both sides visible: `sandhi_idempotent_replays_total`
+  (reused settlements) and `sandhi_idempotent_fallbacks_total` (volatile-arm keys metered without dedup).
+  The client's retry still happens upstream (this deduplicates the *meter*, never the response);
+  a repeat outside the window is a new logical call; when dedup is unavailable the call is
+  **counted**, never dropped. The key is the `(vkey, idempotency-key)` pair with no request-body
+  hash; expired dedup rows are pruned by the reclaim sweep, not only on sight. ADR-0005 D7's
+  "reconcile-once" promise is honoured for the meter.
+- **Opt-in listener TLS** (TD-0017 P1): `SANDHI_CONFIG` accepts a `tls` object containing PEM
+  certificate-chain and private-key paths. The pair is read and validated before bind, HTTPS uses
+  the same HTTP/1 admission, timeout, accounting, and drain path as plaintext, and a silent TLS
+  handshake is bounded by the configured header-read deadline. Plaintext remains the compatible
+  loopback default; a non-loopback plaintext bind now emits a credential-exposure warning.
+- **HTTP contract discovery** (TD-0021 P2, #204): ungated `GET /version` returns the wire
+  and chat contract versions and the wired ingress dialects; `GET /admin/version` (behind the
+  admin gate) adds the capability booleans (transparent plane, durable ledger, alerts, admin
+  API, rate limits, OTel export); every proxied response — including dialect-shaped errors —
+  carries `x-sandhi-contract-version`, so an HTTP consumer knows which contract it is talking
+  to at the moment a mismatch presents. The HTTP form of the TD-0008 handshake.
+
+### Changed
+
+- **Rust (`sandhi-providers`)**: `FamilyFacts` gains a `default_base_url: &'static str` field (with
+  `ProviderFamily::default_base_url()`). Source-breaking for external consumers constructing
+  `FamilyFacts` by struct literal — the same class as 0.4.0's factory-signature change; in-workspace
+  and binding callers are unaffected (the only construction site is `facts()` itself).
+
+### Fixed
+
+- **`input_estimate` reads the request body instead of re-serializing the prompt** (design audit
+  A4). The reservation ceiling's input side re-serialized `messages` + `tools` to JSON on every
+  request — a second full prompt materialization (on top of body → `Value` → `ChatRequestV1` →
+  native re-encode) purely to divide its byte length by four. The estimate now divides the
+  ingress body's length. Adversarial review of this change falsified the first-draft "wire body
+  is a superset" claim — the decoders inject a default `{"type":"object"}` schema for schema-less
+  tools, so Anthropic's bare tool form and Responses' flat form can carry less wire than their
+  neutral serialization — so the pinned contract is the honest one: approximately-conservative
+  with a **bounded deficit** of ~8 tokens per schema-less tool (31 injected bytes ÷ 4), measured
+  and pinned per dialect including the adversarial shapes, and marginal against the
+  output-ceiling-dominated reservation (ADR-0005 D1; accuracy semantics otherwise unchanged —
+  still bytes/4, the script-aware estimator remains TD-0016 R2's).
+- **Metric label cardinality is capped** (design audit A2 — an authenticated memory-DoS).
+  `model` is a deliberate metric dimension, but its *values* are caller-supplied on the typed
+  plane (the per-key model allowlist is optional), so any holder of a valid virtual key could
+  grow the label-keyed registry maps without bound by rotating model strings — while the
+  `Labels` doc claimed every field was "never bounded by traffic". The registry now admits at
+  most `DEFAULT_MAX_METRIC_SERIES` (1024, matching the usage aggregator's cap) distinct label
+  series; further new series fold into a shared `(overflow)` model — the stats fold's precedent.
+  Existing series are never evicted and totals stay exact; only per-series detail degrades.
+  Operators with genuinely larger fleets set `SANDHI_METRICS_MAX_SERIES` in the binary.
+- **Single source for family default base URLs** (design audit A1, the #196 drift class). The
+  proxy's own hard-coded defaults had drifted from the catalog: Gemini without `/v1beta` — in
+  `default_base_url`, the `SANDHI_GEMINI_KEY` env registration, and the typed-runtime fixtures —
+  meaning a default-config Gemini call POSTed to `…/models/{model}:generateContent` with no
+  version segment and 404'd on every call; Cohere sat on the legacy `api.cohere.ai` domain.
+  Family defaults now live once on `FamilyFacts`
+  (`ProviderFamily::default_base_url()`), consumed by the proxy's `default_base_url`, the
+  standalone env registrations, and both bindings' `provider()` dispatch, with a new test
+  pinning them to the catalog descriptors so the copies cannot drift silently again.
+- **The default no-store sink is bounded** (design audit A3). When `SANDHI_STORE` is unset, the
+  standalone proxy's usage sink was an unbounded `Mutex<Vec<UsageEvent>>` — the default
+  no-config deployment grew memory monotonically (~19 allocations per event, forever).
+  `InMemorySink` is now a ring retaining the newest events (default 10 000, tunable via
+  `SANDHI_MEMORY_SINK_MAX`), counting evictions and logging them at powers of two exactly like
+  `BufferedSink` — no bound ships unobservable (TD-0014's rule). `InMemorySink::new()` keeps its
+  signature; `with_capacity` is additive.
+
+### Internal
+
+- **Node typed-error parity closed for real** (TD-0021 P1, #203): `SandhiProviderError` is
+  now rewired on every provider-boundary path (`completeJson`, `streamJson` setup,
+  `TypedEventStream.read`), with an `instanceof` conformance test; binding-internal
+  validation errors deliberately stay ordinary `Error`s (the class distinction between
+  provider and binding failures is the point). TD-0008's scorecard row and follow-up C
+  closed with citations.
+- **Single-source client-facing error construction** (TD-0021 P3, #206): one `IngressError`
+  type owns status, code, dialect rendering, and the redaction decision; the default
+  constructors are redacted and full detail is the explicit named opt-in, so a future error
+  path cannot leak an upstream body by omission. All 29 call sites and the existing
+  dialect-shaping tests unchanged.
+- **Store/stats hygiene bundle** (design audit A5/A6/A7; zero behavior change): the ledger's
+  settled-spend and reserved SUMs are now index-only scans — a covering index
+  `(scope, settled, settled_at, actual, ceiling, expires_at)` replaces the two-column
+  `(scope, settled)` index whose matching rows each cost a table fetch, so admission work no
+  longer grows with the scope's settled history (row retention itself stays TD-0024's);
+  asserted by an `EXPLAIN QUERY PLAN` test, not by trusting the DDL. `RunCostTreeV1` assembly is
+  linear (a parent→children index replaces the per-node full-key rescan — the O(n²) in steps);
+  the assembled tree is byte-identical, pinned by the existing orphan/cycle/double-count tests.
+  `idx_vkeys_hash` is dropped (the `secret_hash UNIQUE` constraint already maintains that index —
+  it was pure write amplification), `hex_encode` is table-driven instead of per-byte `format!`
+  with a FIPS known-answer vector pinning the encoding, and `MeteredProvider`'s doc now states
+  its audience (embedders via the bindings) and its deliberately different no-estimate semantics
+  vs the proxy's `RequestAccounting`. One-time cost worth naming: the first open of a populated
+  store builds the covering index with a table scan proportional to lifetime reservations —
+  bounded, once, and exactly the growth TD-0024 exists to cap.
+- **Pin automation takes its no-op path** (follow-up to the #194 repair, caught by the post-merge
+  verification dispatch): the gate compared a v-prefixed crates.io latest (`v0.8.0`) against the
+  bare manifest pin (`0.8.0`) — never equal, so an already-current pin fell through to the bump
+  branch and failed there; and the bump script only rewrote the historical git `tag = "vX.Y.Z"`
+  form, while the manifest has carried a crates.io `version = "0.8.0"` pin since #188. Versions
+  are now normalized bare at both sources and the script rewrites either shape it finds. The
+  pre-push verification also gains `--features sentinelpass-ipc`: the pin is an optional
+  dependency, so the plain `cargo check -p sandhi-store` compiled none of it. Adversarial review
+  of the fix added two corrections: the check now runs *before* the commit and stages the
+  refreshed workspace `Cargo.lock` (the automated branch would otherwise ship a manifest/lock
+  mismatch), and the automated PR body lost its backticks — inside the double-quoted `--body`
+  they were shell command substitution, re-running the build mid-argument and emptying the body.
+
 ## [0.4.0] — 2026-09-01
 
 The attribution-integrity patch. One user-facing fix — the FFI's `provider()` dispatch silently

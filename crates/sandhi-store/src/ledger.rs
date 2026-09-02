@@ -56,6 +56,20 @@ impl SqliteLedger {
         Ok(Self { conn })
     }
 
+    /// Open with an explicit durability level — measurement and diagnostic
+    /// surface (TD-0015's ledger benchmark compares FULL against NORMAL), not
+    /// a product knob: production always uses `open`, which is FULL.
+    #[doc(hidden)]
+    pub fn open_with_synchronous(
+        path: &str,
+        synchronous: crate::Synchronous,
+    ) -> rusqlite::Result<Self> {
+        let conn = Connection::open(path)?;
+        crate::apply_durable_pragmas(&conn, synchronous)?;
+        Self::init(&conn)?;
+        Ok(Self { conn })
+    }
+
     fn setup(conn: &Connection) -> rusqlite::Result<()> {
         // FULL: a cap/lease commit must survive a power loss (ADR-0005 C2/C3). WAL + busy_timeout
         // also stop the concurrent store writes from colliding with reserve/settle on the same file
@@ -65,6 +79,12 @@ impl SqliteLedger {
     }
 
     fn init(conn: &Connection) -> rusqlite::Result<()> {
+        // `spent`/`reserved` are SUMs over (scope, settled) whose payloads are actual/ceiling —
+        // the old two-column index still paid a row fetch per matching row, so admission cost
+        // grew with the scope's settled history (design audit A5). The covering index makes both
+        // reads index-only scans; predicates are untouched (the COALESCE(settled_at, 0) guard
+        // stays defensive) and its (scope, settled) prefix serves everything the old index did.
+        // Settled-row retention itself is TD-0024's, not the index's.
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS budget_limit (
                  scope        TEXT PRIMARY KEY,
@@ -81,8 +101,23 @@ impl SqliteLedger {
                  settled_at INTEGER,
                  expires_at INTEGER NOT NULL
              );
-             CREATE INDEX IF NOT EXISTS idx_reservation_scope
-                 ON budget_reservation (scope, settled);",
+             DROP INDEX IF EXISTS idx_reservation_scope;
+             CREATE INDEX IF NOT EXISTS idx_reservation_scope_covering
+                 ON budget_reservation (scope, settled, settled_at, actual, ceiling, expires_at);
+             -- TD-0021 P4 (D2): dedup state lives WITH the ledger — the settlement it
+             -- protects is durable, so the dedup must be too. Key is the full
+             -- (virtual_key_id, idempotency_key) pair (R1 — no body hash); the row
+             -- carries the settled reservation so a repeat can reuse the original
+             -- settlement. Rows are pruned on sight when past the window.
+             CREATE TABLE IF NOT EXISTS idempotency_dedup (
+                 vkey        TEXT    NOT NULL,
+                 idem_key    TEXT    NOT NULL,
+                 reservation INTEGER NOT NULL,
+                 actual      INTEGER NOT NULL,
+                 seen_at     INTEGER NOT NULL,
+                 expires_at  INTEGER NOT NULL,
+                 PRIMARY KEY (vkey, idem_key)
+             );",
         )
     }
 
@@ -240,12 +275,131 @@ impl SqliteLedger {
 
     /// Reclaim every unsettled lease expired at or before `now` (crash/leak backstop); returns how
     /// many were reclaimed. A reclaimed lease releases its held ceiling without recording spend.
+    /// Migration-only (TD-0016 P1): insert a legacy budget row verbatim.
+    /// Companion to [`insert_migrated_reservation`](Self::insert_migrated_reservation).
+    #[doc(hidden)]
+    pub fn insert_migrated_limit(
+        &mut self,
+        scope: &str,
+        limit_tokens: Option<i64>,
+        window: &str,
+        policy: &str,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO budget_limit (scope, limit_tokens, window, policy)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![scope, limit_tokens, window, policy],
+        )?;
+        Ok(())
+    }
+
+    /// Migration-only (TD-0016 P1): insert a legacy reservation row verbatim,
+    /// preserving its id and settled state. Not used by the live reserve path.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_migrated_reservation(
+        &mut self,
+        id: i64,
+        scope: &str,
+        ceiling: i64,
+        actual: i64,
+        settled: i64,
+        expires_at: i64,
+        settled_at: Option<i64>,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO budget_reservation
+             (id, scope, ceiling, actual, settled, expires_at, settled_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![id, scope, ceiling, actual, settled, expires_at, settled_at],
+        )?;
+        Ok(())
+    }
+
+    /// TD-0021 P4 (D1): have we already settled a call with this `(vkey, idem_key)`
+    /// inside the window? Returns the original settlement so the caller can reuse it.
+    /// A row past its window is pruned on sight and reports unseen (a retry an hour
+    /// later is a new logical call — D2's boundary is the feature, not a leak).
+    pub fn seen_durable(
+        &mut self,
+        vkey: &str,
+        idem_key: &str,
+        now: OffsetDateTime,
+    ) -> rusqlite::Result<Option<(u64, u64)>> {
+        let now_ts = now.unix_timestamp();
+        let row: Result<(i64, i64, i64), _> = self.conn.query_row(
+            "SELECT reservation, actual, expires_at FROM idempotency_dedup
+             WHERE vkey = ?1 AND idem_key = ?2",
+            params![vkey, idem_key],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        );
+        match row {
+            Ok((reservation, actual, expires_at)) => {
+                if expires_at <= now_ts {
+                    // Past the window: prune and report unseen (count the call, D3).
+                    self.conn.execute(
+                        "DELETE FROM idempotency_dedup WHERE vkey = ?1 AND idem_key = ?2",
+                        params![vkey, idem_key],
+                    )?;
+                    Ok(None)
+                } else {
+                    Ok(Some((reservation.max(0) as u64, actual.max(0) as u64)))
+                }
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Record the settlement of a logical call (TD-0021 P4 D1). Insert-or-replace keeps the
+    /// freshest settlement for the key; the expiry mirrors the lease TTL so the record's
+    /// lifetime matches the settlement it protects.
+    pub fn record_durable(
+        &mut self,
+        vkey: &str,
+        idem_key: &str,
+        reservation: u64,
+        actual: u64,
+        now: OffsetDateTime,
+        ttl: Duration,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO idempotency_dedup (vkey, idem_key, reservation, actual, seen_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(vkey, idem_key) DO UPDATE SET
+                 reservation = excluded.reservation,
+                 actual = excluded.actual,
+                 seen_at = excluded.seen_at,
+                 expires_at = excluded.expires_at",
+            params![
+                vkey,
+                idem_key,
+                reservation as i64,
+                actual as i64,
+                now.unix_timestamp(),
+                (now + ttl).unix_timestamp()
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn reclaim_expired_durable(&mut self, now: OffsetDateTime) -> rusqlite::Result<usize> {
+        let now_ts = now.unix_timestamp();
         let n = self.conn.execute(
             "DELETE FROM budget_reservation WHERE settled = 0 AND expires_at <= ?1",
-            params![now.unix_timestamp()],
+            params![now_ts],
         )?;
-        Ok(n)
+        // TD-0021 P4 review finding: the dedup table is not prune-on-sight only —
+        // without this, a key used once and never retried lives forever, and the
+        // table's growth tracks call volume (the TD-0024 retention class).
+        let d = self.conn.execute(
+            "DELETE FROM idempotency_dedup WHERE expires_at <= ?1",
+            params![now_ts],
+        )?;
+        // The caller's `leases_reclaimed` metric counts BOTH kinds of reaped row;
+        // both are "expired enforcement state reclaimed" — that conflation is the
+        // intent, noted here so the metric's semantics are discoverable.
+        Ok(n + d)
     }
 
     pub fn limit_durable(&self, scope: &str) -> rusqlite::Result<Option<u64>> {
@@ -392,6 +546,183 @@ mod tests {
             l.reserve_durable(scope, ceiling, t0(), ttl()).unwrap(),
             ReserveOutcome::Denied(_)
         )
+    }
+
+    #[test]
+    fn reservation_sums_are_index_only_scans() {
+        // Design audit A5: `spent`/`reserved` are SUMs over (scope, settled) whose payloads are
+        // actual/ceiling. With the old two-column index every matching row cost a table fetch,
+        // so admission work grew with the scope's settled history. The covering index must
+        // serve the hot reads without touching the table — asserted via the query planner, not
+        // by trusting the DDL.
+        let l = mem();
+        let plan: Vec<String> = {
+            let mut stmt = l
+                .conn
+                .prepare(
+                    "EXPLAIN QUERY PLAN \
+                     SELECT COALESCE(SUM(actual), 0) FROM budget_reservation \
+                     WHERE scope = ?1 AND settled = 1 AND COALESCE(settled_at, 0) >= ?2",
+                )
+                .unwrap();
+            let rows = stmt.query_map(["g", "0"], |row| {
+                let detail: String = row.get(3)?;
+                Ok(detail)
+            });
+            rows.unwrap().map(Result::unwrap).collect()
+        };
+        assert!(
+            plan.iter().any(|d| d.contains("USING COVERING INDEX")),
+            "the settled-spend SUM must be an index-only scan, plan was: {plan:?}"
+        );
+        let mut stmt = l
+            .conn
+            .prepare(
+                "SELECT name FROM sqlite_master \
+                 WHERE type = 'index' AND tbl_name = 'budget_reservation'",
+            )
+            .unwrap();
+        let indexes: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            indexes.iter().all(|name| name != "idx_reservation_scope"),
+            "the superseded two-column index must be dropped, found: {indexes:?}"
+        );
+    }
+
+    #[test]
+    fn existing_store_loses_the_superseded_index_and_keeps_rows() {
+        // The migration DIRECTION, not just the fresh-schema state (adversarial review of this
+        // PR): a store carrying the old two-column index must lose it on reopen while its
+        // settled rows survive — otherwise a silently-removed DROP INDEX would pass every
+        // fresh-`:memory:` test while existing deployments keep both indexes forever.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ledger.db");
+        {
+            let conn = Connection::open(&path).expect("open raw");
+            conn.execute_batch(
+                "CREATE TABLE budget_reservation (
+                     id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                     scope      TEXT    NOT NULL,
+                     ceiling    INTEGER NOT NULL,
+                     actual     INTEGER NOT NULL DEFAULT 0,
+                     settled    INTEGER NOT NULL DEFAULT 0,
+                     settled_at INTEGER,
+                     expires_at INTEGER NOT NULL
+                 );
+                 CREATE INDEX idx_reservation_scope ON budget_reservation (scope, settled);
+                 INSERT INTO budget_reservation (scope, ceiling, actual, settled, settled_at, expires_at)
+                 VALUES ('g', 10, 7, 1, 5, 99);",
+            )
+            .expect("seed old schema");
+        }
+        let l = SqliteLedger::open(path.to_str().expect("utf8 path")).expect("reopen as ledger");
+        let mut stmt = l
+            .conn
+            .prepare(
+                "SELECT name FROM sqlite_master \
+                 WHERE type = 'index' AND tbl_name = 'budget_reservation'",
+            )
+            .expect("prepare");
+        let indexes: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            indexes.iter().all(|name| name != "idx_reservation_scope"),
+            "old index must be dropped on reopen, found: {indexes:?}"
+        );
+        assert!(
+            indexes
+                .iter()
+                .any(|name| name == "idx_reservation_scope_covering"),
+            "covering index must exist after migration, found: {indexes:?}"
+        );
+        assert_eq!(l.spent_durable("g").unwrap(), 7, "settled rows survive");
+    }
+
+    #[test]
+    fn idempotency_dedup_one_lease_one_event_inside_the_window() {
+        let mut l = mem();
+        let now = OffsetDateTime::now_utc();
+
+        // First call: unseen → record the settlement.
+        assert!(l.seen_durable("vk_1", "idem_a", now).unwrap().is_none());
+        l.record_durable("vk_1", "idem_a", 7, 120, now, Duration::seconds(900))
+            .unwrap();
+
+        // Repeat INSIDE the window: seen — the caller reuses the settlement.
+        assert_eq!(
+            l.seen_durable("vk_1", "idem_a", now).unwrap(),
+            Some((7, 120)),
+            "TD-0021 P4 D1: the repeat finds the original settlement"
+        );
+
+        // Different key or different vkey: independent logical calls.
+        assert!(l.seen_durable("vk_1", "idem_b", now).unwrap().is_none());
+        assert!(l.seen_durable("vk_2", "idem_a", now).unwrap().is_none());
+    }
+
+    #[test]
+    fn idempotency_dedup_window_expiry_counts_the_retry() {
+        let mut l = mem();
+        let now = OffsetDateTime::now_utc();
+        l.record_durable("vk_1", "idem_a", 7, 120, now, Duration::seconds(900))
+            .unwrap();
+
+        // Past the window: pruned on sight, reports unseen (D2/D3).
+        let later = now + Duration::seconds(901);
+        assert!(
+            l.seen_durable("vk_1", "idem_a", later).unwrap().is_none(),
+            "a retry after the window is a new logical call"
+        );
+
+        // And the row is gone — a third call inside a fresh window is also new.
+        assert!(l.seen_durable("vk_1", "idem_a", later).unwrap().is_none());
+    }
+
+    #[test]
+    fn reclaim_sweep_also_prunes_expired_dedup_rows() {
+        let mut l = mem();
+        let now = OffsetDateTime::now_utc();
+        // Two records: one inside its window, one long past.
+        l.record_durable("vk_keep", "k1", 1, 10, now, Duration::seconds(900))
+            .unwrap();
+        l.record_durable(
+            "vk_gone",
+            "k2",
+            2,
+            20,
+            now - Duration::seconds(2000),
+            Duration::seconds(900),
+        )
+        .unwrap();
+
+        let pruned = l.reclaim_expired_durable(now).unwrap();
+        assert!(pruned >= 1, "the expired dedup row is swept");
+
+        // The live record survives; the expired one is gone even without a sight.
+        assert!(l.seen_durable("vk_keep", "k1", now).unwrap().is_some());
+        assert!(l.seen_durable("vk_gone", "k2", now).unwrap().is_none());
+    }
+
+    #[test]
+    fn idempotency_dedup_record_replaces_with_the_fresh_settlement() {
+        let mut l = mem();
+        let now = OffsetDateTime::now_utc();
+        l.record_durable("vk_1", "idem_a", 7, 120, now, Duration::seconds(900))
+            .unwrap();
+        // A second settlement for the same key: the freshest wins.
+        l.record_durable("vk_1", "idem_a", 9, 99, now, Duration::seconds(900))
+            .unwrap();
+        assert_eq!(
+            l.seen_durable("vk_1", "idem_a", now).unwrap(),
+            Some((9, 99))
+        );
     }
 
     #[test]

@@ -13,11 +13,14 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use sandhi_core::{BufferedSink, InMemorySink, KeyStore, Sink, VirtualKey};
-use sandhi_providers::{AnthropicAuthScheme, GeminiAuthScheme, ProviderHandle, ProviderRuntime};
+use sandhi_providers::{
+    AnthropicAuthScheme, GeminiAuthScheme, ProviderFamily, ProviderHandle, ProviderRuntime,
+};
 use sandhi_proxy::{
-    reclaim_sweep_at, rehydrate_alerts, rehydrate_budgets, serve_with_shutdown_timeout,
-    BufferedAlertStore, ProxyLedger, ProxyState, DEFAULT_HEADER_READ_TIMEOUT_SECS,
-    DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_CONNECTIONS_PER_IP, DEFAULT_MAX_IN_FLIGHT_AI_REQUESTS,
+    plaintext_bind_warning, reclaim_sweep_at, rehydrate_alerts, rehydrate_budgets,
+    serve_with_shutdown_timeout, serve_with_tls_shutdown_timeout, BufferedAlertStore, ProxyLedger,
+    ProxyState, TlsConfig, DEFAULT_HEADER_READ_TIMEOUT_SECS, DEFAULT_MAX_CONNECTIONS,
+    DEFAULT_MAX_CONNECTIONS_PER_IP, DEFAULT_MAX_IN_FLIGHT_AI_REQUESTS,
     DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_SHUTDOWN_GRACE,
 };
 use sandhi_store::{AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
@@ -65,7 +68,7 @@ async fn main() {
     // Legacy demo path: pre-register upstreams + virtual keys from env.
     if let Ok(key) = std::env::var("SANDHI_OPENAI_KEY") {
         let base = std::env::var("SANDHI_OPENAI_BASE")
-            .unwrap_or_else(|_| "https://api.openai.com/v1".into());
+            .unwrap_or_else(|_| ProviderFamily::OpenAiCompat.default_base_url().to_owned());
         providers.insert(
             "openai".into(),
             runtime.openai_compat("openai", base, key, Default::default(), None, None, None),
@@ -84,7 +87,7 @@ async fn main() {
         // only ever be the public API — no Anthropic-compatible gateway, no local mock, and no
         // way for the SDK-conformance suite to exercise this path at all.
         let base = std::env::var("SANDHI_ANTHROPIC_BASE")
-            .unwrap_or_else(|_| "https://api.anthropic.com".into());
+            .unwrap_or_else(|_| ProviderFamily::Anthropic.default_base_url().to_owned());
         providers.insert(
             "anthropic".into(),
             runtime.anthropic(
@@ -109,7 +112,7 @@ async fn main() {
 
     if let Ok(key) = std::env::var("SANDHI_GEMINI_KEY") {
         let base = std::env::var("SANDHI_GEMINI_BASE")
-            .unwrap_or_else(|_| "https://generativelanguage.googleapis.com".into());
+            .unwrap_or_else(|_| ProviderFamily::Gemini.default_base_url().to_owned());
         providers.insert(
             "gemini".into(),
             runtime.gemini(
@@ -211,16 +214,39 @@ async fn main() {
             buffered_sink = Some(Arc::clone(&buffered));
             buffered
         }
-        None => Arc::new(InMemorySink::new()),
+        None => {
+            // No durable store: usage stays in a bounded in-memory ring (design audit A3 — the
+            // previous unbounded Vec made the default no-config deployment a monotonic memory
+            // leak). The newest events are kept and evictions are counted + logged, never silent.
+            let capacity = positive_usize_env(
+                "SANDHI_MEMORY_SINK_MAX",
+                sandhi_core::DEFAULT_MEMORY_SINK_CAPACITY,
+            );
+            eprintln!(
+                "sandhi-proxy: no SANDHI_STORE — usage kept in a bounded in-memory ring \
+                 (newest {capacity} events; SANDHI_MEMORY_SINK_MAX to change)"
+            );
+            Arc::new(InMemorySink::with_capacity(capacity))
+        }
     };
 
     // ADR-0005 step 2: the enforcement ledger is durable (crash-safe leases, calendar windows,
     // restart-surviving spend) when SANDHI_STORE is set — sharing that SQLite file, its tables are
     // disjoint from the usage store's — and volatile in-memory otherwise.
+    // TD-0016 P1: scope-shard the durable ledger so different tenants never
+    // serialize their durable commits. 1 (default) = the single legacy file.
+    let ledger_shards = positive_usize_env("SANDHI_LEDGER_SHARDS", 1);
+    assert!(
+        (1..=64).contains(&ledger_shards),
+        "SANDHI_LEDGER_SHARDS must be between 1 and 64, got {ledger_shards}"
+    );
     let ledger = match std::env::var("SANDHI_STORE") {
-        Ok(path) => match ProxyLedger::durable(&path) {
+        Ok(path) => match ProxyLedger::durable(&path, ledger_shards) {
             Ok(l) => {
-                eprintln!("sandhi-proxy: durable enforcement ledger at {path}");
+                eprintln!(
+                    "sandhi-proxy: durable enforcement ledger at {path} ({ledger_shards} shard{})",
+                    if ledger_shards == 1 { "" } else { "s" }
+                );
                 l
             }
             Err(e) => {
@@ -234,8 +260,22 @@ async fn main() {
     };
 
     let admin_token = std::env::var("SANDHI_ADMIN_TOKEN").ok();
-    let public_url =
-        std::env::var("SANDHI_PUBLIC_URL").unwrap_or_else(|_| "http://localhost:8787".into());
+    let config_path = std::env::var("SANDHI_CONFIG")
+        .ok()
+        .map(std::path::PathBuf::from);
+    let tls = match listener_tls_from_config(config_path.as_deref()) {
+        Ok(tls) => tls,
+        Err(error) => {
+            eprintln!("sandhi-proxy: TLS configuration error: {error}");
+            std::process::exit(1);
+        }
+    };
+    let public_url = std::env::var("SANDHI_PUBLIC_URL").unwrap_or_else(|_| {
+        format!(
+            "{}://localhost:8787",
+            if tls.is_some() { "https" } else { "http" }
+        )
+    });
     if admin_token.is_some() {
         eprintln!("sandhi-proxy: admin API enabled on /admin/*");
     }
@@ -251,6 +291,15 @@ async fn main() {
     // ADR-0004 D4: dashboard read endpoints follow the admin token unless explicitly re-opened.
     state.dashboard_public = std::env::var("SANDHI_DASHBOARD_PUBLIC").as_deref() == Ok("1");
     state.error_detail_full = std::env::var("SANDHI_ERROR_DETAIL").as_deref() == Ok("full");
+    // Design audit A2: label values are caller-supplied (model on the typed plane), so the
+    // registry is capped — excess distinct series fold into "(overflow)". Never let telemetry
+    // fail a request, and never let a valid key grow it without bound.
+    state.metrics = Arc::new(sandhi_proxy::metrics::Metrics::with_max_series(
+        positive_usize_env(
+            "SANDHI_METRICS_MAX_SERIES",
+            sandhi_proxy::metrics::DEFAULT_MAX_METRIC_SERIES,
+        ),
+    ));
     state.max_request_body_bytes = request_body_limit_from_env();
     state.max_in_flight_ai_requests = positive_usize_env(
         "SANDHI_MAX_IN_FLIGHT_AI_REQUESTS",
@@ -274,9 +323,7 @@ async fn main() {
     state.trusted_proxies = sandhi_proxy::parse_trusted_proxies(
         &std::env::var("SANDHI_TRUSTED_PROXIES").unwrap_or_default(),
     );
-    state.config_path = std::env::var("SANDHI_CONFIG")
-        .ok()
-        .map(std::path::PathBuf::from);
+    state.config_path = config_path;
     if let Some(path) = &state.config_path {
         eprintln!(
             "sandhi-proxy: declarative config at {} (GET/POST /admin/config*)",
@@ -330,13 +377,22 @@ async fn main() {
         .parse()
         .expect("SANDHI_BIND must be a valid socket address");
 
+    if let Some(warning) = plaintext_bind_warning(addr, tls.is_some()) {
+        eprintln!("sandhi-proxy: {warning}");
+    }
+    let listener_scheme = if tls.is_some() { "https" } else { "http" };
     eprintln!(
-        "sandhi-proxy listening on http://{addr}  \
+        "sandhi-proxy listening on {listener_scheme}://{addr}  \
          (POST /v1/chat/completions | /v1/messages, Authorization: Bearer vk_...)"
     );
     let shutdown_grace = shutdown_grace_from_env();
-    let serve_result =
-        serve_with_shutdown_timeout(state, addr, shutdown_signal(), shutdown_grace).await;
+    let serve_result = match tls {
+        Some(tls) => {
+            serve_with_tls_shutdown_timeout(state, addr, shutdown_signal(), shutdown_grace, tls)
+                .await
+        }
+        None => serve_with_shutdown_timeout(state, addr, shutdown_signal(), shutdown_grace).await,
+    };
     reclaim_task.abort();
     let _ = reclaim_task.await;
     if let Some(buffered) = buffered_alert_store {
@@ -366,6 +422,43 @@ fn request_body_limit_from_env() -> usize {
         "SANDHI_MAX_REQUEST_BODY_BYTES",
         DEFAULT_MAX_REQUEST_BODY_BYTES,
     )
+}
+
+/// Resolve listener TLS before binding. `SANDHI_CONFIG` stores only paths; the
+/// private-key bytes remain in their separately permissioned file. A configured
+/// but unreadable/invalid pair fails startup rather than silently downgrading to
+/// plaintext.
+fn listener_tls_from_config(path: Option<&std::path::Path>) -> Result<Option<TlsConfig>, String> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("reading {}: {error}", path.display()))?;
+    listener_tls_entry_from_json(&text, path)?
+        .map(|tls| {
+            TlsConfig::from_pem_files(&tls.cert, &tls.key).map_err(|error| error.to_string())
+        })
+        .transpose()
+}
+
+/// Bootstrap needs only the transport projection. Deserializing the complete
+/// operator desired-state schema here would make an unrelated provider or
+/// budget validation error newly fatal to the data plane. The admin endpoints
+/// continue to parse and validate the complete schema when it is previewed or
+/// applied.
+fn listener_tls_entry_from_json(
+    text: &str,
+    path: &std::path::Path,
+) -> Result<Option<sandhi_proxy::config::TlsEntry>, String> {
+    #[derive(serde::Deserialize)]
+    struct ListenerConfigProjection {
+        #[serde(default)]
+        tls: Option<sandhi_proxy::config::TlsEntry>,
+    }
+
+    serde_json::from_str::<ListenerConfigProjection>(text)
+        .map(|config| config.tls)
+        .map_err(|error| format!("parsing {}: {error}", path.display()))
 }
 
 fn shutdown_grace_from_env() -> std::time::Duration {
@@ -465,5 +558,32 @@ fn rehydrate_providers_from_vault(
                 providers.insert(entry.credential_id(), handle);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::listener_tls_entry_from_json;
+    use std::path::Path;
+
+    #[test]
+    fn tls_bootstrap_does_not_validate_unrelated_operator_sections() {
+        let config = r#"{
+            "providers": "validated by the operator API, not bootstrap",
+            "tls": null
+        }"#;
+        assert!(
+            listener_tls_entry_from_json(config, Path::new("sandhi.json"))
+                .expect("valid JSON without TLS remains a plaintext bootstrap")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn tls_bootstrap_rejects_an_incomplete_present_identity() {
+        let config = r#"{"tls":{"cert":"/run/tls/fullchain.pem"}}"#;
+        let error = listener_tls_entry_from_json(config, Path::new("sandhi.json"))
+            .expect_err("a present TLS identity is an atomic certificate/key pair");
+        assert!(error.contains("missing field `key`"), "unexpected: {error}");
     }
 }

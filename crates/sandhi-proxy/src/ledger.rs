@@ -20,7 +20,7 @@ use std::sync::Mutex;
 use time::{Duration, OffsetDateTime};
 
 use sandhi_core::{EnforcementLedger, InMemoryLedger, LedgerView, Policy, Reservation, Window};
-use sandhi_store::{ReserveOutcome, SqliteLedger};
+use sandhi_store::{ReserveOutcome, ShardedLedger};
 
 /// Lease TTL. Must exceed the longest legitimate call (a slow stream can run minutes) so a lease is
 /// only reclaimed well after the request could still be settling (ADR-0005 D2). The proxy settles
@@ -42,7 +42,10 @@ pub enum Admission {
 /// carries crash-safe leases + calendar windows.
 pub enum ProxyLedger {
     Memory(InMemoryLedger),
-    Durable(SqliteLedger),
+    /// The durable arm is scope-sharded (TD-0016 P1): N independent SQLite
+    /// files, so different tenants never serialize their durable commits.
+    /// `shards == 1` (the default) is the single legacy file.
+    Durable(ShardedLedger),
 }
 
 impl ProxyLedger {
@@ -54,14 +57,52 @@ impl ProxyLedger {
 
     /// Open a durable SQLite ledger at `path` (may share the usage-store file — its tables are
     /// disjoint). Returns the backend error as a string so callers need not depend on `rusqlite`.
-    pub fn durable(path: &str) -> Result<Self, String> {
-        SqliteLedger::open(path)
+    pub fn durable(path: &str, shards: usize) -> Result<Self, String> {
+        ShardedLedger::open_sharded(path, shards)
             .map(Self::Durable)
             .map_err(|e| e.to_string())
     }
 
     fn ttl() -> Duration {
         Duration::seconds(RESERVATION_TTL_SECS)
+    }
+
+    /// Whether this ledger is the volatile in-memory arm (dedup unavailable, TD-0021 P4 D3).
+    pub fn is_volatile(&self) -> bool {
+        matches!(self, Self::Memory(_))
+    }
+
+    /// TD-0021 P4 (D1): has this `(vkey, idem_key)` already been settled inside the
+    /// window? `Some(_)` means yes — the repeat is the SAME logical call, so the caller
+    /// drops its duplicate usage event (the meter counts logical calls; enforcement
+    /// still settles the retry's own lease, because the retry physically consumed
+    /// tokens). `None` means unseen or dedup-unavailable; the caller counts the call
+    /// (D3). The returned ids are diagnostic, not a settlement handle.
+    pub fn seen(&mut self, vkey: &str, idem_key: &str) -> Option<(u64, u64)> {
+        let now = OffsetDateTime::now_utc();
+        match self {
+            Self::Memory(_) => None, // no dedup in the volatile arm — count (D3)
+            Self::Durable(l) => l.seen_durable(vkey, idem_key, now).ok().flatten(),
+        }
+    }
+
+    /// TD-0021 P4 (D1): record the settlement of a logical call. Expiry mirrors the
+    /// lease TTL (D2) so the dedup window matches the settlement it protects.
+    pub fn record(&mut self, vkey: &str, idem_key: &str, reservation: u64, actual: u64) {
+        let now = OffsetDateTime::now_utc();
+        match self {
+            Self::Memory(_) => {} // volatile arm: nothing durable to protect
+            Self::Durable(l) => {
+                if let Err(e) =
+                    l.record_durable(vkey, idem_key, reservation, actual, now, Self::ttl())
+                {
+                    tracing::warn!(
+                        %e,
+                        "idempotency record failed — a retry of this call will be metered again (D3 fail-toward-counting)"
+                    );
+                }
+            }
+        }
     }
 
     /// Set (or clear, with `limit = None`) a scope's budget: cap + window + policy.
@@ -124,7 +165,7 @@ impl ProxyLedger {
         match self {
             Self::Memory(l) => l.settle(reservation.id, actual),
             Self::Durable(l) => {
-                if let Err(e) = l.settle_durable(reservation.id, actual) {
+                if let Err(e) = l.settle_durable(&reservation.scope, reservation.id, actual) {
                     // A settle that does not land leaves the lease holding capacity until its TTL
                     // expires, so this is an operator-visible fault, not a debug detail.
                     tracing::error!(
@@ -273,7 +314,7 @@ mod tests {
         let path = path.to_str().unwrap();
 
         {
-            let mut l = ProxyLedger::durable(path).unwrap();
+            let mut l = ProxyLedger::durable(path, 1).unwrap();
             l.set_budget("g", Some(1000), Window::Daily, Policy::Block);
             let Admission::Leased(r) = l.reserve("g", 100, now(), Policy::Block) else {
                 panic!("fits under the 1000 cap");
@@ -283,7 +324,7 @@ mod tests {
             assert_eq!(l.reserved("g"), 0);
         } // connection dropped — simulate a proxy restart
 
-        let reopened = ProxyLedger::durable(path).unwrap();
+        let reopened = ProxyLedger::durable(path, 1).unwrap();
         assert_eq!(
             reopened.spent("g"),
             80,

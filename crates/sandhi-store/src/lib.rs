@@ -5,6 +5,8 @@
 
 pub mod alerts;
 pub mod ledger;
+pub mod sharded;
+pub use sharded::ShardedLedger;
 pub mod vault;
 pub mod vkeys;
 
@@ -51,7 +53,9 @@ pub type Bucket = UsageAggregateV1;
 /// The per-connection `synchronous` level to set on a durable connection. `journal_mode=WAL` is
 /// persistent on the database file (every connection to it sees WAL once any sets it); `synchronous`
 /// is per-connection and is the lever for the durability/speed trade-off.
-enum Synchronous {
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Synchronous {
     /// `NORMAL` — fast; may lose the last committed transaction on a power loss. Correct for the
     /// best-effort usage-event sink (ADR-0047 D7: a sink failure must never break the request, so a
     /// lost last metering row on a hard crash is an acceptable trade for write throughput).

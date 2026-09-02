@@ -741,6 +741,40 @@ mod tests {
     }
 
     #[test]
+    fn family_default_base_urls_match_the_catalog_descriptors() {
+        // The single-source pin (design audit A1, the #196 drift class): the proxy's
+        // `default_base_url`, the standalone env registrations, and both bindings' `provider()`
+        // dispatch all consume `ProviderFamily::default_base_url()`. This pins those values to
+        // the catalog descriptors — the drift it prevents is not hypothetical: the proxy's own
+        // copy had Gemini without `/v1beta` (a default-config 404 on every call) and Cohere on
+        // the legacy `api.cohere.ai` domain.
+        for (slug, family) in [
+            ("anthropic", crate::ProviderFamily::Anthropic),
+            ("gemini", crate::ProviderFamily::Gemini),
+            ("cohere", crate::ProviderFamily::Cohere),
+            ("ollama", crate::ProviderFamily::Ollama),
+        ] {
+            let descriptor = provider_descriptor(slug).expect("curated family descriptor");
+            assert_eq!(
+                family.default_base_url(),
+                descriptor.base_url,
+                "family default for {slug} drifted from the catalog"
+            );
+        }
+        // The compat families' fallback is the curated openai row; per-slug overrides come from
+        // the catalog specs at resolve time.
+        let openai = resolve_openai_compat_provider("openai").expect("curated openai spec");
+        assert_eq!(
+            crate::ProviderFamily::OpenAiCompat.default_base_url(),
+            openai.base_url
+        );
+        assert_eq!(
+            crate::ProviderFamily::OpenAiResponses.default_base_url(),
+            openai.base_url
+        );
+    }
+
+    #[test]
     fn inferflux_is_a_self_hosted_compat_slug_with_no_curated_lineup() {
         let spec = resolve_openai_compat_provider("inferflux").expect("inferflux spec");
         assert_eq!(spec.slug, "inferflux");

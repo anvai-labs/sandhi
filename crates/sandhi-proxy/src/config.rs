@@ -18,13 +18,22 @@
 //! fixed value: the real `vk_...` secret only ever exists at mint time, stored server-side as a
 //! hash. Applying a vkey entry either mints a new key (if none matching its identity exists yet)
 //! or is a no-op (if one does) — it can never "update" a vkey's secret in place.
+//!
+//! Listener TLS is the one startup-only section: preview/apply reports it as
+//! `restart required`, while process bootstrap validates and activates it before bind. Live
+//! certificate replacement belongs to TD-0017 P2 and is not smuggled into desired-state apply.
 
 use serde::Deserialize;
+use std::path::PathBuf;
 
 use sandhi_store::{AlertRuleRecord, VirtualKeyRecord};
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 pub struct SandhiFileConfig {
+    /// Optional listener TLS configuration. Paths are reviewable configuration,
+    /// while the private-key bytes remain outside this file.
+    #[serde(default)]
+    pub tls: Option<TlsEntry>,
     #[serde(default)]
     pub providers: Vec<ProviderEntry>,
     #[serde(default)]
@@ -33,6 +42,14 @@ pub struct SandhiFileConfig {
     pub alerts: Vec<AlertEntry>,
     #[serde(default)]
     pub vkeys: Vec<VkeyEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct TlsEntry {
+    /// PEM certificate chain, leaf first.
+    pub cert: PathBuf,
+    /// PEM PKCS#1, PKCS#8, or SEC1 private key matching the leaf certificate.
+    pub key: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -149,12 +166,17 @@ mod tests {
     #[test]
     fn parses_a_full_config_from_json() {
         let json = r#"{
+            "tls": {"cert":"/run/tls/fullchain.pem","key":"/run/tls/privkey.pem"},
             "providers": [{"provider":"ollama","label":"default","base_url":"http://localhost:11434","secret_env":null}],
             "budgets": [{"scope":"group:platform","limit_tokens":1000000,"window":"monthly","policy":"block"}],
             "alerts": [{"scope":"group:platform","threshold_pct":90,"webhook_env":"SLACK_URL"}],
             "vkeys": [{"upstream":"ollama:default","subject":"alice","group":"platform","rate_limit_per_min":60}]
         }"#;
         let cfg: SandhiFileConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            cfg.tls.as_ref().map(|tls| tls.cert.as_path()),
+            Some(std::path::Path::new("/run/tls/fullchain.pem"))
+        );
         assert_eq!(cfg.providers.len(), 1);
         assert_eq!(cfg.budgets[0].limit_tokens, 1_000_000);
         assert_eq!(cfg.alerts[0].threshold_pct, 90);
@@ -165,6 +187,15 @@ mod tests {
     fn missing_sections_default_to_empty_not_an_error() {
         let cfg: SandhiFileConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(cfg, SandhiFileConfig::default());
+    }
+
+    #[test]
+    fn tls_certificate_and_key_are_an_atomic_pair() {
+        let missing_key = r#"{"tls":{"cert":"/run/tls/fullchain.pem"}}"#;
+        assert!(
+            serde_json::from_str::<SandhiFileConfig>(missing_key).is_err(),
+            "enabling TLS with only half of the identity must fail configuration parsing"
+        );
     }
 
     #[test]
