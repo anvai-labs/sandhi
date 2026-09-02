@@ -142,6 +142,45 @@ pub struct BudgetSpec {
 /// Admin auth. Returns `Ok(())` when the presented bearer matches the configured admin token.
 /// `403` when no admin token is configured; `401` when missing/wrong.
 #[allow(clippy::result_large_err)] // axum::Response is intentionally large; this is the idiomatic shape.
+/// `GET /admin/version` — capability detail beyond the versions (TD-0021 P2, D5/R2).
+///
+/// The ungated `/version` answers "which contract am I talking to"; this answers
+/// "which optional features are on" — operator information, so it sits behind the
+/// same admin gate as the rest of `/admin`. The booleans mirror what the proxy was
+/// BUILT with and CONFIGURED with at startup; a consumer degrades deliberately
+/// instead of by trial and error (the HTTP form of TD-0008's feature detection).
+pub(crate) async fn version_capabilities(
+    State(state): State<Arc<ProxyState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(r) = require_admin(&state, &headers) {
+        return r;
+    }
+    let body = serde_json::json!({
+        "wire_contract_version": sandhi_core::UsageEvent::SCHEMA_VERSION,
+        "chat_contract_version": sandhi_core::CHAT_SCHEMA_VERSION_V1,
+        "chat_contract_minor": sandhi_core::CHAT_CONTRACT_MINOR,
+        "dialects": ["openai", "anthropic", "responses", "gemini"],
+        "capabilities": {
+            // The two-plane proxy is structural (ADR-0004 D1), not optional.
+            "transparent_plane": true,
+            // Durable + crash-safe when SANDHI_STORE is set; volatile otherwise.
+            "durable_ledger": state.store.is_some(),
+            "alerts": state.alerts.is_some(),
+            "admin_api": state.admin_token.is_some(),
+            // TD-0012: per-vkey token bucket, in-memory (N replicas multiply it).
+            "rate_limits": true,
+            // Compiled only with the otel-otlp feature AND initialized at startup.
+            "otel_export": state.otel.is_some(),
+        },
+    });
+    Json(body).into_response()
+}
+
+// The Err is a ready-to-return HTTP Response (status + shaped body) — it is handed
+// straight to the caller and never held; boxing it would add an allocation to every
+// gated handler for no gain.
+#[allow(clippy::result_large_err)]
 pub(crate) fn require_admin(state: &ProxyState, headers: &HeaderMap) -> Result<(), Response> {
     let Some(expected) = state.admin_token.as_deref() else {
         return Err(err(

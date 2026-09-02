@@ -100,6 +100,156 @@ async fn complete_attributes_meters_and_records_budget() {
     assert_eq!(state.ledger.lock().unwrap().reserved("group:platform"), 0);
 }
 
+// ───────────────────────── Contract version discovery (TD-0021 P2) ─────────────────────────
+
+#[tokio::test]
+async fn version_endpoint_is_unauthenticated_and_reports_the_contract() {
+    let sink = Arc::new(InMemorySink::new());
+    let state = state_with("http://127.0.0.1:1".into(), sink, ProxyLedger::in_memory());
+    let app = build_app(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/version")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["wire_contract_version"], "1");
+    assert_eq!(value["chat_contract_version"], "1");
+    assert_eq!(value["chat_contract_minor"], 6);
+    let dialects = value["dialects"].as_array().unwrap();
+    for expected in ["openai", "anthropic", "responses", "gemini"] {
+        assert!(
+            dialects.iter().any(|d| d == expected),
+            "dialect {expected} advertised"
+        );
+    }
+}
+
+#[tokio::test]
+async fn admin_version_reports_capabilities_behind_the_gate() {
+    // state_with carries no admin token and no store — the endpoint must refuse;
+    // the capability detail is operator information (D5/R2).
+    // Admin-gated: a fresh state with an admin token set (state_with has none).
+    let keys = KeyStore::new();
+    let mut admin_state = ProxyState::new(
+        keys,
+        ProxyLedger::in_memory(),
+        Arc::new(InMemorySink::new()),
+        HashMap::new(),
+        None,
+    );
+    admin_state.admin_token = Some("admin".into());
+    let app = build_app(Arc::new(admin_state));
+
+    // Without the token: 403.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/admin/version")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    // With it: the capability booleans.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/admin/version")
+                .header("authorization", "Bearer admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let caps = &value["capabilities"];
+    assert_eq!(caps["transparent_plane"], true);
+    assert_eq!(caps["rate_limits"], true);
+    assert_eq!(caps["durable_ledger"], false); // no SANDHI_STORE in this state
+    assert_eq!(caps["otel_export"], false); // no recorder attached
+}
+
+#[tokio::test]
+async fn every_response_carries_the_contract_version_header_including_errors() {
+    // R3: a version mismatch most often PRESENTS as an error — the header must be
+    // there exactly then. D4: success responses carry it too. The middleware is the
+    // single source, so one success + one error pin the contract.
+    let upstream = MockServer::start().await;
+    let resp = serde_json::json!({
+        "choices": [{ "message": { "content": "hi" } }],
+        "usage": { "prompt_tokens": 5, "completion_tokens": 1 }
+    });
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(resp))
+        .mount(&upstream)
+        .await;
+
+    let sink = Arc::new(InMemorySink::new());
+    let state = state_with(upstream.uri(), sink, ProxyLedger::in_memory());
+    let app = build_app(state);
+
+    // Success path.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("authorization", "Bearer vk_demo")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"model":"gpt-x","messages":[]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("x-sandhi-contract-version").unwrap(),
+        "1"
+    );
+
+    // Error path: a bad virtual key produces a dialect-shaped 401.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("authorization", "Bearer vk_does_not_exist")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"model":"gpt-x","messages":[]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        response.headers().get("x-sandhi-contract-version").unwrap(),
+        "1",
+        "the header rides error responses too (R3)"
+    );
+}
+
 /// A proxy fronting a mocked **Anthropic** upstream that answers `/v1/messages` once.
 async fn anthropic_state(upstream: &MockServer, sink: Arc<InMemorySink>) -> Arc<ProxyState> {
     Mock::given(method("POST"))

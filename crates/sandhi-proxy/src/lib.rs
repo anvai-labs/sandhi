@@ -502,8 +502,16 @@ fn ingress_routes(state: &Arc<ProxyState>) -> axum::Router<Arc<ProxyState>> {
 pub fn build_app(state: Arc<ProxyState>) -> Router {
     let max_request_body_bytes = state.max_request_body_bytes;
     let ai_routes = ingress_routes(&state);
+    // TD-0021 P2 (D4/R3): every response — success AND error, including ingress errors —
+    // carries the chat contract version, so a consumer hitting a mismatch knows which
+    // contract it is talking to at the moment it most needs to (R3: a mismatch presents
+    // as an error). One middleware layer is the single source; no builder can forget it.
     Router::new()
         .route("/healthz", get(health))
+        // TD-0021 P2 (D4/R2): the HTTP-path contract handshake. Ungated — versions
+        // and wired dialects are public facts; the capability detail (D5) lives
+        // behind the admin gate at /admin/version.
+        .route("/version", get(version))
         .route("/catalog/models", get(catalog_models))
         .route("/dashboard", get(dashboard_html))
         .route("/dashboard/api/usage", get(dashboard_api))
@@ -521,6 +529,9 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         .route("/v1/models", get(list_models))
         .route("/v1beta/models", get(list_models_gemini))
         // TD-0003 P1 operator (admin) API.
+        // TD-0021 P2 (D5/R2): capability detail — which optional features are on —
+        // is operator information, gated like the rest of /admin.
+        .route("/admin/version", get(operator::version_capabilities))
         .route(
             "/admin/keys",
             post(operator::add_key).get(operator::list_keys),
@@ -549,6 +560,7 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         .route("/admin/config/apply", post(operator::config_apply))
         .merge(ai_routes)
         .layer(DefaultBodyLimit::max(max_request_body_bytes))
+        .layer(axum::middleware::from_fn(contract_version_header))
         .with_state(state)
 }
 
@@ -989,6 +1001,39 @@ mod request_admission_tests {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+/// Append `x-sandhi-contract-version` to every response (TD-0021 P2, D4/R3).
+///
+/// A middleware, not per-builder calls: the header must appear on success bodies,
+/// upstream-forwarded bytes, streaming bodies, AND dialect-shaped errors — including
+/// future error paths that do not exist yet. One layer cannot be forgotten.
+async fn contract_version_header(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        axum::http::HeaderName::from_static("x-sandhi-contract-version"),
+        axum::http::HeaderValue::from_static(sandhi_core::CHAT_SCHEMA_VERSION_V1),
+    );
+    response
+}
+
+/// `GET /version` — the ungated HTTP form of the contract handshake (TD-0021 P2, D4).
+///
+/// What an HTTP consumer needs before its first call, with nothing an unauthenticated
+/// caller could use for anything else: the wire (usage-event) and chat contract
+/// versions, the additive minor round, and the wired ingress dialects. The capability
+/// detail (D5) is gated at `/admin/version` (R2).
+async fn version() -> Response {
+    let body = json!({
+        "wire_contract_version": sandhi_core::UsageEvent::SCHEMA_VERSION,
+        "chat_contract_version": sandhi_core::CHAT_SCHEMA_VERSION_V1,
+        "chat_contract_minor": sandhi_core::CHAT_CONTRACT_MINOR,
+        "dialects": ["openai", "anthropic", "responses", "gemini"],
+    });
+    Json(body).into_response()
 }
 
 #[derive(serde::Deserialize)]
