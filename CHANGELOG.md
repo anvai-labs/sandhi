@@ -35,6 +35,16 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 
 ### Fixed
 
+- **`input_estimate` reads the request body instead of re-serializing the prompt** (design audit
+  A4). The reservation ceiling's input side re-serialized `messages` + `tools` to JSON on every
+  request — a second full prompt materialization (on top of body → `Value` → `ChatRequestV1` →
+  native re-encode) purely to divide its byte length by four. The estimate now divides the
+  ingress body's length, which is a superset of the neutral serialization it decodes to — so the
+  ceiling stays conservative (ADR-0005 D1: ceilings may grow, never shrink), pinned per dialect
+  by a new test that fails if any future codec lets the wire body stop dominating the content it
+  carried. Accuracy semantics unchanged (still bytes/4; the script-aware estimator remains
+  TD-0016 R2's).
+
 - **Single source for family default base URLs** (design audit A1, the #196 drift class). The
   proxy's own hard-coded defaults had drifted from the catalog: Gemini without `/v1beta` — in
   `default_base_url`, the `SANDHI_GEMINI_KEY` env registration, and the typed-runtime fixtures —

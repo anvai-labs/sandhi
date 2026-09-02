@@ -2137,7 +2137,7 @@ async fn handle(
     // A scope is "capped" (for output-bounding) only under a hard `Block` cap: a `Warn` soft cap
     // never rejects, so we do not shrink the client's request. Bounding output makes the ceiling
     // reservation enforceable when the client left `max_output_tokens` unset (ADR-0005 D1).
-    let (ceiling, effective_max) = reservation_ceiling(&request);
+    let (ceiling, effective_max) = reservation_ceiling(&request, body.len());
     // SQLite's transaction remains a synchronous correctness boundary, but it runs on Tokio's
     // blocking pool so its busy timeout never parks an async scheduler worker.
     let (capped, admission) = reserve_budget(&state, &scope, ceiling, policy).await;
@@ -2952,28 +2952,28 @@ async fn stream_response(
         .expect("valid streaming response")
 }
 
-/// Coarse input-token estimate: bytes of the prompt payload / 4. A known lower-bound approximation
-/// (undercounts CJK, overcounts verbose tool schemas); a model-aware/tokenizer estimator is the
-/// follow-up (ADR-0005 D1). The *output* side, not this, is the load-bearing part of the ceiling.
-fn input_estimate(request: &ChatRequestV1) -> u64 {
-    let bytes = serde_json::to_vec(&request.messages)
-        .map(|value| value.len() as u64)
-        .unwrap_or(0)
-        .saturating_add(
-            serde_json::to_vec(&request.tools)
-                .map(|value| value.len() as u64)
-                .unwrap_or(0),
-        );
-    bytes.saturating_add(3) / 4
+/// Coarse input-token estimate: bytes of the ingress request body / 4. The wire body is a
+/// superset of the neutral `messages`+`tools` it decodes to (every dialect envelope carries the
+/// same content wrapped in its own field names — pinned per dialect by
+/// `body_length_dominates_the_serialized_prompt`), so dividing the body length is at least as
+/// conservative as re-serializing the decoded request, and costs zero allocations on a path that
+/// runs before every reservation (design audit A4 — this used to re-serialize the prompt twice).
+/// A known lower-bound approximation either way (undercounts CJK, overcounts verbose tool
+/// schemas); a model-aware/tokenizer estimator is the follow-up (ADR-0005 D1). The *output*
+/// side, not this, is the load-bearing part of the ceiling.
+fn input_estimate(body_len: usize) -> u64 {
+    (body_len as u64).saturating_add(3) / 4
 }
 
 /// The reservation **ceiling** (ADR-0005 D1): input estimate + the effective output max (the
 /// client's `max_output_tokens`, or [`DEFAULT_OUTPUT_CEILING`] when unbounded). Returns the ceiling
 /// and the effective max so the caller can bound a capped scope's upstream request. This is a
 /// conservative upper bound, not the old `+ 1` lower-bound estimate that let streams overshoot.
-fn reservation_ceiling(request: &ChatRequestV1) -> (u64, u64) {
+fn reservation_ceiling(request: &ChatRequestV1, body_len: usize) -> (u64, u64) {
     let effective_max = request.max_output_tokens.unwrap_or(DEFAULT_OUTPUT_CEILING);
-    let ceiling = input_estimate(request).saturating_add(effective_max).max(1);
+    let ceiling = input_estimate(body_len)
+        .saturating_add(effective_max)
+        .max(1);
     (ceiling, effective_max)
 }
 
@@ -3790,5 +3790,102 @@ mod connection_policy_tests {
             resolve_forwarded_for(peer, Some("10.0.0.1"), &allowlist),
             None
         );
+    }
+
+    /// Design audit A4: `input_estimate` divides the ingress body length instead of
+    /// re-serializing the decoded prompt. That is conservative (ADR-0005 D1 — a ceiling may
+    /// grow, never shrink) only while every dialect's wire body dominates the neutral
+    /// serialization of the content it carried; this pins that domination per dialect so a
+    /// future codec cannot silently invert the direction.
+    #[test]
+    fn body_length_dominates_the_serialized_prompt() {
+        const TEXT: &str = "You are a careful assistant that explains reservation ceilings, \
+             lease semantics, and the difference between what the meter counts and what the \
+             ledger settles, at length and with examples.";
+        const USER: &str = "Please explain the reservation ceiling semantics in detail, \
+             covering the input estimate, the output bound, and the calendar window.";
+        let tool_schema: serde_json::Value = serde_json::json!({
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "the thing to look up"}}
+        });
+        let cases: &[(&str, IngressDialect, serde_json::Value)] = &[
+            (
+                "openai",
+                IngressDialect::OpenAi,
+                serde_json::json!({
+                    "model": "gpt-x",
+                    "messages": [
+                        {"role": "system", "content": TEXT},
+                        {"role": "user", "content": USER}
+                    ],
+                    "tools": [{"type": "function", "function": {
+                        "name": "lookup",
+                        "description": "Look something up in the shared index",
+                        "parameters": tool_schema
+                    }}]
+                }),
+            ),
+            (
+                "anthropic",
+                IngressDialect::Anthropic,
+                serde_json::json!({
+                    "model": "claude-x",
+                    "system": TEXT,
+                    "messages": [
+                        {"role": "user", "content": [{"type": "text", "text": USER}]}
+                    ],
+                    "tools": [{
+                        "name": "lookup",
+                        "description": "Look something up in the shared index",
+                        "input_schema": tool_schema
+                    }]
+                }),
+            ),
+            (
+                "responses",
+                IngressDialect::Responses,
+                serde_json::json!({
+                    "model": "gpt-x",
+                    "input": [
+                        {"role": "system", "content": [{"type": "input_text", "text": TEXT}]},
+                        {"role": "user", "content": [{"type": "input_text", "text": USER}]}
+                    ],
+                    "tools": [{"type": "function",
+                        "name": "lookup",
+                        "description": "Look something up in the shared index",
+                        "parameters": tool_schema
+                    }]
+                }),
+            ),
+            (
+                "gemini",
+                IngressDialect::Gemini,
+                serde_json::json!({
+                    "systemInstruction": {"parts": [{"text": TEXT}]},
+                    "contents": [{"role": "user", "parts": [{"text": USER}]}],
+                    "tools": [{"functionDeclarations": [{
+                        "name": "lookup",
+                        "description": "Look something up in the shared index",
+                        "parameters": {"type": "OBJECT",
+                            "properties": {"query": {"type": "STRING"}}}
+                    }]}]
+                }),
+            ),
+        ];
+        for (name, dialect, body) in cases {
+            let wire_len = serde_json::to_string(body).unwrap().len();
+            let (request, _) =
+                crate::codec::decode_request(*dialect, body.clone(), RequestMetadataV1::default())
+                    .unwrap_or_else(|e| panic!("{name} fixture failed to decode: {e}"));
+            let serialized = serde_json::to_vec(&request.messages).unwrap().len()
+                + serde_json::to_vec(&request.tools).unwrap().len();
+            assert!(
+                wire_len >= serialized,
+                "{name}: wire body {wire_len} bytes < neutral serialization {serialized} bytes \
+                 — the body-length estimate would not be conservative (ADR-0005 D1)"
+            );
+            // And the estimate itself: body/4 covers the old serialized/4 formula.
+            assert!(input_estimate(wire_len) >= (serialized as u64).saturating_add(3) / 4);
+        }
     }
 }
