@@ -17,8 +17,28 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
+### Added
+
+- **HTTP contract discovery** (TD-0021 P2, #204): ungated `GET /version` returns the wire
+  and chat contract versions and the wired ingress dialects; `GET /admin/version` (behind the
+  admin gate) adds the capability booleans (transparent plane, durable ledger, alerts, admin
+  API, rate limits, OTel export); every proxied response — including dialect-shaped errors —
+  carries `x-sandhi-contract-version`, so an HTTP consumer knows which contract it is talking
+  to at the moment a mismatch presents. The HTTP form of the TD-0008 handshake.
+
 ### Internal
 
+- **Node typed-error parity closed for real** (TD-0021 P1, #203): `SandhiProviderError` is
+  now rewired on every provider-boundary path (`completeJson`, `streamJson` setup,
+  `TypedEventStream.read`), with an `instanceof` conformance test; binding-internal
+  validation errors deliberately stay ordinary `Error`s (the class distinction between
+  provider and binding failures is the point). TD-0008's scorecard row and follow-up C
+  closed with citations.
+- **Single-source client-facing error construction** (TD-0021 P3, #206): one `IngressError`
+  type owns status, code, dialect rendering, and the redaction decision; the default
+  constructors are redacted and full detail is the explicit named opt-in, so a future error
+  path cannot leak an upstream body by omission. All 29 call sites and the existing
+  dialect-shaping tests unchanged.
 - **Pin automation takes its no-op path** (follow-up to the #194 repair, caught by the post-merge
   verification dispatch): the gate compared a v-prefixed crates.io latest (`v0.8.0`) against the
   bare manifest pin (`0.8.0`) — never equal, so an already-current pin fell through to the bump
