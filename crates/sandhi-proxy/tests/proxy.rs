@@ -250,6 +250,99 @@ async fn version_endpoint_is_unauthenticated_and_reports_the_contract() {
 }
 
 #[tokio::test]
+async fn config_preview_and_apply_acknowledge_the_startup_only_tls_section() {
+    // Adversarial-review finding on the TLS PR: the config module's doc promised that
+    // preview/apply would report the startup-only `tls` section as `restart required`, but the
+    // responses never mentioned it — an operator applying a TLS edit got silent ignorance of a
+    // security-relevant section. Both responses carry the acknowledgement, and it reads
+    // "not configured" when the section is absent.
+    let keys = KeyStore::new();
+    let mut state = ProxyState::new(
+        keys,
+        ProxyLedger::in_memory(),
+        Arc::new(InMemorySink::new()),
+        HashMap::new(),
+        None,
+    );
+    state.admin_token = Some("admin".into());
+    let cfg_path = std::env::temp_dir().join(format!("sandhi-tls-ack-{}.json", std::process::id()));
+    std::fs::write(
+        &cfg_path,
+        r#"{"tls": {"cert": "/nonexistent/cert.pem", "key": "/nonexistent/key.pem"}}"#,
+    )
+    .unwrap();
+    state.config_path = Some(cfg_path.clone());
+    let app = build_app(Arc::new(state));
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/admin/config")
+                .header("authorization", "Bearer admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let preview: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        preview["tls"], "restart required",
+        "preview must acknowledge the startup-only section, not ignore it"
+    );
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/config/apply")
+                .header("authorization", "Bearer admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let apply: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        apply["tls"], "restart required",
+        "apply must acknowledge that it did NOT activate listener TLS"
+    );
+
+    std::fs::write(&cfg_path, r#"{"providers": []}"#).unwrap();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/config")
+                .header("authorization", "Bearer admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let preview: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(preview["tls"], "not configured");
+    let _ = std::fs::remove_file(&cfg_path);
+}
+
+#[tokio::test]
 async fn admin_version_reports_capabilities_behind_the_gate() {
     // state_with carries no admin token and no store — the endpoint must refuse;
     // the capability detail is operator information (D5/R2).
