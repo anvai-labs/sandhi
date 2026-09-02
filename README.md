@@ -163,6 +163,12 @@ vendor SDK) at it — see [`docs/operator/proxy-guide.adoc`](docs/operator/proxy
 operator-relevant events — reservation denials, fail-open admissions, lease reclaims, settle
 failures — without per-request chatter. `SANDHI_LOG=debug` adds plane selection per call.
 
+**TLS.** Plain HTTP remains the loopback-development default. To terminate TLS in Sandhi, set
+`SANDHI_CONFIG` to a JSON file containing a `tls` object with PEM certificate-chain and private-key
+paths. The pair is validated before bind; invalid or unreadable material fails startup rather than
+silently falling back to plaintext. A non-loopback plaintext bind emits a warning. See the operator
+guide for the complete example.
+
 **Metrics.** `GET /metrics` serves Prometheus text, gated by the same admin bearer as the dashboard
 when `SANDHI_ADMIN_TOKEN` is set:
 

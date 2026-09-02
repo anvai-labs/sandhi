@@ -1,6 +1,7 @@
 # TD-0017: Transport security and ingress protocol breadth — TLS, and finding out what HTTP versions we actually speak
 
-- **Status:** Draft (proposed), 2026-08-31. Owns gaps **G05, G06**.
+- **Status:** Draft (proposed), 2026-08-31. **P1 landed**; P2–P4 remain open. Owns gaps
+  **G05, G06** (G05 ✅).
 - **Relates to:** [ADR-0006](../adr/0006-layer-boundary-and-protocol-scope.md) D2 (protocol breadth
   belongs at L5/L6/L7, and this TD is what that decision authorises),
   [TD-0014](TD-0014-data-plane-resource-safety.md) D4 (`ConnCtx`, which this TD populates with ALPN
@@ -9,11 +10,9 @@
 
 ## Why this exists
 
-**Sandhi terminates plaintext HTTP and nothing else.** There is no TLS anywhere in the listener path:
-no `rustls` server configuration, no `TlsAcceptor`, no certificate loading, no SNI, no ALPN, no
-rotation. `rustls 0.23.42` appears in `Cargo.lock` solely as a `reqwest` *client* dependency
-(`sandhi-providers/src/lib.rs:66-71`). The server is `tokio::net::TcpListener` handed to
-`axum::serve` (`sandhi-proxy/src/lib.rs:262-265,296-299`).
+**At audit time, Sandhi terminated plaintext HTTP and nothing else.** P1 now adds opt-in rustls
+termination configured by certificate/key paths in `SANDHI_CONFIG`; plaintext remains the
+loopback-development default. SNI/ALPN propagation and live rotation remain P2/P3 work.
 
 For a component whose entire purpose is **holding the real upstream credential so clients never see
 it**, and which receives a bearer virtual key on every request, this is the highest-severity gap in
@@ -136,7 +135,7 @@ silently, and do not fail-closed on a posture that many dev setups legitimately 
 | Phase | Scope | Acceptance (the failing test to write first) |
 |---|---|---|
 | ~~**P0**~~ | ~~D1 — the h2 experiment~~ | **Done during fact-check, by dependency-graph inspection rather than a running proxy.** `h2` is not in the non-dev graph; there is no undeclared surface. No code needed |
-| **P1** | D2 + D6 — TLS termination, opt-in | With cert and key configured, a TLS client completes a full request and a full SSE stream; without them, behaviour is byte-identical to today; binding a non-loopback address without TLS emits the startup warning |
+| **P1** ✅ | D2 + D6 — TLS termination, opt-in | A trusted TLS client completes `/healthz` and a full metered SSE stream; plaintext continues through the pre-existing listener tests; a pure startup-policy test pins the non-loopback warning. Certificate/key parsing is atomic and validates the match before bind; the TLS handshake uses the request-head deadline so it cannot reopen G03 |
 | **P2** | D3 — rotation | A certificate is replaced while an SSE stream is in flight: the stream completes uninterrupted and settles `Final` (not `Partial`), and a *new* connection presents the new chain. This test is the whole point of the phase |
 | **P3** | D4 + D5 — ALPN and `ConnCtx` | ALPN offers exactly the tested set; a client negotiating each offered protocol completes a request on every ingress dialect; `ConnCtx` carries ALPN/SNI and they appear in no usage event and no metric label |
 | **P4** | HTTP/2 ingress, only if P0 says it is worth declaring. **Carried requirement from ADR-0009:** the h2 builder sets `header_read_timeout`, `max_buf_size`, and a timer in the same commit, and the silent-connection regression test extends to the h2 path — the sniffing-bypass class must not return with the new protocol | Every ingress dialect passes its full test suite over h2 as well as h1 — the TD-0010 parity matrix gains an HTTP-version axis |

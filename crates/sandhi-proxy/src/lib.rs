@@ -110,6 +110,103 @@ const CONNECTION_READ_BUF_BYTES: usize = 256 * 1024;
 /// busy-spins exactly when it should be shedding.
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
 
+/// Validated TLS material for the inbound listener (TD-0017 P1).
+///
+/// Sandhi configures rustls; it does not implement any cryptographic primitive.
+/// Construction parses the complete certificate chain and private key together,
+/// and rustls rejects an invalid key or one that does not match the leaf
+/// certificate before the listener starts accepting traffic.
+#[derive(Clone)]
+pub struct TlsConfig {
+    acceptor: tokio_rustls::TlsAcceptor,
+}
+
+impl TlsConfig {
+    /// Load and validate a PEM certificate chain and matching private key.
+    pub fn from_pem_files(
+        cert_path: impl AsRef<std::path::Path>,
+        key_path: impl AsRef<std::path::Path>,
+    ) -> std::io::Result<Self> {
+        let cert_path = cert_path.as_ref();
+        let key_path = key_path.as_ref();
+        let cert_pem = std::fs::read(cert_path).map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("reading TLS certificate {}: {error}", cert_path.display()),
+            )
+        })?;
+        let key_pem = std::fs::read(key_path).map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("reading TLS private key {}: {error}", key_path.display()),
+            )
+        })?;
+        Self::from_pem(&cert_pem, &key_pem)
+    }
+
+    /// Parse in-memory PEM material. Public so embedders do not need temporary
+    /// files; the standalone binary uses [`Self::from_pem_files`].
+    pub fn from_pem(cert_pem: &[u8], key_pem: &[u8]) -> std::io::Result<Self> {
+        use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
+
+        let certs = CertificateDer::pem_slice_iter(cert_pem)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("parsing TLS certificate chain: {error}"),
+                )
+            })?;
+        if certs.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "TLS certificate file contains no CERTIFICATE entries",
+            ));
+        }
+        let key = PrivateKeyDer::from_pem_slice(key_pem).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("parsing TLS private key: {error}"),
+            )
+        })?;
+        // reqwest's feature graph can enable both rustls providers. Select one
+        // locally instead of mutating process-global provider state (an
+        // embedding application may already have made its own choice).
+        let server = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("selecting safe TLS protocol versions: {error}"),
+            )
+        })?
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("validating TLS certificate and private key: {error}"),
+            )
+        })?;
+        Ok(Self {
+            acceptor: tokio_rustls::TlsAcceptor::from(Arc::new(server)),
+        })
+    }
+}
+
+/// Warning emitted when bearer credentials would be accepted on a non-loopback
+/// plaintext listener. Loopback development remains quiet; TLS makes the
+/// warning unnecessary.
+#[must_use]
+pub fn plaintext_bind_warning(addr: SocketAddr, tls_enabled: bool) -> Option<&'static str> {
+    (!tls_enabled && !addr.ip().is_loopback()).then_some(
+        "WARNING: accepting bearer credentials over plaintext on a non-loopback listener; \
+         configure tls.cert/tls.key in SANDHI_CONFIG or terminate TLS at a trusted proxy",
+    )
+}
+
 /// Shared server state: the virtual-key store, the budget ledger, the usage sink, and the
 /// registry of configured upstream providers (each already holding its real credential).
 pub struct ProxyState {
@@ -606,7 +703,24 @@ where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    serve_listener_with_shutdown(state, listener, shutdown, grace).await
+    serve_listener_with_shutdown(state, listener, shutdown, grace, None).await
+}
+
+/// TLS counterpart to [`serve_with_shutdown_timeout`]. The HTTP application,
+/// admission controls, slowloris timeout, and drain semantics are identical;
+/// only the accepted byte stream is wrapped in a validated rustls session.
+pub async fn serve_with_tls_shutdown_timeout<F>(
+    state: Arc<ProxyState>,
+    addr: SocketAddr,
+    shutdown: F,
+    grace: Duration,
+    tls: TlsConfig,
+) -> std::io::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    serve_listener_with_shutdown(state, listener, shutdown, grace, Some(tls.acceptor)).await
 }
 
 async fn serve_listener_with_shutdown<F>(
@@ -614,12 +728,14 @@ async fn serve_listener_with_shutdown<F>(
     listener: tokio::net::TcpListener,
     shutdown: F,
     grace: Duration,
+    tls: Option<tokio_rustls::TlsAcceptor>,
 ) -> std::io::Result<()>
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
     let policy = ConnectionPolicy::from_state(&state);
-    serve_router_listener_with_shutdown(build_app(state), listener, shutdown, grace, policy).await
+    serve_router_listener_with_shutdown(build_app(state), listener, shutdown, grace, policy, tls)
+        .await
 }
 
 /// Serve until `shutdown` resolves, with TD-0014 P3 connection-level defence:
@@ -633,13 +749,11 @@ async fn serve_router_listener_with_shutdown<F>(
     shutdown: F,
     grace: Duration,
     policy: ConnectionPolicy,
+    tls: Option<tokio_rustls::TlsAcceptor>,
 ) -> std::io::Result<()>
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    use hyper::server::conn::http1;
-    use hyper_util::rt::TokioTimer;
-    use hyper_util::service::TowerToHyperService;
     use std::collections::HashMap;
 
     let slots = Arc::new(Semaphore::new(policy.max_connections));
@@ -701,35 +815,46 @@ where
                 let watcher = graceful.watcher();
                 let metrics = Arc::clone(&policy.metrics);
                 let app = app.clone();
+                let tls = tls.clone();
+                let header_read_timeout = policy.header_read_timeout;
                 // Builder, connection, watcher, guards: one task owns all of
                 // it, because the connection borrows its builder.
                 tasks.spawn(async move {
                     let _permit = permit;
                     let _per_ip_slot = per_ip_slot;
                     let _conn_open = metrics.connection_open_guard();
-                    let service = TowerToHyperService::new(
-                        app.layer(axum::Extension(PeerCtx { peer: peer.ip() })),
-                    );
-                    // hyper's http1 builder directly — NOT hyper-util's auto
-                    // builder, whose h2c preface sniff buffered reads before
-                    // the header timer armed, exempting silent connections from
-                    // the slowloris defence (review finding 3). See Cargo.toml.
-                    let mut builder = http1::Builder::new();
-                    builder
-                        .timer(TokioTimer::new())
-                        .header_read_timeout(Some(policy.header_read_timeout))
-                        .max_buf_size(CONNECTION_READ_BUF_BYTES);
-                    // Upgrades (websocket-over-h1) would wrap this in
-                    // `.with_upgrades()` — but hyper-util's GracefulConnection
-                    // does not cover the upgradeable wrapper, and no route
-                    // upgrades today. TD-0017 (TLS/h2) reintroduces upgrades
-                    // WITH a pre-first-byte timeout, which is what the
-                    // auto-builder's silent sniffing removed (finding 3).
-                    let conn = builder.serve_connection(
-                        hyper_util::rt::TokioIo::new(stream),
-                        service,
-                    );
-                    let _ = watcher.watch(conn).await;
+                    if let Some(acceptor) = tls {
+                        // TLS handshakes happen before hyper can arm its request-head
+                        // timer. Apply the same deadline here so a silent ClientHello
+                        // cannot recreate the pre-first-byte slowloris gap.
+                        match tokio::time::timeout(header_read_timeout, acceptor.accept(stream)).await {
+                            Ok(Ok(stream)) => {
+                                serve_http1_connection(
+                                    stream,
+                                    app,
+                                    peer.ip(),
+                                    header_read_timeout,
+                                    watcher,
+                                )
+                                .await;
+                            }
+                            Ok(Err(error)) => {
+                                tracing::debug!(%peer, %error, "TLS handshake rejected");
+                            }
+                            Err(_) => {
+                                tracing::debug!(%peer, "TLS handshake timed out");
+                            }
+                        }
+                    } else {
+                        serve_http1_connection(
+                            stream,
+                            app,
+                            peer.ip(),
+                            header_read_timeout,
+                            watcher,
+                        )
+                        .await;
+                    }
                 });
             }
         }
@@ -767,10 +892,64 @@ where
     Ok(())
 }
 
+/// Serve one already-admitted plaintext or TLS stream through the exact same
+/// HTTP/1 path. Keeping the protocol builder below the transport wrapper
+/// prevents TLS configuration from forking Sandhi's request semantics.
+async fn serve_http1_connection<IO>(
+    stream: IO,
+    app: Router,
+    peer: std::net::IpAddr,
+    header_read_timeout: Duration,
+    watcher: hyper_util::server::graceful::Watcher,
+) where
+    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    use hyper::server::conn::http1;
+    use hyper_util::rt::TokioTimer;
+    use hyper_util::service::TowerToHyperService;
+
+    let service = TowerToHyperService::new(app.layer(axum::Extension(PeerCtx { peer })));
+    // hyper's http1 builder directly — NOT hyper-util's auto builder, whose
+    // h2c preface sniff buffered reads before the header timer armed, exempting
+    // silent connections from the slowloris defence (review finding 3).
+    let mut builder = http1::Builder::new();
+    builder
+        .timer(TokioTimer::new())
+        .header_read_timeout(Some(header_read_timeout))
+        .max_buf_size(CONNECTION_READ_BUF_BYTES);
+    let conn = builder.serve_connection(hyper_util::rt::TokioIo::new(stream), service);
+    let _ = watcher.watch(conn).await;
+}
+
 #[cfg(test)]
 mod server_lifecycle_tests {
     use super::*;
     use sandhi_core::{InMemorySink, KeyStore};
+
+    #[test]
+    fn plaintext_warning_is_only_for_exposed_unencrypted_listeners() {
+        assert!(plaintext_bind_warning("127.0.0.1:8787".parse().unwrap(), false).is_none());
+        assert!(plaintext_bind_warning("[::1]:8787".parse().unwrap(), false).is_none());
+        assert!(plaintext_bind_warning("0.0.0.0:8787".parse().unwrap(), true).is_none());
+        let warning = plaintext_bind_warning("0.0.0.0:8787".parse().unwrap(), false)
+            .expect("non-loopback plaintext must be loud");
+        assert!(warning.contains("bearer credentials over plaintext"));
+    }
+
+    #[test]
+    fn tls_material_is_validated_before_listening() {
+        let error = TlsConfig::from_pem(b"not a certificate", b"not a key")
+            .err()
+            .expect("invalid identity must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tls");
+        TlsConfig::from_pem_files(
+            fixture.join("localhost-cert.pem"),
+            fixture.join("localhost-key.pem"),
+        )
+        .expect("the configured file-loading path accepts a valid identity");
+    }
 
     #[tokio::test]
     async fn resolved_shutdown_stops_the_listener_and_returns() {
@@ -793,6 +972,7 @@ mod server_lifecycle_tests {
                 async {},
                 // This path should finish immediately; the bound is still part of the contract.
                 DEFAULT_SHUTDOWN_GRACE,
+                None,
             ),
         )
         .await
@@ -827,6 +1007,7 @@ mod server_lifecycle_tests {
             },
             Duration::from_millis(25),
             ConnectionPolicy::default(),
+            None,
         ));
         let client_call = tokio::spawn(async move {
             let _ = reqwest::get(format!("http://{addr}/stuck")).await;

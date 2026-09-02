@@ -17,9 +17,10 @@ use sandhi_providers::{
     AnthropicAuthScheme, GeminiAuthScheme, ProviderFamily, ProviderHandle, ProviderRuntime,
 };
 use sandhi_proxy::{
-    reclaim_sweep_at, rehydrate_alerts, rehydrate_budgets, serve_with_shutdown_timeout,
-    BufferedAlertStore, ProxyLedger, ProxyState, DEFAULT_HEADER_READ_TIMEOUT_SECS,
-    DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_CONNECTIONS_PER_IP, DEFAULT_MAX_IN_FLIGHT_AI_REQUESTS,
+    plaintext_bind_warning, reclaim_sweep_at, rehydrate_alerts, rehydrate_budgets,
+    serve_with_shutdown_timeout, serve_with_tls_shutdown_timeout, BufferedAlertStore, ProxyLedger,
+    ProxyState, TlsConfig, DEFAULT_HEADER_READ_TIMEOUT_SECS, DEFAULT_MAX_CONNECTIONS,
+    DEFAULT_MAX_CONNECTIONS_PER_IP, DEFAULT_MAX_IN_FLIGHT_AI_REQUESTS,
     DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_SHUTDOWN_GRACE,
 };
 use sandhi_store::{AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
@@ -259,8 +260,22 @@ async fn main() {
     };
 
     let admin_token = std::env::var("SANDHI_ADMIN_TOKEN").ok();
-    let public_url =
-        std::env::var("SANDHI_PUBLIC_URL").unwrap_or_else(|_| "http://localhost:8787".into());
+    let config_path = std::env::var("SANDHI_CONFIG")
+        .ok()
+        .map(std::path::PathBuf::from);
+    let tls = match listener_tls_from_config(config_path.as_deref()) {
+        Ok(tls) => tls,
+        Err(error) => {
+            eprintln!("sandhi-proxy: TLS configuration error: {error}");
+            std::process::exit(1);
+        }
+    };
+    let public_url = std::env::var("SANDHI_PUBLIC_URL").unwrap_or_else(|_| {
+        format!(
+            "{}://localhost:8787",
+            if tls.is_some() { "https" } else { "http" }
+        )
+    });
     if admin_token.is_some() {
         eprintln!("sandhi-proxy: admin API enabled on /admin/*");
     }
@@ -299,9 +314,7 @@ async fn main() {
     state.trusted_proxies = sandhi_proxy::parse_trusted_proxies(
         &std::env::var("SANDHI_TRUSTED_PROXIES").unwrap_or_default(),
     );
-    state.config_path = std::env::var("SANDHI_CONFIG")
-        .ok()
-        .map(std::path::PathBuf::from);
+    state.config_path = config_path;
     if let Some(path) = &state.config_path {
         eprintln!(
             "sandhi-proxy: declarative config at {} (GET/POST /admin/config*)",
@@ -355,13 +368,22 @@ async fn main() {
         .parse()
         .expect("SANDHI_BIND must be a valid socket address");
 
+    if let Some(warning) = plaintext_bind_warning(addr, tls.is_some()) {
+        eprintln!("sandhi-proxy: {warning}");
+    }
+    let listener_scheme = if tls.is_some() { "https" } else { "http" };
     eprintln!(
-        "sandhi-proxy listening on http://{addr}  \
+        "sandhi-proxy listening on {listener_scheme}://{addr}  \
          (POST /v1/chat/completions | /v1/messages, Authorization: Bearer vk_...)"
     );
     let shutdown_grace = shutdown_grace_from_env();
-    let serve_result =
-        serve_with_shutdown_timeout(state, addr, shutdown_signal(), shutdown_grace).await;
+    let serve_result = match tls {
+        Some(tls) => {
+            serve_with_tls_shutdown_timeout(state, addr, shutdown_signal(), shutdown_grace, tls)
+                .await
+        }
+        None => serve_with_shutdown_timeout(state, addr, shutdown_signal(), shutdown_grace).await,
+    };
     reclaim_task.abort();
     let _ = reclaim_task.await;
     if let Some(buffered) = buffered_alert_store {
@@ -391,6 +413,26 @@ fn request_body_limit_from_env() -> usize {
         "SANDHI_MAX_REQUEST_BODY_BYTES",
         DEFAULT_MAX_REQUEST_BODY_BYTES,
     )
+}
+
+/// Resolve listener TLS before binding. `SANDHI_CONFIG` stores only paths; the
+/// private-key bytes remain in their separately permissioned file. A configured
+/// but unreadable/invalid pair fails startup rather than silently downgrading to
+/// plaintext.
+fn listener_tls_from_config(path: Option<&std::path::Path>) -> Result<Option<TlsConfig>, String> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("reading {}: {error}", path.display()))?;
+    let config: sandhi_proxy::config::SandhiFileConfig = serde_json::from_str(&text)
+        .map_err(|error| format!("parsing {}: {error}", path.display()))?;
+    config
+        .tls
+        .map(|tls| {
+            TlsConfig::from_pem_files(&tls.cert, &tls.key).map_err(|error| error.to_string())
+        })
+        .transpose()
 }
 
 fn shutdown_grace_from_env() -> std::time::Duration {

@@ -15,7 +15,7 @@ use sandhi_core::{InMemorySink, KeyStore, Policy, VirtualKey, Window};
 use sandhi_providers::{
     ChatEventStream, ChatProvider, ProviderError, ProviderHandle, ProviderRuntime,
 };
-use sandhi_proxy::{build_app, ProxyLedger, ProxyState};
+use sandhi_proxy::{build_app, ProxyLedger, ProxyState, TlsConfig};
 
 fn state_with(
     upstream_uri: String,
@@ -44,6 +44,117 @@ fn state_with(
         ),
     );
     Arc::new(ProxyState::new(keys, ledger, sink, providers, None))
+}
+
+const TEST_TLS_CERT: &[u8] = include_bytes!("fixtures/tls/localhost-cert.pem");
+const TEST_TLS_KEY: &[u8] = include_bytes!("fixtures/tls/localhost-key.pem");
+
+/// TD-0017 P1: TLS wraps the listener, not the application. A normal request
+/// and a complete metered SSE response must therefore retain their existing
+/// status, bytes, and accounting semantics over HTTPS.
+#[tokio::test]
+async fn tls_listener_serves_full_requests_and_complete_sse_streams() {
+    let upstream = MockServer::start().await;
+    let sse = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2}}\n\n",
+        "data: [DONE]\n\n"
+    );
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse),
+        )
+        .mount(&upstream)
+        .await;
+
+    let sink = Arc::new(InMemorySink::new());
+    let mut state = Arc::try_unwrap(state_with(
+        upstream.uri(),
+        sink.clone(),
+        ProxyLedger::in_memory(),
+    ))
+    .ok()
+    .expect("test owns the only ProxyState reference");
+    state.header_read_timeout_secs = 1;
+    let state = Arc::new(state);
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = probe.local_addr().unwrap();
+    drop(probe);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let tls = TlsConfig::from_pem(TEST_TLS_CERT, TEST_TLS_KEY).unwrap();
+    let server = tokio::spawn(sandhi_proxy::serve_with_tls_shutdown_timeout(
+        state,
+        addr,
+        async {
+            let _ = shutdown_rx.await;
+        },
+        std::time::Duration::from_secs(2),
+        tls,
+    ));
+
+    let root = reqwest::Certificate::from_pem(TEST_TLS_CERT).unwrap();
+    let client = reqwest::Client::builder()
+        .add_root_certificate(root)
+        .build()
+        .unwrap();
+    let health_url = format!("https://{addr}/healthz");
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // The HTTP timer starts only after TLS. A peer that never sends a
+    // ClientHello must still release its connection slot at the same bound.
+    use tokio::io::AsyncReadExt;
+    let mut silent = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut one = [0u8; 1];
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(3), silent.read(&mut one))
+        .await
+        .expect("silent TLS handshake must be bounded")
+        .unwrap_or(0);
+    assert_eq!(
+        closed, 0,
+        "silent TLS handshake must close without a response"
+    );
+
+    let health = client
+        .get(&health_url)
+        .send()
+        .await
+        .unwrap_or_else(|error| panic!("TLS health request failed: {error:?}"));
+    assert_eq!(health.status(), StatusCode::OK);
+
+    let response = client
+        .post(format!("https://{addr}/v1/chat/completions"))
+        .header("authorization", "Bearer vk_demo")
+        .json(&serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": true
+        }))
+        .send()
+        .await
+        .expect("HTTPS streaming request");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.text().await.expect("complete SSE body");
+    assert!(body.contains("hello"));
+    assert!(body.contains("[DONE]"));
+
+    let events = sink.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].tokens_in, 4);
+    assert_eq!(events[0].tokens_out, 2);
+    assert_eq!(
+        events[0].usage_completeness,
+        sandhi_core::UsageCompleteness::Final
+    );
+
+    let _ = shutdown_tx.send(());
+    tokio::time::timeout(std::time::Duration::from_secs(3), server)
+        .await
+        .expect("TLS server drains")
+        .expect("TLS server task joins")
+        .expect("TLS server exits cleanly");
 }
 
 #[tokio::test]
