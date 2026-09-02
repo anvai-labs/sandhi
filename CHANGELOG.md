@@ -19,6 +19,25 @@ hand-edited; see [RELEASING.md](RELEASING.md).
 
 ### Added
 
+- _Nothing yet._
+
+## [0.5.0] — 2026-09-02
+
+The contract-discovery and transport-security release, carrying a full design audit's accepted
+set. TD-0021 completes end to end: an HTTP consumer can now ask which contract it is talking to
+(`GET /version`, the `x-sandhi-contract-version` response header), Node's typed errors reach
+parity with Python's, client-facing error construction is single-sourced with redaction by
+default, and idempotent metering makes **the meter count logical calls while enforcement counts
+physical calls** — semantics stated exactly, counters for both sides. The listener grows
+**opt-in TLS termination** (TD-0017 P1) over the same admission, timeout, accounting, and drain
+path as plaintext — no second protocol surface to drift. The design audit's fixes close a live
+default-config Gemini 404, two unbounded-growth paths in default deployments, and an
+authenticated metric-cardinality DoS, while making the ledger's hot reads index-only and the
+run-cost tree linear; its structural findings are registered as TD-0024/TD-0025 and the gap
+register now runs G01–G32.
+
+### Added
+
 - **Idempotent metering** (TD-0021 P4, D1/D2/D3): a retried call carrying the same
   `(virtual key, idempotency-key)` inside the dedup window — whose TTL matches the 15-minute
   lease TTL and whose storage shares the enforcement ledger's own SQLite, so it survives exactly
@@ -74,7 +93,6 @@ hand-edited; see [RELEASING.md](RELEASING.md).
   series; further new series fold into a shared `(overflow)` model — the stats fold's precedent.
   Existing series are never evicted and totals stay exact; only per-series detail degrades.
   Operators with genuinely larger fleets set `SANDHI_METRICS_MAX_SERIES` in the binary.
-
 - **Single source for family default base URLs** (design audit A1, the #196 drift class). The
   proxy's own hard-coded defaults had drifted from the catalog: Gemini without `/v1beta` — in
   `default_base_url`, the `SANDHI_GEMINI_KEY` env registration, and the typed-runtime fixtures —
