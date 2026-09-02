@@ -303,7 +303,8 @@ impl Metrics {
         }
     }
 
-    /// TD-0021 P4 D1: a retry reused the original settlement (visible, not silent).
+    /// TD-0021 P4 D1: a retry matched the dedup window — its duplicate usage event
+    /// was dropped; the logical call was metered once (visible, not silent).
     pub fn record_idempotent_replay(&self) {
         if let Ok(mut inner) = self.inner.lock() {
             inner.idempotent_replays += 1;

@@ -26,7 +26,7 @@ hand-edited; see [RELEASING.md](RELEASING.md).
   meter records the logical call once**. Semantics stated exactly: *the meter counts logical
   calls; enforcement counts physical calls* — the retry's lease still settles into spent, because
   the retry really consumed upstream tokens. Both sides visible: `sandhi_idempotent_replays_total`
-  (reused settlements) and `sandhi_idempotent_fallbacks_total` (keys metered without dedup).
+  (reused settlements) and `sandhi_idempotent_fallbacks_total` (volatile-arm keys metered without dedup).
   The client's retry still happens upstream (this deduplicates the *meter*, never the response);
   a repeat outside the window is a new logical call; when dedup is unavailable the call is
   **counted**, never dropped. The key is the `(vkey, idempotency-key)` pair with no request-body

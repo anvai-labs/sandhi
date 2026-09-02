@@ -170,6 +170,9 @@ impl ShardedLedger {
         idem_key: &str,
         now: OffsetDateTime,
     ) -> rusqlite::Result<Option<(u64, u64)>> {
+        // SHARDING INVARIANT: see the tripwire comment on `record_durable` — same
+        // two-shard window (vkey here vs scope at settlement), same outer-lock
+        // dependency, same TD-0016 P2+ precondition.
         let shard = self.shard_for(vkey);
         let mut ledger = shard.lock().expect("shard poisoned");
         ledger.seen_durable(vkey, idem_key, now)

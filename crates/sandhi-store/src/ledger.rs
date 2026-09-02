@@ -396,6 +396,9 @@ impl SqliteLedger {
             "DELETE FROM idempotency_dedup WHERE expires_at <= ?1",
             params![now_ts],
         )?;
+        // The caller's `leases_reclaimed` metric counts BOTH kinds of reaped row;
+        // both are "expired enforcement state reclaimed" — that conflation is the
+        // intent, noted here so the metric's semantics are discoverable.
         Ok(n + d)
     }
 

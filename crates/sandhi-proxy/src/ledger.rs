@@ -73,9 +73,11 @@ impl ProxyLedger {
     }
 
     /// TD-0021 P4 (D1): has this `(vkey, idem_key)` already been settled inside the
-    /// window? `Some((reservation, actual))` lets the caller reuse the original
-    /// settlement — the repeat is the SAME logical call, metered once. `None` means
-    /// unseen or dedup-unavailable; the caller counts the call (D3).
+    /// window? `Some(_)` means yes — the repeat is the SAME logical call, so the caller
+    /// drops its duplicate usage event (the meter counts logical calls; enforcement
+    /// still settles the retry's own lease, because the retry physically consumed
+    /// tokens). `None` means unseen or dedup-unavailable; the caller counts the call
+    /// (D3). The returned ids are diagnostic, not a settlement handle.
     pub fn seen(&mut self, vkey: &str, idem_key: &str) -> Option<(u64, u64)> {
         let now = OffsetDateTime::now_utc();
         match self {
