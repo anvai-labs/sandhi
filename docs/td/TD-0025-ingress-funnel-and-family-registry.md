@@ -23,14 +23,14 @@ function names. The repo already contains the counter-pattern it chose for vendo
 DATA, not code branches" — but family↔codec binding never got the same treatment.
 
 On the proxy side, `handle()` is a ~315-line funnel whose ordering contract (auth → allowlist →
-budget → dispatch) lives in a comment; three of the four ingress handlers are byte-identical
-clones; the plane×stream dispatch re-implements the terminal protocol (set_outcome → finalize →
-error shape) at six sites; and the two stream-body loops (transparent, typed) carry the same
-lifecycle contract — permit-in-body, open-stream gauge, running partial usage, delta bytes,
-finalize — by hand, in two different chunk shapes.
+budget → dispatch) lives in a comment; three of the four ingress handlers are identical modulo
+the dialect constant; the plane×stream dispatch re-implements the terminal protocol (set_outcome
+→ finalize → error shape) at six sites; and the two stream-body loops (transparent, typed) carry
+the same lifecycle contract — permit-in-body, open-stream gauge, running partial usage, delta
+bytes, finalize — by hand, in two different chunk shapes.
 
-None of this is a runtime bug today. It is the reason the last four family-level bugs were all
-"silent divergence" class — and each new family multiplies the places to forget.
+None of this is a runtime bug today. It is the surface that made #196's silent per-family
+divergence possible — and each new family multiplies the places to forget.
 
 ## Design
 
