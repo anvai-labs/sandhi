@@ -1,6 +1,8 @@
 # TD-0020: Operational readiness and transport observability — you cannot operate what you cannot see
 
-- **Status:** Draft (proposed), 2026-08-31. Owns gaps **G15, G16, G17, G18, G27**.
+- **Status:** **In progress**, 2026-08-31. P2 is partial via TD-0014's shipped connection,
+  stream, and connection-shed signals; P1 and the remaining P2–P5 scope are open. Owns gaps
+  **G15, G16, G17, G18, G27**.
 - **Relates to:** [TD-0011](TD-0011-first-party-observability.md) (the metric registry and its D2
   bounded-label discipline, which this extends), [TD-0014](TD-0014-data-plane-resource-safety.md)
   (whose every bound is unobservable until G16 lands — build them in parallel),
@@ -14,12 +16,13 @@ TD-0011 built a good metric registry. Every counter and histogram in it describe
 model call**: token dimensions, duration, TTFT, denials, rate-limits, reclaims, overshoot
 (`sandhi-proxy/src/metrics.rs:193-272`). That is the right first layer, and it is the only layer.
 
-There is **no metric for anything that is not a completed call**: not open connections, not in-flight
-streams, not file descriptors, not queue depth, not admission wait time, not upstream pool size.
-Which means every resource bound in TD-0014 — the concurrency limit that does not limit streams
-(G02), the absent connection cap (G03), per-tenant contention (G04), pre-auth connection abuse (G19)
-— is not merely broken but **invisible**. An operator cannot see the problem, cannot see a fix land,
-and cannot tune the knob afterwards.
+At proposal time there was **no metric for anything that was not a completed call**. TD-0014 has
+since shipped open-connection/open-stream gauges and a connection-shed counter. Drain duration, file
+descriptors, queue depth, admission wait time, and upstream pool size remain open here.
+At proposal time that made every resource bound in TD-0014 both broken and **invisible**. G02, G03,
+and G19 have since shipped with connection/stream/connection-shed signals. G04 and the remaining
+drain, queue, file-descriptor, and pool visibility stay open here; those controls cannot be tuned
+honestly until their gauges exist.
 
 The readiness half is a smaller but sharper defect. There is exactly one health route,
 `/healthz` (`lib.rs:211,573`), returning a static string. It has no relationship to shutdown state.
@@ -113,7 +116,7 @@ about to finish or nowhere close.
 | Phase | Scope | Acceptance (the failing test to write first) |
 |---|---|---|
 | **P1** | D1 + D7 — `/readyz` and drain visibility | After the shutdown signal, `/readyz` returns 503 while in-flight streams still complete normally and `/healthz` still returns 200; drain duration is recorded and remaining-stream progress is logged |
-| **P2** (partial ✅) | D2 — the transport gauge set. **Shipped early via TD-0014 P2/P3** (#169, #181): `sandhi_streams_open`, `sandhi_connections_open`, `sandhi_connections_shed_total`, and the drain-duration signal. Still open here: admission-wait histogram, FD gauge, queue depths, pool size | Opening N concurrent SSE streams moves the open-streams gauge to N and back to 0 after drain; `BufferedSink` drop counts appear at `/metrics`; every new label is drawn from the closed set (assert against TD-0011 D2's bounded-label test) |
+| **P2** (partial ✅) | D2 — the transport gauge set. **Shipped early via TD-0014 P2/P3** (#169, #181): `sandhi_streams_open`, `sandhi_connections_open`, and `sandhi_connections_shed_total`. Still open here: drain duration, admission-wait histogram, FD gauge, queue depths, and pool size | Opening N concurrent SSE streams moves the open-streams gauge to N and back to 0 after drain; `BufferedSink` drop counts appear at `/metrics`; every new label is drawn from the closed set (assert against TD-0011 D2's bounded-label test) |
 | **P3** | D4 — pool consolidation | One `ProviderHandle` creates one client; registering K credentials against one host stays within a recorded FD budget; existing per-adapter timeout and auth behaviour is unchanged (assert via the existing provider test suites) |
 | **P4** | D5 — load shedding | Under an offered load exceeding admission capacity, the proxy returns dialect-shaped 503 + `Retry-After` instead of growing the queue; a shed request consumes no lease and emits no usage event (the TD-0012 D5 property, restated for shedding) |
 | **P5** | D6 — DNS bounds and counters | A stalled resolver produces a bounded, counted, observable failure rather than a request that waits on `connect_timeout` |

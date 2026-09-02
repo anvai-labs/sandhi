@@ -1,6 +1,6 @@
 # TD-0014: Data-plane resource safety — the bounds the proxy claims but does not hold
 
-- **Status:** Draft (proposed), 2026-08-31. **P1, P2 (+P2b) and P3 landed**; P4 open. Owns gaps **G01, G02, G03, G04, G19, G28** (G01 ✅, G02 ✅, G03 ✅, G19 ✅).
+- **Status:** **In progress**, 2026-08-31. **P1, P2 (+P2b) and P3 landed**; P4 open. Owns gaps **G01, G02, G03, G04, G19, G28** (G01 ✅, G02 ✅, G03 ✅, G19 ✅).
 - **Relates to:** [ADR-0006](../adr/0006-layer-boundary-and-protocol-scope.md) (why these are fixed
   at L7 rather than by acquiring a transport layer), [TD-0006](TD-0006-two-plane-proxy-transparent-metering.md)
   (which fixed exactly G01 on the *raw* plane and never backported it), [TD-0012](TD-0012-rate-limit-enforcement.md)

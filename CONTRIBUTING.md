@@ -24,7 +24,9 @@ cargo test --workspace
 - `cargo fmt` and `cargo clippy --all-targets -- -D warnings` must pass — CI gates on both.
 - **Test-driven:** line coverage must stay **≥ 75%** (`cargo llvm-cov --workspace
   --fail-under-lines 75`, a CI gate). New behavior lands with tests.
-- Decisions go in `docs/adr/NNNN-slug.md` (heading `# ADR-NNNN: …`).
+- Decisions go in `docs/adr/NNNN-slug.md` (heading `# ADR-NNNN: …`); larger executable designs go
+  in `docs/td/TD-NNNN-*.md`. Update the [documentation status index](docs/README.md) in the same PR
+  that changes a TD's lifecycle or transfers its remaining scope.
 - **Branch workflow:** open PRs against `develop`. `develop` is protected — the aggregate
   **`CI Success`** check must be green (`enforce_admins` on; no force-push or deletion). `main`
   is the release trunk.

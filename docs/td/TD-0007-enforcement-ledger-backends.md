@@ -1,6 +1,7 @@
 # TD-0007: Enforcement-ledger backends — the contract, the conformance suite, and choosing the shared/HA store
 
-Status: Draft (proposed)
+Status: **In progress** — the contract plus in-memory and single-node SQLite arms are shipped;
+shared/HA backend selection and implementation remain open.
 Date: 2026-07-23
 Implements: [ADR-0005](../adr/0005-enforcement-correctness-reservation-ledger-observe-enforce-split.md) D2/D5/D6, Phase 3 ("durable/shared ledger behind the Phase-0 trait")
 

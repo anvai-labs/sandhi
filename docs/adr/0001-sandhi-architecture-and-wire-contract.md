@@ -10,17 +10,9 @@ Accepted (founding decision for this repo). Originates from **AnvaiOps ADR-0047*
 architecture of `sandhi` itself; ADR-0047 remains authoritative for the OSS↔commercial
 boundary.
 
-> **Amended 2026-07-22 by [ADR-0004](0004-two-plane-proxy-and-enforcement-boundary.md).**
-> Three claims below were written as design intent and have since drifted from the
-> implementation; ADR-0004 supersedes them and records the corrected boundary:
-> - **§1 crate table** lists three crates; a fourth, **`sandhi-store`** (durable SQLite sink +
->   the TD-0003 vault/vkeys tables), is now load-bearing. Bedrock is listed as a transport
->   adapter but is **parser-only** until SigV4 lands.
-> - **§4 "Forward the cacheable prefix byte-exact"** describes a goal the proxy does **not**
->   currently meet — it decodes every request to `ChatRequestV1` and re-encodes. ADR-0004
->   re-draws this as a two-plane design (transparent metering vs. opt-in translation).
-> - **Consequences → Status "pre-alpha / design-complete … first milestones"** is stale:
->   TD-0001/0002/0003 have landed the adapters, typed runtime, and operator surface.
+> **Amended 2026-07-22 by [ADR-0004](0004-two-plane-proxy-and-enforcement-boundary.md),
+> reconciled 2026-09-02.** The current four-crate layout, two-plane forwarding rule, and shipped
+> status are reflected below. Bedrock remains parser-only until SigV4 transport is admitted.
 
 ## Context
 
@@ -40,13 +32,14 @@ Sandhi never emits dollars or tier/SKU names.
 | Crate | Role |
 |---|---|
 | **`sandhi-core`** | Usage/token accounting (full cache split), virtual-key resolution, budget + rate-limit enforcement, the neutral-event emitter, the wire types. No transport opinion. |
-| **`sandhi-providers`** | The unified provider transport (ADR-0047 D10): adapter trait + concrete adapters (Anthropic, OpenAI-compatible, Gemini, Bedrock, Cohere, local vLLM/Ollama), streaming/SSE parsing, **usage extraction at the source**, pooling, retry, circuit-breaker. Patterns: adapter / strategy / factory / decorator (the decorator wraps metering + resilience around each adapter). |
+| **`sandhi-providers`** | The unified provider transport (ADR-0047 D10): adapter trait + concrete transports (Anthropic, OpenAI-compatible, Gemini, Cohere, local vLLM/Ollama, OpenAI Responses), streaming parsing, **usage extraction at the source**, pooling, retry, and circuit-breaker. Bedrock is parser-only pending SigV4. Patterns: adapter / strategy / factory / decorator. |
+| **`sandhi-store`** | Durable SQLite usage sink and aggregates, the lease ledger, credential-vault metadata, virtual keys, budgets, and alerts. Kept separate so language bindings do not bundle SQLite. |
 | **`sandhi-proxy`** | The reverse-proxy binary — `sandhi-core` + `sandhi-providers` + an HTTP/streaming listener. Not a second implementation. |
 
 ### 2. Two deployment shapes, one core (ADR-0047 D2)
 
 - **In-process, via bindings** — `bindings/python` (PyO3 → the **`sandhi-gateway`** PyPI
-  wheel), `bindings/node` (napi/wasm). Zero network hop for same-process callers; ProximaDB
+  wheel), `bindings/node` (napi native addon). Zero network hop for same-process callers; ProximaDB
   links `sandhi-core`/`sandhi-providers` natively (no FFI).
 - **Reverse-proxy** — the same core + a listener, for cross-process / cross-host / polyglot
   / shared-key use. **In-path (inline)**, never a redirect (ADR-0047 D8): it holds the real
@@ -65,11 +58,15 @@ codec/transport path used by every front door.
 
 ### 4. Session / prompt-cache / KV affinity is preserved, not flattened (ADR-0047 D9)
 
-Multiplex transport ≠ mix sessions. Forward the cacheable prefix **byte-exact**; carry
-attribution in headers/metadata **outside** the cached prompt; propagate a stable
-per-conversation `session_id` so hosted prompt caches keep hitting and a self-hosted fleet
-consistent-hash routes a conversation to its warm instance. Cache-namespace default:
-shared within `group_id`, per-`subject_id` isolation as a stricter opt-in.
+Multiplex transport ≠ mix sessions. On the proxy, eligible same-family requests use ADR-0004's
+transparent plane and preserve the caller's bytes except for the narrowly specified usage-metering
+envelope normalization. A hard-capped request without an explicit upstream output bound is routed
+through translation so Sandhi can inject an enforceable ceiling. Cross-family requests decode
+through `ChatRequestV1` and re-encode, preserving the neutral contract while provider-specific
+extensions may be lost. Attribution stays in
+headers/metadata **outside** the cached prompt, and a stable per-conversation `session_id` is
+preserved so hosted prompt caches keep hitting and a self-hosted fleet can route a conversation to
+its warm instance.
 
 ### 5. Host-language provider escape hatch (mandatory)
 
@@ -82,11 +79,11 @@ This preserves victor's Python extensibility as its 28 adapters migrate onto San
 
 ```
 sandhi/
-  crates/{sandhi-core, sandhi-providers, sandhi-proxy}/
+  crates/{sandhi-core, sandhi-providers, sandhi-store, sandhi-proxy}/
   bindings/python/            # PyO3 → PyPI `sandhi-gateway`
-  bindings/node/              # napi/wasm → npm `@anvai-labs/sandhi`  (later)
-  schemas/usage-event.v1.schema.json
-  docs/adr/
+  bindings/node/              # napi native addon (npm publication intentionally deferred)
+  schemas/                    # generated public contracts
+  docs/{adr,td}/              # durable decisions + executable designs
 ```
 
 ## Consequences
@@ -96,8 +93,10 @@ sandhi/
   pricing).
 - **Cost:** a cross-repo wire contract to keep stable; PyO3/napi streaming across the FFI
   boundary needs care (solved patterns: async PyO3 / channels; the proxy for full isolation).
-- **Status:** pre-alpha / design-complete. This bootstrap ships the layout, the wire schema,
-  and this ADR; provider adapters + the proxy are the first implementation milestones.
+- **Status:** implemented and released. The four crates, both bindings, generated contract set,
+  typed provider runtime, proxy/operator surface, two-plane forwarding, single-node enforcement,
+  telemetry, and opt-in TLS are present. Remaining work is tracked by owning TD in the
+  [documentation status index](../README.md), not by this founding ADR.
 
 ## References
 

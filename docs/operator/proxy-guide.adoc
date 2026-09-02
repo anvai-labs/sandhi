@@ -100,7 +100,7 @@ On startup it prints (to stderr):
 
 [literal]
 ....
-sandhi-proxy listening on http://127.0.0.1:8787  (POST /v1/chat/completions | /v1/messages, Authorization: Bearer vk_...)
+sandhi-proxy listening on http://127.0.0.1:8787  (OpenAI Chat/Responses | Anthropic Messages | Gemini, virtual-key auth)
 ....
 
 [start=2] .Startup environment
@@ -119,6 +119,14 @@ sandhi-proxy listening on http://127.0.0.1:8787  (POST /v1/chat/completions | /v
 | _(unset → in-memory)_
 | SQLite path. When set, metering + vkeys + budgets + the enforcement ledger are **durable and crash-safe**; survive a restart.
 
+| `SANDHI_MEMORY_SINK_MAX`
+| `10000`
+| Maximum events retained by the bounded in-memory ring when `SANDHI_STORE` is unset. Oldest events are evicted and counted; this does not affect a durable store.
+
+| `SANDHI_LEDGER_SHARDS`
+| `1`
+| Durable enforcement-ledger files, from `1` through `64`. More shards reduce cross-scope lock contention; changing from one shard migrates ledger rows into `<store>-ledger-shard-N.db` files. Benchmark before tuning.
+
 | `SANDHI_ADMIN_TOKEN`
 | _(unset → admin API disabled)_
 | The admin bearer. **Setting it enables `/admin/*`** and (by default) gates `/dashboard` and `/metrics`.
@@ -129,7 +137,15 @@ sandhi-proxy listening on http://127.0.0.1:8787  (POST /v1/chat/completions | /v
 
 | `SANDHI_VAULT_BACKEND`
 | `keyring`
-| Secret backend: `keyring` (OS keychain) or `sentinelpass` (SentinelPass daemon). Unknown → `keyring`.
+| Secret backend: `keyring` (OS keychain) or `sentinelpass`. Release binaries use native SentinelPass daemon IPC; a source build needs the `sentinelpass-ipc` feature or falls back to the CLI. Unknown → `keyring`.
+
+| `SANDHI_OPENAI_KEY` / `SANDHI_ANTHROPIC_KEY` / `SANDHI_GEMINI_KEY`
+| _(unset)_
+| Legacy demo bootstrap: register one in-memory upstream and `vk_*_demo` key without the operator vault. Prefer Steps 2–4 for persistent deployments.
+
+| `SANDHI_OPENAI_BASE` / `SANDHI_ANTHROPIC_BASE` / `SANDHI_GEMINI_BASE`
+| provider default
+| Optional base-URL overrides for the corresponding legacy demo bootstrap only.
 
 | `SANDHI_DASHBOARD_PUBLIC`
 | _(unset → false)_
@@ -138,6 +154,10 @@ sandhi-proxy listening on http://127.0.0.1:8787  (POST /v1/chat/completions | /v
 | `SANDHI_ERROR_DETAIL`
 | _(unset → redacted)_
 | Set to exactly `full` to surface full upstream errors to clients. Default redacts to code/status/request-id; server logs always carry the full error.
+
+| `SANDHI_METRICS_MAX_SERIES`
+| `1024`
+| Maximum distinct bounded-label metric series. New series beyond the cap fold into a shared `(overflow)` model while totals remain exact. Raise only for a genuinely larger model fleet.
 
 | `SANDHI_MAX_REQUEST_BODY_BYTES`
 | `2097152` (2 MiB)
@@ -188,6 +208,19 @@ sandhi-proxy listening on http://127.0.0.1:8787  (POST /v1/chat/completions | /v
 | OTLP export (TD-0011 P3, requires the `otel-otlp` cargo feature). Set to exactly `otlp` to push `gen_ai.*` spans + metrics to a collector; unset behaves like the default build. See also `SANDHI_OTEL_ENDPOINT` / `SANDHI_OTEL_PROTOCOL` (default `http://localhost:4318` / `http/protobuf`).
 |===
 
+[CAUTION]
+====
+Increasing `SANDHI_LEDGER_SHARDS` migrates existing enforcement rows out of the original SQLite
+file. Returning to `1` does not merge the shard files back. Back up the store and treat a shard-count
+change as a storage migration, not a per-process tuning toggle.
+====
+
+When `SANDHI_VAULT_BACKEND=sentinelpass`, native IPC reads `SENTINELPASS_CLIENT_TOKEN`,
+`SANDHI_SENTINELPASS_CLIENT_ID` (default `sandhi`), and `SANDHI_SENTINELPASS_SOCKET`. Set
+`SANDHI_SENTINELPASS_FALLBACK_CLI=1` to force the legacy CLI backend; its executable override is
+`SANDHI_SENTINELPASS_BIN` (default `sentinelpass`). Native IPC is enabled in release binaries and in
+source builds made with `--features sentinelpass-ipc`.
+
 [IMPORTANT]
 ====
 Without `SANDHI_ADMIN_TOKEN`, every `/admin/*` call returns **403** and you cannot provision
@@ -231,10 +264,72 @@ an incomplete, unreadable, malformed, or mismatched pair fails startup. Without 
 the listener remains byte-compatible plain HTTP. Certificate reload without interrupting existing
 streams is tracked separately; restart the process to replace the identity in this phase.
 
+=== Optional reviewed desired state
+
+The same `SANDHI_CONFIG` file can declare providers, budgets, alerts, and virtual-key intent. It is
+not applied automatically at startup: preview it with `GET /admin/config`, then apply it explicitly
+with `POST /admin/config/apply`. Apply is additive-only — it creates or updates declared objects but
+never revokes an object merely because it disappeared from the file.
+
+[source,json]
+----
+{
+  "providers": [
+    {
+      "provider": "anthropic",
+      "label": "default",
+      "scheme": "api-key",
+      "secret_env": "ANTHROPIC_API_KEY"
+    }
+  ],
+  "budgets": [
+    {
+      "scope": "group:platform",
+      "limit_tokens": 1000000,
+      "window": "monthly",
+      "policy": "block",
+      "alert_thresholds": [80, 100]
+    }
+  ],
+  "alerts": [],
+  "vkeys": [
+    {
+      "upstream": "anthropic:default",
+      "subject": "alice",
+      "group": "platform",
+      "models": ["claude-sonnet-5"],
+      "rate_limit_per_min": 60
+    }
+  ]
+}
+----
+
+Provider secrets and webhook URLs never belong in the file; `secret_env` and `webhook_env` name
+variables in the proxy process. An absent or unset provider secret resolves to a keyless provider,
+so verify named variables before apply. A newly minted virtual key appears in the apply response
+once and must be captured exactly like the Step 3 response. TLS is startup-only: preview/apply
+reports `restart required` when `tls` is present.
+
+[source,bash]
+----
+curl -sS http://localhost:8787/admin/config \
+  -H 'Authorization: Bearer admin-secret'
+
+curl -sS -X POST http://localhost:8787/admin/config/apply \
+  -H 'Authorization: Bearer admin-secret'
+----
+
+Both routes require `SANDHI_ADMIN_TOKEN`; durable provider/vkey/alert state also requires
+`SANDHI_STORE`. Use the manual CLI flow below when a virtual key needs an explicit budget scope,
+expiry, or another field not represented by the desired-state `vkeys[]` entry.
+
 
 == Step 2 — register the real upstream credential
 
 In a second shell, use the `sandhi` operator CLI (a thin client to the admin API):
+
+The CLI defaults to `http://localhost:8787`; set `--admin-url` or `SANDHI_ADMIN_URL` when the
+admin endpoint is elsewhere. `--admin-token` can likewise come from `SANDHI_ADMIN_TOKEN`.
 
 [source,bash]
 ----
@@ -461,8 +556,89 @@ cargo run -p sandhi-proxy --bin sandhi -- --admin-token admin-secret vkeys list
 
 * **Dashboard:** `http://localhost:8787/dashboard` — requires `Authorization: Bearer admin-secret`
   unless `SANDHI_DASHBOARD_PUBLIC=1`. Values are masked.
-* **Metrics:** `GET /metrics` (Prometheus text), gated the same way. See the README's
-  _Operating it_ for the four alerts worth wiring.
+* **Metrics:** `GET /metrics` (Prometheus text), gated the same way. See the
+  observability section below for the four alerts worth wiring.
+
+
+== Observability and telemetry
+
+=== Logs
+
+`SANDHI_LOG` (falling back to `RUST_LOG`) controls the tracing filter; logs go to stderr. The
+default keeps reservation denials, fail-open admissions, lease reclaims, and settle failures
+without per-request chatter. `SANDHI_LOG=debug` adds plane selection per call.
+
+=== Prometheus metrics
+
+`GET /metrics` is gated by the same admin bearer as the dashboard when
+`SANDHI_ADMIN_TOKEN` is set:
+
+[source,yaml]
+----
+scrape_configs:
+  - job_name: sandhi
+    metrics_path: /metrics
+    authorization: { credentials: "<SANDHI_ADMIN_TOKEN>" }
+    static_configs: [{ targets: ["sandhi:8787"] }]
+----
+
+Omit `authorization` only when no admin token is configured or the endpoint was deliberately
+opened with `SANDHI_DASHBOARD_PUBLIC=1`. Metrics describe the gateway, not individual callers.
+Label dimensions are closed, and distinct series are capped by `SANDHI_METRICS_MAX_SERIES`; new
+model values beyond the cap fold into `(overflow)` without losing totals. Per-subject attribution
+belongs in the bounded usage aggregate instead of metric labels.
+
+[cols="2,3,5"]
+|===
+| Alert | Expression | Why
+
+| Capacity leaking
+| `increase(sandhi_settle_failures_total[15m]) > 0`
+| A failed settlement holds budget until the lease TTL expires.
+
+| Enforcement is off
+| `increase(sandhi_admitted_unmetered_total[15m]) > 0`
+| A `Warn` scope admitted fail-open during a ledger fault.
+
+| Callers being refused
+| `rate(sandhi_reservations_denied_total{policy="block"}[5m]) > 0`
+| Distinguishes exhausted caps from upstream failures.
+
+| Upstream degrading
+| `histogram_quantile(0.95, rate(sandhi_request_duration_ms_bucket[10m])) > 30000`
+| Surfaces a slow provider/model before clients report it.
+|===
+
+A sustained `sandhi_leases_reclaimed_total` also deserves investigation: reclaims are normal after
+a restart, while a steady trickle suggests requests are not settling.
+
+=== OTLP export (opt-in)
+
+Build the proxy with `otel-otlp`, then opt in at runtime. The exporter emits one `gen_ai` operation
+span per chat call plus token-usage, operation-duration, and time-to-first-token metrics. It runs
+beside `/metrics`; both may be enabled.
+
+[source,bash]
+----
+cargo build -p sandhi-proxy --features otel-otlp
+
+SANDHI_OTEL_EXPORT=otlp \
+SANDHI_OTEL_ENDPOINT=http://otelcol:4318 \
+SANDHI_STORE=usage.db \
+  cargo run -p sandhi-proxy --features otel-otlp --bin sandhi-proxy
+----
+
+[cols="2,2,5"]
+|===
+| Variable | Default | Purpose
+| `SANDHI_OTEL_EXPORT` | _(unset)_ | Set to exactly `otlp` to enable export.
+| `SANDHI_OTEL_ENDPOINT` | `http://localhost:4318` | OTLP base URL; the exporter appends `/v1/traces` and `/v1/metrics`.
+| `SANDHI_OTEL_PROTOCOL` | `http/protobuf` | `http/protobuf` or `http/json`.
+|===
+
+Exported telemetry uses a closed attribute allowlist. It may carry provider, model, operation, and
+token counts, but never `subject_id`, `group_id`, `session_id`, `virtual_key_id`, `request_id`, a
+credential, or a monetary cost.
 
 
 == The request lifecycle
@@ -471,13 +647,12 @@ What happens to one call, end to end:
 
 [literal]
 ....
-  admit            decode               forward              meter              reconcile
-  -----            ------               -------              -----              ----------
-  resolve vk   ->  reserve a       ->   ingress dialect  ->  upstream        -> UsageEvent  -> settle the
-  (hash match)     ceiling (lease)      -> ChatRequestV1      (real key,          (tokens +     lease against
-  check budget                          -> re-encode to       held server-       cache split,   the real billable;
-  check allowlist                       upstream family       side)              attribution)   overshoot is
-  check rate-limit                                                                                   counted, not lost
+  authenticate      normalize          authorize/admit          forward          finalize
+  ------------      ---------          ---------------          -------          --------
+  resolve vk    ->  decode caller  ->  check allowlist     ->  transparent  ->  UsageEvent
+  resolve upstream  dialect            check attribution      or translate      + settle lease
+                                        check rate limit       with real key     against measured
+                                        reserve ceiling                         billable usage
 ....
 
 [NOTE]
@@ -542,6 +717,16 @@ TD-0010 P4, `POST /v1beta/models/{model}:generateContent`.)
 
 [NOTE]
 ====
+A hard (`block`) budget must reserve an enforceable output ceiling. If a same-family request omits
+its output limit, Sandhi injects one through the typed request and therefore selects the translation
+plane for that call. Set an explicit provider-native output limit (`max_tokens`,
+`max_output_tokens`, or the dialect equivalent) to remain eligible for transparent forwarding.
+This affects fidelity and cache behavior, not whether measured usage is settled: both planes settle
+the provider's reported billable usage.
+====
+
+[NOTE]
+====
 **Attribution is key-bound.** The usage event always carries the *virtual key's*
 `subject`/`group` (set at mint time). The optional `x-sandhi-subject-id` /
 `x-sandhi-group-id` request headers are accepted only when they exactly echo that binding —
@@ -591,6 +776,7 @@ Every CLI command maps 1:1 onto a call under `/admin/*` (all require the admin b
 | `GET /admin/usage?by=&since=` | Attribution query (`by=` also accepts `run`).
 | `GET /admin/usage/run/{run_id}` | The run's cost tree (`RunCostTreeV1`); 404 when no event carries the id.
 | `POST /admin/alerts` / `GET /admin/alerts` / `…/{id}/ack` / `DELETE …/{id}` | Alert rules.
+| `GET /admin/config` / `POST /admin/config/apply` | Preview / apply `SANDHI_CONFIG` desired state (additive-only).
 |===
 
 
@@ -627,10 +813,10 @@ Every CLI command maps 1:1 onto a call under `/admin/*` (all require the admin b
 
 [NOTE]
 ====
-**Contract version skew:** a proxy built from current `develop` speaks contract `6`; the
-Victor-installed `sandhi-gateway` wheel may be `0.1.4` (contract `4`). The additive ratchet
-means they interoperate, but the version handshake is *inert* on the older wheel (it won't
-detect drift). Match versions at a release for a live handshake.
+**Contract version skew:** do not infer a contract version from a package version. Query the proxy's
+ungated `GET /version` and compare its `wire_contract_version` / `chat_contract_version` with the
+binding's `wire_contract_version()` / `chat_contract_version()` result. Both major contracts are
+currently `1`; additive chat-contract growth is exposed separately by the bindings' minor counter.
 ====
 
 [NOTE]
@@ -645,7 +831,8 @@ always carry the full error regardless.
 
 * The **real upstream key never leaves the proxy** — it lives in the vault and is rehydrated
   into an in-memory `ProviderHandle` at startup. Clients hold only their virtual key.
-* **Terminate TLS in front of the proxy** — the proxy itself is plaintext HTTP.
+* **Protect bearer credentials in transit.** Configure the listener's `tls` block as shown above,
+  or terminate TLS at a trusted fronting proxy. Plain HTTP is only for loopback or a trusted hop.
 * **Gate the dashboard/metrics** with `SANDHI_ADMIN_TOKEN`; open them only behind a firewall
   or with `SANDHI_DASHBOARD_PUBLIC=1` (values are still masked).
 * **Rotate by revoking** — `keys revoke` (credential) and `vkeys revoke` (per-user) are

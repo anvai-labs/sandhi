@@ -10,16 +10,18 @@ prompt-cache split, GPU-seconds) and never dollars. See
 [ADR-0001](docs/adr/0001-sandhi-architecture-and-wire-contract.md) for the
 architecture and the measure-vs-price boundary this changelog respects.
 
-One tag `vX.Y.Z` releases everything together — the `sandhi-proxy` binaries, the
-PyPI wheel (`sandhi-gateway`), the crates.io libs, and the npm package
-(`@anvai-labs/sandhi`). Versions are derived from the tag at build time, never
-hand-edited; see [RELEASING.md](RELEASING.md).
+One tag `vX.Y.Z` drives the binary and PyPI release plus any configured crates.io/npm
+publishers. Versions are derived from the tag at build time, never hand-edited; see
+[RELEASING.md](RELEASING.md). The npm package is currently intentionally unpublished.
 
 ## [Unreleased]
 
-### Added
+### Fixed
 
-- _Nothing yet._
+- **Release binaries can enable native SentinelPass IPC as intended.** The release workflow has
+  requested `sandhi-proxy --features sentinelpass-ipc` since v0.3.0, but that feature existed only
+  on `sandhi-store`; the proxy package did not forward it, so the exact binary build command was
+  invalid. `sandhi-proxy` now forwards the feature and CI compiles/tests that release seam.
 
 ## [0.5.0] — 2026-09-02
 
@@ -236,10 +238,11 @@ TD-0022 join ADR-0006/0007 + TD-0014…0021.
   passes an upstream-echoed W3C traceparent, restoring response-to-span linkage (`tracestate`
   stays stripped).
 - **Native SentinelPass daemon IPC vault backend** (#176): `SANDHI_VAULT_BACKEND=sentinelpass`
-  speaks the daemon protocol natively through the published `sentinelpass-protocol` v0.8.0
-  contract crate (replacing the CLI shell-out) — read + write support with explicit locked vs
-  not-found errors; deletes stay unsupported by design until upstream entry ownership exists.
-  Selected at runtime via `SANDHI_VAULT_BACKEND=sentinelpass` (no cargo feature; the backend compiles unconditionally).
+  can speak the daemon protocol natively through the published `sentinelpass-protocol` v0.8.0
+  contract crate — read + write support with explicit locked vs not-found errors; deletes stay
+  unsupported by design until upstream entry ownership exists. The backend is behind
+  `sandhi-store`'s non-default `sentinelpass-ipc` feature with an explicit CLI fallback. The
+  missing proxy-level feature forwarding used by release binaries is corrected under Unreleased.
 - **InferFlux admitted as OpenAI-compat catalog data** (ADR-0008, #173): the self-hosted
   inference server is reachable through the OpenAI codec — one catalog row plus its
   session-affinity header fact, not a new family — and the decision record ships with it.
