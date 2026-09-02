@@ -25,7 +25,7 @@ use sandhi_core::{
 };
 use sandhi_providers::{
     resolve_openai_compat_provider, AnthropicAuthScheme, GeminiAuthScheme, ProviderError,
-    ProviderHandle, ProviderRuntime as RustProviderRuntime,
+    ProviderFamily, ProviderHandle, ProviderRuntime as RustProviderRuntime,
 };
 
 fn parse_anthropic_auth_scheme(value: Option<&str>) -> PyResult<AnthropicAuthScheme> {
@@ -227,7 +227,7 @@ protocol; other families always authenticate with 'Authorization: Bearer' \
             }
         } else if matches!(normalized.as_str(), "anthropic" | "claude") {
             self.inner.anthropic(
-                base_url.unwrap_or_else(|| "https://api.anthropic.com".into()),
+                base_url.unwrap_or_else(|| ProviderFamily::Anthropic.default_base_url().into()),
                 api_key,
                 parse_anthropic_auth_scheme(auth_scheme.as_deref())?,
                 parse_headers_json(headers_json)?,
@@ -237,8 +237,7 @@ protocol; other families always authenticate with 'Authorization: Bearer' \
             )
         } else if matches!(normalized.as_str(), "gemini" | "google") {
             self.inner.gemini(
-                base_url
-                    .unwrap_or_else(|| "https://generativelanguage.googleapis.com/v1beta".into()),
+                base_url.unwrap_or_else(|| ProviderFamily::Gemini.default_base_url().into()),
                 api_key,
                 parse_gemini_auth_scheme(auth_scheme.as_deref())?,
                 parse_headers_json(headers_json)?,
@@ -248,7 +247,7 @@ protocol; other families always authenticate with 'Authorization: Bearer' \
             )
         } else if normalized == "cohere" {
             self.inner.cohere(
-                base_url.unwrap_or_else(|| "https://api.cohere.com".into()),
+                base_url.unwrap_or_else(|| ProviderFamily::Cohere.default_base_url().into()),
                 api_key,
                 parse_headers_json(headers_json)?,
                 max_retries,
@@ -257,7 +256,7 @@ protocol; other families always authenticate with 'Authorization: Bearer' \
             )
         } else if normalized == "ollama" {
             self.inner.ollama(
-                base_url.unwrap_or_else(|| "http://localhost:11434".into()),
+                base_url.unwrap_or_else(|| ProviderFamily::Ollama.default_base_url().into()),
                 api_key,
                 parse_headers_json(headers_json)?,
                 max_retries,
