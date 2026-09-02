@@ -13,7 +13,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use sandhi_core::{BufferedSink, InMemorySink, KeyStore, Sink, VirtualKey};
-use sandhi_providers::{AnthropicAuthScheme, GeminiAuthScheme, ProviderHandle, ProviderRuntime};
+use sandhi_providers::{
+    AnthropicAuthScheme, GeminiAuthScheme, ProviderFamily, ProviderHandle, ProviderRuntime,
+};
 use sandhi_proxy::{
     reclaim_sweep_at, rehydrate_alerts, rehydrate_budgets, serve_with_shutdown_timeout,
     BufferedAlertStore, ProxyLedger, ProxyState, DEFAULT_HEADER_READ_TIMEOUT_SECS,
@@ -65,7 +67,7 @@ async fn main() {
     // Legacy demo path: pre-register upstreams + virtual keys from env.
     if let Ok(key) = std::env::var("SANDHI_OPENAI_KEY") {
         let base = std::env::var("SANDHI_OPENAI_BASE")
-            .unwrap_or_else(|_| "https://api.openai.com/v1".into());
+            .unwrap_or_else(|_| ProviderFamily::OpenAiCompat.default_base_url().to_owned());
         providers.insert(
             "openai".into(),
             runtime.openai_compat("openai", base, key, Default::default(), None, None, None),
@@ -84,7 +86,7 @@ async fn main() {
         // only ever be the public API — no Anthropic-compatible gateway, no local mock, and no
         // way for the SDK-conformance suite to exercise this path at all.
         let base = std::env::var("SANDHI_ANTHROPIC_BASE")
-            .unwrap_or_else(|_| "https://api.anthropic.com".into());
+            .unwrap_or_else(|_| ProviderFamily::Anthropic.default_base_url().to_owned());
         providers.insert(
             "anthropic".into(),
             runtime.anthropic(
@@ -109,7 +111,7 @@ async fn main() {
 
     if let Ok(key) = std::env::var("SANDHI_GEMINI_KEY") {
         let base = std::env::var("SANDHI_GEMINI_BASE")
-            .unwrap_or_else(|_| "https://generativelanguage.googleapis.com".into());
+            .unwrap_or_else(|_| ProviderFamily::Gemini.default_base_url().to_owned());
         providers.insert(
             "gemini".into(),
             runtime.gemini(

@@ -277,15 +277,7 @@ fn default_base_url(provider: &str, family: ProviderFamily) -> String {
             return spec.base_url.to_string();
         }
     }
-    match family {
-        ProviderFamily::Anthropic => "https://api.anthropic.com".into(),
-        ProviderFamily::OpenAiCompat | ProviderFamily::OpenAiResponses => {
-            "https://api.openai.com/v1".into()
-        }
-        ProviderFamily::Gemini => "https://generativelanguage.googleapis.com".into(),
-        ProviderFamily::Cohere => "https://api.cohere.ai".into(),
-        ProviderFamily::Ollama => "http://localhost:11434".into(),
-    }
+    family.default_base_url().to_string()
 }
 
 fn parse_scheme(s: Option<&str>) -> CredentialScheme {

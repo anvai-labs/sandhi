@@ -47,11 +47,18 @@ pub enum UsageCadence {
     TerminalOnly,
 }
 
-/// Per-family transport facts. Deliberately one field for now: a table that grows by accretion is
+/// Per-family transport facts. Deliberately small: a table that grows by accretion is
 /// reviewable, one that lands as a seven-site refactor of the existing `match` arms is not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FamilyFacts {
     pub usage_cadence: UsageCadence,
+    /// The family's default upstream base when the caller supplies none. This is the single
+    /// source for the proxy's `default_base_url` and both bindings' `provider()` dispatch, and
+    /// is pinned to the catalog descriptors by test so the endpoint facts cannot drift again
+    /// (the #196 class: the proxy's own copies had Gemini without `/v1beta` — a default-config
+    /// 404 on every call — and Cohere on the legacy `api.cohere.ai` domain). Per-slug overrides
+    /// for the OpenAI-compat family live in the catalog specs, not here.
+    pub default_base_url: &'static str,
 }
 
 impl ProviderFamily {
@@ -81,13 +88,29 @@ impl ProviderFamily {
                 UsageCadence::TerminalOnly
             }
         };
-        FamilyFacts { usage_cadence }
+        let default_base_url = match self {
+            Self::Anthropic => "https://api.anthropic.com",
+            Self::Gemini => "https://generativelanguage.googleapis.com/v1beta",
+            Self::Cohere => "https://api.cohere.com",
+            Self::Ollama => "http://localhost:11434",
+            Self::OpenAiCompat | Self::OpenAiResponses => "https://api.openai.com/v1",
+        };
+        FamilyFacts {
+            usage_cadence,
+            default_base_url,
+        }
     }
 
     /// Convenience accessor for the fact that matters most often.
     #[must_use]
     pub const fn usage_cadence(self) -> UsageCadence {
         self.facts().usage_cadence
+    }
+
+    /// The family's default upstream base (see [`FamilyFacts::default_base_url`]).
+    #[must_use]
+    pub const fn default_base_url(self) -> &'static str {
+        self.facts().default_base_url
     }
 }
 
@@ -1486,7 +1509,7 @@ mod tests {
         assert_eq!(anthropic.family(), ProviderFamily::Anthropic);
 
         let gemini = runtime.gemini(
-            "https://generativelanguage.googleapis.com",
+            "https://generativelanguage.googleapis.com/v1beta",
             "k",
             crate::GeminiAuthScheme::ApiKey,
             HeaderMap::new(),
@@ -1497,7 +1520,7 @@ mod tests {
         assert_eq!(gemini.family(), ProviderFamily::Gemini);
 
         let cohere = runtime.cohere(
-            "https://api.cohere.ai",
+            "https://api.cohere.com",
             "k",
             HeaderMap::new(),
             None,

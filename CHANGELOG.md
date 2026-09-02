@@ -26,6 +26,25 @@ hand-edited; see [RELEASING.md](RELEASING.md).
   carries `x-sandhi-contract-version`, so an HTTP consumer knows which contract it is talking
   to at the moment a mismatch presents. The HTTP form of the TD-0008 handshake.
 
+### Changed
+
+- **Rust (`sandhi-providers`)**: `FamilyFacts` gains a `default_base_url: &'static str` field (with
+  `ProviderFamily::default_base_url()`). Source-breaking for external consumers constructing
+  `FamilyFacts` by struct literal — the same class as 0.4.0's factory-signature change; in-workspace
+  and binding callers are unaffected (the only construction site is `facts()` itself).
+
+### Fixed
+
+- **Single source for family default base URLs** (design audit A1, the #196 drift class). The
+  proxy's own hard-coded defaults had drifted from the catalog: Gemini without `/v1beta` — in
+  `default_base_url`, the `SANDHI_GEMINI_KEY` env registration, and the typed-runtime fixtures —
+  meaning a default-config Gemini call POSTed to `…/models/{model}:generateContent` with no
+  version segment and 404'd on every call; Cohere sat on the legacy `api.cohere.ai` domain.
+  Family defaults now live once on `FamilyFacts`
+  (`ProviderFamily::default_base_url()`), consumed by the proxy's `default_base_url`, the
+  standalone env registrations, and both bindings' `provider()` dispatch, with a new test
+  pinning them to the catalog descriptors so the copies cannot drift silently again.
+
 ### Internal
 
 - **Node typed-error parity closed for real** (TD-0021 P1, #203): `SandhiProviderError` is
