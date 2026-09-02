@@ -173,9 +173,11 @@ Do not build, and do not spike:
   raised across TD-0014…0021 is resolved on evidence, gated on a named experiment, or (TD-0018's two
   product questions) awaiting an owner this document cannot assign.
 
-## Appendix — the gap register (G01–G30)
+## Appendix — the gap register (G01–G32)
 
-The audit produced thirty items. This table is the **coordination index for concurrent sessions**:
+The architecture audit produced thirty items; the 2026-09-01 design audit (patterns +
+data structures, adversarially verified) added G31–G32. This table is the **coordination index
+for concurrent sessions**:
 each gap has exactly one owning document, and each document is one branch and one PR. Sources:
 **R** = architecture audit, **C** = co-design seam (TD-0008 / bindings), **FP** = first principles.
 
@@ -211,6 +213,8 @@ each gap has exactly one owning document, and each document is one branch and on
 | G28 | Rate limiter is a single global `Mutex<HashMap>` on the per-request path | R | P3 | TD-0014 |
 | G29 | Lower-layer proposals have no decision gate | FP | Gov | ADR-0006 (D4) |
 | G30 | Cross-plane error taxonomy not unified | FP | P3 | TD-0021 |
+| G31 | Settled `budget_reservation` rows are never deleted — `Window::Total` spend is a SUM over every admission ever, per request (the covering index removed the row-fetch constant, not the growth) | R | P1 | TD-0024 |
+| G32 | Family↔codec binding is ≥13 co-edit `match` sites plus a ~315-line ingress funnel with the ordering contract in comments — the demonstrated #196 silent-divergence class | R | P2 | TD-0025 |
 
 **Suggested parallelism.** ADR-0007, TD-0014, TD-0015, TD-0019, TD-0020 and TD-0021 have
 near-disjoint file footprints and can proceed simultaneously. TD-0016 wants the TD-0015 baseline
