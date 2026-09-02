@@ -3226,56 +3226,14 @@ fn provider_error(
     provider: &str,
     full_detail: bool,
 ) -> Response {
-    let (status, redacted_msg) = match e {
-        ProviderError::InvalidRequest(_) => (StatusCode::BAD_REQUEST, "invalid provider request"),
-        ProviderError::Auth => (StatusCode::BAD_GATEWAY, "upstream auth failed"),
-        ProviderError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "upstream rate limited"),
-        ProviderError::Upstream { .. } => (StatusCode::BAD_GATEWAY, "upstream error"),
-        ProviderError::Transport(_) => (StatusCode::BAD_GATEWAY, "upstream transport error"),
-        ProviderError::CircuitOpen => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "circuit open (upstream failing)",
-        ),
-        ProviderError::Timeout(_) => (StatusCode::GATEWAY_TIMEOUT, "upstream timed out"),
-        // ProviderError is #[non_exhaustive]; unknown future variants degrade to 502.
-        _ => (StatusCode::BAD_GATEWAY, "upstream error"),
+    // TD-0021 P3 (D6): the redaction decision lives on the type — this wrapper exists so
+    // the seven call sites (and the dialect-shaping tests) read unchanged.
+    let error = if full_detail {
+        codec::IngressError::from_provider_full(e, provider)
+    } else {
+        codec::IngressError::from_provider_redacted(e, provider)
     };
-    let mut typed = e.as_typed(Some(provider));
-    if !full_detail {
-        // Multi-tenant-safe default (TD-0008 D): keep the support-escalation
-        // currency (code / http_status / request_id), drop upstream bodies and
-        // transport internals. SANDHI_ERROR_DETAIL=full restores everything.
-        typed.message = redacted_msg.to_owned();
-        typed.details.clear();
-    }
-    let body = match dialect {
-        IngressDialect::OpenAi | IngressDialect::Responses => json!({"error":typed}),
-        IngressDialect::Anthropic => json!({"type":"error","error":typed}),
-        // Google's shape: `error.code` is the HTTP status as a NUMBER and `error.status` is the
-        // canonical enum name — that is what a google-genai client reads to classify a failure.
-        IngressDialect::Gemini => json!({"error":{
-            "code": status.as_u16(),
-            "message": typed.message,
-            "status": google_status(status),
-        }}),
-    };
-    (status, Json(body)).into_response()
-}
-
-/// HTTP status → the canonical google.rpc status name a Gemini client expects in `error.status`.
-fn google_status(status: StatusCode) -> &'static str {
-    match status {
-        StatusCode::BAD_REQUEST => "INVALID_ARGUMENT",
-        StatusCode::UNAUTHORIZED => "UNAUTHENTICATED",
-        StatusCode::FORBIDDEN => "PERMISSION_DENIED",
-        StatusCode::NOT_FOUND => "NOT_FOUND",
-        StatusCode::TOO_MANY_REQUESTS => "RESOURCE_EXHAUSTED",
-        StatusCode::PAYLOAD_TOO_LARGE => "RESOURCE_EXHAUSTED",
-        StatusCode::NOT_IMPLEMENTED => "UNIMPLEMENTED",
-        StatusCode::SERVICE_UNAVAILABLE => "UNAVAILABLE",
-        StatusCode::GATEWAY_TIMEOUT => "DEADLINE_EXCEEDED",
-        _ => "INTERNAL",
-    }
+    error.render(dialect)
 }
 
 /// A dialect-shaped 429 carrying `Retry-After` (TD-0012 D4).
@@ -3296,22 +3254,8 @@ fn rate_limited_error(dialect: IngressDialect, retry_after_secs: u64) -> Respons
 }
 
 fn ingress_error(dialect: IngressDialect, status: StatusCode, msg: &str) -> Response {
-    let typed = json!({
-        "code":"invalid_request",
-        "message":msg,
-        "retryable":false,
-        "http_status":status.as_u16(),
-    });
-    let body = match dialect {
-        IngressDialect::OpenAi | IngressDialect::Responses => json!({"error":typed}),
-        IngressDialect::Anthropic => json!({"type":"error","error":typed}),
-        IngressDialect::Gemini => json!({"error":{
-            "code": status.as_u16(),
-            "message": msg,
-            "status": google_status(status),
-        }}),
-    };
-    (status, Json(body)).into_response()
+    // TD-0021 P3 (D6): one construction type owns rendering; the 22 call sites unchanged.
+    codec::IngressError::invalid(status, msg).render(dialect)
 }
 
 fn error(status: StatusCode, msg: &str) -> Response {
@@ -3349,6 +3293,53 @@ mod error_detail_tests {
             "redacted mode must not leak details: {error}"
         );
         assert!(!bytes.windows(9).any(|w| w == b"tool call"), "body leaked");
+    }
+
+    #[tokio::test]
+    async fn redaction_is_a_property_of_the_type_not_the_call_site() {
+        // TD-0021 P3 (D6) acceptance: the DEFAULT construction path cannot leak an
+        // upstream body regardless of which constructor a future error path reaches
+        // for. Drive the type directly — not the provider_error wrapper — so the pin
+        // holds even if every wrapper is deleted.
+        for dialect in [
+            IngressDialect::OpenAi,
+            IngressDialect::Responses,
+            IngressDialect::Anthropic,
+            IngressDialect::Gemini,
+        ] {
+            let response =
+                codec::IngressError::from_provider_redacted(&upstream_error(), "moonshot")
+                    .render(dialect);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert!(
+                !bytes.windows(9).any(|w| w == b"tool call"),
+                "{dialect:?}: redacted default leaked the upstream body"
+            );
+            assert!(
+                !bytes.windows(7).any(|w| w == b"call_9"),
+                "{dialect:?}: redacted default leaked the request-internal id"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn protocol_refusals_never_carry_upstream_bytes() {
+        // The invalid_request constructor is for operator/protocol refusals; it has no
+        // upstream payload to leak by construction, and renders identically to the old
+        // inline builder (the dialect-shaping contract).
+        let response =
+            codec::IngressError::invalid(StatusCode::UNAUTHORIZED, "invalid virtual key")
+                .render(IngressDialect::Anthropic);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["type"], "error");
+        assert_eq!(value["error"]["code"], "invalid_request");
+        assert_eq!(value["error"]["http_status"], 401);
+        assert_eq!(value["error"]["message"], "invalid virtual key");
     }
 
     #[tokio::test]
