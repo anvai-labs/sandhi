@@ -65,6 +65,15 @@ hand-edited; see [RELEASING.md](RELEASING.md).
   and pinned per dialect including the adversarial shapes, and marginal against the
   output-ceiling-dominated reservation (ADR-0005 D1; accuracy semantics otherwise unchanged —
   still bytes/4, the script-aware estimator remains TD-0016 R2's).
+- **Metric label cardinality is capped** (design audit A2 — an authenticated memory-DoS).
+  `model` is a deliberate metric dimension, but its *values* are caller-supplied on the typed
+  plane (the per-key model allowlist is optional), so any holder of a valid virtual key could
+  grow the label-keyed registry maps without bound by rotating model strings — while the
+  `Labels` doc claimed every field was "never bounded by traffic". The registry now admits at
+  most `DEFAULT_MAX_METRIC_SERIES` (1024, matching the usage aggregator's cap) distinct label
+  series; further new series fold into a shared `(overflow)` model — the stats fold's precedent.
+  Existing series are never evicted and totals stay exact; only per-series detail degrades.
+  Operators with genuinely larger fleets set `SANDHI_METRICS_MAX_SERIES` in the binary.
 
 - **Single source for family default base URLs** (design audit A1, the #196 drift class). The
   proxy's own hard-coded defaults had drifted from the catalog: Gemini without `/v1beta` — in
