@@ -64,6 +64,164 @@ pub(crate) enum IngressDialect {
     Gemini,
 }
 
+/// The single owner of client-facing error construction (TD-0021 P3, D6).
+///
+/// Status, machine code, dialect rendering, AND the TD-0008 D redaction decision live on
+/// this type — the value is that the *next* error path cannot forget the redaction rule:
+/// the default constructors strip upstream bodies and transport internals, and full detail
+/// is an explicit, named choice (`SandboxMode::FullDetail` / `from_provider_full`), never
+/// a default. Behaviour-identical to the four construction sites it absorbs
+/// (`ingress_error`, `provider_error`, the admin `error`/`err` pair stay as thin
+/// delegates so callers and the dialect-shaping tests are unchanged).
+pub(crate) struct IngressError {
+    status: axum::http::StatusCode,
+    code: String,
+    message: String,
+    /// The full typed payload (ProviderErrorV1). Present ONLY in full-detail mode;
+    /// redacted mode carries the support-escalation currency (code/status/request_id)
+    /// with `details` cleared and `message` replaced by the canonical short form.
+    typed: Option<sandhi_core::ProviderErrorV1>,
+}
+
+impl IngressError {
+    /// An operator/protocol refusal the proxy itself generated (bad key, malformed
+    /// body, throttle). Never carries upstream bytes, so no redaction decision exists.
+    pub(crate) fn invalid(status: axum::http::StatusCode, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            code: "invalid_request".into(),
+            message: message.into(),
+            typed: None,
+        }
+    }
+
+    /// A provider-boundary failure, REDACTED by default (TD-0008 D): keep code /
+    /// http_status / request_id, drop upstream bodies and transport internals. This is
+    /// the constructor every new error path should reach for; the full-detail variant
+    /// is the explicit opt-in.
+    pub(crate) fn from_provider_redacted(
+        e: &sandhi_providers::ProviderError,
+        provider: &str,
+    ) -> Self {
+        Self::from_provider_detail(e, provider, false)
+    }
+
+    /// The `SANDHI_ERROR_DETAIL=full` opt-in (single-tenant / self-hosted): forwards
+    /// the full ProviderErrorV1 including the bounded upstream body.
+    pub(crate) fn from_provider_full(e: &sandhi_providers::ProviderError, provider: &str) -> Self {
+        Self::from_provider_detail(e, provider, true)
+    }
+
+    fn from_provider_detail(
+        e: &sandhi_providers::ProviderError,
+        provider: &str,
+        full_detail: bool,
+    ) -> Self {
+        let (status, canonical) = match e {
+            sandhi_providers::ProviderError::InvalidRequest(_) => (
+                axum::http::StatusCode::BAD_REQUEST,
+                "invalid provider request",
+            ),
+            sandhi_providers::ProviderError::Auth => {
+                (axum::http::StatusCode::BAD_GATEWAY, "upstream auth failed")
+            }
+            sandhi_providers::ProviderError::RateLimited => (
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                "upstream rate limited",
+            ),
+            sandhi_providers::ProviderError::Upstream { .. } => {
+                (axum::http::StatusCode::BAD_GATEWAY, "upstream error")
+            }
+            sandhi_providers::ProviderError::Transport(_) => (
+                axum::http::StatusCode::BAD_GATEWAY,
+                "upstream transport error",
+            ),
+            sandhi_providers::ProviderError::CircuitOpen => (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "circuit open (upstream failing)",
+            ),
+            sandhi_providers::ProviderError::Timeout(_) => (
+                axum::http::StatusCode::GATEWAY_TIMEOUT,
+                "upstream timed out",
+            ),
+            // ProviderError is #[non_exhaustive]; unknown future variants degrade to 502.
+            _ => (axum::http::StatusCode::BAD_GATEWAY, "upstream error"),
+        };
+        let typed = e.as_typed(Some(provider));
+        let (message, typed) = if full_detail {
+            (typed.message.clone(), typed)
+        } else {
+            let mut t = typed;
+            t.message = canonical.to_owned();
+            t.details.clear();
+            (canonical.to_owned(), t)
+        };
+        Self {
+            status,
+            code: "upstream_error".into(),
+            message,
+            typed: Some(typed),
+        }
+    }
+
+    /// Render into the ingress dialect's error envelope. One rendering site for every
+    /// construction path — a future dialect is added here once, not per call site.
+    pub(crate) fn render(&self, dialect: IngressDialect) -> axum::response::Response {
+        let body = match dialect {
+            IngressDialect::OpenAi | IngressDialect::Responses => {
+                json!({"error": self.payload()})
+            }
+            IngressDialect::Anthropic => json!({"type":"error","error": self.payload()}),
+            // Google's shape: `error.code` is the HTTP status as a NUMBER and `error.status`
+            // is the canonical enum name — that is what a google-genai client reads.
+            IngressDialect::Gemini => json!({"error":{
+                "code": self.status.as_u16(),
+                "message": self.message,
+                "status": google_status(self.status),
+            }}),
+        };
+        use axum::response::IntoResponse;
+        (self.status, axum::Json(body)).into_response()
+    }
+
+    /// The dialect-neutral typed payload: the full ProviderErrorV1 when present, else the
+    /// minimal `{code, message, retryable, http_status}` the protocol refusals always carried.
+    fn payload(&self) -> Value {
+        match &self.typed {
+            Some(typed) => serde_json::to_value(typed).unwrap_or_else(|_| {
+                json!({
+                    "code": self.code,
+                    "message": self.message,
+                    "retryable": false,
+                    "http_status": self.status.as_u16(),
+                })
+            }),
+            None => json!({
+                "code": self.code,
+                "message": self.message,
+                "retryable": false,
+                "http_status": self.status.as_u16(),
+            }),
+        }
+    }
+}
+
+/// HTTP status → the canonical google.rpc status name a Gemini client expects.
+pub(crate) fn google_status(status: axum::http::StatusCode) -> &'static str {
+    match status {
+        axum::http::StatusCode::BAD_REQUEST => "INVALID_ARGUMENT",
+        axum::http::StatusCode::UNAUTHORIZED => "UNAUTHENTICATED",
+        axum::http::StatusCode::FORBIDDEN => "PERMISSION_DENIED",
+        axum::http::StatusCode::NOT_FOUND => "NOT_FOUND",
+        axum::http::StatusCode::TOO_MANY_REQUESTS => "RESOURCE_EXHAUSTED",
+        axum::http::StatusCode::PAYLOAD_TOO_LARGE => "RESOURCE_EXHAUSTED",
+        axum::http::StatusCode::NOT_IMPLEMENTED => "UNIMPLEMENTED",
+        axum::http::StatusCode::SERVICE_UNAVAILABLE => "UNAVAILABLE",
+        axum::http::StatusCode::GATEWAY_TIMEOUT => "DEADLINE_EXCEEDED",
+        _ => "INTERNAL",
+    }
+}
+
 /// One way a client may present its virtual key on the wire.
 ///
 /// Kept as data rather than as branches in a handler so that a dialect declares its credential
