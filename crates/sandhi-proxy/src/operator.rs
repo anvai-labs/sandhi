@@ -1023,16 +1023,6 @@ fn read_config_file(state: &ProxyState) -> Result<crate::config::SandhiFileConfi
     })
 }
 
-fn tls_restart_plan(tls: Option<&crate::config::TlsEntry>) -> Option<Value> {
-    tls.map(|tls| {
-        json!({
-            "cert": tls.cert,
-            "key": tls.key,
-            "action": "restart required"
-        })
-    })
-}
-
 /// `GET /admin/config` — parse the declared config and report what `POST /admin/config/apply`
 /// would do, without doing it. Never returns secrets (the file never has them; this doesn't
 /// resolve `secret_env`/`webhook_env` at all — only whether each entry would be new or already
@@ -1125,11 +1115,8 @@ pub(crate) async fn config_preview(
             json!({ "upstream": v.upstream, "subject": v.subject, "group": v.group, "action": action })
         })
         .collect();
-    let tls_plan = tls_restart_plan(cfg.tls.as_ref());
-
     Json(json!({
         "path": state.config_path.as_ref().map(|p| p.display().to_string()),
-        "tls": tls_plan,
         "providers": providers_plan,
         "budgets": budgets_plan,
         "alerts": alerts_plan,
@@ -1244,7 +1231,6 @@ pub(crate) async fn config_apply(
     }
 
     Json(json!({
-        "tls": tls_restart_plan(cfg.tls.as_ref()),
         "providers": { "applied": providers_applied },
         "budgets": { "applied": budgets_applied },
         "alerts": { "created": alerts_created, "skipped": alerts_skipped },
@@ -1291,7 +1277,7 @@ fn apply_one_alert(
 
 #[cfg(test)]
 mod ct_tests {
-    use super::{constant_time_eq, tls_restart_plan};
+    use super::constant_time_eq;
 
     #[test]
     fn constant_time_eq_matches_equality_semantics() {
@@ -1305,23 +1291,5 @@ mod ct_tests {
         assert!(!constant_time_eq(b"admin", b"admin-secret"));
         assert!(!constant_time_eq(b"admin-secret", b"admin"));
         assert!(!constant_time_eq(b"", b"x"));
-    }
-
-    #[test]
-    fn tls_config_is_reported_as_startup_only_without_key_contents() {
-        assert_eq!(tls_restart_plan(None), None);
-
-        let tls = crate::config::TlsEntry {
-            cert: "/run/tls/fullchain.pem".into(),
-            key: "/run/tls/privkey.pem".into(),
-        };
-        assert_eq!(
-            tls_restart_plan(Some(&tls)),
-            Some(serde_json::json!({
-                "cert": "/run/tls/fullchain.pem",
-                "key": "/run/tls/privkey.pem",
-                "action": "restart required"
-            }))
-        );
     }
 }
