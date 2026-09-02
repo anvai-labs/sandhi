@@ -681,9 +681,13 @@ pub fn hash_secret(secret: &str) -> String {
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
+    // Table-driven (design audit A7): the per-byte `format!` built a temporary String for each
+    // of the 32 nibble pairs of a SHA-256 digest on every virtual-key lookup miss.
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push_str(&format!("{byte:02x}"));
+    for &byte in bytes {
+        out.push(HEX[usize::from(byte >> 4)] as char);
+        out.push(HEX[usize::from(byte & 0x0f)] as char);
     }
     out
 }
@@ -791,6 +795,12 @@ mod tests {
         assert_eq!(h1.len(), 64, "sha-256 hex is 64 chars");
         assert!(!h1.contains("vk_abc"));
         assert_ne!(hash_secret("vk_abd"), h1);
+        // Known-answer vector (FIPS 180-2 example): pins the hex encoding itself, not just its
+        // shape — the table-driven rewrite of hex_encode must reproduce it byte-for-byte.
+        assert_eq!(
+            hash_secret("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     #[test]

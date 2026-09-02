@@ -234,6 +234,16 @@ impl RunCostTreeV1 {
 
         let step_names: std::collections::BTreeSet<&str> =
             own.keys().map(|(s, _)| s.as_str()).collect();
+        // Parent→children index (design audit A6): `build` used to rescan every key per node to
+        // find its children — O(n²) in steps for a single scan pass. One grouping walk makes
+        // assembly linear; because `own` is a BTreeMap, each Vec lands in the same sorted order
+        // the full scan produced, so the assembled tree is byte-identical.
+        let mut children_of: BTreeMap<&str, Vec<&StepKey>> = BTreeMap::new();
+        for key in own.keys() {
+            if let Some(parent) = key.1.as_deref() {
+                children_of.entry(parent).or_default().push(key);
+            }
+        }
         let mut visited: std::collections::BTreeSet<StepKey> = std::collections::BTreeSet::new();
         let mut roots = Vec::new();
         // Natural roots: no parent, or a parent naming no step in this run (orphan).
@@ -246,7 +256,7 @@ impl RunCostTreeV1 {
             .cloned()
             .collect();
         for key in root_keys {
-            if let Some(node) = Self::build(&key, &own, &mut visited) {
+            if let Some(node) = Self::build(&key, &own, &children_of, &mut visited) {
                 roots.push(node);
             }
         }
@@ -254,7 +264,7 @@ impl RunCostTreeV1 {
         // the smallest unvisited key to a root — deterministically breaking the cycle without
         // losing or double-counting its spend — until every node is placed.
         while let Some(key) = own.keys().find(|k| !visited.contains(*k)).cloned() {
-            if let Some(node) = Self::build(&key, &own, &mut visited) {
+            if let Some(node) = Self::build(&key, &own, &children_of, &mut visited) {
                 roots.push(node);
             }
         }
@@ -270,6 +280,7 @@ impl RunCostTreeV1 {
     fn build(
         key: &StepKey,
         own: &BTreeMap<StepKey, UsageAggregateV1>,
+        children_of: &BTreeMap<&str, Vec<&StepKey>>,
         visited: &mut std::collections::BTreeSet<StepKey>,
     ) -> Option<RunUsageNodeV1> {
         if !visited.insert(key.clone()) {
@@ -278,15 +289,12 @@ impl RunCostTreeV1 {
         let own_row = own.get(key)?.clone();
         let mut rollup = own_row.clone();
         let mut children = Vec::new();
-        let child_keys: Vec<StepKey> = own
-            .keys()
-            .filter(|(_, p)| p.as_deref() == Some(key.0.as_str()))
-            .cloned()
-            .collect();
-        for child_key in child_keys {
-            if let Some(child) = Self::build(&child_key, own, visited) {
-                rollup.merge(&child.rollup);
-                children.push(child);
+        if let Some(child_keys) = children_of.get(key.0.as_str()) {
+            for child_key in child_keys {
+                if let Some(child) = Self::build(child_key, own, children_of, visited) {
+                    rollup.merge(&child.rollup);
+                    children.push(child);
+                }
             }
         }
         Some(RunUsageNodeV1 {

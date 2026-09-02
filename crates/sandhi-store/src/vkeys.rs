@@ -110,7 +110,11 @@ impl VirtualKeyStore {
                 created_at         TEXT NOT NULL,
                 revoked_at         TEXT
             );
-            CREATE INDEX IF NOT EXISTS idx_vkeys_hash ON virtual_keys(secret_hash);",
+            -- idx_vkeys_hash is intentionally NOT created: `secret_hash TEXT NOT NULL UNIQUE`
+            -- already maintains an implicit unique index on the same column, so a second index
+            -- was pure write amplification (design audit A7). The DROP keeps existing stores
+            -- from carrying it forever.
+            DROP INDEX IF EXISTS idx_vkeys_hash;",
         )
     }
 
@@ -280,6 +284,91 @@ mod tests {
             expires_at: None,
             rate_limit_per_min: Some(60),
         }
+    }
+
+    #[test]
+    fn secret_hash_lookup_uses_only_the_unique_index() {
+        // Design audit A7: `secret_hash TEXT NOT NULL UNIQUE` already maintains an implicit
+        // unique index; `idx_vkeys_hash` duplicated it and cost a second index write per mint
+        // and revoke. The lookup must stay index-served after the drop.
+        let store = VirtualKeyStore::open(":memory:").unwrap();
+        let conn = store.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT name FROM sqlite_master \
+                 WHERE type = 'index' AND tbl_name = 'virtual_keys'",
+            )
+            .unwrap();
+        let indexes: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            indexes.iter().all(|name| name != "idx_vkeys_hash"),
+            "the redundant duplicate of the UNIQUE index must be dropped, found: {indexes:?}"
+        );
+        assert!(
+            indexes
+                .iter()
+                .any(|name| name.starts_with("sqlite_autoindex")),
+            "the UNIQUE constraint's implicit index must remain, found: {indexes:?}"
+        );
+    }
+
+    #[test]
+    fn existing_store_drops_the_redundant_hash_index_and_keeps_keys() {
+        // The migration DIRECTION (adversarial review of this PR): a store carrying the old
+        // idx_vkeys_hash must lose it on reopen while its keys stay readable — the fresh-
+        // `:memory:` test above cannot catch a silently-removed DROP INDEX.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vkeys.db");
+        {
+            let conn = Connection::open(&path).expect("open raw");
+            conn.execute_batch(
+                "CREATE TABLE virtual_keys (
+                    id                 TEXT PRIMARY KEY,
+                    subject_id         TEXT,
+                    group_id           TEXT,
+                    upstream_ref       TEXT NOT NULL,
+                    models             TEXT,
+                    budget_scope       TEXT,
+                    expires_at         TEXT,
+                    rate_limit_per_min INTEGER,
+                    secret_hash        TEXT NOT NULL UNIQUE,
+                    created_at         TEXT NOT NULL,
+                    revoked_at         TEXT
+                );
+                CREATE INDEX idx_vkeys_hash ON virtual_keys(secret_hash);
+                INSERT INTO virtual_keys (id, upstream_ref, secret_hash, created_at)
+                VALUES ('key_1', 'anthropic:default', 'abc', '2026-09-01T00:00:00Z');",
+            )
+            .expect("seed old schema");
+        }
+        let store = VirtualKeyStore::open(path.to_str().expect("utf8 path")).expect("reopen");
+        {
+            let conn = store.conn.lock().expect("conn");
+            let mut stmt = conn
+                .prepare(
+                    "SELECT name FROM sqlite_master \
+                     WHERE type = 'index' AND tbl_name = 'virtual_keys'",
+                )
+                .expect("prepare");
+            let indexes: Vec<String> = stmt
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            assert!(
+                indexes.iter().all(|name| name != "idx_vkeys_hash"),
+                "redundant index must be dropped on reopen, found: {indexes:?}"
+            );
+        }
+        assert_eq!(
+            store.find_by_hash("abc").unwrap().unwrap().id,
+            "key_1",
+            "keys survive the migration"
+        );
     }
 
     #[test]

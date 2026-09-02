@@ -7,6 +7,15 @@
 //! Streams are metered by a Drop-guarded wrapper: exactly one event across every termination —
 //! clean end (terminal usage), mid-stream error (partial usage seen so far, matching the
 //! proxy's precedent), caller abandonment (client disconnect), and never-polled drop.
+//!
+//! **Where this decorator runs (design audit P11):** it is the *embedder* seam — hosts that
+//! compose a provider tree in-process (the ADR-0001 escape-hatch layer, exercised through the
+//! language bindings). The proxy does **not** use it: its request path assembles events itself
+//! in `RequestAccounting`, which additionally settles the enforcement ledger and falls back to
+//! a byte-estimate `Partial` for streams that end without usage. The two semantics are
+//! deliberately different ("measured, never estimated" here; "count the call" there, TD-0021
+//! D3) and both are intentional. The seam stays public — it is part of the published
+//! `sandhi-providers` surface — so removing it is a release decision, not a cleanup.
 
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
