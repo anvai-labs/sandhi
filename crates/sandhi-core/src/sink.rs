@@ -2,6 +2,7 @@
 //! sink must never break or delay the model call (AnvaiOps ADR-0047 D7 / ADR-0020 D7).
 
 use crate::event::UsageEvent;
+use std::collections::VecDeque;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
@@ -150,35 +151,91 @@ impl Sink for BufferedSink {
     }
 }
 
+/// Default event capacity of [`InMemorySink`] when no explicit bound is given.
+pub const DEFAULT_MEMORY_SINK_CAPACITY: usize = 10_000;
+
 /// An in-memory sink — the default for tests and single-process local use.
-#[derive(Debug, Default)]
+///
+/// Bounded by design (design audit A3): the standalone proxy uses this when `SANDHI_STORE` is
+/// unset, where an unbounded `Vec` made the default no-config deployment a monotonic memory
+/// leak. Once full it evicts the OLDEST event (a local recent-usage view wants the newest),
+/// counts the eviction, and logs at powers of two exactly like [`BufferedSink`] — no bound
+/// ships unobservable (TD-0014's rule). The proxy's default is
+/// [`DEFAULT_MEMORY_SINK_CAPACITY`], tunable via `SANDHI_MEMORY_SINK_MAX`.
+#[derive(Debug)]
 pub struct InMemorySink {
-    events: Mutex<Vec<UsageEvent>>,
+    events: Mutex<VecDeque<UsageEvent>>,
+    capacity: usize,
+    dropped: AtomicU64,
 }
 
 impl InMemorySink {
+    /// A bounded sink retaining the newest [`DEFAULT_MEMORY_SINK_CAPACITY`] events.
+    #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self::with_capacity(DEFAULT_MEMORY_SINK_CAPACITY)
     }
 
-    /// A snapshot of everything emitted so far.
+    /// A bounded sink retaining (at most) the newest `capacity` events; zero is promoted to one.
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            events: Mutex::new(VecDeque::new()),
+            capacity: capacity.max(1),
+            dropped: AtomicU64::new(0),
+        }
+    }
+
+    /// A snapshot of the retained events, oldest-first.
     pub fn events(&self) -> Vec<UsageEvent> {
-        self.events.lock().map(|e| e.clone()).unwrap_or_default()
+        self.events
+            .lock()
+            .map(|events| events.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     pub fn len(&self) -> usize {
-        self.events.lock().map(|e| e.len()).unwrap_or(0)
+        self.events.lock().map(|events| events.len()).unwrap_or(0)
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Number of oldest events evicted after the ring filled.
+    #[must_use]
+    pub fn dropped_events(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+
+    fn record_drop(&self) {
+        let dropped = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+        // Log at powers of two: persistent overload stays visible without creating a second
+        // overload through one log line per evicted event.
+        if dropped.is_power_of_two() {
+            tracing::warn!(dropped, "in-memory usage sink full; oldest event evicted");
+        }
+    }
+}
+
+impl Default for InMemorySink {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Sink for InMemorySink {
     fn emit(&self, event: &UsageEvent) {
+        let mut evicted = false;
         if let Ok(mut events) = self.events.lock() {
-            events.push(event.clone());
+            if events.len() >= self.capacity {
+                events.pop_front();
+                evicted = true;
+            }
+            events.push_back(event.clone());
+        }
+        if evicted {
+            self.record_drop();
         }
     }
 }
@@ -220,6 +277,29 @@ mod tests {
         sink.emit(&sample());
         assert_eq!(sink.len(), 1);
         assert_eq!(sink.events()[0].tokens_out, 4);
+    }
+
+    #[test]
+    fn in_memory_sink_evicts_oldest_when_full_and_counts_it() {
+        // Design audit A3: the no-SANDHI_STORE default must be bounded, keep the NEWEST events,
+        // and make the eviction observable — the same three properties BufferedSink guarantees.
+        let sink = InMemorySink::with_capacity(2);
+        sink.emit(&sample().with_tokens(1, 1));
+        sink.emit(&sample().with_tokens(2, 2));
+        sink.emit(&sample().with_tokens(3, 3));
+        assert_eq!(sink.len(), 2, "capacity respected");
+        assert_eq!(sink.dropped_events(), 1, "eviction counted");
+        let kept: Vec<u64> = sink.events().iter().map(|e| e.tokens_out).collect();
+        assert_eq!(kept, vec![2, 3], "newest retained, oldest-first order");
+    }
+
+    #[test]
+    fn in_memory_sink_promotes_zero_capacity_to_one() {
+        let sink = InMemorySink::with_capacity(0);
+        sink.emit(&sample().with_tokens(1, 1));
+        sink.emit(&sample().with_tokens(2, 2));
+        assert_eq!(sink.len(), 1);
+        assert_eq!(sink.dropped_events(), 1);
     }
 
     #[test]

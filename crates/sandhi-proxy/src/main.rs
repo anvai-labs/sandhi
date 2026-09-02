@@ -213,7 +213,20 @@ async fn main() {
             buffered_sink = Some(Arc::clone(&buffered));
             buffered
         }
-        None => Arc::new(InMemorySink::new()),
+        None => {
+            // No durable store: usage stays in a bounded in-memory ring (design audit A3 — the
+            // previous unbounded Vec made the default no-config deployment a monotonic memory
+            // leak). The newest events are kept and evictions are counted + logged, never silent.
+            let capacity = positive_usize_env(
+                "SANDHI_MEMORY_SINK_MAX",
+                sandhi_core::DEFAULT_MEMORY_SINK_CAPACITY,
+            );
+            eprintln!(
+                "sandhi-proxy: no SANDHI_STORE — usage kept in a bounded in-memory ring \
+                 (newest {capacity} events; SANDHI_MEMORY_SINK_MAX to change)"
+            );
+            Arc::new(InMemorySink::with_capacity(capacity))
+        }
     };
 
     // ADR-0005 step 2: the enforcement ledger is durable (crash-safe leases, calendar windows,
