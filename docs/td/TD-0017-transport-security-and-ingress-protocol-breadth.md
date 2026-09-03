@@ -1,6 +1,6 @@
 # TD-0017: Transport security and ingress protocol breadth — TLS, and finding out what HTTP versions we actually speak
 
-- **Status:** Draft (proposed), 2026-08-31. **P1 landed**; P2–P4 remain open. Owns gaps
+- **Status:** **In progress**, 2026-08-31. **P1 landed**; P2–P4 remain open. Owns gaps
   **G05, G06** (G05 ✅).
 - **Relates to:** [ADR-0006](../adr/0006-layer-boundary-and-protocol-scope.md) D2 (protocol breadth
   belongs at L5/L6/L7, and this TD is what that decision authorises),
@@ -15,10 +15,9 @@ termination configured by certificate/key paths in `SANDHI_CONFIG`; plaintext re
 loopback-development default. SNI/ALPN propagation and live rotation remain P2/P3 work.
 
 For a component whose entire purpose is **holding the real upstream credential so clients never see
-it**, and which receives a bearer virtual key on every request, this is the highest-severity gap in
-the audit. Every deployment therefore has a mandatory fronting proxy — and that dependency is
-currently *incidental* rather than documented, which means some deployment somewhere does not have
-one.
+it**, and which receives a bearer virtual key on every request, this was the highest-severity gap in
+the audit. P1 closed it with native opt-in TLS plus a non-loopback plaintext warning; deployments may
+instead use a trusted fronting TLS terminator deliberately.
 
 The second half was, until this TD was fact-checked, an open question — and the answer turned out
 to be the opposite of the draft's inference. **Sandhi's ingress speaks HTTP/1.1 only, and the `h2`
@@ -51,11 +50,11 @@ surface that does not exist in production.
 
 ## First principles
 
-1. **A credential-holding proxy that cannot terminate TLS has an unstated hard dependency.** Either
-   it terminates TLS, or the fronting requirement is a documented, loudly-warned precondition. It is
-   currently neither.
+1. **A credential-holding proxy needs a deliberate TLS boundary.** P1 now provides native opt-in
+   termination and warns on non-loopback plaintext; a trusted fronting terminator remains valid.
 2. **An undeclared protocol surface is worse than an absent one.** Anything reachable must be tested;
-   anything untested must be unreachable. G06 is currently in the gap between those.
+   anything untested must be unreachable. ADR-0009 closes G06 today by making the listener
+   explicitly HTTP/1-only.
 3. **Do not implement TLS; configure it.** ADR-0006 D5 forbids owning cryptography. This TD wires
    `rustls` and owns exactly one thing beyond configuration: certificate rotation, which is an
    operational lifecycle concern rather than a cryptographic one.
@@ -125,10 +124,10 @@ TD-0014 D4's `ConnCtx`. They are available to admission decisions and **must not
 `RequestMetadataV1`, the usage event, or any metric label — same bounded-cardinality discipline as
 TD-0011 D2, and SNI is caller-controlled.
 
-**D6 — Until TLS ships, the plaintext posture is loud.** The proxy already warns when `SANDHI_STORE`
-is set without an admin token (`main.rs`, the ADR-0004 D4 footgun warning). A startup warning when
-binding a non-loopback address without TLS follows the same established pattern: fail loudly, not
-silently, and do not fail-closed on a posture that many dev setups legitimately rely on.
+**D6 — The plaintext posture is loud.** P1 ships a startup warning when binding a non-loopback
+address without TLS, following the existing `SANDHI_STORE`-without-admin-token warning pattern. It
+fails loudly without failing closed on a posture that loopback and trusted-hop setups legitimately
+use.
 
 ## Phases
 
@@ -140,7 +139,8 @@ silently, and do not fail-closed on a posture that many dev setups legitimately 
 | **P3** | D4 + D5 — ALPN and `ConnCtx` | ALPN offers exactly the tested set; a client negotiating each offered protocol completes a request on every ingress dialect; `ConnCtx` carries ALPN/SNI and they appear in no usage event and no metric label |
 | **P4** | HTTP/2 ingress, only if P0 says it is worth declaring. **Carried requirement from ADR-0009:** the h2 builder sets `header_read_timeout`, `max_buf_size`, and a timer in the same commit, and the silent-connection regression test extends to the h2 path — the sniffing-bypass class must not return with the new protocol | Every ingress dialect passes its full test suite over h2 as well as h1 — the TD-0010 parity matrix gains an HTTP-version axis |
 
-P0 is 30 minutes and gates P4 entirely. P1 is the P0-severity item and should not wait for anything.
+P0 is resolved and P1 is shipped. P2/P3 are the active TLS-lifecycle work; P4 remains a deliberate
+feature addition gated by a named HTTP/2 use case and ADR-0009's timeout invariants.
 
 ## Pressure test
 

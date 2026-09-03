@@ -74,11 +74,12 @@ Sandhi measures well and shows almost none of it. Three gaps, each verified agai
   in the live counter. Pricing is downstream (ADR-0001). This is not hypothetical: the README
   advertised a "local cost display — from a community price table" until #71 removed it. A
   running cost is the most natural-feeling feature here and the one that breaks the product.
-- First-party **OTel/Prometheus export** — a real gap, but a different shape (push, long-lived
-  collectors, cardinality governance). Separate TD.
-- **Admin/dashboard authentication** — tracked in SECURITY.md as unauthed-by-design for
-  self-host. Richer stats raise the stakes; it does not change this design.
-- Per-minute **rate-limit enforcement** — orthogonal, still open.
+- First-party **OTel/Prometheus export** — outside this design; subsequently shipped under
+  [TD-0011](TD-0011-first-party-observability.md).
+- **Admin/dashboard authentication** — outside this design; subsequently made admin-bearer-gated
+  by default under ADR-0004 D4.
+- Per-minute **rate-limit enforcement** — orthogonal; subsequently shipped under
+  [TD-0012](TD-0012-rate-limit-enforcement.md).
 
 ## Decisions
 

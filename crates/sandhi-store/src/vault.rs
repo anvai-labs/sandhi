@@ -8,8 +8,9 @@
 //!   touching the secret backend.
 //! - **Secrets** are held by a [`Vault`] backend implementation. The default is [`KeyringVault`]
 //!   (the OS keychain via the `keyring` crate — macOS Keychain / Linux Secret Service / Windows
-//!   Credential Manager); [`SentinelPassVault`] reads from the SentinelPass password manager over
-//!   its CLI (native daemon IPC is a TODO). [`InMemoryVault`] backs tests.
+//!   Credential Manager); [`SentinelPassIpcVault`] uses the native daemon protocol when the
+//!   `sentinelpass-ipc` feature is enabled, with [`SentinelPassVault`] retained as an explicit CLI
+//!   fallback. [`InMemoryVault`] backs tests.
 //!
 //! Selection is via `SANDHI_VAULT_BACKEND=keyring|sentinelpass` (default `keyring`). The
 //! measure-vs-price boundary is held: no dollars, no SKU/tier — only credentials + neutral token

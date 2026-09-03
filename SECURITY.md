@@ -56,10 +56,10 @@ Out of scope:
   token **is** configured and `SANDHI_DASHBOARD_PUBLIC` is unset (they are gated by
   default — ADR-0004 D4), any **unmasked** secret in a response, or a *write*
   endpoint reachable without an admin token.
-- Documented, not-yet-implemented enforcement: per-minute **rate limits** are
-  enforced **per process** (with N replicas the effective limit is N × the configured
-  value), and enforcement is **proxy-only** — the in-process
-  bindings meter without enforcing. See the CHANGELOG's "Known limitations".
+- Documented enforcement boundaries: per-minute **rate limits** are enforced **per process**
+  (with N replicas the effective limit is N × the configured value), and enforcement is
+  **proxy-only** — the in-process bindings meter without enforcing. See the current
+  [documentation map](docs/README.md) and [operator guide](docs/operator/proxy-guide.adoc).
 
 Also note: client-facing provider errors are **redacted by default** (code, HTTP
 status, request id, canonical message). `SANDHI_ERROR_DETAIL=full` opts a

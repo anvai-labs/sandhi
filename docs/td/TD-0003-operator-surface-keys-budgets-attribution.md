@@ -8,7 +8,9 @@
 
 The typed-provider migration (TD-0002) made Sandhi own transport and metering: every admitted call flows through the proxy (or the in-process FFI) and emits a neutral `UsageV2` event attributed to a virtual key / subject / group / provider / session. The **backend pieces already exist** — the virtual-key store, the budget ledger (`sandhi-core/budget.rs`), usage events (`event.rs` / `usage.rs`), a `SqliteStore` with `totals_by_{subject,group,provider}` + `grand_total`, the proxy's bearer-virtual-key auth + per-request budget check, and a basic `/dashboard`.
 
-What is **missing** is the *operator surface*: there is no CLI, no key vault, no admin API, and therefore no way to provision provider credentials, share virtual keys, set budgets, or query attribution. TD-0003 was an 8-line CLI sketch; this document fleshes it into the design that the subsequent build phases implement.
+At proposal time, what was **missing** was the *operator surface*: there was no CLI, key vault, or
+admin API. P1–P4 subsequently shipped those capabilities. The sections below preserve the design
+baseline; the current runbook is the [proxy operator guide](../operator/proxy-guide.adoc).
 
 ## Design boundary (load-bearing)
 
@@ -36,7 +38,10 @@ The concern is split:
 - **Metadata** (provider, label, scheme, base_url, created_at, status) is durably indexed in the `sandhi-store` `vault` SQLite table, so `list()` returns masked metadata without touching the secret backend.
 - **Secrets** are held by a pluggable `Vault` backend:
   - `KeyringVault` (default) — the OS keychain via the Rust `keyring` crate (macOS Keychain / Linux Secret Service / Windows Credential Manager), service `sandhi`, account `<provider>:<label>`.
-  - `SentinelPassVault` — reads from the SentinelPass password manager over its CLI (`sentinelpass secret get …`), keeping the coupling loose (no `sentinelpass-core` path dependency). Read-only for now (the CLI exposes no write); native daemon IPC is a follow-up.
+  - SentinelPass backends — native daemon IPC is available behind `sentinelpass-ipc` through the
+    published `sentinelpass-protocol` contract and supports reads and writes. External deletion is
+    deliberately unsupported until the daemon has entry ownership; revoke the grant instead. The
+    explicit `SentinelPassVault` CLI fallback remains available for compatibility and is read-only.
   - `InMemoryVault` — process-local, for tests/demos.
 
 Selection is via `SANDHI_VAULT_BACKEND=keyring|sentinelpass` (default `keyring`). (An earlier draft proposed an AES/GCM `secret_blob` + `SANDHI_VAULT_KEY`; that was replaced by the OS keychain model — secrets belong in a real secret store, not a hand-rolled encrypted column.)
@@ -112,6 +117,8 @@ Extend `/dashboard` to surface: virtual keys (list / masked), budgets (scopes, s
 
 - **CLI host:** resolved — a single Rust `sandhi` binary (`crates/sandhi-proxy/src/cli.rs`) is a thin HTTP client to the admin API; no direct DB access, so it drives any running proxy. A thin Python console-script shim can wrap it later.
 - **Vault encryption:** resolved — secrets live in the OS keychain (`keyring`) by default, or SentinelPass; no hand-rolled encrypted blob. KMS / hosted-secret-manager is a follow-up at the commercial layer (AnvaiOps).
-- **SentinelPass IPC:** P1 shells out to the `sentinelpass secret get` CLI (loose coupling, no `sentinelpass-core` path dep); native daemon IPC (socket + `IpcMessage`) is a follow-up once a narrow contract is promoted.
+- **SentinelPass IPC:** resolved — the narrow `sentinelpass-protocol` contract is published and
+  native daemon IPC ships behind the `sentinelpass-ipc` feature. The CLI is an explicit fallback,
+  not the only backend. See [TD-0023](TD-0023-release-automation.md).
 - **Alert channels:** webhook + log first; Slack/email later?
 - **Tenancy:** is one Sandhi deployment one tenant, or does it need tenant scoping (likely an AnvaiOps concern)?

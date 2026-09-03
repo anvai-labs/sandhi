@@ -13,21 +13,15 @@ key, and set per-user budgets — without hand-rolling provider APIs.
 > concern. See [ADR-0001](docs/adr/0001-sandhi-architecture-and-wire-contract.md).
 
 - **License:** Apache-2.0
-- **Status:** early, but released — `v0.1.2` is on PyPI (`sandhi-gateway`) and crates.io; the npm
-  package is not published yet. Landed: core metering, the provider adapters (TD-0001), the typed
-  runtime (TD-0002), the operator surface — key vault, virtual keys, admin API, `sandhi` CLI,
-  windowed budgets + warn policy + threshold alerts, model-allowlist enforcement, the dashboard
-  (TD-0003 P1–P4) — the **durable lease ledger**
-  ([ADR-0005](docs/adr/0005-enforcement-correctness-reservation-ledger-observe-enforce-split.md)), and the
-  **transparent-metering plane** of
-  [ADR-0004](docs/adr/0004-two-plane-proxy-and-enforcement-boundary.md). Still open: per-minute
-  a shared/HA ledger backend
-  ([TD-0007](docs/td/TD-0007-enforcement-ledger-backends.md)), the Cohere *ingress* dialect,
-  first-party observability export, and the declarative policy engine
-  ([TD-0005](docs/td/TD-0005-declarative-policy-engine.md)).
+- **Status:** early and released. The metering core, typed provider runtime, four proxy ingress
+  dialects, operator surface, durable single-node lease ledger, rate limiting, observability/OTLP,
+  transparent metering, idempotent usage recording, and opt-in listener TLS are shipped. The
+  concise implementation status and active roadmap live in the
+  [documentation map](docs/README.md), so this README does not freeze a release number or duplicate
+  25 TD phase tables.
 - **Packages:** crates.io `sandhi-core` / `-providers` / `-store` / `-proxy` · PyPI
-  `sandhi-gateway` · npm `@anvai-labs/sandhi` *(not published yet — the Node client is
-  still in development; the binding builds and is tested in CI)*
+  `sandhi-gateway` · npm `@anvailabs/sandhi` *(Trusted Publishing; first ships on the tag after v0.5.0; the Node binding builds
+  from source and is tested in CI)*
 
 ## Why
 
@@ -45,7 +39,7 @@ wrong. Sandhi is the single, fast, neutral implementation of both.
   conservative *ceiling*, settle by lease id), with calendar-aligned daily/monthly/total
   **windows**, a block-or-**warn** policy, and threshold **alerts**. Set `SANDHI_STORE` and the
   ledger is **durable**: spend, caps, and in-flight leases survive a restart, and dangling leases
-  are reclaimed. Without it the ledger is in-memory and a restart resets accrued spend. Still
+  are reclaimed. Without it the ledger is in-memory and a restart resets accrued spend.
 - **Rate limits** — per-virtual-key requests/minute, enforced by a token bucket before the budget
   reservation, so a throttled call consumes no budget. The 429 carries `Retry-After` in the
   caller's own dialect. **Per process:** the limiter is in-memory, so with N replicas the effective
@@ -67,7 +61,7 @@ wrong. Sandhi is the single, fast, neutral implementation of both.
 
 Sandhi is a Rust core (`sandhi-core` + `sandhi-providers`) exposed two ways:
 
-1. **In-process, via bindings** — PyO3 (`sandhi-gateway` wheel) for Python, napi/wasm for
+1. **In-process, via bindings** — PyO3 (`sandhi-gateway` wheel) for Python, a napi native addon for
    TypeScript, a native crate for Rust. No network hop; wrap your existing client or use
    Sandhi's transport.
 2. **Reverse-proxy** — the same core + an HTTP listener. **In-path (inline)**: it holds the
@@ -91,8 +85,10 @@ client = openai.OpenAI(base_url="http://sandhi:8787/v1", api_key="vk_…")      
 client = genai.Client(api_key="vk_…", http_options=genai.types.HttpOptions(base_url="http://sandhi:8787"))
 ```
 
-A Gemini client must resolve to a Gemini upstream: its traffic rides the transparent plane
-byte-for-byte, and cross-family translation is refused rather than served from a lossy decode
+A Gemini client may resolve to a Gemini upstream for byte-exact transparent forwarding or to
+another family through the translation plane. Standard content, tools, inline media, and tool
+results translate; provider-specific extensions may not. A streamed cross-family tool call is not
+rendered into a Gemini partial-function-call frame, while non-streaming tool calls translate fully
 ([TD-0010](docs/td/TD-0010-ingress-dialect-parity.md) D4b).
 
 That table is a CI gate, not a claim: the suite starts the real proxy against a mock upstream and
@@ -107,10 +103,12 @@ are added when they pass, never in advance.
 > [ADR-0004](docs/adr/0004-two-plane-proxy-and-enforcement-boundary.md): when the ingress dialect
 > and the upstream are the same family, the proxy forwards the client's bytes verbatim — except a
 > minimal envelope normalization that injects usage-metering on OpenAI streams (ADR-0004 D1) — and
-> meters the stream as it passes, so provider-specific extras (e.g. message-level Anthropic
-> `cache_control` breakpoints) survive untouched. A **cross-family** request still re-encodes
-> through the neutral contract — faithful for standard fields, but it can drop those extras. The
-> in-process bindings, which never re-encode, are unaffected.
+> meters the stream as it passes. A hard-capped request that omits its output limit uses translation
+> instead so the proxy can inject an enforceable ceiling. Otherwise, provider-specific extras
+> (e.g. message-level Anthropic `cache_control` breakpoints) survive untouched. A
+> **cross-family** request still re-encodes through the neutral contract — faithful for standard
+> fields, but it can drop those extras. The in-process bindings, which never re-encode, are
+> unaffected.
 
 ## The usage event
 
@@ -144,9 +142,11 @@ crates/sandhi-providers/    # unified provider transport + resilience decorator 
 crates/sandhi-store/        # durable SQLite sink + usage aggregation queries
 crates/sandhi-proxy/        # the inline reverse-proxy server + self-hosted dashboard
 bindings/python/            # PyO3 → PyPI `sandhi-gateway`
-bindings/node/              # napi  → npm `@anvai-labs/sandhi`
+bindings/node/              # napi  → npm `@anvailabs/sandhi`
 schemas/usage-event.v1.schema.json   # the wire contract
 docs/adr/                            # architecture decisions
+docs/td/                             # implementation designs and phase status
+docs/README.md                       # documentation map + current status index
 ```
 
 Run the proxy with `SANDHI_STORE=usage.db` to persist events to SQLite and serve a self-hosted
@@ -155,87 +155,11 @@ pricing).
 
 ## Operating it
 
-**Operator guide.** For the full step-by-step — launching the proxy, registering the real
-upstream key, minting virtual keys, setting budgets, and pointing a client (Victor or any
-vendor SDK) at it — see [`docs/operator/proxy-guide.adoc`](docs/operator/proxy-guide.adoc).
-
-**Logs.** `SANDHI_LOG` (or `RUST_LOG`) filters; output goes to stderr. The default keeps the
-operator-relevant events — reservation denials, fail-open admissions, lease reclaims, settle
-failures — without per-request chatter. `SANDHI_LOG=debug` adds plane selection per call.
-
-**TLS.** Plain HTTP remains the loopback-development default. To terminate TLS in Sandhi, set
-`SANDHI_CONFIG` to a JSON file containing a `tls` object with PEM certificate-chain and private-key
-paths. The pair is validated before bind; invalid or unreadable material fails startup rather than
-silently falling back to plaintext. A non-loopback plaintext bind emits a warning. See the operator
-guide for the complete example.
-
-**Metrics.** `GET /metrics` serves Prometheus text, gated by the same admin bearer as the dashboard
-when `SANDHI_ADMIN_TOKEN` is set:
-
-```yaml
-scrape_configs:
-  - job_name: sandhi
-    metrics_path: /metrics
-    authorization: { credentials: "<SANDHI_ADMIN_TOKEN>" }   # omit if no admin token is configured
-    static_configs: [{ targets: ["sandhi:8787"] }]
-```
-
-Metrics describe the **gateway**, not who called it: labels are bounded (`provider`, `model`,
-`dialect`, `plane`, `outcome`), and per-subject attribution deliberately lives in the usage
-aggregate instead — a metric labelled by user is a memory leak with a dashboard attached.
-
-The four alerts worth having, in the order they will save you:
-
-| alert | expression | why |
-|---|---|---|
-| **Capacity leaking** | `increase(sandhi_settle_failures_total[15m]) > 0` | a settle that did not land holds budget until the lease TTL expires; silent otherwise |
-| **Enforcement is off** | `increase(sandhi_admitted_unmetered_total[15m]) > 0` | a `Warn`-policy scope admitting fail-open during a ledger fault looks exactly like normal traffic |
-| **Callers being refused** | `rate(sandhi_reservations_denied_total{policy="block"}[5m]) > 0` | distinguishes a runaway caller from a mis-set cap — both need a human |
-| **Upstream degrading** | `histogram_quantile(0.95, rate(sandhi_request_duration_ms_bucket[10m])) > 30000` | per provider/model, so one bad upstream is visible before users report it |
-
-A sustained `sandhi_leases_reclaimed_total` is worth watching too: reclaims are normal after a
-restart, but a steady trickle means leases are leaking rather than settling.
-
-**Tracing / OTLP (opt-in).** When you would rather push to a collector than scrape `/metrics`,
-build the proxy with the `otel-otlp` cargo feature and point it at an OTLP/HTTP receiver (TD-0011
-P3). It exports the OpenTelemetry GenAI semantic conventions — one `gen_ai` operation span per
-chat call (input / output / cache-creation / cache-read / reasoning tokens, provider, model) plus
-the `gen_ai.client.token.usage`, `gen_ai.client.operation.duration`, and
-`gen_ai.server.time_to_first_token` metrics. It layers *beside* `/metrics`; both can run at once.
-
-```shell
-# the feature is default-off (it pulls the OpenTelemetry stack), so opt in at build time
-cargo build -p sandhi-proxy --features otel-otlp
-
-# run it pointed at a collector's OTLP/HTTP receiver
-SANDHI_OTEL_EXPORT=otlp \
-SANDHI_OTEL_ENDPOINT=http://otelcol:4318 \
-SANDHI_STORE=usage.db \
-  cargo run -p sandhi-proxy --features otel-otlp --bin sandhi-proxy
-```
-
-| env | default | purpose |
-|---|---|---|
-| `SANDHI_OTEL_EXPORT` | _unset_ | set to exactly `otlp` to enable; unset behaves identically to the default build |
-| `SANDHI_OTEL_ENDPOINT` | `http://localhost:4318` | OTLP base URL (the exporter appends `/v1/traces` and `/v1/metrics`) |
-| `SANDHI_OTEL_PROTOCOL` | `http/protobuf` | `http/protobuf` (binary) or `http/json` |
-
-The attribution boundary is the same as `/metrics`, applied to *exported* spans and metrics: they
-carry `gen_ai.system` / `gen_ai.request.model` / `gen_ai.operation.name` and the token counts, but
-**never** `subject_id` / `group_id` / `session_id` / `virtual_key_id` / `request_id` (those stay in
-the usage aggregate), and never a cost. A minimal collector that receives them:
-
-```yaml
-receivers:
-  otlp:
-    protocols: { http: { endpoint: 0.0.0.0:4318 } }
-exporters:
-  debug: {}        # swap for otlphttp / prometheusremotewrite / your backend
-service:
-  pipelines:
-    traces:  { receivers: [otlp], exporters: [debug] }
-    metrics: { receivers: [otlp], exporters: [debug] }
-```
+For a local Ollama-backed instance with persistent state, run `./scripts/quickstart.sh`. For the
+complete production-facing flow—listener/TLS configuration, credential registration, virtual-key
+minting, budgets, client setup, metrics, OTLP, security, and troubleshooting—use the
+[proxy operator guide](docs/operator/proxy-guide.adoc). `GET /version` exposes public contract
+versions; the admin-gated `GET /admin/version` adds enabled capabilities.
 
 ## Tests & coverage
 
@@ -256,13 +180,11 @@ run force-installs the built wheel, so run it inside a **virtual environment** (
 Python, which is often too new for pyo3 — the script guards the version); the base interpreter is
 `python3` or `$COV_PYTHON`.
 
-## Roadmap (first milestones)
+## Architecture, contracts, and roadmap
 
-1. `sandhi-core`: usage accounting + the wire-event emitter + virtual-key/budget model.
-2. `sandhi-providers`: the OpenAI-compatible adapter (unlocks ~20 providers), then Anthropic
-   (validates the cache-split parsing metering depends on).
-3. `bindings/python` (`sandhi-gateway`) + the in-process middleware.
-4. `sandhi-proxy`: the inline reverse-proxy with virtual keys + budgets.
+The [documentation map](docs/README.md) is the maintained index for ADRs, TD status, generated
+schemas, current scope, and the active roadmap. The original first milestones are complete; open
+work is tracked by owning TD rather than repeated here.
 
 ## Community & contributing
 

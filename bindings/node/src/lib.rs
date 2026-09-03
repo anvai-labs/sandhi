@@ -1,4 +1,4 @@
-//! Sandhi Node binding (napi-rs), published as `@anvai-labs/sandhi`.
+//! Sandhi Node binding (napi-rs), published as `@anvailabs/sandhi`.
 //!
 //! `ProviderRuntime` exposes persistent typed chat-contract handles; provider-native request and
 //! response JSON never crosses the binding. The same module exposes metering and budget APIs.

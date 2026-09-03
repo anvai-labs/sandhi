@@ -5,8 +5,8 @@
 //! **single-sourced at the point of the call**, where metering trust is decided.
 //!
 //! Patterns: **adapter** (per provider), **strategy** (routing/fallback), **factory** (from
-//! config), **decorator** (metering + circuit-breaker + retry — later, wrapped around each
-//! adapter). OpenAI-compatibility covers ~20 providers, so the real adapter surface is small.
+//! config), **decorator** (metering + circuit-breaker + retry around each adapter).
+//! OpenAI-compatibility covers ~20 providers, so the real adapter surface is small.
 //!
 //! Adapters return raw counts ([`ParsedUsage`]) + the response; the **caller** (proxy /
 //! middleware) assembles the neutral [`sandhi_core::UsageEvent`] with request id, timestamp,

@@ -1,17 +1,19 @@
-# @anvai-labs/sandhi
+# @anvailabs/sandhi
 
 Node binding for [**Sandhi**](https://github.com/anvai-labs/sandhi) — *the metering layer for
-AI agents*. The Rust core, in-process via napi-rs. Two surfaces: **metering** (virtual keys,
-budgets, neutral usage-event emission — zero network hop) and **provider transport**
-(`complete` / `stream` through the shared Rust adapters, usage parsed at the source). Mirrors
-the Python `sandhi-gateway` API.
+AI agents*. The Rust core runs in-process through napi-rs. It exposes **metering** (virtual keys,
+budgets, neutral usage-event emission — zero network hop) and a typed persistent provider runtime.
 
 ```bash
-npm install @anvai-labs/sandhi
+# The npm package is not published yet; build the binding from a source checkout.
+cd bindings/node
+npm ci
+npm run build
+npm test
 ```
 
 ```js
-import { Gateway, parseUsage, wireContractVersion } from "@anvai-labs/sandhi";
+import { Gateway, parseUsage } from "./sandhi.js";
 
 const gw = new Gateway("usage.jsonl");                 // events append as JSONL (+ in-memory)
 gw.addVirtualKey("vk_alice", "alice", "platform", "anthropic");
@@ -33,8 +35,6 @@ For a provider Sandhi doesn't natively parse, do your own parsing and pass the c
 ```js
 gw.meterTokens("vk_alice", "myprovider", "model", tokensIn, tokensOut);
 ```
-
-(A stored `registerParser(provider, callback)` — like the Python binding — is a fast-follow.)
 
 `meter()` parses usage **at the source** (same Rust parsers as the proxy), attributes it to the
 virtual key's subject/group, records the budget, emits the neutral event, and returns it.
@@ -60,38 +60,30 @@ per-key detail but never the sum. Unknown dimension → throws.
 
 ### Provider transport (in-process)
 
-Forward a provider call through Sandhi's Rust transport in-process — usage is parsed at the
-source, so metering trust is single-sourced. `complete()` returns a promise; `stream()` returns a
-`ByteStream` that is `for await`-able (bytes forwarded verbatim, usage finalized on the last chunk):
+Reuse a provider handle so its HTTP pool, retry policy, timeouts, and circuit breaker survive across
+calls. Inputs and outputs are serialized Sandhi chat-contract v1 documents rather than
+provider-native JSON:
 
 ```js
-import { complete, stream } from "@anvai-labs/sandhi";
+import { ProviderRuntime } from "./sandhi.js";
 
-const res = await complete("openai", "gpt-4o", "https://api.openai.com/v1", KEY, bodyJson, "sess-1");
-// res.status, res.body (JSON string), res.usage.tokensIn ...
+const runtime = new ProviderRuntime();
+const provider = runtime.provider("openrouter", "openai/gpt-4o", API_KEY);
+const request = JSON.stringify({
+  schema_version: "1",
+  model: "openai/gpt-4o",
+  messages: [{ role: "user", content: "hello" }],
+});
 
-for await (const chunk of await stream("openai", "gpt-4o", BASE, KEY, bodyJson, "sess-1")) {
-  process.stdout.write(chunk.data);        // raw upstream bytes
-  if (chunk.usage) record(chunk.usage);    // finalized on the terminal chunk
+const response = JSON.parse(await provider.completeJson(request));
+for await (const eventJson of provider.streamJson(request)) {
+  const event = JSON.parse(eventJson); // response_start, text_delta, usage, finish, ...
 }
 ```
 
-#### Custom providers through transport (`registerProvider`)
-
-For a provider Sandhi's built-in adapters don't cover, register a JS async handler that owns its own
-transport — it then rides `complete()` with the same usage metering (ADR-0047 D10 escape hatch,
-parity with the Python binding):
-
-```js
-import { registerProvider, complete } from "@anvai-labs/sandhi";
-
-registerProvider("myllm", async (model, bodyJson, sessionId) => {
-  const res = await myFetch(model, bodyJson);            // your own transport
-  return { status: 200, body: JSON.stringify(res), usage: { tokensIn, tokensOut } };
-});
-const out = await complete("myllm", "model", base, key, bodyJson, "sess-1");
-```
-
-(Streaming for custom providers is not supported — they run through `complete()`.)
+`completeJson` accepts an optional second JSON-string argument containing per-call wire headers;
+`streamJson` accepts the same argument and returns an async iterable. Transport-owned headers and
+credentials cannot be overridden. Invalid documents fail before network I/O; provider failures
+throw `SandhiProviderError` with a structured `ProviderErrorV1` payload.
 
 Apache-2.0. The transport surface links `sandhi-providers` (async HTTP stack) into the addon.

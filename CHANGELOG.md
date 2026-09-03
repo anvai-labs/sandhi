@@ -10,16 +10,44 @@ prompt-cache split, GPU-seconds) and never dollars. See
 [ADR-0001](docs/adr/0001-sandhi-architecture-and-wire-contract.md) for the
 architecture and the measure-vs-price boundary this changelog respects.
 
-One tag `vX.Y.Z` releases everything together — the `sandhi-proxy` binaries, the
-PyPI wheel (`sandhi-gateway`), the crates.io libs, and the npm package
-(`@anvai-labs/sandhi`). Versions are derived from the tag at build time, never
-hand-edited; see [RELEASING.md](RELEASING.md).
+One tag `vX.Y.Z` drives the binary and PyPI release plus any configured crates.io/npm
+publishers. Versions are derived from the tag at build time, never hand-edited; see
+[RELEASING.md](RELEASING.md). npm publishes as `@anvailabs/sandhi` via Trusted Publishing
+(first shipped in v0.5.1).
 
 ## [Unreleased]
 
 ### Added
 
 - _Nothing yet._
+
+## [0.5.1] — 2026-09-03
+
+The release-plumbing patch: **npm distribution lands** via Trusted Publishing under the
+`@anvailabs` org we own — OIDC-pinned to this repository, workflow, and environment, with no
+token anywhere to leak or rotate — and the release binaries can finally build with native
+SentinelPass IPC as the workflow has requested since v0.3.0. No runtime behavior changes: the
+Python wheel is unchanged, and the crates differ only in version metadata and the proxy's
+forwarded feature declaration.
+
+### Added
+
+- **npm distribution via Trusted Publishing, under `@anvailabs/sandhi`.** The Node binding now
+  publishes as `@anvailabs/sandhi` — the npm org we own; `anvai-labs` was **not available on
+  npm**, so the package scope intentionally differs from the GitHub org (RELEASING.md records
+  why). Publishing is OIDC-based exactly like PyPI: the npm Trusted-Publisher binding pins
+  repository `anvai-labs/sandhi`, workflow `release.yml`, environment `npm` — **no token exists
+  anywhere** to leak, rotate, or scope, replacing the earlier NPM_TOKEN plan. The publish job
+  mints the OIDC assertion (`id-token: write`, Node 24's npm speaks OIDC natively), and the
+  registry verifier now expects npm on every release (`EXPECT_NPM=0` remains for verifying
+  tags that predate the package's existence, through v0.5.0).
+
+### Fixed
+
+- **Release binaries can enable native SentinelPass IPC as intended.** The release workflow has
+  requested `sandhi-proxy --features sentinelpass-ipc` since v0.3.0, but that feature existed only
+  on `sandhi-store`; the proxy package did not forward it, so the exact binary build command was
+  invalid. `sandhi-proxy` now forwards the feature and CI compiles/tests that release seam.
 
 ## [0.5.0] — 2026-09-02
 
@@ -236,10 +264,11 @@ TD-0022 join ADR-0006/0007 + TD-0014…0021.
   passes an upstream-echoed W3C traceparent, restoring response-to-span linkage (`tracestate`
   stays stripped).
 - **Native SentinelPass daemon IPC vault backend** (#176): `SANDHI_VAULT_BACKEND=sentinelpass`
-  speaks the daemon protocol natively through the published `sentinelpass-protocol` v0.8.0
-  contract crate (replacing the CLI shell-out) — read + write support with explicit locked vs
-  not-found errors; deletes stay unsupported by design until upstream entry ownership exists.
-  Selected at runtime via `SANDHI_VAULT_BACKEND=sentinelpass` (no cargo feature; the backend compiles unconditionally).
+  can speak the daemon protocol natively through the published `sentinelpass-protocol` v0.8.0
+  contract crate — read + write support with explicit locked vs not-found errors; deletes stay
+  unsupported by design until upstream entry ownership exists. The backend is behind
+  `sandhi-store`'s non-default `sentinelpass-ipc` feature with an explicit CLI fallback. The
+  missing proxy-level feature forwarding used by release binaries is corrected under Unreleased.
 - **InferFlux admitted as OpenAI-compat catalog data** (ADR-0008, #173): the self-hosted
   inference server is reachable through the OpenAI codec — one catalog row plus its
   session-affinity header fact, not a new family — and the decision record ships with it.

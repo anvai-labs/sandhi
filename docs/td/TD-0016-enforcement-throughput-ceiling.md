@@ -1,7 +1,7 @@
 # TD-0016: The enforcement throughput ceiling — making a durable cap fast enough to keep
 
-- **Status:** Draft (proposed), 2026-08-31. **Blocked on [TD-0015](TD-0015-performance-baseline-and-fault-injection.md) P1**
-  for its central premise. Owns gaps **G07, G08, G24, G25, G26**.
+- **Status:** **In progress**, 2026-08-31. TD-0015 P1 confirmed the central premise; **P0 and P1
+  are complete**, while P2–P6 remain open. Owns gaps **G07, G08, G24, G25, G26**.
 - **Relates to:** [ADR-0005](../adr/0005-enforcement-correctness-reservation-ledger-observe-enforce-split.md)
   (the lease model this must not weaken), [TD-0007](TD-0007-enforcement-ledger-backends.md) (the
   C1–C6 contract and the shared-backend selection this feeds), [ADR-0006](../adr/0006-layer-boundary-and-protocol-scope.md)
@@ -66,9 +66,9 @@ do a rolling deploy without a window where enforcement is absent or duplicated.
 
 ## Decisions
 
-**D1 — Nothing lands before TD-0015 P1 publishes the ledger benchmark.** The premise that the commit
-path dominates is an inference. If P1 falsifies it, this TD is rescoped and ADR-0006 is revised.
-This is the ADR-0005 "pressure-test before code" discipline applied to its own successor.
+**D1 — Satisfied: TD-0015 P1 published the ledger benchmark before optimization.** It confirmed
+that durability/serialization dominates the measured ledger path, promoted ADR-0006, and admitted
+P1 here. This preserves the ADR-0005 "pressure-test before code" discipline as a completed gate.
 
 **D2 — Group commit, not weaker durability.** Concurrent reservations batch into one transaction and
 one `fsync`; each caller is released only after the commit that includes it. Rejected:
@@ -119,22 +119,23 @@ scope with unbounded output is forced off the transparent plane so the output bo
 lose byte-exact forwarding and therefore prompt-cache fidelity, which is a real cost paid by exactly
 the cost-sensitive tenants who set caps — is stated nowhere an operator would see. Either inject the
 bound into the raw body (breaking envelope fidelity in a *different* way, and needing its own
-argument) or document the trade in the operator guide. Silence is the only unacceptable option.
+argument) or document the trade in the operator guide. The operator guide now documents the current
+trade and how an explicit output limit preserves transparent eligibility; raw-plane injection
+remains an optional engineering follow-up.
 
 ## Phases
 
 | Phase | Scope | Acceptance (the failing test to write first) |
 |---|---|---|
-| **P0** | D1 — measure (executed as TD-0015 P1) | A published number for reserve+settle throughput and its breakdown across the three multipliers. **Gate:** if the commit path is not dominant, stop and rescope |
+| **P0** ✅ | D1 — measure (executed as TD-0015 P1) | Published; the commit/durability path is dominant in the measured ledger benchmark |
 | **P1** ✅ (structural; measured caveat) | D3 — shard by scope | Two scopes reserve concurrently with no cross-scope serialization (assert measured parallelism, not just correctness); the full C1–C6 suite green; single-scope behaviour bit-identical to today |
 | **P2** | D4 — read/write connection split | `spent()`/`limit()` no longer contend with `reserve`/`settle`; dashboard aggregate queries under load do not raise admission p99 beyond a recorded bound |
 | **P3** | D2 — group commit | N concurrent reservations complete in one `fsync`; **every** admitted caller observes a durable commit before admission (assert by crash-injection: kill after admit, restart, lease is present); C1–C6 green |
 | **P4** | D6 + D7 — estimator and arm parity | A CJK prompt reserves ≥ the provider's measured input tokens, and `sandhi_settle_overshoot_total` stays at zero across the corpus; the shared conformance harness passes identically against both ledger arms |
-| **P5** | D5 + D8 — topology and the plane trade | Two processes, one store, N racing reservations: the cap is never breached, or the failure is characterised and handed to TD-0007. G26's trade is documented in `docs/operator/proxy-guide.adoc` or removed |
+| **P5** (partial) | D5 + D8 — topology and the plane trade. **D8 documentation shipped; D5 remains open.** | Two processes, one store, N racing reservations: the cap is never breached, or the failure is characterised and handed to TD-0007. G26's trade is documented in `docs/operator/proxy-guide.adoc` or removed |
 
-P1 is the best first move: highest benefit, lowest correctness risk, and it unblocks TD-0014 D5.
-P3 carries the most risk and should land last among the performance phases, behind crash-injection
-tests.
+P1 shipped as the first move. P2 is the next structural isolation step; P3 carries the most risk
+and should land only with crash-injection tests.
 
 ## Pressure test
 
@@ -146,9 +147,8 @@ tests.
    atomicity is *per scope* and lives inside SQLite's `BEGIN IMMEDIATE`. The global mutex adds
    cross-scope serialization that no invariant requires. P1's acceptance asserts exactly this by
    running the full conformance suite unchanged.
-3. **"You are optimising before you know it matters."** Precisely why D1 exists as a hard gate and
-   P0 is a stop-or-continue decision point. This TD is written so it can be *cancelled* by its own
-   first phase.
+3. **"You are optimising before you know it matters."** D1 made P0 a hard stop-or-continue gate;
+   the measurement cleared it before P1 landed.
 4. **"Relaxing the replica assert risks silently multiplying limits — the exact thing it prevents."**
    D5 relaxes it only for a topology that has *passed the conformance suite under real concurrency*,
    and only for multi-process-single-file, not multi-host. If the suite fails, the assert stays and
@@ -197,10 +197,11 @@ admissible calls). Lands as P6.
 
 ## Still open
 
-- **What batch window does group commit use, and is it adaptive?** Gated on P0's measurement. A
-  fixed window penalises low load, an adaptive one is another tuning surface to get wrong, and
-  neither can be chosen before the commit cost is known.
-- **Does sharding by scope degrade when nearly all traffic is one scope?** Gated on P1, which must
-  *measure* the single-large-tenant case rather than assume it is acceptable. The likely answer is
-  that it degrades to today's behaviour, which would be fine — but "likely" is how the P1 line-budget
-  defect happened.
+- **What batch window does group commit use, and is it adaptive?** P0 established that the commit
+  cost matters but did not expose a group-commit API or measure its latency/throughput frontier.
+  Choose the window only in P3's spike; a fixed window penalises low load, while an adaptive one is
+  another tuning surface to get wrong.
+- **How much does sharding help under each tenant distribution?** P1 shipped the implementation,
+  correctness tests, and a benchmark target, but no production-representative result is committed.
+  Record the one-large-tenant and evenly-distributed cases before recommending a shard count; the
+  single-scope case is expected to retain one-shard serialization, but the benchmark must quantify it.
