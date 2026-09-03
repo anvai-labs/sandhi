@@ -5,15 +5,24 @@ name: release
 on:
   push:
     tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      npm_repair_tag:
+        description: "Existing vX.Y.Z tag whose npm leg failed — rebuilds + republishes npm ONLY (same OIDC Trusted-Publishing environment; crates/PyPI/binaries untouched)"
+        required: true
+        type: string
 
 permissions:
   contents: write # create the GitHub Release + upload binary assets
 
+# On a dispatch repair, only the npm half runs: every other job below carries
+# `if: github.event_name == 'push'` (directly, or via a skipped `needs` chain).
 jobs:
   # ── 1a. Create the GitHub Release once, so the binary matrix has a target to upload to. ────
   #        (A tag push does not auto-create a Release; without this the upload jobs fail with
   #        "release not found", and parallel jobs would otherwise race to create it.)
   create-release:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - name: Create the GitHub Release for this tag
@@ -63,6 +72,7 @@ jobs:
 
   # ── 2. PyPI wheels (sandhi-gateway) — build matrix + OIDC Trusted Publishing ───────────────
   pypi-build:
+    if: github.event_name == 'push'
     name: wheels (${{ matrix.os }})
     strategy:
       fail-fast: false
@@ -105,6 +115,7 @@ jobs:
 
   # ── 3. crates.io (core → providers → store → proxy) ───────────────────────────────────────
   crates:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -154,15 +165,20 @@ jobs:
           - { os: macos-latest, target: aarch64-apple-darwin }
     runs-on: ${{ matrix.os }}
     steps:
+      # On a dispatch repair the tag being rebuilt is the input, not the triggering ref.
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.npm_repair_tag || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
       - name: Build native addon
         working-directory: bindings/node
+        env:
+          RELEASE_TAG: ${{ inputs.npm_repair_tag || github.ref_name }}
         run: |
-          npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version --allow-same-version
+          npm version "${RELEASE_TAG#v}" --no-git-tag-version --allow-same-version
           npm install
           npx napi build --platform --release
       - uses: actions/upload-artifact@v7
@@ -183,6 +199,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.npm_repair_tag || github.ref }}
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
@@ -194,9 +212,23 @@ jobs:
           path: bindings/node/artifacts
       - name: Publish to npm
         working-directory: bindings/node
+        env:
+          RELEASE_TAG: ${{ inputs.npm_repair_tag || github.ref_name }}
         run: |
-          npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version --allow-same-version
+          case "$RELEASE_TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;; # vX.Y.Z
+            *) echo "::error::RELEASE_TAG '$RELEASE_TAG' is not a vX.Y.Z tag"; exit 1;;
+          esac
+          git ls-remote --exit-code --tags origin "$RELEASE_TAG" >/dev/null \
+            || { echo "::error::tag $RELEASE_TAG does not exist"; exit 1; }
+          npm version "${RELEASE_TAG#v}" --no-git-tag-version --allow-same-version
           npm install
+          # @napi-rs/cli 2.x: generate the per-platform package dirs from the config before
+          # placing artifacts — `napi artifacts` writes INTO npm/<platform>/ and dies with a
+          # bare ENOENT when the parent dir is missing (the v0.5.1 npm-leg failure; the dirs
+          # are gitignored here by design, so they must be derived at publish time). `-t .`
+          # is required: 2.18.4 declares the target dir option with no default.
+          npx napi create-npm-dir -t .
           npx napi artifacts --dir artifacts
           # napi prepublish IS the publish (main + platform packages, over OIDC) — a trailing
           # bare `npm publish` would re-publish the identical version and hard-fail E403.
@@ -209,7 +241,8 @@ jobs:
   #        when nobody looks. This checks the registries, not the jobs.
   verify:
     needs: [create-release, pypi-publish, crates, npm-publish]
-    if: ${{ always() }}
+    # always() would defeat the needs-chain skip on a dispatch repair — gate on the event too.
+    if: ${{ always() && github.event_name == 'push' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

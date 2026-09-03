@@ -92,3 +92,15 @@ wrong conclusions before this existed.
   them to the tag version at release.
 - Treat any new registry or platform as a separately verified release target. Iterate on
   `release.yml` through the same PR flow.
+- **npm mechanics** (the v0.5.1 lesson): the per-platform package dirs (`bindings/node/npm/`)
+  are **gitignored by design** and are generated at publish time by `napi create-npm-dir` —
+  `napi artifacts` writes into them and fails with a bare ENOENT when they are missing. The
+  napi `triples` config in `bindings/node/package.json` must list **exactly** the targets the
+  `npm-build` matrix builds: `create-npm-dir` derives the dirs from the config, and
+  `napi prepublish` publishes every generated dir — a configured-but-unbuilt target would
+  publish an empty platform package. Add a matrix leg and a config triple together.
+- **npm repair** (same lesson): a tag whose npm leg failed while crates/PyPI landed (a rerun
+  would re-publish those and hard-fail) is repaired without burning a version: run
+  `release.yml` → **Run workflow** on `main` with `npm_repair_tag = vX.Y.Z`. Only the npm jobs
+  run — same OIDC Trusted-Publishing environment, the tag's own tree — everything else is
+  event-gated to tag pushes. Afterwards verify with `python3 scripts/verify-release.py vX.Y.Z`.

@@ -17,9 +17,17 @@ publishers. Versions are derived from the tag at build time, never hand-edited; 
 
 ## [Unreleased]
 
-### Added
+### Fixed
 
-- _Nothing yet._
+- **npm publish leg of the v0.5.1 release run failed; npm first ships on the next tag.** The
+  per-platform package dirs (`bindings/node/npm/`) are gitignored by design and must be
+  generated at publish time — the workflow never ran `napi create-npm-dir`, so `napi artifacts`
+  died on a bare ENOENT. It now does, and the napi `triples` config is aligned to exactly the
+  two targets the build matrix produces (`create-npm-dir` derives dirs from the config and
+  `napi prepublish` publishes every one — a configured-but-unbuilt target would ship an empty
+  platform package). A guarded `workflow_dispatch` repair path (`npm_repair_tag`) republishes
+  **only** the npm half for an existing tag — crates/PyPI/binaries stay event-gated to tag
+  pushes, so a failed npm leg no longer needs a version burn to fix.
 
 ## [0.5.1] — 2026-09-03
 
@@ -28,7 +36,9 @@ The release-plumbing patch: **npm distribution lands** via Trusted Publishing un
 token anywhere to leak or rotate — and the release binaries can finally build with native
 SentinelPass IPC as the workflow has requested since v0.3.0. No runtime behavior changes: the
 Python wheel is unchanged, and the crates differ only in version metadata and the proxy's
-forwarded feature declaration.
+forwarded feature declaration. *(The run's npm leg failed on a missing platform-dir generation
+step — crates.io, PyPI, and the binaries all landed; see Unreleased for the fix and the repair
+path.)*
 
 ### Added
 
