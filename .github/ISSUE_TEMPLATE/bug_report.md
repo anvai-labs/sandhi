@@ -28,7 +28,7 @@ labels: ["bug", "triage"]
 ## Environment
 
 - Sandhi version / tag: <!-- e.g. v0.1.2, or the commit SHA -->
-- How you're running it: <!-- sandhi-proxy server, sandhi-gateway Python wheel, @anvai-labs/sandhi npm, or the Rust crate -->
+- How you're running it: <!-- sandhi-proxy server, sandhi-gateway Python wheel, @anvailabs/sandhi npm, or the Rust crate -->
 - Provider + model: <!-- e.g. anthropic / claude-… -->
 - OS / runtime: <!-- e.g. macOS arm64, Python 3.12, Node 20 -->
 

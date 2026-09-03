@@ -16,6 +16,18 @@ publishers. Versions are derived from the tag at build time, never hand-edited; 
 
 ## [Unreleased]
 
+### Added
+
+- **npm distribution via Trusted Publishing, under `@anvailabs/sandhi`.** The Node binding now
+  publishes as `@anvailabs/sandhi` — the npm org we own; `anvai-labs` was **not available on
+  npm**, so the package scope intentionally differs from the GitHub org (RELEASING.md records
+  why). Publishing is OIDC-based exactly like PyPI: the npm Trusted-Publisher binding pins
+  repository `anvai-labs/sandhi`, workflow `release.yml`, environment `npm` — **no token exists
+  anywhere** to leak, rotate, or scope, replacing the earlier NPM_TOKEN plan. The publish job
+  mints the OIDC assertion (`id-token: write`, Node 24's npm speaks OIDC natively), and the
+  registry verifier now expects npm on every release (`EXPECT_NPM=0` remains for verifying
+  tags that predate the package's existence, through v0.5.0).
+
 ### Fixed
 
 - **Release binaries can enable native SentinelPass IPC as intended.** The release workflow has
