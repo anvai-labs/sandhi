@@ -35,6 +35,7 @@ including the automated `sentinelpass-protocol` publish and pin-bump loop).
 feature branch → PR → develop  (CI Success gate)
 develop        → PR → main     (stricter gate: strict + linear history)
 main           → tag vX.Y.Z    → release.yml publishes configured targets
+main           → merge back into develop (the post-promote back-sync)
 ```
 
 - `develop` — active development; protected (requires `CI Success`).
@@ -42,6 +43,13 @@ main           → tag vX.Y.Z    → release.yml publishes configured targets
   linear history, no force-push/deletion, admins included).
 - **Cut a release:** open a PR `develop → main`, merge once green, then
   `git tag vX.Y.Z && git push origin vX.Y.Z`. The `release` workflow does the rest.
+- **Title the promotion PR with a conventional prefix** (`chore:` — the `lint-title` gate rejects
+  `release:`; found live during the v0.5.0 cut).
+- **After every promotion merge, sync main back into develop** (`git checkout develop && git merge
+  origin/main && git push`). The promotion merge commit exists only on main; without the back-sync
+  the next `develop → main` PR is permanently `BEHIND` on main's up-to-date-branch requirement.
+  This exact trap stalled the v0.5.0 promotion — v0.4.0's promotion (#199) had never been synced
+  back.
 
 ## One-time publisher setup (maintainer)
 
