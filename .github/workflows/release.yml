@@ -178,6 +178,12 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.npm_repair_tag || github.ref_name }}
         run: |
+          # Fail HERE, not after the whole matrix burned: a malformed or empty repair
+          # input would otherwise only die at npm-publish's stricter guards.
+          case "$RELEASE_TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;; # vX.Y.Z
+            *) echo "::error::RELEASE_TAG '$RELEASE_TAG' is not a vX.Y.Z tag"; exit 1;;
+          esac
           npm version "${RELEASE_TAG#v}" --no-git-tag-version --allow-same-version
           npm install
           npx napi build --platform --release
@@ -221,7 +227,8 @@ jobs:
           esac
           git ls-remote --exit-code --tags origin "$RELEASE_TAG" >/dev/null \
             || { echo "::error::tag $RELEASE_TAG does not exist"; exit 1; }
-          npm version "${RELEASE_TAG#v}" --no-git-tag-version --allow-same-version
+          VERSION="${RELEASE_TAG#v}"
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
           npm install
           # @napi-rs/cli 2.x: generate the per-platform package dirs from the config before
           # placing artifacts — `napi artifacts` writes INTO npm/<platform>/ and dies with a
@@ -230,9 +237,38 @@ jobs:
           # is required: 2.18.4 declares the target dir option with no default.
           npx napi create-npm-dir -t .
           npx napi artifacts --dir artifacts
-          # napi prepublish IS the publish (main + platform packages, over OIDC) — a trailing
-          # bare `npm publish` would re-publish the identical version and hard-fail E403.
+          # A dispatch repair must not be able to go green while publishing nothing:
+          # download-artifact exits 0 on an empty pattern match and prepublish merely
+          # warns per missing binary — so assert every generated platform dir actually
+          # received its .node before publishing anything.
+          expected=$(find npm -mindepth 1 -maxdepth 1 -type d | wc -l)
+          placed=$(find npm -mindepth 2 -maxdepth 2 -name '*.node' | wc -l)
+          if [ "$placed" -ne "$expected" ] || [ "$expected" -eq 0 ]; then
+            echo "::error::expected $expected platform binaries under npm/, found $placed"
+            ls -R npm || true
+            exit 1
+          fi
+          # Idempotent repair (mirror of the crates job's skip-if-published): a platform
+          # package@version already on the registry is dropped so prepublish warn-skips
+          # it — otherwise a rerun after a partial publish hard-fails E403 and we are
+          # back to burning a version.
+          for dir in npm/*/; do
+            name=$(node -p "require('./${dir}package.json').name")
+            if npm view "$name@$VERSION" --loglevel=error version >/dev/null 2>&1; then
+              echo "::notice::$name@$VERSION already published — skipping platform package"
+              rm -rf "$dir"
+            fi
+          done
+          # `napi prepublish` publishes the PER-PLATFORM packages only (and stamps versions
+          # + optionalDependencies into package.json); the MAIN package needs an explicit
+          # root publish — exactly how the CLI's own template wires it (prepublishOnly hook
+          # + `npm publish --access public`).
           npx napi prepublish -t npm --skip-gh-release
+          if npm view "@anvailabs/sandhi@$VERSION" --loglevel=error version >/dev/null 2>&1; then
+            echo "::notice::@anvailabs/sandhi@$VERSION already published — skipping main publish"
+          else
+            npm publish --access public
+          fi
 
   # ── 5. Verify the artifacts actually landed ───────────────────────────────────────────────
   #        The crates.io publish step `exit 0`s when its credential is absent, so a job can report

@@ -22,12 +22,17 @@ publishers. Versions are derived from the tag at build time, never hand-edited; 
 - **npm publish leg of the v0.5.1 release run failed; npm first ships on the next tag.** The
   per-platform package dirs (`bindings/node/npm/`) are gitignored by design and must be
   generated at publish time — the workflow never ran `napi create-npm-dir`, so `napi artifacts`
-  died on a bare ENOENT. It now does, and the napi `triples` config is aligned to exactly the
-  two targets the build matrix produces (`create-npm-dir` derives dirs from the config and
-  `napi prepublish` publishes every one — a configured-but-unbuilt target would ship an empty
-  platform package). A guarded `workflow_dispatch` repair path (`npm_repair_tag`) republishes
-  **only** the npm half for an existing tag — crates/PyPI/binaries stay event-gated to tag
-  pushes, so a failed npm leg no longer needs a version burn to fix.
+  died on a bare ENOENT. The publish step is now correct end to end: dirs are generated,
+  every generated platform dir is **asserted** to have received its binary (CLI 2.x silently
+  warn-skips a missing one), the napi `triples` config is aligned to exactly the two targets
+  the build matrix builds (a configured-but-unbuilt triple would emit `optionalDependencies`
+  pointing at packages that never exist), `publishConfig.access = "public"` makes the scoped
+  packages public (the CLI copies it into each platform package; scoped defaults to
+  restricted), and the **main** package gets the explicit root `npm publish` that
+  `napi prepublish` alone never performs. A guarded `workflow_dispatch` repair path
+  (`npm_repair_tag`) republishes **only** the npm half for an existing tag — idempotently
+  (already-published packages are skipped, not E403-ed) — while crates/PyPI/binaries stay
+  event-gated to tag pushes, so a failed npm leg no longer needs a version burn to fix.
 
 ## [0.5.1] — 2026-09-03
 

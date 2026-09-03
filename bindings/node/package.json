@@ -42,5 +42,8 @@
     "index.d.ts",
     "contracts.d.ts",
     "README.md"
-  ]
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }
