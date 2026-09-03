@@ -98,7 +98,7 @@ wrong conclusions before this existed.
   `napi artifacts` writes into them and fails with a bare ENOENT when they are missing. Two
   CLI-2.x behaviors shape the workflow around it: `napi prepublish` publishes **only the
   platform packages** (a platform whose binary is missing is *warned and skipped*, silently —
-  the workflow therefore asserts every generated dir received its `.node` before publishing),
+  the workflow therefore fails the run if no platform binary arrived before publishing),
   and the **main** package needs an explicit root `npm publish --access public` afterwards.
   Scoped packages default to *restricted*; `publishConfig.access = "public"` in the root
   `package.json` propagates into every generated platform package (verified against 2.18.4).

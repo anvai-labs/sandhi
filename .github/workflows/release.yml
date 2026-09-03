@@ -253,12 +253,15 @@ jobs:
             || { echo "::error::napi loader (index.js/index.d.ts) missing — the main package would be uninstallable"; exit 1; }
           # A dispatch repair must not be able to go green while publishing nothing:
           # download-artifact exits 0 on an empty pattern match and prepublish merely
-          # warns per missing binary — so assert every generated platform dir actually
-          # received its .node before publishing anything.
+          # warns per missing binary. Require at least one platform binary (NOT
+          # placed==expected: a repair of an older tag runs this fixed workflow against
+          # the TAG's tree, whose triples config may be wider than the matrix — the
+          # CLI deliberately warn-skips configured-but-unbuilt platforms).
           expected=$(find npm -mindepth 1 -maxdepth 1 -type d | wc -l)
           placed=$(find npm -mindepth 2 -maxdepth 2 -name '*.node' | wc -l)
-          if [ "$placed" -ne "$expected" ] || [ "$expected" -eq 0 ]; then
-            echo "::error::expected $expected platform binaries under npm/, found $placed"
+          echo "npm platform dirs: $expected, binaries placed: $placed"
+          if [ "$placed" -lt 1 ]; then
+            echo "::error::no platform binaries under npm/ — publish would ship nothing"
             ls -R npm || true
             exit 1
           fi

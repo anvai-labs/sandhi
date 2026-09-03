@@ -22,10 +22,12 @@ publishers. Versions are derived from the tag at build time, never hand-edited; 
 - **npm publish leg of the v0.5.1 release run failed; npm first ships on the next tag.** The
   per-platform package dirs (`bindings/node/npm/`) are gitignored by design and must be
   generated at publish time — the workflow never ran `napi create-npm-dir`, so `napi artifacts`
-  died on a bare ENOENT. The publish step is now correct end to end: dirs are generated,
-  every generated platform dir is **asserted** to have received its binary (CLI 2.x silently
-  warn-skips a missing one), the napi `triples` config is aligned to exactly the two targets
-  the build matrix builds (a configured-but-unbuilt triple would emit `optionalDependencies`
+  died on a bare ENOENT. The publish step is now correct end to end: dirs are generated, the
+  run **fails loudly if no platform binary arrived** (CLI 2.x silently warn-skips missing
+  ones — a strict all-dirs check would wrongly block repairing older tags whose tree carries
+  a wider triples config than the matrix), the napi `triples` config is aligned to exactly
+  the two targets the build matrix builds (a configured-but-unbuilt triple would emit
+  `optionalDependencies`
   pointing at packages that never exist), `publishConfig.access = "public"` makes the scoped
   packages public (the CLI copies it into each platform package; scoped defaults to
   restricted), and the **main** package gets the explicit root `npm publish` that
