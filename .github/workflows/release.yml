@@ -173,6 +173,14 @@ jobs:
   npm-publish:
     needs: npm-build
     runs-on: ubuntu-latest
+    # Trusted Publishing (OIDC): the npm Trusted-Publisher binding on npmjs.com pins
+    # (repository anvai-labs/sandhi, workflow release.yml, environment npm) — no token exists
+    # anywhere to leak or rotate. id-token: write is what mints the OIDC assertion; the
+    # environment must match the binding exactly. Node 24 ships npm ≥11, which speaks OIDC.
+    environment: npm
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -186,13 +194,7 @@ jobs:
           path: bindings/node/artifacts
       - name: Publish to npm
         working-directory: bindings/node
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          if [ -z "$NODE_AUTH_TOKEN" ]; then
-            echo "::notice::NPM_TOKEN not set — skipping npm publish"
-            exit 0
-          fi
           npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version --allow-same-version
           npm install
           npx napi artifacts --dir artifacts

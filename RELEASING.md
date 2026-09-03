@@ -45,25 +45,25 @@ main           → tag vX.Y.Z    → release.yml publishes configured targets
 
 ## One-time publisher setup (maintainer)
 
-The release workflow is present, but publishing needs configuration you own. Crates.io and npm
-skip explicitly when their secret is absent. Binaries need no setup; PyPI uses no stored secret but
-does require the trusted-publisher configuration below and will fail if it is missing:
+The release workflow is present, but publishing needs configuration you own. Binaries need no
+setup; PyPI and npm use **no stored secret at all** — both publish via OIDC Trusted Publishing and
+require the trusted-publisher configuration below (they fail without it). crates.io skips
+explicitly when its secret is absent:
 
 | Target | Setup |
 |---|---|
 | **GitHub Release binaries** | none — uses the built-in `GITHUB_TOKEN`. Works immediately. |
 | **PyPI** (`sandhi-gateway`) | Configure a **Trusted Publisher** (OIDC) on PyPI: project → Publishing → add GitHub publisher (repo `anvai-labs/sandhi`, workflow `release.yml`, environment `pypi`). No token stored. |
 | **crates.io** | Add repo secret `CARGO_REGISTRY_TOKEN` (a crates.io API token). Publishes `core → providers → store → proxy` in order. |
-| **npm** (`@anvai-labs/sandhi`) | Currently unconfigured and unpublished. To enable it, add repo secret `NPM_TOKEN` (an npm automation token with publish rights to the `@anvai-labs` scope). |
+| **npm** (`@anvailabs/sandhi`) | Configure a **Trusted Publisher** on npm: package settings → Trusted Publishers → add (repo `anvai-labs/sandhi`, workflow `release.yml`, environment `npm`). No token stored. Note the scope: **`anvailabs`** — the npm org we own; `anvai-labs` was not available on npm, so the package name intentionally differs from the GitHub org. |
 
-Also create a GitHub **Environment** named `pypi` (Settings → Environments) so the trusted
-publisher is scoped to it.
+Also create GitHub **Environments** named `pypi` and `npm` (Settings → Environments) so each
+trusted publisher is scoped to its own job.
 
 ## After the tag: verification is part of the release
 
-The crates.io and npm publish steps `exit 0` when their credential is absent, so a job can report
-**success while shipping nothing** — deliberate for an unconfigured target, but the identical guard
-would hide a genuinely broken publish. The `verify` job therefore checks the *registries*, not the
+The crates.io publish step `exit 0`s when its credential is absent, so a job can report
+**success while shipping nothing**. The `verify` job therefore checks the *registries*, not the
 job results, and fails the run if an expected target is missing.
 
 Run it by hand any time:
