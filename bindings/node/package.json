@@ -17,10 +17,10 @@
   "napi": {
     "name": "sandhi",
     "triples": {
-      "defaults": true,
+      "defaults": false,
       "additional": [
         "aarch64-apple-darwin",
-        "aarch64-unknown-linux-gnu"
+        "x86_64-unknown-linux-gnu"
       ]
     }
   },
@@ -42,5 +42,8 @@
     "index.d.ts",
     "contracts.d.ts",
     "README.md"
-  ]
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }
