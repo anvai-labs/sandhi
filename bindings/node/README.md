@@ -1,4 +1,4 @@
-# @anvai-labs/sandhi
+# @anvailabs/sandhi
 
 Node binding for [**Sandhi**](https://github.com/anvai-labs/sandhi) — *the metering layer for
 AI agents*. The Rust core runs in-process through napi-rs. It exposes **metering** (virtual keys,

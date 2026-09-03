@@ -20,7 +20,7 @@ key, and set per-user budgets — without hand-rolling provider APIs.
   [documentation map](docs/README.md), so this README does not freeze a release number or duplicate
   25 TD phase tables.
 - **Packages:** crates.io `sandhi-core` / `-providers` / `-store` / `-proxy` · PyPI
-  `sandhi-gateway` · npm `@anvai-labs/sandhi` *(intentionally unpublished; the Node binding builds
+  `sandhi-gateway` · npm `@anvailabs/sandhi` *(Trusted Publishing; first ships on the tag after v0.5.0; the Node binding builds
   from source and is tested in CI)*
 
 ## Why
@@ -142,7 +142,7 @@ crates/sandhi-providers/    # unified provider transport + resilience decorator 
 crates/sandhi-store/        # durable SQLite sink + usage aggregation queries
 crates/sandhi-proxy/        # the inline reverse-proxy server + self-hosted dashboard
 bindings/python/            # PyO3 → PyPI `sandhi-gateway`
-bindings/node/              # napi  → npm `@anvai-labs/sandhi`
+bindings/node/              # napi  → npm `@anvailabs/sandhi`
 schemas/usage-event.v1.schema.json   # the wire contract
 docs/adr/                            # architecture decisions
 docs/td/                             # implementation designs and phase status

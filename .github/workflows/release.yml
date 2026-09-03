@@ -140,10 +140,10 @@ jobs:
           publish_member sandhi-store
           publish_member sandhi-proxy
 
-  # ── 4. npm (@anvai-labs/sandhi) — per-platform native builds + napi prepublish ─────────────
+  # ── 4. npm (@anvailabs/sandhi) — per-platform native builds + napi prepublish ──────────────
   #        Intel-mac leg dropped for the same reason as the binaries matrix above; because
   #        `npm-publish` needs the whole build matrix, that stuck leg is what kept npm from ever
-  #        publishing. The publish step still no-ops without NPM_TOKEN (see below).
+  #        publishing. Publishing is OIDC Trusted Publishing — no token, no skip path.
   npm-build:
     name: npm build (${{ matrix.target }})
     strategy:
@@ -198,14 +198,15 @@ jobs:
           npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version --allow-same-version
           npm install
           npx napi artifacts --dir artifacts
+          # napi prepublish IS the publish (main + platform packages, over OIDC) — a trailing
+          # bare `npm publish` would re-publish the identical version and hard-fail E403.
           npx napi prepublish -t npm --skip-gh-release
-          npm publish --access public
 
   # ── 5. Verify the artifacts actually landed ───────────────────────────────────────────────
-  #        The publish steps above `exit 0` when their credential is absent, so a job can report
+  #        The crates.io publish step `exit 0`s when its credential is absent, so a job can report
   #        success while shipping nothing. That is intentional for an unconfigured target, but the
   #        same guard would hide a genuinely broken publish — and a green release run is exactly
-  #        when nobody looks. This checks the registry, not the job.
+  #        when nobody looks. This checks the registries, not the jobs.
   verify:
     needs: [create-release, pypi-publish, crates, npm-publish]
     if: ${{ always() }}
@@ -220,5 +221,5 @@ jobs:
           # Expectation is derived from configuration, never assumed: a target with no credential
           # is reported as an intentional skip instead of silently passing.
           EXPECT_CRATES: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
-          EXPECT_NPM: ${{ secrets.NPM_TOKEN != '' }}
+          EXPECT_NPM: "1" # Trusted Publishing: npm is always expected; the verifier checks the registry, not a token
         run: python3 scripts/verify-release.py "${GITHUB_REF_NAME}"

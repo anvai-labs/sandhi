@@ -14,7 +14,7 @@ All release versions are derived from the tag; do not hand-edit package versions
 | `crates/sandhi-store` | `sandhi-store` (Rust lib — durable SQLite sink + aggregates) | crates.io |
 | `crates/sandhi-proxy` | `sandhi-proxy` (Rust lib + **server** binary + dashboard) | crates.io + GitHub Release binaries |
 | `bindings/python` | `sandhi-gateway` (PyO3 wheel) | PyPI |
-| `bindings/node` | `@anvai-labs/sandhi` (napi addon) | npm, when configured |
+| `bindings/node` | `@anvailabs/sandhi` (napi addon) | npm (Trusted Publishing) |
 
 Each binding is its **own** Cargo workspace, so Rust / Python / TypeScript changes are isolated
 and fmt/clippy/build independently (see `.github/workflows/ci.yml`).
