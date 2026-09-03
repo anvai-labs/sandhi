@@ -190,7 +190,13 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: napi-${{ matrix.target }}
-          path: bindings/node/*.node
+          # index.js/index.d.ts (the napi loader + its types) are gitignored BUILD
+          # OUTPUTS — without them the published main package cannot be required.
+          # Platform-independent, so both legs ship identical copies.
+          path: |
+            bindings/node/*.node
+            bindings/node/index.js
+            bindings/node/index.d.ts
 
   npm-publish:
     needs: npm-build
@@ -237,6 +243,14 @@ jobs:
           # is required: 2.18.4 declares the target dir option with no default.
           npx napi create-npm-dir -t .
           npx napi artifacts --dir artifacts
+          # The napi loader pair rides the build artifacts (gitignored build outputs —
+          # `napi artifacts` only moves the platform binaries). Restore them to the
+          # package root and assert: npm SILENTLY DROPS nonexistent `files` entries,
+          # so a missing loader would otherwise publish an uninstallable package and
+          # the registry-version check would still report OK.
+          cp -f artifacts/index.js artifacts/index.d.ts .
+          test -f index.js && test -f index.d.ts \
+            || { echo "::error::napi loader (index.js/index.d.ts) missing — the main package would be uninstallable"; exit 1; }
           # A dispatch repair must not be able to go green while publishing nothing:
           # download-artifact exits 0 on an empty pattern match and prepublish merely
           # warns per missing binary — so assert every generated platform dir actually
