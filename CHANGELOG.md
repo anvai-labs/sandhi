@@ -12,9 +12,23 @@ architecture and the measure-vs-price boundary this changelog respects.
 
 One tag `vX.Y.Z` drives the binary and PyPI release plus any configured crates.io/npm
 publishers. Versions are derived from the tag at build time, never hand-edited; see
-[RELEASING.md](RELEASING.md). The npm package is currently intentionally unpublished.
+[RELEASING.md](RELEASING.md). npm publishes as `@anvailabs/sandhi` via Trusted Publishing
+(first shipped in v0.5.1).
 
 ## [Unreleased]
+
+### Added
+
+- _Nothing yet._
+
+## [0.5.1] — 2026-09-03
+
+The release-plumbing patch: **npm distribution lands** via Trusted Publishing under the
+`@anvailabs` org we own — OIDC-pinned to this repository, workflow, and environment, with no
+token anywhere to leak or rotate — and the release binaries can finally build with native
+SentinelPass IPC as the workflow has requested since v0.3.0. No runtime behavior changes: the
+Python wheel is unchanged, and the crates differ only in version metadata and the proxy's
+forwarded feature declaration.
 
 ### Added
 
