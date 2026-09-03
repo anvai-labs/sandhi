@@ -35,6 +35,7 @@ including the automated `sentinelpass-protocol` publish and pin-bump loop).
 feature branch → PR → develop  (CI Success gate)
 develop        → PR → main     (stricter gate: strict + linear history)
 main           → tag vX.Y.Z    → release.yml publishes configured targets
+main           → merge back into develop (the post-promote back-sync)
 ```
 
 - `develop` — active development; protected (requires `CI Success`).
@@ -42,6 +43,13 @@ main           → tag vX.Y.Z    → release.yml publishes configured targets
   linear history, no force-push/deletion, admins included).
 - **Cut a release:** open a PR `develop → main`, merge once green, then
   `git tag vX.Y.Z && git push origin vX.Y.Z`. The `release` workflow does the rest.
+- **Title the promotion PR with a conventional prefix** (`chore:` — the `lint-title` gate rejects
+  `release:`; found live during the v0.5.0 cut).
+- **After every promotion merge, sync main back into develop** (`git checkout develop && git merge
+  origin/main && git push`). The promotion merge commit exists only on main; without the back-sync
+  the next `develop → main` PR is permanently `BEHIND` on main's up-to-date-branch requirement.
+  This exact trap stalled the v0.5.0 promotion — v0.4.0's promotion (#199) had never been synced
+  back.
 
 ## One-time publisher setup (maintainer)
 
@@ -58,7 +66,8 @@ explicitly when its secret is absent:
 | **npm** (`@anvailabs/sandhi`) | Configure a **Trusted Publisher** on npm: package settings → Trusted Publishers → add (repo `anvai-labs/sandhi`, workflow `release.yml`, environment `npm`). No token stored. Note the scope: **`anvailabs`** — the npm org we own; `anvai-labs` was not available on npm, so the package name intentionally differs from the GitHub org. |
 
 Also create GitHub **Environments** named `pypi` and `npm` (Settings → Environments) so each
-trusted publisher is scoped to its own job.
+trusted publisher is scoped to its own job; pin `npm`'s deployment branch policy to `main`
+(see the hardening note under *Notes*).
 
 ## After the tag: verification is part of the release
 
@@ -84,3 +93,31 @@ wrong conclusions before this existed.
   them to the tag version at release.
 - Treat any new registry or platform as a separately verified release target. Iterate on
   `release.yml` through the same PR flow.
+- **npm mechanics** (the v0.5.1 lesson): the per-platform package dirs (`bindings/node/npm/`)
+  are **gitignored by design** and are generated at publish time by `napi create-npm-dir` —
+  `napi artifacts` writes into them and fails with a bare ENOENT when they are missing. Two
+  CLI-2.x behaviors shape the workflow around it: `napi prepublish` publishes **only the
+  platform packages** (a platform whose binary is missing is *warned and skipped*, silently —
+  the workflow therefore asserts every generated dir received its `.node` before publishing),
+  and the **main** package needs an explicit root `npm publish --access public` afterwards.
+  Scoped packages default to *restricted*; `publishConfig.access = "public"` in the root
+  `package.json` propagates into every generated platform package (verified against 2.18.4).
+  The napi `triples` config must list **exactly** the targets the `npm-build` matrix builds:
+  a configured-but-unbuilt triple yields `optionalDependencies` pointing at packages that
+  never exist (and warn-skips at publish); a matrix leg without a triple fails loudly at
+  `napi artifacts`. Add a matrix leg and a config triple together.
+- **npm repair** (same lesson): a tag whose npm leg failed while crates/PyPI landed (a rerun
+  would re-publish those and hard-fail) is repaired without burning a version: run
+  `release.yml` → **Run workflow** on `main` with `npm_repair_tag = vX.Y.Z`. Only the npm jobs
+  run — same OIDC Trusted-Publishing environment, the tag's own tree — everything else is
+  event-gated to tag pushes. The publish is **idempotent**: a package (main or platform)
+  already on the registry is skipped rather than E403-ing, so a rerun after a partial
+  publish completes the remainder. Afterwards verify with
+  `python3 scripts/verify-release.py vX.Y.Z`. Caveat: the repair accepts any existing tag and
+  `napi prepublish` never sets a dist-tag, so a prerelease tag (`vX.Y.Z-rc1`) publishes as
+  `latest` — don't cut `-rc` tags, or extend the publish with `--tag next` first.
+- **npm hardening (maintainer, GitHub settings)**: pin the `npm` environment's deployment
+  branch policy to `main`, and add tag protection to `refs/tags/v*`. Without that, any
+  write-access actor can dispatch the repair from an arbitrary branch (or push a tag whose
+  tree carries a doctored `release.yml`) and run arbitrary code under the npm OIDC identity —
+  the same power a tag push already grants, but the policies close both doors.

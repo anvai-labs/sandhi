@@ -1,17 +1,27 @@
 {
   "name": "@anvailabs/sandhi",
   "version": "0.0.0",
-  "description": "Sandhi — the metering layer for AI agents (Node binding): in-process virtual keys, budgets, and neutral usage-event metering.",
+  "description": "Sandhi \u2014 the metering layer for AI agents (Node binding): in-process virtual keys, budgets, and neutral usage-event metering.",
   "license": "Apache-2.0",
   "repository": "https://github.com/anvai-labs/sandhi",
-  "keywords": ["llm", "gateway", "usage", "metering", "attribution", "ai"],
+  "keywords": [
+    "llm",
+    "gateway",
+    "usage",
+    "metering",
+    "attribution",
+    "ai"
+  ],
   "main": "sandhi.js",
   "types": "sandhi.d.ts",
   "napi": {
     "name": "sandhi",
     "triples": {
-      "defaults": true,
-      "additional": ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu"]
+      "defaults": false,
+      "additional": [
+        "aarch64-apple-darwin",
+        "x86_64-unknown-linux-gnu"
+      ]
     }
   },
   "engines": {
@@ -24,5 +34,16 @@
   },
   "devDependencies": {
     "@napi-rs/cli": "^2.18.4"
+  },
+  "files": [
+    "index.js",
+    "sandhi.js",
+    "sandhi.d.ts",
+    "index.d.ts",
+    "contracts.d.ts",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
   }
 }
