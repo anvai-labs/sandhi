@@ -106,6 +106,16 @@ wrong conclusions before this existed.
   a configured-but-unbuilt triple yields `optionalDependencies` pointing at packages that
   never exist (and warn-skips at publish); a matrix leg without a triple fails loudly at
   `napi artifacts`. Add a matrix leg and a config triple together.
+- **npm first-publish bootstrap (the v0.5.1 npm-leg lesson, round 2)**: npm Trusted
+  Publishing **cannot create a package** — the OIDC binding is configured per package in its
+  registry settings, so a first-ever publish of each name (`@anvailabs/sandhi` and every
+  platform package) fails E404 on PUT from CI no matter how correct the workflow is
+  ([npm/cli#8544](https://github.com/npm/cli/issues/8544)). The first version of each name
+  is published once, manually (`npm login` + `npm publish <tarball> --access public`, or any
+  token flow); afterwards add the Trusted Publisher to each package's settings and CI owns
+  every subsequent version. Beware when packing by hand: `napi prepublish --dry-run`
+  rewrites `package.json` WITHOUT the `files` whitelist — restore it before `npm pack` or
+  the tarball ships sources and nested binaries.
 - **npm repair** (same lesson): a tag whose npm leg failed while crates/PyPI landed (a rerun
   would re-publish those and hard-fail) is repaired without burning a version: run
   `release.yml` → **Run workflow** on `main` with `npm_repair_tag = vX.Y.Z`. Only the npm jobs
