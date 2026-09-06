@@ -19,6 +19,14 @@ publishers. Versions are derived from the tag at build time, never hand-edited; 
 
 ### Added
 
+- **Isolated recovery rehearsal (W06c).** Fixed-topology single-file/two-shard restart and
+  offline snapshot/restore drills verify retained accounting, access state and continued service.
+  Negative cases cover malformed snapshots, real crash leases, unavailable broker authority
+  and post-snapshot revocation reconciliation; AgentBrowser checks restored dashboard evidence.
+  The [recovery runbook](docs/operator/recovery-drill.md) requires quarantine and separate secret
+  provisioning. This is test-only rehearsal tooling, not online backup, automatic production
+  restore, live broker certification or a lossless accounting guarantee.
+
 - **Drain-aware readiness (W06a).** `/readyz` distinguishes traffic readiness from `/healthz`
   liveness, with bounded HTTP/TLS same-port quiesce subject to existing connection caps.
   Shared cutoff rejects queued/upload-spanning model calls and admin mutations before new
@@ -41,6 +49,13 @@ publishers. Versions are derived from the tag at build time, never hand-edited; 
   [remaining accounting gates](docs/product/attempt-accounting-and-evidence.md).
 
 ### Fixed
+
+- **Configured storage fails closed at startup.** Failed initialization of a configured usage,
+  credential-metadata, virtual-key, alert or enforcement database stops startup before binding;
+  it no longer substitutes an uncapped memory ledger or drops configured components. Only an
+  absent `SANDHI_STORE` selects memory mode; empty/invalid, `:memory:` and SQLite `file:` URI
+  configuration is refused. Repair storage if a deployment previously relied on
+  fallback. This does not change runtime `Warn`/`Block` policy or require a reachable external broker.
 
 - **Binding dependency security gate.** Upgrade PyO3/async bridge to patched 0.29 releases,
   explicitly retain GIL-required behavior and declare the existing locked source-build floor

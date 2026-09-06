@@ -46,7 +46,9 @@ marking a planning task complete does not mark its implementation complete.
 |---|---|---|---|---|---|
 | C01 | W01–W04 and inactive W05a storage foundation; branch `feat/gateway-trust-checkpoint` | Passed; clean scoped re-review, 103 SDK/browser tests, 37 upgraded Python tests, 94.12% binding coverage | [PR #230](https://github.com/anvai-labs/sandhi/pull/230) merged with explicit owner-authorized review bypass; pre- and [post-merge CI](https://github.com/anvai-labs/sandhi/actions/runs/34015573003) green | Complete: `8f56b91` on `develop` | No |
 | C01b | W06b best-effort buffer visibility; branch `feat/operational-buffer-visibility`, updated from C01 | Passed: 105 SDK/browser tests, native workspace tests, 87.18% coverage; current-base adversarial re-review clean | [PR #231](https://github.com/anvai-labs/sandhi/pull/231) merged as `f777b89671c4b52854cb6c527dd03fa01a7ada52`; latest-head CI `34029737562` and post-merge CI `34030218505` passed; authorized admin review bypass only | Complete | No |
-| C01c | W06a drain-aware readiness; branch `feat/drain-aware-readiness` | Passed: native workspace, OTLP proxy tests, 87.76% native coverage, 113 SDK/browser tests; independent review finding fixed and re-reviewed clean | [PR #232](https://github.com/anvai-labs/sandhi/pull/232) against `develop`; latest-head and post-merge CI required; PR carries live integration evidence | Pending | No |
+| C01c | W06a drain-aware readiness; branch `feat/drain-aware-readiness` | Passed: native workspace, OTLP proxy tests, 87.76% native coverage, 113 SDK/browser tests; independent review finding fixed and re-reviewed clean | [PR #232](https://github.com/anvai-labs/sandhi/pull/232) merged as `31151d9`; latest-head CI `34042875545` and post-merge CI `34048329909` passed; authorized missing-review bypass only | Complete | No |
+| C01d | W06c recovery drills; branch `test/recovery-drills` | Passed: 181 SDK/browser tests (one unavailable SDK skipped), default/native/OTLP tests and clippy, 87.77% native coverage; adversarial findings fixed and independently re-reviewed clean | [PR #233](https://github.com/anvai-labs/sandhi/pull/233); latest-head and post-merge CI required | Pending | No |
+| C01e | W06d workload/operator acceptance | Pending: reproducible workload evidence and actual-user walkthrough; accepting operator requested | Separate focused `develop` PR after C01d; same review/CI gates | Pending | No |
 | C02 | Initial W06 and M1 operator-journey acceptance, then `develop` → `main` | Pending | Pending promotion PR and post-merge CI | Pending | No; tagging/publishing is a separate action |
 
 C01 checkpoints completed work now instead of waiting for W05–W14. Do not claim M1 complete
@@ -89,7 +91,7 @@ verification evidence and an operator-facing release note before its status beco
 | W03 | Metering semantics and guarantee correction; R03, F03/F04 | Sandhi core/providers maintainer | Baseline | 1–2 weeks | Explicit reasoning inclusion and minor-7 schemas; legacy totals preserved; parser/plane/store/ledger/binding corpus and 24 end-to-end cases pass; [estimated-reservation capability matrix](../product/metering-and-budget-guarantees.md) and concurrent overshoot regression | Complete |
 | W04 | Safe broker integration and onboarding; R07/R13, F08/F09, SP0/SP1 | Sandhi store/proxy + SentinelPass protocol owners | Baseline | 1–2 weeks | Native real-handler reproduction fixed; bounded runtime/queue, explicit capabilities, read-only API/CLI/browser registration and 16 broker scenarios pass; [integration contract](../product/broker-integration-contract.md). Live daemon certification remains SP4; generations/revocation cutoff remain W09 | Complete |
 | W05 | Attempt accounting and durable evidence; R03/R05/R11, F05/F06 | Sandhi core/store + downstream consumer owner | W02/W03; accounting-contract review | 2–4 weeks | W05a complete: atomic settlement receipts, bounded/fenced delivery claims and 14 focused tests; [substep contract](../product/attempt-accounting-and-evidence.md). W05b–e retain physical-attempt capture, proxy integration, recovery, export and consumer review gates. A settlement receipt is not an upstream attempt | In progress |
-| W06 | Operational readiness and recovery; R05/R12, F12/F13 | Sandhi operations/proxy maintainer | Baseline; W05 for authoritative backlog | 1–2 weeks | W06b buffer visibility integrated; W06a readiness/cutoff/deadline implemented and locally verified (C01c integration pending). W06c incident/restore drill and W06d workload/user acceptance remain open. See TD-0020 and checkpoint gates | In progress |
+| W06 | Operational readiness and recovery; R05/R12, F12/F13 | Sandhi operations/proxy maintainer | Baseline; W05 for authoritative backlog | 1–2 weeks | W06a/b integrated; W06c offline recovery drills in progress (C01d), W06d workload and actual-user acceptance pending (C01e). Automated smoke does not substitute for user acceptance. See TD-0020 and checkpoint gates | In progress |
 | W07 | Scoped management, audit and egress security; R06/R10, F07/F11/F15 | Sandhi security/API + control-plane owner | W01/W02; identity-boundary review | 2–4 weeks | Cross-scope CRUD/query denial, mutation audit, bounded/redacted egress and webhook delivery, auth/session threat model, failure-injection evidence | Pending |
 | W08 | Declarative policy and hierarchical usage controls; R02/R04/R08, F10/F16 | Sandhi core/store + policy consumer owner | W02/W03/W05/W07 | 2–4 weeks | Reconcile TD-0005; durable revision/conflict preconditions, shadow/effective policy, signed freshness, all-scope/window atomic reservation, rate/token/concurrency tests, explainable denial | Pending |
 | W09 | Credential generations and revocation; R07, F09, SP2 | Sandhi credential manager + SentinelPass owners | W04/W05/W07; broker contract release | 2–3 weeks | Bounded new-dispatch cutoff, generation switch/drain, restart and missed-event recovery, broker outage/expiry matrix | Pending |
@@ -122,6 +124,27 @@ worktree or small team, land them sequentially to avoid overlapping proxy/core e
 does not assume parallel agents or staffing that has not been assigned.
 
 ## Milestones and review checkpoints
+
+### Authorized M1 completion sequence (2026-09-06)
+
+1. W06c/C01d: stop disposable writers, snapshot/validate a complete fixed-topology SQLite set,
+   restore into a new quarantined directory, prove committed state and continued accounting;
+   exercise WAL, forced-exit leases, unavailable broker and post-snapshot revocation reconciliation.
+   Add a recovery runbook; no live-backup, topology-migration or durable-attempt claim.
+2. W06d/C01e: record a reproducible synthetic workload baseline and failure outcomes; exercise
+   operator journeys with API/browser tooling and obtain an actual-user first-request, budget
+   and locked-broker walkthrough. Record the accepting operator and result, not an inferred sign-off.
+3. Land each focused PR into `develop` only after clean adversarial review and green latest-head
+   CI; verify post-merge CI. Existing authorization permits missing-review admin bypass only,
+   never failed/pending checks or protection changes.
+4. Once M1 acceptance evidence exists, open `develop` → `main` C02 promotion PR, review its full
+   diff and verify CI before merge; verify the resulting `main` push. Tagging/publishing remains
+   separate and is not part of this promotion request.
+
+W06c local implementation/verification is complete; focused integration is pending. W06d automation can be prepared in parallel; actual-user
+acceptance is requested and remains an explicit gate, as do later live broker/fleet guarantees.
+
+### Milestone definitions
 
 1. **M0 — review package:** A01–A07 complete, provisional decisions explicit, findings reproducible
    from cited code and future validation clearly separated. Complete; M1 is now underway.
@@ -466,3 +489,26 @@ unit suite is not a distributed correctness proof. Record evidence and update th
   Public-runner routing remains enabled (`OWNER_PRIVATE_CI_ENABLED=false`). Merge remains
   conditional on clean review and green latest-head CI; the PR records live CI/merge evidence.
   This source snapshot does not predeclare integration. W06c remains the next implementation slice.
+- 2026-09-06: C01c integrated as `31151d9`; pre-merge CI `34042875545` and post-merge CI
+  `34048329909` passed. User authorized W06c and W06d focused `develop` PRs followed by M1
+  promotion only after clean review/green CI and acceptance gates. Started `test/recovery-drills`;
+  actual accepting operator requested separately, not inferred from merge authorization.
+- 2026-09-06: Recovery review reproduced a P1 startup bypass: an incompatible reservation schema
+  left a persisted zero hard cap intact, but configured ledger-open failure selected a new memory
+  ledger; readiness was 200 and a synthetic request dispatched successfully. C01d now includes
+  fail-closed configured-storage initialization and real startup regression tests. Runbook
+  preflight alone is insufficient. This correction does not add automatic shard completeness,
+  topology migration, or runtime broker revocation guarantees.
+- 2026-09-06: C01d local gates passed: 181 SDK/browser tests, one unavailable Google SDK skip;
+  default/native workspace and OTLP proxy tests and strict all-target clippy; native coverage
+  87.77%. The final combined suite includes real AgentBrowser restore smoke. Snapshot review
+  findings (nested restore mutation and publication-size mismatch) and the P1 configured-store
+  fallback were corrected; independent startup re-review passed 17 cases including URI rejection.
+  The socket-blocked SDK attempt was rerun with permission. Initial fixtures demonstrate exact
+  committed-state restoration and conservative held leases, not production RTO/RPO or complete
+  consumption reconstruction. Ready for the focused C01d PR; W06d actual-user acceptance remains
+  pending and cannot be inferred from merge authorization.
+- 2026-09-06: Opened [PR #233](https://github.com/anvai-labs/sandhi/pull/233) for C01d,
+  implementation `2c55ded`. Public runners remain selected. Existing authorization permits
+  bypassing only a missing approving review after clean adversarial review and green latest-head
+  CI; post-merge CI must also pass. Live evidence is recorded on the PR, not predeclared here.

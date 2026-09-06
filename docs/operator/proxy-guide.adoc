@@ -117,7 +117,7 @@ sandhi-proxy listening on http://127.0.0.1:8787  (OpenAI Chat/Responses | Anthro
 
 | `SANDHI_STORE`
 | _(unset → in-memory)_
-| SQLite path. When set, metering + vkeys + budgets + the enforcement ledger are **durable and crash-safe**; survive a restart.
+| Ordinary SQLite filesystem path. Committed usage, vkeys, budgets and ledger rows survive restart; best-effort queued observations can be lost. Configured database initialization failures exit `2` before binding, without memory fallback. Empty/whitespace-only values, `:memory:` and SQLite `file:` URIs are refused; unset it explicitly for development memory mode. Recovery still requires a complete, fixed-topology file set.
 
 | `SANDHI_MEMORY_SINK_MAX`
 | `10000`
@@ -665,7 +665,8 @@ One monotonic deadline covers all phases. Normal cleanup exits `0`; deadline/inc
 cleanup exits `124`, possibly leaving uncertain settlement or best-effort observations.
 Do not interpret timeout as a successful flush or retry an uncertain model call blindly.
 The process watchdog does not depend on Tokio cancellation and does not log on its hard-exit
-path. Storage evidence/recovery remains separately tracked under W05/W06c.
+path. See link:recovery-drill.md[the isolated recovery rehearsal] for fixed-topology snapshots,
+crash leases and revocation reconciliation. Authoritative attempt evidence remains W05 scope.
 
 Library embedders retain runtime ownership: deadline expiry requests cancellation and returns
 `io::ErrorKind::TimedOut`, rather than forcing process termination. Synchronous destructors
@@ -713,7 +714,8 @@ Investigate sustained queue growth or `increase(sandhi_buffer_dropped_total[5m])
 best-effort observation. Do not interpret zero drops as complete accounting: storage insert
 failures and in-memory ring evictions are separate, not yet exported signals. These are not
 W05 settlement-outbox backlog metrics. The new buffer signals are Prometheus-only; OTLP parity,
-oldest-item age and backup/restore drills remain tracked follow-ups.
+oldest-item age remain tracked follow-ups. Offline backup/restore rehearsals are covered by
+link:recovery-drill.md[W06c]; online/fleet recovery is not implied.
 
 Unlabelled `sandhi_ready`, `sandhi_shutdown_active_operations` and
 `sandhi_shutdown_elapsed_seconds` follow the same metrics authorization. Active operations
