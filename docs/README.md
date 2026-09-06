@@ -115,13 +115,13 @@ perpetually open.
 | [0017](td/TD-0017-transport-security-and-ingress-protocol-breadth.md) | In progress | P2 rotation, P3 ALPN/context, evidence-gated P4 HTTP/2 |
 | [0018](td/TD-0018-duplex-session-metering.md) | Proposed | Spike, session abstraction, and WebSocket ingress |
 | [0019](td/TD-0019-ingress-codec-untrusted-input-hardening.md) | Proposed | Property/fuzz suites and lossy-field inventory |
-| [0020](td/TD-0020-operational-readiness-and-transport-observability.md) | In progress | W06a/b/c integrated; C01d post-merge CI pending. W06d workload locally verified; user acceptance, remaining gauges, pool, shedding and DNS work still open |
+| [0020](td/TD-0020-operational-readiness-and-transport-observability.md) | In progress | W06a/b/c and W06d automation verified and integrated; actual-user acceptance pending. Remaining gauges, pool, shedding and DNS work still open |
 | [0021](td/TD-0021-co-design-seam-v2-proxy-path-contract.md) | Complete | — |
 | [0022](td/TD-0022-per-call-transport-context.md) | Complete | — |
 | [0023](td/TD-0023-release-automation.md) | Complete | npm remains intentionally unconfigured/unpublished |
 | [0024](td/TD-0024-reservation-retention-and-rollup.md) | Proposed | Bounded reservation history and rollups |
 | [0025](td/TD-0025-ingress-funnel-and-family-registry.md) | Proposed | Family registry and funnel decomposition |
-| [0026](td/TD-0026-gateway-product-evolution.md) | In progress | W01–W04 complete; W05a foundation complete; W06a/b/c integrated, C01d post-merge CI pending; W06d workload locally verified, focused integration and user acceptance pending. M1 promotion awaits those gates; live/joint delivery pending |
+| [0026](td/TD-0026-gateway-product-evolution.md) | In progress | W01–W04 complete; W05a foundation complete; W06a/b/c and W06d automation verified and integrated. M1/main promotion awaits actual-user acceptance; live/joint delivery pending |
 
 TD-0026 slice completion means implementation/local verification. Its separate C01/C02 checkpoint
 table tracks remote CI, merge and release; C01 [PR #230](https://github.com/anvai-labs/sandhi/pull/230)

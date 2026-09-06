@@ -82,6 +82,7 @@ it records the executable SHA-256 and marks the supplied revision unverified. Ha
 | Final checkpoints | No unsettled leases; queue/drop assertions passed; denied calls did not dispatch |
 | Shutdown and elapsed run | Exit 0; 66.28 seconds including setup/checks/cleanup |
 | Combined local regression suite | 227 passed, one unavailable Google SDK skipped; includes real AgentBrowser smoke |
+| Hosted PR regression suite | 233 passed, two optional sibling-browser tests skipped; no sibling checkout in hosted CI |
 
 The summary retains every phase distribution and resource observation. Raw per-request evidence
 was retained locally as `/tmp/sandhi-w06d-final.json` (canonical digest in the summary) and independently
@@ -90,6 +91,18 @@ full report in a durable evidence store. Raw SQL/metric checkpoints are asserted
 harness, not copied into the report. These are observations of one small synthetic profile,
 not a measured production RTO, leak-freedom proof or throughput commitment. Earlier exploratory
 runs are not substituted for this integrated baseline.
+
+### Integration evidence
+
+| Slice | Reviewed head and merge | Latest-head CI | Post-merge CI |
+|---|---|---|---|
+| W06c recovery | [PR #233](https://github.com/anvai-labs/sandhi/pull/233): `7440dab` → `8ae8401` | [34058455291](https://github.com/anvai-labs/sandhi/actions/runs/34058455291), passed | [34059776510](https://github.com/anvai-labs/sandhi/actions/runs/34059776510), passed |
+| W06d automation | [PR #234](https://github.com/anvai-labs/sandhi/pull/234): `948e7af` → `324ba87` | [34060286384](https://github.com/anvai-labs/sandhi/actions/runs/34060286384), passed | [34060985111](https://github.com/anvai-labs/sandhi/actions/runs/34060985111), passed |
+
+Both merges followed clean independent review and green latest-head CI on public hosted runners.
+Only the missing approving review was bypassed under explicit user authorization; no failed or
+pending check was bypassed and no protection was changed. W06d merged after W06c post-merge CI
+passed. Private-route mirrors were skipped and are not used as validation evidence.
 
 ## Actual-user review — required before M1 promotion
 
@@ -116,3 +129,12 @@ W06c and W06d land through focused `develop` PRs with clean adversarial review a
 and post-merge CI. Only after the recorded M1 acceptance gates pass may a `develop` → `main` PR
 promote this checkpoint. Review the full promotion diff and verify the resulting `main` CI.
 No tag, package publication, production rollout or later roadmap guarantee is implied.
+
+The prospective promotion review compared `main` at `72ced4b` with acceptance head `948e7af` and
+found no new release blocker in the cumulative diff/contract review, building on the completed
+per-slice adversarial reviews. It checked accounting propagation and disclosed migrations,
+configured-store/readiness compatibility, and intact CI/security gates. The promotion also
+carries the already-integrated protocol 0.8.1 update (PR #227) and npm bootstrap documentation
+(PR #226). This was not an exhaustive new audit of every line, production certification, or
+permission to skip actual-user acceptance. Recheck the exact promotion head and CI when the
+human gate is satisfied; no `main` promotion PR has been opened for this checkpoint.
