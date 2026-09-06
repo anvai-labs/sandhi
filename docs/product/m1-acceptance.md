@@ -1,0 +1,93 @@
+# M1 workload and operator acceptance
+
+Status: automated workload implementation under verification; actual-user review pending.
+Owner/tracker: [TD-0026](../td/TD-0026-gateway-product-evolution.md), C01e/W06d.
+
+M1 is a trustworthy **single-node baseline**, not the complete gateway roadmap. W01–W04,
+drain-aware readiness, best-effort operational visibility and isolated recovery are its inputs.
+The workload evidence below complements those tests. It cannot establish usability on behalf
+of an operator or authorize a production deployment.
+
+## Automated workload contract
+
+The real proxy talks only to a separate synthetic HTTP/1.1 provider process over loopback.
+A separate driver sends four gateway lanes: transparent Gemini and translated OpenAI ingress,
+each unary and paced SSE. Direct-provider unary/SSE runs use the same provider family and
+corpus. They are a comparison baseline, not a measurement of a previous gateway revision or
+a justified subtraction of provider time from gateway latency.
+
+The local reference profile has 32 scoped synthetic tenants, three repetitions, 128 requests
+per phase, concurrency 8 for closed-loop traffic, and a fixed 50 arrivals/second profile with
+a bounded pending set. The three usage variants independently exercise fresh/cache input
+and zero, smaller-than-output, and larger-than-output separate reasoning counts. Request size
+has a deterministic 10:1 skew. SSE has 16 content frames with configured 2 ms spacing.
+
+For each gateway phase, acceptance requires:
+
+- Every offered request completes successfully; timeouts, bad response content/categories and
+  generator overflow invalidate the run. Fixed arrivals retain scheduling lag and scheduled-to-
+  completion latency instead of silently becoming a closed-loop workload.
+- Exactly one persisted event per request/step, correct subject/group/run binding, exact usage
+  categories, and independently matching enforcement spend per tenant and run totals.
+- No remaining unsettled lease, no observational queue backlog/drop at the sampled checkpoint,
+  and the expected forwarding-plane metric and upstream request deltas. SQL/API reconciliation,
+  not empty queues alone, proves the tested accounting.
+- Untimed unauthorized and exhausted-budget checks do not dispatch or create observations;
+  normal proxy shutdown exits 0.
+
+Reports record latency/TTFB/first-content distributions, scheduled arrival lag, offered/completed
+rates, CPU deltas, sampled RSS/FD peaks, repeat variance and platform/config/binary identity.
+CPU resolution and resource sampling limitations are explicit. No latency SLO, improvement,
+sustained capacity, memory-allocation result, long-history behavior or full TD-0015 completion
+is inferred. There is no warmup; driver connections restart between phases while provider pool
+and ledger history accumulate. Shared-host contention and small-sample tails can be noisy.
+
+The small pytest profile is an accounting/corpus CI gate, not a performance regression threshold.
+
+```bash
+cargo build -p sandhi-proxy --bin sandhi-proxy
+python -m pytest tests/sdk-conformance/test_workload_acceptance.py -q
+python tests/sdk-conformance/workload_acceptance.py \
+  --binary target/debug/sandhi-proxy \
+  --output target/m1-workload.json \
+  --summary-output target/m1-workload-summary.json
+```
+
+Use the full report for per-request evidence and retain its exact binary digest. A caller-supplied
+revision is not cryptographic build provenance; the artifact labels it accordingly. Never run
+this harness with real credentials, arbitrary remote provider endpoints or production storage.
+The compact summary keeps distributions, independent accounting, resources, configuration and
+the canonical full-report digest while omitting individual request samples. It is not a substitute
+for retaining the full report. Distinct output paths are required. Optimized Python (`-O` or
+`PYTHONOPTIMIZE`) is refused so it cannot strip the acceptance assertions.
+
+Independent review corrected missing streaming terminal validation, unexpected ledger-scope
+charges and optimized-Python false passes. Negative tests also cover malformed successful HTTP
+payloads, generator overload, missing metrics and evidence-output aliases. The final measured
+baseline must use the integrated W06c binary; earlier exploratory runs are not the M1 artifact.
+
+## Actual-user review — required before M1 promotion
+
+This gate is distinct from permission to merge a green PR. The accepting developer/operator
+must review the normal and failure journeys and report their observed result. A scripted browser
+test or a prepared walkthrough is not evidence of an actual user's experience.
+
+| Journey | Review task | Evidence/result to record |
+|---|---|---|
+| First useful request | Identify the configured provider reference, create a scoped virtual key, send a synthetic request and locate its attributed usage | Operator identity/role, build, observed outcome, confusion or missing next action; optional observed time |
+| Budget denial | Set a committed scope budget, trigger a denial, explain its next action and compare UI/API state | Denial understood without confusing estimated admission with a strict monetary cap; no upstream dispatch for the denied call |
+| Locked broker | Attempt reference registration with a locked synthetic broker, distinguish locked/denied/missing, recover the exact authorized reference | No secret exposure or fallback, correct recovery action, explicit difference between metadata and secret authority |
+| Recovery and limits | Review the W06c quarantine/revocation procedure and known forced-exit uncertainty | Accept/reject the single-node operating limits; identify any blocker before traffic cutover |
+
+Record findings and corrections before signing off. The proposed five-user/ten-minute onboarding
+target in the vision document remains unvalidated unless that study is actually performed; one
+operator's review must not be reported as that study.
+
+Accepting operator: **pending**. Observed user results: **pending**. M1 acceptance: **not complete**.
+
+## Promotion gate
+
+W06c and W06d land through focused `develop` PRs with clean adversarial review and green latest-head
+and post-merge CI. Only after the recorded M1 acceptance gates pass may a `develop` → `main` PR
+promote this checkpoint. Review the full promotion diff and verify the resulting `main` CI.
+No tag, package publication, production rollout or later roadmap guarantee is implied.
