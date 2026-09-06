@@ -58,6 +58,10 @@ def dashboard(proxy_binary, upstream, tmp_path, request):
         env["SANDHI_STORE"] = str(database)
     if options.get("public"):
         env["SANDHI_DASHBOARD_PUBLIC"] = "1"
+    for option, variable in [("usage_capacity", "SANDHI_USAGE_BUFFER_CAPACITY"),
+                             ("alert_capacity", "SANDHI_ALERT_BUFFER_CAPACITY")]:
+        if option in options:
+            env[variable] = str(options[option])
     proc = subprocess.Popen([str(proxy_binary)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     server = Dashboard(f"http://127.0.0.1:{port}", database, proc)
     try:

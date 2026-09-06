@@ -1,11 +1,12 @@
 # TD-0020: Operational readiness and transport observability — you cannot operate what you cannot see
 
 - **Status:** **In progress**, 2026-08-31. P2 is partial via TD-0014's shipped connection,
-  stream, and connection-shed signals; P1 and the remaining P2–P5 scope are open. Owns gaps
+  stream, and connection-shed signals, plus W06b's locally verified buffer visibility (2026-09-05);
+  P1 and the remaining P2–P5 scope are open. Owns gaps
   **G15, G16, G17, G18, G27**.
 - **Relates to:** [TD-0011](TD-0011-first-party-observability.md) (the metric registry and its D2
   bounded-label discipline, which this extends), [TD-0014](TD-0014-data-plane-resource-safety.md)
-  (whose every bound is unobservable until G16 lands — build them in parallel),
+  (whose bounds need matching G16 instrumentation),
   [TD-0015](TD-0015-performance-baseline-and-fault-injection.md) (the offline counterpart to these
   runtime gauges), [ADR-0004](../adr/0004-two-plane-proxy-and-enforcement-boundary.md) D4 (the gate
   these endpoints inherit).
@@ -172,7 +173,57 @@ graceful-drain measurement). Neither is redundant.
 
 ## Still open
 
-- **What is the right default `pool_max_idle_per_host`?** Gated on
+- **W06 readiness reachability (2026-09-05):** the current shutdown path stops accepting and
+  signals connection graceful shutdown immediately. A router-only `/readyz` flag test would
+  not prove that fresh network probes can receive `503` during drain. Before P1, define a
+  bounded probe-reachable quiesce phase or separate probe listener, reject new model/admin
+  mutation work before dispatch, and test HTTP/TLS, queued admissions and in-flight SSE.
+  Also define the deadline honestly: current alert and usage drains each receive a separate
+  grace after listener drain. P1 cannot claim an end-to-end shutdown deadline without changing
+  and testing those phases. Buffer visibility does not close this gap.
+
+## W06b buffer visibility slice (2026-09-05)
+
+Implemented and locally verified in `feat/operational-buffer-visibility`, separate from
+checkpoint PR #230; not merged or released.
+Core `BufferedSink` and proxy `BufferedAlertStore` expose sender-free observer snapshots;
+the registry reads bookkeeping only, with no database I/O or worker messages at scrape time.
+The binary attaches observers after constructing its metric registry. `/metrics` keeps its
+existing authorization; fixed `buffer="usage"|"alerts"` is the only added dimension.
+
+`sandhi_buffer_configured` distinguishes absence from an idle queue. For configured buffers,
+`sandhi_buffer_capacity`, `sandhi_buffer_queued`, `sandhi_buffer_in_flight` and
+`sandhi_buffer_dropped_total` distinguish channel capacity, accepted data awaiting callback
+start, an active callback and rejected enqueue attempts plus queued items abandoned after a
+worker panic. The panicking callback's persistence result is unknown and is not counted as
+a queue drop. Logical queued capacity is enforced under the same bookkeeping lock as enqueue;
+close also uses that lock so new data cannot enter behind the shutdown message. This preserves
+`queued <= capacity` even when the receiver has dequeued but not yet claimed an item.
+Control messages are excluded from
+queued/in-flight but share channel slots. A snapshot is coherent for one buffer, not a
+transactional snapshot across both writers. Observers contain no sender and do not extend
+channel lifetime. Counters reset on process restart; configured is not a worker-health signal.
+
+These are best-effort observation queues, **not W05 authoritative outbox backlog**. Completed
+callbacks are not confirmed durable writes. SQL insertion failures and in-memory ring evictions
+have separate existing counters but are not exported by this slice. Alert write failures/missing
+rules, oldest age, freshness, OTLP parity and durable incident delivery remain follow-ups. P2
+still owns admission waits, file descriptors and pool instrumentation; P1 readiness is unchanged.
+
+Verification: full workspace tests passed, including the native-feature coverage run at
+**87.26% line coverage**. Deterministic blocked-writer tests cover active versus queued work,
+overflow, callback panic/abandoned queue, observer lifetime and concurrent admission/close.
+Three metric tests cover honest disabled samples, observer integration and contiguous Prometheus
+family grouping. Two real-binary HTTP tests passed for explicit capacities, disabled buffers and
+the unchanged authentication gate. All-target clippy passed with the native feature; formatting,
+binding facade drift and diff checks passed. No public JSON schema or binding contract changed.
+The full SDK/dashboard/broker suite with AgentBrowser passed **95 tests, 1 skipped** (Google SDK
+unavailable locally); all-target clippy also passed without the native feature. C01b in TD-0026
+tracks integration separately; no merge or release is implied by local verification.
+
+## Remaining pool decision
+
+**What is the right default `pool_max_idle_per_host`?** Gated on
   [TD-0015](TD-0015-performance-baseline-and-fault-injection.md) R5. Too low and every request pays
   a handshake; too high and idle FDs accumulate exactly as they do today under reqwest's unbounded
   default. This is a measurement, not a preference.

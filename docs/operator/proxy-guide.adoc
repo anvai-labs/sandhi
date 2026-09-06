@@ -661,6 +661,23 @@ Label dimensions are closed, and distinct series are capped by `SANDHI_METRICS_M
 model values beyond the cap fold into `(overflow)` without losing totals. Per-subject attribution
 belongs in the bounded usage aggregate instead of metric labels.
 
+Best-effort usage and alert writers expose fixed `buffer="usage"` and `buffer="alerts"` samples:
+`sandhi_buffer_configured` is `1` when an observer is attached and `0` otherwise. Unconfigured
+buffers omit depth/drop samples; zero must not imply an active healthy writer. Configured
+buffers expose `sandhi_buffer_capacity`, `sandhi_buffer_queued`, `sandhi_buffer_in_flight` and
+`sandhi_buffer_dropped_total`. Drops include rejected enqueue attempts and queued callbacks
+abandoned after worker panic, not the unknown result of the panicking callback itself.
+Queued excludes the executing callback and flush/shutdown control
+messages, though those control messages share channel capacity. An in-flight callback is not
+evidence of a successful database commit. Counters reset on restart; configured is not a worker
+liveness check. These metrics follow the existing `/metrics` bearer/public-read policy.
+
+Investigate sustained queue growth or `increase(sandhi_buffer_dropped_total[5m]) > 0` as loss of
+best-effort observation. Do not interpret zero drops as complete accounting: storage insert
+failures and in-memory ring evictions are separate, not yet exported signals. These are not
+W05 settlement-outbox backlog metrics. The new buffer signals are Prometheus-only; OTLP parity,
+oldest-item age, drain-aware readiness and backup/restore drills remain tracked follow-ups.
+
 [cols="2,3,5"]
 |===
 | Alert | Expression | Why
