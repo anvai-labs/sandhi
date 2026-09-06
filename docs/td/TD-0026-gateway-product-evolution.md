@@ -46,7 +46,7 @@ marking a planning task complete does not mark its implementation complete.
 |---|---|---|---|---|---|
 | C01 | W01–W04 and inactive W05a storage foundation; branch `feat/gateway-trust-checkpoint` | Passed; clean scoped re-review, 103 SDK/browser tests, 37 upgraded Python tests, 94.12% binding coverage | [PR #230](https://github.com/anvai-labs/sandhi/pull/230) merged with explicit owner-authorized review bypass; pre- and [post-merge CI](https://github.com/anvai-labs/sandhi/actions/runs/34015573003) green | Complete: `8f56b91` on `develop` | No |
 | C01b | W06b best-effort buffer visibility; branch `feat/operational-buffer-visibility`, updated from C01 | Passed: 105 SDK/browser tests, native workspace tests, 87.18% coverage; current-base adversarial re-review clean | [PR #231](https://github.com/anvai-labs/sandhi/pull/231) merged as `f777b89671c4b52854cb6c527dd03fa01a7ada52`; latest-head CI `34029737562` and post-merge CI `34030218505` passed; authorized admin review bypass only | Complete | No |
-| C01c | W06a drain-aware readiness; branch `feat/drain-aware-readiness` | Passed: native workspace, OTLP proxy tests, 87.76% native coverage, 113 SDK/browser tests; independent review finding fixed and re-reviewed clean | PR submission next; latest-head CI and post-merge CI remain required | Pending | No |
+| C01c | W06a drain-aware readiness; branch `feat/drain-aware-readiness` | Passed: native workspace, OTLP proxy tests, 87.76% native coverage, 113 SDK/browser tests; independent review finding fixed and re-reviewed clean | [PR #232](https://github.com/anvai-labs/sandhi/pull/232) against `develop`; latest-head and post-merge CI required; PR carries live integration evidence | Pending | No |
 | C02 | Initial W06 and M1 operator-journey acceptance, then `develop` → `main` | Pending | Pending promotion PR and post-merge CI | Pending | No; tagging/publishing is a separate action |
 
 C01 checkpoints completed work now instead of waiting for W05–W14. Do not claim M1 complete
@@ -462,3 +462,7 @@ unit suite is not a distributed correctness proof. Record evidence and update th
   for a separate `develop` PR; remote CI and integration are not predeclared. Next implementation
   after C01c is W06c: disposable backup/restore and incident recovery drills, followed by W06d
   workload/operator acceptance. No main promotion or release is authorized by local verification.
+- 2026-09-06: Opened [PR #232](https://github.com/anvai-labs/sandhi/pull/232) for C01c.
+  Public-runner routing remains enabled (`OWNER_PRIVATE_CI_ENABLED=false`). Merge remains
+  conditional on clean review and green latest-head CI; the PR records live CI/merge evidence.
+  This source snapshot does not predeclare integration. W06c remains the next implementation slice.
