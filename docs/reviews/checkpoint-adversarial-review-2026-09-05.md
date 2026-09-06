@@ -54,7 +54,8 @@ The bounded migration resolves PyO3 0.29.2 and async-runtimes 0.29.0 and explici
 workspaces with `cargo deny --locked --all-features --config deny.toml check advisories`, adding
 the respective `--manifest-path` for bindings; all three local scans pass. Independent source
 review found no blocker in migration lifetimes/GIL behavior or CI filtering/required-gate wiring.
-Post-upgrade wheel tests and coverage are recorded in TD-0026 before integration.
+Post-upgrade wheel tests pass locally and in CI (**37**); instrumented binding line coverage
+is **94.12%** in both environments, exceeding the 85% gate.
 
 ## Residual and integration gates
 
@@ -66,8 +67,9 @@ Post-upgrade wheel tests and coverage are recorded in TD-0026 before integration
 - Separate W06b branch `800753d` received a read-only adversarial review of buffer accounting,
   observer lifetime, close/panic behavior and metric families; focused tests passed with no
   confirmed blocker. This does not fold W06b into PR #230 or complete readiness/recovery/M1.
-- Hosted CI [34010886202](https://github.com/anvai-labs/sandhi/actions/runs/34010886202) is green
-  for correction `628fb26`. The subsequent dependency/CI hardening must receive fresh green CI.
+- Hosted CI [34014212504](https://github.com/anvai-labs/sandhi/actions/runs/34014212504) is green
+  for runtime and dependency/CI hardening `7faa9f3`; all required jobs ran on GitHub-hosted
+  runners. Any subsequent documentation-only evidence commit still needs latest-head checks.
 - GitHub requires `CI Success` and one approving PR review. At review time no approval is
   recorded. Owner authorization in the working conversation does not satisfy that check;
   do not self-approve, weaken protection or use administrator bypass.

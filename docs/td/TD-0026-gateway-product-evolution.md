@@ -44,7 +44,7 @@ marking a planning task complete does not mark its implementation complete.
 
 | Checkpoint | Scope | Local verification | Remote CI / review | Integrated | Released |
 |---|---|---|---|---|---|
-| C01 | W01–W04 and inactive W05a storage foundation; branch `feat/gateway-trust-checkpoint` | Passed; review fixes rechecked, 103 SDK/browser tests and 37 Python tests pass | [PR #230](https://github.com/anvai-labs/sandhi/pull/230): hosted CI green at `628fb26`; dependency/CI hardening requires fresh CI; one approving PR review still required | Pending | No |
+| C01 | W01–W04 and inactive W05a storage foundation; branch `feat/gateway-trust-checkpoint` | Passed; clean scoped re-review, 103 SDK/browser tests, 37 upgraded Python tests, 94.12% binding coverage | [PR #230](https://github.com/anvai-labs/sandhi/pull/230): runtime and CI hardening green at `7faa9f3` ([run](https://github.com/anvai-labs/sandhi/actions/runs/34014212504)); latest-head checks remain mandatory; one approving PR review missing | Blocked on required GitHub review | No |
 | C02 | Initial W06 and M1 operator-journey acceptance, then `develop` → `main` | Pending | Pending promotion PR and post-merge CI | Pending | No; tagging/publishing is a separate action |
 
 C01 checkpoints completed work now instead of waiting for W05–W14. Do not claim M1 complete
@@ -375,3 +375,13 @@ unit suite is not a distributed correctness proof. Record evidence and update th
   build floor, and audit all three workspaces/all features on binding and policy changes.
   All three local advisory scans pass without ignores; independent re-review is clean. Fresh
   CI for this additional hardening and an eligible GitHub approval remain mandatory.
+- 2026-09-06: Runtime/CI hardening `7faa9f3` passed every actual required job and `CI Success`
+  in hosted [34014212504](https://github.com/anvai-labs/sandhi/actions/runs/34014212504).
+  Verified all executing jobs use `ubuntu-latest`; private authorization skips as intended.
+  Post-upgrade Python tests passed locally and in CI (**37**); instrumented wheel coverage
+  passed both locally and in CI at **94.12%**. All three advisory checks passed without ignores.
+  Final source/workflow re-review has no confirmed blocker. GitHub still reports
+  `REVIEW_REQUIRED`, `reviews: []`, `mergeStateStatus: BLOCKED`; C01 integration is blocked
+  only on an eligible approving GitHub review, subject to green latest-head checks. No merge,
+  bypass, release or main promotion occurred. Next authorized action: after that review,
+  recheck head/checks, merge normally into `develop`, then verify post-merge CI before W06b PR.
