@@ -193,7 +193,11 @@ sandhi-proxy listening on http://127.0.0.1:8787  (OpenAI Chat/Responses | Anthro
 
 | `SANDHI_SHUTDOWN_GRACE_SECS`
 | `30`
-| Maximum drain time after SIGINT/SIGTERM. When it expires, remaining streams are cancelled and their accounting finalizers settle the best partial measurement available.
+| One total deadline after observed SIGINT/SIGTERM, including quiesce, connections, accounting, writer drains, telemetry and runtime teardown. The binary exits `124` when cleanup remains incomplete; settlement/persistence is not guaranteed after forced exit.
+
+| `SANDHI_SHUTDOWN_QUIESCE_MS`
+| `1000`
+| Nonnegative same-port probe window after cutoff; clamped to one quarter of the remaining shutdown grace so drain retains time. `0` closes admission to new connections immediately. The window consumes the original grace, not an additional timeout.
 
 | `SANDHI_REPLICA_COUNT`
 | `1`
@@ -635,6 +639,39 @@ cargo run -p sandhi-proxy --bin sandhi -- --admin-token admin-secret vkeys list
 
 == Observability and telemetry
 
+=== Readiness and shutdown
+
+Use unauthenticated `GET /readyz` for traffic readiness (`200` while running, `503` after
+shutdown cutoff; `Cache-Control: no-store`). `GET /healthz` remains process liveness (`200`).
+Readiness describes drain state only, not provider, ledger, vault or writer health. Migrate
+traffic probes from `/healthz` to `/readyz`; retain `/healthz` for liveness checks.
+
+At cutoff, queued and newly arriving AI requests return dialect-shaped `503` with
+`Retry-After: 1` (`gateway_draining`, or Gemini `UNAVAILABLE`). Body uploads that span cutoff
+cannot authorize model dispatch afterward. Authenticated admin mutations also return `503`;
+a multi-item config apply may have already committed earlier items, so inspect its partial
+results before retrying. Read-only operations remain available during quiesce.
+
+During the bounded quiesce window, fresh HTTP/TLS connections and existing keep-alive
+connections can probe the same port. Global/per-IP connection limits still apply: saturated
+connections may be shed before HTTP and no reserved probe capacity is promised. Size the
+window and external traffic-drain timing for your deployment. After quiesce the listener
+closes and existing connections drain; fresh probes are no longer reachable.
+
+Cutoff serializes *dispatch authorization*, not the instant bytes reach an upstream. Already
+authorized work may finish during drain. Abandoned, undispatched reservations are rolled back
+without usage events; admitted streams retain accounting ownership through finalization.
+One monotonic deadline covers all phases. Normal cleanup exits `0`; deadline/incomplete
+cleanup exits `124`, possibly leaving uncertain settlement or best-effort observations.
+Do not interpret timeout as a successful flush or retry an uncertain model call blindly.
+The process watchdog does not depend on Tokio cancellation and does not log on its hard-exit
+path. Storage evidence/recovery remains separately tracked under W05/W06c.
+
+Library embedders retain runtime ownership: deadline expiry requests cancellation and returns
+`io::ErrorKind::TimedOut`, rather than forcing process termination. Synchronous destructors
+or blocking tasks may continue; embedders must supply their own process-level termination
+policy if a hard bound is required.
+
 === Logs
 
 `SANDHI_LOG` (falling back to `RUST_LOG`) controls the tracing filter; logs go to stderr. The
@@ -676,7 +713,14 @@ Investigate sustained queue growth or `increase(sandhi_buffer_dropped_total[5m])
 best-effort observation. Do not interpret zero drops as complete accounting: storage insert
 failures and in-memory ring evictions are separate, not yet exported signals. These are not
 W05 settlement-outbox backlog metrics. The new buffer signals are Prometheus-only; OTLP parity,
-oldest-item age, drain-aware readiness and backup/restore drills remain tracked follow-ups.
+oldest-item age and backup/restore drills remain tracked follow-ups.
+
+Unlabelled `sandhi_ready`, `sandhi_shutdown_active_operations` and
+`sandhi_shutdown_elapsed_seconds` follow the same metrics authorization. Active operations
+counts tracked model/reservation/admin work, not durable commits, queued requests or all
+connections. Elapsed time is zero before cutoff; metrics are scrapeable only while their
+connection remains reachable. Drain progress logs report active connections/operations and
+remaining time; these signals do not confirm persistence.
 
 [cols="2,3,5"]
 |===

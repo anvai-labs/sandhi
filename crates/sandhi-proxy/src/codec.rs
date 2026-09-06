@@ -84,6 +84,15 @@ pub(crate) struct IngressError {
 }
 
 impl IngressError {
+    pub(crate) fn draining() -> Self {
+        Self {
+            status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            code: "gateway_draining".into(),
+            message: "gateway draining; use a ready instance".into(),
+            typed: None,
+        }
+    }
+
     /// An operator/protocol refusal the proxy itself generated (bad key, malformed
     /// body, throttle). Never carries upstream bytes, so no redaction decision exists.
     pub(crate) fn invalid(status: axum::http::StatusCode, message: impl Into<String>) -> Self {
@@ -199,7 +208,7 @@ impl IngressError {
             None => json!({
                 "code": self.code,
                 "message": self.message,
-                "retryable": false,
+                "retryable": self.code == "gateway_draining",
                 "http_status": self.status.as_u16(),
             }),
         }
