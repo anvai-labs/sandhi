@@ -47,7 +47,7 @@ marking a planning task complete does not mark its implementation complete.
 | C01 | W01–W04 and inactive W05a storage foundation; branch `feat/gateway-trust-checkpoint` | Passed; clean scoped re-review, 103 SDK/browser tests, 37 upgraded Python tests, 94.12% binding coverage | [PR #230](https://github.com/anvai-labs/sandhi/pull/230) merged with explicit owner-authorized review bypass; pre- and [post-merge CI](https://github.com/anvai-labs/sandhi/actions/runs/34015573003) green | Complete: `8f56b91` on `develop` | No |
 | C01b | W06b best-effort buffer visibility; branch `feat/operational-buffer-visibility`, updated from C01 | Passed: 105 SDK/browser tests, native workspace tests, 87.18% coverage; current-base adversarial re-review clean | [PR #231](https://github.com/anvai-labs/sandhi/pull/231) merged as `f777b89671c4b52854cb6c527dd03fa01a7ada52`; latest-head CI `34029737562` and post-merge CI `34030218505` passed; authorized admin review bypass only | Complete | No |
 | C01c | W06a drain-aware readiness; branch `feat/drain-aware-readiness` | Passed: native workspace, OTLP proxy tests, 87.76% native coverage, 113 SDK/browser tests; independent review finding fixed and re-reviewed clean | [PR #232](https://github.com/anvai-labs/sandhi/pull/232) merged as `31151d9`; latest-head CI `34042875545` and post-merge CI `34048329909` passed; authorized missing-review bypass only | Complete | No |
-| C01d | W06c recovery drills; branch `test/recovery-drills` | Passed: 181 SDK/browser tests (one unavailable SDK skipped), default/native/OTLP tests and clippy, 87.77% native coverage; adversarial findings fixed and independently re-reviewed clean | Focused `develop` PR, latest-head and post-merge CI required | Pending | No |
+| C01d | W06c recovery drills; branch `test/recovery-drills` | Passed: 181 SDK/browser tests (one unavailable SDK skipped), default/native/OTLP tests and clippy, 87.77% native coverage; adversarial findings fixed and independently re-reviewed clean | [PR #233](https://github.com/anvai-labs/sandhi/pull/233); latest-head and post-merge CI required | Pending | No |
 | C01e | W06d workload/operator acceptance | Pending: reproducible workload evidence and actual-user walkthrough; accepting operator requested | Separate focused `develop` PR after C01d; same review/CI gates | Pending | No |
 | C02 | Initial W06 and M1 operator-journey acceptance, then `develop` → `main` | Pending | Pending promotion PR and post-merge CI | Pending | No; tagging/publishing is a separate action |
 
@@ -508,3 +508,7 @@ unit suite is not a distributed correctness proof. Record evidence and update th
   committed-state restoration and conservative held leases, not production RTO/RPO or complete
   consumption reconstruction. Ready for the focused C01d PR; W06d actual-user acceptance remains
   pending and cannot be inferred from merge authorization.
+- 2026-09-06: Opened [PR #233](https://github.com/anvai-labs/sandhi/pull/233) for C01d,
+  implementation `2c55ded`. Public runners remain selected. Existing authorization permits
+  bypassing only a missing approving review after clean adversarial review and green latest-head
+  CI; post-merge CI must also pass. Live evidence is recorded on the PR, not predeclared here.
