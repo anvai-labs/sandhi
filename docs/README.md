@@ -15,6 +15,7 @@ mistaken for shipped behavior.
 | What changed in a release? | [CHANGELOG](../CHANGELOG.md) and [release guide](../RELEASING.md) |
 | How do sibling repositories integrate? | [`upstream/`](upstream/) snapshots; these are non-normative and may be historical |
 | What product evolution is proposed and how is it tracked? | [TD-0026 delivery plan](td/TD-0026-gateway-product-evolution.md), [product specification](product/gateway-vision-and-requirements.md), and [2026-09-04 review](reviews/gateway-review-2026-09-04.md); proposals, not shipped claims |
+| What adversarial checks cover the first checkpoint? | [2026-09-05 checkpoint review](reviews/checkpoint-adversarial-review-2026-09-05.md); findings, corrections and remaining integration gates |
 
 ADRs record durable decisions. Their context sections describe the repository at the time the
 decision was made and are not implementation-status pages. TDs record execution: the status line
@@ -121,11 +122,11 @@ perpetually open.
 | [0026](td/TD-0026-gateway-product-evolution.md) | In progress | W01–W04 complete; W05a storage foundation complete, W05b transport capture pending; W06 in progress with W06b buffer visibility locally verified. M1 still needs readiness/recovery/user acceptance. AgentBrowser AB01 verified; live/joint delivery pending |
 
 TD-0026 slice completion means implementation/local verification. Its separate C01/C02 checkpoint
-table tracks remote CI, merge and release; C01 is [PR #230](https://github.com/anvai-labs/sandhi/pull/230)
-to `develop`, moving to GitHub-hosted CI with private routing disabled; required PR review remains
-pending. It is not yet merged or released.
-W06b is separately checkpointed on `feat/operational-buffer-visibility` (C01b), awaiting a PR
-after C01 integration; it does not complete M1 readiness/recovery acceptance.
+table tracks remote CI, merge and release; C01 [PR #230](https://github.com/anvai-labs/sandhi/pull/230)
+merged into `develop` as `8f56b91` after clean review and green hosted CI, with an explicit
+owner-authorized review bypass. Post-merge CI is green; no release or main promotion occurred.
+W06b is separately checkpointed on `feat/operational-buffer-visibility` (C01b), being verified
+against current `develop` for its own PR; it does not complete M1 readiness/recovery acceptance.
 
 The proposed [product evolution plan](td/TD-0026-gateway-product-evolution.md) connects UX,
 accounting, operations, security and credential lifecycle to these existing designs. Its first

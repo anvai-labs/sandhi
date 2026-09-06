@@ -19,7 +19,8 @@ under `target/dashboard-authenticated.png`. Requires loopback sockets and headle
 `test_management.py` adds durable-write fault injection, invalid policy checks, concurrent
 budget writers, actual process restart comparison, partial config/alert reports, sequential
 retry deduplication and browser/CLI failure UX. Its SQLite triggers affect only disposable
-test databases; the provider failure case is keyless and never writes a real vault secret.
+test databases. Provider metadata faults are exercised in `test_broker.py` after proving that
+the synthetic broker received the save, rather than merely failing input validation.
 
 `test_reasoning.py` checks separate reasoning below, equal to and above candidate output across
 transparent Gemini and translated Chat/Responses/Anthropic, both streamed and complete. Its 24
@@ -29,7 +30,8 @@ leases. They validate accounting, not real-provider token bounds or strict-cap e
 `test_broker.py` builds with `sentinelpass-ipc` and drives a real proxy against a disposable Unix
 socket daemon. It tests synthetic read/write grants, locked/denied/missing states, timeout and
 overlapping mutations, redaction, reference registration (API/CLI/browser), unsupported deletion,
-namespace rejection and metadata faults. Its daemon token lives only under a disposable XDG
+namespace rejection, scheme aliases and metadata faults. Config-apply cases retain canonical
+reconciliation facts for storage failure and ambiguous write timeout. Its daemon token lives only under a disposable XDG
 configuration directory. No user vault or daemon is contacted. Unix coverage is not Windows
 named-pipe or live broker certification; those remain joint gates.
 

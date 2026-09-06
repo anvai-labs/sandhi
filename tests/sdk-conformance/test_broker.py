@@ -122,6 +122,7 @@ def broker(broker_binary, tmp_path, request):
     (token_dir / "ipc.token").write_text("disposable-daemon-token")
     config = tmp_path / "empty.json"
     config.write_text("{}")
+    daemon.config = config
     port = _free_port()
     env = {k: v for k, v in os.environ.items() if not k.startswith(("SANDHI_", "SENTINELPASS_"))}
     env.update({"XDG_CONFIG_HOME": str(tmp_path / "config"),
@@ -129,7 +130,8 @@ def broker(broker_binary, tmp_path, request):
                 "SANDHI_BIND": f"127.0.0.1:{port}", "SANDHI_ADMIN_TOKEN": "broker-test-admin",
                 "SANDHI_VAULT_BACKEND": options.get("backend", "sentinelpass"), "SANDHI_SENTINELPASS_SOCKET": daemon.path,
                 "SANDHI_SENTINELPASS_TIMEOUT_MS": "250",
-                "SENTINELPASS_CLIENT_TOKEN": options.get("token", "write-token")})
+                "SENTINELPASS_CLIENT_TOKEN": options.get("token", "write-token"),
+                "BROKER_TEST_PROVIDER_SECRET": SECRET})
     if options.get("cli"):
         env.update({"SANDHI_SENTINELPASS_FALLBACK_CLI": "1", "SANDHI_SENTINELPASS_BIN": "/does-not-exist-fixture"})
     proc = subprocess.Popen([str(broker_binary)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
@@ -267,13 +269,75 @@ def test_cli_reference_does_not_consume_or_forward_stdin(broker):
     client, daemon = broker
     env = {**os.environ, "SANDHI_ADMIN_TOKEN": "broker-test-admin",
            "SANDHI_ADMIN_URL": str(client.base_url)}
-    result = subprocess.run([str(REPO_ROOT / "target/debug/sandhi"), "keys", "reference", "openai", "default"],
+    result = subprocess.run([str(REPO_ROOT / "target/debug/sandhi"), "keys", "reference", "openai", "default",
+                             "--scheme", "api-key"],
                             env=env, input=SECRET, capture_output=True, text=True, timeout=5)
     assert result.returncode == 0, result.stderr
     assert "openai:default" in result.stdout
     assert SECRET not in result.stdout + result.stderr
     assert len(daemon.received) == 1
     assert list(daemon.received[0]["message"]) == ["GetExternalSecret"]
+
+
+@pytest.mark.parametrize("scheme,canonical", [("api-key", "api_key"), ("API_KEY", "api_key"),
+                                              ("Bearer", "bearer"), ("OAuth", "oauth")])
+@pytest.mark.parametrize("reference", [False, True])
+def test_credential_scheme_aliases_reach_the_broker_and_persist(broker, scheme, canonical, reference):
+    client, daemon = broker
+    body = {"provider": "openai", "scheme": scheme}
+    if not reference:
+        body["secret"] = SECRET
+    result = client.post("/admin/keys/reference" if reference else "/admin/keys", json=body)
+    assert result.status_code == 201, result.text
+    assert len(daemon.received) == 1
+    assert client.get("/admin/keys").json()["keys"][0]["scheme"] == canonical
+
+
+def test_unknown_credential_scheme_is_rejected_before_broker_access(broker):
+    client, daemon = broker
+    for scheme in ["none", "api_kee", ""]:
+        result = client.post("/admin/keys", json={"provider": "openai", "scheme": scheme, "secret": SECRET})
+        assert result.status_code == 400
+    assert daemon.received == []
+
+
+def test_config_api_key_alias_exercises_real_metadata_failure_then_commits(broker):
+    client, daemon = broker
+    daemon.config.write_text(json.dumps({"providers": [{"provider": "openai", "scheme": "api-key",
+                                                        "secret_env": "BROKER_TEST_PROVIDER_SECRET"}]}))
+    with sqlite3.connect(daemon.database) as conn:
+        conn.execute("CREATE TRIGGER reject_metadata BEFORE INSERT ON vault "
+                     "BEGIN SELECT RAISE(ABORT, 'synthetic-write-failure'); END")
+    result = client.post("/admin/config/apply")
+    assert result.status_code == 503, result.text
+    failure = result.json()["failures"][0]
+    assert failure["component"] == "provider" and failure["status"] == 503
+    assert failure["code"] == "vault_unavailable"
+    assert failure["reconcile_before_retry"] is True
+    assert len(daemon.received) == 1, "must reach the broker, not fail scheme validation"
+    assert list(daemon.received[0]["message"]) == ["SaveSecret"]
+    assert client.get("/admin/keys").json()["keys"] == []
+    assert SECRET not in result.text and "synthetic-write-failure" not in result.text
+    with sqlite3.connect(daemon.database) as conn:
+        conn.execute("DROP TRIGGER reject_metadata")
+    result = client.post("/admin/config/apply")
+    assert result.status_code == 200, result.text
+    assert len(daemon.received) == 2
+    assert client.get("/admin/keys").json()["keys"][0]["scheme"] == "api_key"
+
+
+def test_config_preserves_ambiguous_broker_write_reconciliation(broker):
+    client, daemon = broker
+    daemon.mode = "hang"
+    daemon.config.write_text(json.dumps({"providers": [{"provider": "openai", "scheme": "api-key",
+                                                        "secret_env": "BROKER_TEST_PROVIDER_SECRET"}]}))
+    result = client.post("/admin/config/apply")
+    assert result.status_code == 503
+    failure = result.json()["failures"][0]
+    assert failure["status"] == 504 and failure["code"] == "vault_timeout"
+    assert failure["reconcile_before_retry"] is True
+    assert len(daemon.received) == 1
+    assert SECRET not in result.text
 
 
 @pytest.mark.parametrize("broker", [{"native": False}, {"backend": "misspelled"}], indirect=True)

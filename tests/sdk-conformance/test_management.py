@@ -177,7 +177,6 @@ def test_config_failed_budget_does_not_create_dependent_alerts(dashboard):
 
 
 @pytest.mark.parametrize("table,config,component", [
-    ("vault", {"providers": [{"provider": "ollama", "scheme": "none"}]}, "provider"),
     ("alert_rules", {"alerts": [{"scope": "g", "threshold_pct": 50}]}, "alert"),
     ("virtual_keys", {"vkeys": [{"upstream": "openai", "subject": "smoke"}]}, "vkey"),
 ])

@@ -179,7 +179,7 @@ runtime, so their glue (`bindings/*/src/lib.rs`) never appears in the `--workspa
 `scripts/coverage-bindings.sh` instruments the cdylib, runs the binding's own test harness, and
 gates the glue file at **≥85% lines** (both bindings sit ~91–96%). CI runs all three. The Python
 run force-installs the built wheel, so run it inside a **virtual environment** (never system
-Python, which is often too new for pyo3 — the script guards the version); the base interpreter is
+Python; the script guards its validated CPython 3.11–3.13 range); the base interpreter is
 `python3` or `$COV_PYTHON`.
 
 ## Architecture, contracts, and roadmap

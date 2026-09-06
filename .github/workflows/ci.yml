@@ -130,6 +130,7 @@ jobs:
               - 'crates/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - 'deny.toml'
               - '.github/workflows/ci.yml'
             python:
               - 'crates/**'
@@ -312,17 +313,11 @@ jobs:
           fi
 
   security:
-    # Security/dependency gate — Sandhi previously had none. `cargo deny check advisories`
-    # fails on known vulnerabilities + yanked crates (deny.toml). Runs whenever Rust deps/code
-    # change (the `rust` filter includes Cargo.lock/Cargo.toml); dependabot covers new advisories
-    # against unchanged deps via its own PRs.
-    #
-    # `actions/dependency-review-action` (per-PR diff of newly-introduced vulns) is deliberately
-    # NOT here yet: it needs the repo Dependency graph enabled, which is a governance setting
-    # (see Phase 2). cargo-deny advisories already covers vuln-detection across the whole tree,
-    # so dependency-review is a fast-follow once the dependency graph is turned on, not a blocker.
+    # Check all three independent Rust workspaces, including optional dependencies.
+    # Binding-only changes and policy changes must run this gate too. Dependabot covers
+    # newly reported advisories against unchanged dependencies between workflow runs.
     needs: changes
-    if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.rust == 'true' }}
+    if: ${{ always() && needs.changes.result == 'success' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.python == 'true' || needs.changes.outputs.node == 'true') }}
     runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -339,7 +334,10 @@ jobs:
         with:
           tool: cargo-deny@0.20.2
       - name: cargo-deny advisories (known vulnerabilities + yanked crates)
-        run: cargo deny check advisories
+        run: |
+          cargo deny --locked --all-features --config deny.toml check advisories
+          cargo deny --locked --all-features --manifest-path bindings/python/Cargo.toml --config deny.toml check advisories
+          cargo deny --locked --all-features --manifest-path bindings/node/Cargo.toml --config deny.toml check advisories
 
   lint-title:
     # Conventional-commit PR title gate. Dependabot PRs are prefixed `chore:`

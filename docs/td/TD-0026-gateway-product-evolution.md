@@ -44,8 +44,8 @@ marking a planning task complete does not mark its implementation complete.
 
 | Checkpoint | Scope | Local verification | Remote CI / review | Integrated | Released |
 |---|---|---|---|---|---|
-| C01 | W01–W04 and inactive W05a storage foundation; branch `feat/gateway-trust-checkpoint` | Passed; commands/evidence in progress log | [PR #230](https://github.com/anvai-labs/sandhi/pull/230) open; private routing disabled by owner decision, fresh hosted CI pending; one approving PR review still required | Pending | No |
-| C01b | W06b best-effort buffer visibility; branch `feat/operational-buffer-visibility`, based on C01 | Passed; 95 SDK/browser tests, workspace tests, 87.26% coverage | Prepare separate PR after C01 integration; no remote CI claim | Pending | No |
+| C01 | W01–W04 and inactive W05a storage foundation; branch `feat/gateway-trust-checkpoint` | Passed; clean scoped re-review, 103 SDK/browser tests, 37 upgraded Python tests, 94.12% binding coverage | [PR #230](https://github.com/anvai-labs/sandhi/pull/230) merged with explicit owner-authorized review bypass; pre- and [post-merge CI](https://github.com/anvai-labs/sandhi/actions/runs/34015573003) green | Complete: `8f56b91` on `develop` | No |
+| C01b | W06b best-effort buffer visibility; branch `feat/operational-buffer-visibility`, updated from C01 | Prior isolated verification passed; current-base regression/re-review in progress | Preparing separate PR against `develop`; own green CI and clean review required | Pending | No |
 | C02 | Initial W06 and M1 operator-journey acceptance, then `develop` → `main` | Pending | Pending promotion PR and post-merge CI | Pending | No; tagging/publishing is a separate action |
 
 C01 checkpoints completed work now instead of waiting for W05–W14. Do not claim M1 complete
@@ -63,6 +63,8 @@ environment approvals and branch protections; no CI bypass or automatic publicat
 
 ## Review outputs
 
+- [Checkpoint adversarial review](../reviews/checkpoint-adversarial-review-2026-09-05.md):
+  confirmed regressions, corrections, re-review evidence and explicit remaining gates.
 - [Evidence register and codebase review](../reviews/gateway-review-2026-09-04.md): F01–F16,
   baseline validation and capability disposition.
 - [Vision, journeys, requirements and architecture](../product/gateway-vision-and-requirements.md):
@@ -376,3 +378,49 @@ unit suite is not a distributed correctness proof. Record evidence and update th
   W06d workload/operator-user acceptance remain open, as do W05b–e's authoritative evidence
   gates. W06b is Prometheus-only; storage-write failures, ring evictions, worker health, age and
   OTLP parity remain explicit observability follow-ups. C01b awaits its own PR after C01 lands.
+- 2026-09-05: Owner authorized merge after clean adversarial review and green CI. Parallel
+  security/accounting reviews identified scheme-alias and Python parser reasoning regressions,
+  a misleading metadata-fault fixture, and lost config reconciliation details. Fixed all four;
+  re-review found no remaining checkpoint blocker. Full SDK/browser tests with real optional
+  AgentBrowser: **103 passed, 1 skipped** (Google SDK absent locally); Python bindings **37
+  passed**. Workspace/native IPC tests and clippy with/without IPC pass; native workspace line
+  coverage **86.96%** exceeds 75%; formatting, generated facade and whitespace checks pass.
+  See the linked checkpoint review for exact commands and limitations. Hosted run
+  [34005979889](https://github.com/anvai-labs/sandhi/actions/runs/34005979889) passed all checks
+  at `97e4195`, before these fixes; fresh CI on the review-fix HEAD remains mandatory. Live
+  GitHub state still requires one approving PR review, with no reviews recorded. Chat approval
+  authorizes the merge operation but does not replace that protected-branch gate; no bypass.
+  Separately reviewed W06b work remains on `feat/operational-buffer-visibility` (`800753d`),
+  not in C01. Next: fresh C01 CI and eligible review, merge and post-merge CI, then its separate
+  W06b PR; W06a readiness/drain, W06c recovery and W06d acceptance still gate M1/main promotion.
+- 2026-09-06: Hosted [34010886202](https://github.com/anvai-labs/sandhi/actions/runs/34010886202)
+  passed all required jobs for review-fix `628fb26`. Push-time dependency alerts revealed that
+  advisory CI excluded independent bindings. Source review exempts the old PyO3 version from
+  the high-severity iterator advisory and found no calls to the other two affected APIs, but
+  the gate gap and old dependency still warranted correction: upgrade PyO3/async bridge to
+  patched 0.29 releases, retain explicit GIL requirement, declare the existing Rust 1.88 locked
+  build floor, and audit all three workspaces/all features on binding and policy changes.
+  All three local advisory scans pass without ignores; independent re-review is clean. Fresh
+  CI for this additional hardening and an eligible GitHub approval remain mandatory.
+- 2026-09-06: Runtime/CI hardening `7faa9f3` passed every actual required job and `CI Success`
+  in hosted [34014212504](https://github.com/anvai-labs/sandhi/actions/runs/34014212504).
+  Verified all executing jobs use `ubuntu-latest`; private authorization skips as intended.
+  Post-upgrade Python tests passed locally and in CI (**37**); instrumented wheel coverage
+  passed both locally and in CI at **94.12%**. All three advisory checks passed without ignores.
+  Final source/workflow re-review has no confirmed blocker. GitHub still reports
+  `REVIEW_REQUIRED`, `reviews: []`, `mergeStateStatus: BLOCKED`; C01 integration is blocked
+  only on an eligible approving GitHub review, subject to green latest-head checks. No merge,
+  bypass, release or main promotion occurred. Next authorized action: after that review,
+  recheck head/checks, merge normally into `develop`, then verify post-merge CI before W06b PR.
+- 2026-09-06: Owner subsequently explicitly authorized administrator bypass of the missing
+  approving review, conditional on clean adversarial review and green CI. Rechecked exact
+  head `4e90cdb` and all required checks, then merged PR #230 into `develop` as `8f56b91`.
+  The merged tree matches the reviewed head; branch protections were not changed. Post-merge
+  [34015573003](https://github.com/anvai-labs/sandhi/actions/runs/34015573003) passed every
+  required validation and the aggregate gate. C01 integration is complete, not a release.
+- 2026-09-06: Resumed C01b by merging current `develop` into the published W06b branch without
+  rewriting history. Kept both checkpoint corrections and W06b implementation; resolved the
+  tracker-only conflict by retaining both evidence histories and current integration state.
+  Next: full current-base regression, independent adversarial re-review, separate PR and CI.
+  W06a probe-reachable shutdown remains the next implementation slice after this checkpoint;
+  W06c/W06d and M1/main promotion are not completed by buffer metrics.
