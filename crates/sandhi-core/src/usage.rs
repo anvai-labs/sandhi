@@ -18,9 +18,13 @@ pub struct ParsedUsage {
     pub cache_creation_tokens: u64,
     /// Prompt-cache read tokens (priced ~0.1x fresh input).
     pub cache_read_tokens: u64,
-    /// Reasoning tokens when reported separately (0 when folded into `tokens_out`
-    /// or not reported).
+    /// Provider-reported reasoning count (0 when not reported). See `reasoning_included`
+    /// to determine whether this count is already part of output.
     pub reasoning_tokens: u64,
+    /// True: output includes reasoning; false: reasoning is a separate category.
+    /// None is reserved for legacy/custom measurements without an explicit convention.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_included: Option<bool>,
 }
 
 impl From<ParsedUsage> for crate::chat::UsageV2 {
@@ -31,6 +35,7 @@ impl From<ParsedUsage> for crate::chat::UsageV2 {
             cache_creation_tokens: value.cache_creation_tokens,
             cache_read_tokens: value.cache_read_tokens,
             reasoning_tokens: (value.reasoning_tokens > 0).then_some(value.reasoning_tokens),
+            reasoning_included: value.reasoning_included,
             completeness: crate::chat::UsageCompleteness::Final,
             ..Self::default()
         }
@@ -50,7 +55,8 @@ impl ParsedUsage {
         event = event
             .with_tokens(self.tokens_in, self.tokens_out)
             .with_cache(self.cache_creation_tokens, self.cache_read_tokens)
-            .with_reasoning((self.reasoning_tokens > 0).then_some(self.reasoning_tokens));
+            .with_reasoning((self.reasoning_tokens > 0).then_some(self.reasoning_tokens))
+            .with_reasoning_included(self.reasoning_included);
         if event.usage_completeness == crate::chat::UsageCompleteness::Unavailable {
             event.usage_completeness = crate::chat::UsageCompleteness::Final;
         }
@@ -126,6 +132,7 @@ pub fn parse_openai_usage(response: &Value) -> Option<ParsedUsage> {
             cache_creation_tokens: 0,
             cache_read_tokens: hit,
             reasoning_tokens: reasoning,
+            reasoning_included: Some(true),
         });
     }
     let prompt = u64_at(usage, "prompt_tokens");
@@ -147,6 +154,7 @@ pub fn parse_openai_usage(response: &Value) -> Option<ParsedUsage> {
         cache_creation_tokens: 0,
         cache_read_tokens: cached,
         reasoning_tokens: reasoning,
+        reasoning_included: Some(true),
     })
 }
 
@@ -181,6 +189,7 @@ pub fn parse_openai_responses_usage(response: &Value) -> Option<ParsedUsage> {
         cache_creation_tokens: 0,
         cache_read_tokens: cached,
         reasoning_tokens: reasoning,
+        reasoning_included: Some(true),
     })
 }
 
@@ -204,6 +213,7 @@ pub fn parse_anthropic_usage(response: &Value) -> Option<ParsedUsage> {
         cache_creation_tokens: u.cache_creation_input_tokens.unwrap_or(0).max(0) as u64,
         cache_read_tokens: u.cache_read_input_tokens.unwrap_or(0).max(0) as u64,
         reasoning_tokens: 0, // Anthropic folds thinking tokens into output_tokens
+        reasoning_included: Some(true),
     })
 }
 
@@ -228,6 +238,7 @@ pub fn parse_gemini_usage(response: &Value) -> Option<ParsedUsage> {
         cache_creation_tokens: 0,
         cache_read_tokens: cached,
         reasoning_tokens: u64_at(usage, "thoughtsTokenCount"),
+        reasoning_included: Some(false),
     })
 }
 
@@ -253,6 +264,7 @@ pub fn parse_cohere_usage(response: &Value) -> Option<ParsedUsage> {
         cache_creation_tokens: 0,
         cache_read_tokens: 0,
         reasoning_tokens: 0,
+        reasoning_included: Some(true),
     })
 }
 
@@ -269,6 +281,7 @@ pub fn parse_ollama_usage(response: &Value) -> Option<ParsedUsage> {
         cache_creation_tokens: 0,
         cache_read_tokens: 0,
         reasoning_tokens: 0,
+        reasoning_included: Some(true),
     })
 }
 
@@ -285,6 +298,7 @@ pub fn parse_bedrock_usage(response: &Value) -> Option<ParsedUsage> {
             cache_creation_tokens: u64_at(usage, "cache_creation_input_tokens"),
             cache_read_tokens: u64_at(usage, "cache_read_input_tokens"),
             reasoning_tokens: 0,
+            reasoning_included: Some(true),
         });
     }
     if response.get("inputTextTokenCount").is_some() {
@@ -299,6 +313,7 @@ pub fn parse_bedrock_usage(response: &Value) -> Option<ParsedUsage> {
             cache_creation_tokens: 0,
             cache_read_tokens: 0,
             reasoning_tokens: 0,
+            reasoning_included: Some(true),
         });
     }
     None
@@ -652,5 +667,44 @@ mod tests {
         fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
         fn enter(&self, _span: &tracing::span::Id) {}
         fn exit(&self, _span: &tracing::span::Id) {}
+    }
+}
+#[test]
+fn parser_reasoning_conventions_are_explicit() {
+    for thoughts in [0, 25, 40, 90] {
+        let gemini = parse_gemini_usage(&serde_json::json!({"usageMetadata": {
+            "promptTokenCount": 100, "cachedContentTokenCount": 30,
+            "candidatesTokenCount": 40, "thoughtsTokenCount": thoughts,
+        }}))
+        .unwrap();
+        let openai = parse_openai_usage(&serde_json::json!({"usage": {
+            "prompt_tokens": 100, "completion_tokens": 40,
+            "prompt_tokens_details": {"cached_tokens":30},
+            "completion_tokens_details": {"reasoning_tokens": thoughts},
+        }}))
+        .unwrap();
+        let responses = parse_openai_responses_usage(&serde_json::json!({"usage": {
+            "input_tokens":100, "output_tokens":40,
+            "input_tokens_details":{"cached_tokens":30},
+            "output_tokens_details":{"reasoning_tokens":thoughts},
+        }}))
+        .unwrap();
+        for (parsed, included, expected) in [
+            (gemini, false, 140 + thoughts),
+            (openai, true, 140),
+            (responses, true, 140),
+        ] {
+            assert_eq!(parsed.reasoning_included, Some(included));
+            let usage: crate::UsageV2 = parsed.into();
+            assert_eq!(crate::billable(&usage), expected);
+            let event = parsed.apply(UsageEvent::new(
+                "r",
+                "t",
+                "p",
+                "m",
+                crate::Backend::External,
+            ));
+            assert_eq!(event.billable_tokens(), expected);
+        }
     }
 }

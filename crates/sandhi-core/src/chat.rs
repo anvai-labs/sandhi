@@ -14,10 +14,11 @@ pub const CHAT_SCHEMA_VERSION_V1: &str = "1";
 /// `include_native_response` request gate (#90), 3 = wire-truth latency on
 /// `UsageV2` (#97), 4 = `reasoning_effort` + `thinking` typed request fields
 /// (W3d/G7), 5 = `UsageV2::basis` — measured vs estimated counts (TD-0013 D5),
-/// 6 = `RunCostTreeV1` — the ADR-0005 D7 agent-run cost tree.
+/// 6 = `RunCostTreeV1` — the ADR-0005 D7 agent-run cost tree;
+/// 7 = explicit reasoning inclusion in output (TD-0026 W03).
 /// Consumers feature-detect the binding export and treat an absent fn as
 /// minor 0.
-pub const CHAT_CONTRACT_MINOR: u32 = 6;
+pub const CHAT_CONTRACT_MINOR: u32 = 7;
 
 fn schema_v1() -> String {
     CHAT_SCHEMA_VERSION_V1.to_owned()
@@ -295,6 +296,10 @@ pub struct UsageV2 {
     pub audio_output_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u64>,
+    /// True: reasoning is included in tokens_out; false: add it separately.
+    /// Absent retains legacy magnitude-based accounting for old records only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_included: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_prediction_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -647,6 +652,7 @@ pub fn contract_schema_documents() -> BTreeMap<&'static str, String> {
     }
 
     BTreeMap::from([
+        ("usage-event.v1.schema.json", render(&usage_event_schema())),
         (
             "chat-request.v1.schema.json",
             render(&schemars::schema_for!(ChatRequestV1)),
@@ -680,6 +686,23 @@ pub fn contract_schema_documents() -> BTreeMap<&'static str, String> {
             render(&schemars::schema_for!(UsageV2)),
         ),
     ])
+}
+
+/// Generate the event schema from Rust while preserving the historical validation constraints.
+/// These constraints validate wire documents; deserialization remains forward compatible.
+fn usage_event_schema() -> schemars::schema::RootSchema {
+    use serde_json::json;
+    let mut schema = serde_json::to_value(schemars::schema_for!(crate::UsageEvent)).unwrap();
+    schema["$id"] = json!("https://anvai-labs.github.io/sandhi/schemas/usage-event.v1.schema.json");
+    schema["additionalProperties"] = json!(false);
+    for field in ["request_id", "provider", "model"] {
+        schema["properties"][field]["minLength"] = json!(1);
+    }
+    schema["properties"]["schema_version"]["const"] = json!(crate::UsageEvent::SCHEMA_VERSION);
+    schema["properties"]["occurred_at"]["format"] = json!("date-time");
+    schema["properties"]["attempts"]["minimum"] = json!(1);
+    schema["properties"]["gpu_seconds"]["minimum"] = json!(0);
+    serde_json::from_value(schema).unwrap()
 }
 
 #[cfg(test)]
@@ -794,7 +817,7 @@ mod tests {
         let digest = fnv1a(concatenated.as_bytes());
         assert_eq!(
             (CHAT_CONTRACT_MINOR, digest),
-            (6, 0xf669dc9014fee5c7_u64),
+            (7, 0x47250214c49247b8_u64),
             "contract schemas changed: bump CHAT_CONTRACT_MINOR and update this digest \
              (new digest = {digest:#x})"
         );

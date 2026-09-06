@@ -99,6 +99,15 @@ enum KeysAction {
     },
     /// List provider credentials (masked).
     List,
+    /// Register an existing exact vault reference with a read grant; never reads a secret from stdin.
+    Reference {
+        provider: String,
+        label: Option<String>,
+        #[arg(long)]
+        scheme: Option<String>,
+        #[arg(long)]
+        base_url: Option<String>,
+    },
     /// Revoke a provider credential.
     Revoke { provider: String, label: String },
     /// Mint a scoped virtual key (printed once).
@@ -206,6 +215,21 @@ pub(crate) fn admin_request(base_url: &str, command: &Command) -> AdminRequest {
         Command::Keys {
             action: KeysAction::List,
         } => ("GET", "/admin/keys".into(), None),
+        Command::Keys {
+            action:
+                KeysAction::Reference {
+                    provider,
+                    label,
+                    scheme,
+                    base_url,
+                },
+        } => (
+            "POST",
+            "/admin/keys/reference".into(),
+            Some(json!({
+                "provider": provider, "label": label, "scheme": scheme, "base_url": base_url,
+            })),
+        ),
         Command::Keys {
             action: KeysAction::Revoke { provider, label },
         } => ("DELETE", format!("/admin/keys/{provider}/{label}"), None),
@@ -327,6 +351,14 @@ fn main() -> ExitCode {
     };
 
     if let Some(err) = response.get("error") {
+        // A failed multi-write can still have committed a budget or minted a key. Preserve
+        // that structured result for the operator while keeping the command's exit nonzero.
+        if response.get("budget_applied").is_some()
+            || response.get("failures").is_some()
+            || response.get("reconcile_before_retry").is_some()
+        {
+            print_json(&response);
+        }
         eprintln!("admin API error: {err}");
         return ExitCode::FAILURE;
     }
@@ -576,6 +608,17 @@ mod tests {
         assert_eq!(body["provider"], "anthropic");
         assert_eq!(body["label"], "default");
         assert_eq!(body["secret"], "sk-x");
+    }
+
+    #[test]
+    fn reference_command_never_serializes_a_secret() {
+        let cli =
+            Cli::try_parse_from(["sandhi", "keys", "reference", "openai", "default"]).unwrap();
+        let req = admin_request(url(), &cli.command);
+        assert_eq!(req.path, "http://localhost:8787/admin/keys/reference");
+        let body: Value = serde_json::from_str(req.body.as_deref().unwrap()).unwrap();
+        assert!(body.get("secret").is_none());
+        assert_eq!(body["label"], "default");
     }
 
     #[test]

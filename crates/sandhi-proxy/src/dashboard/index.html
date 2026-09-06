@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sandhi — operator dashboard</title>
+<link rel="stylesheet" href="/dashboard/assets/dashboard.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <h1>Sandhi</h1>
+    <span class="tagline">the metering layer for AI agents — neutral units, no pricing</span>
+  </div>
+  <form class="token-box" id="token-form">
+    <span class="dot" id="token-dot" aria-hidden="true"></span>
+    <label for="admin-token">Admin token</label>
+    <input id="admin-token" type="password" placeholder="Enter token" autocomplete="off"
+           aria-describedby="auth-status">
+    <button class="btn primary" type="submit">Use token</button>
+    <button class="btn" type="button" data-action="clearToken">Clear token</button>
+  </form>
+  <button class="btn" type="button" data-action="refresh">Refresh</button>
+  <span id="auth-status" role="status">No token supplied.</span>
+</header>
+<div class="wrap">
+
+<h2>Overview</h2>
+<section class="panel" id="usage" aria-label="Usage overview"></section>
+
+<h2>Declarative config <span class="hint">providers, budgets, alerts &amp; vkeys declared in a committed JSON file</span></h2>
+<section class="panel" id="config"></section>
+<div id="config-result" data-sensitive role="status"></div>
+
+<h2>Virtual keys &amp; credentials <span class="hint">who has access, and where calls actually go</span></h2>
+<section class="panel"><div id="keys"></div>
+<details class="actions"><summary>Mint a virtual key</summary>
+        <div class="form-row">
+          <div class="field"><label for="v-upstream">Upstream</label><input id="v-upstream" placeholder="ollama:default" style="width:9rem"></div>
+          <div class="field"><label for="v-subject">Subject</label><input id="v-subject" placeholder="alice"></div>
+          <div class="field"><label for="v-group">Group</label><input id="v-group" placeholder="platform"></div>
+          <div class="field"><label for="v-models">Models (csv)</label><input id="v-models" placeholder="optional"></div>
+          <div class="field"><label for="v-rate">Rate/min</label><input id="v-rate" type="number" placeholder="60" style="width:5rem"></div>
+          <button class="btn primary" data-needs-token data-action="mintVkey">Mint</button>
+        </div>
+        <div id="v-result" data-sensitive role="status"></div>
+      </details>
+      <details class="actions"><summary>Add a credential</summary>
+        <p class="hint">Existing references use a read grant and never write a secret. Native broker
+          IPC is required for SentinelPass reference onboarding; capabilities do not imply granted access.</p>
+        <div class="form-row">
+          <div class="field"><label for="c-mode">Credential source</label><select id="c-mode"><option value="write">Write secret</option><option value="reference">Existing reference (read-only)</option></select></div>
+          <div class="field"><label for="c-provider">Provider</label><input id="c-provider" placeholder="ollama" style="width:7rem"></div>
+          <div class="field"><label for="c-label">Label</label><input id="c-label" placeholder="default" style="width:7rem"></div>
+          <div class="field"><label for="c-baseurl">Base URL</label><input id="c-baseurl" placeholder="http://host:11434" style="width:13rem"></div>
+          <div class="field"><label for="c-secret">Secret</label><input id="c-secret" type="password" placeholder="empty is fine for keyless" style="width:12rem"></div>
+          <button class="btn primary" data-needs-token data-action="addCredential">Add</button>
+        </div>
+        <div id="c-result" data-sensitive role="status"></div>
+      </details>
+</section>
+
+<h2>Budgets <span class="hint">neutral-token caps per scope</span></h2>
+<section class="panel">
+  <div id="budgets"></div>
+  <p class="callout info">Admission uses estimated reservations, not strict token bounds.
+    Actual usage can exceed a cap, including across concurrent calls.</p>
+  <details class="actions"><summary>Set a budget</summary>
+    <div class="form-row">
+      <div class="field"><label for="b-scope">Scope</label><input id="b-scope" placeholder="group:platform"></div>
+      <div class="field"><label for="b-limit">Limit (tokens)</label><input id="b-limit" type="number" placeholder="1000000"></div>
+      <div class="field"><label for="b-window">Window</label>
+        <select id="b-window"><option value="total">total</option><option value="daily">daily</option>
+          <option value="monthly" selected>monthly</option></select></div>
+      <div class="field"><label for="b-policy">Policy</label>
+        <select id="b-policy"><option value="block" selected>block</option><option value="warn">warn</option></select></div>
+      <button class="btn primary" data-needs-token data-action="setBudget">Set budget</button>
+    </div>
+    <div id="b-result" data-sensitive role="status"></div>
+  </details>
+</section>
+
+<h2>Alerts <span class="hint">threshold rules on budget scopes</span></h2>
+<section class="panel" id="alerts"></section>
+
+<h2>Run cost tree <span class="hint">one agent run's spend, per step, own vs subtree</span></h2>
+<section class="panel">
+  <div class="form-row" style="margin-top:0">
+    <div class="field"><label for="run-id">Run ID</label><input id="run-id" placeholder="run_01HK..." style="width:16rem"></div>
+    <button class="btn primary" data-needs-token data-action="lookupRun">Look up</button>
+  </div>
+  <div id="run-tree" style="margin-top:.75rem"></div>
+</section>
+
+<footer>
+  Reads require the admin token when configured, unless public dashboard access is enabled.
+  Changes, config previews and run queries always require admin access. The token is kept only
+  in this page's memory and is cleared when you leave. Changes use the same
+  <code>/admin/*</code> API as the <code>sandhi</code> CLI.
+</footer>
+</div>
+<div class="toast-wrap" id="toasts" role="status" aria-live="polite"></div>
+
+<script src="/dashboard/assets/dashboard.js" defer></script>
+</body>
+</html>

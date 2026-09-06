@@ -28,7 +28,7 @@ pub use alerts::{
 };
 pub use budget::{Budget, BudgetExceeded, BudgetLedger, Policy, Window};
 pub use chat::*;
-pub use event::{billable, billable_parts, Backend, UsageEvent};
+pub use event::{billable, billable_parts, billable_parts_with_reasoning, Backend, UsageEvent};
 pub use keys::{KeyStore, VirtualKey};
 pub use ledger::{Denied, EnforcementLedger, InMemoryLedger, LedgerView, Reservation};
 pub use sink::{BufferedSink, InMemorySink, JsonlSink, Sink, DEFAULT_MEMORY_SINK_CAPACITY};

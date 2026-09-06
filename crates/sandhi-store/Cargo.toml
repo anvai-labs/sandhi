@@ -27,7 +27,7 @@ keyring = { version = "3", default-features = false, features = [
 # it on; crates consumers may enable it themselves. sentinelpass-protocol
 # v0.8.0 is published to crates.io, so the published manifest stays clean.
 sentinelpass-protocol = { version = "0.8.1", optional = true }
-tokio = { version = "1", default-features = false, features = ["rt"], optional = true }
+tokio = { version = "1", default-features = false, features = ["rt", "time"], optional = true }
 
 [features]
 sentinelpass-ipc = ["dep:sentinelpass-protocol", "dep:tokio"]

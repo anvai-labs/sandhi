@@ -26,10 +26,6 @@ pub use vault::{
 };
 pub use vkeys::{MintRequest, MintedKey, VirtualKeyRecord, VirtualKeyStore};
 
-/// Per-row mirror of [`sandhi_core::billable_parts`], summed. The `CASE` reproduces the ADR-0005
-/// D4 reasoning fold **per call**, which is exactly why this cannot be written as
-/// `SUM(reasoning) > SUM(tokens_out)`. `store_matches_core_billable` pins this expression against
-/// the Rust one so the two cannot drift.
 /// Raw latency samples for one group key: `(duration_ms, time_to_first_token_ms)`.
 /// TTFT is shorter than duration whenever a call was non-streaming.
 type LatencySamples = (Vec<u64>, Vec<u64>);
@@ -37,8 +33,12 @@ type LatencySamples = (Vec<u64>, Vec<u64>);
 /// Most-recent calls sampled per query when summarising latency (TD-0009 D3).
 const LATENCY_SAMPLE_LIMIT: usize = 10_000;
 
+/// Per-row mirror of [`sandhi_core::billable_parts_with_reasoning`], summed. Explicit inclusion
+/// takes precedence; only legacy rows retain the magnitude heuristic. Mixed conventions must
+/// be evaluated per call, never over aggregate columns. Store parity tests pin both branches.
 const BILLABLE_SQL: &str = "COALESCE(SUM(tokens_in + cache_creation_tokens + cache_read_tokens \
-     + tokens_out + CASE WHEN COALESCE(reasoning_tokens,0) > tokens_out \
+     + tokens_out + CASE WHEN reasoning_included = 0 OR \
+     (reasoning_included IS NULL AND COALESCE(reasoning_tokens,0) > tokens_out) \
      THEN COALESCE(reasoning_tokens,0) ELSE 0 END),0)";
 
 /// One aggregation row (or the grand total).
@@ -156,6 +156,7 @@ impl SqliteStore {
             "ALTER TABLE usage_events ADD COLUMN duration_ms INTEGER",
             "ALTER TABLE usage_events ADD COLUMN time_to_first_token_ms INTEGER",
             "ALTER TABLE usage_events ADD COLUMN reasoning_tokens INTEGER",
+            "ALTER TABLE usage_events ADD COLUMN reasoning_included INTEGER",
             "ALTER TABLE usage_events ADD COLUMN run_id TEXT",
             "ALTER TABLE usage_events ADD COLUMN step_id TEXT",
             "ALTER TABLE usage_events ADD COLUMN parent_id TEXT",
@@ -183,8 +184,8 @@ impl SqliteStore {
                 virtual_key_id, subject_id, group_id, route, session_id,
                 tokens_in, tokens_out, cache_creation_tokens, cache_read_tokens, gpu_seconds,
                 duration_ms, time_to_first_token_ms, reasoning_tokens,
-                run_id, step_id, parent_id
-            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
+                run_id, step_id, parent_id, reasoning_included
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
             params![
                 e.request_id,
                 e.occurred_at,
@@ -207,6 +208,7 @@ impl SqliteStore {
                 e.run_id,
                 e.step_id,
                 e.parent_id,
+                e.reasoning_included,
             ],
         )?;
         Ok(())
@@ -382,7 +384,7 @@ impl SqliteStore {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT tokens_in, tokens_out, cache_creation_tokens, cache_read_tokens, \
-                    reasoning_tokens, step_id, parent_id \
+                    reasoning_tokens, step_id, parent_id, reasoning_included \
              FROM usage_events WHERE run_id = ?1",
         )?;
         let events: Vec<UsageEvent> = stmt
@@ -391,6 +393,7 @@ impl SqliteStore {
                     .with_tokens(r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)
                     .with_cache(r.get::<_, i64>(2)? as u64, r.get::<_, i64>(3)? as u64)
                     .with_reasoning(r.get::<_, Option<i64>>(4)?.map(|v| v as u64))
+                    .with_reasoning_included(r.get(7)?)
                     .with_identity(None, Some(run_id.to_string()), r.get(5)?, r.get(6)?, None))
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -790,6 +793,37 @@ mod tests {
         assert_ne!(
             naive, rust_sum,
             "fixtures must expose the per-call vs aggregate fold difference, else this proves nothing"
+        );
+    }
+
+    #[test]
+    fn explicit_and_legacy_reasoning_match_sql_and_run_tree() {
+        let store = SqliteStore::in_memory().unwrap();
+        let mut expected = 0;
+        for thoughts in [0, 25, 40, 90] {
+            for included in [None, Some(false), Some(true)] {
+                let event = ev("gemini", "alice", "team-a", 70, 40)
+                    .with_cache(0, 30)
+                    .with_reasoning(Some(thoughts))
+                    .with_reasoning_included(included)
+                    .with_identity(None, Some("run".into()), Some("step".into()), None, None);
+                expected += event.billable_tokens();
+                store.emit(&event);
+            }
+        }
+        assert_eq!(store.grand_total().unwrap().billable_tokens, expected);
+        assert_eq!(
+            store.totals_by_subject().unwrap()[0].billable_tokens,
+            expected
+        );
+        assert_eq!(
+            store
+                .run_cost_tree("run")
+                .unwrap()
+                .unwrap()
+                .total
+                .billable_tokens,
+            expected
         );
     }
 

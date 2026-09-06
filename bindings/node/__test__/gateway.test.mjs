@@ -498,6 +498,21 @@ test("usage parsing and metering retain cache attribution", () => {
   assert.equal(gateway.spent("group:platform"), 120);
 });
 
+test("separate reasoning survives parsing, events and accumulated spend", () => {
+  const gateway = new Gateway();
+  gateway.addVirtualKey("vk_reason", "alice", "reason", "gemini");
+  for (const thoughts of [25, 40, 90]) {
+    const body = JSON.stringify({ usageMetadata: {
+      promptTokenCount: 100, candidatesTokenCount: 40, thoughtsTokenCount: thoughts,
+    }});
+    assert.equal(parseUsage("gemini", body).reasoningIncluded, false);
+    const event = gateway.meter("vk_reason", "gemini", "m", body);
+    assert.equal(event.reasoningTokens, thoughts);
+    assert.equal(event.reasoningIncluded, false);
+  }
+  assert.equal(gateway.spent("group:reason"), 140 * 3 + 25 + 40 + 90);
+});
+
 // ---------------------------------------------------------------------------
 // ProviderRuntime.provider() dispatch + the direct openaiResponses factory.
 // Handle construction is pure (no network); this covers every provider branch

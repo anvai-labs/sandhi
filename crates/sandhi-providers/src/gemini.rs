@@ -148,6 +148,7 @@ mod tests {
     use http::header::{HeaderName, HeaderValue};
 
     const EXPECTED: ParsedUsage = ParsedUsage {
+        reasoning_included: Some(false),
         tokens_in: 200,
         tokens_out: 250,
         cache_creation_tokens: 0,

@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::event::{billable_parts, UsageEvent};
+use crate::event::{billable_parts_with_reasoning, UsageEvent};
 
 /// The attribution dimension an aggregate is grouped by.
 #[derive(
@@ -151,19 +151,20 @@ impl UsageAggregateV1 {
         self.cache_creation_tokens += e.cache_creation_tokens;
         self.cache_read_tokens += e.cache_read_tokens;
         self.reasoning_tokens += e.reasoning_tokens.unwrap_or(0);
-        self.billable_tokens += billable_parts(
+        self.billable_tokens += billable_parts_with_reasoning(
             e.tokens_in,
             e.cache_creation_tokens,
             e.cache_read_tokens,
             e.tokens_out,
             e.reasoning_tokens.unwrap_or(0),
+            e.reasoning_included,
         );
     }
 
     /// Merge another aggregate into this one (the run-tree rollup). Summing `billable_tokens`
     /// directly is correct because the reasoning fold already happened per call inside each
     /// operand — re-deriving from the merged columns would apply the fold once over the sums,
-    /// which is the exact wrong answer [`billable_parts`] warns about. Latency percentiles are
+    /// which loses the per-event semantics of [`billable_parts_with_reasoning`]. Latency percentiles are
     /// not mergeable and are left untouched.
     pub fn merge(&mut self, other: &Self) {
         self.calls += other.calls;

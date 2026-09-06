@@ -544,19 +544,36 @@ fn rehydrate_providers_from_vault(
     providers: &mut HashMap<String, ProviderHandle>,
 ) {
     let Ok(entries) = vault.list() else {
+        tracing::warn!("vault inventory unavailable; provider rehydration incomplete");
         return;
     };
     for entry in entries.into_iter().filter(|e| e.status == "active") {
-        if let Ok(Some((entry, secret))) = vault.resolve(&entry.provider) {
-            if let Some(handle) = sandhi_proxy::build_provider_handle(
-                runtime,
-                &entry.provider,
-                entry.base_url.as_deref(),
-                &secret,
-                entry.scheme,
-            ) {
-                providers.insert(entry.credential_id(), handle);
+        // Resolve the exact label; provider-wide resolution would reload the first label
+        // repeatedly and leave every other credential unavailable after restart.
+        let secret = match vault.get(&entry.provider, &entry.label) {
+            Ok(Some(secret)) => secret,
+            result => {
+                let reason = match result {
+                    Ok(None) => "missing",
+                    Err(sandhi_store::VaultError::Locked) => "locked",
+                    Err(sandhi_store::VaultError::Denied) => "denied",
+                    Err(sandhi_store::VaultError::Timeout) => "timeout",
+                    Err(sandhi_store::VaultError::Configuration) => "configuration",
+                    _ => "unavailable",
+                };
+                tracing::warn!(provider = %entry.provider, label = %entry.label, reason,
+                    "credential not activated; recover via explicit reference registration");
+                continue;
             }
+        };
+        if let Some(handle) = sandhi_proxy::build_provider_handle(
+            runtime,
+            &entry.provider,
+            entry.base_url.as_deref(),
+            &secret,
+            entry.scheme,
+        ) {
+            providers.insert(entry.credential_id(), handle);
         }
     }
 }
@@ -565,6 +582,30 @@ fn rehydrate_providers_from_vault(
 mod tests {
     use super::listener_tls_entry_from_json;
     use std::path::Path;
+
+    #[test]
+    fn startup_rehydrates_each_exact_label() {
+        let vault = sandhi_store::VaultStore::in_memory().unwrap();
+        for label in ["first", "second"] {
+            vault
+                .set(
+                    "openai",
+                    label,
+                    sandhi_store::CredentialScheme::ApiKey,
+                    None,
+                    "synthetic-key",
+                )
+                .unwrap();
+        }
+        let mut providers = std::collections::HashMap::new();
+        super::rehydrate_providers_from_vault(
+            &vault,
+            &sandhi_providers::ProviderRuntime::new(),
+            &mut providers,
+        );
+        assert!(providers.contains_key("openai:first"));
+        assert!(providers.contains_key("openai:second"));
+    }
 
     #[test]
     fn tls_bootstrap_does_not_validate_unrelated_operator_sections() {

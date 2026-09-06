@@ -51,6 +51,16 @@ pub mod admin {
         pub secret: String,
     }
 
+    /// Register an existing exact backend reference using only a read grant. Never accepts secrets.
+    #[derive(Debug, Clone, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct RegisterReferenceRequest {
+        pub provider: String,
+        pub label: Option<String>,
+        pub scheme: Option<String>,
+        pub base_url: Option<String>,
+    }
+
     /// `POST /admin/keys/share` — mint a scoped virtual key.
     #[derive(Debug, Clone, Deserialize)]
     pub struct ShareKeyRequest {
@@ -172,6 +182,11 @@ pub(crate) async fn version_capabilities(
             "rate_limits": true,
             // Compiled only with the otel-otlp feature AND initialized at startup.
             "otel_export": state.otel.is_some(),
+            "vault": state.vault.as_ref().map(|v| json!({
+                "backend": v.backend_name(), "operations": v.capabilities(),
+                "grant_status": "not_checked", "credential_generations": false,
+                "reference_registration": v.capabilities().read && v.backend_name() != "sentinelpass",
+            })),
         },
     });
     Json(body).into_response()
@@ -320,7 +335,28 @@ pub(crate) fn vkey_record_response(r: &VirtualKeyRecord) -> Value {
 
 // --- Handlers ----------------------------------------------------------------
 
-/// `POST /admin/keys` — add a provider credential to the vault + register an upstream handle.
+/// Only canonical error text crosses the admin boundary; broker errors may contain secret material.
+fn vault_failure(error: VaultError, write: bool) -> Response {
+    let reconcile = write && matches!(error, VaultError::Timeout | VaultError::Backend(_));
+    let (status, code, message) = match error {
+        VaultError::Busy => (StatusCode::SERVICE_UNAVAILABLE, "vault_busy", "Credential operation busy; not admitted"),
+        VaultError::Timeout => (StatusCode::GATEWAY_TIMEOUT, "vault_timeout", "Broker deadline exceeded"),
+        VaultError::Locked => (StatusCode::LOCKED, "vault_locked", "Unlock the broker outside Sandhi and retry explicitly"),
+        VaultError::Denied => (StatusCode::FORBIDDEN, "vault_denied", "Broker rejected operation; check the exact client/domain/field and read/write grant"),
+        VaultError::Configuration => (StatusCode::SERVICE_UNAVAILABLE, "vault_configuration", "Check selected backend, IPC feature, daemon token and client token; no automatic fallback"),
+        VaultError::InvalidReference => (StatusCode::BAD_REQUEST, "invalid_reference", "Provider and label require 1–128 lowercase ASCII letters, digits, dots, underscores or hyphens"),
+        VaultError::NotSupported(_) => (StatusCode::NOT_IMPLEMENTED, "vault_unsupported", "Operation unsupported by this backend; provision in the broker and use a supported read-only reference path"),
+        VaultError::Backend(_) => (StatusCode::SERVICE_UNAVAILABLE, "vault_unavailable", "Credential operation failed; backend details are redacted"),
+    };
+    (
+        status,
+        Json(json!({ "error": message, "code": code,
+        "reconcile_before_retry": reconcile })),
+    )
+        .into_response()
+}
+
+/// POST /admin/keys writes a secret; POST /admin/keys/reference only resolves an existing reference.
 pub(crate) async fn add_key(
     State(state): State<Arc<ProxyState>>,
     headers: HeaderMap,
@@ -329,6 +365,35 @@ pub(crate) async fn add_key(
     if let Err(r) = require_admin(&state, &headers) {
         return r;
     }
+    register_credential(
+        state,
+        admin::RegisterReferenceRequest {
+            provider: req.provider,
+            label: req.label,
+            scheme: req.scheme,
+            base_url: req.base_url,
+        },
+        Some(req.secret),
+    )
+    .await
+}
+
+pub(crate) async fn register_reference(
+    State(state): State<Arc<ProxyState>>,
+    headers: HeaderMap,
+    Json(req): Json<admin::RegisterReferenceRequest>,
+) -> Response {
+    if let Err(r) = require_admin(&state, &headers) {
+        return r;
+    }
+    register_credential(state, req, None).await
+}
+
+async fn register_credential(
+    state: Arc<ProxyState>,
+    req: admin::RegisterReferenceRequest,
+    supplied: Option<String>,
+) -> Response {
     let Some(vault) = state.vault.clone() else {
         return err(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -336,46 +401,112 @@ pub(crate) async fn add_key(
         );
     };
     let label = req.label.as_deref().unwrap_or("default");
-    let scheme = parse_scheme(req.scheme.as_deref());
-    match vault.set(
-        &req.provider,
-        label,
-        scheme,
-        req.base_url.as_deref(),
-        &req.secret,
-    ) {
-        Ok(cred_id) => {
-            // Build + cache the upstream handle so the request path resolves it immediately.
-            if let Some(handle) = build_provider_handle(
-                &state.runtime,
-                &req.provider,
-                req.base_url.as_deref(),
-                &req.secret,
-                scheme,
-            ) {
-                state
-                    .providers
-                    .lock()
-                    .expect("providers poisoned")
-                    .insert(cred_id.clone(), handle);
-            }
-            let entry = vault
-                .list()
-                .unwrap_or_default()
-                .into_iter()
-                .find(|e| e.credential_id() == cred_id);
-            let payload = match entry {
-                Some(ref e) => vault_entry_response(e),
-                None => json!({ "credential_id": cred_id }),
-            };
-            (StatusCode::CREATED, Json(payload)).into_response()
-        }
-        Err(VaultError::NotSupported(msg)) => err(StatusCode::NOT_IMPLEMENTED, &msg),
-        Err(VaultError::Backend(msg)) => err(StatusCode::INTERNAL_SERVER_ERROR, &msg),
+    if let Err(e) = sandhi_store::vault::validate_reference(&req.provider, label) {
+        return vault_failure(e, false);
     }
+    if req
+        .scheme
+        .as_deref()
+        .is_some_and(|s| !matches!(s, "api_key" | "bearer" | "oauth"))
+    {
+        return err(StatusCode::BAD_REQUEST, "unknown credential scheme");
+    }
+    if vault.backend_name() == "unavailable" {
+        return vault_failure(VaultError::Configuration, false);
+    }
+    if supplied.is_some() && !vault.capabilities().write {
+        return vault_failure(
+            VaultError::NotSupported("write capability absent".into()),
+            false,
+        );
+    }
+    // The legacy CLI is explicitly unbounded; do not admit interactive reference operations on it.
+    if supplied.is_none() && vault.backend_name() == "sentinelpass" {
+        return vault_failure(
+            VaultError::NotSupported("bounded native IPC required".into()),
+            false,
+        );
+    }
+    let Ok(permit) = state.vault_writer.clone().try_acquire_owned() else {
+        return vault_failure(VaultError::Busy, false);
+    };
+    let write = supplied.is_some();
+    // The permit and publication live inside the blocking task: cancellation cannot admit a
+    // conflicting writer while a detached operation is still committing.
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let label = req.label.as_deref().unwrap_or("default");
+        let scheme = parse_scheme(req.scheme.as_deref());
+        let secret = match supplied {
+            Some(secret) => secret,
+            None => match vault.get(&req.provider, label) {
+                Ok(Some(secret)) => secret,
+                Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({
+                    "error": "No credential at the authorized reference", "code": "vault_missing"
+                }))).into_response(),
+                Err(e) => return vault_failure(e, false),
+            },
+        };
+        let handle = build_provider_handle(
+            &state.runtime,
+            &req.provider,
+            req.base_url.as_deref(),
+            &secret,
+            scheme,
+        );
+        let committed = if write {
+            vault.set(
+                &req.provider,
+                label,
+                scheme,
+                req.base_url.as_deref(),
+                &secret,
+            )
+        } else {
+            vault.register_metadata(&req.provider, label, scheme, req.base_url.as_deref())
+        };
+        let cred_id = match committed {
+            Ok(id) => id,
+            Err(e) => return vault_failure(e, write),
+        };
+        if let Some(handle) = handle {
+            state
+                .providers
+                .lock()
+                .expect("providers poisoned")
+                .insert(cred_id.clone(), handle);
+        }
+        // Failure to read after commit must not turn a persisted mutation into a success-shaped
+        // empty inventory. Preserve its identity so an operator can reconcile without rewriting.
+        match vault.list() {
+            Ok(entries) => {
+                let entry = entries.iter().find(|e| e.credential_id() == cred_id);
+                (
+                    StatusCode::CREATED,
+                    Json(
+                        entry
+                            .map(vault_entry_response)
+                            .unwrap_or_else(|| json!({ "credential_id": cred_id })),
+                    ),
+                )
+                    .into_response()
+            }
+            Err(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "Credential committed; metadata refresh failed",
+                    "code": "credential_committed_refresh_failed", "credential_id": cred_id,
+                    "metadata_committed": true, "reconcile_before_retry": true
+                })),
+            )
+                .into_response(),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| vault_failure(VaultError::Backend("worker failed".into()), write))
 }
 
-/// `GET /admin/keys` — masked provider-credential metadata.
+/// GET /admin/keys reads only masked metadata.
 pub(crate) async fn list_keys(
     State(state): State<Arc<ProxyState>>,
     headers: HeaderMap,
@@ -386,12 +517,16 @@ pub(crate) async fn list_keys(
     let Some(vault) = state.vault.clone() else {
         return err(StatusCode::SERVICE_UNAVAILABLE, "vault not configured");
     };
-    let entries = vault.list().unwrap_or_default();
-    Json(json!({ "keys": entries.iter().map(vault_entry_response).collect::<Vec<_>>() }))
-        .into_response()
+    match tokio::task::spawn_blocking(move || vault.list()).await {
+        Ok(Ok(entries)) => {
+            Json(json!({ "keys": entries.iter().map(vault_entry_response).collect::<Vec<_>>() }))
+                .into_response()
+        }
+        _ => vault_failure(VaultError::Backend("inventory unavailable".into()), false),
+    }
 }
 
-/// `DELETE /admin/keys/{provider}/{label}` — revoke a provider credential.
+/// DELETE revokes local dispatch metadata. It never claims broker-grant or provider-key revocation.
 pub(crate) async fn revoke_key(
     State(state): State<Arc<ProxyState>>,
     headers: HeaderMap,
@@ -403,20 +538,27 @@ pub(crate) async fn revoke_key(
     let Some(vault) = state.vault.clone() else {
         return err(StatusCode::SERVICE_UNAVAILABLE, "vault not configured");
     };
-    match vault.revoke(&provider, &label) {
-        Ok(revoked) => {
-            if revoked {
+    let Ok(permit) = state.vault_writer.clone().try_acquire_owned() else {
+        return vault_failure(VaultError::Busy, false);
+    };
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        match vault.revoke_with_status(&provider, &label) {
+            Ok((revoked, deletion)) => {
                 state
                     .providers
                     .lock()
                     .expect("providers poisoned")
                     .remove(&format!("{provider}:{label}"));
+                Json(json!({ "revoked": revoked, "secret_deletion": deletion,
+                    "broker_grant_revoked": false, "provider_key_revoked": false }))
+                .into_response()
             }
-            Json(json!({ "revoked": revoked })).into_response()
+            Err(e) => vault_failure(e, true),
         }
-        Err(VaultError::NotSupported(msg)) => err(StatusCode::NOT_IMPLEMENTED, &msg),
-        Err(VaultError::Backend(msg)) => err(StatusCode::INTERNAL_SERVER_ERROR, &msg),
-    }
+    })
+    .await
+    .unwrap_or_else(|_| vault_failure(VaultError::Backend("worker failed".into()), true))
 }
 
 /// `POST /admin/keys/share` — mint a scoped virtual key (secret printed once).
@@ -557,33 +699,70 @@ pub(crate) async fn set_budget(
     if let Err(r) = require_admin(&state, &headers) {
         return r;
     }
+    if let Err(message) = validate_budget(&req) {
+        return err(StatusCode::BAD_REQUEST, message);
+    }
+    if req.alert_thresholds.as_ref().is_some_and(|v| !v.is_empty()) && state.alert_store.is_none() {
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "alert store not configured; budget unchanged",
+        );
+    }
     let spec = BudgetSpec {
         scope: req.scope.clone(),
         limit_tokens: req.limit_tokens,
         window: req.window.unwrap_or_else(|| "total".into()),
         policy: req.policy.unwrap_or_else(|| "block".into()),
     };
-    apply_budget(&state.ledger, &state.budgets, &spec);
+    if let Err(error) = apply_budget(&state.ledger, &state.budgets, &spec) {
+        tracing::error!(%error, "budget commit failed");
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "budget commit failed; budget unchanged",
+        );
+    }
 
     // P2: optional threshold percentages create alert rules for this scope.
     let mut created_alerts: Vec<Value> = Vec::new();
+    let mut failed_alerts: Vec<Value> = Vec::new();
     if let Some(thresholds) = &req.alert_thresholds {
         for &pct in thresholds {
-            if let Some(alert) = create_alert_for_scope(&state, &req.scope, pct, AlertChannel::Log)
-            {
-                created_alerts.push(alert_rule_response(&alert));
+            match create_alert_for_scope(&state, &req.scope, pct, AlertChannel::Log) {
+                Ok(alert) => created_alerts.push(alert_rule_response(&alert)),
+                Err(error) => {
+                    tracing::error!(%error, "inline alert commit failed");
+                    failed_alerts
+                        .push(json!({"threshold_pct": pct, "error": "alert commit failed"}));
+                }
             }
         }
     }
 
-    Json(json!({
+    let complete = failed_alerts.is_empty();
+    let mut payload = json!({
+        "ok": complete,
+        "budget_applied": true,
         "scope": spec.scope,
         "limit_tokens": spec.limit_tokens,
         "window": spec.window,
         "policy": spec.policy,
         "alerts_created": created_alerts,
-    }))
-    .into_response()
+        "alerts_failed": failed_alerts,
+    });
+    if !complete {
+        payload["error"] = json!(
+            "budget committed, but some alerts failed; inspect partial results before retrying"
+        );
+    }
+    (
+        if complete {
+            StatusCode::OK
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        },
+        Json(payload),
+    )
+        .into_response()
 }
 
 /// `GET /admin/budget` — list all configured budget scopes.
@@ -739,25 +918,44 @@ fn dimension_buckets(
     )
 }
 
+fn validate_budget(req: &admin::SetBudgetRequest) -> Result<(), &'static str> {
+    if req.scope.trim().is_empty() {
+        return Err("budget scope must not be empty");
+    }
+    if req.limit_tokens > i64::MAX as u64 {
+        return Err("budget limit exceeds the supported signed 64-bit range");
+    }
+    if !matches!(
+        req.window.as_deref(),
+        None | Some("total" | "daily" | "monthly")
+    ) {
+        return Err("window must be total, daily or monthly");
+    }
+    if !matches!(req.policy.as_deref(), None | Some("block" | "warn")) {
+        return Err("policy must be block or warn");
+    }
+    if req.alert_thresholds.iter().flatten().any(|pct| *pct > 100) {
+        return Err("alert thresholds must be between 0 and 100");
+    }
+    Ok(())
+}
+
 fn apply_budget(
     ledger: &Mutex<ProxyLedger>,
     budgets: &Mutex<HashMap<String, BudgetSpec>>,
     spec: &BudgetSpec,
-) {
+) -> Result<(), String> {
     // Carry the cap + window + policy into the live lease ledger (ADR-0005). A `Warn` scope stays a
     // soft cap (the ledger admits over it and tracks spend for alerts); `Block` hard-enforces.
     let window = Window::parse(&spec.window);
     let policy = Policy::parse(&spec.policy);
-    ledger.lock().expect("ledger poisoned").set_budget(
-        &spec.scope,
-        Some(spec.limit_tokens),
-        window,
-        policy,
-    );
-    budgets
-        .lock()
-        .expect("budgets poisoned")
-        .insert(spec.scope.clone(), spec.clone());
+    // Hold both locks through commit and publication: concurrent writers cannot publish
+    // metadata in the opposite order from durable commits. Match dashboard lock ordering.
+    let mut ledger = ledger.lock().map_err(|e| e.to_string())?;
+    let mut budgets = budgets.lock().map_err(|e| e.to_string())?;
+    ledger.set_budget(&spec.scope, Some(spec.limit_tokens), window, policy)?;
+    budgets.insert(spec.scope.clone(), spec.clone());
+    Ok(())
 }
 
 pub(crate) fn alert_rule_response(rec: &AlertRuleRecord) -> Value {
@@ -778,21 +976,28 @@ fn create_alert_for_scope(
     scope: &str,
     threshold_pct: u8,
     channel: AlertChannel,
-) -> Option<AlertRuleRecord> {
-    let store = state.alert_store.clone()?;
+) -> Result<AlertRuleRecord, String> {
+    let store = state
+        .alert_store
+        .as_ref()
+        .ok_or("alert store not configured")?;
+    let mut registry = state
+        .alerts
+        .as_ref()
+        .map(|r| r.lock())
+        .transpose()
+        .map_err(|e| e.to_string())?;
     let record = store
         .create(CreateAlertRequest {
             scope: scope.into(),
             threshold_pct,
             channel: channel.clone(),
         })
-        .ok()?;
-    if let Some(registry) = &state.alerts {
-        if let Ok(mut reg) = registry.lock() {
-            reg.add_rule(record.to_rule());
-        }
+        .map_err(|e| e.to_string())?;
+    if let Some(registry) = registry.as_mut() {
+        registry.add_rule(record.to_rule());
     }
-    Some(record)
+    Ok(record)
 }
 
 // --- Alerts (P2) ------------------------------------------------------------
@@ -829,6 +1034,12 @@ pub(crate) async fn create_alert(
     if let Err(r) = require_admin(&state, &headers) {
         return r;
     }
+    if req.scope.trim().is_empty() || req.threshold_pct > 100 {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "alerts require a nonempty scope and threshold between 0 and 100",
+        );
+    }
     let channel = if let Some(url) = req.webhook_url.as_deref() {
         AlertChannel::Webhook {
             url: url.to_string(),
@@ -841,11 +1052,14 @@ pub(crate) async fn create_alert(
             .unwrap_or(AlertChannel::Log)
     };
     match create_alert_for_scope(&state, &req.scope, req.threshold_pct, channel) {
-        Some(rec) => (StatusCode::CREATED, Json(alert_rule_response(&rec))).into_response(),
-        None => err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "alert store not configured (set SANDHI_STORE)",
-        ),
+        Ok(rec) => (StatusCode::CREATED, Json(alert_rule_response(&rec))).into_response(),
+        Err(error) => {
+            tracing::error!(%error, "alert commit failed");
+            err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "alert commit failed or store not configured",
+            )
+        }
     }
 }
 
@@ -1146,6 +1360,30 @@ pub(crate) async fn config_apply(
     };
     let getenv = |k: &str| std::env::var(k).ok();
 
+    // Reject malformed budget/alert intent before touching any backend, including the vault.
+    for b in &cfg.budgets {
+        let req = admin::SetBudgetRequest {
+            scope: b.scope.clone(),
+            limit_tokens: b.limit_tokens,
+            window: b.window.clone(),
+            policy: b.policy.clone(),
+            alert_thresholds: b.alert_thresholds.clone(),
+        };
+        if let Err(message) = validate_budget(&req) {
+            return err(StatusCode::BAD_REQUEST, message);
+        }
+    }
+    if cfg
+        .alerts
+        .iter()
+        .any(|a| a.scope.trim().is_empty() || a.threshold_pct > 100)
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "alerts require a nonempty scope and threshold between 0 and 100",
+        );
+    }
+    let mut failures = Vec::new();
     let mut providers_applied = Vec::new();
     for p in &cfg.providers {
         let secret = crate::config::resolve_secret(&p.secret_env, getenv);
@@ -1159,6 +1397,9 @@ pub(crate) async fn config_apply(
         let resp = add_key(State(state.clone()), headers.clone(), Json(req)).await;
         if resp.status().is_success() {
             providers_applied.push(json!({ "provider": p.provider, "label": p.label }));
+        } else {
+            failures.push(json!({"component": "provider", "provider": p.provider,
+                "label": p.label, "status": resp.status().as_u16(), "error": "provider apply failed"}));
         }
     }
 
@@ -1177,20 +1418,35 @@ pub(crate) async fn config_apply(
         let resp = set_budget(State(state.clone()), headers.clone(), Json(req)).await;
         if resp.status().is_success() {
             budgets_applied.push(json!({ "scope": b.scope, "limit_tokens": b.limit_tokens }));
+        } else {
+            failures.push(json!({"component": "budget", "scope": b.scope,
+                "status": resp.status().as_u16(), "error": "budget apply failed"}));
+            // Dependent alerts must not be installed for a budget that failed to commit.
+            continue;
         }
         for &pct in b.alert_thresholds.iter().flatten() {
             match apply_one_alert(&state, &b.scope, pct, &None, getenv) {
-                Some(rec) => alerts_created.push(alert_rule_response(&rec)),
-                None => alerts_skipped.push(json!({ "scope": b.scope, "threshold_pct": pct })),
+                Ok(Some(rec)) => alerts_created.push(alert_rule_response(&rec)),
+                Ok(None) => alerts_skipped.push(json!({ "scope": b.scope, "threshold_pct": pct })),
+                Err(error) => {
+                    tracing::error!(%error, "config alert apply failed");
+                    failures.push(json!({"component": "alert", "scope": b.scope,
+                        "threshold_pct": pct, "error": "alert apply failed"}));
+                }
             }
         }
     }
 
     for a in &cfg.alerts {
         match apply_one_alert(&state, &a.scope, a.threshold_pct, &a.webhook_env, getenv) {
-            Some(rec) => alerts_created.push(alert_rule_response(&rec)),
-            None => {
+            Ok(Some(rec)) => alerts_created.push(alert_rule_response(&rec)),
+            Ok(None) => {
                 alerts_skipped.push(json!({ "scope": a.scope, "threshold_pct": a.threshold_pct }))
+            }
+            Err(error) => {
+                tracing::error!(%error, "config alert apply failed");
+                failures.push(json!({"component": "alert", "scope": a.scope,
+                    "threshold_pct": a.threshold_pct, "error": "alert apply failed"}));
             }
         }
     }
@@ -1198,11 +1454,17 @@ pub(crate) async fn config_apply(
     let mut vkeys_minted = Vec::new();
     let mut vkeys_skipped = Vec::new();
     for v in &cfg.vkeys {
-        let existing = state
-            .vkeys
-            .as_ref()
-            .and_then(|s| s.list().ok())
-            .unwrap_or_default();
+        let existing = match state.vkeys.as_ref().map(|s| s.list()).transpose() {
+            Ok(Some(records)) => records,
+            result => {
+                if let Err(error) = result {
+                    tracing::error!(%error, "config vkey lookup failed");
+                }
+                failures.push(json!({"component": "vkey", "upstream": v.upstream,
+                    "error": "virtual key inventory unavailable; no key minted"}));
+                continue;
+            }
+        };
         if crate::config::vkey_already_applied(&existing, v) {
             vkeys_skipped
                 .push(json!({ "upstream": v.upstream, "subject": v.subject, "group": v.group }));
@@ -1226,11 +1488,20 @@ pub(crate) async fn config_apply(
                 // Shown once, same convention as a direct `keys share` call — the caller (dashboard
                 // or CLI) is responsible for capturing it; Sandhi never stores the plaintext.
                 vkeys_minted.push(val);
+            } else {
+                failures.push(json!({"component": "vkey", "upstream": v.upstream,
+                    "error": "key minted but response unavailable; inspect inventory before retrying"}));
             }
+        } else {
+            failures.push(json!({"component": "vkey", "upstream": v.upstream,
+                "status": resp.status().as_u16(), "error": "virtual key apply failed"}));
         }
     }
 
-    Json(json!({
+    let complete = failures.is_empty();
+    let mut payload = json!({
+        "ok": complete,
+        "failures": failures,
         "providers": { "applied": providers_applied },
         "budgets": { "applied": budgets_applied },
         "alerts": { "created": alerts_created, "skipped": alerts_skipped },
@@ -1238,8 +1509,19 @@ pub(crate) async fn config_apply(
         // Same acknowledgement as preview: the `tls` section parsed but was NOT applied —
         // listener TLS activates only at process bootstrap (TD-0017 P1), never mid-flight.
         "tls": if cfg.tls.is_some() { "restart required" } else { "not configured" },
-    }))
-    .into_response()
+    });
+    if !complete {
+        payload["error"] = json!("config apply incomplete; committed items were not rolled back; inspect results before retrying");
+    }
+    (
+        if complete {
+            StatusCode::OK
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        },
+        Json(payload),
+    )
+        .into_response()
 }
 
 /// Shared by both the top-level `alerts[]` config entries and a budget's inline
@@ -1251,20 +1533,21 @@ fn apply_one_alert(
     threshold_pct: u8,
     webhook_env: &Option<String>,
     getenv: impl Fn(&str) -> Option<String> + Copy,
-) -> Option<AlertRuleRecord> {
+) -> Result<Option<AlertRuleRecord>, String> {
     let channel_str = crate::config::resolve_channel(webhook_env, getenv);
     let existing = state
         .alert_store
         .as_ref()
-        .and_then(|s| s.list().ok())
-        .unwrap_or_default();
+        .ok_or("alert store not configured")?
+        .list()
+        .map_err(|e| e.to_string())?;
     let entry = crate::config::AlertEntry {
         scope: scope.to_string(),
         threshold_pct,
         webhook_env: webhook_env.clone(),
     };
     if crate::config::alert_already_applied(&existing, &entry, &channel_str) {
-        return None;
+        return Ok(None);
     }
     let channel = channel_str
         .strip_prefix("webhook:")
@@ -1272,7 +1555,7 @@ fn apply_one_alert(
             url: url.to_string(),
         })
         .unwrap_or(AlertChannel::Log);
-    create_alert_for_scope(state, scope, threshold_pct, channel)
+    create_alert_for_scope(state, scope, threshold_pct, channel).map(Some)
 }
 
 #[cfg(test)]

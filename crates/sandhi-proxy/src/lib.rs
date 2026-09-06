@@ -59,10 +59,10 @@ use sandhi_store::{hash_secret, AlertStore, SqliteStore, VaultStore, VirtualKeyS
 use codec::{decode_request, encode_response, encode_stream_event, IngressDialect};
 pub use operator::BudgetSpec;
 
-/// Conservative output ceiling applied to a **budget-capped** scope when the client omits
-/// `max_output_tokens` (ADR-0005 D1). The reservation holds this as an upper bound and the value
-/// is set on the upstream request so the provider bounds output — otherwise an unbounded stream
-/// overshoots the cap (the 100× soft-cap bug). Unlimited scopes are never modified.
+/// Default output maximum for a Block-budgeted scope when the client omits `max_output_tokens`.
+/// Sent upstream to constrain output and included in the admission estimate (ADR-0005 D1).
+/// It is not a proven bound on total usage; input and provider-specific dimensions can exceed
+/// the estimate. Unlimited scopes are never modified.
 const DEFAULT_OUTPUT_CEILING: u64 = 4096;
 
 /// Axum's historical `Bytes` extractor default, now made an explicit Sandhi policy. AI requests
@@ -225,6 +225,9 @@ pub struct ProxyState {
     // --- TD-0003 P1 operator surface ---
     /// Durable provider-credential vault (metadata in SQLite, secret in the active backend).
     pub vault: Option<Arc<VaultStore>>,
+    /// One admitted credential mutation (no waiting queue). Held through persistence/publication,
+    /// even if its HTTP caller disconnects. Keeps blocking vault work off async workers and bounded.
+    pub vault_writer: Arc<tokio::sync::Semaphore>,
     /// Durable virtual-key store (hashes + scope), rehydrates `keys` on startup.
     pub vkeys: Option<Arc<VirtualKeyStore>>,
     /// Builds typed upstream handles from vault-resolved credentials.
@@ -313,6 +316,7 @@ impl ProxyState {
             providers: Mutex::new(providers),
             store,
             vault: None,
+            vault_writer: Arc::new(tokio::sync::Semaphore::new(1)),
             vkeys: None,
             runtime: ProviderRuntime::new(),
             admin_token: None,
@@ -611,6 +615,8 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         .route("/version", get(version))
         .route("/catalog/models", get(catalog_models))
         .route("/dashboard", get(dashboard_html))
+        .route("/dashboard/assets/dashboard.js", get(dashboard_script))
+        .route("/dashboard/assets/dashboard.css", get(dashboard_style))
         .route("/dashboard/api/usage", get(dashboard_api))
         // TD-0003 P4 dashboard read-only endpoints (masked; admin-bearer-gated when an admin
         // token is configured, unless SANDHI_DASHBOARD_PUBLIC=1 — ADR-0004 D4).
@@ -629,6 +635,7 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         // TD-0021 P2 (D5/R2): capability detail — which optional features are on —
         // is operator information, gated like the rest of /admin.
         .route("/admin/version", get(operator::version_capabilities))
+        .route("/admin/keys/reference", post(operator::register_reference))
         .route(
             "/admin/keys",
             post(operator::add_key).get(operator::list_keys),
@@ -655,6 +662,9 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         // Declarative desired-state config (SANDHI_CONFIG) — additive-only apply, see config.rs.
         .route("/admin/config", get(operator::config_preview))
         .route("/admin/config/apply", post(operator::config_apply))
+        // Management responses can contain attribution or one-time credentials. This layer
+        // deliberately precedes the ingress merge: provider response headers stay untouched.
+        .layer(axum::middleware::map_response(management_no_store))
         .merge(ai_routes)
         .layer(DefaultBodyLimit::max(max_request_body_bytes))
         .layer(axum::middleware::from_fn(contract_version_header))
@@ -1330,23 +1340,22 @@ async fn dashboard_api(State(state): State<Arc<ProxyState>>, headers: HeaderMap)
             "dashboard not configured (set SANDHI_STORE)",
         );
     };
-    let payload = json!({
-        "total": store.grand_total().ok(),
-        "by_subject": store.totals_by_subject().unwrap_or_default(),
-        "by_group": store.totals_by_group().unwrap_or_default(),
-        "by_provider": store.totals_by_provider().unwrap_or_default(),
-        "by_model": store.totals_by_model().unwrap_or_default(),
-    });
-    Json(payload).into_response()
+    dashboard_read(move || {
+        Ok(json!({
+            "total": store.grand_total().map_err(|e| e.to_string())?,
+            "by_subject": store.totals_by_subject().map_err(|e| e.to_string())?,
+            "by_group": store.totals_by_group().map_err(|e| e.to_string())?,
+            "by_provider": store.totals_by_provider().map_err(|e| e.to_string())?,
+            "by_model": store.totals_by_model().map_err(|e| e.to_string())?,
+        }))
+    })
+    .await
 }
 
 // --- TD-0003 P4 dashboard read-only endpoints ----------------------------------
 //
-// Auth model: these mirror the self-hosted single-node trust of the existing `/dashboard` HTML and
-// `/dashboard/api/usage` — they are **unauthed**, and rely on **masked-only** output as the security
-// boundary. The operator binds the proxy to a trusted network / localhost and controls access; no
-// secret (raw provider key, virtual-key plaintext, or virtual-key hash) is ever serialized here.
-// Programmatic/automated access that needs gating uses the admin-token-protected `/admin/*` routes.
+// Reads follow require_dashboard_access: admin-gated unless explicitly public or no admin token
+// is configured. Masking protects secrets; it does not replace authorization for attribution.
 // Units are neutral tokens throughout — no dollars / SKU / tier (the measure-vs-price boundary).
 
 /// `GET /dashboard/api/keys` — masked virtual keys + masked vault entries (no secrets, no hashes).
@@ -1362,21 +1371,28 @@ async fn dashboard_keys(State(state): State<Arc<ProxyState>>, headers: HeaderMap
             "keys dashboard not configured (set SANDHI_STORE)",
         );
     }
-    let vkey_records = vkeys
-        .as_ref()
-        .and_then(|s| s.list().ok())
-        .unwrap_or_default()
-        .iter()
-        .map(operator::vkey_record_response)
-        .collect::<Vec<_>>();
-    let vault_entries = vault
-        .as_ref()
-        .and_then(|s| s.list().ok())
-        .unwrap_or_default()
-        .iter()
-        .map(operator::vault_entry_response)
-        .collect::<Vec<_>>();
-    Json(json!({ "virtual_keys": vkey_records, "vault": vault_entries })).into_response()
+    dashboard_read(move || {
+        let vkey_records = vkeys
+            .as_ref()
+            .map(|s| s.list())
+            .transpose()
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default()
+            .iter()
+            .map(operator::vkey_record_response)
+            .collect::<Vec<_>>();
+        let vault_entries = vault
+            .as_ref()
+            .map(|s| s.list())
+            .transpose()
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default()
+            .iter()
+            .map(operator::vault_entry_response)
+            .collect::<Vec<_>>();
+        Ok(json!({ "virtual_keys": vkey_records, "vault": vault_entries }))
+    })
+    .await
 }
 
 /// `GET /dashboard/api/budgets` — every configured scope with limit / window / policy + live spent
@@ -1385,26 +1401,27 @@ async fn dashboard_budgets(State(state): State<Arc<ProxyState>>, headers: Header
     if let Err(denied) = require_dashboard_access(&state, &headers) {
         return denied;
     }
-    let ledger = state.ledger.lock().expect("ledger poisoned");
-    let scopes: Vec<Value> = state
-        .budgets
-        .lock()
-        .expect("budgets poisoned")
-        .values()
-        .map(|spec| {
-            let spent = ledger.spent(&spec.scope);
-            let limit = spec.limit_tokens;
-            json!({
-                "scope": spec.scope,
-                "limit_tokens": limit,
-                "spent": spent,
-                "remaining": limit.saturating_sub(spent),
-                "window": spec.window,
-                "policy": spec.policy,
+    dashboard_read(move || {
+        let ledger = state.ledger.lock().map_err(|e| e.to_string())?;
+        let budgets = state.budgets.lock().map_err(|e| e.to_string())?;
+        let scopes: Result<Vec<Value>, String> = budgets
+            .values()
+            .map(|spec| {
+                let spent = ledger.try_spent(&spec.scope)?;
+                let limit = spec.limit_tokens;
+                Ok(json!({
+                    "scope": spec.scope,
+                    "limit_tokens": limit,
+                    "spent": spent,
+                    "remaining": limit.saturating_sub(spent),
+                    "window": spec.window,
+                    "policy": spec.policy,
+                }))
             })
-        })
-        .collect();
-    Json(json!({ "budgets": scopes })).into_response()
+            .collect();
+        Ok(json!({ "budgets": scopes? }))
+    })
+    .await
 }
 
 /// `GET /dashboard/api/alerts` — recent fired alerts (rules whose threshold has tripped) plus all
@@ -1419,492 +1436,76 @@ async fn dashboard_alerts(State(state): State<Arc<ProxyState>>, headers: HeaderM
             "alerts dashboard not configured (set SANDHI_STORE)",
         );
     };
-    let rules = store.list().unwrap_or_default();
-    let all: Vec<Value> = rules.iter().map(operator::alert_rule_response).collect();
-    let fired: Vec<Value> = rules
-        .iter()
-        .filter(|r| r.last_fired_at.is_some())
-        .map(operator::alert_rule_response)
-        .collect();
-    Json(json!({ "rules": all, "fired": fired })).into_response()
+    dashboard_read(move || {
+        let rules = store.list().map_err(|e| e.to_string())?;
+        let all: Vec<Value> = rules.iter().map(operator::alert_rule_response).collect();
+        let fired: Vec<Value> = rules
+            .iter()
+            .filter(|r| r.last_fired_at.is_some())
+            .map(operator::alert_rule_response)
+            .collect();
+        Ok(json!({ "rules": all, "fired": fired }))
+    })
+    .await
+}
+
+/// Failed observation is unavailable, never an empty or zero-valued success. SQLite reads
+/// run off the async scheduler so a busy database does not park a request worker.
+async fn dashboard_read(read: impl FnOnce() -> Result<Value, String> + Send + 'static) -> Response {
+    match tokio::task::spawn_blocking(read).await {
+        Ok(Ok(payload)) => Json(payload).into_response(),
+        result => {
+            tracing::warn!(?result, "dashboard read unavailable");
+            error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "dashboard data unavailable; retry later",
+            )
+        }
+    }
+}
+
+async fn management_no_store(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert("cache-control", "no-store".parse().unwrap());
+    response
 }
 
 /// The self-hosted single-node dashboard (static HTML; fetches `/dashboard/api/usage`).
 async fn dashboard_html() -> Response {
-    axum::response::Html(DASHBOARD_HTML).into_response()
+    (
+        [
+            ("content-security-policy", "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"),
+            ("x-content-type-options", "nosniff"),
+            ("referrer-policy", "no-referrer"),
+        ],
+        axum::response::Html(DASHBOARD_HTML),
+    ).into_response()
 }
 
-const DASHBOARD_HTML: &str = r####"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sandhi — operator dashboard</title>
-<style>
-  :root {
-    color-scheme: light dark;
-    --bg: #f7f7f8; --surface: #fff; --border: #e2e2e6; --border-soft: #ececef;
-    --text: #16161a; --muted: #6b7280; --accent: #2563eb; --accent-soft: #eff4ff;
-    --good: #047857; --good-soft: #ecfdf5; --warn: #b45309; --warn-soft: #fffbeb;
-    --bad: #b91c1c; --bad-soft: #fef2f2; --shadow: 0 1px 2px rgb(0 0 0 / 0.04);
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #0f1115; --surface: #17191f; --border: #2a2d36; --border-soft: #23252c;
-      --text: #e7e8ea; --muted: #93949c; --accent: #5b8def; --accent-soft: #182236;
-      --good: #34d399; --good-soft: #0d2420; --warn: #f5a524; --warn-soft: #2b2110;
-      --bad: #f87171; --bad-soft: #2b1616; --shadow: 0 1px 2px rgb(0 0 0 / 0.4);
-    }
-  }
-  * { box-sizing: border-box; }
-  body { font: 14px/1.55 -apple-system, ui-sans-serif, system-ui, sans-serif; margin: 0;
-         background: var(--bg); color: var(--text); }
-  .wrap { max-width: 1120px; margin-inline: auto; padding: 0 1.5rem 3rem; }
-  header { position: sticky; top: 0; z-index: 10; background: var(--bg);
-           border-bottom: 1px solid var(--border); padding: 1rem 1.5rem;
-           display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
-  header .brand { display: flex; align-items: baseline; gap: .5rem; margin-right: auto; }
-  h1 { font-size: 1.15rem; margin: 0; font-weight: 700; letter-spacing: -.01em; }
-  .tagline { color: var(--muted); font-size: .8rem; }
-  .token-box { display: flex; align-items: center; gap: .5rem; }
-  .token-box input { font: inherit; font-size: .8rem; padding: .4rem .6rem; border-radius: 7px;
-    border: 1px solid var(--border); background: var(--surface); color: var(--text); width: 15rem; }
-  .dot { width: .5rem; height: .5rem; border-radius: 50%; background: var(--border);
-         box-shadow: 0 0 0 3px transparent; transition: background .15s; }
-  .dot.on { background: var(--good); }
-  h2 { font-size: .95rem; margin: 2.25rem 0 .75rem; font-weight: 700; letter-spacing: -.005em;
-       display: flex; align-items: center; gap: .5rem; }
-  h2:first-of-type { margin-top: 1.75rem; }
-  h2 .hint { font-weight: 400; color: var(--muted); font-size: .78rem; }
-  h3 { color: var(--muted); font-size: .74rem; text-transform: uppercase; letter-spacing: .05em;
-       margin: 1.1rem 0 .4rem; font-weight: 600; }
-  h3:first-child { margin-top: 0; }
-  section.panel { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
-                  padding: 1.1rem 1.25rem; box-shadow: var(--shadow); }
-  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
-           gap: .75rem; margin-bottom: .5rem; }
-  .card { border: 1px solid var(--border); border-radius: 10px; padding: .9rem 1.1rem;
-          background: var(--surface); box-shadow: var(--shadow); }
-  .card .n { font-size: 1.5rem; font-weight: 700; font-variant-numeric: tabular-nums; }
-  .card .l { color: var(--muted); font-size: .74rem; text-transform: uppercase; letter-spacing: .04em; }
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: .5rem .55rem; border-bottom: 1px solid var(--border-soft);
-           vertical-align: middle; }
-  th { color: var(--muted); font-weight: 600; font-size: .74rem; text-transform: uppercase;
-       letter-spacing: .03em; }
-  tbody tr:hover { background: var(--border-soft); }
-  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
-  .muted { color: var(--muted); }
-  .badge { display: inline-block; padding: .1rem .5rem; border-radius: 999px; font-size: .7rem;
-           font-weight: 600; border: 1px solid transparent; }
-  .badge.active { color: var(--good); background: var(--good-soft); }
-  .badge.revoked { color: var(--bad); background: var(--bad-soft); }
-  .bar { background: var(--border-soft); border-radius: 6px; height: 7px; overflow: hidden; min-width: 6rem; }
-  .bar > span { display: block; height: 100%; background: var(--accent); }
-  .bar.warn > span { background: var(--warn); }
-  .bar.over > span { background: var(--bad); }
-  .fired { background: var(--warn-soft); }
-  code { font-size: .82em; background: var(--border-soft); padding: .05rem .35rem; border-radius: 4px; }
-  a { color: var(--accent); }
-  .btn { font: inherit; font-size: .76rem; font-weight: 600; padding: .3rem .65rem; border-radius: 7px;
-         border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer; }
-  .btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
-  .btn:disabled { opacity: .4; cursor: not-allowed; }
-  .btn.danger:hover:not(:disabled) { border-color: var(--bad); color: var(--bad); }
-  .btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
-  .btn.primary:hover:not(:disabled) { opacity: .9; }
-  details.actions { margin-top: .9rem; border-top: 1px solid var(--border-soft); padding-top: .75rem; }
-  details.actions summary { cursor: pointer; font-size: .78rem; font-weight: 600; color: var(--muted); }
-  details.actions summary:hover { color: var(--text); }
-  .form-row { display: flex; gap: .6rem; flex-wrap: wrap; margin-top: .75rem; align-items: end; }
-  .field { display: flex; flex-direction: column; gap: .25rem; }
-  .field label { font-size: .72rem; color: var(--muted); }
-  .field input, .field select { font: inherit; font-size: .8rem; padding: .35rem .5rem;
-    border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
-  .callout { font-size: .78rem; padding: .5rem .7rem; border-radius: 8px; margin-top: .6rem; }
-  .callout.ok { background: var(--good-soft); color: var(--good); }
-  .callout.err { background: var(--bad-soft); color: var(--bad); }
-  .callout.info { background: var(--accent-soft); color: var(--accent); }
-  .toast-wrap { position: fixed; bottom: 1.25rem; right: 1.25rem; display: flex;
-                flex-direction: column; gap: .5rem; z-index: 50; }
-  .toast { padding: .6rem 1rem; border-radius: 9px; font-size: .82rem; box-shadow: var(--shadow);
-           border: 1px solid var(--border); background: var(--surface); animation: slidein .15s ease-out; }
-  .toast.ok { border-color: var(--good); color: var(--good); }
-  .toast.err { border-color: var(--bad); color: var(--bad); }
-  @keyframes slidein { from { transform: translateY(.4rem); opacity: 0; } to { transform: none; opacity: 1; } }
-  .tree { list-style: none; margin: 0; padding-left: 0; }
-  .tree li { margin: 0; }
-  .tree .node { display: flex; align-items: baseline; gap: .6rem; padding: .3rem .4rem;
-                border-radius: 6px; border-bottom: 1px solid var(--border-soft); }
-  .tree .node:hover { background: var(--border-soft); }
-  .tree ul { list-style: none; padding-left: 1.4rem; border-left: 1px dashed var(--border); margin-left: .4rem; }
-  .tree .step { font-weight: 600; }
-  .tree .stat { color: var(--muted); font-size: .76rem; }
-  footer { color: var(--muted); font-size: .76rem; margin-top: 2.5rem; padding-top: 1rem;
-           border-top: 1px solid var(--border-soft); }
-</style>
-</head>
-<body>
-<header>
-  <div class="brand">
-    <h1>Sandhi</h1>
-    <span class="tagline">the metering layer for AI agents — neutral units, no pricing</span>
-  </div>
-  <div class="token-box">
-    <span class="dot" id="token-dot" title="Admin actions locked until a token is set"></span>
-    <input id="admin-token" type="password" placeholder="Admin token — unlocks revoke / ack / add"
-           autocomplete="off">
-  </div>
-</header>
-<div class="wrap">
-
-<h2>Overview</h2>
-<section class="panel"><div class="cards" id="cards"></div></section>
-
-<div id="tables"></div>
-
-<h2>Declarative config <span class="hint">providers, budgets, alerts &amp; vkeys declared in a committed JSON file</span></h2>
-<section class="panel" id="config"></section>
-
-<h2>Virtual keys &amp; credentials <span class="hint">who has access, and where calls actually go</span></h2>
-<section class="panel" id="keys"></section>
-
-<h2>Budgets <span class="hint">neutral-token caps per scope</span></h2>
-<section class="panel">
-  <div id="budgets"></div>
-  <details class="actions"><summary>Set a budget</summary>
-    <div class="form-row">
-      <div class="field"><label>Scope</label><input id="b-scope" placeholder="group:platform"></div>
-      <div class="field"><label>Limit (tokens)</label><input id="b-limit" type="number" placeholder="1000000"></div>
-      <div class="field"><label>Window</label>
-        <select id="b-window"><option value="total">total</option><option value="daily">daily</option>
-          <option value="monthly" selected>monthly</option></select></div>
-      <div class="field"><label>Policy</label>
-        <select id="b-policy"><option value="block" selected>block</option><option value="warn">warn</option></select></div>
-      <button class="btn primary" onclick="setBudget()">Set budget</button>
-    </div>
-    <div id="b-result"></div>
-  </details>
-</section>
-
-<h2>Alerts <span class="hint">threshold rules on budget scopes</span></h2>
-<section class="panel" id="alerts"></section>
-
-<h2>Run cost tree <span class="hint">one agent run's spend, per step, own vs subtree</span></h2>
-<section class="panel">
-  <div class="form-row" style="margin-top:0">
-    <div class="field"><label>Run ID</label><input id="run-id" placeholder="run_01HK..." style="width:16rem"></div>
-    <button class="btn primary" onclick="lookupRun()">Look up</button>
-  </div>
-  <div id="run-tree" style="margin-top:.75rem"></div>
-</section>
-
-<footer>
-  Read-only data above loads without a token (self-hosted single-node trust; masked secrets only).
-  Mutating actions — revoke, acknowledge, mint, add, set — require the admin token and call the
-  same <code>/admin/*</code> API the <code>sandhi</code> CLI uses.
-</footer>
-</div>
-<div class="toast-wrap" id="toasts"></div>
-
-<script>
-const fmt = n => (n ?? 0).toLocaleString();
-const esc = s => String(s ?? "").replace(/[&<>"]/g, c =>
-  ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
-const orDash = s => (s === null || s === undefined || s === "") ? "—" : esc(s);
-// No latency is "—", never "0 ms": a call that never reported a duration is unknown, not fast.
-const lat = l => (!l || !l.samples) ? "—"
-  : `${fmt(l.p50_ms)} / ${fmt(l.p95_ms)} ms <span class="muted">(n=${fmt(l.samples)})</span>`;
-
-// --- admin token: session-only, unlocks mutating actions -----------------------------------
-const tokenEl = document.getElementById("admin-token");
-const dotEl = document.getElementById("token-dot");
-tokenEl.value = sessionStorage.getItem("sandhi_admin_token") || "";
-function refreshTokenState() {
-  const on = tokenEl.value.length > 0;
-  dotEl.classList.toggle("on", on);
-  document.querySelectorAll("[data-needs-token]").forEach(b => b.disabled = !on);
-}
-tokenEl.addEventListener("input", () => {
-  sessionStorage.setItem("sandhi_admin_token", tokenEl.value);
-  refreshTokenState();
-  loadConfig();
-});
-
-function toast(msg, ok) {
-  const t = document.createElement("div");
-  t.className = "toast " + (ok ? "ok" : "err");
-  t.textContent = msg;
-  document.getElementById("toasts").appendChild(t);
-  setTimeout(() => t.remove(), 4000);
+async fn dashboard_script() -> Response {
+    (
+        [
+            ("content-type", "text/javascript; charset=utf-8"),
+            ("x-content-type-options", "nosniff"),
+        ],
+        include_str!("dashboard/dashboard.js"),
+    )
+        .into_response()
 }
 
-// Thin wrapper: attaches the admin bearer, surfaces non-2xx as a toast, returns parsed JSON or null.
-async function adminCall(method, path, body) {
-  const token = tokenEl.value;
-  if (!token) { toast("Enter the admin token first", false); return null; }
-  try {
-    const resp = await fetch(path, {
-      method, headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
-      body: body ? JSON.stringify(body) : undefined,
-    });
-    const data = await resp.json().catch(() => ({}));
-    if (!resp.ok) { toast((data.error && data.error.message) || `request failed (${resp.status})`, false); return null; }
-    return data;
-  } catch (e) { toast("network error: " + e.message, false); return null; }
+async fn dashboard_style() -> Response {
+    (
+        [
+            ("content-type", "text/css; charset=utf-8"),
+            ("x-content-type-options", "nosniff"),
+        ],
+        include_str!("dashboard/dashboard.css"),
+    )
+        .into_response()
 }
 
-function tbl(title, rows) {
-  const body = rows.map(r => `<tr><td>${esc(r.key)}</td><td class="num">${fmt(r.calls)}</td>`
-    + `<td class="num">${fmt(r.tokens_in)}</td><td class="num">${fmt(r.tokens_out)}</td>`
-    + `<td class="num">${fmt(r.cache_creation_tokens)}</td><td class="num">${fmt(r.cache_read_tokens)}</td>`
-    + `<td class="num">${fmt(r.billable_tokens)}</td>`
-    + `<td class="num">${lat(r.latency)}</td></tr>`).join("");
-  return `<h3>${title}</h3><table><thead><tr><th>key</th><th class="num">calls</th>`
-    + `<th class="num">in</th><th class="num">out</th><th class="num">cache write</th>`
-    + `<th class="num">cache read</th><th class="num" title="ADR-0005 D4: the quantity budgets `
-    + `are enforced on — fresh input + cache split + output (+ unfolded reasoning)">billable`
-    + `</th><th class="num" title="p50 / p95 milliseconds over the sampled calls that reported a `
-    + `duration — approximate by design; tokens above are exact">latency</th></tr></thead>`
-    + `<tbody>${body || '<tr><td colspan=8>no data yet</td></tr>'}</tbody></table>`;
-}
-
-function loadUsage() {
-  fetch("/dashboard/api/usage").then(r => r.json()).then(d => {
-    const t = d.total || { calls: 0, tokens_in: 0, tokens_out: 0, cache_read_tokens: 0, billable_tokens: 0 };
-    document.getElementById("cards").innerHTML =
-      [["calls", fmt(t.calls)], ["tokens in", fmt(t.tokens_in)], ["tokens out", fmt(t.tokens_out)],
-       ["cache read", fmt(t.cache_read_tokens)], ["billable", fmt(t.billable_tokens)],
-       ["latency p50/p95", lat(t.latency)]]
-      .map(([l, n]) => `<div class="card"><div class="n">${n}</div><div class="l">${l}</div></div>`).join("");
-    document.getElementById("tables").innerHTML =
-      `<h2>Attribution</h2><section class="panel">`
-      + tbl("By user (subject)", d.by_subject || [])
-      + tbl("By team (group)", d.by_group || [])
-      + tbl("By provider", d.by_provider || [])
-      + tbl("By model", d.by_model || [])
-      + `</section>`;
-  }).catch(() => { document.getElementById("tables").innerHTML =
-    '<p class="muted">usage store not configured (set SANDHI_STORE).</p>'; });
-}
-
-// Keys: masked virtual keys + vault entries. Never a secret. Revoke/add are admin-gated.
-function keysView(d) {
-  const vkeys = (d.virtual_keys || []).map(k => {
-    const status = k.revoked_at ? "revoked" : "active";
-    const disabled = status === "revoked" ? "disabled" : "";
-    return `<tr><td><code>${esc(k.id)}</code></td><td>${orDash(k.subject)}</td><td>${orDash(k.group)}</td>`
-      + `<td><code>${esc(k.upstream_ref)}</code></td><td>${(k.models||[]).map(esc).join(", ")||'<span class="muted">any</span>'}</td>`
-      + `<td><span class="badge ${status}">${status}</span></td><td>${orDash(k.expires_at)}</td>`
-      + `<td><button class="btn danger" data-needs-token ${disabled} onclick="revokeVkey('${esc(k.id)}')">Revoke</button></td></tr>`;
-  }).join("");
-  const vault = (d.vault || []).map(e => `<tr><td><code>${esc(e.credential_id)}</code></td>`
-    + `<td>${esc(e.scheme)}</td><td>${orDash(e.base_url)}</td>`
-    + `<td><span class="badge ${e.status}">${esc(e.status)}</span></td>`
-    + `<td><button class="btn danger" data-needs-token onclick="revokeCred('${esc(e.provider)}','${esc(e.label)}')">Revoke</button></td></tr>`).join("");
-  return `<h3>Virtual keys (masked — secrets are never stored)</h3>`
-    + `<table><thead><tr><th>id</th><th>subject</th><th>group</th><th>upstream</th><th>models</th><th>status</th><th>expires</th><th></th></tr></thead>`
-    + `<tbody>${vkeys || '<tr><td colspan=8>no virtual keys</td></tr>'}</tbody></table>`
-    + `<details class="actions"><summary>Mint a virtual key</summary>
-        <div class="form-row">
-          <div class="field"><label>Upstream</label><input id="v-upstream" placeholder="ollama:default" style="width:9rem"></div>
-          <div class="field"><label>Subject</label><input id="v-subject" placeholder="alice"></div>
-          <div class="field"><label>Group</label><input id="v-group" placeholder="platform"></div>
-          <div class="field"><label>Models (csv)</label><input id="v-models" placeholder="optional"></div>
-          <div class="field"><label>Rate/min</label><input id="v-rate" type="number" placeholder="60" style="width:5rem"></div>
-          <button class="btn primary" data-needs-token onclick="mintVkey()">Mint</button>
-        </div>
-        <div id="v-result"></div>
-      </details>`
-    + `<h3 style="margin-top:1.5rem">Provider credentials (vault metadata)</h3>`
-    + `<table><thead><tr><th>credential</th><th>scheme</th><th>base url</th><th>status</th><th></th></tr></thead>`
-    + `<tbody>${vault || '<tr><td colspan=5>no provider credentials</td></tr>'}</tbody></table>`
-    + `<details class="actions"><summary>Add a credential</summary>
-        <div class="form-row">
-          <div class="field"><label>Provider</label><input id="c-provider" placeholder="ollama" style="width:7rem"></div>
-          <div class="field"><label>Label</label><input id="c-label" placeholder="default" style="width:7rem"></div>
-          <div class="field"><label>Base URL</label><input id="c-baseurl" placeholder="http://host:11434" style="width:13rem"></div>
-          <div class="field"><label>Secret</label><input id="c-secret" type="password" placeholder="empty is fine for keyless" style="width:12rem"></div>
-          <button class="btn primary" data-needs-token onclick="addCredential()">Add</button>
-        </div>
-        <div id="c-result"></div>
-      </details>`;
-}
-function loadKeys() {
-  fetch("/dashboard/api/keys").then(r => r.ok ? r.json() : null).then(d => {
-    document.getElementById("keys").innerHTML = d ? keysView(d) : "";
-    refreshTokenState();
-  }).catch(() => {});
-}
-async function revokeVkey(id) {
-  if (!(await adminCall("DELETE", `/admin/vkeys/${encodeURIComponent(id)}`))) return;
-  toast("Virtual key revoked", true); loadKeys();
-}
-async function revokeCred(provider, label) {
-  if (!(await adminCall("DELETE", `/admin/keys/${encodeURIComponent(provider)}/${encodeURIComponent(label)}`))) return;
-  toast("Credential revoked", true); loadKeys();
-}
-async function mintVkey() {
-  const models = document.getElementById("v-models").value.trim();
-  const rate = document.getElementById("v-rate").value;
-  const body = {
-    upstream: document.getElementById("v-upstream").value.trim(),
-    subject: document.getElementById("v-subject").value.trim() || null,
-    group: document.getElementById("v-group").value.trim() || null,
-    models: models ? models.split(",").map(s => s.trim()).filter(Boolean) : null,
-    rate_limit_per_min: rate ? Number(rate) : null,
-  };
-  const data = await adminCall("POST", "/admin/keys/share", body);
-  if (!data) return;
-  document.getElementById("v-result").innerHTML =
-    `<div class="callout ok">Minted — copy now, shown once: <code>${esc(data.virtual_key)}</code></div>`;
-  loadKeys();
-}
-async function addCredential() {
-  const body = {
-    provider: document.getElementById("c-provider").value.trim(),
-    label: document.getElementById("c-label").value.trim() || null,
-    base_url: document.getElementById("c-baseurl").value.trim() || null,
-    secret: document.getElementById("c-secret").value,
-  };
-  const data = await adminCall("POST", "/admin/keys", body);
-  if (!data) return;
-  document.getElementById("c-result").innerHTML = `<div class="callout ok">Registered ${esc(data.credential_id || "")}</div>`;
-  loadKeys();
-}
-
-// Budgets: spent-vs-limit bar + window + policy. Neutral tokens.
-function budgetsView(d) {
-  const rows = (d.budgets || []).map(b => {
-    const limit = b.limit_tokens || 0, spent = b.spent || 0;
-    const pct = limit > 0 ? Math.min(100, Math.round(spent * 100 / limit)) : 0;
-    const cls = pct >= 100 ? "over" : (pct >= 80 ? "warn" : "");
-    return `<tr><td><code>${esc(b.scope)}</code></td>`
-      + `<td>${fmt(spent)} <span class="muted">/ ${fmt(limit)}</span></td>`
-      + `<td style="min-width:8rem"><div class="bar ${cls}"><span style="width:${pct}%"></span></div></td>`
-      + `<td>${esc(b.window)}</td><td>${esc(b.policy)}</td></tr>`;
-  }).join("");
-  return `<table><thead><tr><th>scope</th><th class="num">spent / limit (tokens)</th><th>utilization</th><th>window</th><th>policy</th></tr></thead>`
-    + `<tbody>${rows || '<tr><td colspan=5>no budgets configured</td></tr>'}</tbody></table>`;
-}
-function loadBudgets() {
-  fetch("/dashboard/api/budgets").then(r => r.ok ? r.json() : { budgets: [] }).then(d => {
-    document.getElementById("budgets").innerHTML = budgetsView(d);
-  }).catch(() => { document.getElementById("budgets").innerHTML =
-    '<p class="muted">usage store not configured (set SANDHI_STORE).</p>'; });
-}
-async function setBudget() {
-  const body = {
-    scope: document.getElementById("b-scope").value.trim(),
-    limit_tokens: Number(document.getElementById("b-limit").value || 0),
-    window: document.getElementById("b-window").value,
-    policy: document.getElementById("b-policy").value,
-  };
-  const data = await adminCall("POST", "/admin/budget", body);
-  if (!data) return;
-  document.getElementById("b-result").innerHTML = `<div class="callout ok">Budget set for ${esc(body.scope)}</div>`;
-  loadBudgets();
-}
-
-function alertRow(a) {
-  const fired = a.last_fired_at
-    ? `<span style="color:var(--warn)">${esc(a.last_fired_at)}</span>` : '<span class="muted">never</span>';
-  const ackBtn = a.last_fired_at
-    ? `<button class="btn" data-needs-token onclick="ackAlert('${esc(a.id)}')">Ack</button>` : "";
-  return `<tr ${a.last_fired_at ? 'class="fired"' : ''}><td><code>${esc(a.id)}</code></td>`
-    + `<td><code>${esc(a.scope)}</code></td><td class="num">${esc(a.threshold_pct)}%</td>`
-    + `<td>${esc(a.channel)}</td><td>${fired}</td><td>${ackBtn}</td></tr>`;
-}
-function alertsView(d) {
-  const fired = (d.fired || []).map(alertRow).join("");
-  const rules = (d.rules || []).map(alertRow).join("");
-  return `<h3>Recently fired</h3>`
-    + `<table><thead><tr><th>id</th><th>scope</th><th class="num">threshold</th><th>channel</th><th>last fired</th><th></th></tr></thead>`
-    + `<tbody>${fired || '<tr><td colspan=6>none fired</td></tr>'}</tbody></table>`
-    + `<h3 style="margin-top:1.5rem">All configured rules</h3>`
-    + `<table><thead><tr><th>id</th><th>scope</th><th class="num">threshold</th><th>channel</th><th>last fired</th><th></th></tr></thead>`
-    + `<tbody>${rules || '<tr><td colspan=6>no rules configured</td></tr>'}</tbody></table>`;
-}
-function loadAlerts() {
-  fetch("/dashboard/api/alerts").then(r => r.ok ? r.json() : null).then(d => {
-    document.getElementById("alerts").innerHTML = d ? alertsView(d) : "";
-    refreshTokenState();
-  }).catch(() => {});
-}
-async function ackAlert(id) {
-  if (!(await adminCall("POST", `/admin/alerts/${encodeURIComponent(id)}/ack`))) return;
-  toast("Alert acknowledged", true); loadAlerts();
-}
-
-// Declarative config: preview needs the admin token just to READ (config_preview is
-// admin-gated, unlike the other read-only dashboard panels) since it reflects live vault/vkey
-// state, not just masked metadata. Apply is additive-only server-side — see config.rs.
-const actionBadge = a => {
-  const cls = a === "create" || a === "mint" ? "active" : (a === "update" ? "" : "revoked");
-  return `<span class="badge ${cls}" style="${cls ? '' : 'color:var(--muted);background:var(--border-soft)'}">${esc(a)}</span>`;
-};
-function configPlanTable(title, rows, cols) {
-  const body = rows.map(r => `<tr>${cols.map(c => `<td>${orDash(r[c])}</td>`).join("")}<td>${actionBadge(r.action)}</td></tr>`).join("");
-  return `<h3>${title}</h3><table><thead><tr>${cols.map(c => `<th>${c}</th>`).join("")}<th>plan</th></tr></thead>`
-    + `<tbody>${body || `<tr><td colspan=${cols.length + 1}>none declared</td></tr>`}</tbody></table>`;
-}
-async function loadConfig() {
-  const el = document.getElementById("config");
-  if (!tokenEl.value) {
-    el.innerHTML = '<p class="muted">Enter the admin token above to preview the declarative config (config_preview reflects live credential/vkey state, so it\'s admin-gated like everything else that isn\'t masked-only).</p>';
-    return;
-  }
-  const data = await adminCall("GET", "/admin/config");
-  if (!data) { el.innerHTML = '<p class="muted">no config configured (set SANDHI_CONFIG on the proxy)</p>'; return; }
-  el.innerHTML = `<p class="muted" style="margin:0 0 .75rem">${esc(data.path)}</p>`
-    + configPlanTable("Providers", data.providers, ["credential_id", "base_url"])
-    + configPlanTable("Budgets", data.budgets, ["scope", "limit_tokens"])
-    + configPlanTable("Alerts", data.alerts, ["scope", "threshold_pct"])
-    + configPlanTable("Virtual keys", data.vkeys, ["upstream", "subject", "group"])
-    + `<div class="form-row" style="margin-top:1rem"><button class="btn primary" data-needs-token onclick="applyConfig()">Apply config</button></div>`
-    + `<div id="config-result"></div>`;
-  refreshTokenState();
-}
-async function applyConfig() {
-  const data = await adminCall("POST", "/admin/config/apply");
-  if (!data) return;
-  const n = (x) => (x || []).length;
-  let summary = `<div class="callout ok">Applied — providers: ${n(data.providers.applied)}, `
-    + `budgets: ${n(data.budgets.applied)}, alerts: ${n(data.alerts.created)} created / ${n(data.alerts.skipped)} already satisfied, `
-    + `vkeys: ${n(data.vkeys.minted)} minted / ${n(data.vkeys.skipped)} already satisfied</div>`;
-  if (n(data.vkeys.minted)) {
-    summary += `<div class="callout info">New virtual keys — copy now, shown once:<br>`
-      + data.vkeys.minted.map(k => `<code>${esc(k.virtual_key)}</code> (${esc(k.upstream_ref)})`).join("<br>")
-      + `</div>`;
-  }
-  document.getElementById("config-result").innerHTML = summary;
-  loadConfig(); loadKeys(); loadBudgets(); loadAlerts();
-}
-
-// Run cost tree: recursive own-vs-rollup breakdown for one agentic run. Admin-gated (attribution
-// across a whole run can span multiple subjects, so it is treated like any other admin query).
-function renderNode(n) {
-  const kids = (n.children || []).map(renderNode).join("");
-  return `<li><div class="node"><span class="step">${esc(n.step_id)}</span>`
-    + `<span class="stat">own ${fmt(n.own && n.own.billable_tokens)} · subtree ${fmt(n.rollup && n.rollup.billable_tokens)} tok</span></div>`
-    + (kids ? `<ul>${kids}</ul>` : "") + `</li>`;
-}
-async function lookupRun() {
-  const id = document.getElementById("run-id").value.trim();
-  if (!id) return;
-  const data = await adminCall("GET", `/admin/usage/run/${encodeURIComponent(id)}`);
-  const el = document.getElementById("run-tree");
-  if (!data) { el.innerHTML = ""; return; }
-  const roots = (data.roots || []).map(renderNode).join("");
-  el.innerHTML = `<div class="callout info">Total: ${fmt(data.total && data.total.billable_tokens)} billable tokens across ${fmt(data.total && data.total.calls)} calls</div>`
-    + `<ul class="tree" style="margin-top:.6rem">${roots || '<li class="muted">no steps recorded for this run</li>'}</ul>`;
-}
-
-refreshTokenState();
-loadUsage(); loadKeys(); loadBudgets(); loadAlerts(); loadConfig();
-</script>
-</body>
-</html>
-"####;
+const DASHBOARD_HTML: &str = include_str!("dashboard/index.html");
 
 async fn handle_openai(
     State(state): State<Arc<ProxyState>>,
@@ -2331,12 +1932,10 @@ async fn handle(
         );
     }
 
-    // 5. Reserve a **ceiling** — a conservative upper bound (input estimate + the effective output
-    //    max), not a lower-bound estimate (ADR-0005 D1). A call whose worst case would breach the
-    //    cap is refused *before* dispatch, so a hard cap cannot be overshot. On a budget-capped
-    //    scope where the client left the output unbounded, we also set that bound on the upstream
-    //    request so the provider caps output — making the reservation enforceable. The measured
-    //    `billable()` (cache split included, D4) replaces the reservation after completion.
+    // 5. Reserve an estimated liability (input bytes/4 + effective output maximum).
+    //    Block rejects reservations exceeding the cap, but the input heuristic is NOT a proven
+    //    token bound. Actual usage, including concurrent calls and separate reasoning, may exceed
+    //    reservations and the cap. Settlement always records the measured billable quantity.
     // Plane selection (ADR-0004 D1 / TD-0006): when the client's ingress dialect and the resolved
     // upstream are the SAME family, forward the client's bytes verbatim (transparent metering) —
     // no `ChatRequestV1` re-encode, so prompt-cache prefixes and provider-specific fields survive,
@@ -2381,9 +1980,9 @@ async fn handle(
 
     let scope = budget_scope(&vk);
     let policy = scope_policy(&state, &scope);
-    // A scope is "capped" (for output-bounding) only under a hard `Block` cap: a `Warn` soft cap
-    // never rejects, so we do not shrink the client's request. Bounding output makes the ceiling
-    // reservation enforceable when the client left `max_output_tokens` unset (ADR-0005 D1).
+    // A scope is "capped" (for output-bounding) only under a `Block` policy: `Warn` never rejects,
+    // so we do not shrink the client's request. An output maximum reduces exposure when the
+    // client omitted it; it does not make the estimated total a strict cap (TD-0026 W03).
     let (ceiling, effective_max) = reservation_ceiling(&request, body.len());
     // SQLite's transaction remains a synchronous correctness boundary, but it runs on Tokio's
     // blocking pool so its busy timeout never parks an async scheduler worker.
@@ -3000,8 +2599,8 @@ impl RequestAccounting {
         // You cannot simultaneously guarantee "spend never exceeds the cap" and "a real
         // measurement is never lost", once the provider can report more than was reserved.
         // Sandhi's product is the measurement, and the count feeds a downstream ledger it must not
-        // lie to; the cap is a control that recovers on its own, because the overshoot is bounded
-        // by one call and the *next* reservation is refused. So: record the truth, and make the
+        // lie to; later reservations are refused once committed spend consumes the cap, but
+        // every already-admitted call can contribute excess. So: record the truth, and make the
         // under-reservation visible instead of paying for it in silence.
         if let Some(reservation) = &self.reservation {
             if actual > reservation.ceiling {
@@ -3266,7 +2865,8 @@ fn input_estimate(body_len: usize) -> u64 {
 /// The reservation **ceiling** (ADR-0005 D1): input estimate + the effective output max (the
 /// client's `max_output_tokens`, or [`DEFAULT_OUTPUT_CEILING`] when unbounded). Returns the ceiling
 /// and the effective max so the caller can bound a capped scope's upstream request. This is a
-/// conservative upper bound, not the old `+ 1` lower-bound estimate that let streams overshoot.
+/// heuristic reservation, NOT a proven upper bound. Output controls alone cannot bound input,
+/// media, provider-added tools or separately reported reasoning across arbitrary providers.
 fn reservation_ceiling(request: &ChatRequestV1, body_len: usize) -> (u64, u64) {
     let effective_max = request.max_output_tokens.unwrap_or(DEFAULT_OUTPUT_CEILING);
     let ceiling = input_estimate(body_len)
@@ -3326,6 +2926,7 @@ fn reported_parts(usage: &UsageV2) -> ParsedUsage {
         cache_creation_tokens: usage.cache_creation_tokens,
         cache_read_tokens: usage.cache_read_tokens,
         reasoning_tokens: usage.reasoning_tokens.unwrap_or(0),
+        reasoning_included: usage.reasoning_included,
     }
 }
 
@@ -3345,6 +2946,7 @@ fn partial_usage(reported: Option<ParsedUsage>, delta_out_bytes: u64) -> UsageV2
         cache_read_tokens: reported.cache_read_tokens,
         tokens_out: reported.tokens_out.max(estimated_out),
         reasoning_tokens: (reported.reasoning_tokens > 0).then_some(reported.reasoning_tokens),
+        reasoning_included: reported.reasoning_included,
         completeness: UsageCompleteness::Partial,
         // `Estimated` means "at least one category came from the byte fallback" — so the label
         // tracks whether the estimate actually contributed, not merely whether one was available.
@@ -3409,6 +3011,8 @@ fn usage_event(
         metadata.trace_context.clone(),
     )
     .with_tokens(usage.tokens_in, usage.tokens_out)
+    .with_reasoning(usage.reasoning_tokens)
+    .with_reasoning_included(usage.reasoning_included)
     .with_cache(usage.cache_creation_tokens, usage.cache_read_tokens)
     .with_measurement(
         usage.completeness,
@@ -3713,6 +3317,7 @@ mod partial_accounting_tests {
     /// The counts a real Anthropic `message_start` announces before any content streams —
     /// the numbers taken verbatim from `tests/fixtures/anthropic/stream_cache_split.sse`.
     const AT_MESSAGE_START: ParsedUsage = ParsedUsage {
+        reasoning_included: Some(true),
         tokens_in: 1024,
         tokens_out: 0,
         cache_creation_tokens: 2048,
@@ -4256,5 +3861,23 @@ mod connection_policy_tests {
                 schema_less
             );
         }
+    }
+}
+#[test]
+fn reasoning_survives_event_and_partial_conversion() {
+    for thoughts in [25, 40, 90] {
+        let usage = UsageV2 {
+            tokens_in: 70,
+            cache_read_tokens: 30,
+            tokens_out: 40,
+            reasoning_tokens: Some(thoughts),
+            reasoning_included: Some(false),
+            ..UsageV2::default()
+        };
+        let event = usage_event("gemini", "m", &RequestMetadataV1::default(), &usage, None);
+        assert_eq!(event.billable_tokens(), 140 + thoughts);
+        let partial = partial_usage(Some(reported_parts(&usage)), 0);
+        assert_eq!(billable(&partial), 140 + thoughts);
+        assert_eq!(partial.reasoning_included, Some(false));
     }
 }

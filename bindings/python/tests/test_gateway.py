@@ -1067,3 +1067,14 @@ def test_contradictory_auth_scheme_still_rejected_with_explanation():
     message = str(excinfo.value)
     assert "api_key" in message
     assert "no-op" in message  # the error teaches the contract
+def test_separate_reasoning_survives_event_and_aggregate():
+    import sandhi_gateway as sg
+    gateway = sg.Gateway()
+    gateway.add_virtual_key("vk_reason", subject="alice", group="reason", upstream="gemini")
+    for thoughts in [25, 40, 90]:
+        event = gateway.meter("vk_reason", "gemini", "m", json.dumps({"usageMetadata": {
+            "promptTokenCount": 100, "candidatesTokenCount": 40, "thoughtsTokenCount": thoughts,
+        }}))
+        assert event["reasoning_tokens"] == thoughts
+        assert event["reasoning_included"] is False
+    assert gateway.spent("group:reason") == 140 * 3 + 25 + 40 + 90

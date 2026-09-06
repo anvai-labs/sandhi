@@ -159,6 +159,7 @@ pub(crate) fn sniff_usage_line(line: &[u8], acc: &mut ParsedUsage) -> bool {
         Some("message_start") => {
             if let Some(u) = v.get("message").and_then(|m| m.get("usage")) {
                 acc.tokens_in = u64_at(u, "input_tokens");
+                acc.reasoning_included = Some(true);
                 acc.cache_creation_tokens = u64_at(u, "cache_creation_input_tokens");
                 acc.cache_read_tokens = u64_at(u, "cache_read_input_tokens");
                 return true;
@@ -167,6 +168,7 @@ pub(crate) fn sniff_usage_line(line: &[u8], acc: &mut ParsedUsage) -> bool {
         Some("message_delta") => {
             if let Some(u) = v.get("usage") {
                 acc.tokens_out = u64_at(u, "output_tokens");
+                acc.reasoning_included = Some(true);
                 return true;
             }
         }
@@ -187,6 +189,7 @@ mod tests {
     use http::header::{HeaderName, HeaderValue};
 
     const EXPECTED: ParsedUsage = ParsedUsage {
+        reasoning_included: Some(true),
         tokens_in: 1024,
         tokens_out: 256,
         cache_creation_tokens: 2048,

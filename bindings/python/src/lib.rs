@@ -673,6 +673,7 @@ impl Gateway {
             cache_creation_tokens,
             cache_read_tokens,
             reasoning_tokens: 0,
+            reasoning_included: None,
         };
         self.record_and_build(py, virtual_key, provider, model, parsed, session_id, route)
     }
@@ -790,6 +791,10 @@ fn parsed_from_pyobj(obj: &Bound<'_, PyAny>) -> ParsedUsage {
         cache_creation_tokens: get("cache_creation_tokens"),
         cache_read_tokens: get("cache_read_tokens"),
         reasoning_tokens: get("reasoning_tokens"),
+        reasoning_included: obj
+            .get_item("reasoning_included")
+            .ok()
+            .and_then(|v| v.extract::<bool>().ok()),
     }
 }
 
@@ -861,6 +866,8 @@ fn event_to_dict<'py>(py: Python<'py>, e: &UsageEvent) -> PyResult<Bound<'py, Py
     d.set_item("session_id", e.session_id.clone())?;
     d.set_item("tokens_in", e.tokens_in)?;
     d.set_item("tokens_out", e.tokens_out)?;
+    d.set_item("reasoning_tokens", e.reasoning_tokens)?;
+    d.set_item("reasoning_included", e.reasoning_included)?;
     d.set_item("cache_creation_tokens", e.cache_creation_tokens)?;
     d.set_item("cache_read_tokens", e.cache_read_tokens)?;
     d.set_item(
