@@ -221,6 +221,39 @@ The full SDK/dashboard/broker suite with AgentBrowser passed **95 tests, 1 skipp
 unavailable locally); all-target clippy also passed without the native feature. C01b in TD-0026
 tracks integration separately; no merge or release is implied by local verification.
 
+## W06a execution gates (2026-09-06; not implemented)
+
+The next slice must cover the whole shutdown path, not just add a readiness flag:
+
+1. Define a lifecycle/cutoff shared by the listener and request admission. Keep fresh HTTP/TLS
+   probes reachable during a bounded quiesce phase; `/readyz` returns 503 while `/healthz`
+   retains 200. Readiness remains drain-only, not a new ledger/provider-health policy.
+2. Reject new model requests and admin mutations before dispatch after the cutoff, including
+   requests already waiting on admission/body reads. Pin the race between cutoff and permit
+   acquisition; merely checking middleware once is insufficient. Existing admitted streams
+   may finish within the remaining deadline. Define cutoff as dispatch authorization's
+   linearization point: already-authorized work may send bytes later. A literal network-byte
+   cutoff would require transport-level gating. Own reservation guards across detached work
+   so pre-dispatch cancellation cannot orphan leases; track admitted mutations until completion.
+3. Own one monotonic deadline across quiesce, connection cancellation, both writer drains,
+   runtime cleanup and telemetry shutdown. `RequestAccounting::Drop` calls synchronous
+   settlement, the aborted-task join loop is currently unbounded, and detached blocking
+   admission/broker work may outlive its request. `#[tokio::main]` runtime drop and
+   `OtelGuard::Drop` can also wait beyond the listener grace. Explicitly bound or disclose
+   those phases; do not claim a process-wide bound from `close(remaining)` alone.
+4. Before shipping, test real HTTP/TLS fresh probes, keep-alive requests, stalled handshakes,
+   queued admissions, in-flight SSE, locked SQLite settlement, blocked writer callbacks and
+   telemetry shutdown. Assert no post-cutoff dispatch, truthful unfinished/uncertain work,
+   and an externally measured process-exit bound. Do not relabel abandoned work as persisted.
+   Include saturated connection/per-IP limits: a bounded probe allowance or a qualified
+   reachability contract is required, not removal of existing transport protections.
+
+Listener ownership is in `serve_router_listener_with_shutdown`; application admission and
+request accounting are in `lib.rs`; binary/runtime/writer sequencing is in `main.rs`; telemetry
+cleanup is in `otel.rs`. Library embedders must retain runtime ownership and receive an honest
+bounded shutdown result rather than a process-wide termination side effect. W05 continues to
+own authoritative unknown liability and durable settlement evidence.
+
 ## Remaining pool decision
 
 **What is the right default `pool_max_idle_per_host`?** Gated on

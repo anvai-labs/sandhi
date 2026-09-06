@@ -45,7 +45,7 @@ marking a planning task complete does not mark its implementation complete.
 | Checkpoint | Scope | Local verification | Remote CI / review | Integrated | Released |
 |---|---|---|---|---|---|
 | C01 | W01–W04 and inactive W05a storage foundation; branch `feat/gateway-trust-checkpoint` | Passed; clean scoped re-review, 103 SDK/browser tests, 37 upgraded Python tests, 94.12% binding coverage | [PR #230](https://github.com/anvai-labs/sandhi/pull/230) merged with explicit owner-authorized review bypass; pre- and [post-merge CI](https://github.com/anvai-labs/sandhi/actions/runs/34015573003) green | Complete: `8f56b91` on `develop` | No |
-| C01b | W06b best-effort buffer visibility; branch `feat/operational-buffer-visibility`, updated from C01 | Prior isolated verification passed; current-base regression/re-review in progress | Preparing separate PR against `develop`; own green CI and clean review required | Pending | No |
+| C01b | W06b best-effort buffer visibility; branch `feat/operational-buffer-visibility`, updated from C01 | Passed: 105 SDK/browser tests, native workspace tests, 87.18% coverage; current-base adversarial re-review clean | Separate PR against `develop`; own latest-head CI required before merge | Pending | No |
 | C02 | Initial W06 and M1 operator-journey acceptance, then `develop` → `main` | Pending | Pending promotion PR and post-merge CI | Pending | No; tagging/publishing is a separate action |
 
 C01 checkpoints completed work now instead of waiting for W05–W14. Do not claim M1 complete
@@ -424,3 +424,10 @@ unit suite is not a distributed correctness proof. Record evidence and update th
   Next: full current-base regression, independent adversarial re-review, separate PR and CI.
   W06a probe-reachable shutdown remains the next implementation slice after this checkpoint;
   W06c/W06d and M1/main promotion are not completed by buffer metrics.
+- 2026-09-06: C01b current-base verification passed: full native-feature workspace suite,
+  all-target clippy with/without native IPC, fmt, generated binding facade and diff checks.
+  Native-feature workspace line coverage is **87.18%**; full SDK/browser/broker tests with
+  optional real AgentBrowser are **105 passed, 1 skipped** (Google SDK absent locally).
+  Coverage initially hit sandbox socket restrictions; the permitted loopback rerun passed.
+  Independent adversarial re-review found no blocker and verified runtime/test files unchanged
+  from the prior reviewed W06b implementation. This is local evidence; remote CI is separate.
