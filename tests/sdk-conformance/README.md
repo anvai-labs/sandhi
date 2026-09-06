@@ -40,6 +40,15 @@ explicitly unconfigured states and the existing metrics authentication gate. Det
 blocked-writer unit tests separately pin queue/in-flight/drop counters; an empty queue is not
 a claim that SQLite commits succeeded.
 
+`test_recovery_snapshot.py` validates the test-only offline snapshot helper, including WAL,
+complete fixed-shard file sets, integrity, checksums and private, disjoint destinations.
+`test_recovery.py` compares real-process restart/restore evidence, holds uncertain leases
+across SIGKILL and reconciles post-snapshot revocations before enabling credentials.
+`test_recovery_broker.py` checks restored metadata against unavailable and re-provisioned
+synthetic broker authority. `test_store_startup.py` proves configured database initialization
+failures exit before serving, without replacing persisted enforcement with memory. See the
+[recovery runbook](../../docs/operator/recovery-drill.md) for scope and limitations.
+
 ## Optional AgentBrowser integration
 
 Use a built sibling checkout with Node 22 and its Chromium installed. Reviewed source revision:
@@ -53,6 +62,8 @@ SANDHI_AGENTBROWSER_ROOT=/absolute/path/to/agentbrowser \
 
 Without that variable the optional test skips; an explicitly configured broken checkout fails.
 The regular CI job runs the Playwright regressions but does not fetch a sibling repository.
+`test_recovery_agentbrowser.py` uses the same optional checkout to verify restored dashboard
+evidence, Refresh and token clearing without generating new inference observations.
 Joint pinned-checkout CI remains AB02 in the
 [co-design tracker](../../docs/upstream/browser-gateway-vault-codesign.md).
 

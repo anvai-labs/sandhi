@@ -19,7 +19,8 @@ class FixturePolicy extends NetworkPolicy {
     await super.checkRequest(request);
   }
 }
-const secret = 'dashboard-test-admin';
+const secret = process.env.SANDHI_SMOKE_ADMIN_TOKEN || 'dashboard-test-admin';
+const expectedScope = process.env.SANDHI_SMOKE_EXPECTED_SCOPE || 'group:dashboard';
 const reference = 'vault://sandhi-smoke/admin';
 const service = new AgentBrowserService({
   engine: new PlaywrightChromiumEngine(),
@@ -58,7 +59,9 @@ try {
   await observeUntil((text) => text.includes('Authentication required') && !text.includes('gpt-mock'));
   await act('Admin token', 'fill', reference);
   await act('Use token', 'click');
-  await observeUntil((text) => text.includes('gpt-mock') && text.includes('group:dashboard'));
+  await observeUntil((text) => text.includes('gpt-mock') && text.includes(expectedScope));
+  await act('Refresh', 'click');
+  await observeUntil((text) => text.includes('gpt-mock') && text.includes(expectedScope));
   await act('Clear token', 'click');
   await observeUntil((text) => text.includes('Authentication required') && !text.includes('gpt-mock'));
   await assert.rejects(service.navigate(sessionId, pageId, { url: 'http://127.0.0.1:1/' }));
