@@ -24,7 +24,7 @@ tokens; still no dollars.
 > instead — the measured overshoot is **settled in full and counted**
 > (`sandhi_settle_overshoot_total`) rather than clamped, because clamping destroys a real
 > measurement and the cap recovers on its own at the next reservation. A streaming `Block` cap is
-> therefore **soft by one call**, which is exactly what D1 said to "state explicitly wherever
+> therefore **estimate-based, with excess from every in-flight underestimated call**, which is what D1 said to "state explicitly wherever
 > Tier-2 'prevented' is claimed".
 
 ## Context — what the pressure-test falsified
@@ -71,6 +71,12 @@ diverges from the `usage_events` aggregate and audit becomes impossible.
 ## Decision
 
 ### D1. Reserve a ceiling, not an estimate; enforce it mid-stream; settle Partial on interruption
+
+Implementation clarification (2026-09-05, TD-0026 W03): the following is the original target,
+not a shipped strict guarantee. Input still uses bytes/4, mid-stream token cutoff is absent,
+and no provider/model has a proven total-token bound. The implemented class is estimated
+admission with truthful settlement; concurrent calls can compound overshoot. See the
+[current guarantee matrix](../product/metering-and-budget-guarantees.md).
 
 The reservation must be a **conservative upper bound** on what the call can spend, so admitting it
 cannot overshoot a `Block` cap:
@@ -133,6 +139,11 @@ aggregate. It keeps the cache split as distinct weighted terms (`fresh_input`, `
 neutral tokens, no dollars. This closes the budget-vs-event divergence and lets the downstream
 pricer see the real cost basis. Reasoning tokens are made explicit (contract invariant: each
 adapter either folds reasoning into `tokens_out` or the ledger adds it).
+
+W03 amendment (2026-09-05): minor 7 makes this explicit via `reasoning_included` on usage/events.
+`true` adds no reasoning term, `false` adds it regardless of magnitude; absent/null preserves
+legacy arithmetic only. Existing SQLite rows and ledger charges are not rewritten. The
+[compatibility and rollout rules](../product/metering-and-budget-guarantees.md) are load-bearing.
 
 ### D5. The ledger abstraction lives in `sandhi-core`; durability/atomicity/TTL live behind it
 

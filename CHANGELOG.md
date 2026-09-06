@@ -17,7 +17,55 @@ publishers. Versions are derived from the tag at build time, never hand-edited; 
 
 ## [Unreleased]
 
+### Added
+
+- **Settlement evidence storage foundation (W05a).** Separate opt-in store APIs commit a
+  neutral charge and immutable receipt atomically, reject conflicting replays, and provide
+  bounded delivery claims with stale-worker fencing and retained acknowledgement tombstones.
+  Legacy single-file shard migration refuses evidence-bearing sources. This is not yet wired
+  into proxy accounting and is not a physical-attempt record or network exporter; see the
+  [remaining accounting gates](docs/product/attempt-accounting-and-evidence.md).
+
 ### Fixed
+
+- **Safe native broker onboarding.** SentinelPass IPC runs on a dedicated runtime thread with
+  bounded queue/deadlines; credential mutations are serialized and offloaded from async workers.
+  API/CLI/dashboard can register an existing reference using a read grant without writing a
+  secret. Capabilities distinguish support from authorization; missing configuration no longer
+  silently selects another backend. Locked/denied/missing/timeout states are distinct and broker
+  error text is redacted. Local revoke reports secret cleanup separately from broker/provider
+  revocation; startup reloads every exact credential label. See the
+  [broker contract](docs/product/broker-integration-contract.md) for migration and limitations,
+  including potentially applied timed-out writes, unbounded legacy CLI reads, and pending live
+  broker/lifecycle certification.
+
+- **Explicit reasoning accounting (contract minor 7).** Provider parsers now carry
+  `reasoning_included` through typed usage, events, aggregates, SQL and settlement. Gemini
+  thoughts are added even when smaller than candidate output; included-output providers are
+  not double-counted. Proxy events and bindings retain the reasoning dimension; translated
+  usage follows the destination's output/cache convention. Existing rows retain legacy totals,
+  with no historical ledger rewrite. Upgrade strict validators/accounting readers before
+  consuming the new field; see [migration and guarantees](docs/product/metering-and-budget-guarantees.md).
+  Budget controls are explicitly estimate-based; overshoot can involve multiple in-flight calls.
+  Gemini typed streams defer completion until final usage arrives, fixing zero usage in
+  translated Responses completion frames and preventing success after a transport failure.
+
+- **Committed management writes.** Failed durable budget updates return 503 without changing
+  the live policy; concurrent updates publish metadata in commit order. Invalid window/policy,
+  empty scope, out-of-range limits and invalid alert thresholds are rejected. Config apply now
+  reports failed items and returns 503 for incomplete application, preserving committed results
+  and one-time keys; inventory read failures are not treated as empty or already satisfied.
+  Inline alert failures report the committed budget explicitly. The CLI preserves partial
+  results with a nonzero exit, and the dashboard distinguishes incomplete application.
+  Rust callers of `ProxyLedger::set_budget` must now handle its `Result`.
+
+- **Dashboard authentication and trustworthy states.** Served UI assets now share one
+  authenticated read/write path, keep the admin token only in page memory, and clear privileged
+  state on token changes. Locked, forbidden, unconfigured, unavailable and stale data are
+  distinct; failed usage/key/budget/alert storage reads return 503 instead of empty totals.
+  Script-safe actions, CSP and no-store management responses protect the operator surface.
+  One-time minted keys remain visible after refresh. Added real-browser and optional
+  AgentBrowser smoke regressions; no live-vault integration is implied.
 
 - **npm publish leg of the v0.5.1 release run failed; npm first ships on the next tag.** The
   per-platform package dirs (`bindings/node/npm/`) are gitignored by design and must be

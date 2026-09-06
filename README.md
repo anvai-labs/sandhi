@@ -35,11 +35,13 @@ wrong. Sandhi is the single, fast, neutral implementation of both.
 - **Virtual keys** — one shared upstream key fronts many per-user keys; attribution and
   revocation are per person, not per shared secret.
 - **Per-user / per-team attribution** — every call tagged with `subject_id` / `group_id`.
-- **Budgets** — per-virtual-key / per-team **token** caps enforced by a lease ledger (reserve a
-  conservative *ceiling*, settle by lease id), with calendar-aligned daily/monthly/total
+- **Budgets** — per-virtual-key / per-team **token** admission limits enforced by a lease ledger
+  (reserve an estimate, settle measured usage by lease id), with calendar-aligned daily/monthly/total
   **windows**, a block-or-**warn** policy, and threshold **alerts**. Set `SANDHI_STORE` and the
   ledger is **durable**: spend, caps, and in-flight leases survive a restart, and dangling leases
   are reclaimed. Without it the ledger is in-memory and a restart resets accrued spend.
+  These are **not strict total-token caps**: multiple in-flight calls can exceed their estimates.
+  See [metering semantics and budget guarantees](docs/product/metering-and-budget-guarantees.md).
 - **Rate limits** — per-virtual-key requests/minute, enforced by a token bucket before the budget
   reservation, so a throttled call consumes no budget. The 429 carries `Retry-After` in the
   caller's own dialect. **Per process:** the limiter is in-memory, so with N replicas the effective

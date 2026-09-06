@@ -12,6 +12,19 @@ At proposal time, what was **missing** was the *operator surface*: there was no 
 admin API. P1–P4 subsequently shipped those capabilities. The sections below preserve the design
 baseline; the current runbook is the [proxy operator guide](../operator/proxy-guide.adoc).
 
+Correctness follow-up (2026-09-05, [TD-0026 W02](TD-0026-gateway-product-evolution.md)):
+budget persistence failures now prevent live metadata publication; budget policy input is
+validated. Partial config/inline-alert outcomes are explicit non-success responses, with
+committed results preserved for UI/CLI consumers. This does not add cross-store transactions,
+revision conflict detection or fleet guarantees; P1–P4's shipped status is unchanged.
+
+Broker follow-up (2026-09-05, TD-0026 W04): native IPC now uses bounded runtime-safe execution;
+credential mutations use a single-writer offload boundary. Exact reference registration supports
+read-only onboarding in API/CLI/dashboard. Backend capabilities are explicit, missing native
+configuration does not silently fall back, and local revocation reports secret cleanup separately.
+See the [broker integration contract](../product/broker-integration-contract.md); live daemon
+certification and cached credential lifecycle remain separate gates.
+
 ## Design boundary (load-bearing)
 
 **Sandhi measures in neutral tokens and attributes; it does not price.** Dollars / SKU / tier pricing is a *downstream commercial layer* (AnvaiOps, ADR-0047 D3) that consumes Sandhi's usage stream. This is already the stated contract of `sandhi-core` (`budget.rs`: "neutral tokens, not dollars"; `event.rs`: "no dollars, no tier/SKU names"). Therefore:
