@@ -44,7 +44,7 @@ marking a planning task complete does not mark its implementation complete.
 
 | Checkpoint | Scope | Local verification | Remote CI / review | Integrated | Released |
 |---|---|---|---|---|---|
-| C01 | W01–W04 and inactive W05a storage foundation; branch `feat/gateway-trust-checkpoint` | Passed; commands/evidence in progress log | [PR #230](https://github.com/anvai-labs/sandhi/pull/230) open; private routing disabled by owner decision, fresh hosted CI pending; one approving PR review still required | Pending | No |
+| C01 | W01–W04 and inactive W05a storage foundation; branch `feat/gateway-trust-checkpoint` | Passed; review fixes rechecked, 103 SDK/browser tests and 37 Python tests pass | [PR #230](https://github.com/anvai-labs/sandhi/pull/230): hosted CI green at `97e4195`; review-fix HEAD requires fresh CI; one approving PR review still required | Pending | No |
 | C02 | Initial W06 and M1 operator-journey acceptance, then `develop` → `main` | Pending | Pending promotion PR and post-merge CI | Pending | No; tagging/publishing is a separate action |
 
 C01 checkpoints completed work now instead of waiting for W05–W14. Do not claim M1 complete
@@ -62,6 +62,8 @@ environment approvals and branch protections; no CI bypass or automatic publicat
 
 ## Review outputs
 
+- [Checkpoint adversarial review](../reviews/checkpoint-adversarial-review-2026-09-05.md):
+  confirmed regressions, corrections, re-review evidence and explicit remaining gates.
 - [Evidence register and codebase review](../reviews/gateway-review-2026-09-04.md): F01–F16,
   baseline validation and capability disposition.
 - [Vision, journeys, requirements and architecture](../product/gateway-vision-and-requirements.md):
@@ -349,3 +351,18 @@ unit suite is not a distributed correctness proof. Record evidence and update th
   group, branch protection or required review was removed. The standalone self-hosted overflow
   diagnostic remains separate and is not part of normal PR CI. Parallel read-only agents audit
   the hosted route and scope initial W06 while C01 CI runs; no M1/main promotion is implied.
+- 2026-09-05: Owner authorized merge after clean adversarial review and green CI. Parallel
+  security/accounting reviews identified scheme-alias and Python parser reasoning regressions,
+  a misleading metadata-fault fixture, and lost config reconciliation details. Fixed all four;
+  re-review found no remaining checkpoint blocker. Full SDK/browser tests with real optional
+  AgentBrowser: **103 passed, 1 skipped** (Google SDK absent locally); Python bindings **37
+  passed**. Workspace/native IPC tests and clippy with/without IPC pass; native workspace line
+  coverage **86.96%** exceeds 75%; formatting, generated facade and whitespace checks pass.
+  See the linked checkpoint review for exact commands and limitations. Hosted run
+  [34005979889](https://github.com/anvai-labs/sandhi/actions/runs/34005979889) passed all checks
+  at `97e4195`, before these fixes; fresh CI on the review-fix HEAD remains mandatory. Live
+  GitHub state still requires one approving PR review, with no reviews recorded. Chat approval
+  authorizes the merge operation but does not replace that protected-branch gate; no bypass.
+  Separately reviewed W06b work remains on `feat/operational-buffer-visibility` (`800753d`),
+  not in C01. Next: fresh C01 CI and eligible review, merge and post-merge CI, then its separate
+  W06b PR; W06a readiness/drain, W06c recovery and W06d acceptance still gate M1/main promotion.

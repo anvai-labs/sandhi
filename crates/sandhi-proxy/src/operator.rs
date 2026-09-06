@@ -295,11 +295,12 @@ fn default_base_url(provider: &str, family: ProviderFamily) -> String {
     family.default_base_url().to_string()
 }
 
-fn parse_scheme(s: Option<&str>) -> CredentialScheme {
+fn parse_scheme(s: Option<&str>) -> Result<CredentialScheme, &'static str> {
     match s.map(str::to_ascii_lowercase).as_deref() {
-        Some("bearer") => CredentialScheme::Bearer,
-        Some("oauth") => CredentialScheme::Oauth,
-        _ => CredentialScheme::ApiKey,
+        None | Some("api_key" | "api-key") => Ok(CredentialScheme::ApiKey),
+        Some("bearer") => Ok(CredentialScheme::Bearer),
+        Some("oauth") => Ok(CredentialScheme::Oauth),
+        _ => Err("unknown credential scheme"),
     }
 }
 
@@ -404,13 +405,10 @@ async fn register_credential(
     if let Err(e) = sandhi_store::vault::validate_reference(&req.provider, label) {
         return vault_failure(e, false);
     }
-    if req
-        .scheme
-        .as_deref()
-        .is_some_and(|s| !matches!(s, "api_key" | "bearer" | "oauth"))
-    {
-        return err(StatusCode::BAD_REQUEST, "unknown credential scheme");
-    }
+    let scheme = match parse_scheme(req.scheme.as_deref()) {
+        Ok(scheme) => scheme,
+        Err(message) => return err(StatusCode::BAD_REQUEST, message),
+    };
     if vault.backend_name() == "unavailable" {
         return vault_failure(VaultError::Configuration, false);
     }
@@ -436,7 +434,6 @@ async fn register_credential(
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let label = req.label.as_deref().unwrap_or("default");
-        let scheme = parse_scheme(req.scheme.as_deref());
         let secret = match supplied {
             Some(secret) => secret,
             None => match vault.get(&req.provider, label) {
@@ -1398,8 +1395,28 @@ pub(crate) async fn config_apply(
         if resp.status().is_success() {
             providers_applied.push(json!({ "provider": p.provider, "label": p.label }));
         } else {
-            failures.push(json!({"component": "provider", "provider": p.provider,
-                "label": p.label, "status": resp.status().as_u16(), "error": "provider apply failed"}));
+            let status = resp.status().as_u16();
+            let details = match axum::body::to_bytes(resp.into_body(), 4096).await {
+                Ok(bytes) => serde_json::from_slice::<Value>(&bytes).ok(),
+                Err(_) => None,
+            };
+            let mut failure = json!({"component": "provider", "provider": p.provider,
+                "label": p.label, "status": status, "error": "provider apply failed"});
+            // Preserve only canonical, caller-safe reconciliation facts from our own
+            // handler. Never pass through arbitrary broker error messages or payloads.
+            if let Some(details) = details {
+                for field in [
+                    "code",
+                    "reconcile_before_retry",
+                    "metadata_committed",
+                    "credential_id",
+                ] {
+                    if let Some(value) = details.get(field) {
+                        failure[field] = value.clone();
+                    }
+                }
+            }
+            failures.push(failure);
         }
     }
 

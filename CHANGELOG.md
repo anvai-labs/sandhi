@@ -28,6 +28,11 @@ publishers. Versions are derived from the tag at build time, never hand-edited; 
 
 ### Fixed
 
+- **Checkpoint review corrections.** Credential onboarding retains case-insensitive `api-key`
+  compatibility while rejecting unknown schemes. Partial config failures retain safe broker
+  reconciliation facts. Python `parse_usage` preserves reasoning counts and inclusion through
+  custom-parser callbacks, matching the native accounting semantics.
+
 - **Safe native broker onboarding.** SentinelPass IPC runs on a dedicated runtime thread with
   bounded queue/deadlines; credential mutations are serialized and offloaded from async workers.
   API/CLI/dashboard can register an existing reference using a read grant without writing a

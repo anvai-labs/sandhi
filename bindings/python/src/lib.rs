@@ -600,7 +600,8 @@ impl Gateway {
     }
 
     /// Register a host callback that parses a provider's response into a usage mapping with keys
-    /// `{tokens_in, tokens_out, cache_creation_tokens, cache_read_tokens}`. `meter()` then uses it
+    /// `{tokens_in, tokens_out, cache_creation_tokens, cache_read_tokens}` plus optional
+    /// `reasoning_tokens` and `reasoning_included`. `meter()` then uses it
     /// for that provider — the escape hatch for providers Sandhi doesn't natively parse (custom /
     /// air-gapped / community). Overrides any built-in parser for that slug.
     fn register_parser(&self, provider: String, parser: Py<PyAny>) {
@@ -842,6 +843,8 @@ fn usage_to_dict<'py>(py: Python<'py>, u: &ParsedUsage) -> PyResult<Bound<'py, P
     d.set_item("tokens_out", u.tokens_out)?;
     d.set_item("cache_creation_tokens", u.cache_creation_tokens)?;
     d.set_item("cache_read_tokens", u.cache_read_tokens)?;
+    d.set_item("reasoning_tokens", u.reasoning_tokens)?;
+    d.set_item("reasoning_included", u.reasoning_included)?;
     Ok(d)
 }
 

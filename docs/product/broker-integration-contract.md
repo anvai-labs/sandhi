@@ -79,6 +79,9 @@ Equivalent API: `POST /admin/keys/reference` with
 `{"provider":"openai","label":"default","scheme":"api_key"}`. Optional `base_url` remains
 privileged operator configuration. Unknown fields (including `secret`) are rejected. The
 dashboard's “Existing reference (read-only)” mode disables and clears the secret input.
+Credential schemes accept case-insensitive `api_key`/`api-key`, `bearer` and `oauth`, with
+`api_key` as the omitted default. Unknown schemes fail before broker access; inventory uses
+canonical underscore/lowercase spellings.
 
 The reference maps to `sandhi:openai:default`, field `password`, with the configured client ID.
 New provider/label components must be 1–128 lowercase ASCII letters, digits, dots, underscores
@@ -105,6 +108,10 @@ that provider. Resolved material remains in cached handles; it is not persisted 
 Protocol 0.8.1 save errors are not fully typed: a rejected save is not proof of which grant,
 storage or policy check failed. Sandhi does not parse free-form error strings to invent a reason.
 Arbitrary daemon error text is never returned to the admin client or logged by this adapter.
+Config apply returns 503 for incomplete application; each provider failure preserves its
+underlying status and canonical `code`, `reconcile_before_retry`, `metadata_committed` and
+`credential_id` when present. It does not forward arbitrary broker error text. A generic
+partial-apply result must not be mistaken for permission to retry an ambiguous secret write.
 
 `DELETE /admin/keys/{provider}/{label}` commits local revocation first and removes the cached
 handle. Its response separates `revoked` from `secret_deletion` (`deleted`, `missing`, `failed`,
