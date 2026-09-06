@@ -294,12 +294,18 @@ async fn main() {
     // Design audit A2: label values are caller-supplied (model on the typed plane), so the
     // registry is capped — excess distinct series fold into "(overflow)". Never let telemetry
     // fail a request, and never let a valid key grow it without bound.
-    state.metrics = Arc::new(sandhi_proxy::metrics::Metrics::with_max_series(
-        positive_usize_env(
+    state.metrics = Arc::new(
+        sandhi_proxy::metrics::Metrics::with_max_series(positive_usize_env(
             "SANDHI_METRICS_MAX_SERIES",
             sandhi_proxy::metrics::DEFAULT_MAX_METRIC_SERIES,
+        ))
+        .with_buffer_observers(
+            buffered_sink.as_ref().map(|writer| writer.observer()),
+            buffered_alert_store
+                .as_ref()
+                .map(|writer| writer.observer()),
         ),
-    ));
+    );
     state.max_request_body_bytes = request_body_limit_from_env();
     state.max_in_flight_ai_requests = positive_usize_env(
         "SANDHI_MAX_IN_FLIGHT_AI_REQUESTS",

@@ -19,6 +19,11 @@ publishers. Versions are derived from the tag at build time, never hand-edited; 
 
 ### Added
 
+- **Best-effort buffer visibility (W06b).** Sender-free usage/alert writer snapshots feed
+  authenticated Prometheus capacity, queued, in-flight and rejected-item metrics with fixed
+  labels and explicit unconfigured states. These are observation-queue signals, not database
+  commit confirmation or authoritative outbox backlog; readiness/drain and restore gates remain open.
+
 - **Settlement evidence storage foundation (W05a).** Separate opt-in store APIs commit a
   neutral charge and immutable receipt atomically, reject conflicting replays, and provide
   bounded delivery claims with stale-worker fencing and retained acknowledgement tombstones.

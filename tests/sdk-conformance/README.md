@@ -35,6 +35,11 @@ reconciliation facts for storage failure and ambiguous write timeout. Its daemon
 configuration directory. No user vault or daemon is contacted. Unix coverage is not Windows
 named-pipe or live broker certification; those remain joint gates.
 
+`test_buffer_metrics.py` drives the real binary to check configured usage/alert capacities,
+explicitly unconfigured states and the existing metrics authentication gate. Deterministic
+blocked-writer unit tests separately pin queue/in-flight/drop counters; an empty queue is not
+a claim that SQLite commits succeeded.
+
 ## Optional AgentBrowser integration
 
 Use a built sibling checkout with Node 22 and its Chromium installed. Reviewed source revision:

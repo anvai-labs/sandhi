@@ -23,6 +23,35 @@ enum BufferedMessage {
     Shutdown,
 }
 
+/// One coherent, process-local view of a best-effort writer buffer.
+///
+/// `queued` counts accepted items not yet claimed by the writer; `in_flight` counts
+/// executing callbacks. Neither callback return nor an empty buffer proves persistence.
+/// Flush/shutdown control messages do not contribute to these counts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BufferSnapshot {
+    /// Configured maximum queued callbacks; at most one additional callback executes.
+    pub capacity: usize,
+    pub queued: usize,
+    pub in_flight: usize,
+    /// Rejected items and queued callbacks abandoned after worker panic. Excludes
+    /// callback/storage failures, whose persistence outcome cannot be inferred.
+    pub dropped: u64,
+}
+
+/// Sender-free observer: retaining this handle cannot keep a writer channel alive.
+#[derive(Clone, Debug)]
+pub struct BufferedSinkObserver {
+    counters: Arc<Mutex<BufferSnapshot>>,
+}
+
+impl BufferedSinkObserver {
+    #[must_use]
+    pub fn snapshot(&self) -> BufferSnapshot {
+        *self.counters.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 /// A bounded, single-writer buffer in front of a potentially blocking [`Sink`].
 ///
 /// `emit` never waits for SQLite, a file, or a collector. Once the fixed-capacity queue is full,
@@ -33,7 +62,7 @@ enum BufferedMessage {
 /// their synchronous, linearizable path and must never be routed through a best-effort sink.
 pub struct BufferedSink {
     sender: SyncSender<BufferedMessage>,
-    dropped: AtomicU64,
+    observer: BufferedSinkObserver,
     closed: AtomicBool,
     worker: Mutex<Option<JoinHandle<()>>>,
 }
@@ -44,13 +73,42 @@ impl BufferedSink {
     /// A zero capacity is promoted to one: callers always get a useful non-rendezvous buffer.
     #[must_use]
     pub fn new(inner: Arc<dyn Sink>, capacity: usize) -> Self {
-        let (sender, receiver) = mpsc::sync_channel(capacity.max(1));
+        let capacity = capacity.max(1);
+        let (sender, receiver) = mpsc::sync_channel(capacity);
+        let observer = BufferedSinkObserver {
+            counters: Arc::new(Mutex::new(BufferSnapshot {
+                capacity,
+                ..BufferSnapshot::default()
+            })),
+        };
+        let counters = observer.counters.clone();
         let worker = std::thread::Builder::new()
             .name("sandhi-usage-writer".into())
             .spawn(move || {
                 while let Ok(message) = receiver.recv() {
                     match message {
-                        BufferedMessage::Event(event) => inner.emit(&event),
+                        BufferedMessage::Event(event) => {
+                            {
+                                let mut counts = counters.lock().unwrap_or_else(|e| e.into_inner());
+                                counts.queued -= 1;
+                                counts.in_flight += 1;
+                            }
+                            let result =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    inner.emit(&event);
+                                }));
+                            let mut counts = counters.lock().unwrap_or_else(|e| e.into_inner());
+                            counts.in_flight -= 1;
+                            if let Err(panic) = result {
+                                // The callback's persistence outcome is unknown. Only queued
+                                // items abandoned before invocation count as dropped here.
+                                counts.dropped += counts.queued as u64;
+                                counts.queued = 0;
+                                drop(receiver);
+                                drop(counts);
+                                std::panic::resume_unwind(panic);
+                            }
+                        }
                         BufferedMessage::Flush(ack) => {
                             let _ = ack.send(());
                         }
@@ -61,16 +119,27 @@ impl BufferedSink {
             .expect("spawn usage writer");
         Self {
             sender,
-            dropped: AtomicU64::new(0),
+            observer,
             closed: AtomicBool::new(false),
             worker: Mutex::new(Some(worker)),
         }
     }
 
-    /// Number of events rejected because the bounded queue was full or already closed.
+    /// Events rejected by a full/closed/disconnected queue or abandoned before callback
+    /// invocation when the worker panics. Does not count or prove persistence failures.
     #[must_use]
     pub fn dropped_events(&self) -> u64 {
-        self.dropped.load(Ordering::Relaxed)
+        self.snapshot().dropped
+    }
+
+    #[must_use]
+    pub fn observer(&self) -> BufferedSinkObserver {
+        self.observer.clone()
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> BufferSnapshot {
+        self.observer.snapshot()
     }
 
     /// Drain all events accepted before this call and stop the writer thread.
@@ -79,7 +148,16 @@ impl BufferedSink {
     /// left running rather than being detached from queued events; the process may choose its own
     /// forced-shutdown policy after reporting the loss risk.
     pub fn close(&self, timeout: Duration) -> bool {
-        if self.closed.swap(true, Ordering::AcqRel) {
+        // Serialize admission closure with try_send: an emitter cannot enqueue behind Shutdown.
+        let already_closed = {
+            let _counts = self
+                .observer
+                .counters
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            self.closed.swap(true, Ordering::AcqRel)
+        };
+        if already_closed {
             return self
                 .worker
                 .lock()
@@ -125,8 +203,7 @@ impl BufferedSink {
         }
     }
 
-    fn record_drop(&self) {
-        let dropped = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+    fn record_drop(dropped: u64) {
         // Log at powers of two: persistent overload stays visible without creating a second
         // overload through one log line per rejected event.
         if dropped.is_power_of_two() {
@@ -137,16 +214,31 @@ impl BufferedSink {
 
 impl Sink for BufferedSink {
     fn emit(&self, event: &UsageEvent) {
-        if self.closed.load(Ordering::Acquire) {
-            self.record_drop();
+        let event = Box::new(event.clone());
+        // The receiver takes this same lock before claiming an item, preventing a fast
+        // callback from decrementing queued before a successful send is counted.
+        let mut counts = self
+            .observer
+            .counters
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // A received message still counts as queued until the worker claims it under
+        // this lock. Enforce the logical capacity as well as the channel's capacity.
+        if self.closed.load(Ordering::Acquire) || counts.queued >= counts.capacity {
+            counts.dropped += 1;
+            let dropped = counts.dropped;
+            drop(counts);
+            Self::record_drop(dropped);
             return;
         }
-        match self
-            .sender
-            .try_send(BufferedMessage::Event(Box::new(event.clone())))
-        {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => self.record_drop(),
+        match self.sender.try_send(BufferedMessage::Event(event)) {
+            Ok(()) => counts.queued += 1,
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                counts.dropped += 1;
+                let dropped = counts.dropped;
+                drop(counts);
+                Self::record_drop(dropped);
+            }
         }
     }
 }
@@ -350,6 +442,14 @@ mod tests {
             events: Mutex::new(Vec::new()),
         });
         let buffered = BufferedSink::new(inner.clone(), 1);
+        let observer = buffered.observer();
+        assert_eq!(
+            observer.snapshot(),
+            BufferSnapshot {
+                capacity: 1,
+                ..BufferSnapshot::default()
+            }
+        );
 
         buffered.emit(&sample());
         entered_rx
@@ -358,10 +458,134 @@ mod tests {
         buffered.emit(&sample()); // occupies the one queue slot
         buffered.emit(&sample()); // must be rejected, never allocated behind it
         assert_eq!(buffered.dropped_events(), 1);
+        assert_eq!(
+            observer.snapshot(),
+            BufferSnapshot {
+                capacity: 1,
+                queued: 1,
+                in_flight: 1,
+                dropped: 1
+            }
+        );
 
         release_tx.send(()).unwrap();
         release_tx.send(()).unwrap();
         assert!(buffered.close(Duration::from_secs(1)));
         assert_eq!(inner.events.lock().unwrap().len(), 2);
+        assert_eq!(
+            observer.snapshot(),
+            BufferSnapshot {
+                capacity: 1,
+                dropped: 1,
+                ..BufferSnapshot::default()
+            }
+        );
+        buffered.emit(&sample());
+        assert_eq!(observer.snapshot().dropped, 2);
+    }
+
+    #[test]
+    fn buffered_observer_does_not_keep_worker_alive() {
+        struct DropSink(mpsc::Sender<()>);
+        impl Sink for DropSink {
+            fn emit(&self, _: &UsageEvent) {}
+        }
+        impl Drop for DropSink {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+        let (dropped_tx, dropped_rx) = mpsc::channel();
+        let buffered = BufferedSink::new(Arc::new(DropSink(dropped_tx)), 0);
+        let observer = buffered.observer();
+        buffered.emit(&sample());
+        drop(buffered);
+        dropped_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("sender-free observer must not retain worker");
+        assert_eq!(
+            observer.snapshot(),
+            BufferSnapshot {
+                capacity: 1,
+                ..BufferSnapshot::default()
+            }
+        );
+    }
+
+    #[test]
+    fn panicked_worker_clears_activity_and_counts_abandoned_queue() {
+        struct PanicSink {
+            entered: mpsc::Sender<()>,
+            release: Mutex<mpsc::Receiver<()>>,
+        }
+        impl Sink for PanicSink {
+            fn emit(&self, _: &UsageEvent) {
+                self.entered.send(()).unwrap();
+                self.release.lock().unwrap().recv().unwrap();
+                panic!("synthetic sink failure");
+            }
+        }
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let buffered = BufferedSink::new(
+            Arc::new(PanicSink {
+                entered: entered_tx,
+                release: Mutex::new(release_rx),
+            }),
+            1,
+        );
+        buffered.emit(&sample());
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        buffered.emit(&sample());
+        release_tx.send(()).unwrap();
+        assert!(buffered
+            .worker
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap()
+            .join()
+            .is_err());
+        assert_eq!(
+            buffered.snapshot(),
+            BufferSnapshot {
+                capacity: 1,
+                dropped: 1,
+                ..BufferSnapshot::default()
+            }
+        );
+        buffered.emit(&sample());
+        assert_eq!(buffered.snapshot().dropped, 2);
+    }
+
+    #[test]
+    fn concurrent_buffer_admission_and_close_balance_activity() {
+        let inner = Arc::new(InMemorySink::with_capacity(10000));
+        let buffered = Arc::new(BufferedSink::new(inner.clone(), 32));
+        let barrier = Arc::new(std::sync::Barrier::new(5));
+        let writers: Vec<_> = (0..4)
+            .map(|_| {
+                let buffered = buffered.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for _ in 0..250 {
+                        buffered.emit(&sample());
+                        let snapshot = buffered.snapshot();
+                        assert!(snapshot.queued <= snapshot.capacity);
+                        assert!(snapshot.in_flight <= 1);
+                    }
+                })
+            })
+            .collect();
+        barrier.wait();
+        assert!(buffered.close(Duration::from_secs(2)));
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let snapshot = buffered.snapshot();
+        assert_eq!(snapshot.queued, 0);
+        assert_eq!(snapshot.in_flight, 0);
+        assert_eq!(inner.len() as u64 + snapshot.dropped, 1000);
     }
 }

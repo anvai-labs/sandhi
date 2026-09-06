@@ -44,7 +44,8 @@ marking a planning task complete does not mark its implementation complete.
 
 | Checkpoint | Scope | Local verification | Remote CI / review | Integrated | Released |
 |---|---|---|---|---|---|
-| C01 | W01–W04 and inactive W05a storage foundation; branch `feat/gateway-trust-checkpoint` | Passed; clean scoped re-review, 103 SDK/browser tests, 37 upgraded Python tests, 94.12% binding coverage | [PR #230](https://github.com/anvai-labs/sandhi/pull/230): runtime and CI hardening green at `7faa9f3` ([run](https://github.com/anvai-labs/sandhi/actions/runs/34014212504)); latest-head checks remain mandatory; one approving PR review missing | Blocked on required GitHub review | No |
+| C01 | W01–W04 and inactive W05a storage foundation; branch `feat/gateway-trust-checkpoint` | Passed; clean scoped re-review, 103 SDK/browser tests, 37 upgraded Python tests, 94.12% binding coverage | [PR #230](https://github.com/anvai-labs/sandhi/pull/230) merged with explicit owner-authorized review bypass; pre- and [post-merge CI](https://github.com/anvai-labs/sandhi/actions/runs/34015573003) green | Complete: `8f56b91` on `develop` | No |
+| C01b | W06b best-effort buffer visibility; branch `feat/operational-buffer-visibility`, updated from C01 | Passed: 105 SDK/browser tests, native workspace tests, 87.18% coverage; current-base adversarial re-review clean | [PR #231](https://github.com/anvai-labs/sandhi/pull/231) against `develop`; own latest-head CI required before merge; PR carries live integration evidence | Pending | No |
 | C02 | Initial W06 and M1 operator-journey acceptance, then `develop` → `main` | Pending | Pending promotion PR and post-merge CI | Pending | No; tagging/publishing is a separate action |
 
 C01 checkpoints completed work now instead of waiting for W05–W14. Do not claim M1 complete
@@ -87,7 +88,7 @@ verification evidence and an operator-facing release note before its status beco
 | W03 | Metering semantics and guarantee correction; R03, F03/F04 | Sandhi core/providers maintainer | Baseline | 1–2 weeks | Explicit reasoning inclusion and minor-7 schemas; legacy totals preserved; parser/plane/store/ledger/binding corpus and 24 end-to-end cases pass; [estimated-reservation capability matrix](../product/metering-and-budget-guarantees.md) and concurrent overshoot regression | Complete |
 | W04 | Safe broker integration and onboarding; R07/R13, F08/F09, SP0/SP1 | Sandhi store/proxy + SentinelPass protocol owners | Baseline | 1–2 weeks | Native real-handler reproduction fixed; bounded runtime/queue, explicit capabilities, read-only API/CLI/browser registration and 16 broker scenarios pass; [integration contract](../product/broker-integration-contract.md). Live daemon certification remains SP4; generations/revocation cutoff remain W09 | Complete |
 | W05 | Attempt accounting and durable evidence; R03/R05/R11, F05/F06 | Sandhi core/store + downstream consumer owner | W02/W03; accounting-contract review | 2–4 weeks | W05a complete: atomic settlement receipts, bounded/fenced delivery claims and 14 focused tests; [substep contract](../product/attempt-accounting-and-evidence.md). W05b–e retain physical-attempt capture, proxy integration, recovery, export and consumer review gates. A settlement receipt is not an upstream attempt | In progress |
-| W06 | Operational readiness and recovery; R05/R12, F12/F13 | Sandhi operations/proxy maintainer | Baseline; W05 for authoritative backlog | 1–2 weeks | TD-0020 readiness/drain and buffer signals; scripted incident drill, backup/restore and deployment runbook; workload baselines from TD-0015 | Pending |
+| W06 | Operational readiness and recovery; R05/R12, F12/F13 | Sandhi operations/proxy maintainer | Baseline; W05 for authoritative backlog | 1–2 weeks | W06b best-effort buffer snapshots/metrics complete and locally verified on `feat/operational-buffer-visibility`; W06a real-network readiness/drain, W06c incident/restore drill and W06d workload/user acceptance remain open. See TD-0020 P2 and C01b integration gate | In progress |
 | W07 | Scoped management, audit and egress security; R06/R10, F07/F11/F15 | Sandhi security/API + control-plane owner | W01/W02; identity-boundary review | 2–4 weeks | Cross-scope CRUD/query denial, mutation audit, bounded/redacted egress and webhook delivery, auth/session threat model, failure-injection evidence | Pending |
 | W08 | Declarative policy and hierarchical usage controls; R02/R04/R08, F10/F16 | Sandhi core/store + policy consumer owner | W02/W03/W05/W07 | 2–4 weeks | Reconcile TD-0005; durable revision/conflict preconditions, shadow/effective policy, signed freshness, all-scope/window atomic reservation, rate/token/concurrency tests, explainable denial | Pending |
 | W09 | Credential generations and revocation; R07, F09, SP2 | Sandhi credential manager + SentinelPass owners | W04/W05/W07; broker contract release | 2–3 weeks | Bounded new-dispatch cutoff, generation switch/drain, restart and missed-event recovery, broker outage/expiry matrix | Pending |
@@ -351,6 +352,32 @@ unit suite is not a distributed correctness proof. Record evidence and update th
   group, branch protection or required review was removed. The standalone self-hosted overflow
   diagnostic remains separate and is not part of normal PR CI. Parallel read-only agents audit
   the hosted route and scope initial W06 while C01 CI runs; no M1/main promotion is implied.
+- 2026-09-05: C01 hosted cutover verified against live run
+  [34005979889](https://github.com/anvai-labs/sandhi/actions/runs/34005979889): regular PR jobs
+  have `ubuntu-latest` labels and execute on GitHub Actions runners, not the private pool.
+  Routing, attribution, title, Node binding, Rust and security checks passed at this checkpoint;
+  remaining checks were queued and the PR still required an approving review. The old private
+  run was cancelled automatically on the new push. Do not interpret its skipped mirror as CI success.
+- 2026-09-05: Parallel W06b implementation and review completed in an isolated worktree/branch,
+  preserving PR #230's reviewed scope. `BufferedSink` and `BufferedAlertStore` now expose
+  sender-free snapshots of logical capacity, accepted-but-not-started items, executing callbacks
+  and dropped items. Admission and close share the bookkeeping lock; callbacks never hold it.
+  Panic cleanup counts queued uninvoked callbacks as abandoned, not the uncertain result of the
+  panicking callback. No snapshot or completed callback certifies durable persistence.
+- 2026-09-05: W06b metrics are attached in the real binary and served through existing `/metrics`
+  auth with fixed usage/alerts labels. Unconfigured is explicit; no fabricated zero backlog.
+  Independent review caught and corrected incomplete drop HELP text and interleaved metric
+  families; a new ordering regression pins contiguous Prometheus exposition. Full workspace
+  tests passed; native-feature coverage was **87.26%**. All-target clippy passed with/without
+  native IPC; formatting, facade and whitespace checks passed. The complete SDK/browser/broker
+  suite with AgentBrowser passed **95 tests, 1 skipped** (Google SDK unavailable locally),
+  including two new real-binary buffer capacity/auth/unconfigured checks. No schema changed.
+- 2026-09-05: W06 remains in progress. Next operational slice W06a must make readiness reachable
+  over real sockets during bounded quiesce, prohibit new dispatch after cutoff and define listener
+  plus writer shutdown deadlines; a router-only flag is insufficient. W06c backup/restore and
+  W06d workload/operator-user acceptance remain open, as do W05b–e's authoritative evidence
+  gates. W06b is Prometheus-only; storage-write failures, ring evictions, worker health, age and
+  OTLP parity remain explicit observability follow-ups. C01b awaits its own PR after C01 lands.
 - 2026-09-05: Owner authorized merge after clean adversarial review and green CI. Parallel
   security/accounting reviews identified scheme-alias and Python parser reasoning regressions,
   a misleading metadata-fault fixture, and lost config reconciliation details. Fixed all four;
@@ -385,3 +412,28 @@ unit suite is not a distributed correctness proof. Record evidence and update th
   only on an eligible approving GitHub review, subject to green latest-head checks. No merge,
   bypass, release or main promotion occurred. Next authorized action: after that review,
   recheck head/checks, merge normally into `develop`, then verify post-merge CI before W06b PR.
+- 2026-09-06: Owner subsequently explicitly authorized administrator bypass of the missing
+  approving review, conditional on clean adversarial review and green CI. Rechecked exact
+  head `4e90cdb` and all required checks, then merged PR #230 into `develop` as `8f56b91`.
+  The merged tree matches the reviewed head; branch protections were not changed. Post-merge
+  [34015573003](https://github.com/anvai-labs/sandhi/actions/runs/34015573003) passed every
+  required validation and the aggregate gate. C01 integration is complete, not a release.
+- 2026-09-06: Resumed C01b by merging current `develop` into the published W06b branch without
+  rewriting history. Kept both checkpoint corrections and W06b implementation; resolved the
+  tracker-only conflict by retaining both evidence histories and current integration state.
+  Next: full current-base regression, independent adversarial re-review, separate PR and CI.
+  W06a probe-reachable shutdown remains the next implementation slice after this checkpoint;
+  W06c/W06d and M1/main promotion are not completed by buffer metrics.
+- 2026-09-06: C01b current-base verification passed: full native-feature workspace suite,
+  all-target clippy with/without native IPC, fmt, generated binding facade and diff checks.
+  Native-feature workspace line coverage is **87.18%**; full SDK/browser/broker tests with
+  optional real AgentBrowser are **105 passed, 1 skipped** (Google SDK absent locally).
+  Coverage initially hit sandbox socket restrictions; the permitted loopback rerun passed.
+  Independent adversarial re-review found no blocker and verified runtime/test files unchanged
+  from the prior reviewed W06b implementation. This is local evidence; remote CI is separate.
+- 2026-09-06: Opened [PR #231](https://github.com/anvai-labs/sandhi/pull/231) for C01b.
+  Merge remains conditional on clean scoped review and green latest-head CI; verify the
+  resulting `develop` push before closing integration. The PR records live CI/merge evidence;
+  this source snapshot does not predeclare a successful merge. Next implementation is W06a,
+  whose TD-0020 execution gates now cover dispatch-authorization races, blocking settlement,
+  runtime/telemetry cleanup and saturated probe admission, not just a router readiness flag.
