@@ -28,6 +28,11 @@ publishers. Versions are derived from the tag at build time, never hand-edited; 
 
 ### Fixed
 
+- **Binding dependency security gate.** Upgrade PyO3/async bridge to patched 0.29 releases,
+  explicitly retain GIL-required behavior and declare the existing locked source-build floor
+  of Rust 1.88. Advisory CI now checks all three independent Rust workspaces with all features,
+  including binding-only and advisory-policy changes; no vulnerability ignores are added.
+
 - **Checkpoint review corrections.** Credential onboarding retains case-insensitive `api-key`
   compatibility while rejecting unknown schemes. Partial config failures retain safe broker
   reconciliation facts. Python `parse_usage` preserves reasoning counts and inclusion through

@@ -12,6 +12,10 @@ pip install sandhi-gateway   # import as: import sandhi_gateway
 > The bare name `sandhi` on PyPI is an unrelated Sanskrit-linguistics library; this binding is
 > published as `sandhi-gateway`. The crate and GitHub repo are `sandhi`.
 
+Source builds require Rust 1.88 or newer for the locked dependency graph. Wheels retain the
+CPython 3.11+ stable ABI and require the GIL; the dependency upgrade does not certify
+free-threaded execution. The local coverage harness validates CPython 3.11–3.13.
+
 ## Usage
 
 ```python
@@ -32,7 +36,7 @@ print(gw.spent("group:platform"))                  # budget recorded
 print(gw.check_budget("group:platform", 5000))     # True/False
 
 # Just parse usage (same Rust parsers as the proxy), no attribution:
-sg.parse_usage("openai", response_json)            # {tokens_in, tokens_out, cache_*}
+sg.parse_usage("openai", response_json)            # {tokens_in, tokens_out, cache_*, reasoning_*}
 ```
 
 ### Typed persistent provider runtime

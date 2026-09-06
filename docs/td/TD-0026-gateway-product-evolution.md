@@ -44,7 +44,7 @@ marking a planning task complete does not mark its implementation complete.
 
 | Checkpoint | Scope | Local verification | Remote CI / review | Integrated | Released |
 |---|---|---|---|---|---|
-| C01 | W01–W04 and inactive W05a storage foundation; branch `feat/gateway-trust-checkpoint` | Passed; review fixes rechecked, 103 SDK/browser tests and 37 Python tests pass | [PR #230](https://github.com/anvai-labs/sandhi/pull/230): hosted CI green at `97e4195`; review-fix HEAD requires fresh CI; one approving PR review still required | Pending | No |
+| C01 | W01–W04 and inactive W05a storage foundation; branch `feat/gateway-trust-checkpoint` | Passed; review fixes rechecked, 103 SDK/browser tests and 37 Python tests pass | [PR #230](https://github.com/anvai-labs/sandhi/pull/230): hosted CI green at `628fb26`; dependency/CI hardening requires fresh CI; one approving PR review still required | Pending | No |
 | C02 | Initial W06 and M1 operator-journey acceptance, then `develop` → `main` | Pending | Pending promotion PR and post-merge CI | Pending | No; tagging/publishing is a separate action |
 
 C01 checkpoints completed work now instead of waiting for W05–W14. Do not claim M1 complete
@@ -366,3 +366,12 @@ unit suite is not a distributed correctness proof. Record evidence and update th
   Separately reviewed W06b work remains on `feat/operational-buffer-visibility` (`800753d`),
   not in C01. Next: fresh C01 CI and eligible review, merge and post-merge CI, then its separate
   W06b PR; W06a readiness/drain, W06c recovery and W06d acceptance still gate M1/main promotion.
+- 2026-09-06: Hosted [34010886202](https://github.com/anvai-labs/sandhi/actions/runs/34010886202)
+  passed all required jobs for review-fix `628fb26`. Push-time dependency alerts revealed that
+  advisory CI excluded independent bindings. Source review exempts the old PyO3 version from
+  the high-severity iterator advisory and found no calls to the other two affected APIs, but
+  the gate gap and old dependency still warranted correction: upgrade PyO3/async bridge to
+  patched 0.29 releases, retain explicit GIL requirement, declare the existing Rust 1.88 locked
+  build floor, and audit all three workspaces/all features on binding and policy changes.
+  All three local advisory scans pass without ignores; independent re-review is clean. Fresh
+  CI for this additional hardening and an eligible GitHub approval remain mandatory.
