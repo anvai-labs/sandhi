@@ -27,9 +27,14 @@ cargo test --workspace
 - Decisions go in `docs/adr/NNNN-slug.md` (heading `# ADR-NNNN: …`); larger executable designs go
   in `docs/td/TD-NNNN-*.md`. Update the [documentation status index](docs/README.md) in the same PR
   that changes a TD's lifecycle or transfers its remaining scope.
-- **Branch workflow:** open PRs against `develop`. `develop` is protected — the aggregate
-  **`CI Success`** check must be green (`enforce_admins` on; no force-push or deletion). `main`
-  is the release trunk.
+- **Branch workflow:** open PRs against `develop`. Require the aggregate **`CI Success`** check
+  and an approving PR review before merge; do not use an administrator bypass. `main` is the
+  release trunk. Live settings are authoritative: the 2026-09-05 checkpoint found
+  `enforce_admins=false` on `develop`, contrary to older prose; this was not changed.
+- **CI execution:** normal Sandhi PR CI uses GitHub-hosted `ubuntu-latest` with repository
+  variable `OWNER_PRIVATE_CI_ENABLED=false` (2026-09-05 owner decision). The legacy private route
+  remains in the workflow but is disabled. Do not approve or re-enable it to unblock standard
+  checks. The separate overflow-runner diagnostic is not part of normal PR verification.
 
 ## Community & release notes
 

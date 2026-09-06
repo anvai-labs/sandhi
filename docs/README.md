@@ -122,7 +122,8 @@ perpetually open.
 
 TD-0026 slice completion means implementation/local verification. Its separate C01/C02 checkpoint
 table tracks remote CI, merge and release; C01 is [PR #230](https://github.com/anvai-labs/sandhi/pull/230)
-to `develop`, blocked on human CI approval and required PR review, not yet merged or released.
+to `develop`, moving to GitHub-hosted CI with private routing disabled; required PR review remains
+pending. It is not yet merged or released.
 
 The proposed [product evolution plan](td/TD-0026-gateway-product-evolution.md) connects UX,
 accounting, operations, security and credential lifecycle to these existing designs. Its first

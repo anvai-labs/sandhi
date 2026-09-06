@@ -44,7 +44,7 @@ marking a planning task complete does not mark its implementation complete.
 
 | Checkpoint | Scope | Local verification | Remote CI / review | Integrated | Released |
 |---|---|---|---|---|---|
-| C01 | W01–W04 and inactive W05a storage foundation; branch `feat/gateway-trust-checkpoint` | Passed; commands/evidence in progress log | [PR #230](https://github.com/anvai-labs/sandhi/pull/230) open; blocked on human `owner-private-ci` environment approval, then real CI and one required approving PR review | Pending | No |
+| C01 | W01–W04 and inactive W05a storage foundation; branch `feat/gateway-trust-checkpoint` | Passed; commands/evidence in progress log | [PR #230](https://github.com/anvai-labs/sandhi/pull/230) open; private routing disabled by owner decision, fresh hosted CI pending; one approving PR review still required | Pending | No |
 | C02 | Initial W06 and M1 operator-journey acceptance, then `develop` → `main` | Pending | Pending promotion PR and post-merge CI | Pending | No; tagging/publishing is a separate action |
 
 C01 checkpoints completed work now instead of waiting for W05–W14. Do not claim M1 complete
@@ -342,3 +342,10 @@ unit suite is not a distributed correctness proof. Record evidence and update th
   `enforce_admins` is false, contrary to older contributor prose; no administrator bypass or
   protection change was used. After approval, resume real CI diagnostics/fixes, merge only
   with the required checks/review satisfied, and verify post-merge CI before closing C01.
+- 2026-09-05: Owner explicitly authorized disabling Sandhi private CI routing. Set and read back
+  repository variable `OWNER_PRIVATE_CI_ENABLED=false`; normal PR jobs now select GitHub-hosted
+  `ubuntu-latest`. A new documentation commit triggers a fresh `pull_request` run rather than
+  relying on the previous skipped mirror or approving private execution. No environment, runner
+  group, branch protection or required review was removed. The standalone self-hosted overflow
+  diagnostic remains separate and is not part of normal PR CI. Parallel read-only agents audit
+  the hosted route and scope initial W06 while C01 CI runs; no M1/main promotion is implied.
