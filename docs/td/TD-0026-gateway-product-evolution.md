@@ -44,7 +44,7 @@ marking a planning task complete does not mark its implementation complete.
 
 | Checkpoint | Scope | Local verification | Remote CI / review | Integrated | Released |
 |---|---|---|---|---|---|
-| C01 | W01–W04 and inactive W05a storage foundation; branch `feat/gateway-trust-checkpoint` | Passed; commands/evidence in progress log | Pending PR to `develop`; workflow edits may require human environment approval | Pending | No |
+| C01 | W01–W04 and inactive W05a storage foundation; branch `feat/gateway-trust-checkpoint` | Passed; commands/evidence in progress log | [PR #230](https://github.com/anvai-labs/sandhi/pull/230) open; blocked on human `owner-private-ci` environment approval, then real CI and one required approving PR review | Pending | No |
 | C02 | Initial W06 and M1 operator-journey acceptance, then `develop` → `main` | Pending | Pending promotion PR and post-merge CI | Pending | No; tagging/publishing is a separate action |
 
 C01 checkpoints completed work now instead of waiting for W05–W14. Do not claim M1 complete
@@ -334,3 +334,11 @@ unit suite is not a distributed correctness proof. Record evidence and update th
   Regenerated chat schemas successfully. Existing 87.04% workspace coverage and clippy evidence
   above applies to the unchanged implementation. PR/remote CI and merge remain pending, not
   inferred from local success. Workflow edits retain the human private-runner approval gate.
+- 2026-09-05: C01 committed and pushed; [PR #230](https://github.com/anvai-labs/sandhi/pull/230)
+  targets `develop`. The protected-base CI run entered `owner-private-ci` approval waiting;
+  the ordinary PR mirror is intentionally skipped and is not verification evidence. Live
+  branch protection requires `CI Success` and one approving review (`REVIEW_REQUIRED`).
+  Integration is blocked on those external approvals; no merge or release occurred. Live
+  `enforce_admins` is false, contrary to older contributor prose; no administrator bypass or
+  protection change was used. After approval, resume real CI diagnostics/fixes, merge only
+  with the required checks/review satisfied, and verify post-merge CI before closing C01.

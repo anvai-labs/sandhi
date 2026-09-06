@@ -121,7 +121,8 @@ perpetually open.
 | [0026](td/TD-0026-gateway-product-evolution.md) | In progress | W01–W04 complete; W05 in progress, W05a storage foundation complete and W05b transport capture next; M1 still needs initial W06. AgentBrowser AB01 smoke verified; live/joint vault/browser delivery pending |
 
 TD-0026 slice completion means implementation/local verification. Its separate C01/C02 checkpoint
-table tracks remote CI, merge and release; C01 is being prepared for `develop`, not yet released.
+table tracks remote CI, merge and release; C01 is [PR #230](https://github.com/anvai-labs/sandhi/pull/230)
+to `develop`, blocked on human CI approval and required PR review, not yet merged or released.
 
 The proposed [product evolution plan](td/TD-0026-gateway-product-evolution.md) connects UX,
 accounting, operations, security and credential lifecycle to these existing designs. Its first
