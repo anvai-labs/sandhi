@@ -45,7 +45,7 @@ marking a planning task complete does not mark its implementation complete.
 | Checkpoint | Scope | Local verification | Remote CI / review | Integrated | Released |
 |---|---|---|---|---|---|
 | C01 | W01–W04 and inactive W05a storage foundation; branch `feat/gateway-trust-checkpoint` | Passed; clean scoped re-review, 103 SDK/browser tests, 37 upgraded Python tests, 94.12% binding coverage | [PR #230](https://github.com/anvai-labs/sandhi/pull/230) merged with explicit owner-authorized review bypass; pre- and [post-merge CI](https://github.com/anvai-labs/sandhi/actions/runs/34015573003) green | Complete: `8f56b91` on `develop` | No |
-| C01b | W06b best-effort buffer visibility; branch `feat/operational-buffer-visibility`, updated from C01 | Passed: 105 SDK/browser tests, native workspace tests, 87.18% coverage; current-base adversarial re-review clean | Separate PR against `develop`; own latest-head CI required before merge | Pending | No |
+| C01b | W06b best-effort buffer visibility; branch `feat/operational-buffer-visibility`, updated from C01 | Passed: 105 SDK/browser tests, native workspace tests, 87.18% coverage; current-base adversarial re-review clean | [PR #231](https://github.com/anvai-labs/sandhi/pull/231) against `develop`; own latest-head CI required before merge; PR carries live integration evidence | Pending | No |
 | C02 | Initial W06 and M1 operator-journey acceptance, then `develop` → `main` | Pending | Pending promotion PR and post-merge CI | Pending | No; tagging/publishing is a separate action |
 
 C01 checkpoints completed work now instead of waiting for W05–W14. Do not claim M1 complete
@@ -431,3 +431,9 @@ unit suite is not a distributed correctness proof. Record evidence and update th
   Coverage initially hit sandbox socket restrictions; the permitted loopback rerun passed.
   Independent adversarial re-review found no blocker and verified runtime/test files unchanged
   from the prior reviewed W06b implementation. This is local evidence; remote CI is separate.
+- 2026-09-06: Opened [PR #231](https://github.com/anvai-labs/sandhi/pull/231) for C01b.
+  Merge remains conditional on clean scoped review and green latest-head CI; verify the
+  resulting `develop` push before closing integration. The PR records live CI/merge evidence;
+  this source snapshot does not predeclare a successful merge. Next implementation is W06a,
+  whose TD-0020 execution gates now cover dispatch-authorization races, blocking settlement,
+  runtime/telemetry cleanup and saturated probe admission, not just a router readiness flag.

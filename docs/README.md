@@ -125,8 +125,9 @@ TD-0026 slice completion means implementation/local verification. Its separate C
 table tracks remote CI, merge and release; C01 [PR #230](https://github.com/anvai-labs/sandhi/pull/230)
 merged into `develop` as `8f56b91` after clean review and green hosted CI, with an explicit
 owner-authorized review bypass. Post-merge CI is green; no release or main promotion occurred.
-W06b is separately checkpointed on `feat/operational-buffer-visibility` (C01b), being verified
-against current `develop` for its own PR; it does not complete M1 readiness/recovery acceptance.
+W06b is separately checkpointed in [PR #231](https://github.com/anvai-labs/sandhi/pull/231)
+(C01b), verified locally against current `develop` with its own CI/merge evidence on the PR;
+it does not complete M1 readiness/recovery acceptance.
 
 The proposed [product evolution plan](td/TD-0026-gateway-product-evolution.md) connects UX,
 accounting, operations, security and credential lifecycle to these existing designs. Its first
