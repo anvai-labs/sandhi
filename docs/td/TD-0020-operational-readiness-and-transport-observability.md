@@ -1,7 +1,9 @@
 # TD-0020: Operational readiness and transport observability — you cannot operate what you cannot see
 
 - **Status:** **In progress**, updated 2026-09-06. P1/W06a is integrated through PR #232;
-  W06c offline recovery drills are underway (C01d in TD-0026). P2 is partial via TD-0014's shipped connection,
+  W06c offline recovery is merged through PR #233, with post-merge verification pending (C01d in
+  TD-0026). W06d workload automation is locally verified; actual-user acceptance remains open.
+  P2 is partial via TD-0014's shipped connection,
   stream, and connection-shed signals plus integrated W06b buffer visibility;
   the remaining P2–P5 scope is open. Owns gaps
   **G15, G16, G17, G18, G27**.
@@ -294,7 +296,7 @@ and runtime-teardown watchdog subprocesses. This is not a live external-collecto
 workload certification. Adversarial review's trailing OTLP span-drop guard race was fixed by
 placing the operation guard last; re-review found no remaining blocker. C01c owns PR/CI evidence.
 
-## W06c recovery acceptance (2026-09-06; under verification)
+## W06c recovery acceptance (2026-09-06; merged, post-merge CI pending)
 
 The [recovery runbook](../operator/recovery-drill.md) and disposable SDK fixtures rehearse
 single-file and fixed two-shard restart/restore, exact attribution and continued settlement,
@@ -319,6 +321,10 @@ the new startup regression first demonstrated upstream dispatch despite a persis
 then passed after the fix. All 17 startup failure/healthy-mode cases passed independent re-review.
 Default/native workspace and OTLP proxy tests and strict clippy passed; native line coverage was
 87.77%. Final combined SDK/browser and remote CI evidence belongs to C01d.
+
+W06d's [integrated workload record](../product/m1-acceptance.md) adds a 36-phase synthetic baseline
+and a 227-test combined SDK/browser regression result. This is not full TD-0015 certification or
+a production latency/capacity promise. Actual-user acceptance still gates M1/main promotion.
 
 ## Remaining pool decision
 

@@ -19,6 +19,12 @@ publishers. Versions are derived from the tag at build time, never hand-edited; 
 
 ### Added
 
+- **Reproducible workload acceptance (W06d automation).** Isolated direct-provider and real
+  gateway unary/SSE lanes cover closed-loop/fixed-arrival traffic, exact tenant/run/category
+  accounting, denied requests, queue checkpoints and shutdown. Full/compact reports retain
+  distributions, resource observations and binary identity. The recorded synthetic baseline
+  does not establish production capacity or replace [actual-user acceptance](docs/product/m1-acceptance.md).
+
 - **Isolated recovery rehearsal (W06c).** Fixed-topology single-file/two-shard restart and
   offline snapshot/restore drills verify retained accounting, access state and continued service.
   Negative cases cover malformed snapshots, real crash leases, unavailable broker authority
