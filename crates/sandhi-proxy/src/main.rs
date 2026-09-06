@@ -66,6 +66,9 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
     // declared multi-replica topology rather than silently multiplying rate limits or allowing
     // separate processes to make independent hard-budget decisions.
     validate_replica_topology();
+    // Only an absent setting selects volatile development mode. A configured store is
+    // an enforcement commitment: no startup failure may replace its caps with memory.
+    let store_path = configured_store_path();
 
     // Scope 5 (TD-0011 P3): OTLP export of gen_ai.* spans + metrics. `init()` returns None unless
     // the `otel-otlp` feature is compiled in AND `SANDHI_OTEL_EXPORT=otlp` is set — so the default
@@ -153,65 +156,41 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
     }
 
     // Durable usage store (SQLite) + dashboard when SANDHI_STORE=<path> is set; else in-memory.
-    let store = std::env::var("SANDHI_STORE")
-        .ok()
-        .and_then(|p| match SqliteStore::open(&p) {
-            Ok(s) => {
-                eprintln!("sandhi-proxy: usage store at {p} — dashboard on /dashboard");
-                Some(Arc::new(s))
-            }
-            Err(e) => {
-                eprintln!("sandhi-proxy: could not open SANDHI_STORE={p}: {e}");
-                None
-            }
-        });
+    let store = store_path.as_deref().map(|p| {
+        let store = SqliteStore::open(p).unwrap_or_else(|_| startup_store_fatal("usage"));
+        eprintln!("sandhi-proxy: usage store at {p} — dashboard on /dashboard");
+        Arc::new(store)
+    });
 
     // TD-0003 P1 operator surface: vault + virtual-key store (same path as the usage store).
-    let vault = std::env::var("SANDHI_STORE").ok().and_then(|p| {
-        match VaultStore::with_backend(&p, VaultStore::backend_from_env()) {
-            Ok(v) => {
-                eprintln!(
-                    "sandhi-proxy: credential vault (backend: {}) at {p}",
-                    v.backend_name()
-                );
-                // Rehydrate upstream handles for every active vault credential.
-                rehydrate_providers_from_vault(&v, &runtime, &mut providers);
-                Some(Arc::new(v))
-            }
-            Err(e) => {
-                eprintln!("sandhi-proxy: could not open vault at {p}: {e}");
-                None
-            }
-        }
+    let vault = store_path.as_deref().map(|p| {
+        let vault = VaultStore::with_backend(p, VaultStore::backend_from_env())
+            .unwrap_or_else(|_| startup_store_fatal("vault"));
+        eprintln!(
+            "sandhi-proxy: credential vault (backend: {}) at {p}",
+            vault.backend_name()
+        );
+        // Metadata must open, but unavailable external secret authority only disables
+        // the affected provider handle; locked-broker recovery must remain possible.
+        rehydrate_providers_from_vault(&vault, &runtime, &mut providers);
+        Arc::new(vault)
     });
-    let vkeys = std::env::var("SANDHI_STORE")
-        .ok()
-        .and_then(|p| match VirtualKeyStore::open(&p) {
-            Ok(v) => {
-                sandhi_proxy::rehydrate_live_keys(&keys, &v);
-                eprintln!("sandhi-proxy: virtual-key store at {p}");
-                Some(Arc::new(v))
-            }
-            Err(e) => {
-                eprintln!("sandhi-proxy: could not open vkey store at {p}: {e}");
-                None
-            }
-        });
+    let vkeys = store_path.as_deref().map(|p| {
+        let vkeys = VirtualKeyStore::open(p).unwrap_or_else(|_| startup_store_fatal("vkeys"));
+        sandhi_proxy::rehydrate_live_keys(&keys, &vkeys);
+        eprintln!("sandhi-proxy: virtual-key store at {p}");
+        Arc::new(vkeys)
+    });
 
     // TD-0003 P2 alert rules: durable store + live registry (rehydrated from the store; webhook
     // transport injected from this tokio runtime).
-    let (alert_store, alerts) = std::env::var("SANDHI_STORE")
-        .ok()
-        .and_then(|p| match AlertStore::open(&p) {
-            Ok(store) => {
-                eprintln!("sandhi-proxy: alert-rule store at {p}");
-                let registry = rehydrate_alerts(&store);
-                Some((Arc::new(store), Arc::new(std::sync::Mutex::new(registry))))
-            }
-            Err(e) => {
-                eprintln!("sandhi-proxy: could not open alert store at {p}: {e}");
-                None
-            }
+    let (alert_store, alerts) = store_path
+        .as_deref()
+        .map(|p| {
+            let store = AlertStore::open(p).unwrap_or_else(|_| startup_store_fatal("alerts"));
+            eprintln!("sandhi-proxy: alert-rule store at {p}");
+            let registry = rehydrate_alerts(&store);
+            (Arc::new(store), Arc::new(std::sync::Mutex::new(registry)))
         })
         .unzip();
     let buffered_alert_store = alert_store.as_ref().map(|store| {
@@ -257,23 +236,17 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
         (1..=64).contains(&ledger_shards),
         "SANDHI_LEDGER_SHARDS must be between 1 and 64, got {ledger_shards}"
     );
-    let ledger = match std::env::var("SANDHI_STORE") {
-        Ok(path) => match ProxyLedger::durable(&path, ledger_shards) {
-            Ok(l) => {
-                eprintln!(
-                    "sandhi-proxy: durable enforcement ledger at {path} ({ledger_shards} shard{})",
-                    if ledger_shards == 1 { "" } else { "s" }
-                );
-                l
-            }
-            Err(e) => {
-                eprintln!(
-                    "sandhi-proxy: durable ledger unavailable ({e}); falling back to in-memory"
-                );
-                ProxyLedger::in_memory()
-            }
-        },
-        Err(_) => ProxyLedger::in_memory(),
+    let ledger = match store_path.as_deref() {
+        Some(path) => {
+            let ledger = ProxyLedger::durable(path, ledger_shards)
+                .unwrap_or_else(|_| startup_store_fatal("ledger"));
+            eprintln!(
+                "sandhi-proxy: durable enforcement ledger at {path} ({ledger_shards} shard{})",
+                if ledger_shards == 1 { "" } else { "s" }
+            );
+            ledger
+        }
+        None => ProxyLedger::in_memory(),
     };
 
     let admin_token = std::env::var("SANDHI_ADMIN_TOKEN").ok();
@@ -476,6 +449,26 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
         return 1;
     }
     0
+}
+
+/// Configuration/setup failure is distinct from an incomplete shutdown (124). No
+/// listener has bound here; exit directly so the unarmed watchdog cannot rewrite 2.
+/// Never include raw backend errors, SQL or supplied configuration in this diagnostic.
+fn startup_store_fatal(component: &'static str) -> ! {
+    eprintln!("sandhi-proxy: startup failed: configured_store_unavailable component={component}");
+    std::process::exit(2);
+}
+
+fn configured_store_path() -> Option<String> {
+    match std::env::var("SANDHI_STORE") {
+        // SQLite URI options can request volatile databases or interact with shard
+        // suffixes. The binary accepts ordinary filesystem paths, not URI syntax.
+        Ok(path) if !path.trim().is_empty() && path != ":memory:" && !path.starts_with("file:") => {
+            Some(path)
+        }
+        Err(std::env::VarError::NotPresent) => None,
+        _ => startup_store_fatal("configuration"),
+    }
 }
 
 enum WatchdogMessage {

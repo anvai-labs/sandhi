@@ -9,6 +9,7 @@ mistaken for shipped behavior.
 | Question | Source of truth |
 |---|---|
 | What can I run today? | The root [README](../README.md) and [proxy operator guide](operator/proxy-guide.adoc) |
+| How do I rehearse recovery safely? | [Isolated single-node recovery drill](operator/recovery-drill.md); no automatic production restore guarantee |
 | What is the supported architecture and scope? | Accepted records in [`adr/`](adr/) |
 | What is complete or still open? | This index and the status line at the top of each record in [`td/`](td/) |
 | What is the public data contract? | Rust types in `sandhi-core`; generated JSON Schemas in [`../schemas/`](../schemas/) |
@@ -113,13 +114,13 @@ perpetually open.
 | [0017](td/TD-0017-transport-security-and-ingress-protocol-breadth.md) | In progress | P2 rotation, P3 ALPN/context, evidence-gated P4 HTTP/2 |
 | [0018](td/TD-0018-duplex-session-metering.md) | Proposed | Spike, session abstraction, and WebSocket ingress |
 | [0019](td/TD-0019-ingress-codec-untrusted-input-hardening.md) | Proposed | Property/fuzz suites and lossy-field inventory |
-| [0020](td/TD-0020-operational-readiness-and-transport-observability.md) | In progress | W06b integrated; W06a readiness/cutoff/deadline locally verified, C01c integration pending. Remaining gauges, pool, shedding and DNS work still open |
+| [0020](td/TD-0020-operational-readiness-and-transport-observability.md) | In progress | W06a/b integrated; W06c recovery drills underway. Remaining gauges, pool, shedding and DNS work still open |
 | [0021](td/TD-0021-co-design-seam-v2-proxy-path-contract.md) | Complete | — |
 | [0022](td/TD-0022-per-call-transport-context.md) | Complete | — |
 | [0023](td/TD-0023-release-automation.md) | Complete | npm remains intentionally unconfigured/unpublished |
 | [0024](td/TD-0024-reservation-retention-and-rollup.md) | Proposed | Bounded reservation history and rollups |
 | [0025](td/TD-0025-ingress-funnel-and-family-registry.md) | Proposed | Family registry and funnel decomposition |
-| [0026](td/TD-0026-gateway-product-evolution.md) | In progress | W01–W04 complete; W05a storage foundation complete, W05b transport capture pending; W06b integrated, W06a locally verified (C01c pending). M1 still needs recovery/user acceptance. AgentBrowser AB01 verified; live/joint delivery pending |
+| [0026](td/TD-0026-gateway-product-evolution.md) | In progress | W01–W04 complete; W05a foundation complete; W06a/b integrated, W06c recovery underway and W06d workload/user acceptance pending. M1 promotion authorized only after those gates; live/joint delivery pending |
 
 TD-0026 slice completion means implementation/local verification. Its separate C01/C02 checkpoint
 table tracks remote CI, merge and release; C01 [PR #230](https://github.com/anvai-labs/sandhi/pull/230)

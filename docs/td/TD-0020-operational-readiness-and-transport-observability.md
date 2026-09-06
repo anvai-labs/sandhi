@@ -1,7 +1,7 @@
 # TD-0020: Operational readiness and transport observability — you cannot operate what you cannot see
 
-- **Status:** **In progress**, updated 2026-09-06. P1/W06a is implemented and locally verified;
-  integration is tracked by C01c in TD-0026. P2 is partial via TD-0014's shipped connection,
+- **Status:** **In progress**, updated 2026-09-06. P1/W06a is integrated through PR #232;
+  W06c offline recovery drills are underway (C01d in TD-0026). P2 is partial via TD-0014's shipped connection,
   stream, and connection-shed signals plus integrated W06b buffer visibility;
   the remaining P2–P5 scope is open. Owns gaps
   **G15, G16, G17, G18, G27**.
@@ -222,7 +222,7 @@ The full SDK/dashboard/broker suite with AgentBrowser passed **95 tests, 1 skipp
 unavailable locally); all-target clippy also passed without the native feature. C01b in TD-0026
 tracks integration separately; no merge or release is implied by local verification.
 
-## W06a execution gates (2026-09-06; locally verified, integration pending)
+## W06a execution gates (2026-09-06; integrated)
 
 This slice covers the whole shutdown path, not just a readiness flag. These are acceptance
 gates; C01c in TD-0026 tracks verification and integration:
@@ -293,6 +293,32 @@ reservation rollback, admin/config guards, metrics authorization, stalled TLS, b
 and runtime-teardown watchdog subprocesses. This is not a live external-collector or production
 workload certification. Adversarial review's trailing OTLP span-drop guard race was fixed by
 placing the operation guard last; re-review found no remaining blocker. C01c owns PR/CI evidence.
+
+## W06c recovery acceptance (2026-09-06; under verification)
+
+The [recovery runbook](../operator/recovery-drill.md) and disposable SDK fixtures rehearse
+single-file and fixed two-shard restart/restore, exact attribution and continued settlement,
+real SIGKILL lease preservation and held-capacity rejection, WAL-aware standalone snapshots,
+invalid/overlapping archive rejection and historical revocation reconciliation in quarantine.
+Native/plain synthetic broker cases distinguish retained metadata from actual secret authority;
+AgentBrowser checks the restored, authenticated dashboard without seeding new usage.
+
+The broader review also reproduced configured ledger-open failure bypassing a persisted zero
+hard cap through a fresh memory ledger. W06c therefore requires startup failure before binding
+when a configured database cannot initialize; only absent storage configuration selects memory.
+Empty/non-UTF-8 settings, `:memory:` and SQLite `file:` URIs are rejected by the binary.
+External broker resolution remains separate. Initialization is not an atomic migration of all
+components, and missing shards can still be created: restore completeness preflight is required.
+
+These are initial single-node drills, not online cross-file backup, production RTO/RPO, live broker
+certification, automatic revocation reconciliation or authoritative unknown-consumption recovery.
+W06d separately owns workload evidence and actual-user acceptance. C01d tracks review and CI.
+
+Independent review closed source/archive overlap and exact serialized-manifest size findings;
+the new startup regression first demonstrated upstream dispatch despite a persisted zero cap,
+then passed after the fix. All 17 startup failure/healthy-mode cases passed independent re-review.
+Default/native workspace and OTLP proxy tests and strict clippy passed; native line coverage was
+87.77%. Final combined SDK/browser and remote CI evidence belongs to C01d.
 
 ## Remaining pool decision
 
