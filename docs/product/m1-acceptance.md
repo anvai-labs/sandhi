@@ -1,6 +1,6 @@
 # M1 workload and operator acceptance
 
-Status: automated workload implementation under verification; actual-user review pending.
+Status: automated workload and combined local verification passed; actual-user review pending.
 Owner/tracker: [TD-0026](../td/TD-0026-gateway-product-evolution.md), C01e/W06d.
 
 M1 is a trustworthy **single-node baseline**, not the complete gateway roadmap. W01–W04,
@@ -63,8 +63,33 @@ for retaining the full report. Distinct output paths are required. Optimized Pyt
 
 Independent review corrected missing streaming terminal validation, unexpected ledger-scope
 charges and optimized-Python false passes. Negative tests also cover malformed successful HTTP
-payloads, generator overload, missing metrics and evidence-output aliases. The final measured
-baseline must use the integrated W06c binary; earlier exploratory runs are not the M1 artifact.
+payloads, generator overload, missing metrics and evidence-output aliases.
+
+### Recorded baseline — 2026-09-06
+
+The [compact evidence](evidence/m1-workload-2026-09-06.json) records a passing run against
+integrated W06c `develop` revision `8ae84019d7dd5919ea5d242a31c67befa6ff0a4c`. The locally observed
+build command was `cargo build --locked -p sandhi-proxy --bin sandhi-proxy` (unoptimized dev,
+default features), using Rust 1.98.0. The harness itself does not verify that build provenance;
+it records the executable SHA-256 and marks the supplied revision unverified. Harness revision
+`dfdca27736591e3b862c85448232a62a39523c71` was clean when the run began.
+
+| Observation | Result |
+|---|---|
+| Lanes/profiles/repeats | Six lanes × two profiles × three repeats = 36 phases |
+| Completed synthetic requests | 4,608 of 4,608; no generator rejection or request error |
+| Gateway accounting | 3,072 events across 32 tenants; 546,600 neutral charged tokens |
+| Final checkpoints | No unsettled leases; queue/drop assertions passed; denied calls did not dispatch |
+| Shutdown and elapsed run | Exit 0; 66.28 seconds including setup/checks/cleanup |
+| Combined local regression suite | 227 passed, one unavailable Google SDK skipped; includes real AgentBrowser smoke |
+
+The summary retains every phase distribution and resource observation. Raw per-request evidence
+was retained locally as `/tmp/sandhi-w06d-final.json` (canonical digest in the summary) and independently
+reviewed; it is not a repository-hosted artifact. Reproduce with the command above to retain a new
+full report in a durable evidence store. Raw SQL/metric checkpoints are asserted by the reviewed
+harness, not copied into the report. These are observations of one small synthetic profile,
+not a measured production RTO, leak-freedom proof or throughput commitment. Earlier exploratory
+runs are not substituted for this integrated baseline.
 
 ## Actual-user review — required before M1 promotion
 

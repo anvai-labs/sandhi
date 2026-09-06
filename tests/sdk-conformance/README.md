@@ -49,6 +49,12 @@ synthetic broker authority. `test_store_startup.py` proves configured database i
 failures exit before serving, without replacing persisted enforcement with memory. See the
 [recovery runbook](../../docs/operator/recovery-drill.md) for scope and limitations.
 
+`test_workload_acceptance.py` adds a small real-proxy workload gate and negative tests for
+stream completion, accounting isolation, overload, missing metrics and evidence output safety.
+`workload_acceptance.py` runs the larger reproducible profile and emits full/compact JSON evidence.
+See [M1 acceptance](../../docs/product/m1-acceptance.md) for the measured baseline, commands and
+the separate actual-user gate. This is not a production capacity or performance regression SLO.
+
 ## Optional AgentBrowser integration
 
 Use a built sibling checkout with Node 22 and its Chromium installed. Reviewed source revision:
