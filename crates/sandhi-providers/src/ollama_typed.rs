@@ -420,6 +420,7 @@ mod tests {
             Box::pin(futures_util::stream::iter(vec![Ok(crate::StreamChunk {
                 data: bytes::Bytes::from(wire),
                 usage: Some(crate::ParsedUsage {
+                    reasoning_included: Some(true),
                     tokens_in: 1,
                     tokens_out: 2,
                     cache_creation_tokens: 0,
@@ -565,6 +566,7 @@ mod tests {
                 Ok(crate::StreamChunk {
                     data: bytes::Bytes::new(),
                     usage: Some(crate::ParsedUsage {
+                        reasoning_included: Some(true),
                         tokens_in: 2,
                         tokens_out: 3,
                         cache_creation_tokens: 0,

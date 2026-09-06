@@ -17,6 +17,10 @@
 //! count afterwards opens a ledger with no ledger rows (post-migration
 //! settles are not visible to the legacy file). Idempotent: a re-open finds
 //! no rows to move.
+//! Evidence-bearing legacy sources are an exception: widening fails before moving rows or
+//! creating destinations until a receipt-preserving migration is designed (TD-0026 W05e).
+//! Multi-shard N→M changes are not supported automatic migrations; quiesce writers and keep
+//! topology fixed when using settlement evidence.
 //!
 //! The default is `shards = 1`, which opens *exactly* the legacy file —
 //! bit-identical to the pre-sharding behaviour.
@@ -25,6 +29,7 @@ use std::sync::Mutex;
 
 use time::OffsetDateTime;
 
+use crate::ledger::evidence::{ClaimedSettlement, EvidenceError, SettlementOutcome};
 use crate::ledger::{BudgetRow, ReserveOutcome, SqliteLedger};
 use sandhi_core::{Policy, Window};
 
@@ -143,6 +148,55 @@ impl ShardedLedger {
         self.with_shard(scope, |ledger| ledger.limit_durable(scope))
     }
 
+    /// Settle and record evidence on the lease's owning shard. This is separate from the
+    /// legacy proxy settlement path until W05c's authoritative-mode integration.
+    pub fn settle_with_evidence_durable(
+        &self,
+        scope: &str,
+        reservation_id: u64,
+        charged_tokens: u64,
+    ) -> Result<SettlementOutcome, EvidenceError> {
+        self.with_shard(scope, |ledger| {
+            ledger.settle_with_evidence_durable(scope, reservation_id, charged_tokens)
+        })
+    }
+
+    /// Local shard count for polling. Indices are not stable across topology changes and
+    /// confer no tenant authority; an external export/authentication surface is W05e.
+    pub fn evidence_shard_count(&self) -> usize {
+        self.shards.len()
+    }
+
+    pub fn claim_settlements_durable(
+        &self,
+        shard_index: usize,
+        limit: usize,
+        now: OffsetDateTime,
+        lease_seconds: u32,
+    ) -> Result<Vec<ClaimedSettlement>, EvidenceError> {
+        self.shards
+            .get(shard_index)
+            .ok_or(EvidenceError::InvalidShard)?
+            .lock()
+            .expect("ledger shard poisoned")
+            .claim_settlements_durable(limit, now, lease_seconds)
+    }
+
+    pub fn acknowledge_settlement_durable(
+        &self,
+        shard_index: usize,
+        receipt_id: &str,
+        claim_token: &str,
+        now: OffsetDateTime,
+    ) -> Result<bool, EvidenceError> {
+        self.shards
+            .get(shard_index)
+            .ok_or(EvidenceError::InvalidShard)?
+            .lock()
+            .expect("ledger shard poisoned")
+            .acknowledge_settlement_durable(receipt_id, claim_token, now)
+    }
+
     pub fn spent_durable(&self, scope: &str) -> rusqlite::Result<u64> {
         self.with_shard(scope, |ledger| ledger.spent_durable(scope))
     }
@@ -230,6 +284,20 @@ impl ShardedLedger {
                 .optional()
                 .map(|found| found.is_some())
         };
+        // The legacy copier cannot atomically relocate receipt identities/claims. Fail
+        // before creating target files or deleting source rows, even for acknowledged
+        // evidence. A separate topology/retention protocol is required (W05e/TD-0024).
+        if has_table("budget_settlement_outbox")?
+            && legacy.query_row(
+                "SELECT EXISTS(SELECT 1 FROM budget_settlement_outbox)",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?
+        {
+            return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                std::io::Error::other("settlement evidence requires explicit shard migration"),
+            )));
+        }
         if !has_table("budget_reservation")? || !has_table("budget_limit")? {
             return Ok(()); // nothing ever created here
         }

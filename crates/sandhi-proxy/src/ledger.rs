@@ -111,7 +111,13 @@ impl ProxyLedger {
     /// and the metadata survives a restart. The in-memory arm has no policy notion, so a `Warn`
     /// scope is stored **uncapped** (it must never deny) — its configured limit lives only in the
     /// operator's in-memory budgets map (volatile, which is fine for the volatile arm).
-    pub fn set_budget(&mut self, scope: &str, limit: Option<u64>, window: Window, policy: Policy) {
+    pub fn set_budget(
+        &mut self,
+        scope: &str,
+        limit: Option<u64>,
+        window: Window,
+        policy: Policy,
+    ) -> Result<(), String> {
         match self {
             Self::Memory(l) => {
                 let enforced = match policy {
@@ -119,12 +125,11 @@ impl ProxyLedger {
                     Policy::Warn => None,
                 };
                 l.set_limit(scope, enforced);
+                Ok(())
             }
-            Self::Durable(l) => {
-                if let Err(e) = l.set_limit_durable(scope, limit, window, policy) {
-                    eprintln!("sandhi-proxy: durable set_budget failed for {scope}: {e}");
-                }
-            }
+            Self::Durable(l) => l
+                .set_limit_durable(scope, limit, window, policy)
+                .map_err(|e| e.to_string()),
         }
     }
 
@@ -190,9 +195,14 @@ impl ProxyLedger {
 
     /// Settled billable spend in the scope's current window.
     pub fn spent(&self, scope: &str) -> u64 {
+        self.try_spent(scope).unwrap_or(0)
+    }
+
+    /// Fallible observation for operator surfaces: unavailable spend must not appear as zero.
+    pub fn try_spent(&self, scope: &str) -> Result<u64, String> {
         match self {
-            Self::Memory(l) => l.spent(scope),
-            Self::Durable(l) => l.spent_durable(scope).unwrap_or(0),
+            Self::Memory(l) => Ok(l.spent(scope)),
+            Self::Durable(l) => l.spent_durable(scope).map_err(|e| e.to_string()),
         }
     }
 
@@ -253,7 +263,8 @@ mod tests {
     #[test]
     fn block_scope_denies_over_cap_and_settles_by_lease() {
         let mut l = ProxyLedger::in_memory();
-        l.set_budget("g", Some(100), Window::Total, Policy::Block);
+        l.set_budget("g", Some(100), Window::Total, Policy::Block)
+            .unwrap();
         let Admission::Leased(r) = l.reserve("g", 100, now(), Policy::Block) else {
             panic!("first fits");
         };
@@ -271,7 +282,8 @@ mod tests {
         // The in-memory arm stores a Warn scope uncapped, so it never denies (matches the durable
         // arm's soft-cap behavior). Spend still tracks.
         let mut l = ProxyLedger::in_memory();
-        l.set_budget("g", Some(100), Window::Total, Policy::Warn);
+        l.set_budget("g", Some(100), Window::Total, Policy::Warn)
+            .unwrap();
         assert!(l.limit("g").is_none(), "warn is stored uncapped in-memory");
         let Admission::Leased(a) = l.reserve("g", 80, now(), Policy::Warn) else {
             panic!("admits");
@@ -287,7 +299,8 @@ mod tests {
     #[test]
     fn zero_settle_releases_without_recording_spend() {
         let mut l = ProxyLedger::in_memory();
-        l.set_budget("g", Some(100), Window::Total, Policy::Block);
+        l.set_budget("g", Some(100), Window::Total, Policy::Block)
+            .unwrap();
         let Admission::Leased(r) = l.reserve("g", 50, now(), Policy::Block) else {
             panic!("fits");
         };
@@ -315,7 +328,8 @@ mod tests {
 
         {
             let mut l = ProxyLedger::durable(path, 1).unwrap();
-            l.set_budget("g", Some(1000), Window::Daily, Policy::Block);
+            l.set_budget("g", Some(1000), Window::Daily, Policy::Block)
+                .unwrap();
             let Admission::Leased(r) = l.reserve("g", 100, now(), Policy::Block) else {
                 panic!("fits under the 1000 cap");
             };
@@ -355,7 +369,8 @@ mod tests {
         ledger
             .lock()
             .unwrap()
-            .set_budget("g", Some(1000), Window::Total, Policy::Block);
+            .set_budget("g", Some(1000), Window::Total, Policy::Block)
+            .unwrap();
         let Admission::Leased(_r) = ledger
             .lock()
             .unwrap()
@@ -375,4 +390,27 @@ mod tests {
             "sweep reclaimed the abandoned lease"
         );
     }
+}
+#[test]
+fn every_concurrent_underestimated_lease_can_overshoot() {
+    let now = OffsetDateTime::now_utc;
+    let mut ledger = ProxyLedger::in_memory();
+    ledger
+        .set_budget("g", Some(100), Window::Total, Policy::Block)
+        .unwrap();
+    let Admission::Leased(a) = ledger.reserve("g", 50, now(), Policy::Block) else {
+        panic!()
+    };
+    let Admission::Leased(b) = ledger.reserve("g", 50, now(), Policy::Block) else {
+        panic!()
+    };
+    ledger.settle(&a, 80);
+    ledger.settle(&b, 90);
+    assert_eq!(ledger.spent("g"), 170);
+    assert!(matches!(
+        ledger.reserve("g", 1, now(), Policy::Block),
+        Admission::Denied
+    ));
+    // Excess is 30 + 40 from two already-admitted calls, not a one-call bound.
+    assert_eq!(ledger.spent("g") - 100, 70);
 }

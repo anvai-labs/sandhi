@@ -967,7 +967,10 @@ mod streaming_usage_fidelity_tests {
 
         assert_eq!(
             chunks.last().unwrap().usage,
-            Some(ParsedUsage::default()),
+            Some(ParsedUsage {
+                reasoning_included: Some(true),
+                ..ParsedUsage::default()
+            }),
             "reporting zero is not the same as reporting nothing"
         );
     }

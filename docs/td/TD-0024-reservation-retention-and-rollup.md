@@ -7,7 +7,7 @@
   (D1 leases / D2 idempotent settle / D5 calendar windows — the invariants any retention scheme
   must preserve exactly), [TD-0016](TD-0016-enforcement-throughput-ceiling.md) (the throughput
   sibling; this is the *storage-side* ceiling), [TD-0021](TD-0021-co-design-seam-v2-proxy-path-contract.md)
-  (G20 idempotent metering — shares a migration window, see D3),
+  (G20 idempotent metering — shipped separately, see D3),
   `crates/sandhi-store/src/ledger.rs`, the 2026-09-01 design audit (finding D1).
 
 ## Why this exists
@@ -40,11 +40,18 @@ rollup and deleted. A settle arriving for an already-sealed hour writes an adjus
 to that hour — idempotent settle-by-id (ADR-0005 D2) is unchanged; only its storage location
 moves.
 
-**D3 — share the migration window with G20.** `usage_events` has no primary key, which
-forecloses the `UNIQUE(request_id)` upsert TD-0021 G20 will want. Both are store-schema changes
-with the same operational shape (create-then-backfill-then-swap reads); doing them as one
-migration PR halves the operator-facing churn. If G20 moves first, this TD follows its
-conventions.
+**D3 — preserve shipped dedup and new receipt evidence.** Updated 2026-09-05: TD-0021 G20
+already shipped a separate `idempotency_dedup` table; it did not add `UNIQUE(request_id)` to
+`usage_events`. The earlier shared-migration assumption is obsolete. TD-0026 W05a now adds an
+opt-in atomic settlement receipt/outbox primitive; the proxy still uses the legacy settlement
+API. See [accounting and evidence](../product/attempt-accounting-and-evidence.md).
+
+Rollups must preserve receipt identity, exact replay/conflict detection, delivery claims and
+acknowledgement tombstones independently of live reservation retention. Never cascade-delete
+evidence when sealing a reservation. Unknown liabilities, reclaimed leases, late amendments,
+retention windows and cross-shard relocation require W05d/e's joint design before P2. Existing
+single-file widening now refuses a source containing any settlement receipts, acknowledged or
+not. No receipt retention policy or general topology migration is implemented yet.
 
 **D4 — non-goals, explicitly.** No change to lease semantics, ceiling math, the
 observe/enforce split, or `synchronous=FULL` (rejected in TD-0016 D2 — durability is not the

@@ -10,12 +10,12 @@
 #     scripts/coverage-bindings.sh python   # run inside a pyo3-compatible venv (see below)
 #     scripts/coverage-bindings.sh node     # needs npm on PATH + cargo-llvm-cov
 #
-# Python interpreter: the pyo3 0.22 abi3-py311 build needs CPython **3.11–3.13** with `maturin`
+# Python interpreter: this coverage harness validates CPython **3.11–3.13** with `maturin`
 # installed. It uses the active interpreter (`python3`); override with `COV_PYTHON=/path/to/python`.
 # The build wheel is force-installed into that interpreter, so use a **virtual environment**, never
 # system Python — locally that is `~/code/.venv` (3.12): `source ~/code/.venv/bin/activate` first,
 # or `COV_PYTHON=~/code/.venv/bin/python scripts/coverage-bindings.sh python`. (Bare system Python
-# is often too new — e.g. 3.14 — and breaks the pyo3 build; the script guards the version.) In CI
+# may be outside this harness's validated range; the script guards the version.) In CI
 # the setup-python step provides an isolated 3.12 as `python3`.
 #
 # Requires: cargo-llvm-cov + the llvm-tools-preview component (same as the core coverage job).
@@ -33,13 +33,13 @@ case "$LANG_ARG" in
   python)
     DIR="$ROOT/bindings/python"
     PY="${COV_PYTHON:-python3}"
-    # Fail fast if the interpreter can't build the pyo3 abi3-py311 extension (needs 3.11–3.13).
+    # Keep the coverage harness on its validated interpreter range; wheel ABI is abi3-py311.
     PREFLIGHT() {
       command -v "$PY" >/dev/null || { echo "error: '$PY' not found (set COV_PYTHON)" >&2; exit 3; }
       local v; v="$("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
       case "$v" in
         3.11 | 3.12 | 3.13) ;;
-        *) echo "error: Python $v unsupported for the pyo3 build (need 3.11–3.13); activate a venv like ~/code/.venv or set COV_PYTHON" >&2; exit 3 ;;
+        *) echo "error: Python $v outside coverage harness range (3.11–3.13); activate a venv like ~/code/.venv or set COV_PYTHON" >&2; exit 3 ;;
       esac
       "$PY" -m maturin --version >/dev/null 2>&1 || { echo "error: maturin not installed for $PY — 'pip install maturin' in your venv" >&2; exit 3; }
     }

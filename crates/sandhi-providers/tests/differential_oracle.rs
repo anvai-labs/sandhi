@@ -27,6 +27,7 @@ mod anthropic_schema {
 fn parse_expected(s: &str) -> ParsedUsage {
     let v: Value = serde_json::from_str(s).unwrap();
     ParsedUsage {
+        reasoning_included: Some(true),
         tokens_in: v["tokens_in"].as_u64().unwrap(),
         tokens_out: v["tokens_out"].as_u64().unwrap(),
         cache_creation_tokens: v["cache_creation_tokens"].as_u64().unwrap(),
@@ -46,6 +47,7 @@ fn oracle_openai(usage: &Value) -> ParsedUsage {
         .map(|d| d.cached_tokens)
         .unwrap_or(0);
     ParsedUsage {
+        reasoning_included: Some(true),
         tokens_in: (u.prompt_tokens - cached).max(0) as u64,
         tokens_out: u.completion_tokens.max(0) as u64,
         cache_creation_tokens: 0,
@@ -57,6 +59,7 @@ fn oracle_openai(usage: &Value) -> ParsedUsage {
 fn oracle_anthropic(usage: &Value) -> ParsedUsage {
     let u: anthropic_schema::AnthropicMessageUsage = serde_json::from_value(usage.clone()).unwrap();
     ParsedUsage {
+        reasoning_included: Some(true),
         tokens_in: u.input_tokens.max(0) as u64,
         tokens_out: u.output_tokens.max(0) as u64,
         cache_creation_tokens: u.cache_creation_input_tokens.unwrap_or(0).max(0) as u64,

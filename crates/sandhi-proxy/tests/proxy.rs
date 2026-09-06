@@ -239,7 +239,7 @@ async fn version_endpoint_is_unauthenticated_and_reports_the_contract() {
     let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["wire_contract_version"], "1");
     assert_eq!(value["chat_contract_version"], "1");
-    assert_eq!(value["chat_contract_minor"], 6);
+    assert_eq!(value["chat_contract_minor"], 7);
     let dialects = value["dialects"].as_array().unwrap();
     for expected in ["openai", "anthropic", "responses", "gemini"] {
         assert!(
@@ -1655,12 +1655,17 @@ async fn block_capped_scope_with_unbounded_output_is_not_passed_through() {
 
     let sink = Arc::new(InMemorySink::new());
     let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
-    state.ledger.lock().unwrap().set_budget(
-        "group:platform",
-        Some(1_000_000),
-        Window::Total,
-        Policy::Block,
-    );
+    state
+        .ledger
+        .lock()
+        .unwrap()
+        .set_budget(
+            "group:platform",
+            Some(1_000_000),
+            Window::Total,
+            Policy::Block,
+        )
+        .unwrap();
 
     let response = build_app(state.clone())
         .oneshot(
@@ -1834,7 +1839,9 @@ async fn exhausted_budget_is_429_before_calling_upstream() {
     // A tiny hard cap: the conservative ceiling of any real request (input estimate + the default
     // output ceiling) can't fit, so admission is refused before the upstream is ever called
     // (ADR-0005 D1 — the ceiling is the gate, not a lower-bound estimate).
-    ledger.set_budget("group:platform", Some(10), Window::Total, Policy::Block);
+    ledger
+        .set_budget("group:platform", Some(10), Window::Total, Policy::Block)
+        .unwrap();
 
     // An upstream with no mounts — reaching it would 404; asserting 429 proves we never do.
     let upstream = MockServer::start().await;
@@ -2124,7 +2131,9 @@ async fn ceiling_reservation_rejects_unbounded_but_admits_bounded_output() {
         .await;
 
     let mut ledger = ProxyLedger::in_memory();
-    ledger.set_budget("group:platform", Some(100), Window::Total, Policy::Block);
+    ledger
+        .set_budget("group:platform", Some(100), Window::Total, Policy::Block)
+        .unwrap();
     let sink = Arc::new(InMemorySink::new());
     let state = state_with(upstream.uri(), sink.clone(), ledger);
     let app = build_app(state);
@@ -3060,12 +3069,17 @@ async fn a_settle_above_the_ceiling_is_recorded_in_full_and_counted() {
 
     let sink = Arc::new(InMemorySink::new());
     let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
-    state.ledger.lock().unwrap().set_budget(
-        "group:platform",
-        Some(10_000_000),
-        Window::Total,
-        Policy::Block,
-    );
+    state
+        .ledger
+        .lock()
+        .unwrap()
+        .set_budget(
+            "group:platform",
+            Some(10_000_000),
+            Window::Total,
+            Policy::Block,
+        )
+        .unwrap();
     let app = build_app(state.clone());
 
     let req = Request::builder()

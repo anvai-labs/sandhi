@@ -129,6 +129,7 @@ mod tests {
     use wiremock::matchers::{header, method, path};
 
     const EXPECTED: ParsedUsage = ParsedUsage {
+        reasoning_included: Some(true),
         tokens_in: 300,
         tokens_out: 120,
         cache_creation_tokens: 0,

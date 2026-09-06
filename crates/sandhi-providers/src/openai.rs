@@ -197,6 +197,7 @@ mod tests {
     use futures_util::StreamExt;
 
     const EXPECTED: ParsedUsage = ParsedUsage {
+        reasoning_included: Some(true),
         tokens_in: 200,
         tokens_out: 250,
         cache_creation_tokens: 0,

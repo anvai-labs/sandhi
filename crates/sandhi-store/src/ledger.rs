@@ -24,6 +24,8 @@ use time::{Duration, OffsetDateTime};
 
 use sandhi_core::{Denied, EnforcementLedger, LedgerView, Policy, Reservation, Window};
 
+pub mod evidence;
+
 /// Result of an atomic reserve: admitted (with the lease) or denied (over cap).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReserveOutcome {
@@ -118,7 +120,8 @@ impl SqliteLedger {
                  expires_at  INTEGER NOT NULL,
                  PRIMARY KEY (vkey, idem_key)
              );",
-        )
+        )?;
+        evidence::init(conn)
     }
 
     /// The inclusive start (unix seconds) of the current window for `window`, calendar-aligned in
@@ -143,18 +146,18 @@ impl SqliteLedger {
         window: Window,
         policy: Policy,
     ) -> rusqlite::Result<()> {
+        // SQLite INTEGER is signed. Never wrap a requested cap into a negative value.
+        let limit = limit
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
         self.conn.execute(
             "INSERT INTO budget_limit (scope, limit_tokens, window, policy) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(scope) DO UPDATE SET
                  limit_tokens = excluded.limit_tokens,
                  window = excluded.window,
                  policy = excluded.policy",
-            params![
-                scope,
-                limit.map(|v| v as i64),
-                window.as_str(),
-                policy.as_str()
-            ],
+            params![scope, limit, window.as_str(), policy.as_str()],
         )?;
         Ok(())
     }
@@ -901,6 +904,28 @@ mod tests {
                 window: Window::Total,
                 policy: Policy::Warn,
             }
+        );
+    }
+
+    #[test]
+    fn out_of_range_budget_never_overwrites_committed_policy() {
+        let mut ledger = mem();
+        ledger
+            .set_limit_durable("g", Some(7), Window::Daily, Policy::Block)
+            .unwrap();
+        assert!(ledger
+            .set_limit_durable("g", Some(u64::MAX), Window::Total, Policy::Warn)
+            .is_err());
+        let rows = ledger.list_budgets_durable().unwrap();
+        assert_eq!(rows[0].limit, Some(7));
+        assert_eq!(rows[0].window, Window::Daily);
+        assert_eq!(rows[0].policy, Policy::Block);
+        ledger
+            .set_limit_durable("g", Some(i64::MAX as u64), Window::Total, Policy::Block)
+            .unwrap();
+        assert_eq!(
+            ledger.list_budgets_durable().unwrap()[0].limit,
+            Some(i64::MAX as u64)
         );
     }
 

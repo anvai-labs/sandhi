@@ -415,6 +415,8 @@ pub struct UsageBreakdown {
     pub tokens_out: u32,
     pub cache_creation_tokens: u32,
     pub cache_read_tokens: u32,
+    pub reasoning_tokens: f64,
+    pub reasoning_included: Option<bool>,
 }
 
 /// A neutral usage event (mirrors `usage-event.v1.schema.json`).
@@ -433,6 +435,8 @@ pub struct Event {
     pub session_id: Option<String>,
     pub tokens_in: u32,
     pub tokens_out: u32,
+    pub reasoning_tokens: Option<f64>,
+    pub reasoning_included: Option<bool>,
     pub cache_creation_tokens: u32,
     pub cache_read_tokens: u32,
     pub usage_completeness: String,
@@ -643,6 +647,7 @@ impl Gateway {
             cache_creation_tokens: u64::from(cache_creation_tokens.unwrap_or(0)),
             cache_read_tokens: u64::from(cache_read_tokens.unwrap_or(0)),
             reasoning_tokens: 0,
+            reasoning_included: None,
         };
         self.record_and_build(&virtual_key, &provider, &model, parsed, session_id, route)
     }
@@ -797,6 +802,8 @@ fn usage_breakdown(u: &ParsedUsage) -> UsageBreakdown {
         tokens_out: u.tokens_out as u32,
         cache_creation_tokens: u.cache_creation_tokens as u32,
         cache_read_tokens: u.cache_read_tokens as u32,
+        reasoning_tokens: u.reasoning_tokens as f64,
+        reasoning_included: u.reasoning_included,
     }
 }
 
@@ -818,6 +825,8 @@ fn event_to_napi(e: &UsageEvent) -> Event {
         session_id: e.session_id.clone(),
         tokens_in: e.tokens_in as u32,
         tokens_out: e.tokens_out as u32,
+        reasoning_tokens: e.reasoning_tokens.map(|v| v as f64),
+        reasoning_included: e.reasoning_included,
         cache_creation_tokens: e.cache_creation_tokens as u32,
         cache_read_tokens: e.cache_read_tokens as u32,
         usage_completeness: match e.usage_completeness {

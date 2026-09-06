@@ -1,216 +1,264 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://anvai-labs.github.io/sandhi/schemas/usage-event.v1.schema.json",
-  "title": "Sandhi Usage Event (v1)",
-  "description": "The neutral, cross-repo boundary object emitted once per model call. Carries measured units only \u2014 NO dollars, NO tier/SKU names. Measurement lives here; pricing is a downstream commercial concern (AnvaiOps ADR-0047 D3). Superset of the AnvaiOps `llm_tokens` event and the ADR-0024 `anvai-plane-core` metering envelope.",
+  "title": "UsageEvent",
+  "description": "The neutral, cross-repo boundary object emitted once per model call.\n\n**No dollars, no tier/SKU names.** Sandhi measures; the commercial layer prices (AnvaiOps ADR-0047 D3). Build with [`UsageEvent::new`] + the `with_*` setters.",
   "type": "object",
   "required": [
-    "schema_version",
-    "request_id",
+    "backend",
+    "model",
     "occurred_at",
     "provider",
-    "model",
-    "backend",
+    "request_id",
+    "schema_version",
     "tokens_in",
     "tokens_out"
   ],
-  "additionalProperties": false,
   "properties": {
-    "schema_version": {
-      "type": "string",
-      "const": "1",
-      "description": "Wire-contract major version. Breaking changes bump this and coordinate across all consumers."
-    },
-    "request_id": {
-      "type": "string",
-      "minLength": 1,
-      "description": "Unique id for the single model call this event meters."
-    },
-    "occurred_at": {
-      "type": "string",
-      "format": "date-time",
-      "description": "RFC 3339 timestamp of when the call completed (usage finalized)."
-    },
-    "provider": {
-      "type": "string",
-      "minLength": 1,
-      "description": "Provider slug, neutral (e.g. anthropic, openai, gemini, bedrock, cohere, vllm, ollama, byo). Never a commercial tier/SKU name."
-    },
-    "model": {
-      "type": "string",
-      "minLength": 1,
-      "description": "Model identifier as sent to the provider."
+    "attempts": {
+      "description": "Number of upstream attempts made by the runtime for this logical call.",
+      "default": 1,
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 1.0
     },
     "backend": {
-      "type": "string",
-      "enum": [
-        "external",
-        "self_hosted"
-      ],
-      "description": "external = provider API (billed in tokens); self_hosted = local vLLM/TGI (billed in GPU-hours downstream \u2014 token counts are for quota/usage display, not the cost basis)."
+      "$ref": "#/definitions/Backend"
     },
-    "virtual_key_id": {
+    "cache_creation_tokens": {
+      "default": 0,
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "cache_read_tokens": {
+      "default": 0,
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "duration_ms": {
+      "description": "Wall-clock duration of the logical call in milliseconds, measured at the adapter boundary (includes retries; excludes host-side queueing).",
       "type": [
-        "string",
+        "integer",
         "null"
       ],
-      "description": "The Sandhi virtual key that made the call (one shared upstream key fronts many virtual keys). Null for direct/unkeyed in-process use."
+      "format": "uint64",
+      "minimum": 0.0
     },
-    "subject_id": {
+    "gpu_seconds": {
+      "description": "Self-hosted backends only: GPU-seconds (the cost basis there).",
       "type": [
-        "string",
+        "number",
         "null"
       ],
-      "description": "The user the call is attributed to. Opaque, operator-assigned."
+      "format": "double",
+      "minimum": 0.0
     },
     "group_id": {
       "type": [
         "string",
         "null"
+      ]
+    },
+    "idempotency_key": {
+      "description": "Caller-supplied key for at-most-once semantics across retries of one logical call.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1
+    },
+    "occurred_at": {
+      "description": "RFC 3339 timestamp of completion (usage finalized).",
+      "type": "string",
+      "format": "date-time"
+    },
+    "outcome": {
+      "description": "Stable terminal outcome such as `success`, `error`, or `cancelled`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "parent_id": {
+      "description": "Parent step/run for nested agents, so an agent's cost tree is reconstructable.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "provider": {
+      "description": "Neutral provider slug (anthropic, openai, gemini, bedrock, cohere, vllm, ollama, byo…).",
+      "type": "string",
+      "minLength": 1
+    },
+    "reasoning_included": {
+      "description": "True: included in tokens_out; false: separate. Absent preserves legacy accounting.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "reasoning_tokens": {
+      "description": "Provider-reported reasoning count (OpenAI `reasoning_tokens`, Gemini `thoughtsTokenCount`). Inclusion in output is specified by `reasoning_included`; absent when no separate count is reported.",
+      "type": [
+        "integer",
+        "null"
       ],
-      "description": "The team/group the call is attributed to. Opaque, operator-assigned; also the default prompt-cache namespace (ADR-0047 D9)."
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "request_id": {
+      "type": "string",
+      "minLength": 1
     },
     "route": {
       "type": [
         "string",
         "null"
-      ],
-      "description": "Optional caller-supplied route/label (e.g. the calling feature or endpoint)."
-    },
-    "session_id": {
-      "type": [
-        "string",
-        "null"
-      ],
-      "description": "Conversation/session key used for prompt-cache + KV affinity (ADR-0047 D9). Preserved end-to-end so hosted prompt caches keep hitting and self-hosted KV routing stays sticky. Never collapsed to a single value."
-    },
-    "idempotency_key": {
-      "type": [
-        "string",
-        "null"
-      ],
-      "description": "Caller-supplied key for at-most-once semantics across retries of one logical call (ADR-0005 D7). Attribution metadata, never pricing."
+      ]
     },
     "run_id": {
+      "description": "Agent-run identifier; groups every call one run makes (cost-tree root).",
       "type": [
         "string",
         "null"
-      ],
-      "description": "Agent-run identifier; groups every call one run makes (cost-tree root). ADR-0005 D7."
+      ]
+    },
+    "schema_version": {
+      "description": "Wire-contract major version. Breaking changes bump this and coordinate consumers.",
+      "type": "string",
+      "const": "1"
+    },
+    "session_id": {
+      "description": "Conversation/session key for prompt-cache + KV affinity (ADR-0047 D9). Preserved end-to-end; never collapsed to a single value.",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "step_id": {
+      "description": "Step within a run; child dimension under `run_id`.",
       "type": [
         "string",
         "null"
-      ],
-      "description": "Step within a run; child dimension under run_id. ADR-0005 D7."
+      ]
     },
-    "parent_id": {
+    "subject_id": {
       "type": [
         "string",
         "null"
-      ],
-      "description": "Parent step/run for nested agents, so an agent's cost tree is reconstructable. ADR-0005 D7."
+      ]
     },
-    "trace_context": {
+    "time_to_first_token_ms": {
+      "description": "Streams only: milliseconds from request start to the first delivered item.",
       "type": [
-        "string",
+        "integer",
         "null"
       ],
-      "description": "W3C traceparent value, linking the event into distributed traces. ADR-0005 D7."
+      "format": "uint64",
+      "minimum": 0.0
     },
     "tokens_in": {
       "type": "integer",
-      "minimum": 0,
-      "description": "Fresh (non-cached) input tokens."
+      "format": "uint64",
+      "minimum": 0.0
     },
     "tokens_out": {
       "type": "integer",
-      "minimum": 0,
-      "description": "Completion tokens, finalized from the terminal usage block (never estimated mid-stream)."
+      "format": "uint64",
+      "minimum": 0.0
     },
-    "cache_creation_tokens": {
-      "type": "integer",
-      "minimum": 0,
-      "default": 0,
-      "description": "Prompt-cache write tokens (priced ~1.25x fresh input for Anthropic). Attributed per subject/session."
+    "trace_context": {
+      "description": "W3C `traceparent` value, linking the event into distributed traces.",
+      "type": [
+        "string",
+        "null"
+      ]
     },
-    "cache_read_tokens": {
-      "type": "integer",
-      "minimum": 0,
-      "default": 0,
-      "description": "Prompt-cache read tokens (priced ~0.1x fresh input). If A warms a shared prefix and B reads it, B's event shows the cheap read."
+    "upstream_request_id": {
+      "description": "Provider-supplied request identifier when one was returned.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "usage_basis": {
+      "description": "Whether those counts were measured or estimated (TD-0013 D5). Orthogonal to `usage_completeness`: an interrupted stream may carry real provider counts or a byte-derived floor, and only this field tells a consumer which.",
+      "default": "provider_reported",
+      "allOf": [
+        {
+          "$ref": "#/definitions/UsageBasis"
+        }
+      ]
     },
     "usage_completeness": {
+      "description": "Whether token counts are final, partial, or unavailable for this logical call.",
+      "default": "unavailable",
+      "allOf": [
+        {
+          "$ref": "#/definitions/UsageCompleteness"
+        }
+      ]
+    },
+    "virtual_key_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "Backend": {
+      "description": "The cost basis of a call's backend.",
+      "oneOf": [
+        {
+          "description": "Provider API — billed in tokens.",
+          "type": "string",
+          "enum": [
+            "external"
+          ]
+        },
+        {
+          "description": "Local vLLM/TGI — billed in GPU-hours; token counts are display-only.",
+          "type": "string",
+          "enum": [
+            "self_hosted"
+          ]
+        }
+      ]
+    },
+    "UsageBasis": {
+      "description": "Where a usage number came from (TD-0013 D5).\n\nOrthogonal to [`UsageCompleteness`], which answers *how complete* the counts are. This answers *whether they were measured at all* — and the two are genuinely independent: an interrupted stream can carry real provider counts (`Partial` + `ProviderReported`) or a byte-derived floor (`Partial` + `Estimated`), and today nothing on the wire tells them apart.\n\nDeliberately a separate field rather than a fourth `UsageCompleteness` variant: redefining what `Partial` means would retroactively change the meaning of rows already written to operators' stores, without changing a single byte of schema. Adding a field does not.",
+      "oneOf": [
+        {
+          "description": "Every category came from the provider. The default, because it is what every code path that existed before this discriminator was introduced actually did.",
+          "type": "string",
+          "enum": [
+            "provider_reported"
+          ]
+        },
+        {
+          "description": "At least one category was derived from a byte count rather than reported. Reached only when a stream ends before the family had reported that category — never on a completed call.",
+          "type": "string",
+          "enum": [
+            "estimated"
+          ]
+        }
+      ]
+    },
+    "UsageCompleteness": {
       "type": "string",
       "enum": [
         "final",
         "partial",
         "unavailable"
-      ],
-      "default": "unavailable",
-      "description": "Whether token counts are final, partial, or unavailable for this logical call."
-    },
-    "usage_basis": {
-      "type": "string",
-      "enum": [
-        "provider_reported",
-        "estimated"
-      ],
-      "default": "provider_reported",
-      "description": "Whether the token counts were measured by the provider or derived from a byte estimate. Orthogonal to `usage_completeness`: an interrupted stream may carry real provider counts or a byte-derived floor, and only this field distinguishes them. `estimated` means at least one category came from the fallback, which is reachable only when a stream ended before the provider reported that category."
-    },
-    "attempts": {
-      "type": "integer",
-      "minimum": 1,
-      "default": 1,
-      "description": "Number of upstream attempts made for this logical call."
-    },
-    "outcome": {
-      "type": [
-        "string",
-        "null"
-      ],
-      "description": "Stable terminal outcome such as success, error, or cancelled."
-    },
-    "upstream_request_id": {
-      "type": [
-        "string",
-        "null"
-      ],
-      "description": "Provider-supplied request identifier when one was returned."
-    },
-    "gpu_seconds": {
-      "type": [
-        "number",
-        "null"
-      ],
-      "minimum": 0,
-      "description": "Self-hosted backends only: GPU-seconds of compute. The cost basis for self_hosted (token counts are display-only there)."
-    },
-    "duration_ms": {
-      "type": [
-        "integer",
-        "null"
-      ],
-      "minimum": 0,
-      "description": "Wall-clock duration of the logical call in milliseconds, measured at the adapter boundary (includes retries; excludes host-side queueing). Null when the emitting path predates latency metering."
-    },
-    "time_to_first_token_ms": {
-      "type": [
-        "integer",
-        "null"
-      ],
-      "minimum": 0,
-      "description": "Streams only: milliseconds from request start to the first delivered item. Null for non-streaming calls."
-    },
-    "reasoning_tokens": {
-      "type": [
-        "integer",
-        "null"
-      ],
-      "minimum": 0,
-      "description": "Reasoning tokens when the provider reports them separately (OpenAI reasoning_tokens, Gemini thoughtsTokenCount). Null/absent when folded into tokens_out (Anthropic) or not reported. Neutral units \u2014 pricing weights are a downstream concern."
+      ]
     }
   }
 }

@@ -246,6 +246,7 @@ mod tests {
             status: 200,
             body: serde_json::json!({}),
             usage: ParsedUsage {
+                reasoning_included: Some(true),
                 tokens_in: 100,
                 tokens_out: 20,
                 cache_creation_tokens: 5,
