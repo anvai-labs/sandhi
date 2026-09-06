@@ -10,7 +10,8 @@
 use axum::http::HeaderMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use sandhi_core::{BufferedSink, InMemorySink, KeyStore, Sink, VirtualKey};
 use sandhi_providers::{
@@ -25,8 +26,24 @@ use sandhi_proxy::{
 };
 use sandhi_store::{AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // Owning the runtime explicitly prevents Tokio's implicit, potentially unbounded wait for
+    // spawn_blocking tasks after async main returns. The process watchdog remains armed through
+    // runtime teardown, including destructors which do not cooperate with async cancellation.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("create proxy runtime");
+    let shutdown = Arc::new(ShutdownWatchdog::new());
+    let status = runtime.block_on(run(Arc::clone(&shutdown)));
+    runtime.shutdown_timeout(shutdown.remaining());
+    if status == 124 || !shutdown.complete() {
+        std::process::exit(124);
+    }
+    std::process::exit(status);
+}
+
+async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
     // TD-0011 D1: the BINARY installs the subscriber; the libraries only emit through the
     // `tracing` facade. That is what lets an in-process host (Victor) capture Sandhi's spans in
     // its own logging without Sandhi imposing a runtime or a second subscriber.
@@ -53,7 +70,7 @@ async fn main() {
     // Scope 5 (TD-0011 P3): OTLP export of gen_ai.* spans + metrics. `init()` returns None unless
     // the `otel-otlp` feature is compiled in AND `SANDHI_OTEL_EXPORT=otlp` is set — so the default
     // build is unaffected. The guard must outlive `serve()` so the OTel providers flush on shutdown.
-    let (otel_recorder, _otel_guard) = sandhi_proxy::otel::init().unzip();
+    let (otel_recorder, otel_guard) = sandhi_proxy::otel::init().unzip();
     if otel_recorder.is_some() {
         eprintln!(
             "sandhi-proxy: OTLP export ON — gen_ai.* spans + metrics to {} (feature `otel-otlp`, TD-0011 P3)",
@@ -326,6 +343,7 @@ async fn main() {
         "SANDHI_HEADER_READ_TIMEOUT_SECS",
         DEFAULT_HEADER_READ_TIMEOUT_SECS,
     );
+    state.shutdown_quiesce = shutdown_quiesce_from_env();
     state.trusted_proxies = sandhi_proxy::parse_trusted_proxies(
         &std::env::var("SANDHI_TRUSTED_PROXIES").unwrap_or_default(),
     );
@@ -354,8 +372,8 @@ async fn main() {
         let ledger = state.ledger.lock().expect("ledger poisoned");
         rehydrate_budgets(&ledger, &state.budgets);
     }
-    // Scope 5: attach the OTLP recorder (None unless feature-on + configured). The `_otel_guard`
-    // captured above flushes the providers when main returns.
+    // Scope 5: attach the OTLP recorder (None unless feature-on + configured). Its guard is
+    // explicitly dropped below while the process-wide shutdown deadline still applies.
     state.otel = otel_recorder;
     let state = Arc::new(state);
 
@@ -392,34 +410,133 @@ async fn main() {
          (OpenAI Chat/Responses | Anthropic Messages | Gemini, virtual-key auth)"
     );
     let shutdown_grace = shutdown_grace_from_env();
+    let signal = {
+        let lifecycle = Arc::clone(&state.lifecycle);
+        let shutdown = Arc::clone(&shutdown);
+        async move {
+            shutdown_signal().await;
+            // Arm before tracing: a blocked stderr must not defeat the deadline.
+            shutdown.arm(lifecycle.begin_quiesce(shutdown_grace));
+            tracing::info!("shutdown signal received; quiescing and draining in-flight requests");
+        }
+    };
     let serve_result = match tls {
         Some(tls) => {
-            serve_with_tls_shutdown_timeout(state, addr, shutdown_signal(), shutdown_grace, tls)
+            serve_with_tls_shutdown_timeout(Arc::clone(&state), addr, signal, shutdown_grace, tls)
                 .await
         }
-        None => serve_with_shutdown_timeout(state, addr, shutdown_signal(), shutdown_grace).await,
+        None => serve_with_shutdown_timeout(Arc::clone(&state), addr, signal, shutdown_grace).await,
     };
+    // Listener failures also need bounded cleanup. begin_quiesce preserves the original signal
+    // deadline, so no stage below receives another fresh grace period.
+    let deadline = state.lifecycle.begin_quiesce(shutdown_grace);
+    shutdown.arm(deadline);
     reclaim_task.abort();
-    let _ = reclaim_task.await;
+    let _ = tokio::time::timeout_at(deadline.into(), reclaim_task).await;
+    // Detached admission/settlement work can outlive an HTTP connection task. It must stop
+    // producing usage and alert updates BEFORE the respective queue admissions are closed.
+    if tokio::time::timeout_at(deadline.into(), state.lifecycle.wait_idle())
+        .await
+        .is_err()
+    {
+        return 124;
+    }
+    let mut cleanup_complete = true;
     if let Some(buffered) = buffered_alert_store {
-        if !buffered.close(shutdown_grace) {
+        if !buffered.close(shutdown.remaining()) {
+            cleanup_complete = false;
             tracing::error!(
                 dropped = buffered.dropped_updates(),
-                "alert writer did not drain before shutdown deadline"
+                "alert writer shutdown incomplete; persistence may be missing"
             );
         }
     }
     if let Some(buffered) = buffered_sink {
-        if !buffered.close(shutdown_grace) {
+        if !buffered.close(shutdown.remaining()) {
+            cleanup_complete = false;
             tracing::error!(
                 dropped = buffered.dropped_events(),
-                "usage writer did not drain before shutdown deadline"
+                "usage writer shutdown incomplete; persistence may be missing"
             );
         }
     }
+    // OTel SDK shutdown and arbitrary provider/store destructors are synchronous. The watchdog
+    // enforces the same deadline even if one never returns; the library itself never exits.
+    #[allow(clippy::drop_non_drop)] // The no-OTLP build uses a zero-sized, no-Drop guard.
+    drop(otel_guard);
+    state.lifecycle.stop();
+    if !cleanup_complete || Instant::now() >= deadline {
+        return 124;
+    }
     if let Err(e) = serve_result {
+        if e.kind() == std::io::ErrorKind::TimedOut {
+            return 124;
+        }
         eprintln!("sandhi-proxy error: {e}");
-        std::process::exit(1);
+        return 1;
+    }
+    0
+}
+
+enum WatchdogMessage {
+    Arm(Instant),
+    Complete,
+}
+
+/// Binary-only hard-stop policy. Never put logging on the timeout path: stderr, tracing or an
+/// exporter may be the cleanup operation that is blocked. Exit 124 means cleanup was not proven
+/// complete, not that persistence loss has been repaired or every provider call was cancelled.
+struct ShutdownWatchdog {
+    deadline: OnceLock<Instant>,
+    tx: mpsc::Sender<WatchdogMessage>,
+}
+
+impl ShutdownWatchdog {
+    fn new() -> Self {
+        let (tx, rx) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("sandhi-shutdown-watchdog".into())
+            .spawn(move || {
+                let Ok(WatchdogMessage::Arm(deadline)) = rx.recv() else {
+                    return;
+                };
+                match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                    Ok(WatchdogMessage::Complete) if Instant::now() < deadline => return,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        // A panic/drop is not successful cleanup. Retain the original deadline.
+                        std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                    }
+                    _ => {}
+                }
+                std::process::exit(124);
+            })
+            .expect("create shutdown watchdog");
+        Self {
+            deadline: OnceLock::new(),
+            tx,
+        }
+    }
+
+    fn arm(&self, deadline: Instant) {
+        if self.deadline.set(deadline).is_ok()
+            && self.tx.send(WatchdogMessage::Arm(deadline)).is_err()
+        {
+            std::process::exit(124);
+        }
+    }
+
+    fn remaining(&self) -> Duration {
+        self.deadline
+            .get()
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+            .unwrap_or(Duration::ZERO)
+    }
+
+    fn complete(&self) -> bool {
+        self.deadline
+            .get()
+            .is_some_and(|deadline| Instant::now() < *deadline)
+            && self.tx.send(WatchdogMessage::Complete).is_ok()
     }
 }
 
@@ -472,6 +589,16 @@ fn shutdown_grace_from_env() -> std::time::Duration {
         "SANDHI_SHUTDOWN_GRACE_SECS",
         DEFAULT_SHUTDOWN_GRACE.as_secs(),
     ))
+}
+
+fn shutdown_quiesce_from_env() -> Duration {
+    let millis = match std::env::var("SANDHI_SHUTDOWN_QUIESCE_MS") {
+        Ok(raw) => raw.parse::<u64>().unwrap_or_else(|_| {
+            panic!("SANDHI_SHUTDOWN_QUIESCE_MS must be a non-negative integer, got {raw:?}")
+        }),
+        Err(_) => 1000,
+    };
+    Duration::from_millis(millis)
 }
 
 fn positive_usize_env(name: &str, default: usize) -> usize {
@@ -538,8 +665,6 @@ async fn shutdown_signal() {
 
     #[cfg(not(unix))]
     ctrl_c.await;
-
-    tracing::info!("shutdown signal received; draining in-flight requests");
 }
 
 /// Build + register an upstream handle for each active vault credential, so the request path can
@@ -588,6 +713,84 @@ fn rehydrate_providers_from_vault(
 mod tests {
     use super::listener_tls_entry_from_json;
     use std::path::Path;
+
+    #[test]
+    fn completion_without_a_live_deadline_is_not_success() {
+        let watchdog = super::ShutdownWatchdog::new();
+        assert_eq!(watchdog.remaining(), std::time::Duration::ZERO);
+        assert!(!watchdog.complete());
+        // Exercise the completion race check without arming a process-exiting test watchdog.
+        watchdog.deadline.set(std::time::Instant::now()).unwrap();
+        assert!(!watchdog.complete());
+    }
+
+    #[test]
+    fn shutdown_watchdog_child() {
+        let Ok(mode) = std::env::var("SANDHI_TEST_SHUTDOWN_WATCHDOG") else {
+            return;
+        };
+        let watchdog = super::ShutdownWatchdog::new();
+        let original = std::time::Instant::now() + std::time::Duration::from_millis(200);
+        watchdog.arm(original);
+        // Repeated notification must not give a blocked cleanup another grace period.
+        watchdog.arm(original + std::time::Duration::from_secs(30));
+        assert_eq!(watchdog.deadline.get(), Some(&original));
+        match mode.as_str() {
+            "complete" => assert!(watchdog.complete()),
+            "blocked_cleanup" => {
+                // A permanently blocked destructor/exporter, independent of the Tokio runtime.
+                std::sync::Barrier::new(2).wait();
+                unreachable!("watchdog must terminate the process");
+            }
+            "blocked_runtime" => {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(1)
+                    .build()
+                    .unwrap();
+                let (started, ready) = std::sync::mpsc::channel();
+                runtime.spawn_blocking(move || {
+                    started.send(()).unwrap();
+                    std::sync::Barrier::new(2).wait();
+                });
+                ready.recv().unwrap();
+                // Model a non-cooperative teardown; the independent watchdog still owns the
+                // original process deadline, regardless of Tokio's requested timeout.
+                runtime.shutdown_timeout(std::time::Duration::from_secs(30));
+                unreachable!("watchdog must terminate the process");
+            }
+            _ => panic!("unknown child scenario"),
+        }
+    }
+
+    #[test]
+    fn watchdog_bounds_blocked_cleanup_and_runtime_without_extending_deadline() {
+        for (mode, expected) in [
+            ("complete", 0),
+            ("blocked_cleanup", 124),
+            ("blocked_runtime", 124),
+        ] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "tests::shutdown_watchdog_child", "--nocapture"])
+                .env("SANDHI_TEST_SHUTDOWN_WATCHDOG", mode)
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            // Bound the test itself if the watchdog regresses; never hang the whole test suite.
+            let test_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert_eq!(status.code(), Some(expected), "scenario {mode}");
+                    break;
+                }
+                if std::time::Instant::now() >= test_deadline {
+                    child.kill().unwrap();
+                    let _ = child.wait();
+                    panic!("watchdog did not terminate {mode}");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
 
     #[test]
     fn startup_rehydrates_each_exact_label() {

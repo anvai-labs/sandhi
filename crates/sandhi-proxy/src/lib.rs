@@ -8,6 +8,7 @@
 mod codec;
 pub mod config;
 pub mod ledger;
+pub mod lifecycle;
 pub mod metrics;
 pub mod operator;
 pub mod persistence;
@@ -210,6 +211,10 @@ pub fn plaintext_bind_warning(addr: SocketAddr, tls_enabled: bool) -> Option<&'s
 /// Shared server state: the virtual-key store, the budget ledger, the usage sink, and the
 /// registry of configured upstream providers (each already holding its real credential).
 pub struct ProxyState {
+    /// One-shot lifecycle; dispatch authorization stops atomically at shutdown cutoff.
+    pub lifecycle: Arc<lifecycle::Lifecycle>,
+    /// Same-port probe window, included in the total grace and clamped to leave drain time.
+    pub shutdown_quiesce: Duration,
     pub keys: KeyStore,
     /// The enforcement ledger (ADR-0005 lease model): durable [`SqliteLedger`](sandhi_store::SqliteLedger)
     /// when `SANDHI_STORE` is set, else volatile in-memory. See [`ProxyLedger`].
@@ -310,6 +315,8 @@ impl ProxyState {
         store: Option<Arc<SqliteStore>>,
     ) -> Self {
         Self {
+            lifecycle: Arc::new(lifecycle::Lifecycle::new()),
+            shutdown_quiesce: Duration::from_secs(1),
             keys,
             ledger: Mutex::new(ledger),
             sink,
@@ -363,12 +370,14 @@ pub(crate) struct AdmissionPermit {
 #[derive(Clone)]
 pub(crate) struct AdmissionLayer {
     permits: Arc<Semaphore>,
+    lifecycle: Arc<lifecycle::Lifecycle>,
 }
 
 impl AdmissionLayer {
-    pub(crate) fn new(max_in_flight: usize) -> Self {
+    pub(crate) fn new(max_in_flight: usize, lifecycle: Arc<lifecycle::Lifecycle>) -> Self {
         Self {
             permits: Arc::new(Semaphore::new(max_in_flight)),
+            lifecycle,
         }
     }
 }
@@ -380,6 +389,7 @@ impl<S> Layer<S> for AdmissionLayer {
         AdmissionService {
             inner,
             permits: self.permits.clone(),
+            lifecycle: self.lifecycle.clone(),
         }
     }
 }
@@ -388,11 +398,12 @@ impl<S> Layer<S> for AdmissionLayer {
 pub(crate) struct AdmissionService<S> {
     inner: S,
     permits: Arc<Semaphore>,
+    lifecycle: Arc<lifecycle::Lifecycle>,
 }
 
 impl<S> TowerService<axum::http::Request<Body>> for AdmissionService<S>
 where
-    S: TowerService<axum::http::Request<Body>> + Clone + Send + 'static,
+    S: TowerService<axum::http::Request<Body>, Response = Response> + Clone + Send + 'static,
     S::Future: Send + 'static,
 {
     type Response = S::Response;
@@ -406,12 +417,21 @@ where
 
     fn call(&mut self, mut request: axum::http::Request<Body>) -> Self::Future {
         let permits = self.permits.clone();
+        let lifecycle = self.lifecycle.clone();
+        let dialect = dialect_for_path(request.uri().path());
         let mut inner = self.inner.clone();
         Box::pin(async move {
-            let permit = permits
-                .acquire_owned()
-                .await
-                .expect("admission semaphore must not be closed");
+            let permit = tokio::select! {
+                biased;
+                _ = lifecycle.cancelled() => return Ok(draining_error(dialect)),
+                result = permits.acquire_owned() => match result {
+                    Ok(permit) => permit,
+                    Err(_) => return Ok(draining_error(dialect)),
+                },
+            };
+            if !lifecycle.is_running() {
+                return Ok(draining_error(dialect));
+            }
             request
                 .extensions_mut()
                 .insert(Arc::new(AdmissionPermit { _permit: permit }));
@@ -423,6 +443,8 @@ where
 /// Connection-level admission policy, resolved once at startup from `ProxyState` (TD-0014 P3).
 #[derive(Clone)]
 pub(crate) struct ConnectionPolicy {
+    pub lifecycle: Arc<lifecycle::Lifecycle>,
+    pub quiesce: Duration,
     pub max_connections: usize,
     /// 0 disables the per-IP cap. Behind a trusted proxy every connection
     /// shares the proxy's IP at accept time (headers are not parsed yet), so
@@ -437,6 +459,8 @@ pub(crate) struct ConnectionPolicy {
 impl Default for ConnectionPolicy {
     fn default() -> Self {
         Self {
+            lifecycle: Arc::new(lifecycle::Lifecycle::new()),
+            quiesce: Duration::from_secs(1),
             max_connections: DEFAULT_MAX_CONNECTIONS,
             max_per_ip: DEFAULT_MAX_CONNECTIONS_PER_IP,
             header_read_timeout: Duration::from_secs(DEFAULT_HEADER_READ_TIMEOUT_SECS),
@@ -448,6 +472,8 @@ impl Default for ConnectionPolicy {
 impl ConnectionPolicy {
     pub(crate) fn from_state(state: &ProxyState) -> Self {
         Self {
+            lifecycle: state.lifecycle.clone(),
+            quiesce: state.shutdown_quiesce,
             max_connections: state.max_connections.max(1),
             max_per_ip: state.max_connections_per_ip,
             header_read_timeout: Duration::from_secs(state.header_read_timeout_secs.max(1)),
@@ -591,7 +617,10 @@ fn ingress_routes(state: &Arc<ProxyState>) -> axum::Router<Arc<ProxyState>> {
     ai_routes
         // Admission wraps extraction: waiting requests retain only transport-level buffers rather
         // than each allocating `SANDHI_MAX_REQUEST_BODY_BYTES` in application memory.
-        .layer(AdmissionLayer::new(state.max_in_flight_ai_requests.max(1)))
+        .layer(AdmissionLayer::new(
+            state.max_in_flight_ai_requests.max(1),
+            state.lifecycle.clone(),
+        ))
         // TD-0014 P3 (G19): per-request trusted-proxy resolution —
         // X-Forwarded-For believed only from SANDHI_TRUSTED_PROXIES peers.
         .layer(axum::middleware::from_fn_with_state(
@@ -609,6 +638,7 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
     // as an error). One middleware layer is the single source; no builder can forget it.
     Router::new()
         .route("/healthz", get(health))
+        .route("/readyz", get(readiness))
         // TD-0021 P2 (D4/R2): the HTTP-path contract handshake. Ungated — versions
         // and wired dialects are public facts; the capability detail (D5) lives
         // behind the admin gate at /admin/version.
@@ -700,9 +730,10 @@ where
 
 /// Bind and serve with an explicit maximum graceful-drain period.
 ///
-/// Once `shutdown` resolves, new connections are refused. Active calls may finish and settle
-/// until `grace` expires; after that the server future is dropped, which cancels remaining
-/// response streams and runs their accounting finalizers as `Partial`/cancelled.
+/// Once `shutdown` resolves, dispatch authorization closes. Fresh probes remain reachable for
+/// a bounded quiesce interval under the existing connection limits, then accepts stop. At the
+/// original deadline connections are cancelled. Blocking cleanup can outlive cancellation:
+/// a timeout is reported, not a claim of completed settlement or forced embedder process exit.
 pub async fn serve_with_shutdown_timeout<F>(
     state: Arc<ProxyState>,
     addr: SocketAddr,
@@ -751,8 +782,8 @@ where
 /// Serve until `shutdown` resolves, with TD-0014 P3 connection-level defence:
 /// a hard cap on concurrent connections and per-peer connections, a guaranteed
 /// header-read timeout, a bounded per-connection read buffer, and a drain that
-/// actually closes hung connections at the grace deadline (axum's own serve
-/// spawns connection tasks detached, so its grace deadline alone cannot).
+/// requests cancellation of hung connections at the grace deadline. Synchronous
+/// destructors may outlive cancellation; the binary watchdog owns the hard process bound.
 async fn serve_router_listener_with_shutdown<F>(
     app: Router,
     listener: tokio::net::TcpListener,
@@ -772,11 +803,26 @@ where
     let mut tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
     tokio::pin!(shutdown);
 
-    // Accept loop — ends on shutdown signal; connection tasks keep draining
-    // through the grace window below.
+    let mut quiescing = false;
+    let mut quiesce_end = tokio::time::Instant::now();
+    // Keep the same HTTP/TLS listener for probes during bounded quiesce, without relaxing
+    // connection/per-IP limits. Under transport saturation a fresh probe may still be shed.
     loop {
         tokio::select! {
-            _ = &mut shutdown => break,
+            biased;
+            _ = &mut shutdown, if !quiescing => {
+                let deadline = policy.lifecycle.begin_quiesce(grace);
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                quiesce_end = tokio::time::Instant::now() + policy.quiesce.min(remaining / 4);
+                quiescing = true;
+                tracing::info!(remaining_secs = remaining.as_secs_f64(), "shutdown cutoff; quiescing with probes reachable within connection limits");
+            }
+            _ = tokio::time::sleep_until(quiesce_end), if quiescing => break,
+            result = tasks.join_next(), if !tasks.is_empty() => {
+                if let Some(Err(error)) = result {
+                    tracing::warn!(%error, "connection task failed");
+                }
+            }
             accepted = listener.accept() => {
                 let (stream, peer_addr) = match accepted {
                     Ok(pair) => pair,
@@ -869,22 +915,32 @@ where
             }
         }
     }
+    drop(listener);
+    policy.lifecycle.start_draining();
 
     // Grace window: signal every watched connection, wait until they finish or
-    // the deadline passes, then abort the stragglers. This is what makes the
-    // doc claim true — hung streams do not outlive `serve_with_shutdown_timeout`.
+    // the original deadline passes, then request cancellation of stragglers.
+    // Their synchronous cleanup may outlive this library future.
     tracing::info!("shutdown received; draining connections");
     // `shutdown(self)` consumes; unwrap the Arc (watchers hold only the rx
     // side) and let the signal+wait run on its own task.
     let _shutdown_task = Arc::try_unwrap(graceful)
         .map(|g| tokio::spawn(g.shutdown()))
         .ok();
-    let deadline = tokio::time::Instant::now() + grace;
+    let deadline = tokio::time::Instant::from_std(
+        policy
+            .lifecycle
+            .deadline()
+            .expect("shutdown established deadline"),
+    );
+    let mut progress = tokio::time::interval(Duration::from_secs(1));
     let mut expired = false;
     while !tasks.is_empty() {
         tokio::select! {
+            biased;
             _ = tokio::time::sleep_until(deadline) => { expired = true; break; }
             _ = tasks.join_next() => {}
+            _ = progress.tick() => tracing::info!(connections = tasks.len(), active_operations = policy.lifecycle.active_operations(), remaining_secs = policy.lifecycle.remaining().unwrap_or_default().as_secs_f64(), "shutdown drain progress"),
         }
     }
     if expired {
@@ -894,9 +950,24 @@ where
         );
         tasks.abort_all();
     }
-    // Await aborted tasks so their guards (permits, gauges, per-IP slots) drop
-    // before return.
-    while tasks.join_next().await.is_some() {}
+    // Never wait without a deadline for abort destructors: settlement can block in SQLite.
+    // The embedder owns its runtime; the binary separately owns a process-exit watchdog.
+    if expired {
+        tasks.detach_all();
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "shutdown deadline reached; connection cancellation requested, cleanup may remain",
+        ));
+    }
+    if tokio::time::timeout_at(deadline, policy.lifecycle.wait_idle())
+        .await
+        .is_err()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "shutdown deadline reached with admitted operations still cleaning up",
+        ));
+    }
     Ok(())
 }
 
@@ -1009,11 +1080,12 @@ mod server_lifecycle_tests {
         tokio::time::sleep(Duration::from_millis(25)).await;
         let started = std::time::Instant::now();
         shutdown_tx.send(()).expect("signal shutdown");
-        tokio::time::timeout(Duration::from_secs(1), server)
+        let error = tokio::time::timeout(Duration::from_secs(1), server)
             .await
             .expect("stalled TLS handshake must not outlive the grace deadline")
             .expect("server task joins")
-            .expect("server exits cleanly");
+            .expect_err("forced cancellation must not claim clean shutdown");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
         assert!(
             started.elapsed() < Duration::from_secs(1),
             "shutdown waited for the 30-second handshake timeout"
@@ -1032,13 +1104,15 @@ mod server_lifecycle_tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test listener");
-        let state = Arc::new(ProxyState::new(
+        let mut state = ProxyState::new(
             KeyStore::new(),
             ProxyLedger::in_memory(),
             Arc::new(InMemorySink::new()),
             HashMap::new(),
             None,
-        ));
+        );
+        state.shutdown_quiesce = Duration::ZERO;
+        let state = Arc::new(state);
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(1),
@@ -1091,12 +1165,191 @@ mod server_lifecycle_tests {
         entered.notified().await;
         shutdown_tx.send(()).unwrap();
 
-        tokio::time::timeout(Duration::from_secs(1), server)
+        let error = tokio::time::timeout(Duration::from_secs(1), server)
             .await
             .expect("bounded shutdown must return")
             .expect("server task joined")
-            .expect("server returned successfully");
+            .expect_err("forced cancellation must not claim clean shutdown");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
         client_call.abort();
+    }
+}
+
+#[cfg(test)]
+mod drain_contract_tests {
+    use super::*;
+    use axum::http::Request;
+    use sandhi_core::{InMemorySink, KeyStore};
+    use tower::ServiceExt;
+
+    fn state() -> (Arc<ProxyState>, Arc<InMemorySink>) {
+        let sink = Arc::new(InMemorySink::new());
+        let state = Arc::new(ProxyState::new(
+            KeyStore::new(),
+            ProxyLedger::in_memory(),
+            sink.clone(),
+            HashMap::new(),
+            None,
+        ));
+        (state, sink)
+    }
+
+    #[tokio::test]
+    async fn readiness_is_distinct_from_liveness_and_all_dialects_reject_drain() {
+        let (state, sink) = state();
+        let app = build_app(state.clone());
+        let ready = app
+            .clone()
+            .oneshot(Request::get("/readyz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(ready.status(), StatusCode::OK);
+        assert_eq!(ready.headers()["cache-control"], "no-store");
+        state.lifecycle.begin_quiesce(Duration::from_secs(2));
+        for (path, expected) in [
+            ("/readyz", StatusCode::SERVICE_UNAVAILABLE),
+            ("/healthz", StatusCode::OK),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+        for path in [
+            "/v1/chat/completions",
+            "/v1/responses",
+            "/v1/messages",
+            "/v1beta/models/test:generateContent",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(Request::post(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+            assert_eq!(response.headers()["retry-after"], "1");
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            if path.starts_with("/v1beta") {
+                assert_eq!(body["error"]["code"], 503);
+                assert_eq!(body["error"]["status"], "UNAVAILABLE");
+            } else {
+                assert_eq!(body["error"]["code"], "gateway_draining");
+                assert_eq!(body["error"]["retryable"], true);
+            }
+        }
+        assert_eq!(state.lifecycle.active_operations(), 0);
+        assert!(sink.is_empty());
+    }
+
+    #[tokio::test]
+    async fn shutdown_metrics_preserve_auth_and_report_owned_work() {
+        let (mut state, _) = state();
+        Arc::get_mut(&mut state).unwrap().admin_token = Some("test-admin".into());
+        let app = build_app(state.clone());
+        let operation = state.lifecycle.try_operation().unwrap();
+        state.lifecycle.begin_quiesce(Duration::from_secs(2));
+        let denied = app
+            .clone()
+            .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        let response = app
+            .oneshot(
+                Request::get("/metrics")
+                    .header("authorization", "Bearer test-admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        let text = std::str::from_utf8(&body).unwrap();
+        assert!(text.lines().any(|line| line == "sandhi_ready 0"));
+        assert!(text
+            .lines()
+            .any(|line| line == "sandhi_shutdown_active_operations 1"));
+        let elapsed: f64 = text
+            .lines()
+            .find_map(|line| line.strip_prefix("sandhi_shutdown_elapsed_seconds "))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(elapsed >= 0.0);
+        drop(operation);
+        assert_eq!(state.lifecycle.active_operations(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn abandoned_blocking_reservation_rolls_back_without_usage() {
+        let (state, sink) = state();
+        // Hold the ledger before spawning admission, deterministically keeping its blocking
+        // worker alive after the HTTP-side future disappears. No runtime worker holds this lock.
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder_state = state.clone();
+        let holder = std::thread::spawn(move || {
+            let _ledger = holder_state.ledger.lock().unwrap();
+            locked_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        locked_rx.await.unwrap();
+        let request_state = state.clone();
+        let request = tokio::spawn(async move {
+            reserve_budget(&request_state, "scope", 100, Policy::Block).await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while state.lifecycle.active_operations() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        request.abort();
+        assert!(matches!(request.await, Err(error) if error.is_cancelled()));
+        assert_eq!(
+            state.lifecycle.active_operations(),
+            1,
+            "detached reservation still owns its guard"
+        );
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), state.lifecycle.wait_idle())
+            .await
+            .unwrap();
+        holder.join().unwrap();
+        let ledger = state.ledger.lock().unwrap();
+        assert_eq!(
+            ledger.reserved("scope"),
+            0,
+            "lost task output must roll back its lease"
+        );
+        assert_eq!(ledger.spent("scope"), 0);
+        assert!(sink.is_empty(), "undispatched work emits no usage event");
+    }
+
+    #[tokio::test]
+    async fn completed_reservation_without_dispatch_is_rolled_back_at_cutoff() {
+        let (state, sink) = state();
+        let pending = reserve_budget(&state, "scope", 100, Policy::Block)
+            .await
+            .unwrap();
+        assert!(matches!(pending.admission, Some(Admission::Leased(_))));
+        assert_eq!(state.ledger.lock().unwrap().reserved("scope"), 100);
+        state.lifecycle.begin_quiesce(Duration::from_secs(1));
+        assert!(state.lifecycle.try_operation().is_none());
+        assert_eq!(state.lifecycle.active_operations(), 1);
+        drop(pending);
+        assert_eq!(state.lifecycle.active_operations(), 0);
+        assert_eq!(state.ledger.lock().unwrap().reserved("scope"), 0);
+        assert!(sink.is_empty());
     }
 }
 
@@ -1563,17 +1816,43 @@ async fn handle_responses(
 }
 
 /// `GET /metrics` — Prometheus text exposition (TD-0011 P2).
+async fn readiness(State(state): State<Arc<ProxyState>>) -> Response {
+    let (status, body) = if state.lifecycle.is_running() {
+        (StatusCode::OK, "ready")
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "draining")
+    };
+    (
+        status,
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        body,
+    )
+        .into_response()
+}
+
+/// Metrics keep their existing authorization even during quiesce.
 async fn metrics_endpoint(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -> Response {
     if let Err(denied) = require_dashboard_access(&state, &headers) {
         return denied;
     }
+    let mut rendered = state.metrics.render();
+    use std::fmt::Write;
+    let _ = write!(rendered,
+        "# HELP sandhi_ready Whether this process accepts new dispatch authorization.\n\
+         # TYPE sandhi_ready gauge\nsandhi_ready {}\n\
+         # HELP sandhi_shutdown_active_operations Admitted operations still owning cleanup; not durable commits.\n\
+         # TYPE sandhi_shutdown_active_operations gauge\nsandhi_shutdown_active_operations {}\n\
+         # HELP sandhi_shutdown_elapsed_seconds Time since observed shutdown; zero before cutoff.\n\
+         # TYPE sandhi_shutdown_elapsed_seconds gauge\nsandhi_shutdown_elapsed_seconds {}\n",
+        u8::from(state.lifecycle.is_running()), state.lifecycle.active_operations(),
+        state.lifecycle.elapsed().as_secs_f64());
     (
         StatusCode::OK,
         [(
             axum::http::header::CONTENT_TYPE,
             "text/plain; version=0.0.4; charset=utf-8",
         )],
-        state.metrics.render(),
+        rendered,
     )
         .into_response()
 }
@@ -1794,6 +2073,10 @@ async fn handle(
     dialect: IngressDialect,
     gemini_route: Option<GeminiRoute>,
 ) -> Response {
+    // Body extraction may have spanned shutdown even after semaphore admission succeeded.
+    if !state.lifecycle.is_running() {
+        return draining_error(dialect);
+    }
     // 1. Virtual key, presented the way this dialect's own SDK presents a credential
     //    (TD-0010 D1 — `x-api-key` on `/v1/messages`, `Authorization: Bearer` on the OpenAI
     //    paths). Resolve the live key store by exact token (legacy/demo path, where the id
@@ -1986,7 +2269,17 @@ async fn handle(
     let (ceiling, effective_max) = reservation_ceiling(&request, body.len());
     // SQLite's transaction remains a synchronous correctness boundary, but it runs on Tokio's
     // blocking pool so its busy timeout never parks an async scheduler worker.
-    let (capped, admission) = reserve_budget(&state, &scope, ceiling, policy).await;
+    let Some(mut pending) = reserve_budget(&state, &scope, ceiling, policy).await else {
+        return draining_error(dialect);
+    };
+    // Final dispatch authorization shares the cutoff lock. A pending reservation owns its
+    // rollback until this point, including if the blocking result outlives its HTTP caller.
+    let Some(operation) = state.lifecycle.try_operation() else {
+        return draining_error(dialect);
+    };
+    let capped = pending.capped;
+    let admission = pending.admission.take().expect("owned admission result");
+    drop(pending);
     let inject_output_bound = capped && request.max_output_tokens.is_none();
     if inject_output_bound {
         request.max_output_tokens = Some(effective_max);
@@ -2040,6 +2333,7 @@ async fn handle(
         dialect_label(dialect),
         plane,
     );
+    accounting.operation = Some(operation);
     // TD-0021 P4 (D1): the METER records the LOGICAL call once — a repeat of a settled
     // `(vkey, idempotency-key)` inside the window has its duplicate usage event dropped
     // (the original stands). ENFORCEMENT still counts the physical call: the retry really
@@ -2373,23 +2667,64 @@ async fn reserve_budget(
     scope: &str,
     ceiling: u64,
     policy: Policy,
-) -> (bool, Admission) {
-    let state = Arc::clone(state);
+) -> Option<PendingAdmission> {
+    let operation = state.lifecycle.try_operation()?;
+    let worker_state = Arc::clone(state);
     let scope = scope.to_string();
-    match tokio::task::spawn_blocking(move || match state.ledger.lock() {
-        Ok(mut ledger) => {
-            let capped = policy == Policy::Block && ledger.limit(&scope).is_some();
-            let admission = ledger.reserve(&scope, ceiling, OffsetDateTime::now_utc(), policy);
-            (capped, admission)
+    let work = tokio::task::spawn_blocking(move || {
+        let (capped, admission) = match worker_state.ledger.lock() {
+            Ok(mut ledger) => {
+                if worker_state.lifecycle.is_running() {
+                    let capped = policy == Policy::Block && ledger.limit(&scope).is_some();
+                    (
+                        capped,
+                        ledger.reserve(&scope, ceiling, OffsetDateTime::now_utc(), policy),
+                    )
+                } else {
+                    (false, Admission::Denied)
+                }
+            }
+            Err(_) => (false, ledger_failure_admission(policy)),
+        };
+        PendingAdmission {
+            state: worker_state,
+            capped,
+            admission: Some(admission),
+            _operation: operation,
         }
-        Err(_) => (false, ledger_failure_admission(policy)),
-    })
-    .await
-    {
-        Ok(result) => result,
-        Err(error) => {
-            tracing::error!(%error, "budget admission blocking task failed");
-            (false, ledger_failure_admission(policy))
+    });
+    tokio::select! {
+        biased;
+        _ = state.lifecycle.cancelled() => None,
+        result = work => match result {
+            Ok(result) => Some(result),
+            Err(error) => {
+                tracing::error!(%error, "budget admission blocking task failed");
+                Some(PendingAdmission { state: state.clone(), capped: false,
+                    admission: Some(ledger_failure_admission(policy)),
+                    _operation: state.lifecycle.try_operation()? })
+            }
+        },
+    }
+}
+
+/// Roll back a reservation that never reached dispatch, even if the JoinHandle receiver was
+/// cancelled while SQLite work continued. No model call took place, so no usage event is emitted.
+struct PendingAdmission {
+    state: Arc<ProxyState>,
+    capped: bool,
+    admission: Option<Admission>,
+    _operation: lifecycle::OperationGuard,
+}
+
+impl Drop for PendingAdmission {
+    fn drop(&mut self) {
+        if let Some(Admission::Leased(reservation)) = self.admission.take() {
+            blocking_section(|| {
+                if let Ok(mut ledger) = self.state.ledger.lock() {
+                    ledger.settle(&reservation, 0);
+                }
+            });
         }
     }
 }
@@ -2449,6 +2784,9 @@ struct RequestAccounting {
     /// The response finish reason, captured on the typed translation plane (complete/stream) for
     /// `gen_ai.response.finish_reasons`. `None` on the transparent byte paths (no ChatResponseV1).
     finish_reason: Option<FinishReasonV1>,
+    // Last field: outlives finalize AND trailing field destructors (notably SpanHandle::Drop).
+    // Moves into streaming bodies, so idle cannot race a late telemetry producer.
+    operation: Option<lifecycle::OperationGuard>,
 }
 
 impl RequestAccounting {
@@ -2472,6 +2810,7 @@ impl RequestAccounting {
             None => (None, None),
         };
         Self {
+            operation: None,
             state,
             scope,
             reservation,
@@ -3158,6 +3497,26 @@ fn rate_limited_error(dialect: IngressDialect, retry_after_secs: u64) -> Respons
 fn ingress_error(dialect: IngressDialect, status: StatusCode, msg: &str) -> Response {
     // TD-0021 P3 (D6): one construction type owns rendering; the 22 call sites unchanged.
     codec::IngressError::invalid(status, msg).render(dialect)
+}
+
+fn dialect_for_path(path: &str) -> IngressDialect {
+    if path.starts_with("/v1beta/") {
+        IngressDialect::Gemini
+    } else if path == "/v1/messages" {
+        IngressDialect::Anthropic
+    } else if path == "/v1/responses" {
+        IngressDialect::Responses
+    } else {
+        IngressDialect::OpenAi
+    }
+}
+
+fn draining_error(dialect: IngressDialect) -> Response {
+    let mut response = codec::IngressError::draining().render(dialect);
+    response
+        .headers_mut()
+        .insert(axum::http::header::RETRY_AFTER, "1".parse().unwrap());
+    response
 }
 
 fn error(status: StatusCode, msg: &str) -> Response {

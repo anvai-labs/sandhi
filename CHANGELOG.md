@@ -19,10 +19,19 @@ publishers. Versions are derived from the tag at build time, never hand-edited; 
 
 ### Added
 
+- **Drain-aware readiness (W06a).** `/readyz` distinguishes traffic readiness from `/healthz`
+  liveness, with bounded HTTP/TLS same-port quiesce subject to existing connection caps.
+  Shared cutoff rejects queued/upload-spanning model calls and admin mutations before new
+  authorization; abandoned reservations retain rollback ownership. One binary deadline covers
+  connections, accounting, writers, telemetry and runtime teardown; incomplete cleanup exits
+  124 without promising persistence. Library timeouts report unfinished cancellation without
+  terminating the host. See the [operator guide](docs/operator/proxy-guide.adoc) for probe
+  migration, partial config results and `SANDHI_SHUTDOWN_QUIESCE_MS`.
+
 - **Best-effort buffer visibility (W06b).** Sender-free usage/alert writer snapshots feed
   authenticated Prometheus capacity, queued, in-flight and rejected-item metrics with fixed
   labels and explicit unconfigured states. These are observation-queue signals, not database
-  commit confirmation or authoritative outbox backlog; readiness/drain and restore gates remain open.
+  commit confirmation or authoritative outbox backlog; recovery/restore gates remain open.
 
 - **Settlement evidence storage foundation (W05a).** Separate opt-in store APIs commit a
   neutral charge and immutable receipt atomically, reject conflicting replays, and provide

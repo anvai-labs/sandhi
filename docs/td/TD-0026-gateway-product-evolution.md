@@ -45,7 +45,8 @@ marking a planning task complete does not mark its implementation complete.
 | Checkpoint | Scope | Local verification | Remote CI / review | Integrated | Released |
 |---|---|---|---|---|---|
 | C01 | W01–W04 and inactive W05a storage foundation; branch `feat/gateway-trust-checkpoint` | Passed; clean scoped re-review, 103 SDK/browser tests, 37 upgraded Python tests, 94.12% binding coverage | [PR #230](https://github.com/anvai-labs/sandhi/pull/230) merged with explicit owner-authorized review bypass; pre- and [post-merge CI](https://github.com/anvai-labs/sandhi/actions/runs/34015573003) green | Complete: `8f56b91` on `develop` | No |
-| C01b | W06b best-effort buffer visibility; branch `feat/operational-buffer-visibility`, updated from C01 | Passed: 105 SDK/browser tests, native workspace tests, 87.18% coverage; current-base adversarial re-review clean | [PR #231](https://github.com/anvai-labs/sandhi/pull/231) against `develop`; own latest-head CI required before merge; PR carries live integration evidence | Pending | No |
+| C01b | W06b best-effort buffer visibility; branch `feat/operational-buffer-visibility`, updated from C01 | Passed: 105 SDK/browser tests, native workspace tests, 87.18% coverage; current-base adversarial re-review clean | [PR #231](https://github.com/anvai-labs/sandhi/pull/231) merged as `f777b89671c4b52854cb6c527dd03fa01a7ada52`; latest-head CI `34029737562` and post-merge CI `34030218505` passed; authorized admin review bypass only | Complete | No |
+| C01c | W06a drain-aware readiness; branch `feat/drain-aware-readiness` | Passed: native workspace, OTLP proxy tests, 87.76% native coverage, 113 SDK/browser tests; independent review finding fixed and re-reviewed clean | PR submission next; latest-head CI and post-merge CI remain required | Pending | No |
 | C02 | Initial W06 and M1 operator-journey acceptance, then `develop` → `main` | Pending | Pending promotion PR and post-merge CI | Pending | No; tagging/publishing is a separate action |
 
 C01 checkpoints completed work now instead of waiting for W05–W14. Do not claim M1 complete
@@ -88,7 +89,7 @@ verification evidence and an operator-facing release note before its status beco
 | W03 | Metering semantics and guarantee correction; R03, F03/F04 | Sandhi core/providers maintainer | Baseline | 1–2 weeks | Explicit reasoning inclusion and minor-7 schemas; legacy totals preserved; parser/plane/store/ledger/binding corpus and 24 end-to-end cases pass; [estimated-reservation capability matrix](../product/metering-and-budget-guarantees.md) and concurrent overshoot regression | Complete |
 | W04 | Safe broker integration and onboarding; R07/R13, F08/F09, SP0/SP1 | Sandhi store/proxy + SentinelPass protocol owners | Baseline | 1–2 weeks | Native real-handler reproduction fixed; bounded runtime/queue, explicit capabilities, read-only API/CLI/browser registration and 16 broker scenarios pass; [integration contract](../product/broker-integration-contract.md). Live daemon certification remains SP4; generations/revocation cutoff remain W09 | Complete |
 | W05 | Attempt accounting and durable evidence; R03/R05/R11, F05/F06 | Sandhi core/store + downstream consumer owner | W02/W03; accounting-contract review | 2–4 weeks | W05a complete: atomic settlement receipts, bounded/fenced delivery claims and 14 focused tests; [substep contract](../product/attempt-accounting-and-evidence.md). W05b–e retain physical-attempt capture, proxy integration, recovery, export and consumer review gates. A settlement receipt is not an upstream attempt | In progress |
-| W06 | Operational readiness and recovery; R05/R12, F12/F13 | Sandhi operations/proxy maintainer | Baseline; W05 for authoritative backlog | 1–2 weeks | W06b best-effort buffer snapshots/metrics complete and locally verified on `feat/operational-buffer-visibility`; W06a real-network readiness/drain, W06c incident/restore drill and W06d workload/user acceptance remain open. See TD-0020 P2 and C01b integration gate | In progress |
+| W06 | Operational readiness and recovery; R05/R12, F12/F13 | Sandhi operations/proxy maintainer | Baseline; W05 for authoritative backlog | 1–2 weeks | W06b buffer visibility integrated; W06a readiness/cutoff/deadline implemented and locally verified (C01c integration pending). W06c incident/restore drill and W06d workload/user acceptance remain open. See TD-0020 and checkpoint gates | In progress |
 | W07 | Scoped management, audit and egress security; R06/R10, F07/F11/F15 | Sandhi security/API + control-plane owner | W01/W02; identity-boundary review | 2–4 weeks | Cross-scope CRUD/query denial, mutation audit, bounded/redacted egress and webhook delivery, auth/session threat model, failure-injection evidence | Pending |
 | W08 | Declarative policy and hierarchical usage controls; R02/R04/R08, F10/F16 | Sandhi core/store + policy consumer owner | W02/W03/W05/W07 | 2–4 weeks | Reconcile TD-0005; durable revision/conflict preconditions, shadow/effective policy, signed freshness, all-scope/window atomic reservation, rate/token/concurrency tests, explainable denial | Pending |
 | W09 | Credential generations and revocation; R07, F09, SP2 | Sandhi credential manager + SentinelPass owners | W04/W05/W07; broker contract release | 2–3 weeks | Bounded new-dispatch cutoff, generation switch/drain, restart and missed-event recovery, broker outage/expiry matrix | Pending |
@@ -437,3 +438,27 @@ unit suite is not a distributed correctness proof. Record evidence and update th
   this source snapshot does not predeclare a successful merge. Next implementation is W06a,
   whose TD-0020 execution gates now cover dispatch-authorization races, blocking settlement,
   runtime/telemetry cleanup and saturated probe admission, not just a router readiness flag.
+- 2026-09-06: C01b integrated through PR #231; reviewed head
+  `995f105375a8ba1c7c78f988b42cab382b6cffc5`, merge `f777b89671c4b52854cb6c527dd03fa01a7ada52`,
+  latest-head CI `34029737562` and post-merge CI `34030218505` passed. Only the authorized
+  missing-review admin bypass was used; no protection settings changed or main promotion occurred.
+- 2026-09-06: Started C01c/W06a on `feat/drain-aware-readiness`. Implementing a shared cutoff,
+  same-port bounded quiesce, queued/upload admission rejection, owned reservation rollback,
+  admin mutation gates and one binary shutdown deadline including blocking cleanup. Local
+  compilation and focused watchdog/admin tests pass; network tests, cancellation regression,
+  independent adversarial review and full regression remain open. Probe reachability remains
+  subject to existing connection/per-IP limits; no dedicated probe listener is implied.
+  W06c recovery and W06d workload/user acceptance still gate M1/main promotion.
+- 2026-09-06: W06a local acceptance passed: native-feature workspace suite (proxy library 101
+  tests), OTLP-feature proxy suite, default and combined native/OTLP strict clippy, formatting,
+  facade drift and advisories for all three Rust workspaces. Native coverage is **87.76%**.
+  Full SDK/dashboard/broker tests with real AgentBrowser are **113 passed, 1 skipped** (Google
+  SDK absent locally), including eight real-process shutdown cases: HTTP/TLS fresh/keep-alive
+  probes, held SSE, queued/slow-body cutoff, connection-cap shedding, hung SSE and locked SQLite.
+  Focused tests cover detached reservation cancellation, all admin mutation handlers, config
+  partial application, metrics authorization and watchdog/runtime teardown. Independent review
+  found a trailing OTLP span-drop guard race; moving the operation guard last fixed it, and
+  re-review is clean. Socket/advisory checks required permitted sandbox reruns. C01c is ready
+  for a separate `develop` PR; remote CI and integration are not predeclared. Next implementation
+  after C01c is W06c: disposable backup/restore and incident recovery drills, followed by W06d
+  workload/operator acceptance. No main promotion or release is authorized by local verification.

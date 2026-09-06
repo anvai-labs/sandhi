@@ -1,8 +1,9 @@
 # TD-0020: Operational readiness and transport observability — you cannot operate what you cannot see
 
-- **Status:** **In progress**, 2026-08-31. P2 is partial via TD-0014's shipped connection,
-  stream, and connection-shed signals, plus W06b's locally verified buffer visibility (2026-09-05);
-  P1 and the remaining P2–P5 scope are open. Owns gaps
+- **Status:** **In progress**, updated 2026-09-06. P1/W06a is implemented and locally verified;
+  integration is tracked by C01c in TD-0026. P2 is partial via TD-0014's shipped connection,
+  stream, and connection-shed signals plus integrated W06b buffer visibility;
+  the remaining P2–P5 scope is open. Owns gaps
   **G15, G16, G17, G18, G27**.
 - **Relates to:** [TD-0011](TD-0011-first-party-observability.md) (the metric registry and its D2
   bounded-label discipline, which this extends), [TD-0014](TD-0014-data-plane-resource-safety.md)
@@ -221,9 +222,10 @@ The full SDK/dashboard/broker suite with AgentBrowser passed **95 tests, 1 skipp
 unavailable locally); all-target clippy also passed without the native feature. C01b in TD-0026
 tracks integration separately; no merge or release is implied by local verification.
 
-## W06a execution gates (2026-09-06; not implemented)
+## W06a execution gates (2026-09-06; locally verified, integration pending)
 
-The next slice must cover the whole shutdown path, not just add a readiness flag:
+This slice covers the whole shutdown path, not just a readiness flag. These are acceptance
+gates; C01c in TD-0026 tracks verification and integration:
 
 1. Define a lifecycle/cutoff shared by the listener and request admission. Keep fresh HTTP/TLS
    probes reachable during a bounded quiesce phase; `/readyz` returns 503 while `/healthz`
@@ -253,6 +255,44 @@ request accounting are in `lib.rs`; binary/runtime/writer sequencing is in `main
 cleanup is in `otel.rs`. Library embedders must retain runtime ownership and receive an honest
 bounded shutdown result rather than a process-wide termination side effect. W05 continues to
 own authoritative unknown liability and durable settlement evidence.
+
+### Implemented contract
+
+`Lifecycle` serializes cutoff and operation admission. AI requests recheck after body extraction
+and authorize dispatch only after owned reservation acquisition. Lost blocking-task results
+retain reservation rollback ownership. Admin mutation guards outlive detached broker work;
+config children regate individually and retain partial commit results.
+
+`/readyz` is ungated, non-cacheable and drain-only; `/healthz` remains liveness. The same-port
+quiesce window defaults to 1000 ms (`SANDHI_SHUTDOWN_QUIESCE_MS`), bounded by one quarter of
+the original deadline's remaining grace. HTTP/TLS fresh and keep-alive probes are reachable
+only during that window and **subject to existing global/per-IP caps**. No reserved probe
+capacity or reachability after listener close is promised. Requests already authorized before
+cutoff may still send upstream bytes; this is not transport-byte fencing.
+
+The library reports `TimedOut` when cancellation/operation cleanup is unfinished and never
+terminates its host. Synchronous cleanup can outlive cancellation; runtime ownership stays
+with the embedder. The binary owns a separate watchdog, armed before shutdown logging, which
+enforces the same monotonic deadline through accounting, writer closure, OTLP destruction and
+explicit Tokio teardown. Incomplete cleanup exits 124 without claiming settlement or flush;
+normal completion exits 0. The hard-exit path performs no potentially blocking logging.
+
+Prometheus adds fixed, unlabeled readiness, active-operation and elapsed-shutdown gauges under
+the existing metrics authorization. Active operations are not durable commits or all live
+connections. This does not complete the remaining P2 gauges, pool/DNS work, W06c recovery or
+W06d workload/user acceptance. See the operator guide for probe migration and timeout handling.
+
+### Verification
+
+Native workspace tests passed with 87.76% line coverage; OTLP-feature proxy tests and strict
+default/native+OTLP clippy passed. Full SDK/dashboard/broker plus real AgentBrowser smoke:
+113 passed, 1 skipped (Google SDK absent locally). Eight `test_shutdown.py` cases exercise
+actual SIGTERM over HTTP/TLS, including fresh/keep-alive probes, held SSE, queued/slow-body
+cutoff, saturated transport limits and hung/locked-SQLite exit 124. Rust tests cover detached
+reservation rollback, admin/config guards, metrics authorization, stalled TLS, blocked cleanup
+and runtime-teardown watchdog subprocesses. This is not a live external-collector or production
+workload certification. Adversarial review's trailing OTLP span-drop guard race was fixed by
+placing the operation guard last; re-review found no remaining blocker. C01c owns PR/CI evidence.
 
 ## Remaining pool decision
 
