@@ -24,6 +24,8 @@ use time::{Duration, OffsetDateTime};
 
 use sandhi_core::{Denied, EnforcementLedger, LedgerView, Policy, Reservation, Window};
 
+pub mod evidence;
+
 /// Result of an atomic reserve: admitted (with the lease) or denied (over cap).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReserveOutcome {
@@ -118,7 +120,8 @@ impl SqliteLedger {
                  expires_at  INTEGER NOT NULL,
                  PRIMARY KEY (vkey, idem_key)
              );",
-        )
+        )?;
+        evidence::init(conn)
     }
 
     /// The inclusive start (unix seconds) of the current window for `window`, calendar-aligned in
