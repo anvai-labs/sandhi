@@ -1,11 +1,13 @@
 # M1 workload and operator acceptance
 
-Status: automated workload and combined local verification passed; actual-user review pending.
+Status: automated engineering evidence accepted as this release's acceptance method (UA01);
+hands-on usability deferred until before production. Remaining release decisions are pending.
 Owner/tracker: [TD-0026](../td/TD-0026-gateway-product-evolution.md), C01e/W06d.
 
 The follow-up [decision packet](m1-acceptance-decisions.md) separates further automatable journey
 checks from owner choices, with evidence, rationale, recommendations and an observed-user script.
-No acceptance or gate revision is inferred from that packet.
+The explicit user decision recorded in UA01 on 2026-09-07 UTC revises the timing of the hands-on
+gate for this release; it does not claim an observed-user pass or close the other decisions.
 
 M1 is a trustworthy **single-node baseline**, not the complete gateway roadmap. W01–W04,
 drain-aware readiness, best-effort operational visibility and isolated recovery are its inputs.
@@ -108,7 +110,11 @@ Only the missing approving review was bypassed under explicit user authorization
 pending check was bypassed and no protection was changed. W06d merged after W06c post-merge CI
 passed. Private-route mirrors were skipped and are not used as validation evidence.
 
-## Actual-user review — required before M1 promotion
+## Actual-user review — deferred until before production (P01)
+
+The original gate required this review before M1 promotion. On 2026-09-07 UTC, the user explicitly
+accepted automated engineering evidence for this release and deferred hands-on usability
+acceptance until before production. See [UA01 and P01](m1-acceptance-decisions.md).
 
 This gate is distinct from permission to merge a green PR. The accepting developer/operator
 must review the normal and failure journeys and report their observed result. A scripted browser
@@ -125,12 +131,21 @@ Record findings and corrections before signing off. The proposed five-user/ten-m
 target in the vision document remains unvalidated unless that study is actually performed; one
 operator's review must not be reported as that study.
 
-Accepting operator: **pending**. Observed user results: **pending**. M1 acceptance: **not complete**.
+Accepting operator: **pending assignment before production**. Observed user results: **not performed**.
+UA01: **accepted timing revision**. UA02: **existing estimated token budgets accepted**.
+UA03: **current component/synthetic broker evidence accepted for this release**; live interoperability
+and grant-lifecycle validation required before production use of the integration (P02).
+UA04: **operator-controlled recovery accepted for this release**; recovery owner, authoritative
+policy source and cutover/rollback rules remain required before deployment (P03).
+UA05: **measured single-node baseline accepted without production performance promises**.
+Remaining release decision UA06: **pending**;
+M1 release acceptance is not yet complete as a whole.
 
 ## Promotion gate
 
 W06c and W06d land through focused `develop` PRs with clean adversarial review and green latest-head
-and post-merge CI. Only after the recorded M1 acceptance gates pass may a `develop` → `main` PR
+and post-merge CI. Only after the recorded M1 release acceptance decisions close under the
+explicit UA01 timing revision may a `develop` → `main` PR
 promote this checkpoint. Review the full promotion diff and verify the resulting `main` CI.
 No tag, package publication, production rollout or later roadmap guarantee is implied.
 
@@ -140,5 +155,6 @@ per-slice adversarial reviews. It checked accounting propagation and disclosed m
 configured-store/readiness compatibility, and intact CI/security gates. The promotion also
 carries the already-integrated protocol 0.8.1 update (PR #227) and npm bootstrap documentation
 (PR #226). This was not an exhaustive new audit of every line, production certification, or
-permission to skip actual-user acceptance. Recheck the exact promotion head and CI when the
-human gate is satisfied; no `main` promotion PR has been opened for this checkpoint.
+permission to skip actual-user acceptance. UA01 subsequently deferred that acceptance until
+before production; it remains unperformed. Recheck the exact promotion head and CI when the
+remaining release decisions close; no `main` promotion PR has been opened for this checkpoint.

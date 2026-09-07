@@ -1,13 +1,58 @@
 # M1 acceptance decisions and evidence
 
-Status: additional automated journey evidence passed locally; **no user decision or acceptance recorded**.
+Status: **UA01–UA05 accepted** for this release; hands-on usability acceptance deferred until
+before production. UA06 remains pending; no observed-user or live-integration pass is recorded.
 Tracker: [TD-0026](../td/TD-0026-gateway-product-evolution.md), C01f; prior
 [workload and integration evidence](m1-acceptance.md) remains valid.
 
 The question is not whether an automated test can impersonate an accepting user. It is which
 claims the engineering evidence supports, which operating limits the owner accepts, and which
-usability questions still need observation. Recommendations below are proposals, not approvals.
+usability questions still need observation. Recommendations below are proposals unless explicitly
+accepted in the decision record.
 No choice silently changes the existing M1 gate, opens a promotion PR, publishes a package or deploys.
+
+## Acceptance decision record
+
+Authority: explicit user instruction in this working session, 2026-09-07 UTC. Evidence baseline:
+`develop` at `cf469bcbd06679109d0803b3ad47f66a77e4ac51`, including C01f and its green post-merge CI.
+
+| Decision | State | Recorded outcome |
+|---|---|---|
+| UA01 — acceptance method | Accepted | Use automated engineering evidence for this release; explicitly defer hands-on usability acceptance until before production |
+| UA02 — budget guarantees | Accepted | Accept the existing estimate-based token budgets for this release; no strict final-token or monetary-cap guarantee |
+| UA03 — broker assurance | Accepted | Accept current synthetic Sandhi boundary and isolated broker-component evidence for this release; require live interoperability and grant-lifecycle validation before production use of that integration |
+| UA04 — recovery responsibility | Accepted | Accept operator-controlled quarantine and reconciliation for this release; assign the recovery owner, authoritative policy source and cutover/rollback rules before deployment |
+| UA05 — performance scope | Accepted | Accept a measured single-node engineering baseline without production throughput, latency, recovery-time or fleet-capacity promises |
+| UA06 — promotion/release scope | Safeguard work authorized; execution pending | Close the release-safety gaps and track implementation/tests; final tagging/publication scope remains explicit |
+
+This is an explicit revision of the acceptance timing for this release, not completion of the
+original observed-user gate. The automated evidence is accepted as the release acceptance method;
+the operating-limit decisions UA02–UA05 are accepted. Promotion/publication scope (UA06) remains
+to be confirmed. Existing review/CI requirements are unchanged. M1 release acceptance is not
+yet closed as a whole.
+
+Deferred gate **P01 — hands-on usability before production** remains open. Before production use,
+assign an accepting operator and record the tested build, all four journey outcomes, assistance,
+confusion and any blocking corrections using the session below. Operator/results are unassigned
+and not performed; publication or a green build does not satisfy P01. The proposed five-user
+study remains separately unvalidated.
+
+Deferred gate **P02 — live broker integration before production use of that integration** remains
+open under UA03. Validate Sandhi with the actual broker in an isolated setup using disposable
+credentials; record the component versions, platform, interoperability and grant-lifecycle
+outcomes. Current synthetic boundary tests and isolated broker tests do not satisfy this gate.
+No live compatibility, grant-lifecycle, desktop or browser-to-broker connector certification is
+claimed. UA03 selects when validation is required; it does not authorize access to a personal
+vault, production grants or production deployment.
+
+Deferred gate **P03 — recovery ownership and procedure before deployment** remains open under
+UA04. Before production deployment, name the recovery owner and authoritative post-snapshot
+policy/revocation source, and record cutover and rollback rules. For each restore, keep traffic
+isolated until the operator verifies integrity, accounting, current access policy and revocations;
+if current policy cannot be established, remain quarantined. Record uncertain consumption rather
+than inferring zero loss from readiness. Owner/source/rules are not yet assigned. Accepting this
+operating model does not perform a restore, approve traffic cutover, promise automatic fleet
+recovery or establish lossless accounting.
 
 ## What automation can settle
 
@@ -53,7 +98,10 @@ that feedback is clear enough for this checkpoint or needs a UX correction befor
 
 ### UA01 — What acceptance standard should gate main promotion?
 
-**Recommendation:** retain the existing gate, but make it a focused review by one named
+**Recorded decision (2026-09-07 UTC):** the user selected automated engineering evidence for
+this release and explicitly deferred hands-on usability acceptance until before production (P01).
+
+**Original recommendation (not selected):** retain the existing gate, but make it a focused review by one named
 developer/operator of the four journeys below. This is sufficient only for the defined M1
 checkpoint; the proposed five-user/ten-minute onboarding study stays unvalidated.
 
@@ -61,14 +109,18 @@ checkpoint; the proposed five-user/ten-minute onboarding study stays unvalidated
 dispatch. They cannot prove that a person found the operation or understood what to do next.
 The new stitched checks remove avoidable manual regression work, leaving only that judgment.
 
-**Alternative requiring your explicit decision:** promote an engineering checkpoint on automated
+**Selected alternative:** promote an engineering checkpoint on automated
 evidence and defer observed usability acceptance to before production use. That revises the
 current gate; it must be recorded as a revision, not as a completed user study or walkthrough.
 
-**Decision to record:** retain the walkthrough gate and name the reviewer, or explicitly revise
-its timing/scope. Generic permission to continue or merge does not select either option.
+The explicit user decision above selects this alternative. UA01 alone does not approve other
+choices or establish observed-user results; UA02 and UA03 were subsequently accepted separately.
 
 ### UA02 — Are estimated neutral-token budgets acceptable for this checkpoint?
+
+**Recorded decision (2026-09-07 UTC):** the user explicitly accepted the existing estimate-based
+token budgets for this release. This accepts the disclosed admission/settlement contract; it
+does not add a strict mode, change configured policies or extend guarantees to monetary caps.
 
 **Recommendation:** accept the disclosed estimate-based admission contract for M1, with `Block`
 for enforced rejection and `Warn` only where over-budget admission is intentional. Do not describe
@@ -86,6 +138,11 @@ to enable today. The neutral-measurement boundary remains the existing architect
 
 ### UA03 — What broker assurance is required before promotion versus deployment?
 
+**Recorded decision (2026-09-07 UTC):** the user selected the recommendation: accept the current
+synthetic Sandhi boundary tests and 18 isolated SentinelPass contract tests for this release,
+with live interoperability and grant-lifecycle validation required before production use of
+the integration (P02). The live-validation-before-release alternative was not selected.
+
 **Recommendation:** use exact-reference onboarding through the bounded native read-grant path;
 accept synthetic protocol evidence for the explicitly scoped engineering checkpoint, while
 requiring live compatibility/grant-lifecycle certification before claiming production integration.
@@ -99,11 +156,17 @@ real Unix-socket source-contract coverage, not Sandhi interoperability certifica
 workspace is 0.8.2 while Sandhi embeds protocol 0.8.1. AgentBrowser's in-memory secret registry
 is not a SentinelPass connector. See the [probe record](evidence/m1-decisions-2026-09-07/README.md).
 
-**Human decision:** accept that certification boundary, or require live certification before
-main promotion. The latter needs an approved disposable daemon/build and test-vault setup;
-personal vault access, unlock and grant changes are not authorized by this packet.
+**Selected boundary:** current evidence is sufficient for this release's broker-assurance
+decision, not for production integration certification. P02 remains open; personal vault access,
+unlock and grant changes are not authorized by this packet.
 
 ### UA04 — Who owns restored access policy and uncertain consumption?
+
+**Recorded decision (2026-09-07 UTC):** the user selected the recommendation: operator-controlled
+recovery with quarantine and explicit reconciliation is acceptable for this release. A recovery
+owner, authoritative policy source and cutover/rollback rules must be established before
+deployment (P03). The alternative of requiring stronger automated recovery guarantees before
+release was not selected.
 
 **Recommendation:** accept manual quarantine and explicit reconciliation for the single-node
 checkpoint. Name an operator, an authoritative post-snapshot revocation/policy source, and a
@@ -121,6 +184,13 @@ keep that deployment blocked on W05/W12 rather than relabeling these tests as th
 
 ### UA05 — What operational/performance promise is being accepted?
 
+**Recorded decision (2026-09-07 UTC):** the user selected the recommendation: release as a measured
+single-node engineering baseline, without production throughput, latency, recovery-time or fleet
+capacity guarantees. The alternative of requiring deployment-specific performance targets and
+validation before release was not selected. Before making a later performance promise, define
+the target workload, hardware, thresholds and test duration and validate those claims; the
+existing synthetic observations are not that validation.
+
 **Recommendation:** accept a measured single-node engineering baseline, with no production
 latency/capacity/RTO promise. Define deployment workload, thresholds, duration and hardware before
 using a benchmark as a production acceptance gate.
@@ -131,23 +201,62 @@ warmup, uses a synthetic local provider and a short accumulating history, and ru
 host. No production SLO or leak-freedom conclusion follows. Readiness is lifecycle-only; queue
 emptiness is not a commit receipt; shutdown exit 124 means cleanup was not proven complete.
 
-**Human decision:** accept that scope for M1, or supply the target workload/SLO/recovery objective
-that must pass first. A broader request changes the validation scope and must be planned explicitly.
+**Selected boundary:** accept the stated scope for this release. No target workload, production
+SLO or recovery-time objective was supplied or certified. A broader performance promise changes
+the validation scope and must be planned explicitly.
 
 ### UA06 — What action should acceptance authorize?
 
-**Recommendation:** once the selected gate is satisfied, authorize only the reviewed
-`develop` → `main` promotion with fresh exact-head review/CI and post-merge verification.
+**Recorded instruction (2026-09-07 UTC):** the user authorized addressing the gaps needed for a
+safeguarded milestone/release and driving the features and plan accordingly. Implement and
+verify the [release-safeguard plan](release-safeguards.md). Do not interpret this as immediate
+tagging, publication, production deployment or a waiver of a remaining safeguard.
+
+**Recommendation now proposed for explicit approval:** release **v0.6.0** as the M1 engineering
+milestone with the accepted limitations. Integrate the acceptance record through a focused
+`develop` PR; validate publisher configuration and harden the publishing entry points using
+narrowly scoped release-tag protection and publisher-environment restrictions. Preserve required
+CI and existing branch protections. Then promote `develop` → `main` after clean cumulative
+review and fresh exact-head CI, verify post-merge CI, tag the verified commit, publish the planned
+GitHub binaries, PyPI, four Rust crates and npm/platform packages, verify actual artifacts, and
+back-sync `main` into `develop`. Production deployment is excluded. Stop for owner action if
+registry-side authorization cannot be established; do not silently omit a failed target.
+
+**Alternative:** authorize promotion only under the same review/CI gates, with tagging and all
+package publication deferred to a separate decision. This preserves the engineering checkpoint
+without activating publishers yet.
 
 **Rationale/evidence:** the cumulative review also includes the already-integrated protocol
 0.8.1 update and npm bootstrap documentation. The latter documents publishing; it does not
 authorize publishing. M1 is not all later accounting/fleet/broker work.
 
-**Decision to record:** accept that promotion scope, identify any excluded change, or hold.
-Tags, package publication and production rollout remain separate actions. Earlier merge bypass
-authorization covers only a missing approving review after clean review/green CI, never checks.
+**Decision to record:** the approved promotion/publication scope, version, targets and narrowly
+scoped publishing-protection work, or any exclusions/hold. None of these new publishing actions
+is approved by accepting UA01–UA05 alone. Earlier merge bypass authorization covers only a
+missing approving review after clean review/green CI, never checks. Production rollout remains
+separate and subject to P01–P03 and the applicable deployment validations.
 
-## Minimal observed-user session (if UA01 is retained)
+### Release-readiness preflight — 2026-09-07 UTC
+
+Read-only checks continued while collecting acceptance decisions. These results are not a tag,
+publication approval or proof that the next OIDC publish will succeed.
+
+| Check | Observed evidence | Remaining action |
+|---|---|---|
+| Integrated engineering baseline | `develop` at `cf469bc`; [post-merge CI](https://github.com/anvai-labs/sandhi/actions/runs/34080462032) passed | Fresh full-diff review and CI still required for promotion |
+| Last registry release | `python3 scripts/verify-release.py v0.5.1` exited 0: PyPI, all four crates and the main npm package present | Verify the next actual version after publication; presence is not installability certification |
+| Native/platform artifacts | GitHub lists Linux x64 and macOS arm64 v0.5.1 archives; both corresponding npm platform packages report version 0.5.1 | Test newly built artifacts for the next release |
+| Historical npm failure | [Repair run 33740352186](https://github.com/anvai-labs/sandhi/actions/runs/33740352186) failed with E404 on the Linux platform package; that package is now present | Do not mistake the old failure for current absence, or current presence for proven OIDC configuration |
+| Publisher configuration | GitHub metadata lists `CARGO_REGISTRY_TOKEN`; `npm` and `pypi` environments exist | Token validity and registry-side trusted-publisher bindings were not verified; secret values were not read |
+| Publishing protections | `npm`/`pypi` environment API reports no deployment branch policy and no protection rules; repository rulesets query returns an empty list | Review tag/dispatch authorization and approve appropriate publishing restrictions before the tag; no settings changed and no claim of a complete organization-policy audit |
+
+UA06 should settle the release version/targets and the publishing-protection work as well as
+promotion scope. Recommendation: retain the planned unified release targets, validate publisher
+configuration and harden the publishing entry points before tagging. An explicitly narrower
+release scope would require documented workflow/verification changes, not a silently skipped
+publisher. Do not rerun an old publish workflow merely to test credentials.
+
+## Deferred observed-user session — P01, required before production
 
 The reviewer should attempt each task before reading the expected result. Record assistance
 needed rather than quietly coaching every step into a pass. Use synthetic credentials only.
@@ -161,5 +270,6 @@ needed rather than quietly coaching every step into a pass. Use synthetic creden
 
 Record: reviewer/role, tested build, date, task outcomes, assistance, confusion/blockers, chosen
 UA01–UA06 outcomes and explicit accept/hold scope. Do not include tokens, keys or vault contents.
-All decision states are **pending** until the owner supplies them. A screenshot review alone is
+UA01–UA05 are accepted; UA06 and pre-production gates P01–P03 remain **pending**.
+A screenshot review alone is
 an inspection, not an observed unassisted usability session; label it accordingly.

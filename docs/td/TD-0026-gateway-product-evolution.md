@@ -49,8 +49,9 @@ marking a planning task complete does not mark its implementation complete.
 | C01c | W06a drain-aware readiness; branch `feat/drain-aware-readiness` | Passed: native workspace, OTLP proxy tests, 87.76% native coverage, 113 SDK/browser tests; independent review finding fixed and re-reviewed clean | [PR #232](https://github.com/anvai-labs/sandhi/pull/232) merged as `31151d9`; latest-head CI `34042875545` and post-merge CI `34048329909` passed; authorized missing-review bypass only | Complete | No |
 | C01d | W06c recovery drills; branch `test/recovery-drills` | Passed: 181 SDK/browser tests (one unavailable SDK skipped), default/native/OTLP tests and clippy, 87.77% native coverage; adversarial findings fixed and independently re-reviewed clean | [PR #233](https://github.com/anvai-labs/sandhi/pull/233) merged as `8ae8401`; latest-head CI `34058455291` and post-merge CI `34059776510` passed on public hosted runners; authorized missing-review bypass only | Complete | No |
 | C01e | W06d workload/operator acceptance; branch `test/m1-acceptance` | Automation passed: 227 local SDK/browser tests (one unavailable SDK skip), 233 hosted SDK tests (two optional sibling-browser skips), 36-phase integrated workload and clean independent review; [evidence and actual-user gate](../product/m1-acceptance.md). Accepting operator/results still pending | [PR #234](https://github.com/anvai-labs/sandhi/pull/234) merged as `324ba87`; latest-head CI `34060286384` and post-merge CI `34060985111` passed on public hosted runners; authorized missing-review bypass only | Automation verified and integrated; human acceptance pending | No |
-| C01f | Operator decision evidence and run-view correction; branch `test/operator-decision-evidence` | 251 SDK/browser tests, zero skips; Rust tests/clippy/fmt passed; nine masked journey pairs plus JUnit; 18 pinned broker-component tests | [PR #236](https://github.com/anvai-labs/sandhi/pull/236) is the live record for exact-head review, CI and post-merge verification | Follow PR merge state; source-pinned local evidence remains immutable | No; UA01–UA06 pending |
-| C02 | Initial W06 and M1 operator-journey acceptance, then `develop` → `main` | Pending | Pending promotion PR and post-merge CI | Pending | No; tagging/publishing is a separate action |
+| C01f | Operator decision evidence and run-view correction; branch `test/operator-decision-evidence` | 251 SDK/browser tests, zero skips; Rust tests/clippy/fmt passed; nine masked journey pairs plus JUnit; 18 pinned broker-component tests | [PR #236](https://github.com/anvai-labs/sandhi/pull/236) is the live record for exact-head review, CI and post-merge verification | Follow PR merge state; source-pinned local evidence remains immutable | No; UA01–UA05 accepted, UA06 pending |
+| C01g | Release safeguards and accepted engineering scope; branch `docs/m1-release-acceptance` | 207 safeguard tests passed, zero skips; isolated local binary smoke passed; independent review clean; SG06 remote ref controls verified; [SG01–SG08 tracker](../product/release-safeguards.md) | [PR #237](https://github.com/anvai-labs/sandhi/pull/237) open; hosted JSON-depth failure fixed, updated public CI pending | Pending | No; SG07 credential closure and final execution gate open |
+| C02 | M1 engineering-release acceptance under UA01–UA05, then `develop` → `main`; hands-on UX deferred to P01 before production | UA01–UA05 accepted; SG06 ref controls applied; UA06 final execution and SG07 credential gate pending | Pending promotion PR and post-merge CI | Pending | No; tagging/publishing is a separate action |
 
 C01f follow-up: `test/operator-decision-evidence` closes the automatable links between browser
 onboarding, real requests, budget denials, broker recovery and restored numeric evidence. Source
@@ -61,11 +62,19 @@ The exposed dashboard run-envelope mismatch is corrected with malformed/unsafe-r
 escaped-label regressions. Independent source re-review is clean after closing false-pass gaps;
 remote review/CI, merge and post-merge verification are recorded in [PR #236](https://github.com/anvai-labs/sandhi/pull/236).
 The PR's live state is authoritative for integration, separate from this source checkpoint.
-UA01–UA06 choices remain pending: these checks do
-not turn automation into observed-user acceptance or revise C02.
+On 2026-09-07 UTC the user explicitly accepted automated engineering evidence for this release
+and deferred hands-on usability acceptance until before production (UA01/P01). This revises C02's
+acceptance timing, not the evidence: no observed-user pass exists. The user subsequently accepted
+the existing estimate-based token budgets (UA02) and current component/synthetic broker evidence
+(UA03) for this release. Live interoperability and grant-lifecycle validation remain required
+before production use of the integration (P02). The user also accepted operator-controlled
+recovery (UA04); recovery ownership, current policy authority and cutover/rollback rules remain
+required before deployment (P03). The user accepted the measured single-node baseline without
+production performance promises (UA05). Promotion/publication scope (UA06) remains pending.
 
 C01 checkpoints completed work now instead of waiting for W05–W14. Do not claim M1 complete
-or promote C02 until initial W06 and M1 acceptance evidence exist. Preserve required reviews,
+or promote C02 until initial W06 evidence and the remaining M1 release acceptance decisions exist
+under UA01. P01 still gates production. Preserve required reviews,
 environment approvals and branch protections; no CI bypass or automatic publication is implied.
 
 ## Decision log
@@ -104,7 +113,7 @@ verification evidence and an operator-facing release note before its status beco
 | W03 | Metering semantics and guarantee correction; R03, F03/F04 | Sandhi core/providers maintainer | Baseline | 1–2 weeks | Explicit reasoning inclusion and minor-7 schemas; legacy totals preserved; parser/plane/store/ledger/binding corpus and 24 end-to-end cases pass; [estimated-reservation capability matrix](../product/metering-and-budget-guarantees.md) and concurrent overshoot regression | Complete |
 | W04 | Safe broker integration and onboarding; R07/R13, F08/F09, SP0/SP1 | Sandhi store/proxy + SentinelPass protocol owners | Baseline | 1–2 weeks | Native real-handler reproduction fixed; bounded runtime/queue, explicit capabilities, read-only API/CLI/browser registration and 16 broker scenarios pass; [integration contract](../product/broker-integration-contract.md). Live daemon certification remains SP4; generations/revocation cutoff remain W09 | Complete |
 | W05 | Attempt accounting and durable evidence; R03/R05/R11, F05/F06 | Sandhi core/store + downstream consumer owner | W02/W03; accounting-contract review | 2–4 weeks | W05a complete: atomic settlement receipts, bounded/fenced delivery claims and 14 focused tests; [substep contract](../product/attempt-accounting-and-evidence.md). W05b–e retain physical-attempt capture, proxy integration, recovery, export and consumer review gates. A settlement receipt is not an upstream attempt | In progress |
-| W06 | Operational readiness and recovery; R05/R12, F12/F13 | Sandhi operations/proxy maintainer | Baseline; W05 for authoritative backlog | 1–2 weeks | W06a/b/c and W06d automation verified and integrated. C01e actual-user acceptance remains pending. Automated smoke does not substitute for user acceptance. See TD-0020 and checkpoint gates | In progress |
+| W06 | Operational readiness and recovery; R05/R12, F12/F13 | Sandhi operations/proxy maintainer | Baseline; W05 for authoritative backlog | 1–2 weeks | W06a/b/c and W06d automation verified and integrated. UA01 accepts engineering evidence for this release; remaining release decisions pending. Hands-on usability deferred until before production, not performed. See TD-0020 and checkpoint gates | In progress |
 | W07 | Scoped management, audit and egress security; R06/R10, F07/F11/F15 | Sandhi security/API + control-plane owner | W01/W02; identity-boundary review | 2–4 weeks | Cross-scope CRUD/query denial, mutation audit, bounded/redacted egress and webhook delivery, auth/session threat model, failure-injection evidence | Pending |
 | W08 | Declarative policy and hierarchical usage controls; R02/R04/R08, F10/F16 | Sandhi core/store + policy consumer owner | W02/W03/W05/W07 | 2–4 weeks | Reconcile TD-0005; durable revision/conflict preconditions, shadow/effective policy, signed freshness, all-scope/window atomic reservation, rate/token/concurrency tests, explainable denial | Pending |
 | W09 | Credential generations and revocation; R07, F09, SP2 | Sandhi credential manager + SentinelPass owners | W04/W05/W07; broker contract release | 2–3 weeks | Bounded new-dispatch cutoff, generation switch/drain, restart and missed-event recovery, broker outage/expiry matrix | Pending |
@@ -140,6 +149,12 @@ does not assume parallel agents or staffing that has not been assigned.
 
 ### Authorized M1 completion sequence (2026-09-06)
 
+Timing amendment, 2026-09-07 UTC: UA01 explicitly replaces the pre-promotion hands-on requirement
+below for this release with accepted automated engineering evidence. Hands-on acceptance is
+deferred, not completed, and remains required before production (P01). Other release decisions,
+fresh review/CI and publication controls are unchanged. The original sequence is retained here
+for audit context.
+
 1. W06c/C01d: stop disposable writers, snapshot/validate a complete fixed-topology SQLite set,
    restore into a new quarantined directory, prove committed state and continued accounting;
    exercise WAL, forced-exit leases, unavailable broker and post-snapshot revocation reconciliation.
@@ -154,16 +169,26 @@ does not assume parallel agents or staffing that has not been assigned.
    diff and verify CI before merge; verify the resulting `main` push. Tagging/publishing remains
    separate and is not part of this promotion request.
 
-W06c and W06d automation integration and post-merge verification are complete. Actual-user
-acceptance remains the non-automated M1 gate.
-The user requested completion of feasible automation and evidence-backed decisions before
-choosing the acceptance path; C01f supplies that packet instead of repeatedly requesting an
-unqualified sign-off. UA01 includes retaining the observed-user gate or explicitly revising its
-timing for an engineering-only checkpoint; neither has been selected.
-The next required input is a named accepting operator, reviewed build and observed first-request,
-budget-denial, locked-broker and recovery-limit outcomes in the [acceptance record](../product/m1-acceptance.md).
-Correct any reported blocker, then open C02 only after that gate passes. Merge authorization and
-automated browser/workload results are not substitutes. Later live broker/fleet guarantees remain open.
+W06c and W06d automation integration and post-merge verification are complete. The user selected
+UA01's engineering-evidence method for this release and explicitly deferred hands-on acceptance
+until before production. The [decision record](../product/m1-acceptance-decisions.md) tracks that
+approval, the subsequent acceptance of existing estimated token budgets (UA02) and current
+broker evidence (UA03), operator-controlled recovery (UA04) and measured single-node performance
+scope (UA05), remaining UA06 and deferred P01–P03. Next: confirm promotion/publication scope,
+the proposed v0.6.0 targets and publishing safeguards. Do not tag or publish based on UA01–UA05.
+The user subsequently authorized release-safeguard gap closure. Execute and track SG01–SG07
+in the [release-safeguard plan](../product/release-safeguards.md); SG08/final publication remains
+an explicit gate. Independent implementation/review work may proceed without claiming release
+completion or reopening UA01–UA05.
+Do not repeatedly request the now-deferred walkthrough as a release prerequisite. Do not mark
+it performed or authorize production. Later live broker/fleet guarantees remain open.
+
+Release-readiness preflight (2026-09-07 UTC) continued without publishing: the existing verifier
+confirms v0.5.1 on PyPI, all four crates and the main npm package; both npm platform packages and
+two GitHub binary archives are present. Historical npm E404 is not current artifact absence.
+Registry-side trusted-publisher configuration remains unverified; environment/tag publishing
+protections need review before the next tag. Evidence and the remaining UA06 choice are in the
+[decision packet](../product/m1-acceptance-decisions.md). No publisher settings were changed.
 
 ### Milestone definitions
 
@@ -171,7 +196,8 @@ automated browser/workload results are not substitutes. Later live broker/fleet 
    from cited code and future validation clearly separated. Complete; M1 is now underway.
 2. **M1 — trustworthy single-node baseline:** W01–W04 plus initial W06. A configured dashboard is
    usable, control updates are truthful, metering semantics are pinned and broker calls are safe.
-   Review the first-request, budget and locked-broker journeys with actual users.
+   Original scope includes actual-user journey review; UA01 defers that review until before
+   production for this engineering release, without claiming usability validation.
 3. **M2 — accountable team gateway:** W05–W10. Scoped authority, durable attempt evidence,
    hierarchical policy, incident investigation and credential lifecycle work together. Monetary
    reporting remains downstream. Complete operator/security/finance scenario reviews.
