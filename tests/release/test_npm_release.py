@@ -239,10 +239,9 @@ def test_pack_report_rejects_malformed_or_leaking_listing(tmp_path, fault):
 
 
 def test_pinned_napi_generated_manifests_pack_without_prepublication(package):
-    """Optional local generator compatibility, not cross-platform native execution."""
+    """Required pinned-generator compatibility, not cross-platform native execution."""
     cli_root = ROOT / 'bindings/node/node_modules/@napi-rs/cli'
-    if not cli_root.is_dir():
-        pytest.skip('install the pinned @napi-rs/cli 2.18.4 to run generator compatibility')
+    assert cli_root.is_dir(), 'run npm ci --ignore-scripts in bindings/node before release tests'
     assert json.loads((cli_root / 'package.json').read_text())['version'] == '2.18.4'
     # Copy only public source inputs; the fixture's 64-byte native headers are not
     # real loadable addons and must never be described as native ABI certification.

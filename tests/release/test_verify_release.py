@@ -176,6 +176,59 @@ class VerifyReleaseTests(unittest.TestCase):
         self.routes[PYPI_URL] = b'{"x":' * 2000 + b'0' + b'}' * 2000
         self.assertEqual(self.client.fetch(PYPI_URL).status, verify.Status.INVALID)
 
+    def test_json_depth_exact_boundary_objects_arrays_and_mixed(self):
+        for container in ("objects", "arrays", "mixed"):
+            for depth in (verify.MAX_JSON_DEPTH, verify.MAX_JSON_DEPTH + 1):
+                # The outer object is depth1; remaining containers exercise both kinds.
+                payload = b"0"
+                for level in range(depth - 1):
+                    if container == "objects" or (container == "mixed" and level % 2):
+                        payload = b'{"value":' + payload + b'}'
+                    else:
+                        payload = b'[' + payload + b']'
+                self.routes[PYPI_URL] = b'{"root":' + payload + b'}'
+                with self.subTest(container=container, depth=depth):
+                    expected = verify.Status.OK if depth <= verify.MAX_JSON_DEPTH else verify.Status.INVALID
+                    self.assertEqual(self.client.fetch(PYPI_URL).status, expected)
+
+    def test_json_depth_is_checked_before_even_a_permissive_decoder(self):
+        for depth in (verify.MAX_JSON_DEPTH + 1, 2000):
+            self.routes[PYPI_URL] = b'{"x":' * depth + b'0' + b'}' * depth
+            with patch.object(verify.json, "loads", return_value={}) as decode:
+                self.assertEqual(self.client.fetch(PYPI_URL).status, verify.Status.INVALID)
+            decode.assert_not_called()
+
+    def test_json_strings_escaped_quotes_backslashes_and_unicode_are_not_depth(self):
+        values = ["[{" * 2000 + "}]" * 2000, 'quotes " braces { and [',
+                  'escaped backslash \\ then quote " then brackets []{}',
+                  '\\\\"[{', "unicode π 雪 😀"]
+        for value in values:
+            self.routes[PYPI_URL] = json.dumps({"value": value}, ensure_ascii=False).encode("utf-8")
+            with self.subTest(value=value[:30]):
+                result = self.client.fetch(PYPI_URL)
+                self.assertEqual(result.status, verify.Status.OK)
+                self.assertEqual(result.data, {"value": value})
+        # Literal JSON unicode escapes are not structural delimiters either.
+        self.routes[PYPI_URL] = br'{"value":"\u0022\u005c\u007b\u005b\u007d\u005d"}'
+        result = self.client.fetch(PYPI_URL)
+        self.assertEqual(result.status, verify.Status.OK)
+        self.assertEqual(result.data["value"], '"\\{[}]')
+
+    def test_json_escaped_string_cannot_hide_actual_deep_nesting(self):
+        prefix = json.dumps({"text": 'escaped quote " and backslash \\ [{'}).encode()[:-1]
+        self.routes[PYPI_URL] = prefix + b',"deep":' + b'[' * verify.MAX_JSON_DEPTH + b'0' + b']' * verify.MAX_JSON_DEPTH + b'}'
+        self.assertEqual(self.client.fetch(PYPI_URL).status, verify.Status.INVALID)
+
+    def test_json_alternate_encodings_and_malformed_syntax_fail_closed(self):
+        for encoding in ("utf-16", "utf-16-le", "utf-16-be", "utf-32", "utf-32-le", "utf-32-be"):
+            self.routes[PYPI_URL] = '{"value":0}'.encode(encoding)
+            with self.subTest(encoding=encoding):
+                self.assertEqual(self.client.fetch(PYPI_URL).status, verify.Status.INVALID)
+        for payload in (b'}{"x":0}', b'{"x":[}', b'{"x":"unterminated', b'{"x":"escaped\\"}', b'{"x":0'):
+            self.routes[PYPI_URL] = payload
+            with self.subTest(payload=payload):
+                self.assertEqual(self.client.fetch(PYPI_URL).status, verify.Status.INVALID)
+
     def test_malformed_registry_records_fail_closed(self):
         checks = ((PYPI_URL, lambda: verify.check_pypi(self.client, VERSION)),
                   (npm_url(), lambda: verify.check_npm(self.client, VERSION)),

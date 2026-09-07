@@ -158,6 +158,9 @@ def check_ci(document):
     assert needs(job) == {"changes"}
     assert job["if"] == "${{ always() && needs.changes.result == 'success' }}", "safeguards must not be path-filtered"
     assert "python -m pytest tests/release -q" in commands(job)
+    installs = [step for step in job["steps"] if step.get("working-directory") == "bindings/node"]
+    assert len(installs) == 1
+    assert installs[0]["run"] == "npm ci --ignore-scripts --no-audit --no-fund"
     assert "PyYAML==" in commands(job)
     assert "release-safeguards" in needs(document["jobs"]["ci-success"]), "aggregate omits release safeguards"
     for step in job["steps"]:

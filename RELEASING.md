@@ -80,8 +80,10 @@ not transactional and must not be described as atomic.
 
 ## Required owner-side authority setup
 
-These are requirements, **not a claim that settings or credentials are already configured**.
-Track approval and read-back evidence in SG06/SG07.
+Ref restrictions were applied and independently verified on 2026-09-07:
+[read-back evidence](docs/product/evidence/release-controls-2026-09-07.json).
+Credential and registry-side publisher setup below remains **unverified/incomplete** under SG07;
+the ref settings alone do not authorize publication.
 
 | Publisher | Required authority |
 |---|---|
@@ -119,6 +121,7 @@ repair. A missing secret never turns a publisher into a successful optional skip
 ```bash
 python3 scripts/verify-release.py vX.Y.Z --targets pypi,crates,npm,github --repo anvai-labs/sandhi
 python3 scripts/verify-release.py vX.Y.Z --targets npm
+(cd bindings/node && npm ci --ignore-scripts --no-audit --no-fund)
 python3 -m pytest tests/release -q
 ```
 

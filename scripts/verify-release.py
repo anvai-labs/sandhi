@@ -46,6 +46,7 @@ PYPI_PLATFORMS = ("linux-x86_64", "macos-arm64", "windows-amd64")
 NPM_PLATFORMS = ("linux-x64-gnu", "darwin-arm64")
 BINARY_TARGETS = ("x86_64-unknown-linux-gnu", "aarch64-apple-darwin")
 MAX_JSON_BYTES = 8 * 1024 * 1024
+MAX_JSON_DEPTH = 64
 MAX_ASSET_BYTES = 128 * 1024 * 1024
 SHA256 = re.compile(r"[0-9a-fA-F]{64}\Z")
 
@@ -91,6 +92,37 @@ def selection(raw, allowed, label):
     if not values or len(values) != len(set(values)) or any(value not in allowed for value in values):
         raise ValueError(f"{label} must be a nonempty, duplicate-free subset of {','.join(allowed)}")
     return values
+
+
+def bounded_json(raw):
+    """Check UTF-8 JSON nesting before decoding, independent of Python recursion limits.
+
+    Registry metadata needs only shallow nesting. The depth bound counts objects
+    and arrays (including the root); quoted/escaped delimiters do not count.
+    json.loads remains responsible for complete syntax validation. Decode UTF-8
+    explicitly so alternate encodings cannot bypass this pre-parser.
+    """
+    document = raw.decode("utf-8")
+    depth, quoted, escaped = 0, False, False
+    for character in document:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                quoted = False
+        elif character == '"':
+            quoted = True
+        elif character in "[{":
+            depth += 1
+            if depth > MAX_JSON_DEPTH:
+                raise ValueError("JSON nesting exceeds configured limit")
+        elif character in "]}":
+            depth -= 1
+            if depth < 0:
+                raise ValueError("invalid JSON nesting")
+    return json.loads(document)
 
 
 class SafeRedirect(urllib.request.HTTPRedirectHandler):
@@ -162,7 +194,7 @@ class Client:
                         return invalid("archive SHA-256 does not match release metadata")
                     return Result(Status.OK, "archive size and SHA-256 verified" if digest else
                                   "archive size verified; GitHub SHA-256 unavailable")
-                data = json.loads(b"".join(chunks))
+                data = bounded_json(b"".join(chunks))
                 if not isinstance(data, dict):
                     return invalid("JSON root must be an object")
                 return Result(Status.OK, "metadata received", data)
