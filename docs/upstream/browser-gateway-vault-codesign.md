@@ -64,6 +64,14 @@ no live SentinelPass daemon or desktop UI was tested. A Tauri desktop UI is not 
 web page that AgentBrowser can drive. Identify a supported web/extension harness before adding
 browser tests there; use IPC contract fixtures for daemon authorization in the meantime.
 
+The 2026-09-07 UTC [acceptance evidence follow-up](../product/evidence/m1-decisions-2026-09-07/README.md)
+adds 18 existing SentinelPass IPC/grant tests from a clean disposable pinned checkout, including
+real Unix-socket authorization/rotation/revocation and locked-state cases. It does not start a
+live Sandhi–broker integration or close AB02. Restored Sandhi evidence now compares AgentBrowser's
+accessibility-visible attribution/budget rows, with negative hidden/misassociated table checks.
+Overview card comparisons are DOM-value/label checks only: the current sibling accessibility
+observation omits their static text, so it cannot establish their visibility.
+
 ## Joint journeys and acceptance
 
 | Journey | UX / contract | Acceptance and failure behavior |

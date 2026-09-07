@@ -1,0 +1,21 @@
+{
+  "captured_at_utc": "2026-09-07T03:14:38.749080+00:00",
+  "evidence_scope": "completed_journey_assertions_only",
+  "facts": {
+    "attribution_verified": true,
+    "billable_tokens": 14,
+    "browser_run_verified": true,
+    "displayed_key_used": true,
+    "persisted_calls": 1,
+    "read_only_broker": true,
+    "registration_status": 201,
+    "request_status": 200
+  },
+  "format_version": 1,
+  "human_acceptance": "not_performed",
+  "journey": "first-request",
+  "proxy_executable_sha256": "ff4ae4f671b42ead672ca2dd0420abd06d1160a9cb00d8105e992e2d6c2f2702",
+  "suite_outcome": "not_reported_use_pytest_junit_including_teardown",
+  "test_id": "tests/sdk-conformance/test_acceptance_decisions.py::test_browser_onboarding_displayed_key_attribution_and_budget_decisions[broker0]",
+  "visible_copy": "Registered openai:default"
+}

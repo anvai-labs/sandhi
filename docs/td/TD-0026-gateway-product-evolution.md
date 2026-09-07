@@ -51,12 +51,15 @@ marking a planning task complete does not mark its implementation complete.
 | C01e | W06d workload/operator acceptance; branch `test/m1-acceptance` | Automation passed: 227 local SDK/browser tests (one unavailable SDK skip), 233 hosted SDK tests (two optional sibling-browser skips), 36-phase integrated workload and clean independent review; [evidence and actual-user gate](../product/m1-acceptance.md). Accepting operator/results still pending | [PR #234](https://github.com/anvai-labs/sandhi/pull/234) merged as `324ba87`; latest-head CI `34060286384` and post-merge CI `34060985111` passed on public hosted runners; authorized missing-review bypass only | Automation verified and integrated; human acceptance pending | No |
 | C02 | Initial W06 and M1 operator-journey acceptance, then `develop` → `main` | Pending | Pending promotion PR and post-merge CI | Pending | No; tagging/publishing is a separate action |
 
-C01f follow-up: on `test/operator-decision-evidence`, close the remaining automatable links
-between browser onboarding, real requests, budget denials, broker recovery and restored numeric
-evidence. Publish the [decision packet](../product/m1-acceptance-decisions.md) with explicit
-UA01–UA06 recommendations and pending choices. A newly exposed dashboard run-envelope mismatch
-is being corrected and regression-tested. Local/remote verification for this slice is in progress;
-it does not retroactively turn automated tests into observed-user acceptance or revise C02.
+C01f follow-up: `test/operator-decision-evidence` closes the automatable links between browser
+onboarding, real requests, budget denials, broker recovery and restored numeric evidence. Source
+`2b4788b` passed 251 SDK/browser tests with zero skips in a clean isolated Python environment;
+nine masked PNG/JSON pairs and final JUnit are in the [decision packet](../product/m1-acceptance-decisions.md).
+Eighteen isolated pinned broker-source tests add component evidence, not live interoperability.
+The exposed dashboard run-envelope mismatch is corrected with malformed/unsafe-response and
+escaped-label regressions. Independent source re-review is clean after closing false-pass gaps;
+remote PR/CI and integration remain pending. UA01–UA06 choices remain pending: these checks do
+not turn automation into observed-user acceptance or revise C02.
 
 C01 checkpoints completed work now instead of waiting for W05–W14. Do not claim M1 complete
 or promote C02 until initial W06 and M1 acceptance evidence exist. Preserve required reviews,

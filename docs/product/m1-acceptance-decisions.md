@@ -1,6 +1,6 @@
 # M1 acceptance decisions and evidence
 
-Status: additional automated journey evidence in progress; **no user decision or acceptance recorded**.
+Status: additional automated journey evidence passed locally; **no user decision or acceptance recorded**.
 Tracker: [TD-0026](../td/TD-0026-gateway-product-evolution.md), C01f; prior
 [workload and integration evidence](m1-acceptance.md) remains valid.
 
@@ -19,7 +19,12 @@ See the linked acceptance record for exact source/build identities and pre/post-
 
 The additional slice connects previously separate checks into complete operator journeys:
 
-| Journey | Automated question | Evidence still to publish from this slice |
+The clean source-pinned full suite passed **251 tests with zero skips** in 211.29 seconds,
+including all three SDKs and both optional AgentBrowser integrations. The linked packet retains
+nine masked PNG/JSON pairs and final JUnit; 18 additional pinned broker-source tests passed.
+Remote integration status is tracked separately in C01f, not inferred from local results.
+
+| Journey | Automated question | Evidence from this slice |
 |---|---|---|
 | First useful request | Does the exact key minted in the served browser authorize a synthetic call, with correct subject/group/session/run/step in persistent evidence and displayed totals? | Browser/API/SQL assertions and masked synthetic screenshots |
 | Budget intervention | Does a cap committed through the browser deny a real request before dispatch, without changing usage/leases, and permit recovery after an explicit cap change? | Cap/spend values, 429/no-dispatch deltas, recovery result |
@@ -37,6 +42,12 @@ the real envelope, checks the requested run identity and rejects missing, negati
 counts. Browser regressions cover a valid persisted run, escaped hostile step labels, a missing
 run and ten malformed-response cases. These checks establish rendering behavior, not whether
 the run view is easy to discover or its own/subtree distinction is understandable.
+
+The [masked screenshots and assertion records](evidence/m1-decisions-2026-09-07/README.md)
+make the owner review concrete. In particular, recovery captures show a new success confirmation
+while the earlier four-second error toast remains visible; denied-reference copy states the
+denial without spelling out grant-request steps. Decide through the focused review whether
+that feedback is clear enough for this checkpoint or needs a UX correction before acceptance.
 
 ## Decisions for the owner
 
@@ -82,8 +93,11 @@ requiring live compatibility/grant-lifecycle certification before claiming produ
 **Rationale/evidence:** [broker tests and contract](broker-integration-contract.md) cover
 locked/missing/denied/timeouts, no automatic unlock or plaintext fallback, and separate local
 disablement versus broker/provider revocation. Synthetic grants do not exercise a real daemon.
-The sibling SentinelPass checkout is absent; AgentBrowser's in-memory secret registry is not a
-SentinelPass connector. Neither condition can be solved by guessing that grants are compatible.
+The sibling SentinelPass checkout is absent, but an isolated public-source checkout at
+`00d1e7de09e3d360954240be7588dd7c73ac317e` passed 18 broker-side IPC/grant tests. This adds
+real Unix-socket source-contract coverage, not Sandhi interoperability certification: that
+workspace is 0.8.2 while Sandhi embeds protocol 0.8.1. AgentBrowser's in-memory secret registry
+is not a SentinelPass connector. See the [probe record](evidence/m1-decisions-2026-09-07/README.md).
 
 **Human decision:** accept that certification boundary, or require live certification before
 main promotion. The latter needs an approved disposable daemon/build and test-vault setup;
