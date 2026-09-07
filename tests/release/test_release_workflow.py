@@ -20,7 +20,6 @@ PUBLISHERS = {"create-release", "pypi-publish", "crates", "npm-publish"}
 UNPRIVILEGED = {"authorize", "binaries", "pypi-build", "npm-build", "npm-package", "crates-check", "verify"}
 SOURCE_JOBS = {"binaries", "pypi-build", "npm-build", "npm-package", "crates", "crates-check"}
 PIN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}")
-CRATES_AUTH = "rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18"
 STAGE_CRATES = 'python3 .release-controls/scripts/stage-crates-release.py --workspace . --version "$RELEASE_VERSION"'
 
 
@@ -75,34 +74,39 @@ def check_privileges(document):
         assert "secrets." not in str(job), f"{name}: build must not receive stored credentials"
     assert jobs["create-release"]["environment"] == "github-release"
     assert jobs["create-release"]["permissions"] == {"contents": "write", "actions": "read"}
-    for name, environment in (("pypi-publish", "pypi"), ("npm-publish", "npm"), ("crates", "crates-io")):
+    for name, environment in (("pypi-publish", "pypi"), ("npm-publish", "npm")):
         assert jobs[name]["environment"] == environment
         assert jobs[name]["permissions"] == {"contents": "read", "actions": "read", "id-token": "write"}
-    assert "secrets." not in str(document), "stored registry credential or fallback prohibited"
+    assert jobs["crates"]["environment"] == "crates-io"
+    assert jobs["crates"]["permissions"] == {"contents": "read", "actions": "read"}
+    assert "secrets." not in str(document.get("env", {}))
+    for name, job in jobs.items():
+        if name != "crates":
+            assert "secrets." not in str(job), "only crates uses a stored registry credential"
     assert "cargo publish -p \"$crate\" --allow-dirty --no-verify" in commands(jobs["crates"]), "privileged Cargo must not compile build scripts"
     assert "crates-check" in needs(jobs["create-release"])
     assert "create-release" in needs(jobs["crates"])
     assert "cargo check --workspace --all-targets" in commands(jobs["crates-check"])
     assert STAGE_CRATES in commands(jobs["crates-check"])
-    # OIDC permission is job-scoped, including steps before the explicit token exchange.
+    # Publishing jobs must not execute dependency compilation or build helpers.
     for name in ("npm-publish", "pypi-publish", "crates"):
         assert not re.search(r"\b(?:npm\s+(?:ci|install)|cargo\s+(?:build|install|check|test|run|set-version)|npx)\b", commands(jobs[name]))
 
 
-def check_crates_oidc(document):
+def check_crates_token(document):
     job = document["jobs"]["crates"]
     steps = job["steps"]
-    auth = uses(job, "rust-lang/crates-io-auth-action")
-    assert len(auth) == 1 and auth[0]["uses"] == CRATES_AUTH
-    assert auth[0]["id"] == "crates-auth" and "with" not in auth[0]
-    assert "if" not in auth[0] and "continue-on-error" not in auth[0]
-    mint = steps.index(auth[0])
-    assert steps[mint - 1].get("run") == "python3 .release-controls/scripts/release_guard.py --verify-proof .release-proof/proof.json"
-    assert STAGE_CRATES in commands({"steps": steps[:mint]})
+    assert not uses(job, "rust-lang/crates-io-auth-action"), "crates OIDC is not the selected mechanism"
     assert uses(job, "actions/setup-python")[0]["with"]["python-version"] == "3.12"
     uploads = [step for step in steps if "cargo publish" in step.get("run", "")]
-    assert len(uploads) == 1 and steps.index(uploads[0]) == mint + 1
-    assert uploads[0]["env"]["CARGO_REGISTRY_TOKEN"] == "${{ steps.crates-auth.outputs.token }}"
+    assert len(uploads) == 1
+    upload_index = steps.index(uploads[0])
+    assert upload_index > 0
+    assert steps[upload_index - 1].get("run") == "python3 .release-controls/scripts/release_guard.py --verify-proof .release-proof/proof.json"
+    assert STAGE_CRATES in commands({"steps": steps[:upload_index]})
+    assert uploads[0]["env"]["CARGO_REGISTRY_TOKEN"] == "${{ secrets.CARGO_REGISTRY_TOKEN }}"
+    assert str(job).count("secrets.") == 1, "token must have exactly one exposure point, without fallback"
+    assert "if" not in uploads[0] and "continue-on-error" not in uploads[0]
     assert "CARGO_REGISTRY_TOKEN" not in job["env"]
     assert all("CARGO_REGISTRY_TOKEN" not in step.get("env", {}) for step in steps if step != uploads[0])
     assert 'test -n "$CARGO_REGISTRY_TOKEN"' in uploads[0]["run"]
@@ -196,7 +200,7 @@ def test_release_wiring_contracts():
     assert document["concurrency"]["cancel-in-progress"] == "false"
     check_pins_and_checkouts(document)
     check_privileges(document)
-    check_crates_oidc(document)
+    check_crates_token(document)
     check_authority(document)
     check_verification(document)
 
@@ -221,36 +225,35 @@ def test_ci_always_checks_release_safeguards():
     check_ci(workflow("ci.yml"))
 
 
-@pytest.mark.parametrize("fault", ["no_oidc", "stored_token", "install_before_auth", "unchecked_mint",
-    "different_registry", "floating_auth", "job_token", "empty_token", "auth_skipped", "auth_failure_ignored"])
-def test_crates_oidc_rejects_privilege_and_auth_regressions(fault):
+@pytest.mark.parametrize("fault", ["extra_oidc", "wrong_token", "install_before_publish", "unchecked_publish",
+    "token_in_other_job", "oidc_action", "job_token", "empty_token", "upload_skipped", "upload_failure_ignored"])
+def test_crates_token_rejects_privilege_and_auth_regressions(fault):
     document = copy.deepcopy(workflow("release.yml"))
     job = document["jobs"]["crates"]
-    auth = uses(job, "rust-lang/crates-io-auth-action")[0]
     upload = next(step for step in job["steps"] if "cargo publish" in step.get("run", ""))
-    if fault == "no_oidc":
-        job["permissions"].pop("id-token")
-    elif fault == "stored_token":
+    if fault == "extra_oidc":
+        job["permissions"]["id-token"] = "write"
+    elif fault == "wrong_token":
         upload["env"]["CARGO_REGISTRY_TOKEN"] = "${{ secrets.CRATES_RELEASE_TOKEN }}"
-    elif fault == "install_before_auth":
+    elif fault == "install_before_publish":
         job["steps"].insert(0, {"run": "cargo install cargo-edit --locked"})
-    elif fault == "unchecked_mint":
-        job["steps"].pop(job["steps"].index(auth) - 1)
-    elif fault == "different_registry":
-        auth["with"] = {"url": "https://example.invalid"}
-    elif fault == "floating_auth":
-        auth["uses"] = "rust-lang/crates-io-auth-action@v1"
+    elif fault == "unchecked_publish":
+        job["steps"].pop(job["steps"].index(upload) - 1)
+    elif fault == "token_in_other_job":
+        document["jobs"]["npm-publish"]["env"]["NPM_TOKEN"] = "${{ secrets.NPM_TOKEN }}"
+    elif fault == "oidc_action":
+        job["steps"].insert(0, {"uses": "rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18"})
     elif fault == "job_token":
-        job["env"]["CARGO_REGISTRY_TOKEN"] = "${{ steps.crates-auth.outputs.token }}"
+        job["env"]["CARGO_REGISTRY_TOKEN"] = "${{ secrets.CARGO_REGISTRY_TOKEN }}"
     elif fault == "empty_token":
         upload["env"]["CARGO_REGISTRY_TOKEN"] = ""
-    elif fault == "auth_skipped":
-        auth["if"] = "false"
+    elif fault == "upload_skipped":
+        upload["if"] = "false"
     else:
-        auth["continue-on-error"] = "true"
+        upload["continue-on-error"] = "true"
     with pytest.raises(AssertionError):
         check_privileges(document)
-        check_crates_oidc(document)
+        check_crates_token(document)
 
 
 def test_legacy_crates_dispatch_is_read_only_failure_only():
@@ -269,7 +272,7 @@ def test_legacy_crates_dispatch_is_read_only_failure_only():
 
 @pytest.mark.parametrize("fault", ["floating_action", "mutable_source", "persisted_credentials", "wrong_source_role", "write_default",
                                   "build_oidc", "missing_authorization", "proof_by_name", "unchecked_publish",
-                                  "wrong_source_binding", "legacy_token", "credentialed_cargo_build", "implicit_targets",
+                                  "wrong_source_binding", "token_fallback", "credentialed_cargo_build", "implicit_targets",
                                   "repair_build_bypass", "repair_default_skip"])
 def test_release_contracts_reject_regressions(fault):
     document = copy.deepcopy(workflow("release.yml"))
@@ -302,9 +305,9 @@ def test_release_contracts_reject_regressions(fault):
         jobs["pypi-publish"]["steps"] = [step for step in jobs["pypi-publish"]["steps"] if "--verify-proof" not in step.get("run", "")]
     elif fault == "wrong_source_binding":
         jobs["npm-publish"]["env"]["EXPECTED_SOURCE_SHA"] = "${{ github.sha }}"
-    elif fault == "legacy_token":
-        next(step for step in jobs["crates"]["steps"] if "CARGO_REGISTRY_TOKEN" in step.get("env", {}))["env"]["CARGO_REGISTRY_TOKEN"] = "${{ secrets.CARGO_REGISTRY_TOKEN }}"
-        checker = check_privileges
+    elif fault == "token_fallback":
+        next(step for step in jobs["crates"]["steps"] if "CARGO_REGISTRY_TOKEN" in step.get("env", {}))["env"]["CARGO_REGISTRY_TOKEN"] = "${{ secrets.CRATES_RELEASE_TOKEN || secrets.CARGO_REGISTRY_TOKEN }}"
+        checker = check_crates_token
     elif fault == "credentialed_cargo_build":
         for step in jobs["crates"]["steps"]:
             if "run" in step:

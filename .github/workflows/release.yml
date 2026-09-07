@@ -366,7 +366,6 @@ jobs:
     permissions:
       contents: read
       actions: read
-      id-token: write
     env:
       RELEASE_VERSION: ${{ needs.authorize.outputs.version }}
       RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
@@ -391,23 +390,20 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: "3.12"
-      # OIDC is job-scoped: do not install/compile third-party code anywhere in this job.
+      # Keep build helpers and dependency compilation out of the publishing job.
       - name: Stage unified Rust version without dependency execution
         run: python3 .release-controls/scripts/stage-crates-release.py --workspace . --version "$RELEASE_VERSION"
-      - name: Revalidate release authority before requesting registry credentials
+      - name: Revalidate release authority before token-backed publication
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 .release-controls/scripts/release_guard.py --verify-proof .release-proof/proof.json
-      - name: Authenticate to crates.io with GitHub OIDC
-        id: crates-auth
-        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5; post step revokes temporary token
       - name: Publish all required crates in dependency order
         env:
           GH_TOKEN: ${{ github.token }}
-          # Short-lived OIDC credential only; NO stored-token fallback.
-          CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
+          # Owner-authorized existing repository token; exposed only to this step.
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          test -n "$CARGO_REGISTRY_TOKEN" || { echo "::error::Required crates.io OIDC credential missing"; exit 1; }
+          test -n "$CARGO_REGISTRY_TOKEN" || { echo "::error::Required crates.io publishing token missing"; exit 1; }
           for crate in sandhi-core sandhi-providers sandhi-store sandhi-proxy; do
             status=$(curl --silent --show-error --max-time 20 -o crate-response.json -w '%{http_code}' -A sandhi-release "https://crates.io/api/v1/crates/$crate/$RELEASE_VERSION")
             case "$status" in
