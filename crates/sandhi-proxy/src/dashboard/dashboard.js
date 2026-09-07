@@ -374,10 +374,19 @@ async function applyConfig() {
 // Run cost tree: recursive own-vs-rollup breakdown for one agentic run. Admin-gated (attribution
 // across a whole run can span multiple subjects, so it is treated like any other admin query).
 function renderNode(n) {
+  if (!n || typeof n.step_id !== "string" || (n.children !== undefined && !Array.isArray(n.children))) {
+    throw new ApiError(502, "Incomplete response from server");
+  }
+  requireRunCounts(n.own); requireRunCounts(n.rollup);
   const kids = (n.children || []).map(renderNode).join("");
   return `<li><div class="node"><span class="step">${esc(n.step_id)}</span>`
     + `<span class="stat">own ${fmt(n.own && n.own.billable_tokens)} · subtree ${fmt(n.rollup && n.rollup.billable_tokens)} tok</span></div>`
     + (kids ? `<ul>${kids}</ul>` : "") + `</li>`;
+}
+function requireRunCounts(value) {
+  if (!value || ![value.calls, value.billable_tokens].every(n => Number.isSafeInteger(n) && n >= 0)) {
+    throw new ApiError(502, "Incomplete response from server");
+  }
 }
 function lookupRun() {
   const id = document.getElementById("run-id").value.trim();
@@ -385,9 +394,13 @@ function lookupRun() {
   // A failed lookup of another run must not present the previous run's data as its result.
   panels.delete("run-tree");
   return loadPanel("run-tree", `/admin/usage/run/${encodeURIComponent(id)}`, data => {
-    requireFields(data, ["roots"], ["total"]);
-    const roots = data.roots.map(renderNode).join("");
-    return `<div class="callout info">Total: ${fmt(data.total.billable_tokens)} billable tokens across ${fmt(data.total.calls)} calls</div>`
+    requireFields(data, [], ["run"]);
+    const run = data.run;
+    requireFields(run, ["roots"], ["total"]);
+    if (run.run_id !== id) throw new ApiError(502, "Mismatched run response from server");
+    requireRunCounts(run.total);
+    const roots = run.roots.map(renderNode).join("");
+    return `<div class="callout info">Total: ${fmt(run.total.billable_tokens)} billable tokens across ${fmt(run.total.calls)} calls</div>`
       + `<ul class="tree" style="margin-top:.6rem">${roots || '<li class="muted">no steps recorded for this run</li>'}</ul>`;
   }, true);
 }

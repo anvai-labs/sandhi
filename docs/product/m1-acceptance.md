@@ -3,6 +3,10 @@
 Status: automated workload and combined local verification passed; actual-user review pending.
 Owner/tracker: [TD-0026](../td/TD-0026-gateway-product-evolution.md), C01e/W06d.
 
+The follow-up [decision packet](m1-acceptance-decisions.md) separates further automatable journey
+checks from owner choices, with evidence, rationale, recommendations and an observed-user script.
+No acceptance or gate revision is inferred from that packet.
+
 M1 is a trustworthy **single-node baseline**, not the complete gateway roadmap. W01–W04,
 drain-aware readiness, best-effort operational visibility and isolated recovery are its inputs.
 The workload evidence below complements those tests. It cannot establish usability on behalf

@@ -1,0 +1,17 @@
+{
+  "captured_at_utc": "2026-09-07T03:14:44.291682+00:00",
+  "evidence_scope": "completed_journey_assertions_only",
+  "facts": {
+    "error_state": "missing",
+    "read_only_broker": true,
+    "recovered_exact_reference": true,
+    "registration_status": 201
+  },
+  "format_version": 1,
+  "human_acceptance": "not_performed",
+  "journey": "missing-recovery",
+  "proxy_executable_sha256": "ff4ae4f671b42ead672ca2dd0420abd06d1160a9cb00d8105e992e2d6c2f2702",
+  "suite_outcome": "not_reported_use_pytest_junit_including_teardown",
+  "test_id": "tests/sdk-conformance/test_acceptance_decisions.py::test_browser_broker_error_decision_and_exact_reference_recovery[missing-404-vault_missing-No credential at the authorized reference-broker0]",
+  "visible_copy": "Registered openai:default"
+}

@@ -19,6 +19,11 @@ publishers. Versions are derived from the tag at build time, never hand-edited; 
 
 ### Added
 
+- **Operator decision evidence.** Synthetic browser journeys connect reference onboarding,
+  one-time keys, persistent attribution, budget intervention and broker recovery. Masked review
+  artifacts and an [acceptance decision packet](docs/product/m1-acceptance-decisions.md) separate
+  automated correctness from owner choices and observed-user acceptance.
+
 - **Reproducible workload acceptance (W06d automation).** Isolated direct-provider and real
   gateway unary/SSE lanes cover closed-loop/fixed-arrival traffic, exact tenant/run/category
   accounting, denied requests, queue checkpoints and shutdown. Full/compact reports retain
@@ -55,6 +60,10 @@ publishers. Versions are derived from the tag at build time, never hand-edited; 
   [remaining accounting gates](docs/product/attempt-accounting-and-evidence.md).
 
 ### Fixed
+
+- **Dashboard run lookup.** Read the API's wrapped run response and validate run identity,
+  tree shape and safe nonnegative counts before rendering. Malformed responses show unavailable
+  state instead of stale or misleading totals; step labels remain escaped.
 
 - **Configured storage fails closed at startup.** Failed initialization of a configured usage,
   credential-metadata, virtual-key, alert or enforcement database stops startup before binding;
