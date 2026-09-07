@@ -150,7 +150,7 @@ protection/ref controls were not relaxed. Hosted migration CI reported **284 pas
 and passed pinned Actionlint. Post-merge `Release safeguards` and `CI Success` executed and
 succeeded on public GitHub runners; `OWNER_PRIVATE_CI_ENABLED` remains `false`.
 
-The merged develop tree is byte-identical to reviewed migration head `b272f1b0`. Additional
+The develop merge tree at `76316690` is byte-identical to reviewed migration head `b272f1b0`. Additional
 bounded cumulative reviews against main `72ced4bd` found no substantiated new blockers:
 
 - Accounting/reservation/recovery/shutdown review: **134 focused Rust tests passed**, including
@@ -174,8 +174,8 @@ secret after the replacement path is established. No new long-lived crates secre
 Then complete reviewed main promotion, exact-main CI, the v0.6.0 build/publish matrix and final
 artifact verification. P01–P03 production gates remain explicitly open.
 
-These findings describe the pre-change workflow. The local implementation below addresses its
-code paths; SG06/SG07 are still required to close external authority gaps.
+These initial findings describe the pre-change workflow. The implementation below addresses its
+code paths; SG06 ref controls are now complete and SG07 registry authority closure remains open.
 
 The current release workflow triggers on broad `v*.*.*` tags and accepts an npm repair from any
 dispatch ref. Its shell pattern is not strict SemVer. Builds/publishers resolve tag names
