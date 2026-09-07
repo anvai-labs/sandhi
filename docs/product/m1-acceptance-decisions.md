@@ -181,6 +181,26 @@ authorize publishing. M1 is not all later accounting/fleet/broker work.
 Tags, package publication and production rollout remain separate actions. Earlier merge bypass
 authorization covers only a missing approving review after clean review/green CI, never checks.
 
+### Release-readiness preflight — 2026-09-07 UTC
+
+Read-only checks continued while collecting acceptance decisions. These results are not a tag,
+publication approval or proof that the next OIDC publish will succeed.
+
+| Check | Observed evidence | Remaining action |
+|---|---|---|
+| Integrated engineering baseline | `develop` at `cf469bc`; [post-merge CI](https://github.com/anvai-labs/sandhi/actions/runs/34080462032) passed | Fresh full-diff review and CI still required for promotion |
+| Last registry release | `python3 scripts/verify-release.py v0.5.1` exited 0: PyPI, all four crates and the main npm package present | Verify the next actual version after publication; presence is not installability certification |
+| Native/platform artifacts | GitHub lists Linux x64 and macOS arm64 v0.5.1 archives; both corresponding npm platform packages report version 0.5.1 | Test newly built artifacts for the next release |
+| Historical npm failure | [Repair run 33740352186](https://github.com/anvai-labs/sandhi/actions/runs/33740352186) failed with E404 on the Linux platform package; that package is now present | Do not mistake the old failure for current absence, or current presence for proven OIDC configuration |
+| Publisher configuration | GitHub metadata lists `CARGO_REGISTRY_TOKEN`; `npm` and `pypi` environments exist | Token validity and registry-side trusted-publisher bindings were not verified; secret values were not read |
+| Publishing protections | `npm`/`pypi` environment API reports no deployment branch policy and no protection rules; repository rulesets query returns an empty list | Review tag/dispatch authorization and approve appropriate publishing restrictions before the tag; no settings changed and no claim of a complete organization-policy audit |
+
+UA06 should settle the release version/targets and the publishing-protection work as well as
+promotion scope. Recommendation: retain the planned unified release targets, validate publisher
+configuration and harden the publishing entry points before tagging. An explicitly narrower
+release scope would require documented workflow/verification changes, not a silently skipped
+publisher. Do not rerun an old publish workflow merely to test credentials.
+
 ## Deferred observed-user session — P01, required before production
 
 The reviewer should attempt each task before reading the expected result. Record assistance

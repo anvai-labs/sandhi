@@ -172,6 +172,13 @@ responsibilities, performance scope and promotion/release scope.
 Do not repeatedly request the now-deferred walkthrough as a release prerequisite. Do not mark
 it performed or authorize production. Later live broker/fleet guarantees remain open.
 
+Release-readiness preflight (2026-09-07 UTC) continued without publishing: the existing verifier
+confirms v0.5.1 on PyPI, all four crates and the main npm package; both npm platform packages and
+two GitHub binary archives are present. Historical npm E404 is not current artifact absence.
+Registry-side trusted-publisher configuration remains unverified; environment/tag publishing
+protections need review before the next tag. Evidence and the remaining UA06 choice are in the
+[decision packet](../product/m1-acceptance-decisions.md). No publisher settings were changed.
+
 ### Milestone definitions
 
 1. **M0 — review package:** A01–A07 complete, provisional decisions explicit, findings reproducible
