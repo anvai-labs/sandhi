@@ -1,13 +1,40 @@
 # M1 acceptance decisions and evidence
 
-Status: additional automated journey evidence passed locally; **no user decision or acceptance recorded**.
+Status: **UA01 accepted** for this release; hands-on usability acceptance deferred until before
+production. UA02–UA06 remain pending; no observed-user pass is recorded.
 Tracker: [TD-0026](../td/TD-0026-gateway-product-evolution.md), C01f; prior
 [workload and integration evidence](m1-acceptance.md) remains valid.
 
 The question is not whether an automated test can impersonate an accepting user. It is which
 claims the engineering evidence supports, which operating limits the owner accepts, and which
-usability questions still need observation. Recommendations below are proposals, not approvals.
+usability questions still need observation. Recommendations below are proposals unless explicitly
+accepted in the decision record.
 No choice silently changes the existing M1 gate, opens a promotion PR, publishes a package or deploys.
+
+## Acceptance decision record
+
+Authority: explicit user instruction in this working session, 2026-09-07 UTC. Evidence baseline:
+`develop` at `cf469bcbd06679109d0803b3ad47f66a77e4ac51`, including C01f and its green post-merge CI.
+
+| Decision | State | Recorded outcome |
+|---|---|---|
+| UA01 — acceptance method | Accepted | Use automated engineering evidence for this release; explicitly defer hands-on usability acceptance until before production |
+| UA02 — budget guarantees | Pending | Next decision: estimate-based admission versus requiring strict-cap work first |
+| UA03 — broker assurance | Pending | No live interoperability or lifecycle certification inferred from UA01 |
+| UA04 — recovery responsibility | Pending | Operating limits and pre-deployment responsibilities still to confirm |
+| UA05 — performance scope | Pending | No production SLO inferred from the synthetic baseline |
+| UA06 — promotion/release scope | Pending | Remaining scope and release execution to confirm; no action taken by recording UA01 |
+
+This is an explicit revision of the acceptance timing for this release, not completion of the
+original observed-user gate. The automated evidence is accepted as the release acceptance method;
+remaining operating-limit decisions are still being collected. Existing review/CI requirements
+are unchanged. M1 release acceptance is not yet closed as a whole.
+
+Deferred gate **P01 — hands-on usability before production** remains open. Before production use,
+assign an accepting operator and record the tested build, all four journey outcomes, assistance,
+confusion and any blocking corrections using the session below. Operator/results are unassigned
+and not performed; publication or a green build does not satisfy P01. The proposed five-user
+study remains separately unvalidated.
 
 ## What automation can settle
 
@@ -53,7 +80,10 @@ that feedback is clear enough for this checkpoint or needs a UX correction befor
 
 ### UA01 — What acceptance standard should gate main promotion?
 
-**Recommendation:** retain the existing gate, but make it a focused review by one named
+**Recorded decision (2026-09-07 UTC):** the user selected automated engineering evidence for
+this release and explicitly deferred hands-on usability acceptance until before production (P01).
+
+**Original recommendation (not selected):** retain the existing gate, but make it a focused review by one named
 developer/operator of the four journeys below. This is sufficient only for the defined M1
 checkpoint; the proposed five-user/ten-minute onboarding study stays unvalidated.
 
@@ -61,12 +91,12 @@ checkpoint; the proposed five-user/ten-minute onboarding study stays unvalidated
 dispatch. They cannot prove that a person found the operation or understood what to do next.
 The new stitched checks remove avoidable manual regression work, leaving only that judgment.
 
-**Alternative requiring your explicit decision:** promote an engineering checkpoint on automated
+**Selected alternative:** promote an engineering checkpoint on automated
 evidence and defer observed usability acceptance to before production use. That revises the
 current gate; it must be recorded as a revision, not as a completed user study or walkthrough.
 
-**Decision to record:** retain the walkthrough gate and name the reviewer, or explicitly revise
-its timing/scope. Generic permission to continue or merge does not select either option.
+The explicit user decision above selects this alternative. It does not approve the remaining
+UA02–UA06 choices or establish observed-user results.
 
 ### UA02 — Are estimated neutral-token budgets acceptable for this checkpoint?
 
@@ -147,7 +177,7 @@ authorize publishing. M1 is not all later accounting/fleet/broker work.
 Tags, package publication and production rollout remain separate actions. Earlier merge bypass
 authorization covers only a missing approving review after clean review/green CI, never checks.
 
-## Minimal observed-user session (if UA01 is retained)
+## Deferred observed-user session — P01, required before production
 
 The reviewer should attempt each task before reading the expected result. Record assistance
 needed rather than quietly coaching every step into a pass. Use synthetic credentials only.
@@ -161,5 +191,5 @@ needed rather than quietly coaching every step into a pass. Use synthetic creden
 
 Record: reviewer/role, tested build, date, task outcomes, assistance, confusion/blockers, chosen
 UA01–UA06 outcomes and explicit accept/hold scope. Do not include tokens, keys or vault contents.
-All decision states are **pending** until the owner supplies them. A screenshot review alone is
+UA01 is accepted; UA02–UA06 and the P01 observed-user result remain **pending**. A screenshot review alone is
 an inspection, not an observed unassisted usability session; label it accordingly.
