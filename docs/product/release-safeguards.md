@@ -1,6 +1,7 @@
 # Safeguarded milestone release
 
-Status: implementation in progress, authorized by the user on 2026-09-07 UTC.
+Status: safeguard implementation integrated with green post-merge CI; remote ref controls
+verified. Registry credential closure (SG07) and final release execution (SG08) remain open.
 Tracker: [TD-0026](../td/TD-0026-gateway-product-evolution.md); publish mechanics:
 [TD-0023](../td/TD-0023-release-automation.md).
 
@@ -20,10 +21,10 @@ execution under UA06 remains explicit. Do not reopen accepted product limits to 
 | ID | Gap and deliverable | Verification / closure condition | State |
 |---|---|---|---|
 | SG01 | Inventory release trust and artifact gaps; preserve authority boundaries | Source/config evidence, explicit scope and owner dependencies | Complete: initial inventory below |
-| SG02 | Reject unauthorized refs/events and ambiguous source identity before build/publish | Stable exact tag syntax; main ancestry; exact successful main CI; immutable commit across jobs; moved/deleted-tag denial; negative tests | Implemented and locally verified; remote CI pending |
+| SG02 | Reject unauthorized refs/events and ambiguous source identity before build/publish | Stable exact tag syntax; main ancestry; exact successful main CI; immutable commit across jobs; moved/deleted-tag denial; negative tests | Complete: integrated by PR #237, pre/post-merge CI green; publication not performed |
 | SG03 | Verify every expected registry/platform artifact, not just a version entry | Missing/yanked/invalid/unavailable differentiated; exact npm dependencies/platforms; binary and wheel coverage; deterministic negative tests | Implemented and locally verified; registry reads are not installation evidence |
 | SG04 | Validate prepared npm packages and packed contents before publication | Exact target set, binaries, loader/types and dependencies; no source/nested-binary leakage; safe partial retry | Implemented and locally verified; full release matrix still unexecuted |
-| SG05 | Integrate safe release checks into ordinary public CI | Unit/negative tests and workflow contracts green; independent adversarial review; focused develop PR and post-merge CI | In progress: hosted JSON-depth failure fixed; 207 local tests, no skips, clean review; [PR #237](https://github.com/anvai-labs/sandhi/pull/237) awaiting updated CI |
+| SG05 | Integrate safe release checks into ordinary public CI | Unit/negative tests and workflow contracts green; independent adversarial review; focused develop PR and post-merge CI | Complete: [PR #237](https://github.com/anvai-labs/sandhi/pull/237) merged; exact-head and post-merge CI green; 207 hosted safeguard tests passed |
 | SG06 | Restrict release authority outside editable workflow code | Read-back evidence for approved tag/environment controls; preserve current protections; identify repository-secret exposure | Complete for ref controls: two active tag rulesets and four restricted environments independently verified; credential closure remains SG07 |
 | SG07 | Confirm registry-side authority without test-publishing | Trusted-publisher bindings and registry token scope verified by authorized owner; artifact presence alone insufficient | Pending: owner/account-side confirmation may be required |
 | SG08 | Final milestone promotion and release | Explicit version/target approval; fresh cumulative review/CI; main post-merge CI; publish/verify/back-sync; P01–P03 still open | Not started; final execution gate |
@@ -114,8 +115,25 @@ the scoped remote operations were approved. No branch protection was relaxed.
   not skippable. All other substantive jobs in the original run passed; its aggregate failed,
   so no merge was attempted.
 - Updated local suite: **207 passed, zero skips**; Actionlint clean. Independent delta review
-  passed 53 verifier/workflow tests and the actual required generator fixture. Updated remote
-  CI and post-merge CI are still required; these local results do not replace them.
+  passed 53 verifier/workflow tests and the actual required generator fixture. The updated
+  remote and post-merge CI subsequently passed as recorded below.
+
+### Integration evidence
+
+[PR #237](https://github.com/anvai-labs/sandhi/pull/237) merged into `develop` as
+`f790ca71879ba8d87d83cbd3aed2e5e351d9f3ad` after independent clean review of exact head
+`80692e23efd390f420c7d96aed6c1c57ba34f4b2` and successful
+[CI 34107985444](https://github.com/anvai-labs/sandhi/actions/runs/34107985444).
+That hosted safeguard job reported **207 passed, no skips**. The tested base remained
+`cf469bcbd06679109d0803b3ad47f66a77e4ac51` at merge.
+
+[Post-merge CI 34131251842](https://github.com/anvai-labs/sandhi/actions/runs/34131251842)
+passed on the exact merge commit, including executed `Release safeguards` and `CI Success`.
+All substantive CI jobs passed on public runners. The owner's existing administrative bypass
+authorization was used only for the unavailable human approving review; no failed/pending check
+was bypassed and no branch protection was changed. This closes integration, not SG07 or a release.
+
+### Applied ref restrictions
 
 Read-back [evidence](evidence/release-controls-2026-09-07.json) records:
 
@@ -127,6 +145,11 @@ Read-back [evidence](evidence/release-controls-2026-09-07.json) records:
 | `pypi`, `crates-io`, `github-release` environments | Only `v*` tags |
 | Main/develop protection | Full API protection JSON independently compared with pre-change snapshots: unchanged |
 | CI routing | Public runners retained; `OWNER_PRIVATE_CI_ENABLED=false` |
+
+The retired manual crates workflow (`317193810`) was subsequently disabled through GitHub and
+read back as `disabled_manually`; its only recorded run was already complete, and no runs were
+deleted or canceled. The code stub and service-level disable complement each other, but neither
+revokes the legacy repository token or closes all historical credential access paths.
 
 These are ref restrictions, **not** required human environment-review rules. No test tag or
 publishing job was created to prove denial. An administrator can still edit repository settings;
