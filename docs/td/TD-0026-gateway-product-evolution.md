@@ -52,8 +52,8 @@ marking a planning task complete does not mark its implementation complete.
 | C01f | Operator decision evidence and run-view correction; branch `test/operator-decision-evidence` | 251 SDK/browser tests, zero skips; Rust tests/clippy/fmt passed; nine masked journey pairs plus JUnit; 18 pinned broker-component tests | [PR #236](https://github.com/anvai-labs/sandhi/pull/236) is the live record for exact-head review, CI and post-merge verification | Follow PR merge state; source-pinned local evidence remains immutable | No; UA01–UA05 accepted, UA06 pending |
 | C01g | Release safeguards and accepted engineering scope | 207 safeguard tests passed, zero skips; isolated local binary smoke passed; independent exact-head review clean; SG06 remote ref controls verified; [SG01–SG08 tracker](../product/release-safeguards.md) | [PR #237](https://github.com/anvai-labs/sandhi/pull/237) merged; [pre-merge CI](https://github.com/anvai-labs/sandhi/actions/runs/34107985444) and [post-merge CI](https://github.com/anvai-labs/sandhi/actions/runs/34131251842) green on public runners; authorized missing-review bypass only | Complete: `f790ca7` on develop | No; SG07 credential closure and final execution gate open |
 | C01h | Trusted-publishing readiness follow-up | PRs #239/#240 clean exact-head review; 284 hosted release tests passed; [integration checkpoint](../product/release-safeguards.md#trusted-publishing-integration-checkpoint-2026-09-07) | Both PRs merged after green CI; exact develop post-merge CI green on public runners | Historical integration complete; crates mechanism superseded by C01i | No; current owner decision governs SG07 |
-| C01i | Honor owner-selected registry mechanisms | Reuse existing crates token; keep PyPI/npm OIDC and existing safeguards; [owner correction](../product/release-safeguards.md#owner-correction-reuse-the-crates-token-2026-09-07) | Focused workflow/test/docs correction; review and CI required | In progress | No; correction and main promotion must pass CI |
-| C02 | M1 engineering-release acceptance under UA01–UA05, then `develop` → `main`; hands-on UX deferred to P01 before production | UA01–UA05 accepted; SG06 ref controls applied; owner directed v0.6.0 trusted-publishing continuation; SG07 registry authority gate open | Pending promotion PR and post-merge CI; [OIDC integration tracker](../product/release-safeguards.md#trusted-publishing-integration-checkpoint-2026-09-07) | Pending | No; registry authority and current-main CI remain prerequisites |
+| C01i | Honor owner-selected registry mechanisms | 284 release tests passed; independent workflow review clean; existing crates token retained and PyPI/npm OIDC unchanged | [PR #242](https://github.com/anvai-labs/sandhi/pull/242) merged after green exact-head CI; [develop push CI](https://github.com/anvai-labs/sandhi/actions/runs/34161667180) passed | Complete: `c528ad4` | Included in promoted candidate; publication pending |
+| C02 | Accepted M1 engineering milestone and authorized v0.6.0 all-target release; P01–P03 remain pre-production gates | Fresh cumulative reviews clean on `c528ad4`; main merge has identical tree; actual publication authorized to validate reported registry settings | [PR #243](https://github.com/anvai-labs/sandhi/pull/243) merged after full [promotion CI](https://github.com/anvai-labs/sandhi/actions/runs/34163305520) passed; exact-main [push CI](https://github.com/anvai-labs/sandhi/actions/runs/34163982562) pending | Complete main promotion: `9d40f01` | In progress: main CI, immutable tag, build/publish/verify and back-sync; [execution checklist](../product/release-safeguards.md#current-execution-checkpoint-2026-09-07) |
 
 C01f follow-up: `test/operator-decision-evidence` closes the automatable links between browser
 onboarding, real requests, budget denials, broker recovery and restored numeric evidence. Source
@@ -176,15 +176,17 @@ UA01's engineering-evidence method for this release and explicitly deferred hand
 until before production. The [decision record](../product/m1-acceptance-decisions.md) tracks that
 approval, the subsequent acceptance of existing estimated token budgets (UA02) and current
 broker evidence (UA03), operator-controlled recovery (UA04) and measured single-node performance
-scope (UA05), remaining UA06 and deferred P01–P03. Next: confirm promotion/publication scope,
-the proposed v0.6.0 targets and publishing safeguards. Do not tag or publish based on UA01–UA05.
+scope (UA05) and deferred P01–P03. The subsequent v0.6.0 all-target execution approval is
+separate from UA01–UA05; those engineering decisions alone did not authorize publication.
 The user subsequently authorized release-safeguard gap closure. Execute and track SG01–SG07
 in the [release-safeguard plan](../product/release-safeguards.md). The owner subsequently requested
 new-build trusted publication, retained the existing npm packages, and directed continuing the
 proposed v0.6.0 all-target plan. The owner subsequently clarified that crates must reuse the
-existing unrevoked token; OIDC applies only to PyPI/npm. Honor that correction, retain publication
-safeguards, close remaining registry evidence and complete
-reviewed/green main promotion before executing SG08; do not infer completed registry bindings.
+existing unrevoked token; OIDC applies only to PyPI/npm. That correction is integrated through
+PR #242 and reviewed/green main promotion through PR #243. Continue SG08 after successful
+exact-main CI; the owner authorized actual publication to validate reported registry settings.
+Retain safeguards and treat registry rejections as failures; do not infer independently
+confirmed bindings from the owner's reports or existing package presence.
 Independent implementation/review work may proceed without claiming release
 completion or reopening UA01–UA05.
 Do not repeatedly request the now-deferred walkthrough as a release prerequisite. Do not mark

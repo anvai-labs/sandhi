@@ -1,8 +1,8 @@
 # Safeguarded milestone release
 
-Status: owner corrected the registry mechanism—reuse the existing crates token; trusted
-publishing applies only to PyPI/npm. The corresponding workflow correction is in progress.
-Remote ref controls remain verified; registry evidence (SG07) and execution (SG08) remain open.
+Status: registry-mechanism correction integrated through PR #242; reviewed M1 promotion
+merged to `main` through PR #243. Reuse the existing crates token; trusted publishing applies
+only to PyPI/npm. Exact-main CI is pending; v0.6.0 tagging and publication have not occurred.
 See the [current owner decision](#owner-correction-reuse-the-crates-token-2026-09-07).
 Tracker: [TD-0026](../td/TD-0026-gateway-product-evolution.md); publish mechanics:
 [TD-0023](../td/TD-0023-release-automation.md).
@@ -17,8 +17,10 @@ UA01–UA05 accept the engineering release scope and its limits. The user author
 closing release-safeguard gaps, including implementation, tests and plan updates, and has
 subsequently requested trusted publishing of a newly built release while retaining existing
 packages. After the proposed v0.6.0 all-target release was presented, the owner directed continuing
-the plan; proceed toward that milestone using trusted publishing. Reviewed promotion, registry
-authority closure and green exact-main CI remain prerequisites. Production is not authorized. Do not reopen
+the plan; execute that milestone with the existing crates token and PyPI/npm trusted publishing.
+The owner authorized actual publication to validate registry authorization, without a throwaway
+version or another registry-settings confirmation cycle. Reviewed promotion and green exact-main
+CI remain prerequisites; registry rejection remains a release failure. Production is not authorized. Do not reopen
 accepted product limits to expand M1.
 
 ## Tracked work
@@ -31,8 +33,33 @@ accepted product limits to expand M1.
 | SG04 | Validate prepared npm packages and packed contents before publication | Exact target set, binaries, loader/types and dependencies; no source/nested-binary leakage; safe partial retry | Implemented and locally verified; full release matrix still unexecuted |
 | SG05 | Integrate safe release checks into ordinary public CI | Unit/negative tests and workflow contracts green; independent adversarial review; focused develop PR and post-merge CI | Complete: [PR #237](https://github.com/anvai-labs/sandhi/pull/237) merged; exact-head and post-merge CI green; 207 hosted safeguard tests passed |
 | SG06 | Restrict release authority outside editable workflow code | Read-back evidence for approved tag/environment controls; preserve current protections; identify repository-secret exposure | Complete for ref controls: two active tag rulesets and four restricted environments independently verified; credential closure remains SG07 |
-| SG07 | Confirm selected registry authority without test-publishing | Owner-authorized existing crates token; PyPI/npm trusted bindings; artifact presence alone insufficient | Crates token reuse explicitly selected, secret name read back; no revocation or crates OIDC prerequisite. Workflow correction in progress; PyPI/npm binding evidence remains separate |
-| SG08 | Final milestone promotion and release | Version/target authority; fresh cumulative review/CI; main post-merge CI; publish/verify/back-sync; P01–P03 still open | v0.6.0 all-target continuation authorized; promotion/publication await SG07 and current CI |
+| SG07 | Validate the owner-selected registry authority | Owner-authorized existing crates token; PyPI/npm trusted bindings; artifact presence alone insufficient | Configuration is owner-reported; correction merged in PR #242. Owner authorized validation through the actual v0.6.0 publication; no credential rotation or throwaway release. Execution evidence pending |
+| SG08 | Final milestone promotion and release | Version/target authority; fresh cumulative review/CI; main post-merge CI; publish/verify/back-sync; P01–P03 still open | In progress: PR #243 merged after clean cumulative review and green promotion CI; exact-main CI pending, then immutable v0.6.0 tag and all-target publication |
+
+## Current execution checkpoint (2026-09-07)
+
+- [x] Registry-mechanism correction [PR #242](https://github.com/anvai-labs/sandhi/pull/242)
+  merged as `c528ad443d34de721cedde83982d741dd64414ec`; exact develop
+  [push CI](https://github.com/anvai-labs/sandhi/actions/runs/34161667180) passed.
+- [x] Fresh bounded cumulative accounting/recovery and operator/security reviews found no
+  release-blocking issue on that exact candidate. Full
+  [promotion CI](https://github.com/anvai-labs/sandhi/actions/runs/34163305520) passed,
+  including Rust, bindings, coverage, SDK conformance, security and release safeguards.
+- [x] [PR #243](https://github.com/anvai-labs/sandhi/pull/243) merged as
+  `9d40f01b871c1bb00975ceca55c7279e2b3f3dde`, with a tree identical to the reviewed candidate.
+  Only the unavailable human approval was bypassed under existing owner authority; no
+  protection was changed and no pending or failing check was bypassed.
+- [ ] Exact-main [push CI](https://github.com/anvai-labs/sandhi/actions/runs/34163982562)
+  must finish with executed, successful `Release safeguards` and `CI Success` jobs.
+- [ ] Create immutable `v0.6.0` at that verified main commit; run all release builds and smokes.
+- [ ] Publish and verify both GitHub archives, all three PyPI wheel platforms, all four crates,
+  and the root plus both platform npm packages. No target is optional.
+- [ ] Record actual outcomes and back-sync main into develop through the protected PR flow.
+
+Pre-tag registry checks returned HTTP 404 for every required package's `0.6.0` version;
+the GitHub tag and release were absent. These are version-conflict checks, not failed uploads
+or evidence of registry authorization. No existing artifact was modified. P01–P03 remain
+pre-production gates; accepted engineering evidence and estimate-based budgets are unchanged.
 
 ## Initial findings
 

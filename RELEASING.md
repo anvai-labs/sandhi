@@ -134,9 +134,12 @@ non-secret facts after checking the registry account settings:
   [npm trusted publishers](https://docs.npmjs.com/trusted-publishers/) and
   [PyPI publisher setup](https://docs.pypi.org/trusted-publishers/adding-a-publisher/).
 
-After owner confirmation, read back only GitHub secret names/scope and record the registry
-configuration evidence. Do not publish a throwaway version to test credentials. Until SG07 is
-closed, retain the release hold; do not silently omit crates or any other target.
+Record registry configuration evidence without reading token values. For v0.6.0, the owner
+authorized proceeding with the reported configuration and validating authorization through
+the actual all-target publication after reviewed promotion and green exact-main CI. Do not
+publish a throwaway version or reopen a settings-confirmation hold. A registry rejection is a
+failure to diagnose and address, not permission to silently omit that target or substitute a
+different authentication mechanism. Record successful execution separately from owner reports.
 
 The old manual `publish-crates.yml` is a fail-only stub and workflow ID `317193810` is now
 `disabled_manually` in GitHub. This does **not** revoke stored credentials or neutralize every
