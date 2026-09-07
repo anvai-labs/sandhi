@@ -14,8 +14,9 @@ partial publication must be visible, not reported as a complete release.
 UA01–UA05 accept the engineering release scope and its limits. The user authorized
 closing release-safeguard gaps, including implementation, tests and plan updates, and has
 subsequently requested trusted publishing of a newly built release while retaining existing
-packages. Confirm the exact version and target set before execution; reviewed promotion and
-green exact-main CI remain prerequisites. Production is not authorized. Do not reopen
+packages. After the proposed v0.6.0 all-target release was presented, the owner directed continuing
+the plan; proceed toward that milestone using trusted publishing. Reviewed promotion, registry
+authority closure and green exact-main CI remain prerequisites. Production is not authorized. Do not reopen
 accepted product limits to expand M1.
 
 ## Tracked work
@@ -28,8 +29,8 @@ accepted product limits to expand M1.
 | SG04 | Validate prepared npm packages and packed contents before publication | Exact target set, binaries, loader/types and dependencies; no source/nested-binary leakage; safe partial retry | Implemented and locally verified; full release matrix still unexecuted |
 | SG05 | Integrate safe release checks into ordinary public CI | Unit/negative tests and workflow contracts green; independent adversarial review; focused develop PR and post-merge CI | Complete: [PR #237](https://github.com/anvai-labs/sandhi/pull/237) merged; exact-head and post-merge CI green; 207 hosted safeguard tests passed |
 | SG06 | Restrict release authority outside editable workflow code | Read-back evidence for approved tag/environment controls; preserve current protections; identify repository-secret exposure | Complete for ref controls: two active tag rulesets and four restricted environments independently verified; credential closure remains SG07 |
-| SG07 | Confirm registry-side authority without test-publishing | Trusted-publisher bindings and registry token scope verified by authorized owner; artifact presence alone insufficient | Partial: owner supplied root npm publisher configuration; both platform packages, current PyPI binding and crates replacement/revocation remain open |
-| SG08 | Final milestone promotion and release | Explicit version/target approval; fresh cumulative review/CI; main post-merge CI; publish/verify/back-sync; P01–P03 still open | Not started; final execution gate |
+| SG07 | Confirm registry-side authority without test-publishing | Trusted-publisher bindings and legacy credential revocation verified by authorized owner; artifact presence alone insufficient | Partial: owner supplied root npm binding; crates OIDC migration in progress; remaining package bindings and legacy token revocation open |
+| SG08 | Final milestone promotion and release | Version/target authority; fresh cumulative review/CI; main post-merge CI; publish/verify/back-sync; P01–P03 still open | v0.6.0 all-target continuation authorized; promotion/publication await SG07 and current CI |
 
 ## Initial findings
 
@@ -55,9 +56,8 @@ or token revoked during this check. Continue through SG07 and reviewed promotion
 publishing an explicitly selected new version; do not rerun the legacy workflow as a probe.
 
 Crates.io now also supports [OIDC trusted publishing](https://blog.rust-lang.org/2025/07/11/crates-io-development-update-2025-07/).
-The current workflow still requires the scoped token. A tokenless migration is an alternative
-requiring a reviewed workflow change and per-crate registry configuration; it has not been
-implemented or accepted as a replacement for the current checklist.
+At this checkpoint the workflow still required a scoped token. The subsequently authorized
+tokenless migration and per-crate registry prerequisites are tracked below.
 
 ### Platform-package removal preflight (2026-09-07)
 
@@ -86,7 +86,8 @@ Removal or deprecation must not be recorded as complete, or substituted for publ
 
 The owner withdrew the removal request and requested trusted publishing of a new build.
 Retain all existing npm packages and versions. The planned v0.6.0 all-target release versus
-an npm-only scope has been surfaced for confirmation; no new tag or publishing run exists.
+an npm-only scope was surfaced; the owner subsequently directed continuing the plan toward
+v0.6.0 across all targets. No new tag or publishing run exists.
 
 The current npm workflow already uses OIDC. The pinned NAPI generator copies the source
 repository into platform manifests. Packaging now additionally rejects missing or mismatched
@@ -100,13 +101,38 @@ Independent review identified an additional requirement if crates publishing mig
 `cargo install cargo-edit` step would expose OIDC authority to dependency build scripts.
 Remove third-party compilation from that job before granting OIDC, using reviewed first-party
 version staging or immutable outputs from an unprivileged staging job. Preserve proof checks,
-`cargo publish --no-verify`, short-lived credentials and post-job revocation. No crates workflow
-migration, registry binding change or legacy token revocation has been performed.
+`cargo publish --no-verify`, short-lived credentials and post-job revocation. Registry bindings
+and legacy token revocation remain account-side prerequisites, not consequences of a code change.
 
 Local validation: `python3 -m pytest tests/release -q` passed **220 tests, zero skips**.
 The sandbox initially blocked npm child-process execution (`EPERM`); the complete offline
 suite passed with approved subprocess access. This includes the actual pinned generator and
 synthetic-header packaging fixtures, not native ABI execution or registry publication.
+
+### Crates OIDC migration in progress (2026-09-07)
+
+- [PR #239](https://github.com/anvai-labs/sandhi/pull/239), head
+  `af7d36bc252e993ad19dcee8a1d563b2b0f1ba6c`, has clean independent review and **220 local
+  passing release tests**. Hosted CI remained queued at this checkpoint; no merge bypassed it.
+- The crates job now requests OIDC using official action `v1.0.5`, pinned to
+  `c6f97d42243bad5fab37ca0427f495c86d5b1a18`. Only the upload step receives the temporary
+  token; the action's post step revokes it. No stored-token fallback is permitted.
+- A first-party stdlib version-staging helper replaces dependency/tool compilation throughout
+  the privileged crates job; the unprivileged check job uses the same helper. Proof checks
+  precede credential exchange and every upload. All-build gating and `--no-verify` remain.
+- Owner setup changes from creating `CRATES_RELEASE_TOKEN` to four per-crate trusted-publisher
+  bindings. Do not treat GitHub authentication as a crates.io owner session, and do not claim
+  legacy token revocation from deleting a secret or migrating a workflow.
+- This migration is not yet integrated or remotely validated. Registry bindings and revocation,
+  cumulative main promotion/review/CI, the actual build/publish matrix and final artifact
+  verification remain open. Existing artifacts and production acceptance gates remain unchanged.
+
+Migration validation: the full offline release suite passed **284 tests, zero skips**;
+independent staging/workflow review passed **87 tests** with no blocking findings. Pinned
+Actionlint 1.7.12 and `git diff --check` pass. A disposable copy checked with
+`cargo metadata --offline --no-deps` contains exactly four `0.6.0` packages and five internal
+dependency requirements at `^0.6.0`. Real source manifests and lockfiles were not staged.
+This is metadata/staging evidence, not a release-mode compilation or publishing test.
 
 These findings describe the pre-change workflow. The local implementation below addresses its
 code paths; SG06/SG07 are still required to close external authority gaps.
@@ -168,9 +194,9 @@ tests; package preflight may pack/build locally but must not invoke a registry w
 - Ordinary CI now runs `Release safeguards` without a path filter and includes it in `CI Success`.
   The unified workflow pins source/control SHAs and action commits, selects the proof/packed npm
   bundle by artifact ID, separates builds from publishing, and retires the manual crates bypass.
-- New `CRATES_RELEASE_TOKEN` is intentionally required from the `crates-io` environment. No
-  fallback to the legacy repository secret; no missing-credential success. Owners must configure
-  and scope it, then revoke/remove the old token. Neither token contents nor validity were read.
+- The initial implementation required `CRATES_RELEASE_TOKEN` from the `crates-io` environment,
+  with no legacy fallback or missing-credential success. The OIDC migration above supersedes
+  creating that token; legacy token revocation remains necessary. No token values were read.
 
 The full new cross-platform release matrix and actual registry publication have **not** run.
 Local tests and previous M1 engineering evidence cannot substitute for those execution results.
@@ -232,7 +258,8 @@ These are ref restrictions, **not** required human environment-review rules. No 
 publishing job was created to prove denial. An administrator can still edit repository settings;
 historical workflow authority is not fully closed by these controls alone.
 
-SG07 is not complete: the `crates-io` environment currently has no secrets; the legacy repository
-`CARGO_REGISTRY_TOKEN` remains. The owner must configure a least-privilege `CRATES_RELEASE_TOKEN`
-only in that environment and revoke/remove the legacy token, then confirm registry-side trusted
-publishers for PyPI and all three npm packages. Secret values were neither read nor changed.
+At this checkpoint SG07 was incomplete: the `crates-io` environment had no secrets and the legacy
+repository `CARGO_REGISTRY_TOKEN` remained. The later OIDC migration supersedes creating a new
+environment token; the owner must confirm per-crate trusted publishers and revoke/remove the
+legacy token, plus confirm current PyPI and platform npm bindings. Secret values were neither
+read nor changed.

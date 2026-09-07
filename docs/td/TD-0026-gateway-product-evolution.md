@@ -51,7 +51,7 @@ marking a planning task complete does not mark its implementation complete.
 | C01e | W06d workload/operator acceptance; branch `test/m1-acceptance` | Automation passed: 227 local SDK/browser tests (one unavailable SDK skip), 233 hosted SDK tests (two optional sibling-browser skips), 36-phase integrated workload and clean independent review; [evidence and actual-user gate](../product/m1-acceptance.md). Accepting operator/results still pending | [PR #234](https://github.com/anvai-labs/sandhi/pull/234) merged as `324ba87`; latest-head CI `34060286384` and post-merge CI `34060985111` passed on public hosted runners; authorized missing-review bypass only | Automation verified and integrated; human acceptance pending | No |
 | C01f | Operator decision evidence and run-view correction; branch `test/operator-decision-evidence` | 251 SDK/browser tests, zero skips; Rust tests/clippy/fmt passed; nine masked journey pairs plus JUnit; 18 pinned broker-component tests | [PR #236](https://github.com/anvai-labs/sandhi/pull/236) is the live record for exact-head review, CI and post-merge verification | Follow PR merge state; source-pinned local evidence remains immutable | No; UA01–UA05 accepted, UA06 pending |
 | C01g | Release safeguards and accepted engineering scope | 207 safeguard tests passed, zero skips; isolated local binary smoke passed; independent exact-head review clean; SG06 remote ref controls verified; [SG01–SG08 tracker](../product/release-safeguards.md) | [PR #237](https://github.com/anvai-labs/sandhi/pull/237) merged; [pre-merge CI](https://github.com/anvai-labs/sandhi/actions/runs/34107985444) and [post-merge CI](https://github.com/anvai-labs/sandhi/actions/runs/34131251842) green on public runners; authorized missing-review bypass only | Complete: `f790ca7` on develop | No; SG07 credential closure and final execution gate open |
-| C02 | M1 engineering-release acceptance under UA01–UA05, then `develop` → `main`; hands-on UX deferred to P01 before production | UA01–UA05 accepted; SG06 ref controls applied; UA06 final execution and SG07 credential gate pending | Pending promotion PR and post-merge CI | Pending | No; tagging/publishing is a separate action |
+| C02 | M1 engineering-release acceptance under UA01–UA05, then `develop` → `main`; hands-on UX deferred to P01 before production | UA01–UA05 accepted; SG06 ref controls applied; owner directed v0.6.0 trusted-publishing continuation; SG07 registry authority gate open | Pending promotion PR and post-merge CI; [OIDC migration tracker](../product/release-safeguards.md#crates-oidc-migration-in-progress-2026-09-07) | Pending | No; registry authority and current-main CI remain prerequisites |
 
 C01f follow-up: `test/operator-decision-evidence` closes the automatable links between browser
 onboarding, real requests, budget denials, broker recovery and restored numeric evidence. Source
@@ -177,8 +177,11 @@ broker evidence (UA03), operator-controlled recovery (UA04) and measured single-
 scope (UA05), remaining UA06 and deferred P01–P03. Next: confirm promotion/publication scope,
 the proposed v0.6.0 targets and publishing safeguards. Do not tag or publish based on UA01–UA05.
 The user subsequently authorized release-safeguard gap closure. Execute and track SG01–SG07
-in the [release-safeguard plan](../product/release-safeguards.md); SG08/final publication remains
-an explicit gate. Independent implementation/review work may proceed without claiming release
+in the [release-safeguard plan](../product/release-safeguards.md). The owner subsequently requested
+new-build trusted publication, retained the existing npm packages, and directed continuing the
+proposed v0.6.0 all-target plan. Implement safe crates OIDC, close registry authority and complete
+reviewed/green main promotion before executing SG08; do not infer completed registry bindings.
+Independent implementation/review work may proceed without claiming release
 completion or reopening UA01–UA05.
 Do not repeatedly request the now-deferred walkthrough as a release prerequisite. Do not mark
 it performed or authorize production. Later live broker/fleet guarantees remain open.
