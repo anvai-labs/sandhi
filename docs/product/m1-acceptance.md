@@ -135,7 +135,9 @@ Accepting operator: **pending assignment before production**. Observed user resu
 UA01: **accepted timing revision**. UA02: **existing estimated token budgets accepted**.
 UA03: **current component/synthetic broker evidence accepted for this release**; live interoperability
 and grant-lifecycle validation required before production use of the integration (P02).
-Remaining release decisions UA04–UA06: **pending**;
+UA04: **operator-controlled recovery accepted for this release**; recovery owner, authoritative
+policy source and cutover/rollback rules remain required before deployment (P03).
+Remaining release decisions UA05–UA06: **pending**;
 M1 release acceptance is not yet complete as a whole.
 
 ## Promotion gate

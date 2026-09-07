@@ -1,7 +1,7 @@
 # M1 acceptance decisions and evidence
 
-Status: **UA01–UA03 accepted** for this release; hands-on usability acceptance deferred until
-before production. UA04–UA06 remain pending; no observed-user or live-integration pass is recorded.
+Status: **UA01–UA04 accepted** for this release; hands-on usability acceptance deferred until
+before production. UA05–UA06 remain pending; no observed-user or live-integration pass is recorded.
 Tracker: [TD-0026](../td/TD-0026-gateway-product-evolution.md), C01f; prior
 [workload and integration evidence](m1-acceptance.md) remains valid.
 
@@ -21,8 +21,8 @@ Authority: explicit user instruction in this working session, 2026-09-07 UTC. Ev
 | UA01 — acceptance method | Accepted | Use automated engineering evidence for this release; explicitly defer hands-on usability acceptance until before production |
 | UA02 — budget guarantees | Accepted | Accept the existing estimate-based token budgets for this release; no strict final-token or monetary-cap guarantee |
 | UA03 — broker assurance | Accepted | Accept current synthetic Sandhi boundary and isolated broker-component evidence for this release; require live interoperability and grant-lifecycle validation before production use of that integration |
-| UA04 — recovery responsibility | Pending | Next decision: manual quarantine/reconciliation for this release versus requiring automated recovery guarantees first |
-| UA05 — performance scope | Pending | No production SLO inferred from the synthetic baseline |
+| UA04 — recovery responsibility | Accepted | Accept operator-controlled quarantine and reconciliation for this release; assign the recovery owner, authoritative policy source and cutover/rollback rules before deployment |
+| UA05 — performance scope | Pending | Next decision: measured single-node baseline without production SLOs versus requiring deployment-specific performance validation first |
 | UA06 — promotion/release scope | Pending | Remaining scope and release execution to confirm; no action taken by recording UA01 |
 
 This is an explicit revision of the acceptance timing for this release, not completion of the
@@ -43,6 +43,15 @@ outcomes. Current synthetic boundary tests and isolated broker tests do not sati
 No live compatibility, grant-lifecycle, desktop or browser-to-broker connector certification is
 claimed. UA03 selects when validation is required; it does not authorize access to a personal
 vault, production grants or production deployment.
+
+Deferred gate **P03 — recovery ownership and procedure before deployment** remains open under
+UA04. Before production deployment, name the recovery owner and authoritative post-snapshot
+policy/revocation source, and record cutover and rollback rules. For each restore, keep traffic
+isolated until the operator verifies integrity, accounting, current access policy and revocations;
+if current policy cannot be established, remain quarantined. Record uncertain consumption rather
+than inferring zero loss from readiness. Owner/source/rules are not yet assigned. Accepting this
+operating model does not perform a restore, approve traffic cutover, promise automatic fleet
+recovery or establish lossless accounting.
 
 ## What automation can settle
 
@@ -152,6 +161,12 @@ unlock and grant changes are not authorized by this packet.
 
 ### UA04 — Who owns restored access policy and uncertain consumption?
 
+**Recorded decision (2026-09-07 UTC):** the user selected the recommendation: operator-controlled
+recovery with quarantine and explicit reconciliation is acceptable for this release. A recovery
+owner, authoritative policy source and cutover/rollback rules must be established before
+deployment (P03). The alternative of requiring stronger automated recovery guarantees before
+release was not selected.
+
 **Recommendation:** accept manual quarantine and explicit reconciliation for the single-node
 checkpoint. Name an operator, an authoritative post-snapshot revocation/policy source, and a
 traffic-cutover/rollback rule before any deployment recovery.
@@ -228,6 +243,6 @@ needed rather than quietly coaching every step into a pass. Use synthetic creden
 
 Record: reviewer/role, tested build, date, task outcomes, assistance, confusion/blockers, chosen
 UA01–UA06 outcomes and explicit accept/hold scope. Do not include tokens, keys or vault contents.
-UA01–UA03 are accepted; UA04–UA06, the P01 observed-user result and P02 live integration validation
-remain **pending**. A screenshot review alone is
+UA01–UA04 are accepted; UA05–UA06 and pre-production gates P01–P03 remain **pending**.
+A screenshot review alone is
 an inspection, not an observed unassisted usability session; label it accordingly.
