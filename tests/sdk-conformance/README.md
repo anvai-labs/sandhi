@@ -55,6 +55,25 @@ stream completion, accounting isolation, overload, missing metrics and evidence 
 See [M1 acceptance](../../docs/product/m1-acceptance.md) for the measured baseline, commands and
 the separate actual-user gate. This is not a production capacity or performance regression SLO.
 
+`test_acceptance_decisions.py` stitches browser reference registration and one-time key minting
+to actual requests, persistent attribution, displayed run totals, budget denial/recovery and
+locked/missing/denied broker recovery. `test_run_tree_rendering.py` checks the served run-response
+envelope, escaped step labels and rejection of malformed or unsafe counts.
+
+To retain synthetic, masked review aids alongside the authoritative suite result:
+
+```sh
+SANDHI_DECISION_EVIDENCE_DIR=/absolute/private/output/directory \
+  python -m pytest tests/sdk-conformance/test_acceptance_decisions.py -q \
+  --junitxml=/absolute/private/output/junit.xml
+```
+
+Each completed journey writes allowlisted JSON and a masked PNG in a fresh subdirectory.
+Artifacts describe completed assertions only: use the final pytest/JUnit result for teardown
+and suite success. They contain synthetic data, are not a general redaction guarantee and do
+not record human acceptance. See the [decision packet](../../docs/product/m1-acceptance-decisions.md)
+for the remaining owner choices and observed-user tasks.
+
 ## Optional AgentBrowser integration
 
 Use a built sibling checkout with Node 22 and its Chromium installed. Reviewed source revision:
@@ -70,6 +89,8 @@ Without that variable the optional test skips; an explicitly configured broken c
 The regular CI job runs the Playwright regressions but does not fetch a sibling repository.
 `test_recovery_agentbrowser.py` uses the same optional checkout to verify restored dashboard
 evidence, Refresh and token clearing without generating new inference observations.
+It also compares visible scoped numeric accounting against restored evidence and deliberately
+corrupts displayed values to check that the verifier rejects mismatches.
 Joint pinned-checkout CI remains AB02 in the
 [co-design tracker](../../docs/upstream/browser-gateway-vault-codesign.md).
 

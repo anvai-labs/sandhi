@@ -51,6 +51,13 @@ marking a planning task complete does not mark its implementation complete.
 | C01e | W06d workload/operator acceptance; branch `test/m1-acceptance` | Automation passed: 227 local SDK/browser tests (one unavailable SDK skip), 233 hosted SDK tests (two optional sibling-browser skips), 36-phase integrated workload and clean independent review; [evidence and actual-user gate](../product/m1-acceptance.md). Accepting operator/results still pending | [PR #234](https://github.com/anvai-labs/sandhi/pull/234) merged as `324ba87`; latest-head CI `34060286384` and post-merge CI `34060985111` passed on public hosted runners; authorized missing-review bypass only | Automation verified and integrated; human acceptance pending | No |
 | C02 | Initial W06 and M1 operator-journey acceptance, then `develop` → `main` | Pending | Pending promotion PR and post-merge CI | Pending | No; tagging/publishing is a separate action |
 
+C01f follow-up: on `test/operator-decision-evidence`, close the remaining automatable links
+between browser onboarding, real requests, budget denials, broker recovery and restored numeric
+evidence. Publish the [decision packet](../product/m1-acceptance-decisions.md) with explicit
+UA01–UA06 recommendations and pending choices. A newly exposed dashboard run-envelope mismatch
+is being corrected and regression-tested. Local/remote verification for this slice is in progress;
+it does not retroactively turn automated tests into observed-user acceptance or revise C02.
+
 C01 checkpoints completed work now instead of waiting for W05–W14. Do not claim M1 complete
 or promote C02 until initial W06 and M1 acceptance evidence exist. Preserve required reviews,
 environment approvals and branch protections; no CI bypass or automatic publication is implied.
@@ -143,6 +150,10 @@ does not assume parallel agents or staffing that has not been assigned.
 
 W06c and W06d automation integration and post-merge verification are complete. Actual-user
 acceptance remains the non-automated M1 gate.
+The user requested completion of feasible automation and evidence-backed decisions before
+choosing the acceptance path; C01f supplies that packet instead of repeatedly requesting an
+unqualified sign-off. UA01 includes retaining the observed-user gate or explicitly revising its
+timing for an engineering-only checkpoint; neither has been selected.
 The next required input is a named accepting operator, reviewed build and observed first-request,
 budget-denial, locked-broker and recovery-limit outcomes in the [acceptance record](../product/m1-acceptance.md).
 Correct any reported blocker, then open C02 only after that gate passes. Merge authorization and
