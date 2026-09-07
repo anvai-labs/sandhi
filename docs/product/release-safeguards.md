@@ -11,10 +11,12 @@ A milestone must publish the reviewed, CI-verified source and a complete, instal
 declared artifacts without granting build jobs unnecessary publishing authority. A failed or
 partial publication must be visible, not reported as a complete release.
 
-UA01–UA05 accept the engineering release scope and its limits. The user has now authorized
-closing release-safeguard gaps, including implementation, tests and plan updates. This is not
-yet a command to create a release tag, publish packages or deploy production. Final release
-execution under UA06 remains explicit. Do not reopen accepted product limits to expand M1.
+UA01–UA05 accept the engineering release scope and its limits. The user authorized
+closing release-safeguard gaps, including implementation, tests and plan updates, and has
+subsequently requested trusted publishing of a newly built release while retaining existing
+packages. Confirm the exact version and target set before execution; reviewed promotion and
+green exact-main CI remain prerequisites. Production is not authorized. Do not reopen
+accepted product limits to expand M1.
 
 ## Tracked work
 
@@ -26,10 +28,85 @@ execution under UA06 remains explicit. Do not reopen accepted product limits to 
 | SG04 | Validate prepared npm packages and packed contents before publication | Exact target set, binaries, loader/types and dependencies; no source/nested-binary leakage; safe partial retry | Implemented and locally verified; full release matrix still unexecuted |
 | SG05 | Integrate safe release checks into ordinary public CI | Unit/negative tests and workflow contracts green; independent adversarial review; focused develop PR and post-merge CI | Complete: [PR #237](https://github.com/anvai-labs/sandhi/pull/237) merged; exact-head and post-merge CI green; 207 hosted safeguard tests passed |
 | SG06 | Restrict release authority outside editable workflow code | Read-back evidence for approved tag/environment controls; preserve current protections; identify repository-secret exposure | Complete for ref controls: two active tag rulesets and four restricted environments independently verified; credential closure remains SG07 |
-| SG07 | Confirm registry-side authority without test-publishing | Trusted-publisher bindings and registry token scope verified by authorized owner; artifact presence alone insufficient | Pending: owner/account-side confirmation may be required |
+| SG07 | Confirm registry-side authority without test-publishing | Trusted-publisher bindings and registry token scope verified by authorized owner; artifact presence alone insufficient | Partial: owner supplied root npm publisher configuration; both platform packages, current PyPI binding and crates replacement/revocation remain open |
 | SG08 | Final milestone promotion and release | Explicit version/target approval; fresh cumulative review/CI; main post-merge CI; publish/verify/back-sync; P01–P03 still open | Not started; final execution gate |
 
 ## Initial findings
+
+### Owner publisher evidence (2026-09-07)
+
+The owner supplied the trusted-publisher settings for `@anvailabs/sandhi`: repository
+`anvai-labs/sandhi`, workflow `release.yml`, environment `npm`, with both `npm publish`
+and `npm stage publish` permissions. This confirms the reported root-package configuration,
+not an authenticated read-back or a successful new publication. The two platform packages
+require their own confirmation; the root setting does not cover them automatically.
+
+Read-only GitHub checks also found the `pypi-publish` job and its upload step successful in
+[the v0.5.1 run](https://github.com/anvai-labs/sandhi/actions/runs/33708378080).
+That is historical execution evidence, not confirmation of today's registry settings.
+The latest npm repair [run](https://github.com/anvai-labs/sandhi/actions/runs/33740352186)
+failed in its publishing step; the job conclusion alone does not identify the cause.
+
+The owner requested a publishing attempt. Preflight found protected `main` still at
+`72ced4bdcbf479ac5aeda6d513674bb91803ecda`, while the safeguard implementation is on
+`develop` at `cd0a87f011d29c87a99ae81de8bd43d57a21d604`. The `crates-io` environment
+secret list remains empty. No workflow was dispatched, tag created, package published,
+or token revoked during this check. Continue through SG07 and reviewed promotion before
+publishing an explicitly selected new version; do not rerun the legacy workflow as a probe.
+
+Crates.io now also supports [OIDC trusted publishing](https://blog.rust-lang.org/2025/07/11/crates-io-development-update-2025-07/).
+The current workflow still requires the scoped token. A tokenless migration is an alternative
+requiring a reviewed workflow change and per-crate registry configuration; it has not been
+implemented or accepted as a replacement for the current checklist.
+
+### Platform-package removal preflight (2026-09-07)
+
+The owner requested removing the two platform packages on suspicion of prior token-based
+publication. Read-only npm registry metadata shows both `@anvailabs/sandhi-linux-x64-gnu`
+and `@anvailabs/sandhi-darwin-arm64` contain versions `0.5.0` and `0.5.1`, with `latest`
+pointing to `0.5.1`. Neither version advertises `dist.attestations` or repository metadata.
+Absent attestations do not establish the authentication method or prove compromise.
+
+The existing root `@anvailabs/sandhi@0.5.0` explicitly pins both platform packages as optional
+dependencies. Unpublishing would remove those native dependency targets. Under the
+[npm unpublish policy](https://docs.npmjs.com/policies/unpublish/), deleted package/version
+pairs cannot be reused; entirely removing a package also imposes a 24-hour publishing hold.
+These packages are older than 72 hours and have a published dependent, so the documented
+self-service unpublish criteria are not met.
+
+No unpublish or deprecation was attempted. A bounded npm owner-session check returned
+`E401 Unauthorized`; registry governance changes require an authenticated owner session.
+The recommendation is to retain existing artifacts, configure each platform package's trusted
+publisher, and publish a reviewed new version through the safeguarded release train. After
+verification, restrict traditional token publishing and revoke obsolete automation tokens
+following [npm's migration guidance](https://docs.npmjs.com/trusted-publishers/).
+Removal or deprecation must not be recorded as complete, or substituted for publisher setup.
+
+### New-build trusted publishing follow-up (2026-09-07)
+
+The owner withdrew the removal request and requested trusted publishing of a new build.
+Retain all existing npm packages and versions. The planned v0.6.0 all-target release versus
+an npm-only scope has been surfaced for confirmation; no new tag or publishing run exists.
+
+The current npm workflow already uses OIDC. The pinned NAPI generator copies the source
+repository into platform manifests. Packaging now additionally rejects missing or mismatched
+repository identity on all three manifests, before preparation or packing, with positive and
+negative regression tests. This is preventive release validation, not a finding that the new
+generator omitted the repository. Registry-side bindings still require owner confirmation or
+authorized release execution; local npm login is not needed for GitHub's OIDC publication.
+
+Independent review identified an additional requirement if crates publishing migrates to OIDC:
+`id-token: write` applies to the entire job. Merely adding authentication after the existing
+`cargo install cargo-edit` step would expose OIDC authority to dependency build scripts.
+Remove third-party compilation from that job before granting OIDC, using reviewed first-party
+version staging or immutable outputs from an unprivileged staging job. Preserve proof checks,
+`cargo publish --no-verify`, short-lived credentials and post-job revocation. No crates workflow
+migration, registry binding change or legacy token revocation has been performed.
+
+Local validation: `python3 -m pytest tests/release -q` passed **220 tests, zero skips**.
+The sandbox initially blocked npm child-process execution (`EPERM`); the complete offline
+suite passed with approved subprocess access. This includes the actual pinned generator and
+synthetic-header packaging fixtures, not native ABI execution or registry publication.
 
 These findings describe the pre-change workflow. The local implementation below addresses its
 code paths; SG06/SG07 are still required to close external authority gaps.
