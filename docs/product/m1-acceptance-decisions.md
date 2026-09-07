@@ -23,7 +23,7 @@ Authority: explicit user instruction in this working session, 2026-09-07 UTC. Ev
 | UA03 — broker assurance | Accepted | Accept current synthetic Sandhi boundary and isolated broker-component evidence for this release; require live interoperability and grant-lifecycle validation before production use of that integration |
 | UA04 — recovery responsibility | Accepted | Accept operator-controlled quarantine and reconciliation for this release; assign the recovery owner, authoritative policy source and cutover/rollback rules before deployment |
 | UA05 — performance scope | Accepted | Accept a measured single-node engineering baseline without production throughput, latency, recovery-time or fleet-capacity promises |
-| UA06 — promotion/release scope | Pending | Next decision: authorize the safeguarded v0.6.0 unified milestone release versus promotion only with publication deferred |
+| UA06 — promotion/release scope | Safeguard work authorized; execution pending | Close the release-safety gaps and track implementation/tests; final tagging/publication scope remains explicit |
 
 This is an explicit revision of the acceptance timing for this release, not completion of the
 original observed-user gate. The automated evidence is accepted as the release acceptance method;
@@ -206,6 +206,11 @@ SLO or recovery-time objective was supplied or certified. A broader performance 
 the validation scope and must be planned explicitly.
 
 ### UA06 — What action should acceptance authorize?
+
+**Recorded instruction (2026-09-07 UTC):** the user authorized addressing the gaps needed for a
+safeguarded milestone/release and driving the features and plan accordingly. Implement and
+verify the [release-safeguard plan](release-safeguards.md). Do not interpret this as immediate
+tagging, publication, production deployment or a waiver of a remaining safeguard.
 
 **Recommendation now proposed for explicit approval:** release **v0.6.0** as the M1 engineering
 milestone with the accepted limitations. Integrate the acceptance record through a focused

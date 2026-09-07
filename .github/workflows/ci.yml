@@ -480,6 +480,33 @@ jobs:
       - name: Drive the proxy with vendor SDKs and the served dashboard
         run: python -m pytest tests/sdk-conformance/ -q
 
+  release-safeguards:
+    name: Release safeguards
+    needs: changes
+    if: ${{ always() && needs.changes.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - run: python -m pip install pytest==8.4.1 PyYAML==6.0.2
+      - run: python -m pytest tests/release -q
+      - name: Validate release and CI workflow syntax
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl --fail --silent --show-error --location --retry 3 --max-time 60 https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz -o actionlint.tar.gz
+          echo '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz' | sha256sum --check --status
+          tar -xzf actionlint.tar.gz actionlint
+          ./actionlint "$GITHUB_WORKSPACE/.github/workflows/release.yml" "$GITHUB_WORKSPACE/.github/workflows/publish-crates.yml" "$GITHUB_WORKSPACE/.github/workflows/ci.yml"
+
   ci-success:
     name: CI Success
     runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
@@ -496,7 +523,7 @@ jobs:
           vars.OWNER_PRIVATE_CI_ENABLED == 'true' &&
           needs.authorize-owner.result == 'success')
       )
-    needs: [authorize-owner, changes, rust, schema, python-binding, node-binding, attribution, coverage, codegen-drift, sdk-conformance, security, lint-title]
+    needs: [authorize-owner, changes, rust, schema, python-binding, node-binding, attribution, coverage, codegen-drift, sdk-conformance, security, lint-title, release-safeguards]
     steps:
       - name: Verify no required job failed (skipped is OK for docs-only)
         env:

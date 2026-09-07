@@ -50,7 +50,8 @@ marking a planning task complete does not mark its implementation complete.
 | C01d | W06c recovery drills; branch `test/recovery-drills` | Passed: 181 SDK/browser tests (one unavailable SDK skipped), default/native/OTLP tests and clippy, 87.77% native coverage; adversarial findings fixed and independently re-reviewed clean | [PR #233](https://github.com/anvai-labs/sandhi/pull/233) merged as `8ae8401`; latest-head CI `34058455291` and post-merge CI `34059776510` passed on public hosted runners; authorized missing-review bypass only | Complete | No |
 | C01e | W06d workload/operator acceptance; branch `test/m1-acceptance` | Automation passed: 227 local SDK/browser tests (one unavailable SDK skip), 233 hosted SDK tests (two optional sibling-browser skips), 36-phase integrated workload and clean independent review; [evidence and actual-user gate](../product/m1-acceptance.md). Accepting operator/results still pending | [PR #234](https://github.com/anvai-labs/sandhi/pull/234) merged as `324ba87`; latest-head CI `34060286384` and post-merge CI `34060985111` passed on public hosted runners; authorized missing-review bypass only | Automation verified and integrated; human acceptance pending | No |
 | C01f | Operator decision evidence and run-view correction; branch `test/operator-decision-evidence` | 251 SDK/browser tests, zero skips; Rust tests/clippy/fmt passed; nine masked journey pairs plus JUnit; 18 pinned broker-component tests | [PR #236](https://github.com/anvai-labs/sandhi/pull/236) is the live record for exact-head review, CI and post-merge verification | Follow PR merge state; source-pinned local evidence remains immutable | No; UA01–UA05 accepted, UA06 pending |
-| C02 | M1 engineering-release acceptance under UA01, then `develop` → `main`; hands-on UX deferred to P01 before production | UA01 timing revision accepted; remaining decisions pending | Pending promotion PR and post-merge CI | Pending | No; tagging/publishing is a separate action |
+| C01g | Release safeguards and accepted engineering scope; branch `docs/m1-release-acceptance` | 200 safeguard tests passed; isolated local binary smoke passed; independent scoped review clean; [SG01–SG08 tracker](../product/release-safeguards.md) | Focused develop PR/CI next | Pending | No; remote controls and execution gate open |
+| C02 | M1 engineering-release acceptance under UA01–UA05, then `develop` → `main`; hands-on UX deferred to P01 before production | UA01–UA05 accepted; safeguard implementation authorized; UA06 final execution and SG06/SG07 authority gates pending | Pending promotion PR and post-merge CI | Pending | No; tagging/publishing is a separate action |
 
 C01f follow-up: `test/operator-decision-evidence` closes the automatable links between browser
 onboarding, real requests, budget denials, broker recovery and restored numeric evidence. Source
@@ -175,6 +176,10 @@ approval, the subsequent acceptance of existing estimated token budgets (UA02) a
 broker evidence (UA03), operator-controlled recovery (UA04) and measured single-node performance
 scope (UA05), remaining UA06 and deferred P01–P03. Next: confirm promotion/publication scope,
 the proposed v0.6.0 targets and publishing safeguards. Do not tag or publish based on UA01–UA05.
+The user subsequently authorized release-safeguard gap closure. Execute and track SG01–SG07
+in the [release-safeguard plan](../product/release-safeguards.md); SG08/final publication remains
+an explicit gate. Independent implementation/review work may proceed without claiming release
+completion or reopening UA01–UA05.
 Do not repeatedly request the now-deferred walkthrough as a release prerequisite. Do not mark
 it performed or authorize production. Later live broker/fleet guarantees remain open.
 

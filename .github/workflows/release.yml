@@ -1,311 +1,472 @@
 name: release
-
-# Unified version: one tag `vX.Y.Z` on `main` drives the binary/PyPI release and any configured
-# crates.io/npm publishers. See RELEASING.md for the develop→main→tag flow and publisher setup.
+# Stable milestones only. Remote authority controls remain required; see RELEASING.md.
 on:
   push:
     tags: ["v*.*.*"]
   workflow_dispatch:
     inputs:
       npm_repair_tag:
-        description: "Existing vX.Y.Z tag whose npm leg failed — rebuilds + republishes npm ONLY (same OIDC Trusted-Publishing environment; crates/PyPI/binaries untouched)"
+        description: "Stable tag with safeguard-era main CI; dispatch from main; npm only"
         required: true
         type: string
-
 permissions:
-  contents: write # create the GitHub Release + upload binary assets
-
-# On a dispatch repair, only the npm half runs: every other job below carries
-# `if: github.event_name == 'push'` (directly, or via a skipped `needs` chain).
+  contents: read
+  actions: read
+concurrency:
+  group: release-${{ inputs.npm_repair_tag || github.ref_name }}
+  cancel-in-progress: false
 jobs:
-  # ── 1a. Create the GitHub Release once, so the binary matrix has a target to upload to. ────
-  #        (A tag push does not auto-create a Release; without this the upload jobs fail with
-  #        "release not found", and parallel jobs would otherwise race to create it.)
-  create-release:
-    if: github.event_name == 'push'
+  authorize:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      source_sha: ${{ steps.guard.outputs.source_sha }}
+      control_sha: ${{ steps.guard.outputs.control_sha }}
+      version: ${{ steps.guard.outputs.version }}
+      tag: ${{ steps.guard.outputs.tag }}
+      proof_id: ${{ steps.proof.outputs.artifact-id }}
     steps:
-      - name: Create the GitHub Release for this tag
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+      - name: Authorize immutable source against canonical main CI
+        id: guard
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-        run: |
-          gh release view "${GITHUB_REF_NAME}" --repo "$REPO" >/dev/null 2>&1 \
-            || gh release create "${GITHUB_REF_NAME}" --repo "$REPO" \
-                 --title "${GITHUB_REF_NAME}" --generate-notes
+          GH_TOKEN: ${{ github.token }}
+          REPAIR_TAG: ${{ inputs.npm_repair_tag }}
+        run: python3 scripts/release_guard.py --output proof.json --github-output "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        id: proof
+        with:
+          name: release-authorization
+          path: proof.json
+          if-no-files-found: error
+          retention-days: 30
 
-  # ── 1b. Native sandhi-proxy server binaries → the GitHub Release ───────────────────────────
-  #        Native-only (no cross): the proxy links bundled SQLite (sandhi-store), whose C build
-  #        needs the target's C toolchain. aarch64-linux is a follow-up (cross C toolchain).
-  #        No x86_64-apple-darwin: Apple no longer ships Intel macs, and the `macos-13` runner
-  #        that leg needed never got scheduled — it sat queued for GitHub's full 24h timeout and
-  #        was auto-cancelled on every release from v0.1.0 to v0.1.2.
   binaries:
+    if: github.event_name == 'push'
+    needs: authorize
     name: binary (${{ matrix.target }})
-    needs: create-release
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
-          - { os: macos-latest, target: aarch64-apple-darwin }
-    runs-on: ${{ matrix.os }}
+          - {os: ubuntu-latest, target: x86_64-unknown-linux-gnu}
+          - {os: macos-latest, target: aarch64-apple-darwin}
+    env:
+      RELEASE_VERSION: ${{ needs.authorize.outputs.version }}
+      RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
+      EXPECTED_SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+      EXPECTED_CONTROL_SHA: ${{ needs.authorize.outputs.control_sha }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Set version from tag
-        run: |
-          cargo install cargo-edit --locked || true
-          cargo set-version "${GITHUB_REF_NAME#v}"
-      - uses: taiki-e/upload-rust-binary-action@v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          # Both workspace binaries: the server AND the `sandhi` operator CLI.
-          # The homebrew-tap formula installs both; the CLI was missing from
-          # archives before v0.2.1 (anvai-labs/homebrew-tap consumes these).
-          bin: sandhi-proxy, sandhi
-          # The SentinelPass daemon-IPC vault backend is feature-gated so the
-          # crates.io publish carries no git dependency; binaries keep it.
-          features: sentinelpass-ipc
-          target: ${{ matrix.target }}
-          archive: sandhi-proxy-$tag-$target
-          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ needs.authorize.outputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.authorize.outputs.control_sha }}
+          persist-credentials: false
+          path: .release-controls
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+      - name: Stage unified Rust version
+        shell: bash
+        run: |
+          cargo install cargo-edit --version 0.13.13 --locked
+          cargo set-version "$RELEASE_VERSION"
+      - name: Build and smoke-test both operator binaries
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          cargo build --release --features sentinelpass-ipc --target "$TARGET" --bin sandhi-proxy --bin sandhi
+          python3 .release-controls/scripts/smoke-release-binaries.py --binary-dir "target/$TARGET/release"
+          mkdir dist-binaries
+          tar -czf "dist-binaries/sandhi-proxy-$RELEASE_TAG-$TARGET.tar.gz" -C "target/$TARGET/release" sandhi-proxy sandhi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: binary-${{ matrix.target }}
+          path: dist-binaries/*.tar.gz
+          if-no-files-found: error
 
-  # ── 2. PyPI wheels (sandhi-gateway) — build matrix + OIDC Trusted Publishing ───────────────
   pypi-build:
     if: github.event_name == 'push'
+    needs: authorize
     name: wheels (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    env:
+      RELEASE_VERSION: ${{ needs.authorize.outputs.version }}
+      RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
+      EXPECTED_SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+      EXPECTED_CONTROL_SHA: ${{ needs.authorize.outputs.control_sha }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Set version from tag
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.authorize.outputs.source_sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+      - name: Stage unified Rust version
         shell: bash
         run: |
-          cargo install cargo-edit --locked || true
-          ( cd bindings/python && cargo set-version "${GITHUB_REF_NAME#v}" )
-      - uses: PyO3/maturin-action@v1
+          cargo install cargo-edit --version 0.13.13 --locked
+          cargo set-version "$RELEASE_VERSION"
+      - name: Stage Python version
+        shell: bash
+        working-directory: bindings/python
+        run: cargo set-version "$RELEASE_VERSION"
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b
         with:
           command: build
           args: --release -m bindings/python/Cargo.toml --out dist
           manylinux: auto
-      - uses: actions/upload-artifact@v7
+      - name: Install and import the built wheel
+        shell: bash
+        run: |
+          python -m pip install --no-deps dist/*.whl
+          python -c "import sandhi_gateway"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: wheels-${{ matrix.os }}
-          path: dist
+          path: dist/*.whl
+          if-no-files-found: error
 
-  pypi-publish:
-    needs: pypi-build
-    runs-on: ubuntu-latest
-    environment: pypi # scope the OIDC trusted publisher (configure on PyPI, see RELEASING.md)
-    permissions:
-      id-token: write # OIDC — no stored token
-    steps:
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: wheels-*
-          merge-multiple: true
-          path: dist
-      - uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: dist
-
-  # ── 3. crates.io (core → providers → store → proxy) ───────────────────────────────────────
-  crates:
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Publish in dependency order
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
-            echo "::notice::CARGO_REGISTRY_TOKEN not set — skipping crates.io publish"
-            exit 0
-          fi
-          # Skip-if-published makes the job re-runnable after a partial
-          # failure: a bare rerun would die on "crate already published" for
-          # every member that landed before the hiccup.
-          already_published() {
-            status=$(curl -s -o /dev/null -w '%{http_code}' -A "sandhi-release" \
-              "https://crates.io/api/v1/crates/$1/${GITHUB_REF_NAME#v}")
-            [ "$status" = "200" ]
-          }
-          publish_member() {
-            if already_published "$1"; then
-              echo "::notice::$1 ${GITHUB_REF_NAME} already on crates.io — skipping"
-            else
-              cargo publish -p "$1" --allow-dirty
-            fi
-          }
-          cargo install cargo-edit --locked || true
-          cargo set-version "${GITHUB_REF_NAME#v}"
-          # --allow-dirty: the only working-tree change is the intentional set-version rewrite
-          publish_member sandhi-core
-          publish_member sandhi-providers
-          publish_member sandhi-store
-          publish_member sandhi-proxy
-
-  # ── 4. npm (@anvailabs/sandhi) — per-platform native builds + napi prepublish ──────────────
-  #        Intel-mac leg dropped for the same reason as the binaries matrix above; because
-  #        `npm-publish` needs the whole build matrix, that stuck leg is what kept npm from ever
-  #        publishing. Publishing is OIDC Trusted Publishing — no token, no skip path.
   npm-build:
+    needs: authorize
     name: npm build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
-          - { os: macos-latest, target: aarch64-apple-darwin }
-    runs-on: ${{ matrix.os }}
+          - {os: ubuntu-latest, target: x86_64-unknown-linux-gnu}
+          - {os: macos-latest, target: aarch64-apple-darwin}
+    env:
+      RELEASE_VERSION: ${{ needs.authorize.outputs.version }}
+      RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
+      EXPECTED_SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+      EXPECTED_CONTROL_SHA: ${{ needs.authorize.outputs.control_sha }}
     steps:
-      # On a dispatch repair the tag being rebuilt is the input, not the triggering ref.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ inputs.npm_repair_tag || github.ref }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v7
+          ref: ${{ needs.authorize.outputs.source_sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: "24"
-      - name: Build native addon
+      - name: Build and load native addon
         working-directory: bindings/node
-        env:
-          RELEASE_TAG: ${{ inputs.npm_repair_tag || github.ref_name }}
+        shell: bash
         run: |
-          # Fail HERE, not after the whole matrix burned: a malformed or empty repair
-          # input would otherwise only die at npm-publish's stricter guards.
-          case "$RELEASE_TAG" in
-            v[0-9]*.[0-9]*.[0-9]*) ;; # vX.Y.Z
-            *) echo "::error::RELEASE_TAG '$RELEASE_TAG' is not a vX.Y.Z tag"; exit 1;;
-          esac
-          npm version "${RELEASE_TAG#v}" --no-git-tag-version --allow-same-version
-          npm install
-          npx napi build --platform --release
-      - uses: actions/upload-artifact@v7
+          npm ci --ignore-scripts
+          npm version "$RELEASE_VERSION" --no-git-tag-version --allow-same-version --ignore-scripts
+          npx --no-install napi build --platform --release
+          node -e "require('./sandhi.js')"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: napi-${{ matrix.target }}
-          # index.js/index.d.ts (the napi loader + its types) are gitignored BUILD
-          # OUTPUTS — without them the published main package cannot be required.
-          # Platform-independent, so both legs ship identical copies.
           path: |
             bindings/node/*.node
             bindings/node/index.js
             bindings/node/index.d.ts
+          if-no-files-found: error
 
-  npm-publish:
-    needs: npm-build
+  npm-package:
+    needs: [authorize, npm-build]
     runs-on: ubuntu-latest
-    # Trusted Publishing (OIDC): the npm Trusted-Publisher binding on npmjs.com pins
-    # (repository anvai-labs/sandhi, workflow release.yml, environment npm) — no token exists
-    # anywhere to leak or rotate. id-token: write is what mints the OIDC assertion; the
-    # environment must match the binding exactly. Node 24 ships npm ≥11, which speaks OIDC.
-    environment: npm
-    permissions:
-      id-token: write
-      contents: read
+    timeout-minutes: 10
+    outputs:
+      package_id: ${{ steps.packages.outputs.artifact-id }}
+    env:
+      RELEASE_VERSION: ${{ needs.authorize.outputs.version }}
+      RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
+      EXPECTED_SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+      EXPECTED_CONTROL_SHA: ${{ needs.authorize.outputs.control_sha }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ inputs.npm_repair_tag || github.ref }}
-      - uses: actions/setup-node@v7
+          ref: ${{ needs.authorize.outputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.authorize.outputs.control_sha }}
+          persist-credentials: false
+          path: .release-controls
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: "24"
-          registry-url: "https://registry.npmjs.org"
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           pattern: napi-*
           merge-multiple: true
           path: bindings/node/artifacts
-      - name: Publish to npm
+      - name: Prepare complete platforms and validate actual packed contents
         working-directory: bindings/node
-        env:
-          RELEASE_TAG: ${{ inputs.npm_repair_tag || github.ref_name }}
         run: |
-          case "$RELEASE_TAG" in
-            v[0-9]*.[0-9]*.[0-9]*) ;; # vX.Y.Z
-            *) echo "::error::RELEASE_TAG '$RELEASE_TAG' is not a vX.Y.Z tag"; exit 1;;
+          npm ci --ignore-scripts
+          npx --no-install napi create-npm-dir -t .
+          npx --no-install napi artifacts --dir artifacts
+          cp artifacts/index.js artifacts/index.d.ts .
+          node ../../.release-controls/scripts/check-npm-release.mjs prepare --package-dir . --version "$RELEASE_VERSION"
+          node ../../.release-controls/scripts/check-npm-release.mjs pack --package-dir . --version "$RELEASE_VERSION" --output-dir ../../dist-npm > ../../npm-pack.json
+          cp ../../npm-pack.json ../../dist-npm/manifest.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        id: packages
+        with:
+          name: npm-packages
+          path: dist-npm/
+          if-no-files-found: error
+
+  crates-check:
+    if: github.event_name == 'push'
+    needs: authorize
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RELEASE_VERSION: ${{ needs.authorize.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.authorize.outputs.source_sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+      - name: Check staged release versions without publishing credentials
+        run: |
+          cargo install cargo-edit --version 0.13.13 --locked
+          cargo set-version "$RELEASE_VERSION"
+          cargo check --workspace --all-targets
+
+  create-release:
+    if: github.event_name == 'push'
+    needs: [authorize, binaries, pypi-build, npm-package, crates-check]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: github-release
+    permissions:
+      contents: write
+      actions: read
+    env:
+      RELEASE_VERSION: ${{ needs.authorize.outputs.version }}
+      RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
+      EXPECTED_SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+      EXPECTED_CONTROL_SHA: ${{ needs.authorize.outputs.control_sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.authorize.outputs.control_sha }}
+          persist-credentials: false
+          path: .release-controls
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.authorize.outputs.proof_id }}
+          merge-multiple: true
+          path: .release-proof
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: binary-*
+          merge-multiple: true
+          path: dist-binaries
+      - name: Revalidate release authority immediately before publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .release-controls/scripts/release_guard.py --verify-proof .release-proof/proof.json
+      - name: Publish built binary assets without overwriting
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          status=$(curl --silent --show-error --max-time 20 -o release-response.json -w '%{http_code}' -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG")
+          case "$status" in
+            200) ;;
+            404) gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$RELEASE_TAG" --generate-notes ;;
+            *) echo "::error::GitHub release lookup unavailable ($status)"; exit 1 ;;
           esac
-          git ls-remote --exit-code --tags origin "$RELEASE_TAG" >/dev/null \
-            || { echo "::error::tag $RELEASE_TAG does not exist"; exit 1; }
-          VERSION="${RELEASE_TAG#v}"
-          npm version "$VERSION" --no-git-tag-version --allow-same-version
-          npm install
-          # @napi-rs/cli 2.x: generate the per-platform package dirs from the config before
-          # placing artifacts — `napi artifacts` writes INTO npm/<platform>/ and dies with a
-          # bare ENOENT when the parent dir is missing (the v0.5.1 npm-leg failure; the dirs
-          # are gitignored here by design, so they must be derived at publish time). `-t .`
-          # is required: 2.18.4 declares the target dir option with no default.
-          npx napi create-npm-dir -t .
-          npx napi artifacts --dir artifacts
-          # The napi loader pair rides the build artifacts (gitignored build outputs —
-          # `napi artifacts` only moves the platform binaries). Restore them to the
-          # package root and assert: npm SILENTLY DROPS nonexistent `files` entries,
-          # so a missing loader would otherwise publish an uninstallable package and
-          # the registry-version check would still report OK.
-          cp -f artifacts/index.js artifacts/index.d.ts .
-          test -f index.js && test -f index.d.ts \
-            || { echo "::error::napi loader (index.js/index.d.ts) missing — the main package would be uninstallable"; exit 1; }
-          # A dispatch repair must not be able to go green while publishing nothing:
-          # download-artifact exits 0 on an empty pattern match and prepublish merely
-          # warns per missing binary. Require at least one platform binary (NOT
-          # placed==expected: a repair of an older tag runs this fixed workflow against
-          # the TAG's tree, whose triples config may be wider than the matrix — the
-          # CLI deliberately warn-skips configured-but-unbuilt platforms).
-          expected=$(find npm -mindepth 1 -maxdepth 1 -type d | wc -l)
-          placed=$(find npm -mindepth 2 -maxdepth 2 -name '*.node' | wc -l)
-          echo "npm platform dirs: $expected, binaries placed: $placed"
-          if [ "$placed" -lt 1 ]; then
-            echo "::error::no platform binaries under npm/ — publish would ship nothing"
-            ls -R npm || true
-            exit 1
-          fi
-          # Idempotent repair (mirror of the crates job's skip-if-published): a platform
-          # package@version already on the registry is dropped so prepublish warn-skips
-          # it — otherwise a rerun after a partial publish hard-fails E403 and we are
-          # back to burning a version.
-          for dir in npm/*/; do
-            name=$(node -p "require('./${dir}package.json').name")
-            if npm view "$name@$VERSION" --loglevel=error version >/dev/null 2>&1; then
-              echo "::notice::$name@$VERSION already published — skipping platform package"
-              rm -rf "$dir"
+          for archive in dist-binaries/*.tar.gz; do
+            python3 .release-controls/scripts/release_guard.py --verify-proof .release-proof/proof.json
+            name=$(basename "$archive")
+            assets=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets)
+            if jq -e --arg name "$name" '.assets[] | select(.name == $name)' <<< "$assets" >/dev/null; then
+              mkdir -p existing
+              gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$name" --dir existing
+              cmp "$archive" "existing/$name"
+            else
+              gh release upload "$RELEASE_TAG" "$archive" --repo "$GITHUB_REPOSITORY"
             fi
           done
-          # `napi prepublish` publishes the PER-PLATFORM packages only (and stamps versions
-          # + optionalDependencies into package.json); the MAIN package needs an explicit
-          # root publish — exactly how the CLI's own template wires it (prepublishOnly hook
-          # + `npm publish --access public`).
-          npx napi prepublish -t npm --skip-gh-release
-          if npm view "@anvailabs/sandhi@$VERSION" --loglevel=error version >/dev/null 2>&1; then
-            echo "::notice::@anvailabs/sandhi@$VERSION already published — skipping main publish"
-          else
-            npm publish --access public
-          fi
 
-  # ── 5. Verify the artifacts actually landed ───────────────────────────────────────────────
-  #        The crates.io publish step `exit 0`s when its credential is absent, so a job can report
-  #        success while shipping nothing. That is intentional for an unconfigured target, but the
-  #        same guard would hide a genuinely broken publish — and a green release run is exactly
-  #        when nobody looks. This checks the registries, not the jobs.
-  verify:
-    needs: [create-release, pypi-publish, crates, npm-publish]
-    # always() would defeat the needs-chain skip on a dispatch repair — gate on the event too.
-    if: ${{ always() && github.event_name == 'push' }}
+  pypi-publish:
+    needs: [authorize, create-release, pypi-build]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: pypi
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      RELEASE_VERSION: ${{ needs.authorize.outputs.version }}
+      RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
+      EXPECTED_SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+      EXPECTED_CONTROL_SHA: ${{ needs.authorize.outputs.control_sha }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          python-version: '3.12'
-      - name: Verify every expected registry received this tag
+          ref: ${{ needs.authorize.outputs.control_sha }}
+          persist-credentials: false
+          path: .release-controls
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.authorize.outputs.proof_id }}
+          merge-multiple: true
+          path: .release-proof
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+      - name: Revalidate release authority immediately before publication
         env:
-          # Expectation is derived from configuration, never assumed: a target with no credential
-          # is reported as an intentional skip instead of silently passing.
-          EXPECT_CRATES: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
-          EXPECT_NPM: "1" # Trusted Publishing: npm is always expected; the verifier checks the registry, not a token
-        run: python3 scripts/verify-release.py "${GITHUB_REF_NAME}"
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .release-controls/scripts/release_guard.py --verify-proof .release-proof/proof.json
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
+        with:
+          packages-dir: dist
+          skip-existing: true
+
+  crates:
+    if: github.event_name == 'push'
+    needs: [authorize, create-release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: crates-io
+    env:
+      RELEASE_VERSION: ${{ needs.authorize.outputs.version }}
+      RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
+      EXPECTED_SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+      EXPECTED_CONTROL_SHA: ${{ needs.authorize.outputs.control_sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.authorize.outputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.authorize.outputs.control_sha }}
+          persist-credentials: false
+          path: .release-controls
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.authorize.outputs.proof_id }}
+          merge-multiple: true
+          path: .release-proof
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+      - name: Stage unified Rust version
+        shell: bash
+        run: |
+          cargo install cargo-edit --version 0.13.13 --locked
+          cargo set-version "$RELEASE_VERSION"
+      - name: Publish all required crates in dependency order
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # New environment-only credential; NO fallback to the legacy repository secret.
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_RELEASE_TOKEN }}
+        run: |
+          test -n "$CARGO_REGISTRY_TOKEN" || { echo "::error::Required crates-io environment credential missing"; exit 1; }
+          for crate in sandhi-core sandhi-providers sandhi-store sandhi-proxy; do
+            status=$(curl --silent --show-error --max-time 20 -o crate-response.json -w '%{http_code}' -A sandhi-release "https://crates.io/api/v1/crates/$crate/$RELEASE_VERSION")
+            case "$status" in
+              200) echo "$crate version exists; final verification still required" ;;
+              404)
+                python3 .release-controls/scripts/release_guard.py --verify-proof .release-proof/proof.json
+                # Staged workspace checked in the separate, unprivileged crates-check job.
+                # Do not compile dependency/build.rs code while holding the registry token.
+                cargo publish -p "$crate" --allow-dirty --no-verify
+                ;;
+              *) echo "::error::Crates lookup unavailable ($status)"; exit 1 ;;
+            esac
+          done
+
+  npm-publish:
+    needs: [authorize, npm-package]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: npm
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      RELEASE_VERSION: ${{ needs.authorize.outputs.version }}
+      RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
+      EXPECTED_SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+      EXPECTED_CONTROL_SHA: ${{ needs.authorize.outputs.control_sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.authorize.outputs.control_sha }}
+          persist-credentials: false
+          path: .release-controls
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.authorize.outputs.proof_id }}
+          merge-multiple: true
+          path: .release-proof
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.npm-package.outputs.package_id }}
+          merge-multiple: true
+          path: dist-npm
+      - name: Revalidate release authority immediately before publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .release-controls/scripts/release_guard.py --verify-proof .release-proof/proof.json
+      - name: Publish only checked tarballs; preserve complete dependencies on retry
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .release-controls/scripts/publish-npm-release.py --package-dir dist-npm --version "$RELEASE_VERSION" --proof .release-proof/proof.json
+
+  verify:
+    needs: [authorize, create-release, pypi-publish, crates, npm-publish]
+    if: ${{ !cancelled() && needs.authorize.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.authorize.outputs.control_sha }}
+          persist-credentials: false
+          path: .release-controls
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+      - name: Verify every declared release target
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
+          RELEASE_EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$RELEASE_EVENT" = workflow_dispatch ]; then
+            python3 .release-controls/scripts/verify-release.py "$RELEASE_TAG" --targets npm
+          else
+            python3 .release-controls/scripts/verify-release.py "$RELEASE_TAG" --targets pypi,crates,npm,github
+          fi
