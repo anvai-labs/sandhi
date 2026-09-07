@@ -122,7 +122,7 @@ perpetually open.
 | [0023](td/TD-0023-release-automation.md) | Complete | npm remains intentionally unconfigured/unpublished |
 | [0024](td/TD-0024-reservation-retention-and-rollup.md) | Proposed | Bounded reservation history and rollups |
 | [0025](td/TD-0025-ingress-funnel-and-family-registry.md) | Proposed | Family registry and funnel decomposition |
-| [0026](td/TD-0026-gateway-product-evolution.md) | In progress | W01–W04 complete; W05a foundation complete; W06a/b/c and W06d automation verified and integrated. UA01–UA04 accepted; performance/release decisions pending; pre-production usability, broker integration validation and recovery ownership gates remain open |
+| [0026](td/TD-0026-gateway-product-evolution.md) | In progress | W01–W04 complete; W05a foundation complete; W06a/b/c and W06d automation verified and integrated. UA01–UA05 accepted; release scope pending; pre-production usability, broker integration validation and recovery ownership gates remain open |
 
 TD-0026 slice completion means implementation/local verification. Its separate C01/C02 checkpoint
 table tracks remote CI, merge and release; C01 [PR #230](https://github.com/anvai-labs/sandhi/pull/230)

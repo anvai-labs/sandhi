@@ -1,7 +1,7 @@
 # M1 acceptance decisions and evidence
 
-Status: **UA01–UA04 accepted** for this release; hands-on usability acceptance deferred until
-before production. UA05–UA06 remain pending; no observed-user or live-integration pass is recorded.
+Status: **UA01–UA05 accepted** for this release; hands-on usability acceptance deferred until
+before production. UA06 remains pending; no observed-user or live-integration pass is recorded.
 Tracker: [TD-0026](../td/TD-0026-gateway-product-evolution.md), C01f; prior
 [workload and integration evidence](m1-acceptance.md) remains valid.
 
@@ -22,13 +22,14 @@ Authority: explicit user instruction in this working session, 2026-09-07 UTC. Ev
 | UA02 — budget guarantees | Accepted | Accept the existing estimate-based token budgets for this release; no strict final-token or monetary-cap guarantee |
 | UA03 — broker assurance | Accepted | Accept current synthetic Sandhi boundary and isolated broker-component evidence for this release; require live interoperability and grant-lifecycle validation before production use of that integration |
 | UA04 — recovery responsibility | Accepted | Accept operator-controlled quarantine and reconciliation for this release; assign the recovery owner, authoritative policy source and cutover/rollback rules before deployment |
-| UA05 — performance scope | Pending | Next decision: measured single-node baseline without production SLOs versus requiring deployment-specific performance validation first |
-| UA06 — promotion/release scope | Pending | Remaining scope and release execution to confirm; no action taken by recording UA01 |
+| UA05 — performance scope | Accepted | Accept a measured single-node engineering baseline without production throughput, latency, recovery-time or fleet-capacity promises |
+| UA06 — promotion/release scope | Pending | Next decision: authorize the safeguarded v0.6.0 unified milestone release versus promotion only with publication deferred |
 
 This is an explicit revision of the acceptance timing for this release, not completion of the
 original observed-user gate. The automated evidence is accepted as the release acceptance method;
-remaining operating-limit decisions are still being collected. Existing review/CI requirements
-are unchanged. M1 release acceptance is not yet closed as a whole.
+the operating-limit decisions UA02–UA05 are accepted. Promotion/publication scope (UA06) remains
+to be confirmed. Existing review/CI requirements are unchanged. M1 release acceptance is not
+yet closed as a whole.
 
 Deferred gate **P01 — hands-on usability before production** remains open. Before production use,
 assign an accepting operator and record the tested build, all four journey outcomes, assistance,
@@ -183,6 +184,13 @@ keep that deployment blocked on W05/W12 rather than relabeling these tests as th
 
 ### UA05 — What operational/performance promise is being accepted?
 
+**Recorded decision (2026-09-07 UTC):** the user selected the recommendation: release as a measured
+single-node engineering baseline, without production throughput, latency, recovery-time or fleet
+capacity guarantees. The alternative of requiring deployment-specific performance targets and
+validation before release was not selected. Before making a later performance promise, define
+the target workload, hardware, thresholds and test duration and validate those claims; the
+existing synthetic observations are not that validation.
+
 **Recommendation:** accept a measured single-node engineering baseline, with no production
 latency/capacity/RTO promise. Define deployment workload, thresholds, duration and hardware before
 using a benchmark as a production acceptance gate.
@@ -193,21 +201,35 @@ warmup, uses a synthetic local provider and a short accumulating history, and ru
 host. No production SLO or leak-freedom conclusion follows. Readiness is lifecycle-only; queue
 emptiness is not a commit receipt; shutdown exit 124 means cleanup was not proven complete.
 
-**Human decision:** accept that scope for M1, or supply the target workload/SLO/recovery objective
-that must pass first. A broader request changes the validation scope and must be planned explicitly.
+**Selected boundary:** accept the stated scope for this release. No target workload, production
+SLO or recovery-time objective was supplied or certified. A broader performance promise changes
+the validation scope and must be planned explicitly.
 
 ### UA06 — What action should acceptance authorize?
 
-**Recommendation:** once the selected gate is satisfied, authorize only the reviewed
-`develop` → `main` promotion with fresh exact-head review/CI and post-merge verification.
+**Recommendation now proposed for explicit approval:** release **v0.6.0** as the M1 engineering
+milestone with the accepted limitations. Integrate the acceptance record through a focused
+`develop` PR; validate publisher configuration and harden the publishing entry points using
+narrowly scoped release-tag protection and publisher-environment restrictions. Preserve required
+CI and existing branch protections. Then promote `develop` → `main` after clean cumulative
+review and fresh exact-head CI, verify post-merge CI, tag the verified commit, publish the planned
+GitHub binaries, PyPI, four Rust crates and npm/platform packages, verify actual artifacts, and
+back-sync `main` into `develop`. Production deployment is excluded. Stop for owner action if
+registry-side authorization cannot be established; do not silently omit a failed target.
+
+**Alternative:** authorize promotion only under the same review/CI gates, with tagging and all
+package publication deferred to a separate decision. This preserves the engineering checkpoint
+without activating publishers yet.
 
 **Rationale/evidence:** the cumulative review also includes the already-integrated protocol
 0.8.1 update and npm bootstrap documentation. The latter documents publishing; it does not
 authorize publishing. M1 is not all later accounting/fleet/broker work.
 
-**Decision to record:** accept that promotion scope, identify any excluded change, or hold.
-Tags, package publication and production rollout remain separate actions. Earlier merge bypass
-authorization covers only a missing approving review after clean review/green CI, never checks.
+**Decision to record:** the approved promotion/publication scope, version, targets and narrowly
+scoped publishing-protection work, or any exclusions/hold. None of these new publishing actions
+is approved by accepting UA01–UA05 alone. Earlier merge bypass authorization covers only a
+missing approving review after clean review/green CI, never checks. Production rollout remains
+separate and subject to P01–P03 and the applicable deployment validations.
 
 ### Release-readiness preflight — 2026-09-07 UTC
 
@@ -243,6 +265,6 @@ needed rather than quietly coaching every step into a pass. Use synthetic creden
 
 Record: reviewer/role, tested build, date, task outcomes, assistance, confusion/blockers, chosen
 UA01–UA06 outcomes and explicit accept/hold scope. Do not include tokens, keys or vault contents.
-UA01–UA04 are accepted; UA05–UA06 and pre-production gates P01–P03 remain **pending**.
+UA01–UA05 are accepted; UA06 and pre-production gates P01–P03 remain **pending**.
 A screenshot review alone is
 an inspection, not an observed unassisted usability session; label it accordingly.

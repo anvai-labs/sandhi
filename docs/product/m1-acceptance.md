@@ -137,7 +137,8 @@ UA03: **current component/synthetic broker evidence accepted for this release**;
 and grant-lifecycle validation required before production use of the integration (P02).
 UA04: **operator-controlled recovery accepted for this release**; recovery owner, authoritative
 policy source and cutover/rollback rules remain required before deployment (P03).
-Remaining release decisions UA05–UA06: **pending**;
+UA05: **measured single-node baseline accepted without production performance promises**.
+Remaining release decision UA06: **pending**;
 M1 release acceptance is not yet complete as a whole.
 
 ## Promotion gate
