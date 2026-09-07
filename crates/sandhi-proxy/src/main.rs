@@ -10,7 +10,8 @@
 use axum::http::HeaderMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use sandhi_core::{BufferedSink, InMemorySink, KeyStore, Sink, VirtualKey};
 use sandhi_providers::{
@@ -25,8 +26,24 @@ use sandhi_proxy::{
 };
 use sandhi_store::{AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // Owning the runtime explicitly prevents Tokio's implicit, potentially unbounded wait for
+    // spawn_blocking tasks after async main returns. The process watchdog remains armed through
+    // runtime teardown, including destructors which do not cooperate with async cancellation.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("create proxy runtime");
+    let shutdown = Arc::new(ShutdownWatchdog::new());
+    let status = runtime.block_on(run(Arc::clone(&shutdown)));
+    runtime.shutdown_timeout(shutdown.remaining());
+    if status == 124 || !shutdown.complete() {
+        std::process::exit(124);
+    }
+    std::process::exit(status);
+}
+
+async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
     // TD-0011 D1: the BINARY installs the subscriber; the libraries only emit through the
     // `tracing` facade. That is what lets an in-process host (Victor) capture Sandhi's spans in
     // its own logging without Sandhi imposing a runtime or a second subscriber.
@@ -49,11 +66,14 @@ async fn main() {
     // declared multi-replica topology rather than silently multiplying rate limits or allowing
     // separate processes to make independent hard-budget decisions.
     validate_replica_topology();
+    // Only an absent setting selects volatile development mode. A configured store is
+    // an enforcement commitment: no startup failure may replace its caps with memory.
+    let store_path = configured_store_path();
 
     // Scope 5 (TD-0011 P3): OTLP export of gen_ai.* spans + metrics. `init()` returns None unless
     // the `otel-otlp` feature is compiled in AND `SANDHI_OTEL_EXPORT=otlp` is set — so the default
     // build is unaffected. The guard must outlive `serve()` so the OTel providers flush on shutdown.
-    let (otel_recorder, _otel_guard) = sandhi_proxy::otel::init().unzip();
+    let (otel_recorder, otel_guard) = sandhi_proxy::otel::init().unzip();
     if otel_recorder.is_some() {
         eprintln!(
             "sandhi-proxy: OTLP export ON — gen_ai.* spans + metrics to {} (feature `otel-otlp`, TD-0011 P3)",
@@ -136,65 +156,41 @@ async fn main() {
     }
 
     // Durable usage store (SQLite) + dashboard when SANDHI_STORE=<path> is set; else in-memory.
-    let store = std::env::var("SANDHI_STORE")
-        .ok()
-        .and_then(|p| match SqliteStore::open(&p) {
-            Ok(s) => {
-                eprintln!("sandhi-proxy: usage store at {p} — dashboard on /dashboard");
-                Some(Arc::new(s))
-            }
-            Err(e) => {
-                eprintln!("sandhi-proxy: could not open SANDHI_STORE={p}: {e}");
-                None
-            }
-        });
+    let store = store_path.as_deref().map(|p| {
+        let store = SqliteStore::open(p).unwrap_or_else(|_| startup_store_fatal("usage"));
+        eprintln!("sandhi-proxy: usage store at {p} — dashboard on /dashboard");
+        Arc::new(store)
+    });
 
     // TD-0003 P1 operator surface: vault + virtual-key store (same path as the usage store).
-    let vault = std::env::var("SANDHI_STORE").ok().and_then(|p| {
-        match VaultStore::with_backend(&p, VaultStore::backend_from_env()) {
-            Ok(v) => {
-                eprintln!(
-                    "sandhi-proxy: credential vault (backend: {}) at {p}",
-                    v.backend_name()
-                );
-                // Rehydrate upstream handles for every active vault credential.
-                rehydrate_providers_from_vault(&v, &runtime, &mut providers);
-                Some(Arc::new(v))
-            }
-            Err(e) => {
-                eprintln!("sandhi-proxy: could not open vault at {p}: {e}");
-                None
-            }
-        }
+    let vault = store_path.as_deref().map(|p| {
+        let vault = VaultStore::with_backend(p, VaultStore::backend_from_env())
+            .unwrap_or_else(|_| startup_store_fatal("vault"));
+        eprintln!(
+            "sandhi-proxy: credential vault (backend: {}) at {p}",
+            vault.backend_name()
+        );
+        // Metadata must open, but unavailable external secret authority only disables
+        // the affected provider handle; locked-broker recovery must remain possible.
+        rehydrate_providers_from_vault(&vault, &runtime, &mut providers);
+        Arc::new(vault)
     });
-    let vkeys = std::env::var("SANDHI_STORE")
-        .ok()
-        .and_then(|p| match VirtualKeyStore::open(&p) {
-            Ok(v) => {
-                sandhi_proxy::rehydrate_live_keys(&keys, &v);
-                eprintln!("sandhi-proxy: virtual-key store at {p}");
-                Some(Arc::new(v))
-            }
-            Err(e) => {
-                eprintln!("sandhi-proxy: could not open vkey store at {p}: {e}");
-                None
-            }
-        });
+    let vkeys = store_path.as_deref().map(|p| {
+        let vkeys = VirtualKeyStore::open(p).unwrap_or_else(|_| startup_store_fatal("vkeys"));
+        sandhi_proxy::rehydrate_live_keys(&keys, &vkeys);
+        eprintln!("sandhi-proxy: virtual-key store at {p}");
+        Arc::new(vkeys)
+    });
 
     // TD-0003 P2 alert rules: durable store + live registry (rehydrated from the store; webhook
     // transport injected from this tokio runtime).
-    let (alert_store, alerts) = std::env::var("SANDHI_STORE")
-        .ok()
-        .and_then(|p| match AlertStore::open(&p) {
-            Ok(store) => {
-                eprintln!("sandhi-proxy: alert-rule store at {p}");
-                let registry = rehydrate_alerts(&store);
-                Some((Arc::new(store), Arc::new(std::sync::Mutex::new(registry))))
-            }
-            Err(e) => {
-                eprintln!("sandhi-proxy: could not open alert store at {p}: {e}");
-                None
-            }
+    let (alert_store, alerts) = store_path
+        .as_deref()
+        .map(|p| {
+            let store = AlertStore::open(p).unwrap_or_else(|_| startup_store_fatal("alerts"));
+            eprintln!("sandhi-proxy: alert-rule store at {p}");
+            let registry = rehydrate_alerts(&store);
+            (Arc::new(store), Arc::new(std::sync::Mutex::new(registry)))
         })
         .unzip();
     let buffered_alert_store = alert_store.as_ref().map(|store| {
@@ -240,23 +236,17 @@ async fn main() {
         (1..=64).contains(&ledger_shards),
         "SANDHI_LEDGER_SHARDS must be between 1 and 64, got {ledger_shards}"
     );
-    let ledger = match std::env::var("SANDHI_STORE") {
-        Ok(path) => match ProxyLedger::durable(&path, ledger_shards) {
-            Ok(l) => {
-                eprintln!(
-                    "sandhi-proxy: durable enforcement ledger at {path} ({ledger_shards} shard{})",
-                    if ledger_shards == 1 { "" } else { "s" }
-                );
-                l
-            }
-            Err(e) => {
-                eprintln!(
-                    "sandhi-proxy: durable ledger unavailable ({e}); falling back to in-memory"
-                );
-                ProxyLedger::in_memory()
-            }
-        },
-        Err(_) => ProxyLedger::in_memory(),
+    let ledger = match store_path.as_deref() {
+        Some(path) => {
+            let ledger = ProxyLedger::durable(path, ledger_shards)
+                .unwrap_or_else(|_| startup_store_fatal("ledger"));
+            eprintln!(
+                "sandhi-proxy: durable enforcement ledger at {path} ({ledger_shards} shard{})",
+                if ledger_shards == 1 { "" } else { "s" }
+            );
+            ledger
+        }
+        None => ProxyLedger::in_memory(),
     };
 
     let admin_token = std::env::var("SANDHI_ADMIN_TOKEN").ok();
@@ -294,12 +284,18 @@ async fn main() {
     // Design audit A2: label values are caller-supplied (model on the typed plane), so the
     // registry is capped — excess distinct series fold into "(overflow)". Never let telemetry
     // fail a request, and never let a valid key grow it without bound.
-    state.metrics = Arc::new(sandhi_proxy::metrics::Metrics::with_max_series(
-        positive_usize_env(
+    state.metrics = Arc::new(
+        sandhi_proxy::metrics::Metrics::with_max_series(positive_usize_env(
             "SANDHI_METRICS_MAX_SERIES",
             sandhi_proxy::metrics::DEFAULT_MAX_METRIC_SERIES,
+        ))
+        .with_buffer_observers(
+            buffered_sink.as_ref().map(|writer| writer.observer()),
+            buffered_alert_store
+                .as_ref()
+                .map(|writer| writer.observer()),
         ),
-    ));
+    );
     state.max_request_body_bytes = request_body_limit_from_env();
     state.max_in_flight_ai_requests = positive_usize_env(
         "SANDHI_MAX_IN_FLIGHT_AI_REQUESTS",
@@ -320,6 +316,7 @@ async fn main() {
         "SANDHI_HEADER_READ_TIMEOUT_SECS",
         DEFAULT_HEADER_READ_TIMEOUT_SECS,
     );
+    state.shutdown_quiesce = shutdown_quiesce_from_env();
     state.trusted_proxies = sandhi_proxy::parse_trusted_proxies(
         &std::env::var("SANDHI_TRUSTED_PROXIES").unwrap_or_default(),
     );
@@ -348,8 +345,8 @@ async fn main() {
         let ledger = state.ledger.lock().expect("ledger poisoned");
         rehydrate_budgets(&ledger, &state.budgets);
     }
-    // Scope 5: attach the OTLP recorder (None unless feature-on + configured). The `_otel_guard`
-    // captured above flushes the providers when main returns.
+    // Scope 5: attach the OTLP recorder (None unless feature-on + configured). Its guard is
+    // explicitly dropped below while the process-wide shutdown deadline still applies.
     state.otel = otel_recorder;
     let state = Arc::new(state);
 
@@ -386,34 +383,153 @@ async fn main() {
          (OpenAI Chat/Responses | Anthropic Messages | Gemini, virtual-key auth)"
     );
     let shutdown_grace = shutdown_grace_from_env();
+    let signal = {
+        let lifecycle = Arc::clone(&state.lifecycle);
+        let shutdown = Arc::clone(&shutdown);
+        async move {
+            shutdown_signal().await;
+            // Arm before tracing: a blocked stderr must not defeat the deadline.
+            shutdown.arm(lifecycle.begin_quiesce(shutdown_grace));
+            tracing::info!("shutdown signal received; quiescing and draining in-flight requests");
+        }
+    };
     let serve_result = match tls {
         Some(tls) => {
-            serve_with_tls_shutdown_timeout(state, addr, shutdown_signal(), shutdown_grace, tls)
+            serve_with_tls_shutdown_timeout(Arc::clone(&state), addr, signal, shutdown_grace, tls)
                 .await
         }
-        None => serve_with_shutdown_timeout(state, addr, shutdown_signal(), shutdown_grace).await,
+        None => serve_with_shutdown_timeout(Arc::clone(&state), addr, signal, shutdown_grace).await,
     };
+    // Listener failures also need bounded cleanup. begin_quiesce preserves the original signal
+    // deadline, so no stage below receives another fresh grace period.
+    let deadline = state.lifecycle.begin_quiesce(shutdown_grace);
+    shutdown.arm(deadline);
     reclaim_task.abort();
-    let _ = reclaim_task.await;
+    let _ = tokio::time::timeout_at(deadline.into(), reclaim_task).await;
+    // Detached admission/settlement work can outlive an HTTP connection task. It must stop
+    // producing usage and alert updates BEFORE the respective queue admissions are closed.
+    if tokio::time::timeout_at(deadline.into(), state.lifecycle.wait_idle())
+        .await
+        .is_err()
+    {
+        return 124;
+    }
+    let mut cleanup_complete = true;
     if let Some(buffered) = buffered_alert_store {
-        if !buffered.close(shutdown_grace) {
+        if !buffered.close(shutdown.remaining()) {
+            cleanup_complete = false;
             tracing::error!(
                 dropped = buffered.dropped_updates(),
-                "alert writer did not drain before shutdown deadline"
+                "alert writer shutdown incomplete; persistence may be missing"
             );
         }
     }
     if let Some(buffered) = buffered_sink {
-        if !buffered.close(shutdown_grace) {
+        if !buffered.close(shutdown.remaining()) {
+            cleanup_complete = false;
             tracing::error!(
                 dropped = buffered.dropped_events(),
-                "usage writer did not drain before shutdown deadline"
+                "usage writer shutdown incomplete; persistence may be missing"
             );
         }
     }
+    // OTel SDK shutdown and arbitrary provider/store destructors are synchronous. The watchdog
+    // enforces the same deadline even if one never returns; the library itself never exits.
+    #[allow(clippy::drop_non_drop)] // The no-OTLP build uses a zero-sized, no-Drop guard.
+    drop(otel_guard);
+    state.lifecycle.stop();
+    if !cleanup_complete || Instant::now() >= deadline {
+        return 124;
+    }
     if let Err(e) = serve_result {
+        if e.kind() == std::io::ErrorKind::TimedOut {
+            return 124;
+        }
         eprintln!("sandhi-proxy error: {e}");
-        std::process::exit(1);
+        return 1;
+    }
+    0
+}
+
+/// Configuration/setup failure is distinct from an incomplete shutdown (124). No
+/// listener has bound here; exit directly so the unarmed watchdog cannot rewrite 2.
+/// Never include raw backend errors, SQL or supplied configuration in this diagnostic.
+fn startup_store_fatal(component: &'static str) -> ! {
+    eprintln!("sandhi-proxy: startup failed: configured_store_unavailable component={component}");
+    std::process::exit(2);
+}
+
+fn configured_store_path() -> Option<String> {
+    match std::env::var("SANDHI_STORE") {
+        // SQLite URI options can request volatile databases or interact with shard
+        // suffixes. The binary accepts ordinary filesystem paths, not URI syntax.
+        Ok(path) if !path.trim().is_empty() && path != ":memory:" && !path.starts_with("file:") => {
+            Some(path)
+        }
+        Err(std::env::VarError::NotPresent) => None,
+        _ => startup_store_fatal("configuration"),
+    }
+}
+
+enum WatchdogMessage {
+    Arm(Instant),
+    Complete,
+}
+
+/// Binary-only hard-stop policy. Never put logging on the timeout path: stderr, tracing or an
+/// exporter may be the cleanup operation that is blocked. Exit 124 means cleanup was not proven
+/// complete, not that persistence loss has been repaired or every provider call was cancelled.
+struct ShutdownWatchdog {
+    deadline: OnceLock<Instant>,
+    tx: mpsc::Sender<WatchdogMessage>,
+}
+
+impl ShutdownWatchdog {
+    fn new() -> Self {
+        let (tx, rx) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("sandhi-shutdown-watchdog".into())
+            .spawn(move || {
+                let Ok(WatchdogMessage::Arm(deadline)) = rx.recv() else {
+                    return;
+                };
+                match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                    Ok(WatchdogMessage::Complete) if Instant::now() < deadline => return,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        // A panic/drop is not successful cleanup. Retain the original deadline.
+                        std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                    }
+                    _ => {}
+                }
+                std::process::exit(124);
+            })
+            .expect("create shutdown watchdog");
+        Self {
+            deadline: OnceLock::new(),
+            tx,
+        }
+    }
+
+    fn arm(&self, deadline: Instant) {
+        if self.deadline.set(deadline).is_ok()
+            && self.tx.send(WatchdogMessage::Arm(deadline)).is_err()
+        {
+            std::process::exit(124);
+        }
+    }
+
+    fn remaining(&self) -> Duration {
+        self.deadline
+            .get()
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+            .unwrap_or(Duration::ZERO)
+    }
+
+    fn complete(&self) -> bool {
+        self.deadline
+            .get()
+            .is_some_and(|deadline| Instant::now() < *deadline)
+            && self.tx.send(WatchdogMessage::Complete).is_ok()
     }
 }
 
@@ -466,6 +582,16 @@ fn shutdown_grace_from_env() -> std::time::Duration {
         "SANDHI_SHUTDOWN_GRACE_SECS",
         DEFAULT_SHUTDOWN_GRACE.as_secs(),
     ))
+}
+
+fn shutdown_quiesce_from_env() -> Duration {
+    let millis = match std::env::var("SANDHI_SHUTDOWN_QUIESCE_MS") {
+        Ok(raw) => raw.parse::<u64>().unwrap_or_else(|_| {
+            panic!("SANDHI_SHUTDOWN_QUIESCE_MS must be a non-negative integer, got {raw:?}")
+        }),
+        Err(_) => 1000,
+    };
+    Duration::from_millis(millis)
 }
 
 fn positive_usize_env(name: &str, default: usize) -> usize {
@@ -532,8 +658,6 @@ async fn shutdown_signal() {
 
     #[cfg(not(unix))]
     ctrl_c.await;
-
-    tracing::info!("shutdown signal received; draining in-flight requests");
 }
 
 /// Build + register an upstream handle for each active vault credential, so the request path can
@@ -544,19 +668,36 @@ fn rehydrate_providers_from_vault(
     providers: &mut HashMap<String, ProviderHandle>,
 ) {
     let Ok(entries) = vault.list() else {
+        tracing::warn!("vault inventory unavailable; provider rehydration incomplete");
         return;
     };
     for entry in entries.into_iter().filter(|e| e.status == "active") {
-        if let Ok(Some((entry, secret))) = vault.resolve(&entry.provider) {
-            if let Some(handle) = sandhi_proxy::build_provider_handle(
-                runtime,
-                &entry.provider,
-                entry.base_url.as_deref(),
-                &secret,
-                entry.scheme,
-            ) {
-                providers.insert(entry.credential_id(), handle);
+        // Resolve the exact label; provider-wide resolution would reload the first label
+        // repeatedly and leave every other credential unavailable after restart.
+        let secret = match vault.get(&entry.provider, &entry.label) {
+            Ok(Some(secret)) => secret,
+            result => {
+                let reason = match result {
+                    Ok(None) => "missing",
+                    Err(sandhi_store::VaultError::Locked) => "locked",
+                    Err(sandhi_store::VaultError::Denied) => "denied",
+                    Err(sandhi_store::VaultError::Timeout) => "timeout",
+                    Err(sandhi_store::VaultError::Configuration) => "configuration",
+                    _ => "unavailable",
+                };
+                tracing::warn!(provider = %entry.provider, label = %entry.label, reason,
+                    "credential not activated; recover via explicit reference registration");
+                continue;
             }
+        };
+        if let Some(handle) = sandhi_proxy::build_provider_handle(
+            runtime,
+            &entry.provider,
+            entry.base_url.as_deref(),
+            &secret,
+            entry.scheme,
+        ) {
+            providers.insert(entry.credential_id(), handle);
         }
     }
 }
@@ -565,6 +706,108 @@ fn rehydrate_providers_from_vault(
 mod tests {
     use super::listener_tls_entry_from_json;
     use std::path::Path;
+
+    #[test]
+    fn completion_without_a_live_deadline_is_not_success() {
+        let watchdog = super::ShutdownWatchdog::new();
+        assert_eq!(watchdog.remaining(), std::time::Duration::ZERO);
+        assert!(!watchdog.complete());
+        // Exercise the completion race check without arming a process-exiting test watchdog.
+        watchdog.deadline.set(std::time::Instant::now()).unwrap();
+        assert!(!watchdog.complete());
+    }
+
+    #[test]
+    fn shutdown_watchdog_child() {
+        let Ok(mode) = std::env::var("SANDHI_TEST_SHUTDOWN_WATCHDOG") else {
+            return;
+        };
+        let watchdog = super::ShutdownWatchdog::new();
+        let original = std::time::Instant::now() + std::time::Duration::from_millis(200);
+        watchdog.arm(original);
+        // Repeated notification must not give a blocked cleanup another grace period.
+        watchdog.arm(original + std::time::Duration::from_secs(30));
+        assert_eq!(watchdog.deadline.get(), Some(&original));
+        match mode.as_str() {
+            "complete" => assert!(watchdog.complete()),
+            "blocked_cleanup" => {
+                // A permanently blocked destructor/exporter, independent of the Tokio runtime.
+                std::sync::Barrier::new(2).wait();
+                unreachable!("watchdog must terminate the process");
+            }
+            "blocked_runtime" => {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(1)
+                    .build()
+                    .unwrap();
+                let (started, ready) = std::sync::mpsc::channel();
+                runtime.spawn_blocking(move || {
+                    started.send(()).unwrap();
+                    std::sync::Barrier::new(2).wait();
+                });
+                ready.recv().unwrap();
+                // Model a non-cooperative teardown; the independent watchdog still owns the
+                // original process deadline, regardless of Tokio's requested timeout.
+                runtime.shutdown_timeout(std::time::Duration::from_secs(30));
+                unreachable!("watchdog must terminate the process");
+            }
+            _ => panic!("unknown child scenario"),
+        }
+    }
+
+    #[test]
+    fn watchdog_bounds_blocked_cleanup_and_runtime_without_extending_deadline() {
+        for (mode, expected) in [
+            ("complete", 0),
+            ("blocked_cleanup", 124),
+            ("blocked_runtime", 124),
+        ] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "tests::shutdown_watchdog_child", "--nocapture"])
+                .env("SANDHI_TEST_SHUTDOWN_WATCHDOG", mode)
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            // Bound the test itself if the watchdog regresses; never hang the whole test suite.
+            let test_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert_eq!(status.code(), Some(expected), "scenario {mode}");
+                    break;
+                }
+                if std::time::Instant::now() >= test_deadline {
+                    child.kill().unwrap();
+                    let _ = child.wait();
+                    panic!("watchdog did not terminate {mode}");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+
+    #[test]
+    fn startup_rehydrates_each_exact_label() {
+        let vault = sandhi_store::VaultStore::in_memory().unwrap();
+        for label in ["first", "second"] {
+            vault
+                .set(
+                    "openai",
+                    label,
+                    sandhi_store::CredentialScheme::ApiKey,
+                    None,
+                    "synthetic-key",
+                )
+                .unwrap();
+        }
+        let mut providers = std::collections::HashMap::new();
+        super::rehydrate_providers_from_vault(
+            &vault,
+            &sandhi_providers::ProviderRuntime::new(),
+            &mut providers,
+        );
+        assert!(providers.contains_key("openai:first"));
+        assert!(providers.contains_key("openai:second"));
+    }
 
     #[test]
     fn tls_bootstrap_does_not_validate_unrelated_operator_sections() {

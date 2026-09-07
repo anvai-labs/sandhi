@@ -22,6 +22,9 @@ use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use crate::persistence::AlertBufferObserver;
+use sandhi_core::sink::{BufferSnapshot, BufferedSinkObserver};
+
 /// Which plane served a request (ADR-0004 D1) — the adoption signal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Plane {
@@ -250,6 +253,9 @@ impl Inner {
 #[derive(Debug)]
 pub struct Metrics {
     inner: Mutex<Inner>,
+    // Sender-free observers cannot keep a writer/channel alive during shutdown.
+    usage_buffer: Option<BufferedSinkObserver>,
+    alert_buffer: Option<AlertBufferObserver>,
     /// Open streaming response bodies. Outside the registry lock on purpose: touched twice per
     /// stream by the body's own lifetime. TD-0014 D6 — no bound ships unobservable.
     streams_open: AtomicI64,
@@ -279,10 +285,25 @@ impl Metrics {
     pub fn with_max_series(max_series: usize) -> Self {
         Self {
             inner: Mutex::new(Inner::new(max_series)),
+            usage_buffer: None,
+            alert_buffer: None,
             streams_open: AtomicI64::new(0),
             connections_open: AtomicI64::new(0),
             connections_shed: AtomicU64::new(0),
         }
+    }
+
+    /// Bind best-effort buffer observers at registry construction. These snapshots report
+    /// writer activity, not database commits or authoritative settlement-outbox backlog.
+    #[must_use]
+    pub fn with_buffer_observers(
+        mut self,
+        usage: Option<BufferedSinkObserver>,
+        alerts: Option<AlertBufferObserver>,
+    ) -> Self {
+        self.usage_buffer = usage;
+        self.alert_buffer = alerts;
+        self
     }
 
     /// One streaming response body opened. Paired with [`stream_closed`](Self::stream_closed) by
@@ -485,6 +506,14 @@ impl Metrics {
         out.push_str("# TYPE sandhi_connections_shed_total counter\n");
         let _ = writeln!(out, "sandhi_connections_shed_total {connections_shed}");
 
+        render_buffers(
+            &mut out,
+            [
+                ("usage", self.usage_buffer.as_ref().map(|b| b.snapshot())),
+                ("alerts", self.alert_buffer.as_ref().map(|b| b.snapshot())),
+            ],
+        );
+
         out.push_str(
             "# HELP sandhi_rate_limited_total Requests refused by the per-key rate limiter.\n",
         );
@@ -567,6 +596,31 @@ impl Metrics {
     }
 }
 
+fn render_buffers(out: &mut String, buffers: [(&'static str, Option<BufferSnapshot>); 2]) {
+    for (name, kind, help) in [
+        ("configured", "gauge", "Whether a best-effort writer buffer is configured; not a health check."),
+        ("capacity", "gauge", "Configured channel slots; control messages also consume slots."),
+        ("queued", "gauge", "Accepted data items awaiting worker callback start; excludes active and control items."),
+        ("in_flight", "gauge", "Worker callbacks currently executing; not database commits."),
+        ("dropped_total", "counter", "Data items rejected by full/closed/disconnected buffers or abandoned before callback after worker panic; excludes storage write failures."),
+    ] {
+        let _ = writeln!(out, "# HELP sandhi_buffer_{name} {help}");
+        let _ = writeln!(out, "# TYPE sandhi_buffer_{name} {kind}");
+        // Prometheus requires a metric family's metadata and all its samples together.
+        for (buffer, snapshot) in buffers {
+            let value = match (name, snapshot) {
+                ("configured", snapshot) => u64::from(snapshot.is_some()),
+                ("capacity", Some(snapshot)) => snapshot.capacity as u64,
+                ("queued", Some(snapshot)) => snapshot.queued as u64,
+                ("in_flight", Some(snapshot)) => snapshot.in_flight as u64,
+                ("dropped_total", Some(snapshot)) => snapshot.dropped,
+                _ => continue,
+            };
+            let _ = writeln!(out, "sandhi_buffer_{name}{{buffer=\"{buffer}\"}} {value}");
+        }
+    }
+}
+
 fn render_histogram(
     out: &mut String,
     name: &str,
@@ -597,6 +651,82 @@ fn render_histogram(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn buffer_samples_have_fixed_labels_and_honest_disabled_state() {
+        let mut rendered = String::new();
+        render_buffers(
+            &mut rendered,
+            [
+                (
+                    "usage",
+                    Some(BufferSnapshot {
+                        capacity: 1,
+                        queued: 1,
+                        in_flight: 1,
+                        dropped: 9,
+                    }),
+                ),
+                ("alerts", None),
+            ],
+        );
+        for line in [
+            "sandhi_buffer_configured{buffer=\"usage\"} 1",
+            "sandhi_buffer_capacity{buffer=\"usage\"} 1",
+            "sandhi_buffer_queued{buffer=\"usage\"} 1",
+            "sandhi_buffer_in_flight{buffer=\"usage\"} 1",
+            "sandhi_buffer_dropped_total{buffer=\"usage\"} 9",
+            "sandhi_buffer_configured{buffer=\"alerts\"} 0",
+            "# TYPE sandhi_buffer_dropped_total counter",
+            "# TYPE sandhi_buffer_in_flight gauge",
+        ] {
+            assert!(rendered.lines().any(|actual| actual == line), "{rendered}");
+        }
+        assert!(!rendered.contains("sandhi_buffer_queued{buffer=\"alerts\"}"));
+        let empty = Metrics::new().render();
+        assert!(empty.contains("sandhi_buffer_configured{buffer=\"usage\"} 0"));
+        assert!(!empty.contains("sandhi_buffer_dropped_total{buffer="));
+    }
+
+    #[test]
+    fn registry_observes_live_buffers_without_owning_the_sender() {
+        let writer = sandhi_core::BufferedSink::new(Arc::new(sandhi_core::InMemorySink::new()), 7);
+        let metrics = Metrics::new().with_buffer_observers(Some(writer.observer()), None);
+        assert!(metrics
+            .render()
+            .contains("sandhi_buffer_capacity{buffer=\"usage\"} 7"));
+        assert!(writer.close(std::time::Duration::from_secs(1)));
+        drop(writer);
+        let rendered = metrics.render();
+        assert!(rendered.contains("sandhi_buffer_queued{buffer=\"usage\"} 0"));
+        assert!(rendered.contains("sandhi_buffer_in_flight{buffer=\"usage\"} 0"));
+    }
+
+    #[test]
+    fn buffer_metric_families_are_contiguous_in_exposition() {
+        let mut rendered = String::new();
+        render_buffers(
+            &mut rendered,
+            [
+                ("usage", Some(BufferSnapshot::default())),
+                ("alerts", Some(BufferSnapshot::default())),
+            ],
+        );
+        let lines: Vec<_> = rendered.lines().collect();
+        assert_eq!(lines.len(), 20);
+        for (group, family) in lines.chunks_exact(4).zip([
+            "configured",
+            "capacity",
+            "queued",
+            "in_flight",
+            "dropped_total",
+        ]) {
+            assert!(group[0].starts_with(&format!("# HELP sandhi_buffer_{family} ")));
+            assert!(group[1].starts_with(&format!("# TYPE sandhi_buffer_{family} ")));
+            assert!(group[2].starts_with(&format!("sandhi_buffer_{family}{{buffer=\"usage\"}} ")));
+            assert!(group[3].starts_with(&format!("sandhi_buffer_{family}{{buffer=\"alerts\"}} ")));
+        }
+    }
 
     fn labels() -> Labels {
         Labels {

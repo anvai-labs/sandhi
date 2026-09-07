@@ -19,6 +19,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 fn parse_expected(s: &str) -> ParsedUsage {
     let v: serde_json::Value = serde_json::from_str(s).unwrap();
     ParsedUsage {
+        reasoning_included: v["reasoning_included"].as_bool().or(Some(true)),
         tokens_in: v["tokens_in"].as_u64().unwrap(),
         tokens_out: v["tokens_out"].as_u64().unwrap(),
         cache_creation_tokens: v["cache_creation_tokens"].as_u64().unwrap(),

@@ -1433,6 +1433,7 @@ mod tests {
                 Ok(crate::StreamChunk {
                     data: Bytes::new(),
                     usage: Some(ParsedUsage {
+                        reasoning_included: Some(true),
                         tokens_in: 6,
                         tokens_out: 5,
                         cache_creation_tokens: 0,

@@ -196,7 +196,8 @@ than a known gap, because it stops the next reader from looking.
 > ~3 bytes/char). So the two goals cannot both hold: **"spend never exceeds the cap"** and **"a
 > real measurement is never lost"**. Sandhi's product is the measurement, and the count feeds a
 > downstream ledger it must not lie to; the cap is a control that recovers on its own, because the
-> overshoot is bounded by one call and the *next* reservation is refused. `reserve` still never
+> overshoot can accumulate across all already-admitted calls and a later reservation is refused.
+> The original one-call claim was corrected by TD-0026 W03 (2026-09-05). `reserve` still never
 > admits over the limit, which is the invariant TD-0007 C1/C4 actually assert — settle was never
 > what they constrained.
 >
@@ -266,9 +267,10 @@ correctness debt this work surfaced and would otherwise leave slightly worse tha
    TD-0002 additive policy, and it is the *conservative* option: the alternative considered was
    redefining `UsageCompleteness::Partial`, which would have changed the meaning of data already
    written to operators' stores without changing a single byte of schema.
-6. **"Settling above the ceiling lets spend exceed the cap."** It does, by at most one call's
-   overshoot, and then the next reservation is refused. The alternative was tried and reverted:
-   clamping cut a measured 7168 to 47 in P1's own test. Between "the cap binds one call later" and
+6. **"Settling above the ceiling lets spend exceed the cap."** It does, by the combined
+   overshoot of already-admitted calls, and then the next reservation is refused. The alternative
+   was tried and reverted: clamping cut a measured 7168 to 47 in P1's own test.
+   Between "admission blocks subsequent calls after measured overspend" and
    "a real measurement is destroyed", the first is recoverable and the second is not — and a
    gateway whose product is the count must not lie to the ledger downstream of it. `reserve` still
    never admits over the limit, which is what TD-0007 C1/C4 actually assert.
@@ -288,10 +290,10 @@ correctness debt this work surfaced and would otherwise leave slightly worse tha
   the *first* reported output and then be dropped entirely? The latter is cleaner in principle and
   under-counts when a provider's cumulative output lags badly. Leaning `max` until we have evidence
   of a family whose reporting is far enough behind to matter.
-- Should the cache split be reserved as well as settled? A reservation ceiling built from
-  `input_estimate` (bytes/4 of the request) roughly covers a cached prompt today, but only because
-  the client re-sends the full prompt each turn. If a future provider supports server-side prompt
-  handles, the ceiling would badly under-reserve and D6's clamp would start firing constantly.
+- Should the cache split be reserved as well as settled? `input_estimate` (request bytes/4)
+  has no proven bound even when the client resends the full prompt. Server-side prompt handles
+  can increase under-reservation further. D6 records the measured excess without clamping;
+  TD-0026 W03 documents this limitation and the proof required for future strict eligibility.
 - Does `ParsedUsage` need audio and prediction categories? They exist on `UsageV2` but are populated
   only by the typed OpenAI decoder, so the transparent plane reports `None` for them on every
   family. Out of scope here, but it is the same shape of gap.

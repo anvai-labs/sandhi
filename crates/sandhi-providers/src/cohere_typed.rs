@@ -498,6 +498,7 @@ mod tests {
                 Ok(crate::StreamChunk {
                     data: bytes::Bytes::new(),
                     usage: Some(crate::ParsedUsage {
+                        reasoning_included: Some(true),
                         tokens_in: 2,
                         tokens_out: 3,
                         cache_creation_tokens: 0,

@@ -633,6 +633,7 @@ mod tests {
         let out = decode_anthropic_response(
             body,
             ParsedUsage {
+                reasoning_included: Some(true),
                 tokens_in: 2,
                 tokens_out: 3,
                 cache_creation_tokens: 4,
@@ -679,6 +680,7 @@ mod tests {
                 Ok(crate::StreamChunk {
                     data: Bytes::new(),
                     usage: Some(ParsedUsage {
+                        reasoning_included: Some(true),
                         tokens_in: 2,
                         tokens_out: 3,
                         cache_creation_tokens: 4,

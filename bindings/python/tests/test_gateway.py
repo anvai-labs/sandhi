@@ -78,6 +78,8 @@ def test_parse_usage_keeps_cache_split_single_sourced():
         "tokens_out": 20,
         "cache_creation_tokens": 0,
         "cache_read_tokens": 60,
+        "reasoning_tokens": 0,
+        "reasoning_included": True,
     }
 
 
@@ -1010,6 +1012,8 @@ def test_parse_usage_exercises_every_builtin_provider_parser():
         "tokens_out": 3,
         "cache_creation_tokens": 0,
         "cache_read_tokens": 0,
+        "reasoning_tokens": 0,
+        "reasoning_included": True,
     }
     # Remaining parsers are selected by slug; missing fields default to zero via unwrap_or_default,
     # so a minimal body still exercises each match arm.
@@ -1027,6 +1031,8 @@ def test_parse_usage_exercises_every_builtin_provider_parser():
             "tokens_out": 0,
             "cache_creation_tokens": 0,
             "cache_read_tokens": 0,
+            "reasoning_tokens": 0,
+            "reasoning_included": None,
         }
     with pytest.raises(ValueError):
         sg.parse_usage("openai", "{nope")
@@ -1067,3 +1073,44 @@ def test_contradictory_auth_scheme_still_rejected_with_explanation():
     message = str(excinfo.value)
     assert "api_key" in message
     assert "no-op" in message  # the error teaches the contract
+def test_separate_reasoning_survives_event_and_aggregate():
+    import sandhi_gateway as sg
+    gateway = sg.Gateway()
+    gateway.add_virtual_key("vk_reason", subject="alice", group="reason", upstream="gemini")
+    for thoughts in [25, 40, 90]:
+        event = gateway.meter("vk_reason", "gemini", "m", json.dumps({"usageMetadata": {
+            "promptTokenCount": 100, "candidatesTokenCount": 40, "thoughtsTokenCount": thoughts,
+        }}))
+        assert event["reasoning_tokens"] == thoughts
+        assert event["reasoning_included"] is False
+    assert gateway.spent("group:reason") == 140 * 3 + 25 + 40 + 90
+
+
+@pytest.mark.parametrize("thoughts", [0, 25, 40, 90])
+@pytest.mark.parametrize("provider,included", [("gemini", False), ("openai", True)])
+def test_parse_usage_reasoning_survives_custom_parser_roundtrip(provider, included, thoughts):
+    body = (
+        {"usageMetadata": {
+            "promptTokenCount": 100,
+            "candidatesTokenCount": 40,
+            "thoughtsTokenCount": thoughts,
+        }}
+        if provider == "gemini" else
+        {"usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 40,
+            "completion_tokens_details": {"reasoning_tokens": thoughts},
+        }}
+    )
+    response_json = json.dumps(body)
+    parsed = sg.parse_usage(provider, response_json)
+    assert parsed["reasoning_tokens"] == thoughts
+    assert parsed["reasoning_included"] is included
+
+    gateway = sg.Gateway()
+    gateway.add_virtual_key("vk_alias", subject="alice", group="alias", upstream="alias")
+    gateway.register_parser("alias", lambda response: sg.parse_usage(provider, response))
+    event = gateway.meter("vk_alias", "alias", "m", response_json)
+    assert event["reasoning_tokens"] == (thoughts or None)
+    assert event["reasoning_included"] is included
+    assert gateway.spent("group:alias") == 140 + (0 if included else thoughts)

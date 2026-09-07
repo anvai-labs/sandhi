@@ -84,6 +84,15 @@ pub(crate) struct IngressError {
 }
 
 impl IngressError {
+    pub(crate) fn draining() -> Self {
+        Self {
+            status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            code: "gateway_draining".into(),
+            message: "gateway draining; use a ready instance".into(),
+            typed: None,
+        }
+    }
+
     /// An operator/protocol refusal the proxy itself generated (bad key, malformed
     /// body, throttle). Never carries upstream bytes, so no redaction decision exists.
     pub(crate) fn invalid(status: axum::http::StatusCode, message: impl Into<String>) -> Self {
@@ -199,7 +208,7 @@ impl IngressError {
             None => json!({
                 "code": self.code,
                 "message": self.message,
-                "retryable": false,
+                "retryable": self.code == "gateway_draining",
                 "http_status": self.status.as_u16(),
             }),
         }
@@ -653,10 +662,16 @@ fn gemini_finish_reason(reason: FinishReasonV1) -> &'static str {
 
 /// Neutral usage → Gemini's `usageMetadata`, preserving the cache split it reports natively.
 fn gemini_usage(usage: &UsageV2) -> Value {
+    let output = output_including_reasoning(usage);
+    let reasoning = usage.reasoning_tokens.unwrap_or(0);
+    let prompt = usage
+        .tokens_in
+        .saturating_add(usage.cache_read_tokens)
+        .saturating_add(usage.cache_creation_tokens);
     let mut meta = json!({
-        "promptTokenCount": usage.tokens_in,
-        "candidatesTokenCount": usage.tokens_out,
-        "totalTokenCount": usage.tokens_in + usage.tokens_out + usage.cache_read_tokens,
+        "promptTokenCount": prompt,
+        "candidatesTokenCount": output.saturating_sub(reasoning),
+        "totalTokenCount": prompt.saturating_add(output),
     });
     if usage.cache_read_tokens > 0 {
         meta["cachedContentTokenCount"] = json!(usage.cache_read_tokens);
@@ -1566,8 +1581,8 @@ fn responses_status(reason: Option<FinishReasonV1>) -> &'static str {
 
 fn responses_usage(usage: &UsageV2) -> Value {
     json!({
-        "input_tokens":usage.tokens_in,
-        "output_tokens":usage.tokens_out,
+        "input_tokens":usage.tokens_in.saturating_add(usage.cache_read_tokens).saturating_add(usage.cache_creation_tokens),
+        "output_tokens":output_including_reasoning(usage),
         "input_tokens_details":{"cached_tokens":usage.cache_read_tokens},
         "output_tokens_details":{
             "reasoning_tokens":usage.reasoning_tokens.unwrap_or(0)
@@ -1760,12 +1775,27 @@ fn encode_responses_stream_event(
     }
 }
 
+fn output_including_reasoning(usage: &UsageV2) -> u64 {
+    sandhi_core::billable_parts_with_reasoning(
+        0,
+        0,
+        0,
+        usage.tokens_out,
+        usage.reasoning_tokens.unwrap_or(0),
+        usage.reasoning_included,
+    )
+}
+
 fn openai_usage(usage: &UsageV2) -> Value {
-    let prompt_tokens = usage.tokens_in.saturating_add(usage.cache_read_tokens);
+    let prompt_tokens = usage
+        .tokens_in
+        .saturating_add(usage.cache_read_tokens)
+        .saturating_add(usage.cache_creation_tokens);
+    let output = output_including_reasoning(usage);
     json!({
         "prompt_tokens":prompt_tokens,
-        "completion_tokens":usage.tokens_out,
-        "total_tokens":prompt_tokens.saturating_add(usage.tokens_out),
+        "completion_tokens":output,
+        "total_tokens":prompt_tokens.saturating_add(output),
         "prompt_tokens_details":{"cached_tokens":usage.cache_read_tokens},
         "completion_tokens_details":{
             "reasoning_tokens":usage.reasoning_tokens,
@@ -1779,7 +1809,7 @@ fn openai_usage(usage: &UsageV2) -> Value {
 fn anthropic_usage(usage: &UsageV2) -> Value {
     json!({
         "input_tokens":usage.tokens_in,
-        "output_tokens":usage.tokens_out,
+        "output_tokens":output_including_reasoning(usage),
         "cache_creation_input_tokens":usage.cache_creation_tokens,
         "cache_read_input_tokens":usage.cache_read_tokens,
     })
@@ -2159,7 +2189,7 @@ mod tests {
         assert_eq!(body["output"][1]["type"], "function_call");
         assert_eq!(body["output"][1]["call_id"], "call_1");
         assert_eq!(body["output"][1]["name"], "weather");
-        assert_eq!(body["usage"]["input_tokens"], 40);
+        assert_eq!(body["usage"]["input_tokens"], 100);
         assert_eq!(body["usage"]["output_tokens"], 20);
         assert_eq!(body["usage"]["input_tokens_details"]["cached_tokens"], 60);
         assert_eq!(
@@ -2466,7 +2496,7 @@ mod gemini_codec_tests {
             encoded["candidates"][0]["content"]["parts"][1]["functionCall"]["args"]["q"],
             "x"
         );
-        assert_eq!(encoded["usageMetadata"]["promptTokenCount"], 11);
+        assert_eq!(encoded["usageMetadata"]["promptTokenCount"], 15);
         assert_eq!(encoded["usageMetadata"]["cachedContentTokenCount"], 4);
         // A tool turn is an ordinary STOP for Gemini; the functionCall part is the signal.
         assert_eq!(encoded["candidates"][0]["finishReason"], "STOP");

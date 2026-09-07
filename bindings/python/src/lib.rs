@@ -446,7 +446,7 @@ fn provider_spec<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     let spec = resolve_openai_compat_provider(provider)
         .ok_or_else(|| PyKeyError::new_err(format!("unknown provider: {provider}")))?;
-    let d = PyDict::new_bound(py);
+    let d = PyDict::new(py);
     d.set_item("slug", spec.slug)?;
     d.set_item("aliases", spec.aliases)?;
     d.set_item(
@@ -600,7 +600,8 @@ impl Gateway {
     }
 
     /// Register a host callback that parses a provider's response into a usage mapping with keys
-    /// `{tokens_in, tokens_out, cache_creation_tokens, cache_read_tokens}`. `meter()` then uses it
+    /// `{tokens_in, tokens_out, cache_creation_tokens, cache_read_tokens}` plus optional
+    /// `reasoning_tokens` and `reasoning_included`. `meter()` then uses it
     /// for that provider — the escape hatch for providers Sandhi doesn't natively parse (custom /
     /// air-gapped / community). Overrides any built-in parser for that slug.
     fn register_parser(&self, provider: String, parser: Py<PyAny>) {
@@ -673,6 +674,7 @@ impl Gateway {
             cache_creation_tokens,
             cache_read_tokens,
             reasoning_tokens: 0,
+            reasoning_included: None,
         };
         self.record_and_build(py, virtual_key, provider, model, parsed, session_id, route)
     }
@@ -790,6 +792,10 @@ fn parsed_from_pyobj(obj: &Bound<'_, PyAny>) -> ParsedUsage {
         cache_creation_tokens: get("cache_creation_tokens"),
         cache_read_tokens: get("cache_read_tokens"),
         reasoning_tokens: get("reasoning_tokens"),
+        reasoning_included: obj
+            .get_item("reasoning_included")
+            .ok()
+            .and_then(|v| v.extract::<bool>().ok()),
     }
 }
 
@@ -832,16 +838,18 @@ fn now_rfc3339() -> String {
 }
 
 fn usage_to_dict<'py>(py: Python<'py>, u: &ParsedUsage) -> PyResult<Bound<'py, PyDict>> {
-    let d = PyDict::new_bound(py);
+    let d = PyDict::new(py);
     d.set_item("tokens_in", u.tokens_in)?;
     d.set_item("tokens_out", u.tokens_out)?;
     d.set_item("cache_creation_tokens", u.cache_creation_tokens)?;
     d.set_item("cache_read_tokens", u.cache_read_tokens)?;
+    d.set_item("reasoning_tokens", u.reasoning_tokens)?;
+    d.set_item("reasoning_included", u.reasoning_included)?;
     Ok(d)
 }
 
 fn event_to_dict<'py>(py: Python<'py>, e: &UsageEvent) -> PyResult<Bound<'py, PyDict>> {
-    let d = PyDict::new_bound(py);
+    let d = PyDict::new(py);
     d.set_item("schema_version", &e.schema_version)?;
     d.set_item("request_id", &e.request_id)?;
     d.set_item("occurred_at", &e.occurred_at)?;
@@ -861,6 +869,8 @@ fn event_to_dict<'py>(py: Python<'py>, e: &UsageEvent) -> PyResult<Bound<'py, Py
     d.set_item("session_id", e.session_id.clone())?;
     d.set_item("tokens_in", e.tokens_in)?;
     d.set_item("tokens_out", e.tokens_out)?;
+    d.set_item("reasoning_tokens", e.reasoning_tokens)?;
+    d.set_item("reasoning_included", e.reasoning_included)?;
     d.set_item("cache_creation_tokens", e.cache_creation_tokens)?;
     d.set_item("cache_read_tokens", e.cache_read_tokens)?;
     d.set_item(
@@ -878,7 +888,8 @@ fn event_to_dict<'py>(py: Python<'py>, e: &UsageEvent) -> PyResult<Bound<'py, Py
     Ok(d)
 }
 
-#[pymodule]
+// Preserve the existing interpreter/GIL contract; free-threaded certification is separate.
+#[pymodule(gil_used = true)]
 fn sandhi_gateway(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add(
         "__doc__",
@@ -886,7 +897,7 @@ fn sandhi_gateway(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     m.add(
         "SandhiProviderError",
-        m.py().get_type_bound::<SandhiProviderError>(),
+        m.py().get_type::<SandhiProviderError>(),
     )?;
     m.add_function(wrap_pyfunction!(wire_contract_version, m)?)?;
     m.add_function(wrap_pyfunction!(chat_contract_version, m)?)?;

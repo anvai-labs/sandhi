@@ -370,6 +370,13 @@
             "null"
           ]
         },
+        "reasoning_included": {
+          "description": "True: reasoning is included in tokens_out; false: add it separately. Absent retains legacy magnitude-based accounting for old records only.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "reasoning_tokens": {
           "type": [
             "integer",

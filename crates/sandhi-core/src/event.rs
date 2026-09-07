@@ -12,28 +12,28 @@ use crate::chat::{UsageBasis, UsageCompleteness, UsageV2};
 /// reasoning) rather than flattening to `tokens_in + tokens_out`; the downstream pricer
 /// applies its own weights to the preserved split. Still neutral tokens — no dollars.
 ///
-/// Reasoning invariant (D4): each adapter either folds `reasoning_tokens` into `tokens_out`
-/// (OpenAI and Anthropic both do) or reports them separately, in which case this function
-/// adds them. Detection is total: reasoning that *cannot* be contained in `tokens_out`
-/// (`reasoning_tokens > tokens_out`) is treated as unfolded and added; otherwise it is
-/// assumed folded and not double-counted.
+/// Provider parsers explicitly state whether reasoning is included in output. Only historical
+/// records with no marker retain the old magnitude heuristic; that heuristic cannot determine
+/// a provider's convention and must not be used for newly parsed provider measurements.
 #[must_use]
 pub fn billable(u: &UsageV2) -> u64 {
-    billable_parts(
+    billable_parts_with_reasoning(
         u.tokens_in,
         u.cache_creation_tokens,
         u.cache_read_tokens,
         u.tokens_out,
         u.reasoning_tokens.unwrap_or(0),
+        u.reasoning_included,
     )
 }
 
-/// The D4 quantity from raw components — the ONE formula every path shares.
+/// Legacy D4 compatibility wrapper for callers without a reasoning-inclusion marker.
+/// New measurements should use [`billable_parts_with_reasoning`].
 ///
 /// [`billable`] takes a [`UsageV2`], but the same number has to be produced from a flat
 /// [`UsageEvent`] and from SQL columns in the aggregate store. Each of those re-deriving the
 /// arithmetic is how a dashboard ends up disagreeing with what the ledger charged, so they all
-/// route through here (SQL mirrors this expression per row and is pinned by a test).
+/// use the explicit formula (SQL mirrors it per row and is pinned by a test).
 ///
 /// **Order of operations matters at the aggregate level.** The reasoning fold is a
 /// *per-call* decision, so a total must sum this function per event — summing the columns first
@@ -47,7 +47,30 @@ pub fn billable_parts(
     tokens_out: u64,
     reasoning_tokens: u64,
 ) -> u64 {
-    let unfolded_reasoning = if reasoning_tokens > tokens_out {
+    billable_parts_with_reasoning(
+        tokens_in,
+        cache_creation_tokens,
+        cache_read_tokens,
+        tokens_out,
+        reasoning_tokens,
+        None,
+    )
+}
+
+/// Explicit per-call reasoning semantics. `None` preserves historical accounting; never infer
+/// a new record's marker from provider labels, which may identify a compatible custom server.
+#[must_use]
+pub fn billable_parts_with_reasoning(
+    tokens_in: u64,
+    cache_creation_tokens: u64,
+    cache_read_tokens: u64,
+    tokens_out: u64,
+    reasoning_tokens: u64,
+    reasoning_included: Option<bool>,
+) -> u64 {
+    let unfolded_reasoning = if reasoning_included == Some(false)
+        || (reasoning_included.is_none() && reasoning_tokens > tokens_out)
+    {
         reasoning_tokens
     } else {
         0
@@ -63,7 +86,7 @@ pub fn billable_parts(
 }
 
 /// The cost basis of a call's backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Backend {
     /// Provider API — billed in tokens.
@@ -76,7 +99,7 @@ pub enum Backend {
 ///
 /// **No dollars, no tier/SKU names.** Sandhi measures; the commercial layer prices
 /// (AnvaiOps ADR-0047 D3). Build with [`UsageEvent::new`] + the `with_*` setters.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct UsageEvent {
     /// Wire-contract major version. Breaking changes bump this and coordinate consumers.
     pub schema_version: String,
@@ -151,11 +174,14 @@ pub struct UsageEvent {
     /// Streams only: milliseconds from request start to the first delivered item.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_to_first_token_ms: Option<u64>,
-    /// Reasoning tokens when the provider reports them separately (OpenAI o-series
-    /// `reasoning_tokens`, Gemini `thoughtsTokenCount`). Absent when folded into
-    /// `tokens_out` (Anthropic) or not reported.
+    /// Provider-reported reasoning count (OpenAI `reasoning_tokens`, Gemini
+    /// `thoughtsTokenCount`). Inclusion in output is specified by `reasoning_included`;
+    /// absent when no separate count is reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u64>,
+    /// True: included in tokens_out; false: separate. Absent preserves legacy accounting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_included: Option<bool>,
 }
 
 impl UsageEvent {
@@ -200,6 +226,7 @@ impl UsageEvent {
             duration_ms: None,
             time_to_first_token_ms: None,
             reasoning_tokens: None,
+            reasoning_included: None,
         }
     }
 
@@ -210,14 +237,15 @@ impl UsageEvent {
     /// migrated to [`billable`]. That left two meters in the tree: the proxy charged the cache
     /// split, and every caller of this helper (both language bindings record spend with it, and
     /// the dashboard ranked by it) charged less for the same call — a 2× under-count on
-    /// cache-heavy traffic. Phase 0 is over; there is one definition, [`billable_parts`].
+    /// cache-heavy traffic. All new paths use [`billable_parts_with_reasoning`].
     pub fn billable_tokens(&self) -> u64 {
-        billable_parts(
+        billable_parts_with_reasoning(
             self.tokens_in,
             self.cache_creation_tokens,
             self.cache_read_tokens,
             self.tokens_out,
             self.reasoning_tokens.unwrap_or(0),
+            self.reasoning_included,
         )
     }
 
@@ -252,10 +280,16 @@ impl UsageEvent {
         self
     }
 
-    /// Separately-reported reasoning tokens (None when folded or not reported).
+    /// Provider-reported reasoning count (None when not reported).
     #[must_use]
     pub fn with_reasoning(mut self, reasoning_tokens: Option<u64>) -> Self {
         self.reasoning_tokens = reasoning_tokens;
+        self
+    }
+
+    #[must_use]
+    pub fn with_reasoning_included(mut self, included: Option<bool>) -> Self {
+        self.reasoning_included = included;
         self
     }
 
@@ -454,5 +488,26 @@ mod tests {
         assert_eq!(billable_parts(u64::MAX, 0, 0, 10, u64::MAX), u64::MAX);
         // A single runaway dimension saturates rather than wrapping the rest away.
         assert_eq!(billable_parts(u64::MAX, 1, 0, 0, 0), u64::MAX);
+    }
+}
+#[test]
+fn explicit_reasoning_semantics_do_not_depend_on_magnitude() {
+    for thoughts in [0, 25, 40, 90] {
+        for included in [Some(false), Some(true), None] {
+            let e = UsageEvent::new("r", "t", "gemini", "m", Backend::External)
+                .with_tokens(70, 40)
+                .with_cache(0, 30)
+                .with_reasoning(Some(thoughts))
+                .with_reasoning_included(included);
+            let extra = if included == Some(false) || (included.is_none() && thoughts > 40) {
+                thoughts
+            } else {
+                0
+            };
+            assert_eq!(e.billable_tokens(), 140 + extra);
+            let roundtrip: UsageEvent =
+                serde_json::from_value(serde_json::to_value(&e).unwrap()).unwrap();
+            assert_eq!(roundtrip, e);
+        }
     }
 }

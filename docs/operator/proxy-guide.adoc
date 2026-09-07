@@ -117,7 +117,7 @@ sandhi-proxy listening on http://127.0.0.1:8787  (OpenAI Chat/Responses | Anthro
 
 | `SANDHI_STORE`
 | _(unset → in-memory)_
-| SQLite path. When set, metering + vkeys + budgets + the enforcement ledger are **durable and crash-safe**; survive a restart.
+| Ordinary SQLite filesystem path. Committed usage, vkeys, budgets and ledger rows survive restart; best-effort queued observations can be lost. Configured database initialization failures exit `2` before binding, without memory fallback. Empty/whitespace-only values, `:memory:` and SQLite `file:` URIs are refused; unset it explicitly for development memory mode. Recovery still requires a complete, fixed-topology file set.
 
 | `SANDHI_MEMORY_SINK_MAX`
 | `10000`
@@ -129,7 +129,7 @@ sandhi-proxy listening on http://127.0.0.1:8787  (OpenAI Chat/Responses | Anthro
 
 | `SANDHI_ADMIN_TOKEN`
 | _(unset → admin API disabled)_
-| The admin bearer. **Setting it enables `/admin/*`** and (by default) gates `/dashboard` and `/metrics`.
+| The admin bearer. **Setting it enables `/admin/*`** and (by default) gates dashboard data APIs and `/metrics`. The dashboard HTML shell is public; data is authenticated separately.
 
 | `SANDHI_PUBLIC_URL`
 | `http://localhost:8787` (`https://...` when TLS is configured)
@@ -137,7 +137,7 @@ sandhi-proxy listening on http://127.0.0.1:8787  (OpenAI Chat/Responses | Anthro
 
 | `SANDHI_VAULT_BACKEND`
 | `keyring`
-| Secret backend: `keyring` (OS keychain) or `sentinelpass`. Release binaries use native SentinelPass daemon IPC; a source build needs the `sentinelpass-ipc` feature or falls back to the CLI. Unknown → `keyring`.
+| Secret backend: `keyring` (OS keychain) or `sentinelpass`. Native IPC requires the `sentinelpass-ipc` feature and configured tokens. Missing support/configuration or unknown names leave the vault unavailable; no automatic fallback.
 
 | `SANDHI_OPENAI_KEY` / `SANDHI_ANTHROPIC_KEY` / `SANDHI_GEMINI_KEY`
 | _(unset)_
@@ -193,7 +193,11 @@ sandhi-proxy listening on http://127.0.0.1:8787  (OpenAI Chat/Responses | Anthro
 
 | `SANDHI_SHUTDOWN_GRACE_SECS`
 | `30`
-| Maximum drain time after SIGINT/SIGTERM. When it expires, remaining streams are cancelled and their accounting finalizers settle the best partial measurement available.
+| One total deadline after observed SIGINT/SIGTERM, including quiesce, connections, accounting, writer drains, telemetry and runtime teardown. The binary exits `124` when cleanup remains incomplete; settlement/persistence is not guaranteed after forced exit.
+
+| `SANDHI_SHUTDOWN_QUIESCE_MS`
+| `1000`
+| Nonnegative same-port probe window after cutoff; clamped to one quarter of the remaining shutdown grace so drain retains time. `0` closes admission to new connections immediately. The window consumes the original grace, not an additional timeout.
 
 | `SANDHI_REPLICA_COUNT`
 | `1`
@@ -210,9 +214,17 @@ sandhi-proxy listening on http://127.0.0.1:8787  (OpenAI Chat/Responses | Anthro
 
 [CAUTION]
 ====
-Increasing `SANDHI_LEDGER_SHARDS` migrates existing enforcement rows out of the original SQLite
-file. Returning to `1` does not merge the shard files back. Back up the store and treat a shard-count
-change as a storage migration, not a per-process tuning toggle.
+Changing `SANDHI_LEDGER_SHARDS` from `1` to multiple shards migrates existing enforcement rows
+out of the original SQLite file. Returning to `1` does not merge shard files back; changing an
+existing multi-shard topology is not a supported automatic migration. Quiesce writers and back
+up the store before a supported migration; this is not a per-process tuning toggle.
+
+W05a adds opt-in store APIs for atomic settlement receipts and delivery claims. The proxy still
+uses its existing settlement path: there is no new authoritative export mode, receiver, or
+attempt timeline. If a library caller uses these primitives, receipt/acknowledgement rows have
+no automatic retention and single-file widening refuses that evidence-bearing source before
+creating destination files or moving rows. Do not delete receipts to bypass the guard. See
+link:../product/attempt-accounting-and-evidence.md[accounting/evidence gates] before adoption.
 ====
 
 When `SANDHI_VAULT_BACKEND=sentinelpass`, native IPC reads `SENTINELPASS_CLIENT_TOKEN`,
@@ -220,6 +232,19 @@ When `SANDHI_VAULT_BACKEND=sentinelpass`, native IPC reads `SENTINELPASS_CLIENT_
 `SANDHI_SENTINELPASS_FALLBACK_CLI=1` to force the legacy CLI backend; its executable override is
 `SANDHI_SENTINELPASS_BIN` (default `sentinelpass`). Native IPC is enabled in release binaries and in
 source builds made with `--features sentinelpass-ipc`.
+
+Native IPC uses a dedicated runtime thread and a bounded queue. Its default deadline is 5000 ms,
+including queue time; `SANDHI_SENTINELPASS_TIMEOUT_MS` accepts 50–30000 ms. A timed-out write may
+have applied in the broker: reconcile before retrying. The explicit legacy CLI backend has no
+I/O deadline and is disabled for interactive reference onboarding.
+
+For read-only runtime grants, provision through the broker first, then use
+`sandhi keys reference openai default` or the dashboard's “Existing reference (read-only)” mode.
+`POST /admin/keys/reference` never writes a secret. `GET /admin/version` reports local backend
+operations separately from grants (`grant_status: not_checked`). Local credential revocation
+does not revoke a broker grant or provider key, and reports secret cleanup separately.
+See link:../product/broker-integration-contract.md[the broker contract] for setup, failure codes,
+partial-write recovery, canonical references and the remaining live-daemon gates.
 
 [IMPORTANT]
 ====
@@ -322,6 +347,48 @@ curl -sS -X POST http://localhost:8787/admin/config/apply \
 Both routes require `SANDHI_ADMIN_TOKEN`; durable provider/vkey/alert state also requires
 `SANDHI_STORE`. Use the manual CLI flow below when a virtual key needs an explicit budget scope,
 expiry, or another field not represented by the desired-state `vkeys[]` entry.
+
+=== Management commit and failure semantics
+
+Budget admission is estimate-based, even with `policy: block`: bytes/4 is not a proven input
+token bound, and every in-flight call can contribute excess. No provider/model currently has a
+strict total-token-cap guarantee. See link:../product/metering-and-budget-guarantees.md[the
+metering and budget matrix] for controls, missing proofs, reasoning semantics and upgrade rules.
+
+`POST /admin/budget` validates a nonempty scope, a `total`/`daily`/`monthly` window, a
+`block`/`warn` policy, a limit from zero through `9223372036854775807`, and any alert thresholds
+from zero through 100. Unknown spellings are errors, not fallback policy choices. A rejected
+budget request returns 400 before writing. Config apply validates all declared budget and alert
+intent before touching any backend. Other component errors are reported as apply failures.
+
+With `SANDHI_STORE`, budget persistence must succeed before live metadata changes or the API
+acknowledges the update. A failed budget commit returns 503 and leaves the previous policy
+unchanged. Concurrent budget updates are serialized through commit/publication; the final live
+policy matches durable state. This is last-writer-wins, not revision/ETag conflict detection.
+Without `SANDHI_STORE`, budgets remain explicitly volatile and reset on restart.
+
+[IMPORTANT]
+====
+Config apply and a budget with inline alerts are *not* multi-store transactions. HTTP 503 does
+not necessarily mean that nothing changed. Inspect the JSON response before retrying:
+
+* Config: `ok: false`, an `error` summary, a `failures` array identifying failed components,
+  and the usual `providers.applied`, `budgets.applied`, `alerts.created/skipped` and
+  `vkeys.minted/skipped` lists. Committed items are not rolled back. A failed budget's inline
+  alerts are not attempted. A failed inventory read is a failure, not a successful skip.
+* Budget with inline alerts: `budget_applied: true` means the budget committed even if some
+  alerts failed; `alerts_created` and `alerts_failed` report the outcome. If the alert store is
+  absent, the request is rejected before the budget changes.
+* The dashboard renders incomplete config results and still shows keys minted in that response.
+  Copy them before another apply or clearing authentication. The CLI prints partial budget
+  results and exits nonzero. Direct API consumers must preserve the response body on errors.
+====
+
+After a failure, compare inventory and the committed-item lists, repair the failing backend or
+intent, then apply deliberately. Sequential config retries deduplicate satisfied alerts and key
+identities; direct budget alert creation can duplicate rules on retry. Concurrent config apply
+is not an exactly-once workflow, and no automatic retry/rollback guarantee is implied. Shared
+policy revisions and transactional multi-store reconciliation remain future work.
 
 
 == Step 2 — register the real upstream credential
@@ -554,13 +621,57 @@ cargo run -p sandhi-proxy --bin sandhi -- --admin-token admin-secret budget usag
 cargo run -p sandhi-proxy --bin sandhi -- --admin-token admin-secret vkeys list
 ----
 
-* **Dashboard:** `http://localhost:8787/dashboard` — requires `Authorization: Bearer admin-secret`
-  unless `SANDHI_DASHBOARD_PUBLIC=1`. Values are masked.
+* **Dashboard:** Open `http://localhost:8787/dashboard`, enter the admin token and select
+  *Use token* (or press Enter). The public HTML shell and compiled CSS/JavaScript assets need
+  no separate frontend server. Data reads attach the bearer unless public access is enabled;
+  mutations, config previews and run lookups always require admin access. Inventory values
+  are masked; newly minted keys are shown once for copying.
+  The token stays in page memory, not browser storage. Editing or clearing it immediately
+  clears privileged panels and one-time results. Reloading requires re-entry. Management
+  responses use `Cache-Control: no-store`; use HTTPS beyond a trusted local hop.
+  Panels distinguish authentication/permission errors, unconfigured stores and unavailable
+  data. A failed refresh retains prior data only with a *stale* label and timestamp; it is not
+  a fresh zero-usage report. Storage read failures return 503. Public access exposes data
+  deliberately and should not be enabled just to work around authentication.
 * **Metrics:** `GET /metrics` (Prometheus text), gated the same way. See the
   observability section below for the four alerts worth wiring.
 
 
 == Observability and telemetry
+
+=== Readiness and shutdown
+
+Use unauthenticated `GET /readyz` for traffic readiness (`200` while running, `503` after
+shutdown cutoff; `Cache-Control: no-store`). `GET /healthz` remains process liveness (`200`).
+Readiness describes drain state only, not provider, ledger, vault or writer health. Migrate
+traffic probes from `/healthz` to `/readyz`; retain `/healthz` for liveness checks.
+
+At cutoff, queued and newly arriving AI requests return dialect-shaped `503` with
+`Retry-After: 1` (`gateway_draining`, or Gemini `UNAVAILABLE`). Body uploads that span cutoff
+cannot authorize model dispatch afterward. Authenticated admin mutations also return `503`;
+a multi-item config apply may have already committed earlier items, so inspect its partial
+results before retrying. Read-only operations remain available during quiesce.
+
+During the bounded quiesce window, fresh HTTP/TLS connections and existing keep-alive
+connections can probe the same port. Global/per-IP connection limits still apply: saturated
+connections may be shed before HTTP and no reserved probe capacity is promised. Size the
+window and external traffic-drain timing for your deployment. After quiesce the listener
+closes and existing connections drain; fresh probes are no longer reachable.
+
+Cutoff serializes *dispatch authorization*, not the instant bytes reach an upstream. Already
+authorized work may finish during drain. Abandoned, undispatched reservations are rolled back
+without usage events; admitted streams retain accounting ownership through finalization.
+One monotonic deadline covers all phases. Normal cleanup exits `0`; deadline/incomplete
+cleanup exits `124`, possibly leaving uncertain settlement or best-effort observations.
+Do not interpret timeout as a successful flush or retry an uncertain model call blindly.
+The process watchdog does not depend on Tokio cancellation and does not log on its hard-exit
+path. See link:recovery-drill.md[the isolated recovery rehearsal] for fixed-topology snapshots,
+crash leases and revocation reconciliation. Authoritative attempt evidence remains W05 scope.
+
+Library embedders retain runtime ownership: deadline expiry requests cancellation and returns
+`io::ErrorKind::TimedOut`, rather than forcing process termination. Synchronous destructors
+or blocking tasks may continue; embedders must supply their own process-level termination
+policy if a hard bound is required.
 
 === Logs
 
@@ -587,6 +698,31 @@ opened with `SANDHI_DASHBOARD_PUBLIC=1`. Metrics describe the gateway, not indiv
 Label dimensions are closed, and distinct series are capped by `SANDHI_METRICS_MAX_SERIES`; new
 model values beyond the cap fold into `(overflow)` without losing totals. Per-subject attribution
 belongs in the bounded usage aggregate instead of metric labels.
+
+Best-effort usage and alert writers expose fixed `buffer="usage"` and `buffer="alerts"` samples:
+`sandhi_buffer_configured` is `1` when an observer is attached and `0` otherwise. Unconfigured
+buffers omit depth/drop samples; zero must not imply an active healthy writer. Configured
+buffers expose `sandhi_buffer_capacity`, `sandhi_buffer_queued`, `sandhi_buffer_in_flight` and
+`sandhi_buffer_dropped_total`. Drops include rejected enqueue attempts and queued callbacks
+abandoned after worker panic, not the unknown result of the panicking callback itself.
+Queued excludes the executing callback and flush/shutdown control
+messages, though those control messages share channel capacity. An in-flight callback is not
+evidence of a successful database commit. Counters reset on restart; configured is not a worker
+liveness check. These metrics follow the existing `/metrics` bearer/public-read policy.
+
+Investigate sustained queue growth or `increase(sandhi_buffer_dropped_total[5m]) > 0` as loss of
+best-effort observation. Do not interpret zero drops as complete accounting: storage insert
+failures and in-memory ring evictions are separate, not yet exported signals. These are not
+W05 settlement-outbox backlog metrics. The new buffer signals are Prometheus-only; OTLP parity,
+oldest-item age remain tracked follow-ups. Offline backup/restore rehearsals are covered by
+link:recovery-drill.md[W06c]; online/fleet recovery is not implied.
+
+Unlabelled `sandhi_ready`, `sandhi_shutdown_active_operations` and
+`sandhi_shutdown_elapsed_seconds` follow the same metrics authorization. Active operations
+counts tracked model/reservation/admin work, not durable commits, queued requests or all
+connections. Elapsed time is zero before cutoff; metrics are scrapeable only while their
+connection remains reachable. Drain progress logs report active connections/operations and
+remaining time; these signals do not confirm persistence.
 
 [cols="2,3,5"]
 |===

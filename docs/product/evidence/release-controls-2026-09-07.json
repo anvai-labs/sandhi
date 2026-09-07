@@ -1,0 +1,133 @@
+{
+  "schema_version": 1,
+  "repository": "anvai-labs/sandhi",
+  "observed_at": "2026-09-07 09:32:41 UTC",
+  "tag_rules": [
+    {
+      "id": 22437305,
+      "name": "release-tag-creation",
+      "target": "tag",
+      "enforcement": "active",
+      "conditions": {
+        "ref_name": {
+          "exclude": [],
+          "include": [
+            "refs/tags/v*"
+          ]
+        }
+      },
+      "bypass_actors": [
+        {
+          "actor_id": 5,
+          "actor_type": "RepositoryRole",
+          "bypass_mode": "always"
+        }
+      ],
+      "rules": [
+        {
+          "type": "creation"
+        }
+      ],
+      "url": "https://github.com/anvai-labs/sandhi/rules/22437305",
+      "current_user_can_bypass": "always"
+    },
+    {
+      "id": 22437308,
+      "name": "release-tag-immutability",
+      "target": "tag",
+      "enforcement": "active",
+      "conditions": {
+        "ref_name": {
+          "exclude": [],
+          "include": [
+            "refs/tags/v*"
+          ]
+        }
+      },
+      "bypass_actors": [],
+      "rules": [
+        {
+          "type": "update"
+        },
+        {
+          "type": "deletion"
+        }
+      ],
+      "url": "https://github.com/anvai-labs/sandhi/rules/22437308",
+      "current_user_can_bypass": "never"
+    }
+  ],
+  "environments": [
+    {
+      "name": "npm",
+      "deployment_branch_policy": {
+        "protected_branches": false,
+        "custom_branch_policies": true
+      },
+      "policies": [
+        {
+          "id": 59317862,
+          "type": "branch",
+          "name": "main"
+        },
+        {
+          "id": 59317852,
+          "type": "tag",
+          "name": "v*"
+        }
+      ]
+    },
+    {
+      "name": "pypi",
+      "deployment_branch_policy": {
+        "protected_branches": false,
+        "custom_branch_policies": true
+      },
+      "policies": [
+        {
+          "id": 59317855,
+          "type": "tag",
+          "name": "v*"
+        }
+      ]
+    },
+    {
+      "name": "crates-io",
+      "deployment_branch_policy": {
+        "protected_branches": false,
+        "custom_branch_policies": true
+      },
+      "policies": [
+        {
+          "id": 59317858,
+          "type": "tag",
+          "name": "v*"
+        }
+      ]
+    },
+    {
+      "name": "github-release",
+      "deployment_branch_policy": {
+        "protected_branches": false,
+        "custom_branch_policies": true
+      },
+      "policies": [
+        {
+          "id": 59317861,
+          "type": "tag",
+          "name": "v*"
+        }
+      ]
+    }
+  ],
+  "branch_protections_unchanged": true,
+  "credentials": {
+    "values_read": false,
+    "rotated": false,
+    "repository_secret_names": [
+      "CARGO_REGISTRY_TOKEN"
+    ],
+    "crates_environment_secret_names": []
+  },
+  "public_runner_routing": true
+}

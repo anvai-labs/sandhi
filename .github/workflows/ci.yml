@@ -130,6 +130,7 @@ jobs:
               - 'crates/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - 'deny.toml'
               - '.github/workflows/ci.yml'
             python:
               - 'crates/**'
@@ -312,17 +313,11 @@ jobs:
           fi
 
   security:
-    # Security/dependency gate — Sandhi previously had none. `cargo deny check advisories`
-    # fails on known vulnerabilities + yanked crates (deny.toml). Runs whenever Rust deps/code
-    # change (the `rust` filter includes Cargo.lock/Cargo.toml); dependabot covers new advisories
-    # against unchanged deps via its own PRs.
-    #
-    # `actions/dependency-review-action` (per-PR diff of newly-introduced vulns) is deliberately
-    # NOT here yet: it needs the repo Dependency graph enabled, which is a governance setting
-    # (see Phase 2). cargo-deny advisories already covers vuln-detection across the whole tree,
-    # so dependency-review is a fast-follow once the dependency graph is turned on, not a blocker.
+    # Check all three independent Rust workspaces, including optional dependencies.
+    # Binding-only changes and policy changes must run this gate too. Dependabot covers
+    # newly reported advisories against unchanged dependencies between workflow runs.
     needs: changes
-    if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.rust == 'true' }}
+    if: ${{ always() && needs.changes.result == 'success' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.python == 'true' || needs.changes.outputs.node == 'true') }}
     runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -339,7 +334,10 @@ jobs:
         with:
           tool: cargo-deny@0.20.2
       - name: cargo-deny advisories (known vulnerabilities + yanked crates)
-        run: cargo deny check advisories
+        run: |
+          cargo deny --locked --all-features --config deny.toml check advisories
+          cargo deny --locked --all-features --manifest-path bindings/python/Cargo.toml --config deny.toml check advisories
+          cargo deny --locked --all-features --manifest-path bindings/node/Cargo.toml --config deny.toml check advisories
 
   lint-title:
     # Conventional-commit PR title gate. Dependabot PRs are prefixed `chore:`
@@ -475,10 +473,42 @@ jobs:
           python-version: '3.12'
       # The vendors' own clients decide how a request is shaped. Pinning majors keeps a vendor
       # release from turning this gate red without a code change, while still tracking real SDKs.
-      - name: Install the vendor SDKs
-        run: python -m pip install --quiet 'openai>=2,<3' 'anthropic>=0.97,<1' 'google-genai>=1.73,<2' 'httpx>=0.27' pytest
-      - name: Drive the proxy with openai-python, anthropic-python and google-genai
+      - name: Install the vendor SDKs and browser test driver
+        run: python -m pip install --quiet 'openai>=2,<3' 'anthropic>=0.97,<1' 'google-genai>=1.73,<2' 'httpx>=0.27' pytest 'playwright==1.58.0'
+      - name: Install the dashboard test browser
+        run: python -m playwright install --with-deps chromium
+      - name: Drive the proxy with vendor SDKs and the served dashboard
         run: python -m pytest tests/sdk-conformance/ -q
+
+  release-safeguards:
+    name: Release safeguards
+    needs: changes
+    if: ${{ always() && needs.changes.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - run: python -m pip install pytest==8.4.1 PyYAML==6.0.2
+      - name: Install locked packaging-test tooling without lifecycle scripts
+        working-directory: bindings/node
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: python -m pytest tests/release -q
+      - name: Validate release and CI workflow syntax
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl --fail --silent --show-error --location --retry 3 --max-time 60 https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz -o actionlint.tar.gz
+          echo '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz' | sha256sum --check --status
+          tar -xzf actionlint.tar.gz actionlint
+          ./actionlint "$GITHUB_WORKSPACE/.github/workflows/release.yml" "$GITHUB_WORKSPACE/.github/workflows/publish-crates.yml" "$GITHUB_WORKSPACE/.github/workflows/ci.yml"
 
   ci-success:
     name: CI Success
@@ -496,7 +526,7 @@ jobs:
           vars.OWNER_PRIVATE_CI_ENABLED == 'true' &&
           needs.authorize-owner.result == 'success')
       )
-    needs: [authorize-owner, changes, rust, schema, python-binding, node-binding, attribution, coverage, codegen-drift, sdk-conformance, security, lint-title]
+    needs: [authorize-owner, changes, rust, schema, python-binding, node-binding, attribution, coverage, codegen-drift, sdk-conformance, security, lint-title, release-safeguards]
     steps:
       - name: Verify no required job failed (skipped is OK for docs-only)
         env:

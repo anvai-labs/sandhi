@@ -89,6 +89,16 @@ impl VaultEntry {
 /// `service = "sandhi"`, `account = "<provider>:<label>"`.
 pub trait Vault: Send + Sync {
     fn name(&self) -> &'static str;
+    /// Implementation support, not a grant probe or a daemon-health assertion. Custom backends
+    /// must explicitly opt into write/delete capability; an implemented trait is not evidence.
+    fn capabilities(&self) -> VaultCapabilities {
+        VaultCapabilities {
+            read: true,
+            write: false,
+            delete: false,
+            bounded_io: false,
+        }
+    }
     /// Read the raw secret for `provider:label`. `None` if not present.
     fn get_secret(&self, provider: &str, label: &str) -> Result<Option<String>, VaultError>;
     /// Write the raw secret for `provider:label`.
@@ -103,6 +113,30 @@ pub trait Vault: Send + Sync {
 pub enum VaultError {
     Backend(String),
     NotSupported(String),
+    Busy,
+    Timeout,
+    Locked,
+    Denied,
+    Configuration,
+    InvalidReference,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct VaultCapabilities {
+    pub read: bool,
+    pub write: bool,
+    pub delete: bool,
+    pub bounded_io: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretDeletion {
+    NotAttempted,
+    Unsupported,
+    Deleted,
+    Missing,
+    Failed,
 }
 
 impl std::fmt::Display for VaultError {
@@ -110,6 +144,12 @@ impl std::fmt::Display for VaultError {
         match self {
             Self::Backend(m) => write!(f, "vault backend error: {m}"),
             Self::NotSupported(m) => write!(f, "vault operation not supported: {m}"),
+            Self::Busy => f.write_str("vault busy; operation not admitted"),
+            Self::Timeout => f.write_str("vault deadline exceeded; a dispatched write may have applied; reconcile before retry"),
+            Self::Locked => f.write_str("vault locked; unlock through the broker and retry explicitly"),
+            Self::Denied => f.write_str("broker rejected operation; check client token and exact read/write grant"),
+            Self::Configuration => f.write_str("vault configuration unavailable; check backend feature, client token and daemon token"),
+            Self::InvalidReference => f.write_str("provider and label must use lowercase ASCII letters, digits, dots, underscores or hyphens (1–128 characters)"),
         }
     }
 }
@@ -132,6 +172,15 @@ impl KeyringVault {
 impl Vault for KeyringVault {
     fn name(&self) -> &'static str {
         "keyring"
+    }
+
+    fn capabilities(&self) -> VaultCapabilities {
+        VaultCapabilities {
+            read: true,
+            write: true,
+            delete: true,
+            bounded_io: false,
+        }
     }
 
     fn get_secret(&self, provider: &str, label: &str) -> Result<Option<String>, VaultError> {
@@ -166,171 +215,10 @@ impl Default for KeyringVault {
     }
 }
 
-/// SentinelPass daemon IPC backend. Speaks the native daemon protocol through the
-/// `sentinelpass-protocol` contract crate (Unix socket / named pipe) — no CLI spawn, one
-/// message per lookup, explicit locked vs not-found semantics, and write support via
-/// token-enforced `--write` grants.
-///
-/// Env: `SENTINELPASS_CLIENT_TOKEN` (per-client grant token), `SANDHI_SENTINELPASS_CLIENT_ID`
-/// (default `sandhi`), `SANDHI_SENTINELPASS_SOCKET` (socket path override).
 #[cfg(feature = "sentinelpass-ipc")]
-pub struct SentinelPassIpcVault {
-    client_id: String,
-    client_token: Option<String>,
-    socket_path: std::path::PathBuf,
-    /// Current-thread runtime used to drive the async IPC client from the sync
-    /// `Vault` trait. Built eagerly so failures surface at backend selection.
-    rt: tokio::runtime::Runtime,
-}
-
+mod ipc;
 #[cfg(feature = "sentinelpass-ipc")]
-impl SentinelPassIpcVault {
-    pub fn new() -> Result<Self, VaultError> {
-        let client_id =
-            std::env::var("SANDHI_SENTINELPASS_CLIENT_ID").unwrap_or_else(|_| "sandhi".into());
-        let client_token = std::env::var("SENTINELPASS_CLIENT_TOKEN")
-            .ok()
-            .filter(|t| !t.is_empty());
-        let socket_path = std::env::var("SANDHI_SENTINELPASS_SOCKET")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| sentinelpass_protocol::default_ipc_socket_path());
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| VaultError::Backend(format!("sentinelpass ipc runtime: {e}")))?;
-        Ok(Self {
-            client_id,
-            client_token,
-            socket_path,
-            rt,
-        })
-    }
-
-    fn domain(provider: &str, label: &str) -> String {
-        format!("sandhi:{provider}:{label}")
-    }
-
-    fn send(
-        &self,
-        message: sentinelpass_protocol::IpcMessage,
-    ) -> Result<sentinelpass_protocol::IpcMessage, VaultError> {
-        let client = sentinelpass_protocol::IpcClient::new(self.socket_path.clone())
-            .map_err(|e| VaultError::Backend(format!("sentinelpass ipc client: {e}")))?
-            .with_context(
-                self.client_token.clone(),
-                Some(sentinelpass_protocol::Origin::Cli),
-            );
-        self.rt
-            .block_on(client.send(message))
-            .map_err(|e| VaultError::Backend(format!("sentinelpass ipc: {e}")))
-    }
-}
-
-#[cfg(feature = "sentinelpass-ipc")]
-impl Default for SentinelPassIpcVault {
-    /// Falls back to an empty backend on construction failure; the proxy logs backend
-    /// errors per lookup, so a degraded start stays observable without aborting boot.
-    fn default() -> Self {
-        Self::new().unwrap_or_else(|_| Self {
-            client_id: "sandhi".into(),
-            client_token: None,
-            socket_path: sentinelpass_protocol::default_ipc_socket_path(),
-            rt: tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("tokio current-thread runtime"),
-        })
-    }
-}
-
-#[cfg(feature = "sentinelpass-ipc")]
-impl Vault for SentinelPassIpcVault {
-    fn name(&self) -> &'static str {
-        "sentinelpass-ipc"
-    }
-
-    fn get_secret(&self, provider: &str, label: &str) -> Result<Option<String>, VaultError> {
-        let response = self.send(sentinelpass_protocol::IpcMessage::GetExternalSecret {
-            client_id: self.client_id.clone(),
-            domain: Self::domain(provider, label),
-            field: sentinelpass_protocol::ExternalSecretField::Password,
-            purpose: Some("sandhi-vault".into()),
-        })?;
-        match response {
-            sentinelpass_protocol::IpcMessage::GetExternalSecretResponse {
-                value,
-                authorized: true,
-                error,
-                locked,
-            } => {
-                if locked == Some(true) {
-                    return Err(VaultError::Backend(
-                        "sentinelpass vault is locked (unlock it, then restart the proxy)".into(),
-                    ));
-                }
-                match (value, error) {
-                    (Some(value), _) => Ok(Some(value)),
-                    (None, Some(err)) => Err(VaultError::Backend(err)),
-                    (None, None) => Ok(None),
-                }
-            }
-            sentinelpass_protocol::IpcMessage::GetExternalSecretResponse {
-                authorized: false,
-                error,
-                ..
-            } => Err(VaultError::Backend(error.unwrap_or_else(|| {
-                "not authorized: run 'sentinelpass secret allow --client-id sandhi --domain                  sandhi:<provider>:<label> --field password' and set SENTINELPASS_CLIENT_TOKEN"
-                    .into()
-            }))),
-            _ => Err(VaultError::Backend(
-                "sentinelpass ipc: unexpected response".into(),
-            )),
-        }
-    }
-
-    fn set_secret(&self, provider: &str, label: &str, secret: &str) -> Result<(), VaultError> {
-        let response = self.send(sentinelpass_protocol::IpcMessage::SaveSecret {
-            client_id: self.client_id.clone(),
-            domain: Self::domain(provider, label),
-            value: secret.to_string(),
-            purpose: Some("sandhi-vault".into()),
-        })?;
-        match response {
-            sentinelpass_protocol::IpcMessage::SaveSecretResponse { success: true, .. } => Ok(()),
-            sentinelpass_protocol::IpcMessage::SaveSecretResponse {
-                success: false,
-                error,
-                ..
-            } => Err(VaultError::Backend(
-                error.unwrap_or_else(|| "sentinelpass save rejected".into()),
-            )),
-            _ => Err(VaultError::Backend(
-                "sentinelpass ipc: unexpected save response".into(),
-            )),
-        }
-    }
-
-    fn delete_secret(&self, provider: &str, label: &str) -> Result<bool, VaultError> {
-        // The daemon rejects external deletion by design (no entry ownership yet);
-        // revoking the grant is the supported off-boarding path.
-        let response = self.send(sentinelpass_protocol::IpcMessage::DeleteSecret {
-            client_id: self.client_id.clone(),
-            domain: Self::domain(provider, label),
-        })?;
-        match response {
-            sentinelpass_protocol::IpcMessage::DeleteSecretResponse {
-                deleted: false,
-                error,
-                ..
-            } => Err(VaultError::NotSupported(error.unwrap_or_else(|| {
-                "revoke the SentinelPass grant instead (sentinelpass secret revoke)".into()
-            }))),
-            _ => Err(VaultError::NotSupported(
-                "revoke the SentinelPass grant instead (sentinelpass secret revoke)".into(),
-            )),
-        }
-    }
-}
+pub use ipc::SentinelPassIpcVault;
 
 /// SentinelPass password-manager backend. Talks to the SentinelPass daemon through its CLI
 /// (`sentinelpass secret get …`) to keep the coupling loose — there is intentionally **no path
@@ -371,6 +259,15 @@ impl Default for SentinelPassVault {
 impl Vault for SentinelPassVault {
     fn name(&self) -> &'static str {
         "sentinelpass"
+    }
+
+    fn capabilities(&self) -> VaultCapabilities {
+        VaultCapabilities {
+            read: true,
+            write: false,
+            delete: false,
+            bounded_io: false,
+        }
     }
 
     fn get_secret(&self, provider: &str, label: &str) -> Result<Option<String>, VaultError> {
@@ -447,6 +344,15 @@ impl Vault for InMemoryVault {
         "memory"
     }
 
+    fn capabilities(&self) -> VaultCapabilities {
+        VaultCapabilities {
+            read: true,
+            write: true,
+            delete: true,
+            bounded_io: true,
+        }
+    }
+
     fn get_secret(&self, provider: &str, label: &str) -> Result<Option<String>, VaultError> {
         Ok(self
             .secrets
@@ -476,6 +382,47 @@ impl Vault for InMemoryVault {
 
 fn account(provider: &str, label: &str) -> String {
     format!("{provider}:{label}")
+}
+
+/// Reject normalization collisions and wildcards rather than silently widening a broker domain.
+pub fn validate_reference(provider: &str, label: &str) -> Result<(), VaultError> {
+    for value in [provider, label] {
+        if value.is_empty()
+            || value.ends_with('.')
+            || value.len() > 128
+            || !value.bytes().all(|c| {
+                c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'.' | b'_' | b'-')
+            })
+        {
+            return Err(VaultError::InvalidReference);
+        }
+    }
+    Ok(())
+}
+
+/// Preserve a configured-but-unavailable backend; never silently select another secret store.
+struct UnavailableVault;
+impl Vault for UnavailableVault {
+    fn name(&self) -> &'static str {
+        "unavailable"
+    }
+    fn capabilities(&self) -> VaultCapabilities {
+        VaultCapabilities {
+            read: false,
+            write: false,
+            delete: false,
+            bounded_io: false,
+        }
+    }
+    fn get_secret(&self, _: &str, _: &str) -> Result<Option<String>, VaultError> {
+        Err(VaultError::Configuration)
+    }
+    fn set_secret(&self, _: &str, _: &str, _: &str) -> Result<(), VaultError> {
+        Err(VaultError::Configuration)
+    }
+    fn delete_secret(&self, _: &str, _: &str) -> Result<bool, VaultError> {
+        Err(VaultError::Configuration)
+    }
 }
 
 /// The operator-facing vault: a SQLite metadata index composed with a secret backend.
@@ -523,19 +470,28 @@ impl VaultStore {
                 } else {
                     #[cfg(feature = "sentinelpass-ipc")]
                     {
-                        Box::new(SentinelPassIpcVault::new().unwrap_or_default())
+                        match SentinelPassIpcVault::new() {
+                            Ok(backend) => Box::new(backend),
+                            Err(_) => {
+                                tracing::warn!(
+                                    "native vault configuration unavailable; no fallback selected"
+                                );
+                                Box::new(UnavailableVault)
+                            }
+                        }
                     }
                     #[cfg(not(feature = "sentinelpass-ipc"))]
                     {
                         tracing::warn!(
                             "SANDHI_VAULT_BACKEND=sentinelpass daemon IPC requires the \
-                             `sentinelpass-ipc` feature; falling back to the legacy CLI shell-out"
+                             `sentinelpass-ipc` feature; no fallback selected"
                         );
-                        Box::new(SentinelPassVault::new())
+                        Box::new(UnavailableVault)
                     }
                 }
             }
-            _ => Box::new(KeyringVault),
+            "keyring" => Box::new(KeyringVault),
+            _ => Box::new(UnavailableVault),
         }
     }
 
@@ -563,7 +519,21 @@ impl VaultStore {
         base_url: Option<&str>,
         secret: &str,
     ) -> Result<String, VaultError> {
+        validate_reference(provider, label)?;
         self.backend.set_secret(provider, label, secret)?;
+        self.register_metadata(provider, label, scheme, base_url)
+    }
+
+    /// Index a reference only after its caller has successfully resolved and validated the secret.
+    /// This never writes to the secret backend; registration is not a grant or a rotation.
+    pub fn register_metadata(
+        &self,
+        provider: &str,
+        label: &str,
+        scheme: CredentialScheme,
+        base_url: Option<&str>,
+    ) -> Result<String, VaultError> {
+        validate_reference(provider, label)?;
         let conn = self.conn.lock().expect("vault conn poisoned");
         conn.execute(
             "INSERT OR REPLACE INTO vault (provider, label, scheme, base_url, created_at, status) \
@@ -620,9 +590,17 @@ impl VaultStore {
     /// Backends that cannot delete (e.g. sentinelpass, where revoking the grant is the
     /// off-boarding path) only fail the secret deletion — the metadata revocation proceeds.
     pub fn revoke(&self, provider: &str, label: &str) -> Result<bool, VaultError> {
-        if let Err(e) = self.backend.delete_secret(provider, label) {
-            tracing::warn!(provider, label, %e, "vault secret deletion not performed; revoking metadata anyway");
-        }
+        self.revoke_with_status(provider, label)
+            .map(|(revoked, _)| revoked)
+    }
+
+    /// Commit local revocation before attempting secret deletion. Unsupported brokers receive
+    /// no delete request. Report cleanup independently; neither step revokes a provider API key.
+    pub fn revoke_with_status(
+        &self,
+        provider: &str,
+        label: &str,
+    ) -> Result<(bool, SecretDeletion), VaultError> {
         let conn = self.conn.lock().expect("vault conn poisoned");
         let changed = conn
             .execute(
@@ -631,7 +609,19 @@ impl VaultStore {
                 params![provider, label],
             )
             .map_err(|e| VaultError::Backend(format!("sqlite vault revoke: {e}")))?;
-        Ok(changed > 0)
+        drop(conn);
+        let deletion = if changed == 0 {
+            SecretDeletion::NotAttempted
+        } else if !self.backend.capabilities().delete {
+            SecretDeletion::Unsupported
+        } else {
+            match self.backend.delete_secret(provider, label) {
+                Ok(true) => SecretDeletion::Deleted,
+                Ok(false) => SecretDeletion::Missing,
+                Err(_) => SecretDeletion::Failed,
+            }
+        };
+        Ok((changed > 0, deletion))
     }
 
     fn first_active_entry(&self, provider: &str) -> Result<Option<VaultEntry>, VaultError> {
@@ -660,6 +650,10 @@ impl VaultStore {
     /// The configured backend name.
     pub fn backend_name(&self) -> &'static str {
         self.backend.name()
+    }
+
+    pub fn capabilities(&self) -> VaultCapabilities {
+        self.backend.capabilities()
     }
 }
 
@@ -703,6 +697,47 @@ fn now_rfc3339() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_references_reject_broker_normalization_collisions() {
+        for label in [
+            "UPPER",
+            "tail.",
+            ".",
+            "..",
+            "white space",
+            "*",
+            "bad:label",
+            "bad/label",
+        ] {
+            assert!(matches!(
+                validate_reference("openai", label),
+                Err(VaultError::InvalidReference)
+            ));
+        }
+        assert!(validate_reference("openai", "team.prod-1_a").is_ok());
+    }
+
+    #[test]
+    fn failed_local_revocation_does_not_delete_the_secret() {
+        let vault = VaultStore::in_memory().unwrap();
+        vault
+            .set(
+                "openai",
+                "default",
+                CredentialScheme::ApiKey,
+                None,
+                "synthetic-key",
+            )
+            .unwrap();
+        vault.conn.lock().unwrap().execute_batch("CREATE TRIGGER deny_revoke BEFORE UPDATE ON vault BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END;").unwrap();
+        assert!(vault.revoke_with_status("openai", "default").is_err());
+        assert_eq!(
+            vault.get("openai", "default").unwrap().as_deref(),
+            Some("synthetic-key")
+        );
+        assert_eq!(vault.list().unwrap()[0].status, "active");
+    }
 
     #[test]
     fn in_memory_round_trip_and_masked_listing() {

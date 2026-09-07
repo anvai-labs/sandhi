@@ -51,6 +51,16 @@ pub mod admin {
         pub secret: String,
     }
 
+    /// Register an existing exact backend reference using only a read grant. Never accepts secrets.
+    #[derive(Debug, Clone, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct RegisterReferenceRequest {
+        pub provider: String,
+        pub label: Option<String>,
+        pub scheme: Option<String>,
+        pub base_url: Option<String>,
+    }
+
     /// `POST /admin/keys/share` — mint a scoped virtual key.
     #[derive(Debug, Clone, Deserialize)]
     pub struct ShareKeyRequest {
@@ -172,6 +182,11 @@ pub(crate) async fn version_capabilities(
             "rate_limits": true,
             // Compiled only with the otel-otlp feature AND initialized at startup.
             "otel_export": state.otel.is_some(),
+            "vault": state.vault.as_ref().map(|v| json!({
+                "backend": v.backend_name(), "operations": v.capabilities(),
+                "grant_status": "not_checked", "credential_generations": false,
+                "reference_registration": v.capabilities().read && v.backend_name() != "sentinelpass",
+            })),
         },
     });
     Json(body).into_response()
@@ -211,6 +226,76 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 fn err(status: StatusCode, msg: &str) -> Response {
     (status, Json(json!({ "error": msg }))).into_response()
+}
+
+fn draining_response() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [("retry-after", "1")],
+        Json(json!({"error": "Gateway is draining; mutation not admitted", "code": "gateway_draining"})),
+    )
+        .into_response()
+}
+
+#[allow(clippy::result_large_err)]
+fn admit_mutation(state: &ProxyState) -> Result<crate::lifecycle::OperationGuard, Response> {
+    state
+        .lifecycle
+        .try_operation()
+        .ok_or_else(draining_response)
+}
+
+/// Preserve only our handler's canonical, secret-free reconciliation fields in a batch result.
+async fn config_component_failure(mut failure: Value, response: Response) -> Value {
+    failure["status"] = json!(response.status().as_u16());
+    if let Ok(bytes) = axum::body::to_bytes(response.into_body(), 4096).await {
+        if let Ok(details) = serde_json::from_slice::<Value>(&bytes) {
+            for field in [
+                "code",
+                "reconcile_before_retry",
+                "metadata_committed",
+                "credential_id",
+            ] {
+                if let Some(value) = details.get(field) {
+                    failure[field] = value.clone();
+                }
+            }
+        }
+    }
+    failure
+}
+
+#[derive(Debug)]
+enum AlertApplyError {
+    Draining,
+    Store(String),
+}
+
+impl AlertApplyError {
+    fn failure(&self, scope: &str, threshold_pct: u8) -> Value {
+        let mut failure = json!({"component": "alert", "scope": scope,
+            "threshold_pct": threshold_pct, "error": "alert apply failed"});
+        if matches!(self, Self::Draining) {
+            failure["code"] = json!("gateway_draining");
+            failure["status"] = json!(503);
+        }
+        failure
+    }
+}
+
+impl From<String> for AlertApplyError {
+    fn from(message: String) -> Self {
+        Self::Store(message)
+    }
+}
+
+impl std::fmt::Display for AlertApplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Draining => f.write_str("gateway_draining"),
+            Self::Store(message) => f.write_str(message),
+        }
+    }
 }
 
 /// Build a typed upstream handle from a resolved credential. The family is inferred from the
@@ -280,11 +365,12 @@ fn default_base_url(provider: &str, family: ProviderFamily) -> String {
     family.default_base_url().to_string()
 }
 
-fn parse_scheme(s: Option<&str>) -> CredentialScheme {
+fn parse_scheme(s: Option<&str>) -> Result<CredentialScheme, &'static str> {
     match s.map(str::to_ascii_lowercase).as_deref() {
-        Some("bearer") => CredentialScheme::Bearer,
-        Some("oauth") => CredentialScheme::Oauth,
-        _ => CredentialScheme::ApiKey,
+        None | Some("api_key" | "api-key") => Ok(CredentialScheme::ApiKey),
+        Some("bearer") => Ok(CredentialScheme::Bearer),
+        Some("oauth") => Ok(CredentialScheme::Oauth),
+        _ => Err("unknown credential scheme"),
     }
 }
 
@@ -320,7 +406,28 @@ pub(crate) fn vkey_record_response(r: &VirtualKeyRecord) -> Value {
 
 // --- Handlers ----------------------------------------------------------------
 
-/// `POST /admin/keys` — add a provider credential to the vault + register an upstream handle.
+/// Only canonical error text crosses the admin boundary; broker errors may contain secret material.
+fn vault_failure(error: VaultError, write: bool) -> Response {
+    let reconcile = write && matches!(error, VaultError::Timeout | VaultError::Backend(_));
+    let (status, code, message) = match error {
+        VaultError::Busy => (StatusCode::SERVICE_UNAVAILABLE, "vault_busy", "Credential operation busy; not admitted"),
+        VaultError::Timeout => (StatusCode::GATEWAY_TIMEOUT, "vault_timeout", "Broker deadline exceeded"),
+        VaultError::Locked => (StatusCode::LOCKED, "vault_locked", "Unlock the broker outside Sandhi and retry explicitly"),
+        VaultError::Denied => (StatusCode::FORBIDDEN, "vault_denied", "Broker rejected operation; check the exact client/domain/field and read/write grant"),
+        VaultError::Configuration => (StatusCode::SERVICE_UNAVAILABLE, "vault_configuration", "Check selected backend, IPC feature, daemon token and client token; no automatic fallback"),
+        VaultError::InvalidReference => (StatusCode::BAD_REQUEST, "invalid_reference", "Provider and label require 1–128 lowercase ASCII letters, digits, dots, underscores or hyphens"),
+        VaultError::NotSupported(_) => (StatusCode::NOT_IMPLEMENTED, "vault_unsupported", "Operation unsupported by this backend; provision in the broker and use a supported read-only reference path"),
+        VaultError::Backend(_) => (StatusCode::SERVICE_UNAVAILABLE, "vault_unavailable", "Credential operation failed; backend details are redacted"),
+    };
+    (
+        status,
+        Json(json!({ "error": message, "code": code,
+        "reconcile_before_retry": reconcile })),
+    )
+        .into_response()
+}
+
+/// POST /admin/keys writes a secret; POST /admin/keys/reference only resolves an existing reference.
 pub(crate) async fn add_key(
     State(state): State<Arc<ProxyState>>,
     headers: HeaderMap,
@@ -329,6 +436,39 @@ pub(crate) async fn add_key(
     if let Err(r) = require_admin(&state, &headers) {
         return r;
     }
+    register_credential(
+        state,
+        admin::RegisterReferenceRequest {
+            provider: req.provider,
+            label: req.label,
+            scheme: req.scheme,
+            base_url: req.base_url,
+        },
+        Some(req.secret),
+    )
+    .await
+}
+
+pub(crate) async fn register_reference(
+    State(state): State<Arc<ProxyState>>,
+    headers: HeaderMap,
+    Json(req): Json<admin::RegisterReferenceRequest>,
+) -> Response {
+    if let Err(r) = require_admin(&state, &headers) {
+        return r;
+    }
+    register_credential(state, req, None).await
+}
+
+async fn register_credential(
+    state: Arc<ProxyState>,
+    req: admin::RegisterReferenceRequest,
+    supplied: Option<String>,
+) -> Response {
+    let operation = match admit_mutation(&state) {
+        Ok(operation) => operation,
+        Err(response) => return response,
+    };
     let Some(vault) = state.vault.clone() else {
         return err(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -336,46 +476,109 @@ pub(crate) async fn add_key(
         );
     };
     let label = req.label.as_deref().unwrap_or("default");
-    let scheme = parse_scheme(req.scheme.as_deref());
-    match vault.set(
-        &req.provider,
-        label,
-        scheme,
-        req.base_url.as_deref(),
-        &req.secret,
-    ) {
-        Ok(cred_id) => {
-            // Build + cache the upstream handle so the request path resolves it immediately.
-            if let Some(handle) = build_provider_handle(
-                &state.runtime,
-                &req.provider,
-                req.base_url.as_deref(),
-                &req.secret,
-                scheme,
-            ) {
-                state
-                    .providers
-                    .lock()
-                    .expect("providers poisoned")
-                    .insert(cred_id.clone(), handle);
-            }
-            let entry = vault
-                .list()
-                .unwrap_or_default()
-                .into_iter()
-                .find(|e| e.credential_id() == cred_id);
-            let payload = match entry {
-                Some(ref e) => vault_entry_response(e),
-                None => json!({ "credential_id": cred_id }),
-            };
-            (StatusCode::CREATED, Json(payload)).into_response()
-        }
-        Err(VaultError::NotSupported(msg)) => err(StatusCode::NOT_IMPLEMENTED, &msg),
-        Err(VaultError::Backend(msg)) => err(StatusCode::INTERNAL_SERVER_ERROR, &msg),
+    if let Err(e) = sandhi_store::vault::validate_reference(&req.provider, label) {
+        return vault_failure(e, false);
     }
+    let scheme = match parse_scheme(req.scheme.as_deref()) {
+        Ok(scheme) => scheme,
+        Err(message) => return err(StatusCode::BAD_REQUEST, message),
+    };
+    if vault.backend_name() == "unavailable" {
+        return vault_failure(VaultError::Configuration, false);
+    }
+    if supplied.is_some() && !vault.capabilities().write {
+        return vault_failure(
+            VaultError::NotSupported("write capability absent".into()),
+            false,
+        );
+    }
+    // The legacy CLI is explicitly unbounded; do not admit interactive reference operations on it.
+    if supplied.is_none() && vault.backend_name() == "sentinelpass" {
+        return vault_failure(
+            VaultError::NotSupported("bounded native IPC required".into()),
+            false,
+        );
+    }
+    let Ok(permit) = state.vault_writer.clone().try_acquire_owned() else {
+        return vault_failure(VaultError::Busy, false);
+    };
+    let write = supplied.is_some();
+    // The permit and publication live inside the blocking task: cancellation cannot admit a
+    // conflicting writer while a detached operation is still committing.
+    tokio::task::spawn_blocking(move || {
+        let _operation = operation;
+        let _permit = permit;
+        let label = req.label.as_deref().unwrap_or("default");
+        let secret = match supplied {
+            Some(secret) => secret,
+            None => match vault.get(&req.provider, label) {
+                Ok(Some(secret)) => secret,
+                Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({
+                    "error": "No credential at the authorized reference", "code": "vault_missing"
+                }))).into_response(),
+                Err(e) => return vault_failure(e, false),
+            },
+        };
+        let handle = build_provider_handle(
+            &state.runtime,
+            &req.provider,
+            req.base_url.as_deref(),
+            &secret,
+            scheme,
+        );
+        let committed = if write {
+            vault.set(
+                &req.provider,
+                label,
+                scheme,
+                req.base_url.as_deref(),
+                &secret,
+            )
+        } else {
+            vault.register_metadata(&req.provider, label, scheme, req.base_url.as_deref())
+        };
+        let cred_id = match committed {
+            Ok(id) => id,
+            Err(e) => return vault_failure(e, write),
+        };
+        if let Some(handle) = handle {
+            state
+                .providers
+                .lock()
+                .expect("providers poisoned")
+                .insert(cred_id.clone(), handle);
+        }
+        // Failure to read after commit must not turn a persisted mutation into a success-shaped
+        // empty inventory. Preserve its identity so an operator can reconcile without rewriting.
+        match vault.list() {
+            Ok(entries) => {
+                let entry = entries.iter().find(|e| e.credential_id() == cred_id);
+                (
+                    StatusCode::CREATED,
+                    Json(
+                        entry
+                            .map(vault_entry_response)
+                            .unwrap_or_else(|| json!({ "credential_id": cred_id })),
+                    ),
+                )
+                    .into_response()
+            }
+            Err(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "Credential committed; metadata refresh failed",
+                    "code": "credential_committed_refresh_failed", "credential_id": cred_id,
+                    "metadata_committed": true, "reconcile_before_retry": true
+                })),
+            )
+                .into_response(),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| vault_failure(VaultError::Backend("worker failed".into()), write))
 }
 
-/// `GET /admin/keys` — masked provider-credential metadata.
+/// GET /admin/keys reads only masked metadata.
 pub(crate) async fn list_keys(
     State(state): State<Arc<ProxyState>>,
     headers: HeaderMap,
@@ -386,12 +589,16 @@ pub(crate) async fn list_keys(
     let Some(vault) = state.vault.clone() else {
         return err(StatusCode::SERVICE_UNAVAILABLE, "vault not configured");
     };
-    let entries = vault.list().unwrap_or_default();
-    Json(json!({ "keys": entries.iter().map(vault_entry_response).collect::<Vec<_>>() }))
-        .into_response()
+    match tokio::task::spawn_blocking(move || vault.list()).await {
+        Ok(Ok(entries)) => {
+            Json(json!({ "keys": entries.iter().map(vault_entry_response).collect::<Vec<_>>() }))
+                .into_response()
+        }
+        _ => vault_failure(VaultError::Backend("inventory unavailable".into()), false),
+    }
 }
 
-/// `DELETE /admin/keys/{provider}/{label}` — revoke a provider credential.
+/// DELETE revokes local dispatch metadata. It never claims broker-grant or provider-key revocation.
 pub(crate) async fn revoke_key(
     State(state): State<Arc<ProxyState>>,
     headers: HeaderMap,
@@ -400,23 +607,35 @@ pub(crate) async fn revoke_key(
     if let Err(r) = require_admin(&state, &headers) {
         return r;
     }
+    let operation = match admit_mutation(&state) {
+        Ok(operation) => operation,
+        Err(response) => return response,
+    };
     let Some(vault) = state.vault.clone() else {
         return err(StatusCode::SERVICE_UNAVAILABLE, "vault not configured");
     };
-    match vault.revoke(&provider, &label) {
-        Ok(revoked) => {
-            if revoked {
+    let Ok(permit) = state.vault_writer.clone().try_acquire_owned() else {
+        return vault_failure(VaultError::Busy, false);
+    };
+    tokio::task::spawn_blocking(move || {
+        let _operation = operation;
+        let _permit = permit;
+        match vault.revoke_with_status(&provider, &label) {
+            Ok((revoked, deletion)) => {
                 state
                     .providers
                     .lock()
                     .expect("providers poisoned")
                     .remove(&format!("{provider}:{label}"));
+                Json(json!({ "revoked": revoked, "secret_deletion": deletion,
+                    "broker_grant_revoked": false, "provider_key_revoked": false }))
+                .into_response()
             }
-            Json(json!({ "revoked": revoked })).into_response()
+            Err(e) => vault_failure(e, true),
         }
-        Err(VaultError::NotSupported(msg)) => err(StatusCode::NOT_IMPLEMENTED, &msg),
-        Err(VaultError::Backend(msg)) => err(StatusCode::INTERNAL_SERVER_ERROR, &msg),
-    }
+    })
+    .await
+    .unwrap_or_else(|_| vault_failure(VaultError::Backend("worker failed".into()), true))
 }
 
 /// `POST /admin/keys/share` — mint a scoped virtual key (secret printed once).
@@ -428,6 +647,10 @@ pub(crate) async fn share_key(
     if let Err(r) = require_admin(&state, &headers) {
         return r;
     }
+    let _operation = match admit_mutation(&state) {
+        Ok(operation) => operation,
+        Err(response) => return response,
+    };
     // Require a configured durable vkey store.
     let Some(vkeys) = state.vkeys.clone() else {
         return err(
@@ -533,6 +756,10 @@ pub(crate) async fn revoke_virtual_key(
     if let Err(r) = require_admin(&state, &headers) {
         return r;
     }
+    let _operation = match admit_mutation(&state) {
+        Ok(operation) => operation,
+        Err(response) => return response,
+    };
     let Some(vkeys) = state.vkeys.clone() else {
         return err(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -557,33 +784,74 @@ pub(crate) async fn set_budget(
     if let Err(r) = require_admin(&state, &headers) {
         return r;
     }
+    let _operation = match admit_mutation(&state) {
+        Ok(operation) => operation,
+        Err(response) => return response,
+    };
+    if let Err(message) = validate_budget(&req) {
+        return err(StatusCode::BAD_REQUEST, message);
+    }
+    if req.alert_thresholds.as_ref().is_some_and(|v| !v.is_empty()) && state.alert_store.is_none() {
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "alert store not configured; budget unchanged",
+        );
+    }
     let spec = BudgetSpec {
         scope: req.scope.clone(),
         limit_tokens: req.limit_tokens,
         window: req.window.unwrap_or_else(|| "total".into()),
         policy: req.policy.unwrap_or_else(|| "block".into()),
     };
-    apply_budget(&state.ledger, &state.budgets, &spec);
+    if let Err(error) = apply_budget(&state.ledger, &state.budgets, &spec) {
+        tracing::error!(%error, "budget commit failed");
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "budget commit failed; budget unchanged",
+        );
+    }
 
     // P2: optional threshold percentages create alert rules for this scope.
     let mut created_alerts: Vec<Value> = Vec::new();
+    let mut failed_alerts: Vec<Value> = Vec::new();
     if let Some(thresholds) = &req.alert_thresholds {
         for &pct in thresholds {
-            if let Some(alert) = create_alert_for_scope(&state, &req.scope, pct, AlertChannel::Log)
-            {
-                created_alerts.push(alert_rule_response(&alert));
+            match create_alert_for_scope(&state, &req.scope, pct, AlertChannel::Log) {
+                Ok(alert) => created_alerts.push(alert_rule_response(&alert)),
+                Err(error) => {
+                    tracing::error!(%error, "inline alert commit failed");
+                    failed_alerts
+                        .push(json!({"threshold_pct": pct, "error": "alert commit failed"}));
+                }
             }
         }
     }
 
-    Json(json!({
+    let complete = failed_alerts.is_empty();
+    let mut payload = json!({
+        "ok": complete,
+        "budget_applied": true,
         "scope": spec.scope,
         "limit_tokens": spec.limit_tokens,
         "window": spec.window,
         "policy": spec.policy,
         "alerts_created": created_alerts,
-    }))
-    .into_response()
+        "alerts_failed": failed_alerts,
+    });
+    if !complete {
+        payload["error"] = json!(
+            "budget committed, but some alerts failed; inspect partial results before retrying"
+        );
+    }
+    (
+        if complete {
+            StatusCode::OK
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        },
+        Json(payload),
+    )
+        .into_response()
 }
 
 /// `GET /admin/budget` — list all configured budget scopes.
@@ -739,25 +1007,44 @@ fn dimension_buckets(
     )
 }
 
+fn validate_budget(req: &admin::SetBudgetRequest) -> Result<(), &'static str> {
+    if req.scope.trim().is_empty() {
+        return Err("budget scope must not be empty");
+    }
+    if req.limit_tokens > i64::MAX as u64 {
+        return Err("budget limit exceeds the supported signed 64-bit range");
+    }
+    if !matches!(
+        req.window.as_deref(),
+        None | Some("total" | "daily" | "monthly")
+    ) {
+        return Err("window must be total, daily or monthly");
+    }
+    if !matches!(req.policy.as_deref(), None | Some("block" | "warn")) {
+        return Err("policy must be block or warn");
+    }
+    if req.alert_thresholds.iter().flatten().any(|pct| *pct > 100) {
+        return Err("alert thresholds must be between 0 and 100");
+    }
+    Ok(())
+}
+
 fn apply_budget(
     ledger: &Mutex<ProxyLedger>,
     budgets: &Mutex<HashMap<String, BudgetSpec>>,
     spec: &BudgetSpec,
-) {
+) -> Result<(), String> {
     // Carry the cap + window + policy into the live lease ledger (ADR-0005). A `Warn` scope stays a
     // soft cap (the ledger admits over it and tracks spend for alerts); `Block` hard-enforces.
     let window = Window::parse(&spec.window);
     let policy = Policy::parse(&spec.policy);
-    ledger.lock().expect("ledger poisoned").set_budget(
-        &spec.scope,
-        Some(spec.limit_tokens),
-        window,
-        policy,
-    );
-    budgets
-        .lock()
-        .expect("budgets poisoned")
-        .insert(spec.scope.clone(), spec.clone());
+    // Hold both locks through commit and publication: concurrent writers cannot publish
+    // metadata in the opposite order from durable commits. Match dashboard lock ordering.
+    let mut ledger = ledger.lock().map_err(|e| e.to_string())?;
+    let mut budgets = budgets.lock().map_err(|e| e.to_string())?;
+    ledger.set_budget(&spec.scope, Some(spec.limit_tokens), window, policy)?;
+    budgets.insert(spec.scope.clone(), spec.clone());
+    Ok(())
 }
 
 pub(crate) fn alert_rule_response(rec: &AlertRuleRecord) -> Value {
@@ -778,21 +1065,28 @@ fn create_alert_for_scope(
     scope: &str,
     threshold_pct: u8,
     channel: AlertChannel,
-) -> Option<AlertRuleRecord> {
-    let store = state.alert_store.clone()?;
+) -> Result<AlertRuleRecord, String> {
+    let store = state
+        .alert_store
+        .as_ref()
+        .ok_or("alert store not configured")?;
+    let mut registry = state
+        .alerts
+        .as_ref()
+        .map(|r| r.lock())
+        .transpose()
+        .map_err(|e| e.to_string())?;
     let record = store
         .create(CreateAlertRequest {
             scope: scope.into(),
             threshold_pct,
             channel: channel.clone(),
         })
-        .ok()?;
-    if let Some(registry) = &state.alerts {
-        if let Ok(mut reg) = registry.lock() {
-            reg.add_rule(record.to_rule());
-        }
+        .map_err(|e| e.to_string())?;
+    if let Some(registry) = registry.as_mut() {
+        registry.add_rule(record.to_rule());
     }
-    Some(record)
+    Ok(record)
 }
 
 // --- Alerts (P2) ------------------------------------------------------------
@@ -829,6 +1123,16 @@ pub(crate) async fn create_alert(
     if let Err(r) = require_admin(&state, &headers) {
         return r;
     }
+    let _operation = match admit_mutation(&state) {
+        Ok(operation) => operation,
+        Err(response) => return response,
+    };
+    if req.scope.trim().is_empty() || req.threshold_pct > 100 {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "alerts require a nonempty scope and threshold between 0 and 100",
+        );
+    }
     let channel = if let Some(url) = req.webhook_url.as_deref() {
         AlertChannel::Webhook {
             url: url.to_string(),
@@ -841,11 +1145,14 @@ pub(crate) async fn create_alert(
             .unwrap_or(AlertChannel::Log)
     };
     match create_alert_for_scope(&state, &req.scope, req.threshold_pct, channel) {
-        Some(rec) => (StatusCode::CREATED, Json(alert_rule_response(&rec))).into_response(),
-        None => err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "alert store not configured (set SANDHI_STORE)",
-        ),
+        Ok(rec) => (StatusCode::CREATED, Json(alert_rule_response(&rec))).into_response(),
+        Err(error) => {
+            tracing::error!(%error, "alert commit failed");
+            err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "alert commit failed or store not configured",
+            )
+        }
     }
 }
 
@@ -858,6 +1165,10 @@ pub(crate) async fn ack_alert(
     if let Err(r) = require_admin(&state, &headers) {
         return r;
     }
+    let _operation = match admit_mutation(&state) {
+        Ok(operation) => operation,
+        Err(response) => return response,
+    };
     let Some(store) = state.alert_store.clone() else {
         return err(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -882,6 +1193,10 @@ pub(crate) async fn delete_alert(
     if let Err(r) = require_admin(&state, &headers) {
         return r;
     }
+    let _operation = match admit_mutation(&state) {
+        Ok(operation) => operation,
+        Err(response) => return response,
+    };
     let Some(store) = state.alert_store.clone() else {
         return err(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1140,12 +1455,40 @@ pub(crate) async fn config_apply(
     if let Err(r) = require_admin(&state, &headers) {
         return r;
     }
+    let _operation = match admit_mutation(&state) {
+        Ok(operation) => operation,
+        Err(response) => return response,
+    };
     let cfg = match read_config_file(&state) {
         Ok(c) => c,
         Err(r) => return r,
     };
     let getenv = |k: &str| std::env::var(k).ok();
 
+    // Reject malformed budget/alert intent before touching any backend, including the vault.
+    for b in &cfg.budgets {
+        let req = admin::SetBudgetRequest {
+            scope: b.scope.clone(),
+            limit_tokens: b.limit_tokens,
+            window: b.window.clone(),
+            policy: b.policy.clone(),
+            alert_thresholds: b.alert_thresholds.clone(),
+        };
+        if let Err(message) = validate_budget(&req) {
+            return err(StatusCode::BAD_REQUEST, message);
+        }
+    }
+    if cfg
+        .alerts
+        .iter()
+        .any(|a| a.scope.trim().is_empty() || a.threshold_pct > 100)
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "alerts require a nonempty scope and threshold between 0 and 100",
+        );
+    }
+    let mut failures = Vec::new();
     let mut providers_applied = Vec::new();
     for p in &cfg.providers {
         let secret = crate::config::resolve_secret(&p.secret_env, getenv);
@@ -1159,6 +1502,15 @@ pub(crate) async fn config_apply(
         let resp = add_key(State(state.clone()), headers.clone(), Json(req)).await;
         if resp.status().is_success() {
             providers_applied.push(json!({ "provider": p.provider, "label": p.label }));
+        } else {
+            failures.push(
+                config_component_failure(
+                    json!({"component": "provider", "provider": p.provider,
+                "label": p.label, "error": "provider apply failed"}),
+                    resp,
+                )
+                .await,
+            );
         }
     }
 
@@ -1177,20 +1529,39 @@ pub(crate) async fn config_apply(
         let resp = set_budget(State(state.clone()), headers.clone(), Json(req)).await;
         if resp.status().is_success() {
             budgets_applied.push(json!({ "scope": b.scope, "limit_tokens": b.limit_tokens }));
+        } else {
+            failures.push(
+                config_component_failure(
+                    json!({"component": "budget", "scope": b.scope,
+                "error": "budget apply failed"}),
+                    resp,
+                )
+                .await,
+            );
+            // Dependent alerts must not be installed for a budget that failed to commit.
+            continue;
         }
         for &pct in b.alert_thresholds.iter().flatten() {
             match apply_one_alert(&state, &b.scope, pct, &None, getenv) {
-                Some(rec) => alerts_created.push(alert_rule_response(&rec)),
-                None => alerts_skipped.push(json!({ "scope": b.scope, "threshold_pct": pct })),
+                Ok(Some(rec)) => alerts_created.push(alert_rule_response(&rec)),
+                Ok(None) => alerts_skipped.push(json!({ "scope": b.scope, "threshold_pct": pct })),
+                Err(error) => {
+                    tracing::error!(%error, "config alert apply failed");
+                    failures.push(error.failure(&b.scope, pct));
+                }
             }
         }
     }
 
     for a in &cfg.alerts {
         match apply_one_alert(&state, &a.scope, a.threshold_pct, &a.webhook_env, getenv) {
-            Some(rec) => alerts_created.push(alert_rule_response(&rec)),
-            None => {
+            Ok(Some(rec)) => alerts_created.push(alert_rule_response(&rec)),
+            Ok(None) => {
                 alerts_skipped.push(json!({ "scope": a.scope, "threshold_pct": a.threshold_pct }))
+            }
+            Err(error) => {
+                tracing::error!(%error, "config alert apply failed");
+                failures.push(error.failure(&a.scope, a.threshold_pct));
             }
         }
     }
@@ -1198,11 +1569,17 @@ pub(crate) async fn config_apply(
     let mut vkeys_minted = Vec::new();
     let mut vkeys_skipped = Vec::new();
     for v in &cfg.vkeys {
-        let existing = state
-            .vkeys
-            .as_ref()
-            .and_then(|s| s.list().ok())
-            .unwrap_or_default();
+        let existing = match state.vkeys.as_ref().map(|s| s.list()).transpose() {
+            Ok(Some(records)) => records,
+            result => {
+                if let Err(error) = result {
+                    tracing::error!(%error, "config vkey lookup failed");
+                }
+                failures.push(json!({"component": "vkey", "upstream": v.upstream,
+                    "error": "virtual key inventory unavailable; no key minted"}));
+                continue;
+            }
+        };
         if crate::config::vkey_already_applied(&existing, v) {
             vkeys_skipped
                 .push(json!({ "upstream": v.upstream, "subject": v.subject, "group": v.group }));
@@ -1226,11 +1603,29 @@ pub(crate) async fn config_apply(
                 // Shown once, same convention as a direct `keys share` call — the caller (dashboard
                 // or CLI) is responsible for capturing it; Sandhi never stores the plaintext.
                 vkeys_minted.push(val);
+            } else {
+                failures.push(json!({"component": "vkey", "upstream": v.upstream,
+                    "error": "key minted but response unavailable; inspect inventory before retrying"}));
             }
+        } else {
+            failures.push(
+                config_component_failure(
+                    json!({"component": "vkey", "upstream": v.upstream,
+                "error": "virtual key apply failed"}),
+                    resp,
+                )
+                .await,
+            );
         }
     }
 
-    Json(json!({
+    let complete = failures.is_empty();
+    let draining = failures
+        .iter()
+        .any(|failure| failure["code"] == "gateway_draining");
+    let mut payload = json!({
+        "ok": complete,
+        "failures": failures,
         "providers": { "applied": providers_applied },
         "budgets": { "applied": budgets_applied },
         "alerts": { "created": alerts_created, "skipped": alerts_skipped },
@@ -1238,8 +1633,28 @@ pub(crate) async fn config_apply(
         // Same acknowledgement as preview: the `tls` section parsed but was NOT applied —
         // listener TLS activates only at process bootstrap (TD-0017 P1), never mid-flight.
         "tls": if cfg.tls.is_some() { "restart required" } else { "not configured" },
-    }))
-    .into_response()
+    });
+    if !complete {
+        payload["error"] = json!("config apply incomplete; committed items were not rolled back; inspect results before retrying");
+    }
+    if draining {
+        payload["code"] = json!("gateway_draining");
+    }
+    let mut response = (
+        if complete {
+            StatusCode::OK
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        },
+        Json(payload),
+    )
+        .into_response();
+    if draining {
+        response
+            .headers_mut()
+            .insert("retry-after", "1".parse().unwrap());
+    }
+    response
 }
 
 /// Shared by both the top-level `alerts[]` config entries and a budget's inline
@@ -1251,20 +1666,26 @@ fn apply_one_alert(
     threshold_pct: u8,
     webhook_env: &Option<String>,
     getenv: impl Fn(&str) -> Option<String> + Copy,
-) -> Option<AlertRuleRecord> {
+) -> Result<Option<AlertRuleRecord>, AlertApplyError> {
+    // Config orchestration does not confer authority on components that reach cutoff later.
+    let _operation = state
+        .lifecycle
+        .try_operation()
+        .ok_or(AlertApplyError::Draining)?;
     let channel_str = crate::config::resolve_channel(webhook_env, getenv);
     let existing = state
         .alert_store
         .as_ref()
-        .and_then(|s| s.list().ok())
-        .unwrap_or_default();
+        .ok_or_else(|| "alert store not configured".to_string())?
+        .list()
+        .map_err(|e| e.to_string())?;
     let entry = crate::config::AlertEntry {
         scope: scope.to_string(),
         threshold_pct,
         webhook_env: webhook_env.clone(),
     };
     if crate::config::alert_already_applied(&existing, &entry, &channel_str) {
-        return None;
+        return Ok(None);
     }
     let channel = channel_str
         .strip_prefix("webhook:")
@@ -1273,6 +1694,368 @@ fn apply_one_alert(
         })
         .unwrap_or(AlertChannel::Log);
     create_alert_for_scope(state, scope, threshold_pct, channel)
+        .map(Some)
+        .map_err(Into::into)
+}
+
+#[cfg(test)]
+mod mutation_lifecycle_tests {
+    use super::*;
+    use sandhi_core::InMemorySink;
+    use sandhi_store::vault::{Vault, VaultCapabilities};
+
+    fn state() -> ProxyState {
+        let mut state = ProxyState::new(
+            KeyStore::new(),
+            ProxyLedger::in_memory(),
+            Arc::new(InMemorySink::new()),
+            HashMap::new(),
+            None,
+        );
+        state.admin_token = Some("synthetic-admin".into());
+        state.vault = Some(Arc::new(sandhi_store::VaultStore::in_memory().unwrap()));
+        state.vkeys = Some(Arc::new(VirtualKeyStore::in_memory().unwrap()));
+        state.alert_store = Some(Arc::new(AlertStore::in_memory().unwrap()));
+        state
+    }
+
+    fn headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer synthetic-admin".parse().unwrap());
+        headers
+    }
+
+    async fn body(response: Response) -> Value {
+        serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 16384)
+                .await
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn every_mutating_handler_rejects_after_cutoff_before_touching_stores() {
+        let state = Arc::new(state());
+        let vault = state.vault.as_ref().unwrap();
+        vault
+            .set(
+                "openai",
+                "default",
+                CredentialScheme::ApiKey,
+                None,
+                "synthetic-provider",
+            )
+            .unwrap();
+        let rule = state
+            .alert_store
+            .as_ref()
+            .unwrap()
+            .create(CreateAlertRequest {
+                scope: "group:test".into(),
+                threshold_pct: 50,
+                channel: AlertChannel::Log,
+            })
+            .unwrap();
+        let before_vault = vault.list().unwrap();
+        let before_alerts = state.alert_store.as_ref().unwrap().list().unwrap();
+        let minted = state
+            .vkeys
+            .as_ref()
+            .unwrap()
+            .mint(sandhi_store::MintRequest {
+                upstream_ref: "openai:default".into(),
+                subject_id: None,
+                group_id: None,
+                models: Vec::new(),
+                budget_scope: None,
+                expires_at: None,
+                rate_limit_per_min: None,
+            })
+            .unwrap();
+        let before_vkeys = state.vkeys.as_ref().unwrap().list().unwrap();
+        state.lifecycle.begin_quiesce(Duration::from_secs(1));
+        for operation in 0..10 {
+            // Invoke handlers directly: an outer router rejection must not hide a missing gate.
+            let response = match operation {
+                0 => {
+                    add_key(
+                        State(state.clone()),
+                        headers(),
+                        Json(
+                            serde_json::from_value(json!({
+                                "provider": "openai", "secret": "replacement-secret"
+                            }))
+                            .unwrap(),
+                        ),
+                    )
+                    .await
+                }
+                1 => {
+                    register_reference(
+                        State(state.clone()),
+                        headers(),
+                        Json(
+                            serde_json::from_value(json!({
+                                "provider": "openai"
+                            }))
+                            .unwrap(),
+                        ),
+                    )
+                    .await
+                }
+                2 => {
+                    revoke_key(
+                        State(state.clone()),
+                        headers(),
+                        Path(("openai".into(), "default".into())),
+                    )
+                    .await
+                }
+                3 => {
+                    share_key(
+                        State(state.clone()),
+                        headers(),
+                        Json(
+                            serde_json::from_value(json!({
+                                "upstream": "openai:default"
+                            }))
+                            .unwrap(),
+                        ),
+                    )
+                    .await
+                }
+                4 => {
+                    revoke_virtual_key(
+                        State(state.clone()),
+                        headers(),
+                        Path(minted.record.id.clone()),
+                    )
+                    .await
+                }
+                5 => {
+                    set_budget(
+                        State(state.clone()),
+                        headers(),
+                        Json(
+                            serde_json::from_value(json!({
+                                "scope": "group:test", "limit_tokens": 10
+                            }))
+                            .unwrap(),
+                        ),
+                    )
+                    .await
+                }
+                6 => {
+                    create_alert(
+                        State(state.clone()),
+                        headers(),
+                        Json(
+                            serde_json::from_value(json!({
+                                "scope": "group:test", "threshold_pct": 90
+                            }))
+                            .unwrap(),
+                        ),
+                    )
+                    .await
+                }
+                7 => ack_alert(State(state.clone()), headers(), Path(rule.id.clone())).await,
+                8 => delete_alert(State(state.clone()), headers(), Path(rule.id.clone())).await,
+                _ => config_apply(State(state.clone()), headers()).await,
+            };
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "operation {operation}"
+            );
+            assert_eq!(response.headers()["retry-after"], "1");
+            assert_eq!(body(response).await["code"], "gateway_draining");
+        }
+        assert_eq!(vault.list().unwrap(), before_vault);
+        assert_eq!(
+            vault.get("openai", "default").unwrap().as_deref(),
+            Some("synthetic-provider")
+        );
+        assert_eq!(
+            state.alert_store.as_ref().unwrap().list().unwrap(),
+            before_alerts
+        );
+        assert_eq!(state.vkeys.as_ref().unwrap().list().unwrap(), before_vkeys);
+        assert!(state.budgets.lock().unwrap().is_empty());
+        assert_eq!(state.lifecycle.active_operations(), 0);
+        // Existing authentication remains authoritative, even while draining.
+        assert_eq!(
+            revoke_key(
+                State(state),
+                HeaderMap::new(),
+                Path(("openai".into(), "default".into()))
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    struct ControlledVault {
+        entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: Arc<(Mutex<bool>, std::sync::Condvar)>,
+        cutoff: Option<Arc<crate::lifecycle::Lifecycle>>,
+    }
+
+    impl Vault for ControlledVault {
+        fn name(&self) -> &'static str {
+            "synthetic-controlled"
+        }
+        fn capabilities(&self) -> VaultCapabilities {
+            VaultCapabilities {
+                read: true,
+                write: true,
+                delete: false,
+                bounded_io: true,
+            }
+        }
+        fn get_secret(&self, _: &str, _: &str) -> Result<Option<String>, VaultError> {
+            Ok(Some("synthetic-provider".into()))
+        }
+        fn set_secret(&self, _: &str, _: &str, _: &str) -> Result<(), VaultError> {
+            if let Some(cutoff) = &self.cutoff {
+                cutoff.begin_quiesce(Duration::from_secs(1));
+            }
+            if let Some(entered) = self.entered.lock().unwrap().take() {
+                let _ = entered.send(());
+            }
+            let (released, wake) = &*self.release;
+            let (_released, result) = wake
+                .wait_timeout_while(
+                    released.lock().unwrap(),
+                    Duration::from_secs(5),
+                    |released| !*released,
+                )
+                .unwrap();
+            if result.timed_out() {
+                return Err(VaultError::Timeout);
+            }
+            Ok(())
+        }
+        fn delete_secret(&self, _: &str, _: &str) -> Result<bool, VaultError> {
+            Ok(false)
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_credential_caller_does_not_release_the_worker_operation_guard() {
+        let mut state = state();
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        state.vault = Some(Arc::new(
+            sandhi_store::VaultStore::with_backend(
+                ":memory:",
+                Box::new(ControlledVault {
+                    entered: Mutex::new(Some(entered)),
+                    release: release.clone(),
+                    cutoff: None,
+                }),
+            )
+            .unwrap(),
+        ));
+        let state = Arc::new(state);
+        let caller_state = state.clone();
+        let caller = tokio::spawn(async move {
+            add_key(
+                State(caller_state),
+                headers(),
+                Json(
+                    serde_json::from_value(json!({
+                        "provider": "openai", "secret": "synthetic-provider"
+                    }))
+                    .unwrap(),
+                ),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), started)
+            .await
+            .unwrap()
+            .unwrap();
+        state.lifecycle.begin_quiesce(Duration::from_secs(1));
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert_eq!(state.lifecycle.active_operations(), 1);
+        assert_eq!(state.vault_writer.available_permits(), 0);
+        *release.0.lock().unwrap() = true;
+        release.1.notify_all();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while state.lifecycle.active_operations() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(state.vault.as_ref().unwrap().list().unwrap().len(), 1);
+        assert!(state
+            .providers
+            .lock()
+            .unwrap()
+            .contains_key("openai:default"));
+        assert_eq!(state.vault_writer.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn config_cutoff_preserves_committed_provider_and_rejects_remaining_components() {
+        let mut state = state();
+        state.vault = Some(Arc::new(
+            sandhi_store::VaultStore::with_backend(
+                ":memory:",
+                Box::new(ControlledVault {
+                    entered: Mutex::new(None),
+                    release: Arc::new((Mutex::new(true), std::sync::Condvar::new())),
+                    cutoff: Some(state.lifecycle.clone()),
+                }),
+            )
+            .unwrap(),
+        ));
+        let path = std::env::temp_dir().join(format!(
+            "sandhi-cutoff-{}-{}.json",
+            std::process::id(),
+            time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        std::fs::write(
+            &path,
+            json!({
+                "providers": [{"provider": "openai"}],
+                "budgets": [{"scope": "group:test", "limit_tokens": 10, "alert_thresholds": [50]}],
+                "alerts": [{"scope": "group:test", "threshold_pct": 90}],
+                "vkeys": [{"upstream": "openai:default"}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        state.config_path = Some(path.clone());
+        let state = Arc::new(state);
+        let response = config_apply(State(state.clone()), headers()).await;
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()["retry-after"], "1");
+        let result = body(response).await;
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["code"], "gateway_draining");
+        assert_eq!(result["providers"]["applied"].as_array().unwrap().len(), 1);
+        let failures = result["failures"].as_array().unwrap();
+        assert_eq!(failures.len(), 3);
+        assert!(failures
+            .iter()
+            .all(|failure| failure["code"] == "gateway_draining"));
+        assert!(state.budgets.lock().unwrap().is_empty());
+        assert!(state
+            .alert_store
+            .as_ref()
+            .unwrap()
+            .list()
+            .unwrap()
+            .is_empty());
+        assert!(state.vkeys.as_ref().unwrap().list().unwrap().is_empty());
+        assert_eq!(state.lifecycle.active_operations(), 0);
+    }
 }
 
 #[cfg(test)]

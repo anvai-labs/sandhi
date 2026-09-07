@@ -19,6 +19,7 @@ SCHEMAS = (
     "provider-descriptor.v1.schema.json",
     "provider-error.v1.schema.json",
     "usage.v2.schema.json",
+    "usage-event.v1.schema.json",
     "usage-aggregate.v1.schema.json",
 )
 
@@ -140,6 +141,7 @@ class UsageV2(TypedDict):
     audio_input_tokens: NotRequired[int]
     audio_output_tokens: NotRequired[int]
     reasoning_tokens: NotRequired[int]
+    reasoning_included: NotRequired[bool]
     accepted_prediction_tokens: NotRequired[int]
     rejected_prediction_tokens: NotRequired[int]
 class LatencySummary(TypedDict):
@@ -268,6 +270,7 @@ export interface UsageV2 {{
   upstream_request_id?: string
   duration_ms?: number; time_to_first_token_ms?: number
   audio_input_tokens?: number; audio_output_tokens?: number; reasoning_tokens?: number
+  reasoning_included?: boolean
   accepted_prediction_tokens?: number; rejected_prediction_tokens?: number
 }}
 export interface LatencySummary {{ samples: number; p50_ms: number; p95_ms: number; ttft_p50_ms?: number }}

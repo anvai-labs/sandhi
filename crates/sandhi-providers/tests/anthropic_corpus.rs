@@ -21,6 +21,7 @@ fn expected() -> ParsedUsage {
     let v: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/anthropic/expected_usage.json")).unwrap();
     ParsedUsage {
+        reasoning_included: Some(true),
         tokens_in: v["tokens_in"].as_u64().unwrap(),
         tokens_out: v["tokens_out"].as_u64().unwrap(),
         cache_creation_tokens: v["cache_creation_tokens"].as_u64().unwrap(),

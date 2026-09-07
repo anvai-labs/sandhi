@@ -17,7 +17,109 @@ publishers. Versions are derived from the tag at build time, never hand-edited; 
 
 ## [Unreleased]
 
+### Added
+
+- **Operator decision evidence.** Synthetic browser journeys connect reference onboarding,
+  one-time keys, persistent attribution, budget intervention and broker recovery. Masked review
+  artifacts and an [acceptance decision packet](docs/product/m1-acceptance-decisions.md) separate
+  automated correctness from owner choices and observed-user acceptance.
+
+- **Reproducible workload acceptance (W06d automation).** Isolated direct-provider and real
+  gateway unary/SSE lanes cover closed-loop/fixed-arrival traffic, exact tenant/run/category
+  accounting, denied requests, queue checkpoints and shutdown. Full/compact reports retain
+  distributions, resource observations and binary identity. The recorded synthetic baseline
+  does not establish production capacity or replace [actual-user acceptance](docs/product/m1-acceptance.md).
+
+- **Isolated recovery rehearsal (W06c).** Fixed-topology single-file/two-shard restart and
+  offline snapshot/restore drills verify retained accounting, access state and continued service.
+  Negative cases cover malformed snapshots, real crash leases, unavailable broker authority
+  and post-snapshot revocation reconciliation; AgentBrowser checks restored dashboard evidence.
+  The [recovery runbook](docs/operator/recovery-drill.md) requires quarantine and separate secret
+  provisioning. This is test-only rehearsal tooling, not online backup, automatic production
+  restore, live broker certification or a lossless accounting guarantee.
+
+- **Drain-aware readiness (W06a).** `/readyz` distinguishes traffic readiness from `/healthz`
+  liveness, with bounded HTTP/TLS same-port quiesce subject to existing connection caps.
+  Shared cutoff rejects queued/upload-spanning model calls and admin mutations before new
+  authorization; abandoned reservations retain rollback ownership. One binary deadline covers
+  connections, accounting, writers, telemetry and runtime teardown; incomplete cleanup exits
+  124 without promising persistence. Library timeouts report unfinished cancellation without
+  terminating the host. See the [operator guide](docs/operator/proxy-guide.adoc) for probe
+  migration, partial config results and `SANDHI_SHUTDOWN_QUIESCE_MS`.
+
+- **Best-effort buffer visibility (W06b).** Sender-free usage/alert writer snapshots feed
+  authenticated Prometheus capacity, queued, in-flight and rejected-item metrics with fixed
+  labels and explicit unconfigured states. These are observation-queue signals, not database
+  commit confirmation or authoritative outbox backlog; recovery/restore gates remain open.
+
+- **Settlement evidence storage foundation (W05a).** Separate opt-in store APIs commit a
+  neutral charge and immutable receipt atomically, reject conflicting replays, and provide
+  bounded delivery claims with stale-worker fencing and retained acknowledgement tombstones.
+  Legacy single-file shard migration refuses evidence-bearing sources. This is not yet wired
+  into proxy accounting and is not a physical-attempt record or network exporter; see the
+  [remaining accounting gates](docs/product/attempt-accounting-and-evidence.md).
+
 ### Fixed
+
+- **Dashboard run lookup.** Read the API's wrapped run response and validate run identity,
+  tree shape and safe nonnegative counts before rendering. Malformed responses show unavailable
+  state instead of stale or misleading totals; step labels remain escaped.
+
+- **Configured storage fails closed at startup.** Failed initialization of a configured usage,
+  credential-metadata, virtual-key, alert or enforcement database stops startup before binding;
+  it no longer substitutes an uncapped memory ledger or drops configured components. Only an
+  absent `SANDHI_STORE` selects memory mode; empty/invalid, `:memory:` and SQLite `file:` URI
+  configuration is refused. Repair storage if a deployment previously relied on
+  fallback. This does not change runtime `Warn`/`Block` policy or require a reachable external broker.
+
+- **Binding dependency security gate.** Upgrade PyO3/async bridge to patched 0.29 releases,
+  explicitly retain GIL-required behavior and declare the existing locked source-build floor
+  of Rust 1.88. Advisory CI now checks all three independent Rust workspaces with all features,
+  including binding-only and advisory-policy changes; no vulnerability ignores are added.
+
+- **Checkpoint review corrections.** Credential onboarding retains case-insensitive `api-key`
+  compatibility while rejecting unknown schemes. Partial config failures retain safe broker
+  reconciliation facts. Python `parse_usage` preserves reasoning counts and inclusion through
+  custom-parser callbacks, matching the native accounting semantics.
+
+- **Safe native broker onboarding.** SentinelPass IPC runs on a dedicated runtime thread with
+  bounded queue/deadlines; credential mutations are serialized and offloaded from async workers.
+  API/CLI/dashboard can register an existing reference using a read grant without writing a
+  secret. Capabilities distinguish support from authorization; missing configuration no longer
+  silently selects another backend. Locked/denied/missing/timeout states are distinct and broker
+  error text is redacted. Local revoke reports secret cleanup separately from broker/provider
+  revocation; startup reloads every exact credential label. See the
+  [broker contract](docs/product/broker-integration-contract.md) for migration and limitations,
+  including potentially applied timed-out writes, unbounded legacy CLI reads, and pending live
+  broker/lifecycle certification.
+
+- **Explicit reasoning accounting (contract minor 7).** Provider parsers now carry
+  `reasoning_included` through typed usage, events, aggregates, SQL and settlement. Gemini
+  thoughts are added even when smaller than candidate output; included-output providers are
+  not double-counted. Proxy events and bindings retain the reasoning dimension; translated
+  usage follows the destination's output/cache convention. Existing rows retain legacy totals,
+  with no historical ledger rewrite. Upgrade strict validators/accounting readers before
+  consuming the new field; see [migration and guarantees](docs/product/metering-and-budget-guarantees.md).
+  Budget controls are explicitly estimate-based; overshoot can involve multiple in-flight calls.
+  Gemini typed streams defer completion until final usage arrives, fixing zero usage in
+  translated Responses completion frames and preventing success after a transport failure.
+
+- **Committed management writes.** Failed durable budget updates return 503 without changing
+  the live policy; concurrent updates publish metadata in commit order. Invalid window/policy,
+  empty scope, out-of-range limits and invalid alert thresholds are rejected. Config apply now
+  reports failed items and returns 503 for incomplete application, preserving committed results
+  and one-time keys; inventory read failures are not treated as empty or already satisfied.
+  Inline alert failures report the committed budget explicitly. The CLI preserves partial
+  results with a nonzero exit, and the dashboard distinguishes incomplete application.
+  Rust callers of `ProxyLedger::set_budget` must now handle its `Result`.
+
+- **Dashboard authentication and trustworthy states.** Served UI assets now share one
+  authenticated read/write path, keep the admin token only in page memory, and clear privileged
+  state on token changes. Locked, forbidden, unconfigured, unavailable and stale data are
+  distinct; failed usage/key/budget/alert storage reads return 503 instead of empty totals.
+  Script-safe actions, CSP and no-store management responses protect the operator surface.
+  One-time minted keys remain visible after refresh. Added real-browser and optional
+  AgentBrowser smoke regressions; no live-vault integration is implied.
 
 - **npm publish leg of the v0.5.1 release run failed; npm first ships on the next tag.** The
   per-platform package dirs (`bindings/node/npm/`) are gitignored by design and must be

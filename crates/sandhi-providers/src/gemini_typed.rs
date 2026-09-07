@@ -320,6 +320,9 @@ fn decode_gemini_stream(mut raw: ByteStream, requested_model: String) -> ChatEve
         let mut splitter = crate::linesplit::LineSplitter::new(crate::MAX_STREAM_LINE_BYTES);
         let mut started = false;
         let mut emitted_usage = false;
+        // A candidate finish can precede the metered stream's terminal usage-only chunk.
+        // Defer canonical completion until successful EOF so egress sees final usage first.
+        let mut pending_finish = None;
         // The last running total published, so progress is emitted on change rather than per chunk.
         let mut last_running: Option<crate::ParsedUsage> = None;
         // TD-0014 P2b: after the real chunks end, ONE synthetic empty chunk flushes any
@@ -386,7 +389,7 @@ fn decode_gemini_stream(mut raw: ByteStream, requested_model: String) -> ChatEve
                         }
                     }
                     if let Some(reason) = value.pointer("/candidates/0/finishReason").and_then(Value::as_str) {
-                        yield ChatStreamEventV1::Finish { reason: decode_finish_reason(reason) };
+                        pending_finish = Some(decode_finish_reason(reason));
                     }
                 }
                 // TD-0014 P1 (gap G01): past MAX_STREAM_LINE_BYTES the upstream has sent no
@@ -424,12 +427,37 @@ fn decode_gemini_stream(mut raw: ByteStream, requested_model: String) -> ChatEve
                 yield ChatStreamEventV1::Usage { usage };
             }
         }
+        if let Some(reason) = pending_finish {
+            yield ChatStreamEventV1::Finish { reason };
+        }
     };
     Box::pin(stream)
 }
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn pending_finish_is_not_published_after_transport_failure() {
+        use futures_util::StreamExt;
+        let raw: crate::ByteStream = Box::pin(futures_util::stream::iter(vec![
+            Ok(crate::StreamChunk {
+                data: bytes::Bytes::from_static(
+                    b"data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n",
+                ),
+                usage: None,
+                usage_running: None,
+                attempts: 1,
+            }),
+            Err(crate::ProviderError::Transport("mock disconnect".into())),
+        ]));
+        let events = super::decode_gemini_stream(raw, "m".into())
+            .collect::<Vec<_>>()
+            .await;
+        assert!(matches!(events.last(), Some(Err(_))));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, Ok(sandhi_core::ChatStreamEventV1::Finish { .. }))));
+    }
 
     /// TD-0014 P1, the opposing guard. The six `..._is_bounded_and_errors_...` tests pin the
     /// ceiling from BELOW; on their own they would all still pass with the bound set to 1 KiB,
@@ -545,6 +573,7 @@ mod tests {
                 Ok(crate::StreamChunk {
                     data: bytes::Bytes::new(),
                     usage: Some(crate::ParsedUsage {
+                        reasoning_included: Some(false),
                         tokens_in: 2,
                         tokens_out: 3,
                         cache_creation_tokens: 0,
@@ -583,10 +612,8 @@ mod tests {
                 "split {split}: text deltas must reassemble exactly"
             );
             assert!(
-                events
-                    .iter()
-                    .any(|event| matches!(event, sandhi_core::ChatStreamEventV1::Finish { .. })),
-                "split {split}: Finish must survive any split"
+                matches!(events.last(), Some(ChatStreamEventV1::Finish { .. })),
+                "split {split}: Finish must follow final usage, including an empty terminal chunk"
             );
             assert_eq!(
                 events

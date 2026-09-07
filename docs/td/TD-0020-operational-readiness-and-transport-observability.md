@@ -1,11 +1,15 @@
 # TD-0020: Operational readiness and transport observability — you cannot operate what you cannot see
 
-- **Status:** **In progress**, 2026-08-31. P2 is partial via TD-0014's shipped connection,
-  stream, and connection-shed signals; P1 and the remaining P2–P5 scope are open. Owns gaps
+- **Status:** **In progress**, updated 2026-09-06. P1/W06a is integrated through PR #232;
+  W06c offline recovery is merged through PR #233 with green post-merge CI (C01d in TD-0026).
+  W06d workload automation is integrated through PR #234 with green post-merge CI; actual-user acceptance remains open.
+  P2 is partial via TD-0014's shipped connection,
+  stream, and connection-shed signals plus integrated W06b buffer visibility;
+  the remaining P2–P5 scope is open. Owns gaps
   **G15, G16, G17, G18, G27**.
 - **Relates to:** [TD-0011](TD-0011-first-party-observability.md) (the metric registry and its D2
   bounded-label discipline, which this extends), [TD-0014](TD-0014-data-plane-resource-safety.md)
-  (whose every bound is unobservable until G16 lands — build them in parallel),
+  (whose bounds need matching G16 instrumentation),
   [TD-0015](TD-0015-performance-baseline-and-fault-injection.md) (the offline counterpart to these
   runtime gauges), [ADR-0004](../adr/0004-two-plane-proxy-and-enforcement-boundary.md) D4 (the gate
   these endpoints inherit).
@@ -172,7 +176,159 @@ graceful-drain measurement). Neither is redundant.
 
 ## Still open
 
-- **What is the right default `pool_max_idle_per_host`?** Gated on
+- **W06 readiness reachability (2026-09-05):** the current shutdown path stops accepting and
+  signals connection graceful shutdown immediately. A router-only `/readyz` flag test would
+  not prove that fresh network probes can receive `503` during drain. Before P1, define a
+  bounded probe-reachable quiesce phase or separate probe listener, reject new model/admin
+  mutation work before dispatch, and test HTTP/TLS, queued admissions and in-flight SSE.
+  Also define the deadline honestly: current alert and usage drains each receive a separate
+  grace after listener drain. P1 cannot claim an end-to-end shutdown deadline without changing
+  and testing those phases. Buffer visibility does not close this gap.
+
+## W06b buffer visibility slice (2026-09-05)
+
+Implemented and locally verified in `feat/operational-buffer-visibility`, separate from
+checkpoint PR #230; not merged or released.
+Core `BufferedSink` and proxy `BufferedAlertStore` expose sender-free observer snapshots;
+the registry reads bookkeeping only, with no database I/O or worker messages at scrape time.
+The binary attaches observers after constructing its metric registry. `/metrics` keeps its
+existing authorization; fixed `buffer="usage"|"alerts"` is the only added dimension.
+
+`sandhi_buffer_configured` distinguishes absence from an idle queue. For configured buffers,
+`sandhi_buffer_capacity`, `sandhi_buffer_queued`, `sandhi_buffer_in_flight` and
+`sandhi_buffer_dropped_total` distinguish channel capacity, accepted data awaiting callback
+start, an active callback and rejected enqueue attempts plus queued items abandoned after a
+worker panic. The panicking callback's persistence result is unknown and is not counted as
+a queue drop. Logical queued capacity is enforced under the same bookkeeping lock as enqueue;
+close also uses that lock so new data cannot enter behind the shutdown message. This preserves
+`queued <= capacity` even when the receiver has dequeued but not yet claimed an item.
+Control messages are excluded from
+queued/in-flight but share channel slots. A snapshot is coherent for one buffer, not a
+transactional snapshot across both writers. Observers contain no sender and do not extend
+channel lifetime. Counters reset on process restart; configured is not a worker-health signal.
+
+These are best-effort observation queues, **not W05 authoritative outbox backlog**. Completed
+callbacks are not confirmed durable writes. SQL insertion failures and in-memory ring evictions
+have separate existing counters but are not exported by this slice. Alert write failures/missing
+rules, oldest age, freshness, OTLP parity and durable incident delivery remain follow-ups. P2
+still owns admission waits, file descriptors and pool instrumentation; P1 readiness is unchanged.
+
+Verification: full workspace tests passed, including the native-feature coverage run at
+**87.26% line coverage**. Deterministic blocked-writer tests cover active versus queued work,
+overflow, callback panic/abandoned queue, observer lifetime and concurrent admission/close.
+Three metric tests cover honest disabled samples, observer integration and contiguous Prometheus
+family grouping. Two real-binary HTTP tests passed for explicit capacities, disabled buffers and
+the unchanged authentication gate. All-target clippy passed with the native feature; formatting,
+binding facade drift and diff checks passed. No public JSON schema or binding contract changed.
+The full SDK/dashboard/broker suite with AgentBrowser passed **95 tests, 1 skipped** (Google SDK
+unavailable locally); all-target clippy also passed without the native feature. C01b in TD-0026
+tracks integration separately; no merge or release is implied by local verification.
+
+## W06a execution gates (2026-09-06; integrated)
+
+This slice covers the whole shutdown path, not just a readiness flag. These are acceptance
+gates; C01c in TD-0026 tracks verification and integration:
+
+1. Define a lifecycle/cutoff shared by the listener and request admission. Keep fresh HTTP/TLS
+   probes reachable during a bounded quiesce phase; `/readyz` returns 503 while `/healthz`
+   retains 200. Readiness remains drain-only, not a new ledger/provider-health policy.
+2. Reject new model requests and admin mutations before dispatch after the cutoff, including
+   requests already waiting on admission/body reads. Pin the race between cutoff and permit
+   acquisition; merely checking middleware once is insufficient. Existing admitted streams
+   may finish within the remaining deadline. Define cutoff as dispatch authorization's
+   linearization point: already-authorized work may send bytes later. A literal network-byte
+   cutoff would require transport-level gating. Own reservation guards across detached work
+   so pre-dispatch cancellation cannot orphan leases; track admitted mutations until completion.
+3. Own one monotonic deadline across quiesce, connection cancellation, both writer drains,
+   runtime cleanup and telemetry shutdown. `RequestAccounting::Drop` calls synchronous
+   settlement, the aborted-task join loop is currently unbounded, and detached blocking
+   admission/broker work may outlive its request. `#[tokio::main]` runtime drop and
+   `OtelGuard::Drop` can also wait beyond the listener grace. Explicitly bound or disclose
+   those phases; do not claim a process-wide bound from `close(remaining)` alone.
+4. Before shipping, test real HTTP/TLS fresh probes, keep-alive requests, stalled handshakes,
+   queued admissions, in-flight SSE, locked SQLite settlement, blocked writer callbacks and
+   telemetry shutdown. Assert no post-cutoff dispatch, truthful unfinished/uncertain work,
+   and an externally measured process-exit bound. Do not relabel abandoned work as persisted.
+   Include saturated connection/per-IP limits: a bounded probe allowance or a qualified
+   reachability contract is required, not removal of existing transport protections.
+
+Listener ownership is in `serve_router_listener_with_shutdown`; application admission and
+request accounting are in `lib.rs`; binary/runtime/writer sequencing is in `main.rs`; telemetry
+cleanup is in `otel.rs`. Library embedders must retain runtime ownership and receive an honest
+bounded shutdown result rather than a process-wide termination side effect. W05 continues to
+own authoritative unknown liability and durable settlement evidence.
+
+### Implemented contract
+
+`Lifecycle` serializes cutoff and operation admission. AI requests recheck after body extraction
+and authorize dispatch only after owned reservation acquisition. Lost blocking-task results
+retain reservation rollback ownership. Admin mutation guards outlive detached broker work;
+config children regate individually and retain partial commit results.
+
+`/readyz` is ungated, non-cacheable and drain-only; `/healthz` remains liveness. The same-port
+quiesce window defaults to 1000 ms (`SANDHI_SHUTDOWN_QUIESCE_MS`), bounded by one quarter of
+the original deadline's remaining grace. HTTP/TLS fresh and keep-alive probes are reachable
+only during that window and **subject to existing global/per-IP caps**. No reserved probe
+capacity or reachability after listener close is promised. Requests already authorized before
+cutoff may still send upstream bytes; this is not transport-byte fencing.
+
+The library reports `TimedOut` when cancellation/operation cleanup is unfinished and never
+terminates its host. Synchronous cleanup can outlive cancellation; runtime ownership stays
+with the embedder. The binary owns a separate watchdog, armed before shutdown logging, which
+enforces the same monotonic deadline through accounting, writer closure, OTLP destruction and
+explicit Tokio teardown. Incomplete cleanup exits 124 without claiming settlement or flush;
+normal completion exits 0. The hard-exit path performs no potentially blocking logging.
+
+Prometheus adds fixed, unlabeled readiness, active-operation and elapsed-shutdown gauges under
+the existing metrics authorization. Active operations are not durable commits or all live
+connections. This does not complete the remaining P2 gauges, pool/DNS work, W06c recovery or
+W06d workload/user acceptance. See the operator guide for probe migration and timeout handling.
+
+### Verification
+
+Native workspace tests passed with 87.76% line coverage; OTLP-feature proxy tests and strict
+default/native+OTLP clippy passed. Full SDK/dashboard/broker plus real AgentBrowser smoke:
+113 passed, 1 skipped (Google SDK absent locally). Eight `test_shutdown.py` cases exercise
+actual SIGTERM over HTTP/TLS, including fresh/keep-alive probes, held SSE, queued/slow-body
+cutoff, saturated transport limits and hung/locked-SQLite exit 124. Rust tests cover detached
+reservation rollback, admin/config guards, metrics authorization, stalled TLS, blocked cleanup
+and runtime-teardown watchdog subprocesses. This is not a live external-collector or production
+workload certification. Adversarial review's trailing OTLP span-drop guard race was fixed by
+placing the operation guard last; re-review found no remaining blocker. C01c owns PR/CI evidence.
+
+## W06c recovery acceptance (2026-09-06; integrated and verified)
+
+The [recovery runbook](../operator/recovery-drill.md) and disposable SDK fixtures rehearse
+single-file and fixed two-shard restart/restore, exact attribution and continued settlement,
+real SIGKILL lease preservation and held-capacity rejection, WAL-aware standalone snapshots,
+invalid/overlapping archive rejection and historical revocation reconciliation in quarantine.
+Native/plain synthetic broker cases distinguish retained metadata from actual secret authority;
+AgentBrowser checks the restored, authenticated dashboard without seeding new usage.
+
+The broader review also reproduced configured ledger-open failure bypassing a persisted zero
+hard cap through a fresh memory ledger. W06c therefore requires startup failure before binding
+when a configured database cannot initialize; only absent storage configuration selects memory.
+Empty/non-UTF-8 settings, `:memory:` and SQLite `file:` URIs are rejected by the binary.
+External broker resolution remains separate. Initialization is not an atomic migration of all
+components, and missing shards can still be created: restore completeness preflight is required.
+
+These are initial single-node drills, not online cross-file backup, production RTO/RPO, live broker
+certification, automatic revocation reconciliation or authoritative unknown-consumption recovery.
+W06d separately owns workload evidence and actual-user acceptance. C01d tracks review and CI.
+
+Independent review closed source/archive overlap and exact serialized-manifest size findings;
+the new startup regression first demonstrated upstream dispatch despite a persisted zero cap,
+then passed after the fix. All 17 startup failure/healthy-mode cases passed independent re-review.
+Default/native workspace and OTLP proxy tests and strict clippy passed; native line coverage was
+87.77%. Final combined SDK/browser and remote CI evidence belongs to C01d.
+
+W06d's [integrated workload record](../product/m1-acceptance.md) adds a 36-phase synthetic baseline
+and a 227-test combined SDK/browser regression result. This is not full TD-0015 certification or
+a production latency/capacity promise. Actual-user acceptance still gates M1/main promotion.
+
+## Remaining pool decision
+
+**What is the right default `pool_max_idle_per_host`?** Gated on
   [TD-0015](TD-0015-performance-baseline-and-fault-injection.md) R5. Too low and every request pays
   a handshake; too high and idle FDs accumulate exactly as they do today under reqwest's unbounded
   default. This is a measurement, not a preference.

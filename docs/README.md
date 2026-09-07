@@ -9,11 +9,17 @@ mistaken for shipped behavior.
 | Question | Source of truth |
 |---|---|
 | What can I run today? | The root [README](../README.md) and [proxy operator guide](operator/proxy-guide.adoc) |
+| How do I rehearse recovery safely? | [Isolated single-node recovery drill](operator/recovery-drill.md); no automatic production restore guarantee |
 | What is the supported architecture and scope? | Accepted records in [`adr/`](adr/) |
 | What is complete or still open? | This index and the status line at the top of each record in [`td/`](td/) |
 | What is the public data contract? | Rust types in `sandhi-core`; generated JSON Schemas in [`../schemas/`](../schemas/) |
 | What changed in a release? | [CHANGELOG](../CHANGELOG.md) and [release guide](../RELEASING.md) |
 | How do sibling repositories integrate? | [`upstream/`](upstream/) snapshots; these are non-normative and may be historical |
+| What product evolution is proposed and how is it tracked? | [TD-0026 delivery plan](td/TD-0026-gateway-product-evolution.md), [product specification](product/gateway-vision-and-requirements.md), and [2026-09-04 review](reviews/gateway-review-2026-09-04.md); proposals, not shipped claims |
+| What evidence gates the M1 checkpoint? | [Workload and acceptance](product/m1-acceptance.md); UA01 accepts engineering evidence for this release and defers hands-on usability until before production |
+| Which acceptance decisions remain, and why? | [M1 decision packet](product/m1-acceptance-decisions.md); automated evidence, operating-limit choices and a focused user-review script |
+| What must be hardened before the milestone release? | [Release safeguards](product/release-safeguards.md); owner-selected existing crates token, PyPI/npm OIDC; workflow correction in progress, ref controls verified (SG06), registry evidence pending (SG07) |
+| What adversarial checks cover the first checkpoint? | [2026-09-05 checkpoint review](reviews/checkpoint-adversarial-review-2026-09-05.md); findings, corrections and remaining integration gates |
 
 ADRs record durable decisions. Their context sections describe the repository at the time the
 decision was made and are not implementation-status pages. TDs record execution: the status line
@@ -36,6 +42,11 @@ Sandhi is an L7 AI usage gateway and provider-transport library, not a general L
   usage but do not enforce the proxy's lease ledger.
 - Sandhi measures neutral usage units. Pricing, billing, identity governance, and commercial
   policy remain downstream.
+- Budget admission uses estimates, not strict total-token bounds. Reasoning inclusion is explicit
+  in contract minor 7; see [metering semantics, compatibility and guarantees](product/metering-and-budget-guarantees.md).
+- W05a provides an opt-in store primitive for atomic settlement receipts and delivery claims;
+  the proxy does not use it yet. See [attempt accounting and evidence](product/attempt-accounting-and-evidence.md)
+  for the remaining transport, recovery, export and consumer-review gates.
 
 The rationale and the evidence gate for changing this scope live in
 [ADR-0006](adr/0006-layer-boundary-and-protocol-scope.md). The HTTP/1-only listener decision is
@@ -80,7 +91,8 @@ All current ADRs are accepted; ADR-0007 is an accepted **negative** decision.
 
 ## Technical-design status
 
-Status was reconciled with `develop` on 2026-09-02. “Complete” means the TD's required scope is
+Status was reconciled with `develop` on 2026-09-02; TD-0026 was added on 2026-09-04.
+“Complete” means the TD's required scope is
 shipped; a deliberately transferred or optional follow-up is named in the TD instead of keeping it
 perpetually open.
 
@@ -105,14 +117,32 @@ perpetually open.
 | [0017](td/TD-0017-transport-security-and-ingress-protocol-breadth.md) | In progress | P2 rotation, P3 ALPN/context, evidence-gated P4 HTTP/2 |
 | [0018](td/TD-0018-duplex-session-metering.md) | Proposed | Spike, session abstraction, and WebSocket ingress |
 | [0019](td/TD-0019-ingress-codec-untrusted-input-hardening.md) | Proposed | Property/fuzz suites and lossy-field inventory |
-| [0020](td/TD-0020-operational-readiness-and-transport-observability.md) | In progress | Readiness, remaining gauges, pool, shedding, and DNS work |
+| [0020](td/TD-0020-operational-readiness-and-transport-observability.md) | In progress | W06a/b/c and W06d automation verified and integrated; actual-user acceptance pending. Remaining gauges, pool, shedding and DNS work still open |
 | [0021](td/TD-0021-co-design-seam-v2-proxy-path-contract.md) | Complete | — |
 | [0022](td/TD-0022-per-call-transport-context.md) | Complete | — |
 | [0023](td/TD-0023-release-automation.md) | Complete | npm remains intentionally unconfigured/unpublished |
 | [0024](td/TD-0024-reservation-retention-and-rollup.md) | Proposed | Bounded reservation history and rollups |
 | [0025](td/TD-0025-ingress-funnel-and-family-registry.md) | Proposed | Family registry and funnel decomposition |
+| [0026](td/TD-0026-gateway-product-evolution.md) | In progress | W01–W04 complete; W05a foundation complete; W06a/b/c and W06d automation verified and integrated. UA01–UA05 accepted; release scope pending; pre-production usability, broker integration validation and recovery ownership gates remain open |
 
-The compact active roadmap is therefore:
+TD-0026 slice completion means implementation/local verification. Its separate C01/C02 checkpoint
+table tracks remote CI, merge and release; C01 [PR #230](https://github.com/anvai-labs/sandhi/pull/230)
+merged into `develop` as `8f56b91` after clean review and green hosted CI, with an explicit
+owner-authorized review bypass. Post-merge CI is green; no release or main promotion occurred.
+W06b is separately checkpointed in [PR #231](https://github.com/anvai-labs/sandhi/pull/231)
+(C01b), verified locally against current `develop` with its own CI/merge evidence on the PR;
+it does not complete M1 readiness/recovery acceptance.
+
+The proposed [product evolution plan](td/TD-0026-gateway-product-evolution.md) connects UX,
+accounting, operations, security and credential lifecycle to these existing designs. Its first
+milestone addresses confirmed correctness gaps; its later fleet and protocol work retains the
+accepted scope and evidence gates. The [SentinelPass co-design](upstream/sentinelpass-gateway-codesign.md)
+defines proposed shared contracts and reciprocal capabilities from pinned source review.
+The [browser–gateway–vault co-design](upstream/browser-gateway-vault-codesign.md) adds
+AgentBrowser smoke coverage and proposed destination-bound secrets and correlated action evidence;
+it does not imply a live three-product integration.
+
+The existing implementation roadmap, which TD-0026 proposes reprioritizing, is:
 
 1. Establish proxy/load/fault measurements (TD-0015), then use them to choose fairness,
    operational, and throughput changes (TD-0014/0016/0020).

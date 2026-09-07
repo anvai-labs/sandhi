@@ -12,6 +12,14 @@
 
 ## Why this exists
 
+**2026-09-07 safeguard revision (implementation/review in progress):** the historical mechanisms
+below are superseded where noted by [RELEASING.md](../../RELEASING.md) and the
+[safeguard tracker](../product/release-safeguards.md). The new unified workflow requires exact
+main-push CI and immutable source identity, all declared targets, environment-only crates
+credentials, checked npm tarballs and fail-closed verification. The old manual crates publisher
+is retired. Remote authority/registry setup and final release execution remain separately open;
+do not use the historical token/skip instructions as current setup guidance.
+
 The v0.3.0 release was blocked by a dependency nobody could publish:
 sandhi-store pinned `sentinelpass-protocol` via a **git tag**, and crates.io
 rejects any manifest resolved from a git source at publish time. The protocol
@@ -98,4 +106,3 @@ release published all four crates in order — verified at the registry:
 crates.io `core/providers/store/proxy` all at 0.3.0, with store 0.3.0's
 published manifest carrying `sentinelpass-protocol ^0.8 (optional)` and no
 git source.
-
