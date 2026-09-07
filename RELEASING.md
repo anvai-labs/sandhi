@@ -72,8 +72,8 @@ Actions are pinned by full commit SHA and checkout credentials are not persisted
   trusted publishing; a binding on the root package does not authorize platform packages.
 - A separate unprivileged job checks the staged Rust workspace. Both it and the crates publisher
   use the same first-party, standard-library-only version staging helper from the control SHA.
-  No third-party dependency compilation or build-helper installation runs in the OIDC-authorized crates job:
-  OIDC permission applies to every step, not only the step exchanging a token. Publication uses
+  No third-party dependency compilation or build-helper installation runs in the crates publishing job.
+  The existing repository token is exposed only to the upload step. Publication uses
   `--no-verify` to avoid compiling dependency build scripts while holding registry authority.
   This is **not** a packaged-crate installation test; registry resolution/package checks still
   occur at publish time. The helper leaves the lockfile unchanged; Cargo refreshes local package
@@ -89,30 +89,31 @@ not transactional and must not be described as atomic.
 
 Ref restrictions were applied and independently verified on 2026-09-07:
 [read-back evidence](docs/product/evidence/release-controls-2026-09-07.json).
-Credential and registry-side publisher setup below remains **unverified/incomplete** under SG07;
-the ref settings alone do not authorize publication.
+The owner selected reuse of the existing crates token, with trusted publishing only for PyPI
+and npm. SG07 tracks that decision and remaining registry evidence; ref settings alone do not
+establish credential validity or registry-side bindings.
 
 | Publisher | Required authority |
 |---|---|
 | GitHub assets | `github-release` environment restricted to permitted release tags; job-scoped `contents: write` |
 | PyPI | Trusted publisher for repo `anvai-labs/sandhi`, workflow `release.yml`, environment `pypi`; environment allows release tags |
 | npm | Trusted publisher on **each of the three packages**, same repo/workflow, environment `npm`; allow release tags and branch `main` for repair |
-| crates.io | GitHub trusted publisher on **each of the four crates**, repo `anvai-labs/sandhi`, workflow `release.yml`, environment `crates-io`; job-scoped `id-token: write`, environment allows release tags |
+| crates.io | Existing repository secret `CARGO_REGISTRY_TOKEN`, supplied only to the upload step; `crates-io` environment allows release tags; no OIDC permission |
 
 Protect `v*` tag creation and prohibit updates/deletions. Tag and branch deployment rules are
 distinct: allowing only branch `main` would block legitimate tag-triggered publishing.
 
-The legacy repository `CARGO_REGISTRY_TOKEN` must be revoked at crates.io and removed from GitHub
-after the trusted replacement path is confirmed. A tokenless new workflow does not revoke existing
-credentials or isolate an old repository-wide secret. Never paste tokens into chat or committed
-files. GitHub secret metadata cannot establish token validity/scope.
-Public package presence cannot establish registry-side trusted-publisher bindings.
+Do **not** revoke, delete or rotate `CARGO_REGISTRY_TOKEN` as part of this release: the owner
+explicitly confirmed it is retained and should be reused. Neither a new `CRATES_RELEASE_TOKEN`
+nor crates.io trusted-publisher bindings are required by the selected mechanism. Token contents
+must not appear in chat, logs or committed files. Metadata confirms presence, not validity/scope;
+an authentication failure must stop publication, not skip crates successfully.
 
-The crates publisher uses the [official crates.io OIDC action](https://github.com/rust-lang/crates-io-auth-action)
-pinned to `c6f97d42243bad5fab37ca0427f495c86d5b1a18` (`v1.0.5`). It obtains a temporary
-token after proof revalidation, exposes it only to the upload step and revokes it in its post step.
-Runner loss can prevent cleanup; expiry remains the backstop. There is no stored-token fallback,
-and no new `CRATES_RELEASE_TOKEN` secret is needed. OIDC migration does not revoke the legacy token.
+The repository-scoped credential remains potentially accessible to other same-repository
+workflows that request it. Supplying it only to this workflow's upload step and restricting the
+`crates-io` environment do **not** make the secret environment-scoped. This retained exposure
+is part of the owner's existing-token choice; do not claim it was eliminated. The retired manual
+publisher remains disabled. Public package presence cannot establish trusted-publisher bindings.
 
 ### Owner confirmation for SG07
 
@@ -124,13 +125,9 @@ not yet confirm either platform package or the current PyPI settings. See the
 Do not send token values, recovery codes or credentials in chat. Confirm only the following
 non-secret facts after checking the registry account settings:
 
-- Each of `sandhi-core`, `sandhi-providers`, `sandhi-store` and `sandhi-proxy` has a crates.io
-  GitHub trusted publisher: owner `anvai-labs`, repository `sandhi`, workflow filename
-  `release.yml`, environment `crates-io`. Use each existing crate's trusted-publishing settings;
-  do not create or upload a long-lived replacement token. See
-  [crates.io trusted publishing](https://crates.io/docs/trusted-publishing).
-- The old token is revoked at crates.io and its legacy repository secret removed. Merely deleting
-  the GitHub secret does not revoke a token that may have been copied elsewhere.
+- **Received:** the owner states the existing crates token has not been revoked and should
+  be reused. GitHub read-back confirms the repository secret name `CARGO_REGISTRY_TOKEN`.
+  Its value, permissions and expiry were not read; actual authorization is checked by publication.
 - The PyPI project and **each** npm package authorize `anvai-labs/sandhi`, workflow filename
   `release.yml`, and their exact environment (`pypi` or `npm`). npm must permit direct
   `npm publish`, not only staged publication. Review the registry-side forms, not package presence:

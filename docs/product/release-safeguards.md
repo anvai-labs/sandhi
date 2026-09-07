@@ -1,8 +1,9 @@
 # Safeguarded milestone release
 
-Status: safeguard implementation and crates OIDC migration integrated with green post-merge CI;
-remote ref controls verified. Registry authority closure (SG07) and release execution (SG08)
-remain open. See the latest [integration checkpoint](#trusted-publishing-integration-checkpoint-2026-09-07).
+Status: owner corrected the registry mechanism—reuse the existing crates token; trusted
+publishing applies only to PyPI/npm. The corresponding workflow correction is in progress.
+Remote ref controls remain verified; registry evidence (SG07) and execution (SG08) remain open.
+See the [current owner decision](#owner-correction-reuse-the-crates-token-2026-09-07).
 Tracker: [TD-0026](../td/TD-0026-gateway-product-evolution.md); publish mechanics:
 [TD-0023](../td/TD-0023-release-automation.md).
 
@@ -30,10 +31,36 @@ accepted product limits to expand M1.
 | SG04 | Validate prepared npm packages and packed contents before publication | Exact target set, binaries, loader/types and dependencies; no source/nested-binary leakage; safe partial retry | Implemented and locally verified; full release matrix still unexecuted |
 | SG05 | Integrate safe release checks into ordinary public CI | Unit/negative tests and workflow contracts green; independent adversarial review; focused develop PR and post-merge CI | Complete: [PR #237](https://github.com/anvai-labs/sandhi/pull/237) merged; exact-head and post-merge CI green; 207 hosted safeguard tests passed |
 | SG06 | Restrict release authority outside editable workflow code | Read-back evidence for approved tag/environment controls; preserve current protections; identify repository-secret exposure | Complete for ref controls: two active tag rulesets and four restricted environments independently verified; credential closure remains SG07 |
-| SG07 | Confirm registry-side authority without test-publishing | Trusted-publisher bindings and legacy credential revocation verified by authorized owner; artifact presence alone insufficient | Implementation integrated: PRs #239/#240 reviewed, pre/post-merge CI green; root npm owner evidence received; remaining bindings and legacy revocation open |
+| SG07 | Confirm selected registry authority without test-publishing | Owner-authorized existing crates token; PyPI/npm trusted bindings; artifact presence alone insufficient | Crates token reuse explicitly selected, secret name read back; no revocation or crates OIDC prerequisite. Workflow correction in progress; PyPI/npm binding evidence remains separate |
 | SG08 | Final milestone promotion and release | Version/target authority; fresh cumulative review/CI; main post-merge CI; publish/verify/back-sync; P01–P03 still open | v0.6.0 all-target continuation authorized; promotion/publication await SG07 and current CI |
 
 ## Initial findings
+
+### Owner correction: reuse the crates token (2026-09-07)
+
+The owner clarified that the existing crates.io token is **not revoked and should be reused**;
+trusted publishers are used only for PyPI and npm. This supersedes earlier requirements below
+to migrate crates to OIDC, create an environment replacement token, or revoke the existing token.
+Those dated sections remain historical evidence, not current release instructions.
+
+- Restore `secrets.CARGO_REGISTRY_TOKEN` only in the crates upload-step environment. Its
+  repository-level presence was read back; value, validity, permissions and expiry were not read.
+- Remove the crates OIDC action and `id-token: write`; leave PyPI/npm OIDC unchanged.
+- Retain first-party stdlib staging, unprivileged compilation, proof checks before uploads,
+  `cargo publish --no-verify`, all-build gates, immutable source/action pins and environment rules.
+- Do not revoke/remove/rotate the token or require four crates trusted-publisher bindings.
+  The repository-scoped secret remains available to other workflows that request it; this
+  exposure is retained under the owner's choice, not falsely described as environment isolation.
+- The owner confirms the intended PyPI/npm mechanism; prior root npm settings and historical
+  PyPI upload evidence remain recorded. This does not independently read back every current
+  per-package binding. Failures during authorized publication remain failures, not optional skips.
+
+No secret value, registry settings, existing package, tag or main branch was changed by this
+correction. Reviewed/green integration and main promotion still precede v0.6.0 publication.
+
+Local correction validation: **284 release tests passed, zero skips**; independent workflow
+review passed **33 tests** with no blocking findings. Actionlint 1.7.12 and `git diff --check`
+pass. These checks validate workflow wiring, not the reusable token's registry permissions.
 
 ### Owner publisher evidence (2026-09-07)
 
@@ -138,6 +165,9 @@ dependency requirements at `^0.6.0`. Real source manifests and lockfiles were no
 This is metadata/staging evidence, not a release-mode compilation or publishing test.
 
 ### Trusted-publishing integration checkpoint (2026-09-07)
+
+Historical checkpoint: the later owner correction above supersedes the crates OIDC/revocation
+requirements, without undoing the recorded test and integration evidence.
 
 | Change | Reviewed head | Develop merge | Executed pre/post-merge CI |
 |---|---|---|---|
