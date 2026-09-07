@@ -1,7 +1,8 @@
 # Safeguarded milestone release
 
-Status: safeguard implementation integrated with green post-merge CI; remote ref controls
-verified. Registry credential closure (SG07) and final release execution (SG08) remain open.
+Status: safeguard implementation and crates OIDC migration integrated with green post-merge CI;
+remote ref controls verified. Registry authority closure (SG07) and release execution (SG08)
+remain open. See the latest [integration checkpoint](#trusted-publishing-integration-checkpoint-2026-09-07).
 Tracker: [TD-0026](../td/TD-0026-gateway-product-evolution.md); publish mechanics:
 [TD-0023](../td/TD-0023-release-automation.md).
 
@@ -29,7 +30,7 @@ accepted product limits to expand M1.
 | SG04 | Validate prepared npm packages and packed contents before publication | Exact target set, binaries, loader/types and dependencies; no source/nested-binary leakage; safe partial retry | Implemented and locally verified; full release matrix still unexecuted |
 | SG05 | Integrate safe release checks into ordinary public CI | Unit/negative tests and workflow contracts green; independent adversarial review; focused develop PR and post-merge CI | Complete: [PR #237](https://github.com/anvai-labs/sandhi/pull/237) merged; exact-head and post-merge CI green; 207 hosted safeguard tests passed |
 | SG06 | Restrict release authority outside editable workflow code | Read-back evidence for approved tag/environment controls; preserve current protections; identify repository-secret exposure | Complete for ref controls: two active tag rulesets and four restricted environments independently verified; credential closure remains SG07 |
-| SG07 | Confirm registry-side authority without test-publishing | Trusted-publisher bindings and legacy credential revocation verified by authorized owner; artifact presence alone insufficient | Partial: owner supplied root npm binding; crates OIDC migration in progress; remaining package bindings and legacy token revocation open |
+| SG07 | Confirm registry-side authority without test-publishing | Trusted-publisher bindings and legacy credential revocation verified by authorized owner; artifact presence alone insufficient | Implementation integrated: PRs #239/#240 reviewed, pre/post-merge CI green; root npm owner evidence received; remaining bindings and legacy revocation open |
 | SG08 | Final milestone promotion and release | Version/target authority; fresh cumulative review/CI; main post-merge CI; publish/verify/back-sync; P01–P03 still open | v0.6.0 all-target continuation authorized; promotion/publication await SG07 and current CI |
 
 ## Initial findings
@@ -111,6 +112,8 @@ synthetic-header packaging fixtures, not native ABI execution or registry public
 
 ### Crates OIDC migration in progress (2026-09-07)
 
+Historical implementation checkpoint; integration subsequently completed as recorded below.
+
 - [PR #239](https://github.com/anvai-labs/sandhi/pull/239), head
   `af7d36bc252e993ad19dcee8a1d563b2b0f1ba6c`, has clean independent review and **220 local
   passing release tests**. Hosted CI remained queued at this checkpoint; no merge bypassed it.
@@ -133,6 +136,43 @@ Actionlint 1.7.12 and `git diff --check` pass. A disposable copy checked with
 `cargo metadata --offline --no-deps` contains exactly four `0.6.0` packages and five internal
 dependency requirements at `^0.6.0`. Real source manifests and lockfiles were not staged.
 This is metadata/staging evidence, not a release-mode compilation or publishing test.
+
+### Trusted-publishing integration checkpoint (2026-09-07)
+
+| Change | Reviewed head | Develop merge | Executed pre/post-merge CI |
+|---|---|---|---|
+| [PR #239](https://github.com/anvai-labs/sandhi/pull/239): npm repository identity | `af7d36bc252e993ad19dcee8a1d563b2b0f1ba6c` | `4ba75d172ebd995c0044039165dda5d9856ed271` | [34147426407](https://github.com/anvai-labs/sandhi/actions/runs/34147426407), [34148138831](https://github.com/anvai-labs/sandhi/actions/runs/34148138831): success |
+| [PR #240](https://github.com/anvai-labs/sandhi/pull/240): crates OIDC and stdlib staging | `b272f1b0b869f781d4948ed712e3b5507042caeb` | `76316690f2f27268a1da7cf3c633219e06396be5` | [34148093698](https://github.com/anvai-labs/sandhi/actions/runs/34148093698), [34148361660](https://github.com/anvai-labs/sandhi/actions/runs/34148361660): success |
+
+Both heads received clean independent review before merge. Only the previously authorized
+missing-human-approval admin bypass was used; no failed/pending CI was bypassed, and branch
+protection/ref controls were not relaxed. Hosted migration CI reported **284 passed, zero skips**
+and passed pinned Actionlint. Post-merge `Release safeguards` and `CI Success` executed and
+succeeded on public GitHub runners; `OWNER_PRIVATE_CI_ENABLED` remains `false`.
+
+The merged develop tree is byte-identical to reviewed migration head `b272f1b0`. Additional
+bounded cumulative reviews against main `72ced4bd` found no substantiated new blockers:
+
+- Accounting/reservation/recovery/shutdown review: **134 focused Rust tests passed**, including
+  98 core tests; accepted estimated-token and single-node guarantees are unchanged.
+- Operator/admin/dashboard/vault/error-boundary review: **89 browser/management/recovery
+  tests passed, zero skips**, plus **3 Rust lifecycle tests**. The initial restricted invocation
+  hit socket `EPERM`; its approved rerun passed. This is synthetic evidence, not live integration.
+- Fresh synthetic acceptance journeys: **5 passed** via
+  `timeout 180s python3 -m pytest tests/sdk-conformance/test_acceptance_decisions.py -q` with
+  approved browser/localhost access. An earlier restricted invocation stalled without results
+  and was terminated before the bounded rerun. No hands-on usability acceptance is claimed.
+
+These scoped reviews prepare promotion; they do not replace cumulative promotion-PR CI or
+exact-main post-merge CI. Main has not been promoted and no release tag, registry upload,
+package removal/deprecation, registry publisher edit or credential revocation was performed.
+
+Remaining owner gate: confirm the two platform npm bindings, current PyPI binding, and all four
+crates.io bindings using [the owner checklist](../../RELEASING.md#owner-confirmation-for-sg07).
+Confirm legacy token revocation at crates.io separately from removal of the GitHub repository
+secret after the replacement path is established. No new long-lived crates secret is required.
+Then complete reviewed main promotion, exact-main CI, the v0.6.0 build/publish matrix and final
+artifact verification. P01–P03 production gates remain explicitly open.
 
 These findings describe the pre-change workflow. The local implementation below addresses its
 code paths; SG06/SG07 are still required to close external authority gaps.
