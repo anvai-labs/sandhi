@@ -50,9 +50,12 @@ before using it. The wider suite also builds default-feature binaries; this hash
 the nine decision artifacts, not every process in the suite.
 
 Final full-suite result: **251 passed, zero skipped, zero failures/errors, 211.29 seconds**.
-The unmodified [JUnit result](junit.xml) includes teardown and two recovery properties;
+The hostname-redacted [JUnit result](junit.xml) includes teardown and properties on two recovery cases;
 pytest emitted two `record_property`/xunit2 compatibility warnings, not test failures.
-JUnit SHA-256: `e0c7bfc71baacf2e53bdc157a9f9f1bb93f7fda6e62148dfd345dcdd470bde0d`.
+Published JUnit SHA-256: `7b957d35afee0eb70b6a6c284b1e26c22f0fc65597d0086ef6cef287cfbc35a6`.
+Only the machine hostname attribute was removed; results/timings/properties are unchanged.
+The raw local original remains under `target/`, SHA-256
+`e0c7bfc71baacf2e53bdc157a9f9f1bb93f7fda6e62148dfd345dcdd470bde0d`.
 
 Command from the Sandhi root (the output directory must be private and disposable):
 
@@ -79,7 +82,8 @@ Local Rust verification also passed: `cargo test --workspace`,
 The source remained unchanged during sequential execution; documentation/artifact additions
 followed capture. Nine PNGs were visually inspected, and published JSON/XML were checked for
 fixture secret values and captured request/log bodies. Re-run rather than reuse the random
-`journey-*` output subdirectories. The copies here preserve the emitted bytes and fixed basenames.
+`journey-*` output subdirectories. PNG/JSON copies preserve emitted bytes and fixed basenames;
+JUnit has only the hostname redaction documented above.
 
 ## Additional broker-source automation
 
@@ -92,7 +96,7 @@ A clean isolated public-source checkout of SentinelPass at
 | `cargo test --locked --offline -p sentinelpass-core --lib external_secret_access::tests -- --test-threads=1` | 15 passed, 0.00 s reported |
 
 The real Unix-socket tests cover exact grants/fields, missing/wrong client tokens, rotation and
-revocation, locked read/write states, authorized upsert/readback, read-only write denial and
+revocation of client tokens, locked read/write states, authorized upsert/readback, read-only write denial and
 unsupported deletion. Grant-policy tests include persistence, token hashing and private file
 permissions. They do not prove elapsed-time expiry or live Sandhi interoperability.
 

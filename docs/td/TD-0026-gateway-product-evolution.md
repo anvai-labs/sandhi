@@ -49,6 +49,7 @@ marking a planning task complete does not mark its implementation complete.
 | C01c | W06a drain-aware readiness; branch `feat/drain-aware-readiness` | Passed: native workspace, OTLP proxy tests, 87.76% native coverage, 113 SDK/browser tests; independent review finding fixed and re-reviewed clean | [PR #232](https://github.com/anvai-labs/sandhi/pull/232) merged as `31151d9`; latest-head CI `34042875545` and post-merge CI `34048329909` passed; authorized missing-review bypass only | Complete | No |
 | C01d | W06c recovery drills; branch `test/recovery-drills` | Passed: 181 SDK/browser tests (one unavailable SDK skipped), default/native/OTLP tests and clippy, 87.77% native coverage; adversarial findings fixed and independently re-reviewed clean | [PR #233](https://github.com/anvai-labs/sandhi/pull/233) merged as `8ae8401`; latest-head CI `34058455291` and post-merge CI `34059776510` passed on public hosted runners; authorized missing-review bypass only | Complete | No |
 | C01e | W06d workload/operator acceptance; branch `test/m1-acceptance` | Automation passed: 227 local SDK/browser tests (one unavailable SDK skip), 233 hosted SDK tests (two optional sibling-browser skips), 36-phase integrated workload and clean independent review; [evidence and actual-user gate](../product/m1-acceptance.md). Accepting operator/results still pending | [PR #234](https://github.com/anvai-labs/sandhi/pull/234) merged as `324ba87`; latest-head CI `34060286384` and post-merge CI `34060985111` passed on public hosted runners; authorized missing-review bypass only | Automation verified and integrated; human acceptance pending | No |
+| C01f | Operator decision evidence and run-view correction; branch `test/operator-decision-evidence` | 251 SDK/browser tests, zero skips; Rust tests/clippy/fmt passed; nine masked journey pairs plus JUnit; 18 pinned broker-component tests | [PR #236](https://github.com/anvai-labs/sandhi/pull/236) is the live record for exact-head review, CI and post-merge verification | Follow PR merge state; source-pinned local evidence remains immutable | No; UA01–UA06 pending |
 | C02 | Initial W06 and M1 operator-journey acceptance, then `develop` → `main` | Pending | Pending promotion PR and post-merge CI | Pending | No; tagging/publishing is a separate action |
 
 C01f follow-up: `test/operator-decision-evidence` closes the automatable links between browser
@@ -58,7 +59,9 @@ nine masked PNG/JSON pairs and final JUnit are in the [decision packet](../produ
 Eighteen isolated pinned broker-source tests add component evidence, not live interoperability.
 The exposed dashboard run-envelope mismatch is corrected with malformed/unsafe-response and
 escaped-label regressions. Independent source re-review is clean after closing false-pass gaps;
-remote PR/CI and integration remain pending. UA01–UA06 choices remain pending: these checks do
+remote review/CI, merge and post-merge verification are recorded in [PR #236](https://github.com/anvai-labs/sandhi/pull/236).
+The PR's live state is authoritative for integration, separate from this source checkpoint.
+UA01–UA06 choices remain pending: these checks do
 not turn automation into observed-user acceptance or revise C02.
 
 C01 checkpoints completed work now instead of waiting for W05–W14. Do not claim M1 complete
