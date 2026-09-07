@@ -73,7 +73,7 @@ tests; package preflight may pack/build locally but must not invoke a registry w
 
 ## Implementation evidence (2026-09-07 UTC)
 
-- `python3 -m pytest tests/release -q`: **200 passed**, including real offline npm packing,
+- `python3 -m pytest tests/release -q`: **202 passed**, including real offline npm packing,
   registry transport failures, proof substitutions, workflow-negative mutations and binary-smoke
   failure paths. The local sandbox denied npm child execution, so the same offline suite ran
   with approved subprocess access; no registry writes occurred.

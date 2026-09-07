@@ -136,10 +136,10 @@ def check_authority(document):
 def check_verification(document):
     npm = document["jobs"]["npm-publish"]
     assert needs(npm) == {"authorize", "npm-package", "create-release"}
-    assert "!cancelled()" in npm["if"]
-    assert "needs.authorize.result == 'success'" in npm["if"]
-    assert "needs.npm-package.result == 'success'" in npm["if"]
-    assert "(github.event_name == 'workflow_dispatch' || needs.create-release.result == 'success')" in npm["if"]
+    assert " ".join(npm["if"].split()) == (
+        "!cancelled() && needs.authorize.result == 'success' && needs.npm-package.result == 'success' && "
+        "(github.event_name == 'workflow_dispatch' || needs.create-release.result == 'success')"
+    ), "full release requires all builds; repair explicitly tolerates skipped non-npm jobs"
     job = document["jobs"]["verify"]
     assert needs(job) == PUBLISHERS | {"authorize"}
     assert "!cancelled()" in job["if"] and "needs.authorize.result == 'success'" in job["if"]
@@ -181,8 +181,9 @@ def test_non_npm_publish_paths_are_skipped_for_repair():
     for name in ("binaries", "pypi-build", "create-release", "crates", "crates-check"):
         assert jobs[name]["if"] == "github.event_name == 'push'"
     assert "create-release" in needs(jobs["pypi-publish"])
-    for name in ("npm-build", "npm-package", "npm-publish"):
+    for name in ("npm-build", "npm-package"):
         assert "if" not in jobs[name]
+    check_verification(workflow("release.yml"))
 
 
 def test_no_nonexistent_proxy_help_smoke():
@@ -211,7 +212,8 @@ def test_legacy_crates_dispatch_is_read_only_failure_only():
 
 @pytest.mark.parametrize("fault", ["floating_action", "mutable_source", "persisted_credentials", "wrong_source_role", "write_default",
                                   "build_oidc", "missing_authorization", "proof_by_name", "unchecked_publish",
-                                  "wrong_source_binding", "legacy_token", "credentialed_cargo_build", "implicit_targets"])
+                                  "wrong_source_binding", "legacy_token", "credentialed_cargo_build", "implicit_targets",
+                                  "repair_build_bypass", "repair_default_skip"])
 def test_release_contracts_reject_regressions(fault):
     document = copy.deepcopy(workflow("release.yml"))
     jobs = document["jobs"]
@@ -251,6 +253,10 @@ def test_release_contracts_reject_regressions(fault):
             if "run" in step:
                 step["run"] = step["run"].replace(" --no-verify", "")
         checker = check_privileges
+    elif fault in {"repair_build_bypass", "repair_default_skip"}:
+        expression = jobs["npm-publish"]["if"]
+        jobs["npm-publish"]["if"] = expression + " || true" if fault == "repair_build_bypass" else expression.replace("!cancelled() && ", "")
+        checker = check_verification
     else:
         for step in jobs["verify"]["steps"]:
             if "run" in step:
@@ -268,6 +274,9 @@ def test_ci_contract_rejects_silent_safeguard_skips(fault):
     elif fault == "missing_aggregate":
         document["jobs"]["ci-success"]["needs"].remove("release-safeguards")
     else:
-        document["jobs"]["release-safeguards"]["steps"].pop()
+        document["jobs"]["release-safeguards"]["steps"] = [
+            step for step in document["jobs"]["release-safeguards"]["steps"]
+            if "python -m pytest tests/release -q" not in step.get("run", "")
+        ]
     with pytest.raises(AssertionError):
         check_ci(document)
