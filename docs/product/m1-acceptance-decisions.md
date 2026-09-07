@@ -24,7 +24,7 @@ The additional slice connects previously separate checks into complete operator 
 | First useful request | Does the exact key minted in the served browser authorize a synthetic call, with correct subject/group/session/run/step in persistent evidence and displayed totals? | Browser/API/SQL assertions and masked synthetic screenshots |
 | Budget intervention | Does a cap committed through the browser deny a real request before dispatch, without changing usage/leases, and permit recovery after an explicit cap change? | Cap/spend values, 429/no-dispatch deltas, recovery result |
 | Broker failure/recovery | Does the browser distinguish locked, missing and denied references, show safe recovery copy, and register only the exact authorized reference without a secret write? | Canonical visible copy, HTTP outcome and synthetic broker operation assertions |
-| Restored accounting | Do AgentBrowser's displayed numeric values match the restored API/SQL evidence, not merely the model/scope labels? | Exact scoped comparisons through the existing synthetic browser integration |
+| Restored accounting | Do AgentBrowser's accessible attribution/budget rows match restored API/SQL evidence, not merely the model/scope labels? | Exact scoped row comparisons and overview card DOM-value/label checks; card visibility is not established by this API |
 
 Screenshots are synthetic, masked review aids, not proof of general secret redaction. JSON
 journey evidence is not a substitute for final pytest/JUnit results, including fixture teardown.

@@ -89,8 +89,11 @@ Without that variable the optional test skips; an explicitly configured broken c
 The regular CI job runs the Playwright regressions but does not fetch a sibling repository.
 `test_recovery_agentbrowser.py` uses the same optional checkout to verify restored dashboard
 evidence, Refresh and token clearing without generating new inference observations.
-It also compares visible scoped numeric accounting against restored evidence and deliberately
-corrupts displayed values to check that the verifier rejects mismatches.
+It also compares accessibility-visible attribution/budget rows against restored evidence and
+deliberately corrupts values, headings and visibility to check that the verifier rejects
+mismatches. Overview cards receive exact DOM-value/label checks only: the current sibling
+observation API omits their static text from accessibility output, so card visibility is not
+certified by this integration.
 Joint pinned-checkout CI remains AB02 in the
 [co-design tracker](../../docs/upstream/browser-gateway-vault-codesign.md).
 
