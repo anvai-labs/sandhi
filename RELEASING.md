@@ -100,9 +100,34 @@ configured; a new environment on one job cannot isolate an old repository-wide s
 tokens into chat or committed files. GitHub secret metadata cannot establish token validity/scope.
 Public package presence cannot establish registry-side trusted-publisher bindings.
 
-The old manual `publish-crates.yml` is now an explicit fail-only stub. This does **not** disable
-historical workflow definitions/reruns: external environment/ref controls and credential rotation
-remain necessary. See GitHub's
+### Owner confirmation for SG07
+
+Do not send token values, recovery codes or credentials in chat. Confirm only the following
+non-secret facts after checking the registry account settings:
+
+- The replacement token is limited to publishing the four existing Sandhi crate names, with
+  an appropriate expiry, and exists only in the `crates-io` environment. To enter it securely
+  from your own terminal, use the interactive command below (do not put the value in arguments).
+- The old token is revoked at crates.io and its legacy repository secret removed. Merely deleting
+  the GitHub secret does not revoke a token that may have been copied elsewhere.
+- The PyPI project and **each** npm package authorize `anvai-labs/sandhi`, workflow filename
+  `release.yml`, and their exact environment (`pypi` or `npm`). npm must permit direct
+  `npm publish`, not only staged publication. Review the registry-side forms, not package presence:
+  [npm trusted publishers](https://docs.npmjs.com/trusted-publishers/) and
+  [PyPI publisher setup](https://docs.pypi.org/trusted-publishers/adding-a-publisher/).
+
+```bash
+gh secret set CRATES_RELEASE_TOKEN --env crates-io --repo anvai-labs/sandhi
+```
+
+After owner confirmation, read back only GitHub secret names/scope and record the registry
+configuration evidence. Do not publish a throwaway version to test credentials. Until SG07 is
+closed, retain the release hold; do not silently omit crates or any other target.
+
+The old manual `publish-crates.yml` is a fail-only stub and workflow ID `317193810` is now
+`disabled_manually` in GitHub. This does **not** revoke stored credentials or neutralize every
+historical workflow path: external environment/ref controls and credential rotation remain
+necessary. See GitHub's
 [environment restrictions](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)
 and [immutable action pinning guidance](https://docs.github.com/en/actions/reference/security/secure-use).
 
