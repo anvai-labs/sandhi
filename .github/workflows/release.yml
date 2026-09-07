@@ -404,7 +404,12 @@ jobs:
           done
 
   npm-publish:
-    needs: [authorize, npm-package]
+    needs: [authorize, npm-package, create-release]
+    # A repair intentionally skips the non-npm graph. A full release must pass ALL builds
+    # and create its binary release before any registry publisher is allowed to write.
+    if: >-
+      !cancelled() && needs.authorize.result == 'success' && needs.npm-package.result == 'success' &&
+      (github.event_name == 'workflow_dispatch' || needs.create-release.result == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: npm

@@ -74,7 +74,8 @@ Actions are pinned by full commit SHA and checkout credentials are not persisted
   occur at publish time. The pinned cargo-edit tool stages identical versions in each job.
 
 Serializing each release tag avoids overlapping publication runs, without canceling an active
-release. Builds must pass before the GitHub release is created; cross-registry publication is
+release. All builds must pass before the GitHub release is created or any registry is written
+on a full release (npm-only repair checks only its own builds); cross-registry publication is
 not transactional and must not be described as atomic.
 
 ## Required owner-side authority setup

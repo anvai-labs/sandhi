@@ -134,6 +134,12 @@ def check_authority(document):
 
 
 def check_verification(document):
+    npm = document["jobs"]["npm-publish"]
+    assert needs(npm) == {"authorize", "npm-package", "create-release"}
+    assert "!cancelled()" in npm["if"]
+    assert "needs.authorize.result == 'success'" in npm["if"]
+    assert "needs.npm-package.result == 'success'" in npm["if"]
+    assert "(github.event_name == 'workflow_dispatch' || needs.create-release.result == 'success')" in npm["if"]
     job = document["jobs"]["verify"]
     assert needs(job) == PUBLISHERS | {"authorize"}
     assert "!cancelled()" in job["if"] and "needs.authorize.result == 'success'" in job["if"]
