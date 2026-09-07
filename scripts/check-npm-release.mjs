@@ -8,6 +8,7 @@ import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const NAME = '@anvailabs/sandhi';
+const REPOSITORY = 'https://github.com/anvai-labs/sandhi';
 const ROOT_FILES = ['index.js', 'sandhi.js', 'sandhi.d.ts', 'index.d.ts', 'contracts.d.ts', 'README.md'];
 const PLATFORMS = [
   { id: 'linux-x64-gnu', os: 'linux', cpu: 'x64', libc: ['glibc'] },
@@ -86,6 +87,12 @@ function inspect(packageDir, version, prepared) {
   });
   packages.push({ path: packageDir, data: root, files: [...ROOT_FILES, 'package.json'] });
   for (const pkg of packages) {
+    // OIDC/provenance identifies the workflow repository, independently for each package.
+    // Accept npm's string shorthand and canonical git-object form, not arbitrary URLs.
+    const repository = pkg.data.repository;
+    assert.ok(repository === REPOSITORY || (repository && typeof repository === 'object'
+      && repository.type === 'git' && repository.url === `git+${REPOSITORY}.git`),
+    'package repository must identify the trusted publishing repository');
     assert.ok(!pkg.data.private, 'private package is not publishable');
     assert.ok(!pkg.data.bundleDependencies && !pkg.data.bundledDependencies, 'bundled dependencies prohibited');
     // Some npm releases still run prepare during pack with --ignore-scripts.

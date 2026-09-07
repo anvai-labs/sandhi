@@ -10,6 +10,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 HELPER = ROOT / 'scripts/check-npm-release.mjs'
 VERSION = '1.2.3'
+REPOSITORY = 'https://github.com/anvai-labs/sandhi'
 PLATFORMS = [('linux-x64-gnu', 'linux', 'x64'), ('darwin-arm64', 'darwin', 'arm64')]
 FILES = ['index.js', 'sandhi.js', 'sandhi.d.ts', 'index.d.ts', 'contracts.d.ts', 'README.md']
 
@@ -29,7 +30,7 @@ def package(tmp_path):
     root = tmp_path / 'npm-package'
     root.mkdir()
     manifest = {'name': '@anvailabs/sandhi', 'version': '0.0.0', 'main': 'sandhi.js',
-                'types': 'sandhi.d.ts', 'files': FILES}
+                'types': 'sandhi.d.ts', 'files': FILES, 'repository': REPOSITORY}
     write_json(root / 'package.json', manifest)
     for name in FILES:
         (root / name).write_text('// disposable loader/types/readme\n')
@@ -38,7 +39,7 @@ def package(tmp_path):
         target.mkdir(parents=True)
         native = f'sandhi.{platform}.node'
         data = {'name': f'@anvailabs/sandhi-{platform}', 'version': '0.0.0', 'main': native,
-                'os': [operating_system], 'cpu': [cpu], 'files': [native]}
+                'os': [operating_system], 'cpu': [cpu], 'files': [native], 'repository': REPOSITORY}
         if operating_system == 'linux':
             data['libc'] = ['glibc']
         write_json(target / 'package.json', data)
@@ -76,6 +77,30 @@ def test_prepare_preserves_complete_dependency_set_on_repair(package):
     prepared(package)
     assert (package / 'package.json').read_bytes() == before
     assert len(list((package / 'npm').iterdir())) == 2
+
+
+@pytest.mark.parametrize('relative', ['.', 'npm/linux-x64-gnu', 'npm/darwin-arm64'])
+@pytest.mark.parametrize('repository', [None, 'https://github.com/other/project',
+    {'type': 'git', 'url': 'https://example.invalid/sandhi.git'},
+    {'type': 'svn', 'url': f'git+{REPOSITORY}.git'}])
+def test_every_package_requires_trusted_repository_before_prepare_or_pack(package, relative, repository):
+    prepared(package)
+    change(package / relative / 'package.json', repository=repository)
+    before = {path: path.read_bytes() for path in package.rglob('package.json')}
+    for command in ('prepare', 'pack'):
+        result = run(package, command)
+        assert result.returncode != 0
+        assert 'trusted publishing repository' in result.stderr
+    assert all(path.read_bytes() == content for path, content in before.items())
+    assert not (package.parent / 'npm-packed').exists()
+
+
+def test_canonical_git_repository_object_packs(package):
+    for path in package.rglob('package.json'):
+        change(path, repository={'type': 'git', 'url': f'git+{REPOSITORY}.git'})
+    prepared(package)
+    result = run(package, 'pack')
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize('version', ['0.0.0', '01.2.3', '1.2', '1.2.3-beta.1', '1.2.3+build', 'v1.2.3', '../1.2.3',

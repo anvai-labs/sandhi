@@ -68,6 +68,8 @@ Actions are pinned by full commit SHA and checkout credentials are not persisted
   architectures, complete loaders/types, exact manifests/dependencies, and allowed packed files.
   It rejects lifecycle hooks before packing and checks tarball digests. The privileged job receives
   only the checked bundle, never installs build dependencies, and publishes explicit tarballs.
+  All three package manifests must identify `anvai-labs/sandhi` as their repository for
+  trusted publishing; a binding on the root package does not authorize platform packages.
 - A separate unprivileged job checks the staged Rust workspace. Crates publication uses
   `--no-verify` to avoid compiling dependency build scripts while holding the registry token.
   This is **not** a packaged-crate installation test; registry resolution/package checks still
@@ -101,6 +103,11 @@ tokens into chat or committed files. GitHub secret metadata cannot establish tok
 Public package presence cannot establish registry-side trusted-publisher bindings.
 
 ### Owner confirmation for SG07
+
+Owner evidence received on 2026-09-07 confirms the reported trusted-publisher settings for
+the root `@anvailabs/sandhi` package, including direct `npm publish` permission. This does
+not yet confirm either platform package or the current PyPI settings. See the
+[SG07 evidence](docs/product/release-safeguards.md#owner-publisher-evidence-2026-09-07).
 
 Do not send token values, recovery codes or credentials in chat. Confirm only the following
 non-secret facts after checking the registry account settings:
