@@ -133,7 +133,9 @@ operator's review must not be reported as that study.
 
 Accepting operator: **pending assignment before production**. Observed user results: **not performed**.
 UA01: **accepted timing revision**. UA02: **existing estimated token budgets accepted**.
-Remaining release decisions UA03–UA06: **pending**;
+UA03: **current component/synthetic broker evidence accepted for this release**; live interoperability
+and grant-lifecycle validation required before production use of the integration (P02).
+Remaining release decisions UA04–UA06: **pending**;
 M1 release acceptance is not yet complete as a whole.
 
 ## Promotion gate

@@ -1,7 +1,7 @@
 # M1 acceptance decisions and evidence
 
-Status: **UA01 and UA02 accepted** for this release; hands-on usability acceptance deferred until
-before production. UA03–UA06 remain pending; no observed-user pass is recorded.
+Status: **UA01–UA03 accepted** for this release; hands-on usability acceptance deferred until
+before production. UA04–UA06 remain pending; no observed-user or live-integration pass is recorded.
 Tracker: [TD-0026](../td/TD-0026-gateway-product-evolution.md), C01f; prior
 [workload and integration evidence](m1-acceptance.md) remains valid.
 
@@ -20,8 +20,8 @@ Authority: explicit user instruction in this working session, 2026-09-07 UTC. Ev
 |---|---|---|
 | UA01 — acceptance method | Accepted | Use automated engineering evidence for this release; explicitly defer hands-on usability acceptance until before production |
 | UA02 — budget guarantees | Accepted | Accept the existing estimate-based token budgets for this release; no strict final-token or monetary-cap guarantee |
-| UA03 — broker assurance | Pending | Next decision: current component/synthetic evidence versus live integration validation before release |
-| UA04 — recovery responsibility | Pending | Operating limits and pre-deployment responsibilities still to confirm |
+| UA03 — broker assurance | Accepted | Accept current synthetic Sandhi boundary and isolated broker-component evidence for this release; require live interoperability and grant-lifecycle validation before production use of that integration |
+| UA04 — recovery responsibility | Pending | Next decision: manual quarantine/reconciliation for this release versus requiring automated recovery guarantees first |
 | UA05 — performance scope | Pending | No production SLO inferred from the synthetic baseline |
 | UA06 — promotion/release scope | Pending | Remaining scope and release execution to confirm; no action taken by recording UA01 |
 
@@ -35,6 +35,14 @@ assign an accepting operator and record the tested build, all four journey outco
 confusion and any blocking corrections using the session below. Operator/results are unassigned
 and not performed; publication or a green build does not satisfy P01. The proposed five-user
 study remains separately unvalidated.
+
+Deferred gate **P02 — live broker integration before production use of that integration** remains
+open under UA03. Validate Sandhi with the actual broker in an isolated setup using disposable
+credentials; record the component versions, platform, interoperability and grant-lifecycle
+outcomes. Current synthetic boundary tests and isolated broker tests do not satisfy this gate.
+No live compatibility, grant-lifecycle, desktop or browser-to-broker connector certification is
+claimed. UA03 selects when validation is required; it does not authorize access to a personal
+vault, production grants or production deployment.
 
 ## What automation can settle
 
@@ -96,7 +104,7 @@ evidence and defer observed usability acceptance to before production use. That 
 current gate; it must be recorded as a revision, not as a completed user study or walkthrough.
 
 The explicit user decision above selects this alternative. UA01 alone does not approve other
-choices or establish observed-user results; UA02 was subsequently accepted separately.
+choices or establish observed-user results; UA02 and UA03 were subsequently accepted separately.
 
 ### UA02 — Are estimated neutral-token budgets acceptable for this checkpoint?
 
@@ -120,6 +128,11 @@ to enable today. The neutral-measurement boundary remains the existing architect
 
 ### UA03 — What broker assurance is required before promotion versus deployment?
 
+**Recorded decision (2026-09-07 UTC):** the user selected the recommendation: accept the current
+synthetic Sandhi boundary tests and 18 isolated SentinelPass contract tests for this release,
+with live interoperability and grant-lifecycle validation required before production use of
+the integration (P02). The live-validation-before-release alternative was not selected.
+
 **Recommendation:** use exact-reference onboarding through the bounded native read-grant path;
 accept synthetic protocol evidence for the explicitly scoped engineering checkpoint, while
 requiring live compatibility/grant-lifecycle certification before claiming production integration.
@@ -133,9 +146,9 @@ real Unix-socket source-contract coverage, not Sandhi interoperability certifica
 workspace is 0.8.2 while Sandhi embeds protocol 0.8.1. AgentBrowser's in-memory secret registry
 is not a SentinelPass connector. See the [probe record](evidence/m1-decisions-2026-09-07/README.md).
 
-**Human decision:** accept that certification boundary, or require live certification before
-main promotion. The latter needs an approved disposable daemon/build and test-vault setup;
-personal vault access, unlock and grant changes are not authorized by this packet.
+**Selected boundary:** current evidence is sufficient for this release's broker-assurance
+decision, not for production integration certification. P02 remains open; personal vault access,
+unlock and grant changes are not authorized by this packet.
 
 ### UA04 — Who owns restored access policy and uncertain consumption?
 
@@ -215,5 +228,6 @@ needed rather than quietly coaching every step into a pass. Use synthetic creden
 
 Record: reviewer/role, tested build, date, task outcomes, assistance, confusion/blockers, chosen
 UA01–UA06 outcomes and explicit accept/hold scope. Do not include tokens, keys or vault contents.
-UA01 and UA02 are accepted; UA03–UA06 and the P01 observed-user result remain **pending**. A screenshot review alone is
+UA01–UA03 are accepted; UA04–UA06, the P01 observed-user result and P02 live integration validation
+remain **pending**. A screenshot review alone is
 an inspection, not an observed unassisted usability session; label it accordingly.

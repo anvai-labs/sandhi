@@ -49,7 +49,7 @@ marking a planning task complete does not mark its implementation complete.
 | C01c | W06a drain-aware readiness; branch `feat/drain-aware-readiness` | Passed: native workspace, OTLP proxy tests, 87.76% native coverage, 113 SDK/browser tests; independent review finding fixed and re-reviewed clean | [PR #232](https://github.com/anvai-labs/sandhi/pull/232) merged as `31151d9`; latest-head CI `34042875545` and post-merge CI `34048329909` passed; authorized missing-review bypass only | Complete | No |
 | C01d | W06c recovery drills; branch `test/recovery-drills` | Passed: 181 SDK/browser tests (one unavailable SDK skipped), default/native/OTLP tests and clippy, 87.77% native coverage; adversarial findings fixed and independently re-reviewed clean | [PR #233](https://github.com/anvai-labs/sandhi/pull/233) merged as `8ae8401`; latest-head CI `34058455291` and post-merge CI `34059776510` passed on public hosted runners; authorized missing-review bypass only | Complete | No |
 | C01e | W06d workload/operator acceptance; branch `test/m1-acceptance` | Automation passed: 227 local SDK/browser tests (one unavailable SDK skip), 233 hosted SDK tests (two optional sibling-browser skips), 36-phase integrated workload and clean independent review; [evidence and actual-user gate](../product/m1-acceptance.md). Accepting operator/results still pending | [PR #234](https://github.com/anvai-labs/sandhi/pull/234) merged as `324ba87`; latest-head CI `34060286384` and post-merge CI `34060985111` passed on public hosted runners; authorized missing-review bypass only | Automation verified and integrated; human acceptance pending | No |
-| C01f | Operator decision evidence and run-view correction; branch `test/operator-decision-evidence` | 251 SDK/browser tests, zero skips; Rust tests/clippy/fmt passed; nine masked journey pairs plus JUnit; 18 pinned broker-component tests | [PR #236](https://github.com/anvai-labs/sandhi/pull/236) is the live record for exact-head review, CI and post-merge verification | Follow PR merge state; source-pinned local evidence remains immutable | No; UA01/UA02 accepted, UA03–UA06 pending |
+| C01f | Operator decision evidence and run-view correction; branch `test/operator-decision-evidence` | 251 SDK/browser tests, zero skips; Rust tests/clippy/fmt passed; nine masked journey pairs plus JUnit; 18 pinned broker-component tests | [PR #236](https://github.com/anvai-labs/sandhi/pull/236) is the live record for exact-head review, CI and post-merge verification | Follow PR merge state; source-pinned local evidence remains immutable | No; UA01–UA03 accepted, UA04–UA06 pending |
 | C02 | M1 engineering-release acceptance under UA01, then `develop` → `main`; hands-on UX deferred to P01 before production | UA01 timing revision accepted; remaining decisions pending | Pending promotion PR and post-merge CI | Pending | No; tagging/publishing is a separate action |
 
 C01f follow-up: `test/operator-decision-evidence` closes the automatable links between browser
@@ -64,7 +64,9 @@ The PR's live state is authoritative for integration, separate from this source 
 On 2026-09-07 UTC the user explicitly accepted automated engineering evidence for this release
 and deferred hands-on usability acceptance until before production (UA01/P01). This revises C02's
 acceptance timing, not the evidence: no observed-user pass exists. The user subsequently accepted
-the existing estimate-based token budgets for this release (UA02). UA03–UA06 remain pending.
+the existing estimate-based token budgets (UA02) and current component/synthetic broker evidence
+(UA03) for this release. Live interoperability and grant-lifecycle validation remain required
+before production use of the integration (P02). UA04–UA06 remain pending.
 
 C01 checkpoints completed work now instead of waiting for W05–W14. Do not claim M1 complete
 or promote C02 until initial W06 evidence and the remaining M1 release acceptance decisions exist
@@ -166,9 +168,9 @@ for audit context.
 W06c and W06d automation integration and post-merge verification are complete. The user selected
 UA01's engineering-evidence method for this release and explicitly deferred hands-on acceptance
 until before production. The [decision record](../product/m1-acceptance-decisions.md) tracks that
-approval, the subsequent acceptance of existing estimated token budgets (UA02), remaining
-UA03–UA06 choices and deferred P01. Next: confirm broker assurance (UA03), then recovery
-responsibilities, performance scope and promotion/release scope.
+approval, the subsequent acceptance of existing estimated token budgets (UA02) and current
+broker evidence (UA03), remaining UA04–UA06 choices and deferred P01/P02. Next: confirm the
+recovery operating model (UA04), then performance scope and promotion/release scope.
 Do not repeatedly request the now-deferred walkthrough as a release prerequisite. Do not mark
 it performed or authorize production. Later live broker/fleet guarantees remain open.
 
