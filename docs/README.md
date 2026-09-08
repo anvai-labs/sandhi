@@ -18,7 +18,7 @@ mistaken for shipped behavior.
 | What product evolution is proposed and how is it tracked? | [TD-0026 delivery plan](td/TD-0026-gateway-product-evolution.md), [product specification](product/gateway-vision-and-requirements.md), and [2026-09-04 review](reviews/gateway-review-2026-09-04.md); proposals, not shipped claims |
 | What evidence gates the M1 checkpoint? | [Workload and acceptance](product/m1-acceptance.md); UA01 accepts engineering evidence for this release and defers hands-on usability until before production |
 | Which acceptance decisions remain, and why? | [M1 decision packet](product/m1-acceptance-decisions.md); automated evidence, operating-limit choices and a focused user-review script |
-| What is the milestone release state? | [Release safeguards](product/release-safeguards.md); existing crates token, PyPI/npm OIDC; reviewed main promotion and exact-main CI passed; immutable v0.6.0 tagged and release builds running, publication not yet verified |
+| What is the milestone release state? | [Release safeguards](product/release-safeguards.md); v0.6.0 builds passed and GitHub/PyPI/crates published; npm ENEEDAUTH leaves the required all-target release incomplete; platform publisher checks requested |
 | What adversarial checks cover the first checkpoint? | [2026-09-05 checkpoint review](reviews/checkpoint-adversarial-review-2026-09-05.md); findings, corrections and remaining integration gates |
 
 ADRs record durable decisions. Their context sections describe the repository at the time the
@@ -123,7 +123,7 @@ perpetually open.
 | [0023](td/TD-0023-release-automation.md) | Complete | Publish mechanics implemented; safeguarded all-target v0.6.0 execution tracked separately in TD-0026 |
 | [0024](td/TD-0024-reservation-retention-and-rollup.md) | Proposed | Bounded reservation history and rollups |
 | [0025](td/TD-0025-ingress-funnel-and-family-registry.md) | Proposed | Family registry and funnel decomposition |
-| [0026](td/TD-0026-gateway-product-evolution.md) | In progress | Accepted M1 engineering milestone promoted to main via PR #243; exact-main CI passed and immutable v0.6.0 tagged; all-target release running. W05a remains an inactive foundation; pre-production usability, live broker validation and recovery ownership gates remain open |
+| [0026](td/TD-0026-gateway-product-evolution.md) | In progress | Accepted M1 milestone promoted/tagged as v0.6.0; all builds passed, GitHub/PyPI/crates published, npm authorization failed. Required release verification remains open. W05a remains inactive; P01–P03 remain pre-production gates |
 
 TD-0026 slice completion means implementation/local verification. Its separate C01/C02 checkpoint
 table tracks remote CI, merge and release; C01 [PR #230](https://github.com/anvai-labs/sandhi/pull/230)

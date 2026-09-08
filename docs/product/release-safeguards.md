@@ -3,8 +3,9 @@
 Status: registry-mechanism correction integrated through PR #242; reviewed M1 promotion
 merged to `main` through PR #243. Reuse the existing crates token; trusted publishing applies
 only to PyPI/npm. Exact-main CI passed; immutable `v0.6.0` now resolves to the reviewed main
-commit. Release authorization passed and the all-target build/publish workflow is running.
-Publication and final artifact verification are not yet complete.
+commit. All builds passed; GitHub binaries, PyPI and all four crates published and verified.
+Npm failed with `ENEEDAUTH` on the Linux platform package; all three npm 0.6.0 versions remain
+absent. The release is partially published, not complete; owner-side npm binding checks are pending.
 See the [current owner decision](#owner-correction-reuse-the-crates-token-2026-09-07).
 Tracker: [TD-0026](../td/TD-0026-gateway-product-evolution.md); publish mechanics:
 [TD-0023](../td/TD-0023-release-automation.md).
@@ -32,11 +33,11 @@ accepted product limits to expand M1.
 | SG01 | Inventory release trust and artifact gaps; preserve authority boundaries | Source/config evidence, explicit scope and owner dependencies | Complete: initial inventory below |
 | SG02 | Reject unauthorized refs/events and ambiguous source identity before build/publish | Stable exact tag syntax; main ancestry; exact successful main CI; immutable commit across jobs; moved/deleted-tag denial; negative tests | Complete: integrated by PR #237, pre/post-merge CI green; publication not performed |
 | SG03 | Verify every expected registry/platform artifact, not just a version entry | Missing/yanked/invalid/unavailable differentiated; exact npm dependencies/platforms; binary and wheel coverage; deterministic negative tests | Implemented and locally verified; registry reads are not installation evidence |
-| SG04 | Validate prepared npm packages and packed contents before publication | Exact target set, binaries, loader/types and dependencies; no source/nested-binary leakage; safe partial retry | Implemented and locally verified; full release matrix still unexecuted |
+| SG04 | Validate prepared npm packages and packed contents before publication | Exact target set, binaries, loader/types and dependencies; no source/nested-binary leakage; safe partial retry | Complete build/pack validation in v0.6.0 run; npm upload separately failed authorization under SG07 |
 | SG05 | Integrate safe release checks into ordinary public CI | Unit/negative tests and workflow contracts green; independent adversarial review; focused develop PR and post-merge CI | Complete: [PR #237](https://github.com/anvai-labs/sandhi/pull/237) merged; exact-head and post-merge CI green; 207 hosted safeguard tests passed |
 | SG06 | Restrict release authority outside editable workflow code | Read-back evidence for approved tag/environment controls; preserve current protections; identify repository-secret exposure | Complete for ref controls: two active tag rulesets and four restricted environments independently verified; credential closure remains SG07 |
-| SG07 | Validate the owner-selected registry authority | Owner-authorized existing crates token; PyPI/npm trusted bindings; artifact presence alone insufficient | Configuration is owner-reported; correction merged in PR #242. Owner authorized validation through the actual v0.6.0 publication; no credential rotation or throwaway release. Execution evidence pending |
-| SG08 | Final milestone promotion and release | Version/target authority; fresh cumulative review/CI; main post-merge CI; publish/verify/back-sync; P01–P03 still open | In progress: promotion and exact-main CI passed; immutable v0.6.0 created; [release run](https://github.com/anvai-labs/sandhi/actions/runs/34173783838) authorized and building; publication/verification and PR #244 back-sync pending |
+| SG07 | Validate the owner-selected registry authority | Owner-authorized existing crates token; PyPI/npm trusted bindings; artifact presence alone insufficient | Crates token reuse and PyPI OIDC succeeded in actual publication. Npm Linux platform upload failed ENEEDAUTH; owner check of both platform trusted-publisher bindings requested; exact exchange failure not yet established |
+| SG08 | Final milestone promotion and release | Version/target authority; fresh cumulative review/CI; main post-merge CI; publish/verify/back-sync; P01–P03 still open | Partially published: [release run](https://github.com/anvai-labs/sandhi/actions/runs/34173783838) built every target and published GitHub/PyPI/crates, but npm and aggregate verification failed; npm repair and PR #244 back-sync remain open |
 
 ## Current execution checkpoint (2026-09-07)
 
@@ -56,11 +57,13 @@ accepted product limits to expand M1.
 - [x] Create immutable `v0.6.0` at that verified main commit. On 2026-09-08 UTC, fresh
   protected-main ancestry, canonical CI and tag-absence checks passed; active tag immutability
   rules still denied updates/deletions with no bypass actors. The tag resolves to `9d40f01`.
-- [ ] Finish all release builds and smokes. The tag-triggered
+- [x] Finish all release builds and smokes. The tag-triggered
   [release run](https://github.com/anvai-labs/sandhi/actions/runs/34173783838) passed source
-  authorization and entered the full build matrix; this is not a completed publication.
-- [ ] Publish and verify both GitHub archives, all three PyPI wheel platforms, all four crates,
-  and the root plus both platform npm packages. No target is optional.
+  authorization, both binary builds/smokes, all three wheel build/install/import jobs,
+  both native npm build/load jobs, staged crates-check and npm-package validation.
+- [x] Publish and verify both GitHub archives, all three PyPI wheel platforms and all four crates.
+- [ ] Publish and verify the root plus both platform npm packages. No target is optional;
+  the Linux package failed authorization before any npm upload succeeded.
 - [ ] Record actual outcomes and back-sync main into develop through
   [PR #244](https://github.com/anvai-labs/sandhi/pull/244), with fresh exact-head review/CI.
 
@@ -68,6 +71,42 @@ Pre-tag registry checks returned HTTP 404 for every required package's `0.6.0` v
 the GitHub tag and release were absent. These are version-conflict checks, not failed uploads
 or evidence of registry authorization. No existing artifact was modified. P01–P03 remain
 pre-production gates; accepted engineering evidence and estimate-based budgets are unchanged.
+
+### Publication outcome (2026-09-08 UTC)
+
+| Target | Actual evidence | State |
+|---|---|---|
+| GitHub | [v0.6.0](https://github.com/anvai-labs/sandhi/releases/tag/v0.6.0); both archives verified for size and SHA-256 | Published and verified |
+| PyPI | `sandhi-gateway==0.6.0`; all three non-yanked wheel platforms verified; fresh Linux wheel install/import and installed-version check passed in a disposable environment | Published through trusted publishing |
+| crates.io | `sandhi-core`, `sandhi-providers`, `sandhi-store`, `sandhi-proxy` 0.6.0 verified non-yanked | Published with the existing token; no token changed |
+| npm | [Job 101901932706](https://github.com/anvai-labs/sandhi/actions/runs/34173783838/job/101901932706) failed `ENEEDAUTH` on `@anvailabs/sandhi-linux-x64-gnu`; all three exact versions return HTTP 404 | Not published; required target |
+| Aggregate | Hosted verifier and independent `verify-release.py v0.6.0 --targets pypi,crates,npm,github --attempts 1` both fail because npm is missing | Release incomplete |
+
+The Linux archive SHA-256 is
+`f9d1461346d3006c89078a9f2beae38145e43adc0ca199d37bddcd0f51590556`.
+Its downloaded build artifact (`10036625056`) contains only executable `sandhi-proxy` and
+`sandhi`; isolated CLI help, health/readiness and zero-exit SIGTERM checks passed after an
+approved rerun outside the socket-restricted sandbox. The GitHub release asset has the same
+digest. These checks use no providers, credentials or durable store and do not establish
+production behavior. The macOS archive SHA-256 is
+`81c8baaab5f5654922412c4ac42bae3db7068bdbd067b488dbdc8a1fb5b6bf9b`.
+
+Npm used Node **24.20.0**, npm **11.19.0**, a public GitHub runner and `id-token: write`;
+the publishing helper retains the OIDC variables while withholding `GH_TOKEN` from npm.
+Package-repository identity and complete checked tarballs passed validation. These facts rule
+out an unsupported CLI version or a missing repository-field build defect, but `ENEEDAUTH`
+does not identify the exact registry/OIDC exchange cause. Npm's matching CLI implementation
+falls back to that generic error when OIDC does not yield credentials.
+
+Owner action requested: inspect both platform packages' trusted-publisher bindings, not only
+the root package. Each must authorize owner `anvai-labs`, repository `sandhi`, workflow
+`release.yml`, environment `npm`, and direct `npm publish`. See
+[npm's setup/troubleshooting guidance](https://docs.npmjs.com/trusted-publishers/).
+No registry account session is available here to independently inspect/change those settings.
+After confirmation/correction, retry only this safeguarded run's npm publishing job and its
+dependent verifier, reusing the checked artifacts. Do not move the tag, rebuild/overwrite
+published assets, substitute an npm token or create a new version merely to retry authentication.
+If the bindings already match, continue focused OIDC diagnostics rather than asserting they are absent.
 
 ## Initial findings
 
