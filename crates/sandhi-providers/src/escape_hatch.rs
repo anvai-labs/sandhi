@@ -41,10 +41,20 @@ impl Provider for FnProvider {
     }
 
     async fn complete(&self, req: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        if req.attempt_context.is_some() {
+            return Err(ProviderError::InvalidRequest(
+                "physical-attempt observation is unsupported by FnProvider".into(),
+            ));
+        }
         (self.complete)(req).await
     }
 
-    async fn stream(&self, _req: ProviderRequest) -> Result<ByteStream, ProviderError> {
+    async fn stream(&self, req: ProviderRequest) -> Result<ByteStream, ProviderError> {
+        if req.attempt_context.is_some() {
+            return Err(ProviderError::InvalidRequest(
+                "physical-attempt observation is unsupported by FnProvider".into(),
+            ));
+        }
         // Custom providers implement the non-streaming path; a streaming closure variant can be
         // added later. Callers should route custom providers through `complete`.
         Err(ProviderError::Upstream {
@@ -60,6 +70,8 @@ mod tests {
     use super::*;
     use crate::ParsedUsage;
     use serde_json::json;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn dispatches_to_the_user_closure() {
@@ -85,5 +97,25 @@ mod tests {
         assert_eq!(out.status, 200);
         assert_eq!(out.usage.tokens_in, 3);
         assert_eq!(out.body["model"], "my-model");
+    }
+
+    #[tokio::test]
+    async fn observed_calls_fail_closed_before_the_user_closure() {
+        let called = Arc::new(AtomicBool::new(false));
+        let closure_called = called.clone();
+        let provider = FnProvider::new("custom", move |_req| {
+            closure_called.store(true, Ordering::Relaxed);
+            async move { unreachable!("unsupported observed call must not invoke the closure") }
+        });
+        let (context, receiver) = crate::AttemptContext::channel("exec_custom", 2).unwrap();
+
+        let error = provider
+            .complete(ProviderRequest::new("m", json!({})).with_attempt_context(context))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, ProviderError::InvalidRequest(_)));
+        assert!(!called.load(Ordering::Relaxed));
+        assert!(receiver.drain().is_empty());
     }
 }

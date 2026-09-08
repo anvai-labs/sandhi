@@ -1,7 +1,8 @@
 # Attempt accounting and durable evidence
 
-Status: W05 in progress. W05a complete in the working tree: a storage foundation, not a shipped authoritative proxy mode.
-Date: 2026-09-05. Tracker: [TD-0026](../td/TD-0026-gateway-product-evolution.md).
+Status: W05 in progress. W05a is integrated; W05b is locally verified and awaiting remote
+integration. It remains opt-in/non-authoritative.
+Date: 2026-09-08. Tracker: [TD-0026](../td/TD-0026-gateway-product-evolution.md).
 
 ## Work backward from reconciliation
 
@@ -29,8 +30,8 @@ TTL reclaim currently deletes abandoned leases; W05a does not change that behavi
 
 | ID | Deliverable | Gate / state |
 |---|---|---|
-| W05a | Atomic settlement receipt/outbox storage, immutable IDs, bounded claims and acknowledgement, rollback/reopen/concurrency tests | Complete in working tree; 14 focused tests; not wired to proxy or network exporter |
-| W05b | Transport-owned attempt lifecycle and neutral draft contract | Pending: all adapter/plane/retry paths, pre-dispatch rejection, timeout, cancellation and non-final usage; downstream accounting review before external release |
+| W05a | Atomic settlement receipt/outbox storage, immutable IDs, bounded claims and acknowledgement, rollback/reopen/concurrency tests | Integrated; 14 focused tests; not wired to proxy or network exporter |
+| W05b | Transport-owned attempt lifecycle and neutral draft contract | Locally verified: implementation, TDD regressions and clean adversarial review cover adapter/plane/retry paths, pre-dispatch rejection, nested timeout/cancellation lineage, correlation, bounded metadata and non-final usage; remote PR/CI still gate integration and downstream accounting review still gates external release |
 | W05c | Connect admission, settlement and evidence without bypassing correctness | Pending: opt-in authoritative mode, per-shard colocation, failure policy, receipt/attempt linkage, logical dedup separation and all no-lease paths |
 | W05d | Unknown-liability and late-settlement recovery | Pending: durable pre-dispatch intent; crash windows, stale leases, late observations, amendments and idempotent recovery; coordinate TD-0024 retention |
 | W05e | Receiver contract, exporter and operator evidence | Pending: receiver idempotency, authenticated/scoped transport, retry/backoff, backlog/freshness UX, safe retention, multi-shard cursor/migration and real consumer review |
@@ -107,6 +108,51 @@ explicit policy must not erase that fact. Later measured evidence appends an ide
 linked to the original attempt/receipt; it must not mutate previously exported facts. The lease
 TTL, recovery window, liability policy and retention tombstones need a single reviewed design.
 Retries need their own identities and coverage, including failure before headers and after bytes.
+
+### W05b diagnostic contract implemented for review
+
+`AttemptContext::channel` creates an execution-scoped sender/receiver pair with a caller-selected
+capacity of 1–65,536. The sender is Sandhi-owned and uses only non-blocking `try_send`; consumer
+code never runs on the provider task. A full or disconnected channel increments
+`dropped_observations()`. Delivery is therefore best-effort, not an audit guarantee. Each guard
+attempts at most one terminal emission, but either dispatch or terminal observations may be
+dropped. The receiver must be drained outside the request task. No persistence worker is supplied.
+
+An attempt ID combines 128 bits from operating-system randomness with a checked monotonic `u64`
+ordinal. Separate contexts remain collision-resistant when a caller execution ID repeats, and
+ordinal exhaustion disables observation rather than wrapping. Execution/provider/model/request-ID
+labels are bounded and control characters are rejected or replaced. Bodies, raw headers,
+credentials, attribution authority and prices never enter the observation shape.
+
+`Dispatch` means the adapter has begun the HTTP transport invocation; it does not prove that bytes
+left the host, the provider received them, or the provider billed them. A terminal observation
+records success, provider rejection, transport error, timeout, cancellation or incomplete stream,
+independently from final/partial/unavailable neutral usage. Status and bounded provider request ID
+are retained after response headers, including cancellation, idle timeout, mid-stream failure and
+response-decode failure. `StreamChunk::terminal` is the only completion signal; an empty data chunk
+can be nonterminal and cannot hide a later error.
+
+The built-in `ProviderHandle` factories expose `complete_with_attempts` and
+`stream_with_attempts`, which carry the context through the typed codec and resilience decorator
+to each physical adapter invocation. Host-owned `ChatProvider` implementations and `FnProvider`
+fail the observed path explicitly unless they implement it. `RawForwarder` names the narrower
+`with_metered_attempt_context` scope honestly: only `forward_metered` and
+`forward_stream_metered` observe attempts; the unmetered escape hatches do not. W05b does not wire
+this channel into the proxy request path. That authoritative connection, failure policy and
+receipt linkage remain W05c–e work, so these diagnostics cannot yet justify billing or budget
+enforcement.
+
+### W05b verification
+
+The exact local branch passes 618 workspace tests with all features, plus strict all-target
+Clippy, formatting and diff checks. Four credential-dependent live tests are intentionally
+ignored. Line coverage is 86.41% workspace-wide and 93.51% for the attempt module, above the 75%
+gate. TDD regressions first reproduced nested complete/stream-setup/idle timeouts being mislabeled
+as cancellation and control-character expansion exceeding metadata byte budgets. Linked timeout
+scopes preserve ancestor causes without contaminating retry or concurrent sibling scopes, and
+sanitization now accounts for replacement-character UTF-8 width. Fresh adversarial review found
+no remaining findings. This is local implementation evidence; remote PR review, exact-head CI,
+merge and post-merge CI remain pending.
 
 A future external schema should contain opaque execution/attempt/evidence IDs, authenticated
 attribution, destination/provider/model facts, optional policy and credential revisions, neutral

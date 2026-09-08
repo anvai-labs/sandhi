@@ -71,49 +71,74 @@ impl Provider for Ollama {
     }
 
     async fn complete(&self, req: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        let attempt_context = req.attempt_context.clone();
+        let model = req.model.clone();
         let call_headers = req.extra_headers.clone();
         let mut body = req.body;
         if let Some(obj) = body.as_object_mut() {
             obj.insert("stream".into(), Value::Bool(false));
         }
-        let resp = self
-            .post(&body, &call_headers)
-            .send()
-            .await
-            .map_err(|e| ProviderError::Transport(e.to_string()))?;
-        let status = resp.status().as_u16();
-        if !resp.status().is_success() {
-            return Err(error_for_response(resp, None).await);
-        }
-        let body: Value = resp
-            .json()
-            .await
-            .map_err(|e| ProviderError::Transport(e.to_string()))?;
-        let usage = parse_ollama_usage(&body).unwrap_or_default();
-        Ok(ProviderResponse {
-            status,
-            body,
-            usage,
-            attempts: 1,
-        })
+        crate::attempt::observe_complete(
+            attempt_context,
+            self.slug(),
+            Some(&model),
+            |facts| async move {
+                let resp = self
+                    .post(&body, &call_headers)
+                    .send()
+                    .await
+                    .map_err(|e| ProviderError::Transport(e.to_string()))?;
+                let status = resp.status().as_u16();
+                facts.record_headers(status, resp.headers(), None);
+                if !resp.status().is_success() {
+                    return Err(error_for_response(resp, None).await);
+                }
+                let body: Value = resp
+                    .json()
+                    .await
+                    .map_err(|e| ProviderError::Transport(e.to_string()))?;
+                let observed_usage = parse_ollama_usage(&body);
+                Ok((
+                    ProviderResponse {
+                        status,
+                        body,
+                        usage: observed_usage.unwrap_or_default(),
+                        attempts: 1,
+                    },
+                    observed_usage,
+                ))
+            },
+        )
+        .await
     }
 
     async fn stream(&self, req: ProviderRequest) -> Result<ByteStream, ProviderError> {
+        let attempt_context = req.attempt_context.clone();
+        let model = req.model.clone();
         let call_headers = req.extra_headers.clone();
         let mut body = req.body;
         if let Some(obj) = body.as_object_mut() {
             obj.insert("stream".into(), Value::Bool(true));
         }
-        let resp = self
-            .post(&body, &call_headers)
-            .send()
-            .await
-            .map_err(|e| ProviderError::Transport(e.to_string()))?;
-        if !resp.status().is_success() {
-            return Err(error_for_response(resp, None).await);
-        }
-        // NDJSON: each line is a complete JSON object; the final one carries the eval counts.
-        Ok(metered_passthrough(resp.bytes_stream(), sniff_usage_line))
+        crate::attempt::observe_stream(
+            attempt_context,
+            self.slug(),
+            Some(&model),
+            |facts| async move {
+                let resp = self
+                    .post(&body, &call_headers)
+                    .send()
+                    .await
+                    .map_err(|e| ProviderError::Transport(e.to_string()))?;
+                facts.record_headers(resp.status().as_u16(), resp.headers(), None);
+                if !resp.status().is_success() {
+                    return Err(error_for_response(resp, None).await);
+                }
+                // NDJSON: each line is a complete JSON object; the final one carries the eval counts.
+                Ok(metered_passthrough(resp.bytes_stream(), sniff_usage_line))
+            },
+        )
+        .await
     }
 }
 

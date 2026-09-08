@@ -1,6 +1,6 @@
 //! Typed codec for the OpenAI Responses item/event protocol.
 
-use crate::typed::{provider_request, ChatEventStream, ChatProvider};
+use crate::typed::{provider_request_observed, ChatEventStream, ChatProvider};
 use crate::{
     parse_openai_responses_usage, ByteStream, OpenAiResponsesProfile, ParsedUsage, Provider,
     ProviderError,
@@ -28,6 +28,56 @@ impl TypedOpenAiResponses {
     ) -> Self {
         Self { slug, raw, profile }
     }
+
+    async fn complete_inner(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+        attempt_context: Option<crate::AttemptContext>,
+    ) -> Result<ChatResponseV1, ProviderError> {
+        if self.profile == OpenAiResponsesProfile::ChatGptCodex {
+            return aggregate_stream(
+                self.stream_inner(request, call_headers, attempt_context)
+                    .await?,
+            )
+            .await;
+        }
+        let body = encode_responses_request_for_profile(&request, self.profile)?;
+        let response = self
+            .raw
+            .complete(provider_request_observed(
+                &request,
+                body,
+                call_headers,
+                attempt_context,
+            ))
+            .await?;
+        let mut decoded = decode_responses_response(response.body, response.usage, &request.model)?;
+        if !request.include_native_response {
+            decoded.extensions.remove("openai_responses");
+        }
+        decoded.usage.attempts = response.attempts;
+        Ok(decoded)
+    }
+
+    async fn stream_inner(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+        attempt_context: Option<crate::AttemptContext>,
+    ) -> Result<ChatEventStream, ProviderError> {
+        let body = encode_responses_request_for_profile(&request, self.profile)?;
+        let stream = self
+            .raw
+            .stream(provider_request_observed(
+                &request,
+                body,
+                call_headers,
+                attempt_context,
+            ))
+            .await?;
+        Ok(decode_responses_stream(stream, request.model))
+    }
 }
 
 #[async_trait]
@@ -41,22 +91,7 @@ impl ChatProvider for TypedOpenAiResponses {
         request: ChatRequestV1,
         call_headers: http::HeaderMap,
     ) -> Result<ChatResponseV1, ProviderError> {
-        if self.profile == OpenAiResponsesProfile::ChatGptCodex {
-            return aggregate_stream(self.stream(request, call_headers).await?).await;
-        }
-        let body = encode_responses_request_for_profile(&request, self.profile)?;
-        let response = self
-            .raw
-            .complete(provider_request(&request, body, call_headers))
-            .await?;
-        let mut decoded = decode_responses_response(response.body, response.usage, &request.model)?;
-        if !request.include_native_response {
-            // G8: the native body is debug metadata, not contract. Decoded
-            // extensions (e.g. "reasoning") always survive.
-            decoded.extensions.remove("openai_responses");
-        }
-        decoded.usage.attempts = response.attempts;
-        Ok(decoded)
+        self.complete_inner(request, call_headers, None).await
     }
 
     async fn stream(
@@ -64,12 +99,27 @@ impl ChatProvider for TypedOpenAiResponses {
         request: ChatRequestV1,
         call_headers: http::HeaderMap,
     ) -> Result<ChatEventStream, ProviderError> {
-        let body = encode_responses_request_for_profile(&request, self.profile)?;
-        let stream = self
-            .raw
-            .stream(provider_request(&request, body, call_headers))
-            .await?;
-        Ok(decode_responses_stream(stream, request.model))
+        self.stream_inner(request, call_headers, None).await
+    }
+
+    async fn complete_observed(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+        attempt_context: crate::AttemptContext,
+    ) -> Result<ChatResponseV1, ProviderError> {
+        self.complete_inner(request, call_headers, Some(attempt_context))
+            .await
+    }
+
+    async fn stream_observed(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+        attempt_context: crate::AttemptContext,
+    ) -> Result<ChatEventStream, ProviderError> {
+        self.stream_inner(request, call_headers, Some(attempt_context))
+            .await
     }
 }
 
@@ -544,6 +594,7 @@ fn decode_responses_stream(mut raw: ByteStream, requested_model: String) -> Chat
                     usage: None,
                     usage_running: None,
                     attempts: 1,
+                    terminal: false,
                 }
             } else {
                 match raw.next().await {
@@ -708,6 +759,7 @@ mod tests {
                     usage: None,
                     usage_running: None,
                     attempts: 1,
+                    terminal: false,
                 })
             })
             .collect();
@@ -756,6 +808,7 @@ mod tests {
                     usage: None,
                     usage_running: None,
                     attempts: 1,
+                    terminal: false,
                 })
             })
             .collect();
@@ -874,12 +927,14 @@ mod tests {
                     usage: None,
                     usage_running: None,
                     attempts: 2,
+                    terminal: false,
                 }),
                 Ok(crate::StreamChunk {
                     data: Bytes::copy_from_slice(&sse.as_bytes()[split..]),
                     usage: None,
                     usage_running: None,
                     attempts: 2,
+                    terminal: false,
                 }),
             ];
             let raw: ByteStream = Box::pin(futures_util::stream::iter(chunks));
