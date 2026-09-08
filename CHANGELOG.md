@@ -27,6 +27,11 @@ This release does not claim patch-level source compatibility. The capability is 
 non-authoritative; W05c–e remain required before attempt observations can drive accounting,
 export or enforcement.
 
+**Fully published:** GitHub binaries, PyPI, all four crates and all three npm packages are
+available and independently verified from the immutable tag. PyPI/npm used trusted publishing;
+the root npm package exposes SLSA provenance. See the
+[release outcome](docs/product/release-safeguards.md#v061-publication-outcome-2026-09-08-utc).
+
 ### Added
 
 - **Opt-in physical-attempt diagnostics (W05b).** Sandhi-owned bounded channels can observe each

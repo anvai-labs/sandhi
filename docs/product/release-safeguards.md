@@ -1,10 +1,9 @@
 # Safeguarded milestone release
 
-Status: v0.6.0 is fully published and back-synced. W05b is integrated on `develop`; the owner
-explicitly selected `v0.6.1` as a documented compatibility exception despite source-breaking
-public Rust API additions. Release preparation is in progress. Reuse the existing crates token;
-trusted publishing applies only to PyPI/npm. Promotion review, exact-source CI, complete
-publication verification and back-sync remain mandatory. Production is not authorized.
+Status: v0.6.1 is fully published and independently verified as the owner-approved compatibility
+exception for W05b's source-breaking public Rust API additions. Reuse of the existing crates token
+and PyPI/npm trusted publishing succeeded. Immutable release-evidence back-sync to `develop`
+remains in progress. Production is not authorized.
 See the [v0.6.1 checkpoint](#v061-compatibility-exception-execution-checkpoint-2026-09-08-utc)
 and the [current registry decision](#owner-correction-reuse-the-crates-token-2026-09-07).
 Tracker: [TD-0026](../td/TD-0026-gateway-product-evolution.md); publish mechanics:
@@ -51,17 +50,38 @@ open and continue to block production authorization.
   `34230690137` passed, and the fresh adversarial review was clean.
 - [x] Prepare the compatibility-exception record and pass local gates: 284 release-safeguard
   tests, 618 workspace tests, strict all-feature/all-target Clippy, formatting and diff checks.
-- [ ] Merge this focused release-preparation record into `develop` after clean review and green
-  exact-head CI; verify post-merge `develop` CI.
-- [ ] Open and adversarially review the cumulative `develop` to `main` promotion; merge only
-  after required CI is green, then verify exact-main push CI.
-- [ ] Confirm `v0.6.1` is absent from the tag, GitHub release and every target registry; create
-  the immutable tag only at the verified `main` commit.
-- [ ] Monitor all builds and publishers: two GitHub archives, three PyPI wheel platforms, four
-  crates and the root plus two platform npm packages.
-- [ ] Run the independent all-target verifier and record artifact identities and any partial or
-  repaired publication without moving the tag.
+- [x] Merge the focused release-preparation record through
+  [PR #248](https://github.com/anvai-labs/sandhi/pull/248) after clean review and green exact-head
+  CI `34240780249`; post-merge `develop` CI `34241511630` passed.
+- [x] Adversarially review the cumulative promotion and merge
+  [PR #249](https://github.com/anvai-labs/sandhi/pull/249) only after its required CI passed;
+  exact-main push CI `34243470644` then passed at merge `39d2998`.
+- [x] Confirm `v0.6.1` was absent from the tag, GitHub release and every target registry; create
+  the annotated immutable tag only at verified main commit `39d2998`.
+- [x] Monitor all builds and publishers. [Release run 34246850651](https://github.com/anvai-labs/sandhi/actions/runs/34246850651)
+  passed for two GitHub archives, all three PyPI wheel platforms, four crates and the root plus
+  two platform npm packages.
+- [x] Run the independent all-target verifier. Every expected target passed without repair or tag
+  movement; artifact identities are recorded below.
 - [ ] Back-sync immutable release evidence from `main` to `develop` through a reviewed, green PR.
+
+### v0.6.1 publication outcome (2026-09-08 UTC)
+
+Annotated tag object `cb7ceba7463e86deb80799e7ae3b17e908ccd2ad` resolves to exact protected-main
+commit `39d2998fe91b099141baa74e8d5cfa3da43d2998`. The tag-triggered
+[release run](https://github.com/anvai-labs/sandhi/actions/runs/34246850651) passed source
+authorization, every build/smoke/package gate, all publishers and the final hosted verifier.
+
+| Target | Actual evidence | State |
+|---|---|---|
+| GitHub | [v0.6.1](https://github.com/anvai-labs/sandhi/releases/tag/v0.6.1); Linux archive SHA-256 `29f69993ef4c41f7d78f2ba8ea6d5aa57026dad1d6f94d0f87321cb95545b2f0`; macOS archive SHA-256 `ef8d74571b8e23f920ff3eb13b77d4709f0cd60c8f26796e7c310ea837f7ce87` | Published and verified |
+| PyPI | `sandhi-gateway==0.6.1`; expected Linux, macOS and Windows non-yanked wheel coverage | Published through trusted publishing and verified |
+| crates.io | `sandhi-core`, `sandhi-providers`, `sandhi-store`, `sandhi-proxy` 0.6.1 | Published with the existing token and verified non-yanked |
+| npm | `@anvailabs/sandhi`, `@anvailabs/sandhi-linux-x64-gnu` and `@anvailabs/sandhi-darwin-arm64` 0.6.1; root metadata exposes SLSA provenance | Published through trusted publishing and verified |
+| Aggregate | Hosted verifier plus independent `verify-release.py v0.6.1 --targets pypi,crates,npm,github --attempts 1` | All explicitly expected targets verified |
+
+This closes publication, not production acceptance. The compatibility warning remains binding;
+W05b remains opt-in and non-authoritative, while P01–P03 remain open pre-production gates.
 
 ## Current execution checkpoint (2026-09-07)
 
