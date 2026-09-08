@@ -23,9 +23,10 @@ M1 engineering milestone: automated acceptance is approved, including the existi
 token budgets and single-node evidence limits. Hands-on usability, live broker validation and
 deployment recovery ownership remain pre-production gates, not completed acceptance tests.
 
-**Publication incomplete:** GitHub binaries, PyPI and all four crates are available and verified;
-npm failed authorization on its Linux platform package. No npm 0.6.0 package is published yet.
-See the [release outcome and retry gate](docs/product/release-safeguards.md#publication-outcome-2026-09-08-utc).
+**Fully published:** GitHub binaries, PyPI, all four crates and all three npm packages are
+available and verified. The initial npm authorization failure was repaired after configuring
+each package's trusted publisher; the successful retry published signed provenance.
+See the [release outcome](docs/product/release-safeguards.md#publication-outcome-2026-09-08-utc).
 
 ### Added
 
@@ -142,7 +143,8 @@ See the [release outcome and retry gate](docs/product/release-safeguards.md#publ
   An npm-only repair accepts safeguard-era tags with verified main CI; existing immutable
   package integrity must match before a retry skips it. The v0.5.1 npm packages already exist
   and remain untouched; presence alone does not establish how they were authenticated.
-  The v0.6.0 build/pack checks passed, but its npm authorization failure remains unresolved.
+  The v0.6.0 build/pack checks passed; after correcting per-package trusted-publisher bindings,
+  npm-only repair run `34188380114` published and verified all three packages.
 
 ## [0.5.1] — 2026-09-03
 

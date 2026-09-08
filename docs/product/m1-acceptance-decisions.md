@@ -1,9 +1,9 @@
 # M1 acceptance decisions and evidence
 
 Status: **UA01–UA06 accepted** for this engineering release; hands-on usability acceptance
-deferred until before production. The authorized v0.6.0 release is partially published:
-GitHub/PyPI/crates succeeded, npm authorization failed. No completed all-target publication,
-observed-user or live-integration pass is inferred from acceptance.
+deferred until before production. The authorized v0.6.0 release is fully published and verified
+across GitHub, PyPI, crates.io and npm. Publication does not imply an observed-user or
+live-integration pass.
 Tracker: [TD-0026](../td/TD-0026-gateway-product-evolution.md), C01f; prior
 [workload and integration evidence](m1-acceptance.md) remains valid.
 
@@ -25,14 +25,14 @@ Authority: explicit user instruction in this working session, 2026-09-07 UTC. Ev
 | UA03 — broker assurance | Accepted | Accept current synthetic Sandhi boundary and isolated broker-component evidence for this release; require live interoperability and grant-lifecycle validation before production use of that integration |
 | UA04 — recovery responsibility | Accepted | Accept operator-controlled quarantine and reconciliation for this release; assign the recovery owner, authoritative policy source and cutover/rollback rules before deployment |
 | UA05 — performance scope | Accepted | Accept a measured single-node engineering baseline without production throughput, latency, recovery-time or fleet-capacity promises |
-| UA06 — promotion/release scope | Accepted; execution in progress | Reviewed/green develop-to-main promotion, immutable v0.6.0, all required targets and protected back-sync; existing crates token, PyPI/npm trusted publishing; actual publication validates reported registry authorization; production excluded |
+| UA06 — promotion/release scope | Accepted; publication complete | Reviewed/green develop-to-main promotion, immutable v0.6.0 and all required targets published/verified; existing crates token, PyPI/npm trusted publishing; protected back-sync remains; production excluded |
 
 This is an explicit revision of the acceptance timing for this release, not completion of the
 original observed-user gate. The automated evidence is accepted as the release acceptance method;
 the operating-limit decisions UA02–UA05 are accepted. The owner subsequently authorized the
 v0.6.0 all-target promotion/publication scope (UA06) and continued execution after the release
-sequence was presented. Engineering acceptance is closed; publication and verification remain
-separate execution gates. Existing review/CI requirements are unchanged.
+sequence was presented. Engineering acceptance and all-target publication are closed; protected
+back-sync remains a separate integration step. Existing review/CI requirements are unchanged.
 
 Deferred gate **P01 — hands-on usability before production** remains open. Before production use,
 assign an accepting operator and record the tested build, all four journey outcomes, assistance,
