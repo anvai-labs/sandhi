@@ -1,7 +1,7 @@
 # Attempt accounting and durable evidence
 
-Status: W05 in progress. W05a is integrated; W05b is locally verified and awaiting remote
-integration. It remains opt-in/non-authoritative.
+Status: W05 in progress. W05a and W05b are integrated. W05b remains
+opt-in/non-authoritative; W05c–e are pending.
 Date: 2026-09-08. Tracker: [TD-0026](../td/TD-0026-gateway-product-evolution.md).
 
 ## Work backward from reconciliation
@@ -31,7 +31,7 @@ TTL reclaim currently deletes abandoned leases; W05a does not change that behavi
 | ID | Deliverable | Gate / state |
 |---|---|---|
 | W05a | Atomic settlement receipt/outbox storage, immutable IDs, bounded claims and acknowledgement, rollback/reopen/concurrency tests | Integrated; 14 focused tests; not wired to proxy or network exporter |
-| W05b | Transport-owned attempt lifecycle and neutral draft contract | Locally verified: implementation, TDD regressions and clean adversarial review cover adapter/plane/retry paths, pre-dispatch rejection, nested timeout/cancellation lineage, correlation, bounded metadata and non-final usage; remote PR/CI still gate integration and downstream accounting review still gates external release |
+| W05b | Transport-owned attempt lifecycle and neutral draft contract | Integrated through PR #246 after clean adversarial review and green exact-head/post-merge CI; remains opt-in diagnostics only, while downstream accounting review still gates authoritative use and external release |
 | W05c | Connect admission, settlement and evidence without bypassing correctness | Pending: opt-in authoritative mode, per-shard colocation, failure policy, receipt/attempt linkage, logical dedup separation and all no-lease paths |
 | W05d | Unknown-liability and late-settlement recovery | Pending: durable pre-dispatch intent; crash windows, stale leases, late observations, amendments and idempotent recovery; coordinate TD-0024 retention |
 | W05e | Receiver contract, exporter and operator evidence | Pending: receiver idempotency, authenticated/scoped transport, retry/backoff, backlog/freshness UX, safe retention, multi-shard cursor/migration and real consumer review |
@@ -151,8 +151,12 @@ gate. TDD regressions first reproduced nested complete/stream-setup/idle timeout
 as cancellation and control-character expansion exceeding metadata byte budgets. Linked timeout
 scopes preserve ancestor causes without contaminating retry or concurrent sibling scopes, and
 sanitization now accounts for replacement-character UTF-8 width. Fresh adversarial review found
-no remaining findings. This is local implementation evidence; remote PR review, exact-head CI,
-merge and post-merge CI remain pending.
+no remaining findings. PR #246 merged the verified implementation as `bc4b120`; exact-head CI
+`34229915141` and post-merge CI `34230690137` passed on public hosted runners. The first PR-head
+run exposed stale path-dependency metadata in the separate Python and Node lockfiles. Refreshing
+only those entries made all three locked advisory scans pass before the successful rerun. The
+authorized admin override bypassed only the missing approving review, never a failed or pending
+check.
 
 A future external schema should contain opaque execution/attempt/evidence IDs, authenticated
 attribution, destination/provider/model facts, optional policy and credential revisions, neutral
