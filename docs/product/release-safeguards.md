@@ -1,9 +1,8 @@
 # Safeguarded milestone release
 
-Status: v0.6.1 is fully published and independently verified as the owner-approved compatibility
-exception for W05b's source-breaking public Rust API additions. Reuse of the existing crates token
-and PyPI/npm trusted publishing succeeded. Immutable release-evidence back-sync to `develop`
-remains in progress. Production is not authorized.
+Status: v0.6.1 is fully published, independently verified and back-synced as the owner-approved
+compatibility exception for W05b's source-breaking public Rust API additions. Reuse of the existing
+crates token and PyPI/npm trusted publishing succeeded. Production is not authorized.
 See the [v0.6.1 checkpoint](#v061-compatibility-exception-execution-checkpoint-2026-09-08-utc)
 and the [current registry decision](#owner-correction-reuse-the-crates-token-2026-09-07).
 Tracker: [TD-0026](../td/TD-0026-gateway-product-evolution.md); publish mechanics:
@@ -63,7 +62,9 @@ open and continue to block production authorization.
   two platform npm packages.
 - [x] Run the independent all-target verifier. Every expected target passed without repair or tag
   movement; artifact identities are recorded below.
-- [ ] Back-sync immutable release evidence from `main` to `develop` through a reviewed, green PR.
+- [x] Back-sync immutable release evidence from `main` to `develop` through reviewed, green
+  [PR #250](https://github.com/anvai-labs/sandhi/pull/250), merged as `76237c3`; exact-develop
+  [push CI 34283659652](https://github.com/anvai-labs/sandhi/actions/runs/34283659652) passed.
 
 ### v0.6.1 publication outcome (2026-09-08 UTC)
 
