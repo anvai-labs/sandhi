@@ -1,6 +1,7 @@
 # TD-0026: Gateway product evolution and delivery plan
 
-Status: In progress — review and planning complete; M1 implementation underway.
+Status: In progress — M1 v0.6.0 published and back-synced; M2/W05b integrated; owner-approved
+v0.6.1 compatibility-exception release preparation underway.
 Date: 2026-09-04
 Baseline: `ed1781e` (Sandhi); source review, not a release certification.
 
@@ -49,11 +50,13 @@ marking a planning task complete does not mark its implementation complete.
 | C01c | W06a drain-aware readiness; branch `feat/drain-aware-readiness` | Passed: native workspace, OTLP proxy tests, 87.76% native coverage, 113 SDK/browser tests; independent review finding fixed and re-reviewed clean | [PR #232](https://github.com/anvai-labs/sandhi/pull/232) merged as `31151d9`; latest-head CI `34042875545` and post-merge CI `34048329909` passed; authorized missing-review bypass only | Complete | No |
 | C01d | W06c recovery drills; branch `test/recovery-drills` | Passed: 181 SDK/browser tests (one unavailable SDK skipped), default/native/OTLP tests and clippy, 87.77% native coverage; adversarial findings fixed and independently re-reviewed clean | [PR #233](https://github.com/anvai-labs/sandhi/pull/233) merged as `8ae8401`; latest-head CI `34058455291` and post-merge CI `34059776510` passed on public hosted runners; authorized missing-review bypass only | Complete | No |
 | C01e | W06d workload/operator acceptance; branch `test/m1-acceptance` | Automation passed: 227 local SDK/browser tests (one unavailable SDK skip), 233 hosted SDK tests (two optional sibling-browser skips), 36-phase integrated workload and clean independent review; [evidence and actual-user gate](../product/m1-acceptance.md). Accepting operator/results still pending | [PR #234](https://github.com/anvai-labs/sandhi/pull/234) merged as `324ba87`; latest-head CI `34060286384` and post-merge CI `34060985111` passed on public hosted runners; authorized missing-review bypass only | Automation verified and integrated; human acceptance pending | No |
-| C01f | Operator decision evidence and run-view correction; branch `test/operator-decision-evidence` | 251 SDK/browser tests, zero skips; Rust tests/clippy/fmt passed; nine masked journey pairs plus JUnit; 18 pinned broker-component tests | [PR #236](https://github.com/anvai-labs/sandhi/pull/236) is the live record for exact-head review, CI and post-merge verification | Follow PR merge state; source-pinned local evidence remains immutable | No; UA01–UA05 accepted, UA06 pending |
+| C01f | Operator decision evidence and run-view correction; branch `test/operator-decision-evidence` | 251 SDK/browser tests, zero skips; Rust tests/clippy/fmt passed; nine masked journey pairs plus JUnit; 18 pinned broker-component tests | [PR #236](https://github.com/anvai-labs/sandhi/pull/236) records exact-head review, CI and post-merge verification | Complete; source-pinned local evidence remains immutable | Included in v0.6.0; later UA06 decision recorded by C02 |
 | C01g | Release safeguards and accepted engineering scope | 207 safeguard tests passed, zero skips; isolated local binary smoke passed; independent exact-head review clean; SG06 remote ref controls verified; [SG01–SG08 tracker](../product/release-safeguards.md) | [PR #237](https://github.com/anvai-labs/sandhi/pull/237) merged; [pre-merge CI](https://github.com/anvai-labs/sandhi/actions/runs/34107985444) and [post-merge CI](https://github.com/anvai-labs/sandhi/actions/runs/34131251842) green on public runners; authorized missing-review bypass only | Complete: `f790ca7` on develop | No; SG07 credential closure and final execution gate open |
 | C01h | Trusted-publishing readiness follow-up | PRs #239/#240 clean exact-head review; 284 hosted release tests passed; [integration checkpoint](../product/release-safeguards.md#trusted-publishing-integration-checkpoint-2026-09-07) | Both PRs merged after green CI; exact develop post-merge CI green on public runners | Historical integration complete; crates mechanism superseded by C01i | No; current owner decision governs SG07 |
-| C01i | Honor owner-selected registry mechanisms | Reuse existing crates token; keep PyPI/npm OIDC and existing safeguards; [owner correction](../product/release-safeguards.md#owner-correction-reuse-the-crates-token-2026-09-07) | Focused workflow/test/docs correction; review and CI required | In progress | No; correction and main promotion must pass CI |
-| C02 | M1 engineering-release acceptance under UA01–UA05, then `develop` → `main`; hands-on UX deferred to P01 before production | UA01–UA05 accepted; SG06 ref controls applied; owner directed v0.6.0 trusted-publishing continuation; SG07 registry authority gate open | Pending promotion PR and post-merge CI; [OIDC integration tracker](../product/release-safeguards.md#trusted-publishing-integration-checkpoint-2026-09-07) | Pending | No; registry authority and current-main CI remain prerequisites |
+| C01i | Honor owner-selected registry mechanisms | 284 release tests passed; independent workflow review clean; existing crates token retained and PyPI/npm OIDC unchanged | [PR #242](https://github.com/anvai-labs/sandhi/pull/242) merged after green exact-head CI; [develop push CI](https://github.com/anvai-labs/sandhi/actions/runs/34161667180) passed | Complete: `c528ad4` | Included in v0.6.0; all selected mechanisms succeeded |
+| C02 | Accepted M1 engineering milestone and authorized v0.6.0 all-target release; P01–P03 remain pre-production gates | Fresh cumulative reviews clean; all cross-platform build/pack gates passed; independent downloaded Linux binary smoke and published PyPI install/import passed; final all-target verifier passed | [PR #243](https://github.com/anvai-labs/sandhi/pull/243) merged after full [promotion CI](https://github.com/anvai-labs/sandhi/actions/runs/34163305520) passed; exact-main [push CI](https://github.com/anvai-labs/sandhi/actions/runs/34163982562) passed; npm-only [repair run](https://github.com/anvai-labs/sandhi/actions/runs/34188380114) passed; [PR #244](https://github.com/anvai-labs/sandhi/pull/244) back-synced release evidence and exact-develop [push CI](https://github.com/anvai-labs/sandhi/actions/runs/34217140784) passed | Complete: main promotion/tag `9d40f01`; develop back-sync `b7dcbb0` | Fully published and verified: GitHub, PyPI, four crates and three npm packages; [outcome](../product/release-safeguards.md#publication-outcome-2026-09-08-utc) |
+| C03 | W05b opt-in physical-attempt diagnostics; branch `feat/w05b-physical-attempts` | Passed: 618 workspace tests, strict all-feature/all-target Clippy, fmt/diff checks, 86.41% line coverage; TDD covers identity, explicit terminal state, bounded delivery/metadata, correlation, typed/raw planes, retry isolation and nested timeout lineage; fresh adversarial review clean | [PR #246](https://github.com/anvai-labs/sandhi/pull/246) merged after exact-head CI `34229915141` passed; initial stale binding-lock failure was fixed before rerun; post-merge CI `34230690137` passed on public runners; authorized missing-review bypass only | Complete: `bc4b120` on `develop` | No; W05c–e still gate authoritative accounting/export |
+| C04 | Owner-directed v0.6.1 all-target release of C03 as an explicit compatibility exception; branch `release/v0.6.1-prep` | Release notes disclose the source break; local safeguard and workspace gates must pass without weakening W05b limits | Focused prep PR, cumulative promotion review/CI, exact-main CI, immutable tag, every-target verification and evidence back-sync are required | In progress: release preparation | No; tag and registries must remain untouched until promotion gates pass |
 
 C01f follow-up: `test/operator-decision-evidence` closes the automatable links between browser
 onboarding, real requests, budget denials, broker recovery and restored numeric evidence. Source
@@ -72,12 +75,16 @@ the existing estimate-based token budgets (UA02) and current component/synthetic
 before production use of the integration (P02). The user also accepted operator-controlled
 recovery (UA04); recovery ownership, current policy authority and cutover/rollback rules remain
 required before deployment (P03). The user accepted the measured single-node baseline without
-production performance promises (UA05). Promotion/publication scope (UA06) remains pending.
+production performance promises (UA05). The owner subsequently accepted and completed the
+v0.6.0 promotion/publication scope (UA06); P01–P03 remain pre-production gates.
+The owner then explicitly selected v0.6.1 for the W05b release despite the normal minor-version
+recommendation (UA07). This compatibility exception changes the release label only: it does not
+claim patch-level Rust source compatibility, authoritative attempt accounting, or production
+readiness. The migration warning, full all-target release safeguards and P01–P03 remain binding.
 
-C01 checkpoints completed work now instead of waiting for W05–W14. Do not claim M1 complete
-or promote C02 until initial W06 evidence and the remaining M1 release acceptance decisions exist
-under UA01. P01 still gates production. Preserve required reviews,
-environment approvals and branch protections; no CI bypass or automatic publication is implied.
+C01 checkpoints completed work without waiting for W05–W14. C02 was promoted only after the
+initial W06 evidence and M1 release decisions were recorded. P01 still gates production.
+Preserve required reviews, environment approvals and branch protections for subsequent work.
 
 ## Decision log
 
@@ -176,15 +183,18 @@ UA01's engineering-evidence method for this release and explicitly deferred hand
 until before production. The [decision record](../product/m1-acceptance-decisions.md) tracks that
 approval, the subsequent acceptance of existing estimated token budgets (UA02) and current
 broker evidence (UA03), operator-controlled recovery (UA04) and measured single-node performance
-scope (UA05), remaining UA06 and deferred P01–P03. Next: confirm promotion/publication scope,
-the proposed v0.6.0 targets and publishing safeguards. Do not tag or publish based on UA01–UA05.
+scope (UA05) and deferred P01–P03. The subsequent v0.6.0 all-target execution approval is
+separate from UA01–UA05; those engineering decisions alone did not authorize publication.
 The user subsequently authorized release-safeguard gap closure. Execute and track SG01–SG07
 in the [release-safeguard plan](../product/release-safeguards.md). The owner subsequently requested
 new-build trusted publication, retained the existing npm packages, and directed continuing the
 proposed v0.6.0 all-target plan. The owner subsequently clarified that crates must reuse the
-existing unrevoked token; OIDC applies only to PyPI/npm. Honor that correction, retain publication
-safeguards, close remaining registry evidence and complete
-reviewed/green main promotion before executing SG08; do not infer completed registry bindings.
+existing unrevoked token; OIDC applies only to PyPI/npm. That correction is integrated through
+PR #242 and reviewed/green main promotion through PR #243. Exact-main CI passed and immutable
+v0.6.0 was tagged on 2026-09-08 UTC; continue SG08 build/publish/verification and back-sync.
+The owner authorized actual publication to validate reported registry settings.
+Retain safeguards and treat registry rejections as failures; do not infer independently
+confirmed bindings from the owner's reports or existing package presence.
 Independent implementation/review work may proceed without claiming release
 completion or reopening UA01–UA05.
 Do not repeatedly request the now-deferred walkthrough as a release prerequisite. Do not mark
@@ -213,6 +223,31 @@ protections need review before the next tag. Evidence and the remaining UA06 cho
    claim before shared-ledger and distributed failure gates pass.
 5. **M4 — admitted expansions:** selected W14 spikes, each with a named adopter and separate scope
    decision. Defer unproven breadth instead of making M1–M3 depend on it.
+
+### Authorized next engineering sequence (M2)
+
+M2 starts with W05b because physical-attempt identity and terminal evidence are prerequisites for
+W08 policy reconciliation, W09 credential cutoff evidence and W10 operator/cost investigation.
+Logical usage events and aggregate attempt counts cannot safely stand in for that evidence.
+
+1. Define an internal, versioned attempt-observation contract with opaque execution/attempt
+   identity, provider/model facts, transport outcome, bounded provider correlation, neutral usage
+   and explicit final/partial/unavailable measurement state. Exclude request bodies, credentials,
+   raw headers, prices and identity-provider authority.
+2. Instrument the actual provider transport boundary across typed and transparent planes. Emit no
+   physical attempt for validation/circuit/admission rejection before send; give each retry its own
+   identity; classify setup/whole-call timeout, caller cancellation, provider rejection, transport
+   failure, successful terminal usage and interrupted-stream partial usage.
+3. Keep the observer opt-in and in-memory for W05b. Do not connect it to settlement, persistence,
+   export, UI or enforcement until W05c–e establish failure policy and consumer acknowledgement.
+4. Add deterministic adapter/plane/retry/cancellation tests, then run provider, proxy, workspace,
+   formatting, clippy and coverage gates. Obtain a fresh adversarial review before a focused PR to
+   `develop`; merge only with green latest-head CI and verify exact post-merge CI.
+5. Before any external schema or authoritative mode, record downstream accounting review of
+   logical-versus-physical totals, unknown liability, amendments and price-effective-time needs.
+
+P01–P03 remain pre-production gates and are deliberately not reclassified as M2 implementation
+blockers. No M2 work authorizes deployment or expands the v0.6.0 production assurance claim.
 
 At each checkpoint, collect the observed user result, latency/resource cost, denied/failed-path
 behavior and unresolved tradeoffs. A prototype walkthrough is not a usability result; a green
@@ -593,3 +628,38 @@ unit suite is not a distributed correctness proof. Record evidence and update th
   W06d/M1 remain incomplete because accepting operator and observed journey results have not been
   supplied. C02/main promotion is deliberately unopened. Next: obtain the recorded actual-user
   outcomes, address any findings, then recheck the promotion head/review/CI and resulting main push.
+- 2026-09-08: C02/SG08 is operationally closed. v0.6.0 is fully published and independently
+  verified across GitHub, PyPI, four crates and three npm packages. PR #244 back-synced the release
+  evidence as `b7dcbb0`; exact-develop CI `34217140784` passed the release-safeguard and aggregate
+  gates on public hosted runners. P01–P03 remain open before production. Started the next
+  dependency-critical M2 slice, W05b, on `feat/w05b-physical-attempts`; the sequence above keeps
+  observation opt-in and non-authoritative until W05c–e.
+- 2026-09-08: W05b TDD/adversarial hardening is in progress. Red regressions reproduced
+  context-local attempt-ID collisions, empty-chunk false completion and missing successful
+  provider correlation. The implementation now uses random context nonces plus checked `u64`
+  ordinals, an explicit terminal marker, Sandhi-owned bounded `try_send` delivery with a dropped
+  counter, and retained response facts across post-header failures/cancellation. Built-in typed
+  handles expose an explicit observed-call seam; unsupported custom providers fail closed and the
+  raw builder is named for its metered-only scope. Focused provider tests pass; full workspace
+  gates and fresh adversarial re-review remain required before C03 PR/integration.
+- 2026-09-08: W05b local verification is complete. The final adversarial pass exposed two more
+  bounded-contract defects: nested resilience mislabeled outer complete/stream-setup/idle timeouts
+  as cancellation, and control-character replacement could expand labels beyond their byte cap.
+  Red tests reproduced both. Linked cancellation scopes now retain ancestor timeout causes while
+  keeping retries and siblings isolated; UTF-8 sanitization observes the exact byte budget. The
+  exact branch passes 618 workspace tests, strict Clippy/fmt/diff gates and 86.41% line coverage;
+  the fresh re-review is clean. C03 is ready for a focused PR, but remains unintegrated until
+  exact-head remote CI and review pass. W05c–e remain pending and authoritative use stays disabled.
+- 2026-09-08: C03/W05b is integrated. PR #246 first exposed stale provider dependency metadata
+  in the separate Python and Node binding lockfiles; the exact two entries were refreshed and all
+  three locked advisory scans then passed. Exact-head public-runner CI `34229915141` was green
+  before merge. The authorized admin override bypassed only the missing approval, not checks.
+  Merge commit `bc4b120` is the current `develop` head and post-merge CI `34230690137` passed.
+  Next is a focused W05c design review and TDD slice connecting admission, settlement and evidence;
+  W05b observations remain non-authoritative until those correctness gates are implemented.
+- 2026-09-08: The owner explicitly overrode the normal minor-version recommendation and selected
+  v0.6.1 for an all-target release of integrated W05b (UA07). C04 tracks this as a compatibility
+  exception: release notes must disclose the public Rust struct-literal migration, and no
+  authoritative accounting or production claim is added. Proceed through a focused prep PR,
+  cumulative promotion review/CI, exact-main CI, immutable tag, every-target verification and
+  evidence back-sync; stop on any unresolved review, CI or publication failure.

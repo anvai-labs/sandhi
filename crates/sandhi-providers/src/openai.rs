@@ -106,6 +106,8 @@ impl Provider for OpenAiCompat {
 
     async fn complete(&self, req: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         validate_openai_chat_messages(&req.body)?;
+        let attempt_context = req.attempt_context.clone();
+        let model = req.model.clone();
         let headers = self.request_headers(&req);
         let mut body = req.body;
         if let Some(obj) = body.as_object_mut() {
@@ -115,30 +117,44 @@ impl Provider for OpenAiCompat {
         if !self.api_key.is_empty() {
             request = request.bearer_auth(&self.api_key);
         }
-        let resp = request
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| ProviderError::Transport(e.to_string()))?;
-        let status = resp.status().as_u16();
-        if !resp.status().is_success() {
-            return Err(error_for_response(resp, self.request_id_header).await);
-        }
-        let body: Value = resp
-            .json()
-            .await
-            .map_err(|e| ProviderError::Transport(e.to_string()))?;
-        let usage = parse_openai_usage(&body).unwrap_or_default();
-        Ok(ProviderResponse {
-            status,
-            body,
-            usage,
-            attempts: 1,
-        })
+        crate::attempt::observe_complete(
+            attempt_context,
+            self.slug(),
+            Some(&model),
+            |facts| async move {
+                let resp = request
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|e| ProviderError::Transport(e.to_string()))?;
+                let status = resp.status().as_u16();
+                facts.record_headers(status, resp.headers(), self.request_id_header);
+                if !resp.status().is_success() {
+                    return Err(error_for_response(resp, self.request_id_header).await);
+                }
+                let body: Value = resp
+                    .json()
+                    .await
+                    .map_err(|e| ProviderError::Transport(e.to_string()))?;
+                let observed_usage = parse_openai_usage(&body);
+                Ok((
+                    ProviderResponse {
+                        status,
+                        body,
+                        usage: observed_usage.unwrap_or_default(),
+                        attempts: 1,
+                    },
+                    observed_usage,
+                ))
+            },
+        )
+        .await
     }
 
     async fn stream(&self, req: ProviderRequest) -> Result<ByteStream, ProviderError> {
         validate_openai_chat_messages(&req.body)?;
+        let attempt_context = req.attempt_context.clone();
+        let model = req.model.clone();
         let headers = self.request_headers(&req);
         let mut body = req.body;
         if let Some(obj) = body.as_object_mut() {
@@ -159,18 +175,31 @@ impl Provider for OpenAiCompat {
         if !self.api_key.is_empty() {
             request = request.bearer_auth(&self.api_key);
         }
-        let resp = request
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| ProviderError::Transport(e.to_string()))?;
-        if !resp.status().is_success() {
-            return Err(error_for_response(resp, self.request_id_header).await);
-        }
-        // Forward every upstream chunk verbatim (O(1) pass-through) while sniffing each complete
-        // line for the terminal usage object; `metered_passthrough` is the shared streaming
-        // primitive (the chunk-boundary property test exercises this exact path).
-        Ok(metered_passthrough(resp.bytes_stream(), sniff_usage_line))
+        crate::attempt::observe_stream(
+            attempt_context,
+            self.slug(),
+            Some(&model),
+            |facts| async move {
+                let resp = request
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|e| ProviderError::Transport(e.to_string()))?;
+                facts.record_headers(
+                    resp.status().as_u16(),
+                    resp.headers(),
+                    self.request_id_header,
+                );
+                if !resp.status().is_success() {
+                    return Err(error_for_response(resp, self.request_id_header).await);
+                }
+                // Forward every upstream chunk verbatim (O(1) pass-through) while sniffing each complete
+                // line for the terminal usage object; `metered_passthrough` is the shared streaming
+                // primitive (the chunk-boundary property test exercises this exact path).
+                Ok(metered_passthrough(resp.bytes_stream(), sniff_usage_line))
+            },
+        )
+        .await
     }
 }
 
@@ -618,5 +647,138 @@ mod tests {
         assert_eq!(u.tokens_in, 6); // 10 - 4 cached
         assert_eq!(u.tokens_out, 5);
         assert_eq!(u.cache_read_tokens, 4);
+    }
+
+    #[tokio::test]
+    async fn validation_rejection_emits_no_physical_attempt() {
+        let (context, receiver) = crate::AttemptContext::channel("exec_invalid", 8).unwrap();
+        let provider = OpenAiCompat::new("openai", "http://127.0.0.1:1", "k");
+        let error = provider
+            .complete(
+                ProviderRequest::new("m", json!({"messages": "not-an-array"}))
+                    .with_attempt_context(context),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, ProviderError::InvalidRequest(_)));
+        assert!(receiver.drain().is_empty());
+    }
+
+    #[tokio::test]
+    async fn successful_attempt_carries_status_and_bounded_provider_request_id() {
+        use crate::{AttemptOutcome, AttemptPhase};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("x-request-id", "provider-success-42")
+                    .set_body_json(json!({
+                        "choices": [],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+                    })),
+            )
+            .mount(&server)
+            .await;
+        let (context, receiver) = crate::AttemptContext::channel("exec_success", 4).unwrap();
+        OpenAiCompat::new("openai", server.uri(), "k")
+            .complete(
+                ProviderRequest::new("model", json!({"messages": []}))
+                    .with_attempt_context(context),
+            )
+            .await
+            .unwrap();
+
+        let observations = receiver.drain();
+        assert!(matches!(
+            &observations[1].phase,
+            AttemptPhase::Terminal {
+                outcome: AttemptOutcome::Success,
+                provider_status: Some(200),
+                provider_request_id: Some(id),
+                ..
+            } if id == "provider-success-42"
+        ));
+    }
+
+    #[tokio::test]
+    async fn post_header_decode_failure_preserves_provider_correlation() {
+        use crate::{AttemptOutcome, AttemptPhase};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("x-request-id", "provider-decode-43")
+                    .set_body_string("not-json"),
+            )
+            .mount(&server)
+            .await;
+        let (context, receiver) = crate::AttemptContext::channel("exec_decode", 4).unwrap();
+
+        let error = OpenAiCompat::new("openai", server.uri(), "k")
+            .complete(
+                ProviderRequest::new("model", json!({"messages": []}))
+                    .with_attempt_context(context),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, ProviderError::Transport(_)));
+        let observations = receiver.drain();
+        assert!(matches!(
+            &observations[1].phase,
+            AttemptPhase::Terminal {
+                outcome: AttemptOutcome::TransportError,
+                provider_status: Some(200),
+                provider_request_id: Some(id),
+                ..
+            } if id == "provider-decode-43"
+        ));
+    }
+
+    #[tokio::test]
+    async fn auth_and_rate_limit_attempts_retain_exact_status_and_request_id() {
+        use crate::{AttemptOutcome, AttemptPhase};
+
+        for status in [401u16, 403, 429] {
+            let server = MockServer::start().await;
+            let request_id = format!("provider-reject-{status}");
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .insert_header("x-request-id", request_id.as_str())
+                        .set_body_string("rejected"),
+                )
+                .mount(&server)
+                .await;
+            let (context, receiver) =
+                crate::AttemptContext::channel(format!("exec_reject_{status}"), 4).unwrap();
+
+            let error = OpenAiCompat::new("openai", server.uri(), "k")
+                .complete(
+                    ProviderRequest::new("model", json!({"messages": []}))
+                        .with_attempt_context(context),
+                )
+                .await
+                .unwrap_err();
+            if status == 429 {
+                assert!(matches!(error, ProviderError::RateLimited));
+            } else {
+                assert!(matches!(error, ProviderError::Auth));
+            }
+
+            let observations = receiver.drain();
+            assert!(matches!(
+                &observations[1].phase,
+                AttemptPhase::Terminal {
+                    outcome: AttemptOutcome::ProviderRejected,
+                    provider_status: Some(observed_status),
+                    provider_request_id: Some(observed_id),
+                    ..
+                } if *observed_status == status && observed_id == &request_id
+            ));
+        }
     }
 }

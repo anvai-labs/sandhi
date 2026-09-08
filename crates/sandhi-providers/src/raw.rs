@@ -69,9 +69,21 @@ pub struct RawForwarder {
     /// VALUE is caller-minted (the proxy's admission id, which becomes the event's
     /// `request_id`); this field supplies only the name.
     client_request_id_header: Option<&'static str>,
+    /// Vendor response-correlation header. This is transport configuration and is deliberately
+    /// independent of the diagnostic provider label carried by an attempt observation.
+    response_request_id_header: Option<&'static str>,
     complete_timeout: Duration,
     stream_setup_timeout: Duration,
     stream_idle_timeout: Option<Duration>,
+    /// Opt-in W05b physical-attempt observation for one cloned per-execution forwarder.
+    attempt: Option<RawAttemptContext>,
+}
+
+#[derive(Clone)]
+struct RawAttemptContext {
+    provider: String,
+    model: Option<String>,
+    context: crate::AttemptContext,
 }
 
 impl RawForwarder {
@@ -96,9 +108,14 @@ impl RawForwarder {
             extra_headers: HeaderMap::new(),
             session_header: None,
             client_request_id_header: None,
+            response_request_id_header: match family {
+                ProviderFamily::Anthropic => Some("anthropic-request-id"),
+                _ => None,
+            },
             complete_timeout: Duration::from_secs(120),
             stream_setup_timeout: Duration::from_secs(30),
             stream_idle_timeout: Some(Duration::from_secs(90)),
+            attempt: None,
         }
     }
 
@@ -136,6 +153,14 @@ impl RawForwarder {
         self
     }
 
+    /// Declare the upstream's response-correlation header. The typed runtime resolves this from
+    /// provider transport configuration; custom raw transports may set it explicitly.
+    #[must_use]
+    pub fn with_provider_request_id_header(mut self, header: Option<&'static str>) -> Self {
+        self.response_request_id_header = header;
+        self
+    }
+
     /// Override the Anthropic auth scheme (API key vs OAuth Bearer).
     #[must_use]
     pub fn with_anthropic_auth(mut self, scheme: AnthropicAuthScheme) -> Self {
@@ -167,10 +192,32 @@ impl RawForwarder {
         self
     }
 
+    /// Attach opt-in physical-attempt observation to this cloned forwarder's **metered** methods.
+    /// [`Self::forward`] and [`Self::forward_stream`] remain unobserved escape hatches. The
+    /// provider/model labels are diagnostic facts only; they never enter the upstream request.
+    /// Reusing the forwarder is safe: every metered call receives a fresh cancellation signal
+    /// and attempt ordinal.
+    #[must_use]
+    pub fn with_metered_attempt_context(
+        mut self,
+        provider: impl Into<String>,
+        model: Option<String>,
+        context: crate::AttemptContext,
+    ) -> Self {
+        let provider = provider.into();
+        self.attempt = Some(RawAttemptContext {
+            provider,
+            model,
+            context,
+        });
+        self
+    }
+
     /// Non-streaming forward: POST the (envelope-normalized) body bytes to `{base_url}{path}`,
     /// return the status + raw body bytes + curated headers.
     pub async fn forward(&self, path: &str, body: Bytes) -> Result<RawResponse, ProviderError> {
-        self.forward_with_session(path, body, None, None).await
+        self.forward_with_session(path, body, None, None, None, None)
+            .await
     }
 
     /// Session-aware core of [`Self::forward`]: `session` is the neutral conversation key
@@ -181,6 +228,8 @@ impl RawForwarder {
         body: Bytes,
         session: Option<&str>,
         correlation: Option<&str>,
+        attempt_facts: Option<&crate::attempt::AttemptResponseFacts>,
+        response_request_id_header: Option<&str>,
     ) -> Result<RawResponse, ProviderError> {
         let url = self.url(path);
         let out_body = normalize_envelope(self.family, &body, false);
@@ -189,8 +238,11 @@ impl RawForwarder {
                 .send_with_session(&url, out_body, session, correlation)
                 .await?;
             let status = resp.status().as_u16();
+            if let Some(facts) = attempt_facts {
+                facts.record_headers(status, resp.headers(), response_request_id_header);
+            }
             if !resp.status().is_success() {
-                return Err(error_for_response(resp, None).await);
+                return Err(error_for_response(resp, response_request_id_header).await);
             }
             let headers = filter_response_headers(resp.headers());
             let body = resp
@@ -250,15 +302,29 @@ impl RawForwarder {
         session: Option<&str>,
         correlation: Option<&str>,
     ) -> Result<(RawResponse, sandhi_core::UsageV2), ProviderError> {
-        let raw = self
-            .forward_with_session(path, body, session, correlation)
-            .await?;
-        let usage = serde_json::from_slice::<Value>(&raw.body)
-            .ok()
-            .and_then(|value| parse_usage_for_family(self.family, &value))
-            .unwrap_or_default()
-            .into();
-        Ok((raw, usage))
+        let attempt = self.attempt.as_ref();
+        let context = attempt.map(|attempt| attempt.context.fresh_call());
+        let provider = attempt.map_or("transparent", |attempt| attempt.provider.as_str());
+        let model = attempt.and_then(|attempt| attempt.model.as_deref());
+        let response_request_id_header = self.response_request_id_header;
+        crate::attempt::observe_value(context, provider, model, |facts| async move {
+            let raw = self
+                .forward_with_session(
+                    path,
+                    body,
+                    session,
+                    correlation,
+                    Some(&facts),
+                    response_request_id_header,
+                )
+                .await?;
+            let observed_usage = serde_json::from_slice::<Value>(&raw.body)
+                .ok()
+                .and_then(|value| parse_usage_for_family(self.family, &value));
+            let usage = observed_usage.unwrap_or_default().into();
+            Ok(((raw, usage), observed_usage))
+        })
+        .await
     }
 
     /// Streaming forward **that also meters**: yields the upstream bytes verbatim (O(1)
@@ -275,6 +341,12 @@ impl RawForwarder {
         session: Option<&str>,
         correlation: Option<&str>,
     ) -> Result<RawMeteredStreamResponse, ProviderError> {
+        let attempt = self.attempt.as_ref();
+        let context = attempt.map(|attempt| attempt.context.fresh_call());
+        let provider = attempt.map_or("transparent", |attempt| attempt.provider.as_str());
+        let model = attempt.and_then(|attempt| attempt.model.as_deref());
+        let response_request_id_header = self.response_request_id_header;
+        let mut guard = context.and_then(|context| context.begin(provider, model));
         let url = self.url(path);
         let out_body = normalize_envelope(self.family, &body, true);
         let resp = match tokio::time::timeout(
@@ -283,19 +355,47 @@ impl RawForwarder {
         )
         .await
         {
-            Ok(result) => result?,
-            Err(_) => return Err(ProviderError::Timeout(self.stream_setup_timeout)),
+            Ok(result) => match result {
+                Ok(response) => response,
+                Err(error) => {
+                    if let Some(guard) = guard.as_mut() {
+                        guard.finish_error(&error);
+                    }
+                    return Err(error);
+                }
+            },
+            Err(_) => {
+                let error = ProviderError::Timeout(self.stream_setup_timeout);
+                if let Some(guard) = guard.as_mut() {
+                    guard.finish_error(&error);
+                }
+                return Err(error);
+            }
         };
-        if !resp.status().is_success() {
-            return Err(error_for_response(resp, None).await);
-        }
         let status = resp.status().as_u16();
+        let facts = crate::attempt::AttemptResponseFacts::default();
+        facts.record_headers(status, resp.headers(), response_request_id_header);
+        if let Some(guard) = guard.as_mut() {
+            guard.set_response_facts(&facts);
+        }
+        if !resp.status().is_success() {
+            let error = error_for_response(resp, response_request_id_header).await;
+            if let Some(guard) = guard.as_mut() {
+                guard.finish_error(&error);
+            }
+            return Err(error);
+        }
         let headers = filter_response_headers(resp.headers());
         let stream = crate::metered_passthrough(resp.bytes_stream(), sniff_for_family(self.family));
+        let stream = with_idle_timeout(stream, self.stream_idle_timeout);
+        let stream = match guard {
+            Some(guard) => guard.wrap_stream(stream),
+            None => stream,
+        };
         Ok(RawMeteredStreamResponse {
             status,
             headers,
-            stream: with_idle_timeout(stream, self.stream_idle_timeout),
+            stream,
         })
     }
 
@@ -1182,5 +1282,181 @@ data: [DONE]\n\n";
             .err()
             .expect("stream setup should time out");
         assert!(matches!(err, ProviderError::Timeout(d) if d == Duration::from_millis(10)));
+    }
+
+    #[tokio::test]
+    async fn metered_raw_complete_emits_neutral_attempt_measurement() {
+        use crate::{AttemptOutcome, AttemptPhase, ParsedUsage};
+        use sandhi_core::UsageCompleteness;
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "choices": [],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 2}
+            })))
+            .mount(&server)
+            .await;
+        let (context, receiver) = crate::AttemptContext::channel("exec_raw", 8).unwrap();
+        let forwarder = RawForwarder::new(ProviderFamily::OpenAiCompat, server.uri(), "k")
+            .with_metered_attempt_context("openai", Some("gpt-test".into()), context);
+
+        forwarder
+            .forward_metered(
+                "/v1/chat/completions",
+                Bytes::from_static(b"{}"),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let observations = receiver.drain();
+        assert_eq!(observations.len(), 2);
+        assert_eq!(observations[0].provider, "openai");
+        assert_eq!(observations[0].model.as_deref(), Some("gpt-test"));
+        assert!(matches!(
+            observations[1].phase,
+            AttemptPhase::Terminal {
+                outcome: AttemptOutcome::Success,
+                usage: Some(ParsedUsage {
+                    tokens_in: 5,
+                    tokens_out: 2,
+                    ..
+                }),
+                usage_completeness: UsageCompleteness::Final,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn metered_raw_stream_drop_preserves_partial_provider_usage() {
+        use crate::{AttemptOutcome, AttemptPhase, ParsedUsage};
+        use futures_util::StreamExt;
+        use sandhi_core::UsageCompleteness;
+
+        let server = MockServer::start().await;
+        let partial = concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{",
+            "\"input_tokens\":9,\"cache_read_input_tokens\":3}}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"hi\"}}\n\n"
+        );
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(partial),
+            )
+            .mount(&server)
+            .await;
+        let (context, receiver) = crate::AttemptContext::channel("exec_raw_stream", 8).unwrap();
+        let forwarder = RawForwarder::new(ProviderFamily::Anthropic, server.uri(), "k")
+            .with_metered_attempt_context("anthropic", Some("claude-test".into()), context);
+
+        let response = forwarder
+            .forward_stream_metered("/v1/messages", Bytes::from_static(b"{}"), None, None)
+            .await
+            .unwrap();
+        let mut stream = response.stream;
+        stream.next().await.unwrap().unwrap();
+        drop(stream);
+
+        let observations = receiver.drain();
+        assert_eq!(observations.len(), 2);
+        assert!(matches!(
+            observations[1].phase,
+            AttemptPhase::Terminal {
+                outcome: AttemptOutcome::Cancelled,
+                usage: Some(ParsedUsage {
+                    tokens_in: 9,
+                    cache_read_tokens: 3,
+                    ..
+                }),
+                usage_completeness: UsageCompleteness::Partial,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn metered_raw_rejection_retains_configured_request_id_header() {
+        use crate::{AttemptOutcome, AttemptPhase};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("msh-request-id", "msh-rate-12")
+                    .set_body_string("limited"),
+            )
+            .mount(&server)
+            .await;
+        let (context, receiver) = crate::AttemptContext::channel("exec_raw_reject", 4).unwrap();
+        let forwarder = RawForwarder::new(ProviderFamily::OpenAiCompat, server.uri(), "k")
+            .with_provider_request_id_header(Some("msh-request-id"))
+            .with_metered_attempt_context("moonshot", Some("kimi-test".into()), context);
+
+        let error = forwarder
+            .forward_metered(
+                "/v1/chat/completions",
+                Bytes::from_static(b"{}"),
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, ProviderError::RateLimited));
+        let observations = receiver.drain();
+        assert!(matches!(
+            &observations[1].phase,
+            AttemptPhase::Terminal {
+                outcome: AttemptOutcome::ProviderRejected,
+                provider_status: Some(429),
+                provider_request_id: Some(id),
+                ..
+            } if id == "msh-rate-12"
+        ));
+    }
+
+    #[tokio::test]
+    async fn raw_response_correlation_is_independent_of_the_diagnostic_label() {
+        use crate::{AttemptOutcome, AttemptPhase};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .insert_header("anthropic-request-id", "anthropic-denied-13")
+                    .set_body_string("denied"),
+            )
+            .mount(&server)
+            .await;
+        let (context, receiver) = crate::AttemptContext::channel("exec_raw_label", 4).unwrap();
+        let forwarder = RawForwarder::new(ProviderFamily::Anthropic, server.uri(), "k")
+            .with_metered_attempt_context(
+                "custom-diagnostic-label",
+                Some("claude-test".into()),
+                context,
+            );
+
+        let error = forwarder
+            .forward_metered("/v1/messages", Bytes::from_static(b"{}"), None, None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, ProviderError::Auth));
+        let observations = receiver.drain();
+        assert_eq!(observations[0].provider, "custom-diagnostic-label");
+        assert!(matches!(
+            &observations[1].phase,
+            AttemptPhase::Terminal {
+                outcome: AttemptOutcome::ProviderRejected,
+                provider_status: Some(403),
+                provider_request_id: Some(id),
+                ..
+            } if id == "anthropic-denied-13"
+        ));
     }
 }
