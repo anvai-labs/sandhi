@@ -307,6 +307,7 @@ mod tests {
             usage,
             usage_running: None,
             attempts: 1,
+            terminal: usage.is_some(),
         }
     }
 

@@ -92,6 +92,8 @@ impl Provider for OpenAiResponses {
             ));
         }
         Self::validate(&req.body)?;
+        let attempt_context = req.attempt_context.clone();
+        let model = req.model.clone();
         let mut body = req.body;
         body["stream"] = Value::Bool(false);
         let mut request = self
@@ -102,30 +104,44 @@ impl Provider for OpenAiResponses {
             // Keyless local upstreams get no Authorization header (ADR-0008 D1).
             request = request.bearer_auth(&self.bearer_token);
         }
-        let response = request
-            .json(&body)
-            .send()
-            .await
-            .map_err(|error| ProviderError::Transport(error.to_string()))?;
-        if !response.status().is_success() {
-            return Err(error_for_response(response, None).await);
-        }
-        let status = response.status().as_u16();
-        let body: Value = response
-            .json()
-            .await
-            .map_err(|error| ProviderError::Transport(error.to_string()))?;
-        let usage = parse_openai_responses_usage(&body).unwrap_or_default();
-        Ok(ProviderResponse {
-            status,
-            body,
-            usage,
-            attempts: 1,
-        })
+        crate::attempt::observe_complete(
+            attempt_context,
+            self.slug(),
+            Some(&model),
+            |facts| async move {
+                let response = request
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|error| ProviderError::Transport(error.to_string()))?;
+                let status = response.status().as_u16();
+                facts.record_headers(status, response.headers(), None);
+                if !response.status().is_success() {
+                    return Err(error_for_response(response, None).await);
+                }
+                let body: Value = response
+                    .json()
+                    .await
+                    .map_err(|error| ProviderError::Transport(error.to_string()))?;
+                let observed_usage = parse_openai_responses_usage(&body);
+                Ok((
+                    ProviderResponse {
+                        status,
+                        body,
+                        usage: observed_usage.unwrap_or_default(),
+                        attempts: 1,
+                    },
+                    observed_usage,
+                ))
+            },
+        )
+        .await
     }
 
     async fn stream(&self, req: ProviderRequest) -> Result<ByteStream, ProviderError> {
         Self::validate(&req.body)?;
+        let attempt_context = req.attempt_context.clone();
+        let model = req.model.clone();
         let mut body = req.body;
         body["stream"] = Value::Bool(true);
         let mut request = self
@@ -136,18 +152,27 @@ impl Provider for OpenAiResponses {
             // Keyless local upstreams get no Authorization header (ADR-0008 D1).
             request = request.bearer_auth(&self.bearer_token);
         }
-        let response = request
-            .json(&body)
-            .send()
-            .await
-            .map_err(|error| ProviderError::Transport(error.to_string()))?;
-        if !response.status().is_success() {
-            return Err(error_for_response(response, None).await);
-        }
-        Ok(metered_passthrough(
-            response.bytes_stream(),
-            sniff_responses_usage_line,
-        ))
+        crate::attempt::observe_stream(
+            attempt_context,
+            self.slug(),
+            Some(&model),
+            |facts| async move {
+                let response = request
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|error| ProviderError::Transport(error.to_string()))?;
+                facts.record_headers(response.status().as_u16(), response.headers(), None);
+                if !response.status().is_success() {
+                    return Err(error_for_response(response, None).await);
+                }
+                Ok(metered_passthrough(
+                    response.bytes_stream(),
+                    sniff_responses_usage_line,
+                ))
+            },
+        )
+        .await
     }
 }
 

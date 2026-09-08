@@ -25,6 +25,7 @@ pub use sandhi_core::usage::{
 
 pub mod anthropic;
 mod anthropic_typed;
+pub mod attempt;
 pub mod catalog;
 pub mod cohere;
 mod cohere_typed;
@@ -41,6 +42,10 @@ pub mod raw;
 pub mod resilience;
 pub mod typed;
 pub use anthropic::{Anthropic, AnthropicAuthScheme};
+pub use attempt::{
+    AttemptContext, AttemptContextError, AttemptObservation, AttemptOutcome, AttemptPhase,
+    AttemptReceiver, ATTEMPT_OBSERVATION_VERSION,
+};
 pub use catalog::{
     openai_compat_descriptor, provider_descriptor, resolve_openai_compat_provider,
     ModelEndpointRoute, OpenAiCompatProviderSpec, OPENAI_COMPAT_PROVIDER_SPECS,
@@ -93,6 +98,9 @@ pub struct ProviderRequest {
     /// Who this call is for (metering decorator input). Never enters the wire body —
     /// attribution rides outside the cached prompt (ADR-0001 §4); adapters ignore it.
     pub attribution: Attribution,
+    /// Optional W05b physical-attempt observer. It stays outside the wire body and headers and is
+    /// not connected to settlement, persistence, export, or enforcement.
+    pub attempt_context: Option<AttemptContext>,
 }
 
 /// Per-call attribution consumed by the metering decorator. Carried on the request (not the
@@ -113,6 +121,7 @@ impl ProviderRequest {
             session_id: None,
             extra_headers: http::HeaderMap::new(),
             attribution: Attribution::default(),
+            attempt_context: None,
         }
     }
 
@@ -134,6 +143,12 @@ impl ProviderRequest {
     #[must_use]
     pub fn with_attribution(mut self, attribution: Attribution) -> Self {
         self.attribution = attribution;
+        self
+    }
+
+    #[must_use]
+    pub fn with_attempt_context(mut self, attempt_context: AttemptContext) -> Self {
+        self.attempt_context = Some(attempt_context);
         self
     }
 }
@@ -227,6 +242,12 @@ pub struct StreamChunk {
     pub usage_running: Option<ParsedUsage>,
     /// Upstream stream-setup attempts made for this logical call.
     pub attempts: u32,
+    /// `true` only for the adapter-generated end-of-stream measurement item.
+    ///
+    /// Raw data may legitimately contain an empty chunk, so `data.is_empty()` is not a
+    /// lifecycle signal. Consumers that need to distinguish a completed stream from a dropped
+    /// or truncated stream must use this marker.
+    pub terminal: bool,
 }
 
 /// A streaming response: a stream of [`StreamChunk`]s ending with a usage-bearing terminal item.
@@ -331,13 +352,7 @@ pub(crate) async fn error_for_response(
     // header as a transport fact (`OpenAiCompatProviderSpec::request_id_header`,
     // e.g. Moonshot's `Msh-Request-Id`) or passes it from its adapter — vendor
     // differences are data/strategy, never branches in shared code.
-    let request_id = ["x-request-id", "request-id"]
-        .iter()
-        .copied()
-        .chain(vendor_request_id_header)
-        .find_map(|header| resp.headers().get(header))
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
+    let request_id = provider_request_id(resp.headers(), vendor_request_id_header);
     let body = match resp.text().await {
         Ok(text) => {
             let trimmed = text.trim();
@@ -350,6 +365,21 @@ pub(crate) async fn error_for_response(
         Err(_) => None,
     };
     error_for_status_with_body(status, body, request_id)
+}
+
+/// Extract the de-facto or catalog-declared provider correlation id from response headers.
+/// Success and error observations share this exact strategy so support correlation cannot drift.
+pub(crate) fn provider_request_id(
+    headers: &http::HeaderMap,
+    vendor_request_id_header: Option<&str>,
+) -> Option<String> {
+    ["x-request-id", "request-id"]
+        .iter()
+        .copied()
+        .chain(vendor_request_id_header)
+        .find_map(|header| headers.get(header))
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
 }
 
 /// The adapter contract every provider implements. The metering/resilience **decorator** will
@@ -457,6 +487,7 @@ where
                 usage: None,
                 usage_running: sniffed.then_some(usage),
                 attempts: 1,
+                terminal: false,
             };
         }
         // Transport-shape awareness: on stream end, sniff any remaining buffered bytes. Handles
@@ -478,6 +509,7 @@ where
             usage: sniffed.then_some(usage),
             usage_running: sniffed.then_some(usage),
             attempts: 1,
+            terminal: true,
         };
     };
     Box::pin(s)

@@ -178,6 +178,31 @@ pub trait ChatProvider: Send + Sync {
         request: ChatRequestV1,
         call_headers: http::HeaderMap,
     ) -> Result<ChatEventStream, ProviderError>;
+
+    /// Opt-in physical-attempt observation. Implementations that do not own a Sandhi transport
+    /// reject this explicitly rather than pretending a logical call is a physical attempt.
+    async fn complete_observed(
+        &self,
+        _request: ChatRequestV1,
+        _call_headers: http::HeaderMap,
+        _attempt_context: crate::AttemptContext,
+    ) -> Result<ChatResponseV1, ProviderError> {
+        Err(ProviderError::InvalidRequest(
+            "physical-attempt observation is unsupported by this typed provider".into(),
+        ))
+    }
+
+    /// Streaming counterpart of [`Self::complete_observed`].
+    async fn stream_observed(
+        &self,
+        _request: ChatRequestV1,
+        _call_headers: http::HeaderMap,
+        _attempt_context: crate::AttemptContext,
+    ) -> Result<ChatEventStream, ProviderError> {
+        Err(ProviderError::InvalidRequest(
+            "physical-attempt observation is unsupported by this typed provider".into(),
+        ))
+    }
 }
 
 /// Build the same-family raw byte-forwarder for a handle, from the **same** transport config used
@@ -191,6 +216,12 @@ fn build_raw_forwarder(config: &ProviderTransportConfig) -> crate::raw::RawForwa
     if let Some(secs) = config.stream_idle_timeout_secs {
         timeouts.idle = Some(std::time::Duration::from_secs_f64(secs.max(0.001)));
     }
+    let response_request_id_header = match config.family {
+        ProviderFamily::Anthropic => Some("anthropic-request-id"),
+        ProviderFamily::OpenAiCompat => crate::resolve_openai_compat_provider(&config.slug)
+            .and_then(|spec| spec.request_id_header),
+        _ => None,
+    };
     crate::raw::RawForwarder::new(
         config.family,
         config.base_url.clone(),
@@ -204,6 +235,7 @@ fn build_raw_forwarder(config: &ProviderTransportConfig) -> crate::raw::RawForwa
         crate::resolve_openai_compat_provider(&config.slug).and_then(|spec| spec.session_header),
     )
     .with_client_request_id_header(crate::client_request_id_header(&config.slug))
+    .with_provider_request_id_header(response_request_id_header)
 }
 
 #[derive(Clone)]
@@ -303,6 +335,39 @@ impl ProviderHandle {
     ) -> Result<ChatEventStream, ProviderError> {
         let started = std::time::Instant::now();
         let inner = self.inner.stream(request, call_headers).await?;
+        Ok(stamp_stream_latency(inner, started))
+    }
+
+    /// [`Self::complete_with`] with opt-in physical-attempt observations from the owned
+    /// transport. Host-owned escape-hatch providers reject this unless they implement the
+    /// observation methods explicitly.
+    pub async fn complete_with_attempts(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+        attempt_context: crate::AttemptContext,
+    ) -> Result<ChatResponseV1, ProviderError> {
+        let started = std::time::Instant::now();
+        let mut response = self
+            .inner
+            .complete_observed(request, call_headers, attempt_context)
+            .await?;
+        response.usage.duration_ms = Some(elapsed_ms(started));
+        Ok(response)
+    }
+
+    /// [`Self::stream_with`] with opt-in physical-attempt observations.
+    pub async fn stream_with_attempts(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+        attempt_context: crate::AttemptContext,
+    ) -> Result<ChatEventStream, ProviderError> {
+        let started = std::time::Instant::now();
+        let inner = self
+            .inner
+            .stream_observed(request, call_headers, attempt_context)
+            .await?;
         Ok(stamp_stream_latency(inner, started))
     }
 }
@@ -671,17 +736,59 @@ impl ChatProvider for TypedOpenAiCompat {
 
     async fn complete(
         &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+    ) -> Result<ChatResponseV1, ProviderError> {
+        self.complete_inner(request, call_headers, None).await
+    }
+
+    async fn stream(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+    ) -> Result<ChatEventStream, ProviderError> {
+        self.stream_inner(request, call_headers, None).await
+    }
+
+    async fn complete_observed(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+        attempt_context: crate::AttemptContext,
+    ) -> Result<ChatResponseV1, ProviderError> {
+        self.complete_inner(request, call_headers, Some(attempt_context))
+            .await
+    }
+
+    async fn stream_observed(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+        attempt_context: crate::AttemptContext,
+    ) -> Result<ChatEventStream, ProviderError> {
+        self.stream_inner(request, call_headers, Some(attempt_context))
+            .await
+    }
+}
+
+impl TypedOpenAiCompat {
+    async fn complete_inner(
+        &self,
         mut request: ChatRequestV1,
         call_headers: http::HeaderMap,
+        attempt_context: Option<crate::AttemptContext>,
     ) -> Result<ChatResponseV1, ProviderError> {
         self.apply_constraints(&mut request)?;
         request.validate().map_err(ProviderError::InvalidRequest)?;
-        let req = provider_request(&request, encode_openai_request(&request)?, call_headers);
+        let req = provider_request_observed(
+            &request,
+            encode_openai_request(&request)?,
+            call_headers,
+            attempt_context,
+        );
         let response = self.raw.complete(req).await?;
         let mut decoded = decode_openai_response(response.body, response.usage, &request.model)?;
         if !request.include_native_response {
-            // G8: the native body is debug metadata, not contract. Decoded
-            // extensions (e.g. "reasoning") always survive.
             decoded.extensions.remove("openai");
         }
         decoded.usage.attempts = response.attempts;
@@ -689,20 +796,24 @@ impl ChatProvider for TypedOpenAiCompat {
         Ok(decoded)
     }
 
-    async fn stream(
+    async fn stream_inner(
         &self,
         mut request: ChatRequestV1,
         call_headers: http::HeaderMap,
+        attempt_context: Option<crate::AttemptContext>,
     ) -> Result<ChatEventStream, ProviderError> {
         self.apply_constraints(&mut request)?;
         request.validate().map_err(ProviderError::InvalidRequest)?;
-        let req = provider_request(&request, encode_openai_request(&request)?, call_headers);
+        let req = provider_request_observed(
+            &request,
+            encode_openai_request(&request)?,
+            call_headers,
+            attempt_context,
+        );
         let raw = self.raw.stream(req).await?;
         Ok(decode_openai_stream(raw, request.model))
     }
-}
 
-impl TypedOpenAiCompat {
     fn apply_constraints(&self, request: &mut ChatRequestV1) -> Result<(), ProviderError> {
         if self.slug == "moonshot" && request.model.starts_with("kimi-k3") {
             // Kimi K3's sampling contract requires temperature=1. The host-facing default is
@@ -725,12 +836,13 @@ impl TypedOpenAiCompat {
     }
 }
 
-pub(crate) fn provider_request(
+pub(crate) fn provider_request_observed(
     request: &ChatRequestV1,
     body: Value,
     call_headers: http::HeaderMap,
+    attempt_context: Option<crate::AttemptContext>,
 ) -> ProviderRequest {
-    ProviderRequest::new(request.model.clone(), body)
+    let request = ProviderRequest::new(request.model.clone(), body)
         .with_session(request.metadata.session_id.clone())
         .with_extra_headers(call_headers)
         .with_attribution(Attribution {
@@ -738,7 +850,11 @@ pub(crate) fn provider_request(
             subject_id: request.metadata.subject_id.clone(),
             group_id: request.metadata.group_id.clone(),
             route: request.metadata.route.clone(),
-        })
+        });
+    match attempt_context {
+        Some(context) => request.with_attempt_context(context),
+        None => request,
+    }
 }
 
 pub fn encode_openai_request(request: &ChatRequestV1) -> Result<Value, ProviderError> {
@@ -1052,6 +1168,7 @@ fn decode_openai_stream(mut raw: ByteStream, requested_model: String) -> ChatEve
                     usage: None,
                     usage_running: None,
                     attempts: 1,
+                    terminal: false,
                 }
             } else {
                 match raw.next().await {
@@ -1214,6 +1331,7 @@ mod tests {
                     usage: None,
                     usage_running: None,
                     attempts: 1,
+                    terminal: false,
                 })
             })
             .collect();
@@ -1258,6 +1376,7 @@ mod tests {
                     usage: None,
                     usage_running: None,
                     attempts: 1,
+                    terminal: false,
                 })
             })
             .collect();
@@ -1423,12 +1542,14 @@ mod tests {
                     usage: None,
                     usage_running: None,
                     attempts: 3,
+                    terminal: false,
                 }),
                 Ok(crate::StreamChunk {
                     data: Bytes::copy_from_slice(&sse[split..]),
                     usage: None,
                     usage_running: None,
                     attempts: 3,
+                    terminal: false,
                 }),
                 Ok(crate::StreamChunk {
                     data: Bytes::new(),
@@ -1442,6 +1563,7 @@ mod tests {
                     }),
                     usage_running: None,
                     attempts: 3,
+                    terminal: true,
                 }),
             ]));
             let events = decode_openai_stream(raw, "fallback".into())
@@ -1787,6 +1909,63 @@ mod tests {
         assert_eq!(response.usage.tokens_in, 3);
     }
 
+    #[tokio::test]
+    async fn public_typed_handle_observes_the_owned_physical_transport() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("x-request-id", "typed-provider-17")
+                    .set_body_json(serde_json::json!({
+                        "id": "r1", "model": "m",
+                        "choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}],
+                        "usage": {"prompt_tokens": 3, "completion_tokens": 1}
+                    })),
+            )
+            .mount(&server)
+            .await;
+        let handle = ProviderRuntime::new().openai_compat(
+            "openai",
+            server.uri(),
+            "k",
+            Default::default(),
+            Some(0),
+            None,
+            None,
+        );
+        let request: ChatRequestV1 = serde_json::from_value(serde_json::json!({
+            "schema_version": "1", "model": "m",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .unwrap();
+        let (context, receiver) = crate::AttemptContext::channel("exec_typed", 4).unwrap();
+
+        handle
+            .complete_with_attempts(request, http::HeaderMap::new(), context)
+            .await
+            .unwrap();
+
+        let observations = receiver.drain();
+        assert_eq!(observations.len(), 2);
+        assert!(matches!(
+            observations[0].phase,
+            crate::AttemptPhase::Dispatch
+        ));
+        assert!(matches!(
+            &observations[1].phase,
+            crate::AttemptPhase::Terminal {
+                outcome: crate::AttemptOutcome::Success,
+                provider_status: Some(200),
+                provider_request_id: Some(id),
+                ..
+            } if id == "typed-provider-17"
+        ));
+    }
+
     /// Canned raw provider for complete()-level tests of the native-body gate (G8).
     struct CannedRaw(Value);
     #[async_trait]
@@ -1897,6 +2076,24 @@ mod tests {
             .unwrap();
         assert!(out.usage.duration_ms.is_some());
         assert!(out.usage.time_to_first_token_ms.is_none()); // streaming-only
+    }
+
+    #[tokio::test]
+    async fn host_owned_typed_provider_rejects_unsupported_attempt_observation() {
+        let handle = ProviderHandle::new(Arc::new(CannedChat));
+        let (context, receiver) = crate::AttemptContext::channel("exec_escape", 2).unwrap();
+        let request: ChatRequestV1 = serde_json::from_value(json!({
+            "model": "m", "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .unwrap();
+
+        let error = handle
+            .complete_with_attempts(request, http::HeaderMap::new(), context)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, ProviderError::InvalidRequest(_)));
+        assert!(receiver.drain().is_empty());
     }
 
     #[tokio::test]

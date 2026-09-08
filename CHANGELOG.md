@@ -17,6 +17,25 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+### Added
+
+- **Opt-in physical-attempt diagnostics (W05b).** Sandhi-owned bounded channels can observe each
+  actual provider transport invocation, including retry identity, dispatch, provider rejection,
+  timeout, cancellation, incomplete streams, neutral usage completeness, response status and a
+  bounded provider request ID. The public typed handle exposes explicit observed-call methods;
+  transparent forwarding exposes the capability only on its metered methods. Custom providers
+  that do not implement physical observation reject the observed path explicitly.
+
+### Changed
+
+- **Provider stream lifecycle is explicit.** `StreamChunk::terminal` replaces the ambiguous
+  convention that an empty byte chunk means completion. `ProviderRequest` can carry the opt-in
+  attempt context outside the wire body and headers. These source-breaking public Rust API
+  additions require the next release to use a minor version. Attempt delivery is best-effort and
+  non-authoritative: a full or disconnected bounded channel increments an observable dropped
+  counter without delaying provider traffic; no persistence, settlement, pricing, export, UI or
+  enforcement behavior is enabled yet.
+
 ## [0.6.0] — 2026-09-08
 
 M1 engineering milestone: automated acceptance is approved, including the existing estimate-based

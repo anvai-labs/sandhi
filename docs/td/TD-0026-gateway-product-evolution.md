@@ -1,6 +1,6 @@
 # TD-0026: Gateway product evolution and delivery plan
 
-Status: In progress — review and planning complete; M1 implementation underway.
+Status: In progress — M1 v0.6.0 published and back-synced; M2/W05b underway.
 Date: 2026-09-04
 Baseline: `ed1781e` (Sandhi); source review, not a release certification.
 
@@ -53,7 +53,8 @@ marking a planning task complete does not mark its implementation complete.
 | C01g | Release safeguards and accepted engineering scope | 207 safeguard tests passed, zero skips; isolated local binary smoke passed; independent exact-head review clean; SG06 remote ref controls verified; [SG01–SG08 tracker](../product/release-safeguards.md) | [PR #237](https://github.com/anvai-labs/sandhi/pull/237) merged; [pre-merge CI](https://github.com/anvai-labs/sandhi/actions/runs/34107985444) and [post-merge CI](https://github.com/anvai-labs/sandhi/actions/runs/34131251842) green on public runners; authorized missing-review bypass only | Complete: `f790ca7` on develop | No; SG07 credential closure and final execution gate open |
 | C01h | Trusted-publishing readiness follow-up | PRs #239/#240 clean exact-head review; 284 hosted release tests passed; [integration checkpoint](../product/release-safeguards.md#trusted-publishing-integration-checkpoint-2026-09-07) | Both PRs merged after green CI; exact develop post-merge CI green on public runners | Historical integration complete; crates mechanism superseded by C01i | No; current owner decision governs SG07 |
 | C01i | Honor owner-selected registry mechanisms | 284 release tests passed; independent workflow review clean; existing crates token retained and PyPI/npm OIDC unchanged | [PR #242](https://github.com/anvai-labs/sandhi/pull/242) merged after green exact-head CI; [develop push CI](https://github.com/anvai-labs/sandhi/actions/runs/34161667180) passed | Complete: `c528ad4` | Included in v0.6.0; all selected mechanisms succeeded |
-| C02 | Accepted M1 engineering milestone and authorized v0.6.0 all-target release; P01–P03 remain pre-production gates | Fresh cumulative reviews clean; all cross-platform build/pack gates passed; independent downloaded Linux binary smoke and published PyPI install/import passed; final all-target verifier passed | [PR #243](https://github.com/anvai-labs/sandhi/pull/243) merged after full [promotion CI](https://github.com/anvai-labs/sandhi/actions/runs/34163305520) passed; exact-main [push CI](https://github.com/anvai-labs/sandhi/actions/runs/34163982562) passed; npm-only [repair run](https://github.com/anvai-labs/sandhi/actions/runs/34188380114) passed | Complete main promotion: `9d40f01`; immutable v0.6.0 tag at that commit | Fully published and verified: GitHub, PyPI, four crates and three npm packages; PR #244 back-sync pending; [outcome](../product/release-safeguards.md#publication-outcome-2026-09-08-utc) |
+| C02 | Accepted M1 engineering milestone and authorized v0.6.0 all-target release; P01–P03 remain pre-production gates | Fresh cumulative reviews clean; all cross-platform build/pack gates passed; independent downloaded Linux binary smoke and published PyPI install/import passed; final all-target verifier passed | [PR #243](https://github.com/anvai-labs/sandhi/pull/243) merged after full [promotion CI](https://github.com/anvai-labs/sandhi/actions/runs/34163305520) passed; exact-main [push CI](https://github.com/anvai-labs/sandhi/actions/runs/34163982562) passed; npm-only [repair run](https://github.com/anvai-labs/sandhi/actions/runs/34188380114) passed; [PR #244](https://github.com/anvai-labs/sandhi/pull/244) back-synced release evidence and exact-develop [push CI](https://github.com/anvai-labs/sandhi/actions/runs/34217140784) passed | Complete: main promotion/tag `9d40f01`; develop back-sync `b7dcbb0` | Fully published and verified: GitHub, PyPI, four crates and three npm packages; [outcome](../product/release-safeguards.md#publication-outcome-2026-09-08-utc) |
+| C03 | W05b opt-in physical-attempt diagnostics; branch `feat/w05b-physical-attempts` | Passed: 618 workspace tests, strict all-feature/all-target Clippy, fmt/diff checks, 86.41% line coverage; TDD covers identity, explicit terminal state, bounded delivery/metadata, correlation, typed/raw planes, retry isolation and nested timeout lineage; fresh adversarial review clean | No PR yet; local gate is ready for focused remote review/CI | No | No; W05c–e still gate authoritative accounting/export |
 
 C01f follow-up: `test/operator-decision-evidence` closes the automatable links between browser
 onboarding, real requests, budget denials, broker recovery and restored numeric evidence. Source
@@ -216,6 +217,31 @@ protections need review before the next tag. Evidence and the remaining UA06 cho
    claim before shared-ledger and distributed failure gates pass.
 5. **M4 — admitted expansions:** selected W14 spikes, each with a named adopter and separate scope
    decision. Defer unproven breadth instead of making M1–M3 depend on it.
+
+### Authorized next engineering sequence (M2)
+
+M2 starts with W05b because physical-attempt identity and terminal evidence are prerequisites for
+W08 policy reconciliation, W09 credential cutoff evidence and W10 operator/cost investigation.
+Logical usage events and aggregate attempt counts cannot safely stand in for that evidence.
+
+1. Define an internal, versioned attempt-observation contract with opaque execution/attempt
+   identity, provider/model facts, transport outcome, bounded provider correlation, neutral usage
+   and explicit final/partial/unavailable measurement state. Exclude request bodies, credentials,
+   raw headers, prices and identity-provider authority.
+2. Instrument the actual provider transport boundary across typed and transparent planes. Emit no
+   physical attempt for validation/circuit/admission rejection before send; give each retry its own
+   identity; classify setup/whole-call timeout, caller cancellation, provider rejection, transport
+   failure, successful terminal usage and interrupted-stream partial usage.
+3. Keep the observer opt-in and in-memory for W05b. Do not connect it to settlement, persistence,
+   export, UI or enforcement until W05c–e establish failure policy and consumer acknowledgement.
+4. Add deterministic adapter/plane/retry/cancellation tests, then run provider, proxy, workspace,
+   formatting, clippy and coverage gates. Obtain a fresh adversarial review before a focused PR to
+   `develop`; merge only with green latest-head CI and verify exact post-merge CI.
+5. Before any external schema or authoritative mode, record downstream accounting review of
+   logical-versus-physical totals, unknown liability, amendments and price-effective-time needs.
+
+P01–P03 remain pre-production gates and are deliberately not reclassified as M2 implementation
+blockers. No M2 work authorizes deployment or expands the v0.6.0 production assurance claim.
 
 At each checkpoint, collect the observed user result, latency/resource cost, denied/failed-path
 behavior and unresolved tradeoffs. A prototype walkthrough is not a usability result; a green
@@ -596,3 +622,25 @@ unit suite is not a distributed correctness proof. Record evidence and update th
   W06d/M1 remain incomplete because accepting operator and observed journey results have not been
   supplied. C02/main promotion is deliberately unopened. Next: obtain the recorded actual-user
   outcomes, address any findings, then recheck the promotion head/review/CI and resulting main push.
+- 2026-09-08: C02/SG08 is operationally closed. v0.6.0 is fully published and independently
+  verified across GitHub, PyPI, four crates and three npm packages. PR #244 back-synced the release
+  evidence as `b7dcbb0`; exact-develop CI `34217140784` passed the release-safeguard and aggregate
+  gates on public hosted runners. P01–P03 remain open before production. Started the next
+  dependency-critical M2 slice, W05b, on `feat/w05b-physical-attempts`; the sequence above keeps
+  observation opt-in and non-authoritative until W05c–e.
+- 2026-09-08: W05b TDD/adversarial hardening is in progress. Red regressions reproduced
+  context-local attempt-ID collisions, empty-chunk false completion and missing successful
+  provider correlation. The implementation now uses random context nonces plus checked `u64`
+  ordinals, an explicit terminal marker, Sandhi-owned bounded `try_send` delivery with a dropped
+  counter, and retained response facts across post-header failures/cancellation. Built-in typed
+  handles expose an explicit observed-call seam; unsupported custom providers fail closed and the
+  raw builder is named for its metered-only scope. Focused provider tests pass; full workspace
+  gates and fresh adversarial re-review remain required before C03 PR/integration.
+- 2026-09-08: W05b local verification is complete. The final adversarial pass exposed two more
+  bounded-contract defects: nested resilience mislabeled outer complete/stream-setup/idle timeouts
+  as cancellation, and control-character replacement could expand labels beyond their byte cap.
+  Red tests reproduced both. Linked cancellation scopes now retain ancestor timeout causes while
+  keeping retries and siblings isolated; UTF-8 sanitization observes the exact byte budget. The
+  exact branch passes 618 workspace tests, strict Clippy/fmt/diff gates and 86.41% line coverage;
+  the fresh re-review is clean. C03 is ready for a focused PR, but remains unintegrated until
+  exact-head remote CI and review pass. W05c–e remain pending and authoritative use stays disabled.

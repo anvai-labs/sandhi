@@ -1,6 +1,6 @@
 //! Canonical chat v1 ↔ Gemini `generateContent` codec.
 
-use crate::typed::{provider_request, ChatEventStream, ChatProvider};
+use crate::typed::{provider_request_observed, ChatEventStream, ChatProvider};
 use crate::{ByteStream, ParsedUsage, Provider, ProviderError};
 use async_trait::async_trait;
 use sandhi_core::{
@@ -20,6 +20,52 @@ impl TypedGemini {
     pub(crate) fn new(raw: Arc<dyn Provider>) -> Self {
         Self { raw }
     }
+
+    async fn complete_inner(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+        attempt_context: Option<crate::AttemptContext>,
+    ) -> Result<ChatResponseV1, ProviderError> {
+        request.validate().map_err(ProviderError::InvalidRequest)?;
+        let body = encode_gemini_request(&request)?;
+        let response = self
+            .raw
+            .complete(provider_request_observed(
+                &request,
+                body,
+                call_headers,
+                attempt_context,
+            ))
+            .await?;
+        let mut decoded = decode_gemini_response(response.body, response.usage, &request.model)?;
+        if !request.include_native_response {
+            decoded.extensions.remove("gemini");
+        }
+        decoded.usage.attempts = response.attempts;
+        decoded.usage.outcome = Some("success".into());
+        Ok(decoded)
+    }
+
+    async fn stream_inner(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+        attempt_context: Option<crate::AttemptContext>,
+    ) -> Result<ChatEventStream, ProviderError> {
+        request.validate().map_err(ProviderError::InvalidRequest)?;
+        let body = encode_gemini_request(&request)?;
+        let raw = self
+            .raw
+            .stream(provider_request_observed(
+                &request,
+                body,
+                call_headers,
+                attempt_context,
+            ))
+            .await?;
+        Ok(decode_gemini_stream(raw, request.model))
+    }
 }
 
 #[async_trait]
@@ -33,21 +79,7 @@ impl ChatProvider for TypedGemini {
         request: ChatRequestV1,
         call_headers: http::HeaderMap,
     ) -> Result<ChatResponseV1, ProviderError> {
-        request.validate().map_err(ProviderError::InvalidRequest)?;
-        let body = encode_gemini_request(&request)?;
-        let response = self
-            .raw
-            .complete(provider_request(&request, body, call_headers))
-            .await?;
-        let mut decoded = decode_gemini_response(response.body, response.usage, &request.model)?;
-        if !request.include_native_response {
-            // G8: the native body is debug metadata, not contract. Decoded
-            // extensions (e.g. "reasoning") always survive.
-            decoded.extensions.remove("gemini");
-        }
-        decoded.usage.attempts = response.attempts;
-        decoded.usage.outcome = Some("success".into());
-        Ok(decoded)
+        self.complete_inner(request, call_headers, None).await
     }
 
     async fn stream(
@@ -55,13 +87,27 @@ impl ChatProvider for TypedGemini {
         request: ChatRequestV1,
         call_headers: http::HeaderMap,
     ) -> Result<ChatEventStream, ProviderError> {
-        request.validate().map_err(ProviderError::InvalidRequest)?;
-        let body = encode_gemini_request(&request)?;
-        let raw = self
-            .raw
-            .stream(provider_request(&request, body, call_headers))
-            .await?;
-        Ok(decode_gemini_stream(raw, request.model))
+        self.stream_inner(request, call_headers, None).await
+    }
+
+    async fn complete_observed(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+        attempt_context: crate::AttemptContext,
+    ) -> Result<ChatResponseV1, ProviderError> {
+        self.complete_inner(request, call_headers, Some(attempt_context))
+            .await
+    }
+
+    async fn stream_observed(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+        attempt_context: crate::AttemptContext,
+    ) -> Result<ChatEventStream, ProviderError> {
+        self.stream_inner(request, call_headers, Some(attempt_context))
+            .await
     }
 }
 
@@ -339,6 +385,7 @@ fn decode_gemini_stream(mut raw: ByteStream, requested_model: String) -> ChatEve
                     usage: None,
                     usage_running: None,
                     attempts: 1,
+                    terminal: false,
                 }
             } else {
                 match raw.next().await {
@@ -447,6 +494,7 @@ mod tests {
                 usage: None,
                 usage_running: None,
                 attempts: 1,
+                terminal: false,
             }),
             Err(crate::ProviderError::Transport("mock disconnect".into())),
         ]));
@@ -481,6 +529,7 @@ mod tests {
                     usage: None,
                     usage_running: None,
                     attempts: 1,
+                    terminal: false,
                 })
             })
             .collect();
@@ -525,6 +574,7 @@ mod tests {
                     usage: None,
                     usage_running: None,
                     attempts: 1,
+                    terminal: false,
                 })
             })
             .collect();
@@ -563,12 +613,14 @@ mod tests {
                     usage: None,
                     usage_running: None,
                     attempts: 1,
+                    terminal: false,
                 }),
                 Ok(crate::StreamChunk {
                     data: bytes::Bytes::copy_from_slice(&wire[split..]),
                     usage: None,
                     usage_running: None,
                     attempts: 1,
+                    terminal: false,
                 }),
                 Ok(crate::StreamChunk {
                     data: bytes::Bytes::new(),
@@ -582,6 +634,7 @@ mod tests {
                     }),
                     usage_running: None,
                     attempts: 1,
+                    terminal: true,
                 }),
             ]));
             let events = decode_gemini_stream(raw, "gemini-test".into())

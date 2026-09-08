@@ -11,10 +11,14 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use futures_util::future::{select, Either};
 use futures_util::Stream;
 use tokio::time::sleep;
 
-use crate::{ByteStream, Provider, ProviderError, ProviderRequest, ProviderResponse, StreamChunk};
+use crate::{
+    AttemptContext, ByteStream, Provider, ProviderError, ProviderRequest, ProviderResponse,
+    StreamChunk,
+};
 
 /// Retry policy for transient failures.
 #[derive(Debug, Clone)]
@@ -177,11 +181,20 @@ impl ResilientProvider {
 /// Run one attempt under a bound, mapping elapsed → `ProviderError::Timeout(bound)`.
 async fn bounded<T>(
     bound: Duration,
+    attempt_context: Option<&AttemptContext>,
     fut: impl std::future::Future<Output = Result<T, ProviderError>>,
 ) -> Result<T, ProviderError> {
-    match tokio::time::timeout(bound, fut).await {
-        Ok(result) => result,
-        Err(_elapsed) => Err(ProviderError::Timeout(bound)),
+    match select(Box::pin(fut), Box::pin(tokio::time::sleep(bound))).await {
+        Either::Left((result, _timeout)) => result,
+        Either::Right(((), in_flight)) => {
+            // Mark before the in-flight adapter future is dropped so its transport guard emits
+            // timeout, not indistinguishable caller cancellation.
+            if let Some(context) = attempt_context {
+                context.mark_timeout();
+            }
+            drop(in_flight);
+            Err(ProviderError::Timeout(bound))
+        }
     }
 }
 
@@ -189,19 +202,21 @@ async fn bounded<T>(
 /// between items exceeds `idle`. Lives in the resilience decorator (time policy), NOT in
 /// `metered_passthrough` (the metering primitive must not carry resilience policy).
 struct IdleTimeout {
-    inner: ByteStream,
+    inner: Option<ByteStream>,
     idle: Duration,
     sleep: Pin<Box<tokio::time::Sleep>>,
     expired: bool,
+    attempt_context: Option<AttemptContext>,
 }
 
 impl IdleTimeout {
-    fn new(inner: ByteStream, idle: Duration) -> Self {
+    fn new(inner: ByteStream, idle: Duration, attempt_context: Option<AttemptContext>) -> Self {
         Self {
-            inner,
+            inner: Some(inner),
             idle,
             sleep: Box::pin(tokio::time::sleep(idle)),
             expired: false,
+            attempt_context,
         }
     }
 }
@@ -213,7 +228,13 @@ impl Stream for IdleTimeout {
         if self.expired {
             return Poll::Ready(None);
         }
-        match self.inner.as_mut().poll_next(cx) {
+        let poll = self
+            .inner
+            .as_mut()
+            .expect("non-expired timeout retains its stream")
+            .as_mut()
+            .poll_next(cx);
+        match poll {
             Poll::Ready(item) => {
                 let idle = self.idle;
                 self.sleep
@@ -223,6 +244,12 @@ impl Stream for IdleTimeout {
             }
             Poll::Pending => match self.sleep.as_mut().poll(cx) {
                 Poll::Ready(()) => {
+                    if let Some(context) = self.attempt_context.as_ref() {
+                        context.mark_timeout();
+                    }
+                    // Drop the observed inner stream now, while the timeout marker is visible,
+                    // so the terminal observation is not delayed until the caller drops us.
+                    self.inner.take();
                     self.expired = true;
                     Poll::Ready(Some(Err(ProviderError::Timeout(self.idle))))
                 }
@@ -263,7 +290,17 @@ impl Provider for ResilientProvider {
         }
         let mut attempt = 0u32;
         loop {
-            match bounded(self.timeouts.complete, self.inner.complete(req.clone())).await {
+            let mut attempt_req = req.clone();
+            attempt_req.attempt_context =
+                req.attempt_context.as_ref().map(AttemptContext::fresh_call);
+            let attempt_context = attempt_req.attempt_context.clone();
+            match bounded(
+                self.timeouts.complete,
+                attempt_context.as_ref(),
+                self.inner.complete(attempt_req),
+            )
+            .await
+            {
                 Ok(mut resp) => {
                     self.breaker.record_success();
                     resp.attempts = attempt.saturating_add(1);
@@ -290,7 +327,17 @@ impl Provider for ResilientProvider {
         }
         let mut attempt = 0u32;
         loop {
-            match bounded(self.timeouts.stream_setup, self.inner.stream(req.clone())).await {
+            let mut attempt_req = req.clone();
+            attempt_req.attempt_context =
+                req.attempt_context.as_ref().map(AttemptContext::fresh_call);
+            let attempt_context = attempt_req.attempt_context.clone();
+            match bounded(
+                self.timeouts.stream_setup,
+                attempt_context.as_ref(),
+                self.inner.stream(attempt_req),
+            )
+            .await
+            {
                 Ok(stream) => {
                     self.breaker.record_success();
                     let counted: ByteStream = Box::pin(AttemptCountStream {
@@ -298,7 +345,7 @@ impl Provider for ResilientProvider {
                         attempts: attempt.saturating_add(1),
                     });
                     return Ok(match self.timeouts.idle {
-                        Some(idle) => Box::pin(IdleTimeout::new(counted, idle)),
+                        Some(idle) => Box::pin(IdleTimeout::new(counted, idle, attempt_context)),
                         None => counted,
                     });
                 }
@@ -338,8 +385,9 @@ impl Stream for AttemptCountStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ParsedUsage;
+    use crate::{AttemptOutcome, AttemptPhase, ParsedUsage};
     use futures_util::stream;
+    use sandhi_core::UsageCompleteness;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -375,21 +423,41 @@ mod tests {
         fn slug(&self) -> &str {
             "flaky"
         }
-        async fn complete(&self, _req: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            self.queue
-                .lock()
-                .unwrap()
-                .pop_front()
-                .unwrap_or(Err(ProviderError::Transport("exhausted".into())))
+        async fn complete(&self, req: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+            let attempt_context = req.attempt_context.clone();
+            let model = req.model.clone();
+            crate::attempt::observe_complete(
+                attempt_context,
+                self.slug(),
+                Some(&model),
+                |_| async {
+                    self.calls.fetch_add(1, Ordering::Relaxed);
+                    let result = self
+                        .queue
+                        .lock()
+                        .unwrap()
+                        .pop_front()
+                        .unwrap_or(Err(ProviderError::Transport("exhausted".into())));
+                    result.map(|response| {
+                        let usage = response.usage;
+                        (response, Some(usage))
+                    })
+                },
+            )
+            .await
         }
-        async fn stream(&self, _req: ProviderRequest) -> Result<ByteStream, ProviderError> {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            match self.queue.lock().unwrap().pop_front() {
-                Some(Ok(_)) => Ok(Box::pin(stream::empty())),
-                Some(Err(e)) => Err(e),
-                None => Err(ProviderError::Transport("exhausted".into())),
-            }
+        async fn stream(&self, req: ProviderRequest) -> Result<ByteStream, ProviderError> {
+            let attempt_context = req.attempt_context.clone();
+            let model = req.model.clone();
+            crate::attempt::observe_stream(attempt_context, self.slug(), Some(&model), |_| async {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                match self.queue.lock().unwrap().pop_front() {
+                    Some(Ok(_)) => Ok(Box::pin(stream::empty()) as ByteStream),
+                    Some(Err(e)) => Err(e),
+                    None => Err(ProviderError::Transport("exhausted".into())),
+                }
+            })
+            .await
         }
     }
 
@@ -440,26 +508,43 @@ mod tests {
         fn slug(&self) -> &str {
             "hang"
         }
-        async fn complete(&self, _req: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
-            let n = self.calls.fetch_add(1, Ordering::Relaxed);
-            if n < self.hang_calls {
-                std::future::pending::<()>().await;
-            }
-            Ok(ok_resp())
+        async fn complete(&self, req: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+            let attempt_context = req.attempt_context.clone();
+            let model = req.model.clone();
+            crate::attempt::observe_complete(
+                attempt_context,
+                self.slug(),
+                Some(&model),
+                |_| async {
+                    let n = self.calls.fetch_add(1, Ordering::Relaxed);
+                    if n < self.hang_calls {
+                        std::future::pending::<()>().await;
+                    }
+                    let response = ok_resp();
+                    Ok((response, Some(ParsedUsage::default())))
+                },
+            )
+            .await
         }
-        async fn stream(&self, _req: ProviderRequest) -> Result<ByteStream, ProviderError> {
-            let n = self.calls.fetch_add(1, Ordering::Relaxed);
-            if n < self.hang_calls {
-                std::future::pending::<()>().await;
-            }
-            Ok(Box::pin(stream::once(async {
-                Ok(StreamChunk {
-                    data: bytes::Bytes::new(),
-                    usage: Some(ParsedUsage::default()),
-                    usage_running: None,
-                    attempts: 1,
-                })
-            })))
+        async fn stream(&self, req: ProviderRequest) -> Result<ByteStream, ProviderError> {
+            let attempt_context = req.attempt_context.clone();
+            let model = req.model.clone();
+            crate::attempt::observe_stream(attempt_context, self.slug(), Some(&model), |_| async {
+                let n = self.calls.fetch_add(1, Ordering::Relaxed);
+                if n < self.hang_calls {
+                    std::future::pending::<()>().await;
+                }
+                Ok(Box::pin(stream::once(async {
+                    Ok(StreamChunk {
+                        data: bytes::Bytes::new(),
+                        usage: Some(ParsedUsage::default()),
+                        usage_running: None,
+                        attempts: 1,
+                        terminal: true,
+                    })
+                })) as ByteStream)
+            })
+            .await
         }
     }
 
@@ -492,6 +577,266 @@ mod tests {
         let response = p.complete(req()).await.unwrap();
         assert_eq!(response.attempts, 2);
         assert_eq!(hang.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn retries_have_distinct_attempt_identity_and_terminal_outcome() {
+        let (context, receiver) = AttemptContext::channel("exec_retry", 16).unwrap();
+        let flaky = Flaky::new(vec![Err(ProviderError::RateLimited), Ok(ok_resp())]);
+        let provider = ResilientProvider::new(flaky)
+            .with_retry(1, Duration::from_millis(1))
+            .with_timeouts(tight_timeouts());
+
+        provider
+            .complete(req().with_attempt_context(context))
+            .await
+            .unwrap();
+
+        let observations = receiver.drain();
+        assert_eq!(observations.len(), 4);
+        assert_eq!(observations[0].attempt_ordinal, 1);
+        assert_eq!(observations[1].attempt_id, observations[0].attempt_id);
+        assert_eq!(observations[2].attempt_ordinal, 2);
+        assert_eq!(observations[3].attempt_id, observations[2].attempt_id);
+        assert_ne!(observations[0].attempt_id, observations[2].attempt_id);
+        assert!(matches!(
+            observations[1].phase,
+            AttemptPhase::Terminal {
+                outcome: AttemptOutcome::ProviderRejected,
+                provider_status: Some(429),
+                usage_completeness: UsageCompleteness::Unavailable,
+                ..
+            }
+        ));
+        assert!(matches!(
+            observations[3].phase,
+            AttemptPhase::Terminal {
+                outcome: AttemptOutcome::Success,
+                usage_completeness: UsageCompleteness::Final,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn outer_timeout_marks_attempt_timeout_before_cancelling_adapter() {
+        let (context, receiver) = AttemptContext::channel("exec_timeout", 8).unwrap();
+        let hang = Hang::new(u32::MAX);
+        let provider = ResilientProvider::new(hang)
+            .with_retry(0, Duration::from_millis(1))
+            .with_timeouts(tight_timeouts());
+
+        assert!(matches!(
+            provider.complete(req().with_attempt_context(context)).await,
+            Err(ProviderError::Timeout(_))
+        ));
+        let observations = receiver.drain();
+        assert_eq!(observations.len(), 2);
+        assert!(matches!(
+            observations[1].phase,
+            AttemptPhase::Terminal {
+                outcome: AttemptOutcome::Timeout,
+                usage_completeness: UsageCompleteness::Unavailable,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn nested_outer_complete_timeout_reaches_the_physical_attempt() {
+        let (context, receiver) = AttemptContext::channel("exec_nested_timeout", 8).unwrap();
+        let physical = Hang::new(u32::MAX);
+        let inner = ResilientProvider::new(physical)
+            .with_retry(0, Duration::from_millis(1))
+            .with_timeouts(TimeoutConfig {
+                complete: Duration::from_millis(500),
+                stream_setup: Duration::from_millis(500),
+                idle: None,
+            });
+        let outer = ResilientProvider::new(Arc::new(inner))
+            .with_retry(0, Duration::from_millis(1))
+            .with_timeouts(TimeoutConfig {
+                complete: Duration::from_millis(20),
+                stream_setup: Duration::from_millis(500),
+                idle: None,
+            });
+
+        assert!(matches!(
+            outer.complete(req().with_attempt_context(context)).await,
+            Err(ProviderError::Timeout(_))
+        ));
+        let observations = receiver.drain();
+        assert_eq!(observations.len(), 2);
+        assert!(matches!(
+            observations[1].phase,
+            AttemptPhase::Terminal {
+                outcome: AttemptOutcome::Timeout,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn nested_outer_stream_setup_timeout_reaches_the_physical_attempt() {
+        let (context, receiver) = AttemptContext::channel("exec_nested_setup", 8).unwrap();
+        let physical = Hang::new(u32::MAX);
+        let inner = ResilientProvider::new(physical)
+            .with_retry(0, Duration::from_millis(1))
+            .with_timeouts(TimeoutConfig {
+                complete: Duration::from_millis(500),
+                stream_setup: Duration::from_millis(500),
+                idle: None,
+            });
+        let outer = ResilientProvider::new(Arc::new(inner))
+            .with_retry(0, Duration::from_millis(1))
+            .with_timeouts(TimeoutConfig {
+                complete: Duration::from_millis(500),
+                stream_setup: Duration::from_millis(20),
+                idle: None,
+            });
+
+        assert!(matches!(
+            outer.stream(req().with_attempt_context(context)).await,
+            Err(ProviderError::Timeout(_))
+        ));
+        let observations = receiver.drain();
+        assert_eq!(observations.len(), 2);
+        assert!(matches!(
+            observations[1].phase,
+            AttemptPhase::Terminal {
+                outcome: AttemptOutcome::Timeout,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn timeout_retry_uses_an_uncontaminated_sibling_scope() {
+        let (context, receiver) = AttemptContext::channel("exec_timeout_retry", 8).unwrap();
+        let physical = Hang::new(1);
+        let provider = ResilientProvider::new(physical)
+            .with_retry(1, Duration::from_millis(1))
+            .with_timeouts(tight_timeouts());
+
+        provider
+            .complete(req().with_attempt_context(context))
+            .await
+            .unwrap();
+        let terminals: Vec<_> = receiver
+            .drain()
+            .into_iter()
+            .filter_map(|observation| match observation.phase {
+                AttemptPhase::Terminal { outcome, .. } => Some(outcome),
+                AttemptPhase::Dispatch => None,
+            })
+            .collect();
+        assert_eq!(
+            terminals,
+            vec![AttemptOutcome::Timeout, AttemptOutcome::Success]
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_outer_idle_timeout_reaches_the_physical_attempt() {
+        use futures_util::StreamExt;
+
+        struct ObservedPending;
+        #[async_trait]
+        impl Provider for ObservedPending {
+            fn slug(&self) -> &str {
+                "observed-pending"
+            }
+
+            async fn complete(
+                &self,
+                _req: ProviderRequest,
+            ) -> Result<ProviderResponse, ProviderError> {
+                unreachable!()
+            }
+
+            async fn stream(&self, req: ProviderRequest) -> Result<ByteStream, ProviderError> {
+                let model = req.model.clone();
+                crate::attempt::observe_stream(
+                    req.attempt_context,
+                    self.slug(),
+                    Some(&model),
+                    |_| async {
+                        Ok(
+                            Box::pin(stream::pending::<Result<StreamChunk, ProviderError>>())
+                                as ByteStream,
+                        )
+                    },
+                )
+                .await
+            }
+        }
+
+        let (context, receiver) = AttemptContext::channel("exec_nested_idle", 8).unwrap();
+        let inner = ResilientProvider::new(Arc::new(ObservedPending))
+            .with_retry(0, Duration::from_millis(1))
+            .with_timeouts(TimeoutConfig {
+                complete: Duration::from_millis(500),
+                stream_setup: Duration::from_millis(500),
+                idle: Some(Duration::from_millis(500)),
+            });
+        let outer = ResilientProvider::new(Arc::new(inner))
+            .with_retry(0, Duration::from_millis(1))
+            .with_timeouts(TimeoutConfig {
+                complete: Duration::from_millis(500),
+                stream_setup: Duration::from_millis(500),
+                idle: Some(Duration::from_millis(20)),
+            });
+
+        let mut stream = outer
+            .stream(req().with_attempt_context(context))
+            .await
+            .unwrap();
+        assert!(matches!(
+            stream.next().await,
+            Some(Err(ProviderError::Timeout(_)))
+        ));
+        let observations = receiver.drain();
+        assert_eq!(observations.len(), 2);
+        assert!(matches!(
+            observations[1].phase,
+            AttemptPhase::Terminal {
+                outcome: AttemptOutcome::Timeout,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn open_circuit_emits_no_physical_attempt() {
+        let (context, receiver) = AttemptContext::channel("exec_circuit", 8).unwrap();
+        let flaky = Flaky::new(vec![Err(ProviderError::Transport("down".into()))]);
+        let provider = ResilientProvider::new(flaky)
+            .with_retry(0, Duration::from_millis(1))
+            .with_circuit(1, Duration::from_secs(60))
+            .with_timeouts(tight_timeouts());
+
+        assert!(provider
+            .complete(req().with_attempt_context(context.clone()))
+            .await
+            .is_err());
+        assert!(matches!(
+            provider.complete(req().with_attempt_context(context)).await,
+            Err(ProviderError::CircuitOpen)
+        ));
+        let observations = receiver.drain();
+        assert_eq!(
+            observations.len(),
+            2,
+            "only the first dispatched call is observed"
+        );
+        assert!(matches!(observations[0].phase, AttemptPhase::Dispatch));
+        assert!(matches!(
+            observations[1].phase,
+            AttemptPhase::Terminal {
+                outcome: AttemptOutcome::TransportError,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -543,6 +888,7 @@ mod tests {
             usage: None,
             usage_running: None,
             attempts: 1,
+            terminal: false,
         }
     }
 
@@ -556,6 +902,7 @@ mod tests {
             }),
             usage_running: None,
             attempts: 1,
+            terminal: true,
         }
     }
 
