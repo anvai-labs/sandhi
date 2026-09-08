@@ -2,8 +2,9 @@
 
 All notable changes to **Sandhi** are documented here.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+The project normally follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html);
+any owner-approved compatibility exception is called out in its release entry.
 
 Sandhi is an **AI usage gateway** that emits neutral **units** (tokens, the
 prompt-cache split, GPU-seconds) and never dollars. See
@@ -16,6 +17,15 @@ Versions are derived from the tag at build time, never hand-edited; see
 A partly published release remains incomplete even when some artifacts are available.
 
 ## [Unreleased]
+
+## [0.6.1] — 2026-09-08
+
+**Compatibility exception:** the owner explicitly selected `0.6.1` for this release despite
+source-breaking additions to the public Rust API. Rust consumers that construct or exhaustively
+destructure `ProviderRequest` or `StreamChunk` must account for the new fields described below.
+This release does not claim patch-level source compatibility. The capability is opt-in and
+non-authoritative; W05c–e remain required before attempt observations can drive accounting,
+export or enforcement.
 
 ### Added
 
@@ -30,11 +40,16 @@ A partly published release remains incomplete even when some artifacts are avail
 
 - **Provider stream lifecycle is explicit.** `StreamChunk::terminal` replaces the ambiguous
   convention that an empty byte chunk means completion. `ProviderRequest` can carry the opt-in
-  attempt context outside the wire body and headers. These source-breaking public Rust API
-  additions require the next release to use a minor version. Attempt delivery is best-effort and
-  non-authoritative: a full or disconnected bounded channel increments an observable dropped
-  counter without delaying provider traffic; no persistence, settlement, pricing, export, UI or
-  enforcement behavior is enabled yet.
+  attempt context outside the wire body and headers. In the owner-approved `0.6.1` compatibility
+  exception, external Rust struct literals must initialize `ProviderRequest::attempt_context` to
+  `None` unless opting into observation, and set `StreamChunk::terminal` to `false` for data chunks
+  and `true` only for terminal chunks. Exhaustive destructuring must bind the new fields or add
+  `..` to ignore remaining fields. Existing constructor calls do not need a construction-site
+  change, but consumers that inferred completion from `data.is_empty()` must read `terminal`
+  instead. Attempt delivery is
+  best-effort and non-authoritative: a full or disconnected bounded channel increments an
+  observable dropped counter without delaying provider traffic; no persistence, settlement,
+  pricing, export, UI or enforcement behavior is enabled yet.
 
 ## [0.6.0] — 2026-09-08
 
@@ -1105,7 +1120,11 @@ inline reverse-proxy, the durable store, and both language bindings.
   ([#9](https://github.com/anvai-labs/sandhi/pull/9),
   [#10](https://github.com/anvai-labs/sandhi/pull/10))
 
-[Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/anvai-labs/sandhi/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/anvai-labs/sandhi/compare/v0.5.1...v0.6.0
+[0.5.1]: https://github.com/anvai-labs/sandhi/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/anvai-labs/sandhi/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/anvai-labs/sandhi/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/anvai-labs/sandhi/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/anvai-labs/sandhi/compare/v0.2.0...v0.2.1

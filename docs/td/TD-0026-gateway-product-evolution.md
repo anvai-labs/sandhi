@@ -1,6 +1,7 @@
 # TD-0026: Gateway product evolution and delivery plan
 
-Status: In progress — M1 v0.6.0 published and back-synced; M2/W05b underway.
+Status: In progress — M1 v0.6.0 published and back-synced; M2/W05b integrated; owner-approved
+v0.6.1 compatibility-exception release preparation underway.
 Date: 2026-09-04
 Baseline: `ed1781e` (Sandhi); source review, not a release certification.
 
@@ -55,6 +56,7 @@ marking a planning task complete does not mark its implementation complete.
 | C01i | Honor owner-selected registry mechanisms | 284 release tests passed; independent workflow review clean; existing crates token retained and PyPI/npm OIDC unchanged | [PR #242](https://github.com/anvai-labs/sandhi/pull/242) merged after green exact-head CI; [develop push CI](https://github.com/anvai-labs/sandhi/actions/runs/34161667180) passed | Complete: `c528ad4` | Included in v0.6.0; all selected mechanisms succeeded |
 | C02 | Accepted M1 engineering milestone and authorized v0.6.0 all-target release; P01–P03 remain pre-production gates | Fresh cumulative reviews clean; all cross-platform build/pack gates passed; independent downloaded Linux binary smoke and published PyPI install/import passed; final all-target verifier passed | [PR #243](https://github.com/anvai-labs/sandhi/pull/243) merged after full [promotion CI](https://github.com/anvai-labs/sandhi/actions/runs/34163305520) passed; exact-main [push CI](https://github.com/anvai-labs/sandhi/actions/runs/34163982562) passed; npm-only [repair run](https://github.com/anvai-labs/sandhi/actions/runs/34188380114) passed; [PR #244](https://github.com/anvai-labs/sandhi/pull/244) back-synced release evidence and exact-develop [push CI](https://github.com/anvai-labs/sandhi/actions/runs/34217140784) passed | Complete: main promotion/tag `9d40f01`; develop back-sync `b7dcbb0` | Fully published and verified: GitHub, PyPI, four crates and three npm packages; [outcome](../product/release-safeguards.md#publication-outcome-2026-09-08-utc) |
 | C03 | W05b opt-in physical-attempt diagnostics; branch `feat/w05b-physical-attempts` | Passed: 618 workspace tests, strict all-feature/all-target Clippy, fmt/diff checks, 86.41% line coverage; TDD covers identity, explicit terminal state, bounded delivery/metadata, correlation, typed/raw planes, retry isolation and nested timeout lineage; fresh adversarial review clean | [PR #246](https://github.com/anvai-labs/sandhi/pull/246) merged after exact-head CI `34229915141` passed; initial stale binding-lock failure was fixed before rerun; post-merge CI `34230690137` passed on public runners; authorized missing-review bypass only | Complete: `bc4b120` on `develop` | No; W05c–e still gate authoritative accounting/export |
+| C04 | Owner-directed v0.6.1 all-target release of C03 as an explicit compatibility exception; branch `release/v0.6.1-prep` | Release notes disclose the source break; local safeguard and workspace gates must pass without weakening W05b limits | Focused prep PR, cumulative promotion review/CI, exact-main CI, immutable tag, every-target verification and evidence back-sync are required | In progress: release preparation | No; tag and registries must remain untouched until promotion gates pass |
 
 C01f follow-up: `test/operator-decision-evidence` closes the automatable links between browser
 onboarding, real requests, budget denials, broker recovery and restored numeric evidence. Source
@@ -75,6 +77,10 @@ recovery (UA04); recovery ownership, current policy authority and cutover/rollba
 required before deployment (P03). The user accepted the measured single-node baseline without
 production performance promises (UA05). The owner subsequently accepted and completed the
 v0.6.0 promotion/publication scope (UA06); P01–P03 remain pre-production gates.
+The owner then explicitly selected v0.6.1 for the W05b release despite the normal minor-version
+recommendation (UA07). This compatibility exception changes the release label only: it does not
+claim patch-level Rust source compatibility, authoritative attempt accounting, or production
+readiness. The migration warning, full all-target release safeguards and P01–P03 remain binding.
 
 C01 checkpoints completed work without waiting for W05–W14. C02 was promoted only after the
 initial W06 evidence and M1 release decisions were recorded. P01 still gates production.
@@ -651,3 +657,9 @@ unit suite is not a distributed correctness proof. Record evidence and update th
   Merge commit `bc4b120` is the current `develop` head and post-merge CI `34230690137` passed.
   Next is a focused W05c design review and TDD slice connecting admission, settlement and evidence;
   W05b observations remain non-authoritative until those correctness gates are implemented.
+- 2026-09-08: The owner explicitly overrode the normal minor-version recommendation and selected
+  v0.6.1 for an all-target release of integrated W05b (UA07). C04 tracks this as a compatibility
+  exception: release notes must disclose the public Rust struct-literal migration, and no
+  authoritative accounting or production claim is added. Proceed through a focused prep PR,
+  cumulative promotion review/CI, exact-main CI, immutable tag, every-target verification and
+  evidence back-sync; stop on any unresolved review, CI or publication failure.
