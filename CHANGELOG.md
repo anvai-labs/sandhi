@@ -10,14 +10,31 @@ prompt-cache split, GPU-seconds) and never dollars. See
 [ADR-0001](docs/adr/0001-sandhi-architecture-and-wire-contract.md) for the
 architecture and the measure-vs-price boundary this changelog respects.
 
-One tag `vX.Y.Z` drives the binary and PyPI release plus any configured crates.io/npm
-publishers. Versions are derived from the tag at build time, never hand-edited; see
-[RELEASING.md](RELEASING.md). npm publishes as `@anvailabs/sandhi` via Trusted Publishing
-(first shipped in v0.5.1).
+One tag `vX.Y.Z` drives the required binary, PyPI, four-crate and three-package npm release.
+Versions are derived from the tag at build time, never hand-edited; see
+[RELEASING.md](RELEASING.md). PyPI/npm use trusted publishing; crates reuse the existing token.
+A partly published release remains incomplete even when some artifacts are available.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-09-08
+
+M1 engineering milestone: automated acceptance is approved, including the existing estimate-based
+token budgets and single-node evidence limits. Hands-on usability, live broker validation and
+deployment recovery ownership remain pre-production gates, not completed acceptance tests.
+
+**Fully published:** GitHub binaries, PyPI, all four crates and all three npm packages are
+available and verified. The initial npm authorization failure was repaired after configuring
+each package's trusted publisher; the successful retry published signed provenance.
+See the [release outcome](docs/product/release-safeguards.md#publication-outcome-2026-09-08-utc).
+
 ### Added
+
+- **Safeguarded release train.** Exact-source protected-main CI and immutable tags authorize
+  unprivileged cross-platform builds and smokes before publishing. Checked npm bundles retain
+  exact platform dependencies and repository identity. Publishers revalidate source authority;
+  aggregate verification fails visibly for missing, invalid, yanked or unavailable targets.
+  Crates use the owner-selected existing token only in the upload step; PyPI/npm retain OIDC.
 
 - **Operator decision evidence.** Synthetic browser journeys connect reference onboarding,
   one-time keys, persistent attribution, budget intervention and broker recovery. Masked review
@@ -121,22 +138,13 @@ publishers. Versions are derived from the tag at build time, never hand-edited; 
   One-time minted keys remain visible after refresh. Added real-browser and optional
   AgentBrowser smoke regressions; no live-vault integration is implied.
 
-- **npm publish leg of the v0.5.1 release run failed; npm first ships on the next tag.** The
-  per-platform package dirs (`bindings/node/npm/`) are gitignored by design and must be
-  generated at publish time — the workflow never ran `napi create-npm-dir`, so `napi artifacts`
-  died on a bare ENOENT. The publish step is now correct end to end: dirs are generated, the
-  run **fails loudly if no platform binary arrived** (CLI 2.x silently warn-skips missing
-  ones — a strict all-dirs check would wrongly block repairing older tags whose tree carries
-  a wider triples config than the matrix), the napi `triples` config is aligned to exactly
-  the two targets the build matrix builds (a configured-but-unbuilt triple would emit
-  `optionalDependencies`
-  pointing at packages that never exist), `publishConfig.access = "public"` makes the scoped
-  packages public (the CLI copies it into each platform package; scoped defaults to
-  restricted), and the **main** package gets the explicit root `npm publish` that
-  `napi prepublish` alone never performs. A guarded `workflow_dispatch` repair path
-  (`npm_repair_tag`) republishes **only** the npm half for an existing tag — idempotently
-  (already-published packages are skipped, not E403-ed) — while crates/PyPI/binaries stay
-  event-gated to tag pushes, so a failed npm leg no longer needs a version burn to fix.
+- **Npm package preparation and safe retries.** Generate both platform directories, reject
+  missing native artifacts, and publish the root package with exact platform dependencies.
+  An npm-only repair accepts safeguard-era tags with verified main CI; existing immutable
+  package integrity must match before a retry skips it. The v0.5.1 npm packages already exist
+  and remain untouched; presence alone does not establish how they were authenticated.
+  The v0.6.0 build/pack checks passed; after correcting per-package trusted-publisher bindings,
+  npm-only repair run `34188380114` published and verified all three packages.
 
 ## [0.5.1] — 2026-09-03
 

@@ -18,7 +18,7 @@ mistaken for shipped behavior.
 | What product evolution is proposed and how is it tracked? | [TD-0026 delivery plan](td/TD-0026-gateway-product-evolution.md), [product specification](product/gateway-vision-and-requirements.md), and [2026-09-04 review](reviews/gateway-review-2026-09-04.md); proposals, not shipped claims |
 | What evidence gates the M1 checkpoint? | [Workload and acceptance](product/m1-acceptance.md); UA01 accepts engineering evidence for this release and defers hands-on usability until before production |
 | Which acceptance decisions remain, and why? | [M1 decision packet](product/m1-acceptance-decisions.md); automated evidence, operating-limit choices and a focused user-review script |
-| What must be hardened before the milestone release? | [Release safeguards](product/release-safeguards.md); owner-selected existing crates token, PyPI/npm OIDC; workflow correction in progress, ref controls verified (SG06), registry evidence pending (SG07) |
+| What is the milestone release state? | [Release safeguards](product/release-safeguards.md); v0.6.0 is fully published and verified across GitHub, PyPI, four crates and three npm packages; protected back-sync remains |
 | What adversarial checks cover the first checkpoint? | [2026-09-05 checkpoint review](reviews/checkpoint-adversarial-review-2026-09-05.md); findings, corrections and remaining integration gates |
 
 ADRs record durable decisions. Their context sections describe the repository at the time the
@@ -120,15 +120,17 @@ perpetually open.
 | [0020](td/TD-0020-operational-readiness-and-transport-observability.md) | In progress | W06a/b/c and W06d automation verified and integrated; actual-user acceptance pending. Remaining gauges, pool, shedding and DNS work still open |
 | [0021](td/TD-0021-co-design-seam-v2-proxy-path-contract.md) | Complete | — |
 | [0022](td/TD-0022-per-call-transport-context.md) | Complete | — |
-| [0023](td/TD-0023-release-automation.md) | Complete | npm remains intentionally unconfigured/unpublished |
+| [0023](td/TD-0023-release-automation.md) | Complete | Publish mechanics implemented; safeguarded all-target v0.6.0 execution tracked separately in TD-0026 |
 | [0024](td/TD-0024-reservation-retention-and-rollup.md) | Proposed | Bounded reservation history and rollups |
 | [0025](td/TD-0025-ingress-funnel-and-family-registry.md) | Proposed | Family registry and funnel decomposition |
-| [0026](td/TD-0026-gateway-product-evolution.md) | In progress | W01–W04 complete; W05a foundation complete; W06a/b/c and W06d automation verified and integrated. UA01–UA05 accepted; release scope pending; pre-production usability, broker integration validation and recovery ownership gates remain open |
+| [0026](td/TD-0026-gateway-product-evolution.md) | In progress | Accepted M1 milestone promoted/tagged as v0.6.0 and fully published/verified; protected back-sync remains. W05a remains inactive; P01–P03 remain pre-production gates |
 
 TD-0026 slice completion means implementation/local verification. Its separate C01/C02 checkpoint
 table tracks remote CI, merge and release; C01 [PR #230](https://github.com/anvai-labs/sandhi/pull/230)
 merged into `develop` as `8f56b91` after clean review and green hosted CI, with an explicit
-owner-authorized review bypass. Post-merge CI is green; no release or main promotion occurred.
+owner-authorized review bypass. That checkpoint did not include release or main promotion;
+C02 now records the reviewed main promotion in [PR #243](https://github.com/anvai-labs/sandhi/pull/243),
+the completed exact-main CI/tag and successful all-target publication/verification.
 W06b is separately checkpointed in [PR #231](https://github.com/anvai-labs/sandhi/pull/231)
 (C01b), verified locally against current `develop` with its own CI/merge evidence on the PR;
 it does not complete M1 readiness/recovery acceptance.

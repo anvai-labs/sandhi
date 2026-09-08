@@ -1,7 +1,9 @@
 # M1 acceptance decisions and evidence
 
-Status: **UA01–UA05 accepted** for this release; hands-on usability acceptance deferred until
-before production. UA06 remains pending; no observed-user or live-integration pass is recorded.
+Status: **UA01–UA06 accepted** for this engineering release; hands-on usability acceptance
+deferred until before production. The authorized v0.6.0 release is fully published and verified
+across GitHub, PyPI, crates.io and npm. Publication does not imply an observed-user or
+live-integration pass.
 Tracker: [TD-0026](../td/TD-0026-gateway-product-evolution.md), C01f; prior
 [workload and integration evidence](m1-acceptance.md) remains valid.
 
@@ -23,13 +25,14 @@ Authority: explicit user instruction in this working session, 2026-09-07 UTC. Ev
 | UA03 — broker assurance | Accepted | Accept current synthetic Sandhi boundary and isolated broker-component evidence for this release; require live interoperability and grant-lifecycle validation before production use of that integration |
 | UA04 — recovery responsibility | Accepted | Accept operator-controlled quarantine and reconciliation for this release; assign the recovery owner, authoritative policy source and cutover/rollback rules before deployment |
 | UA05 — performance scope | Accepted | Accept a measured single-node engineering baseline without production throughput, latency, recovery-time or fleet-capacity promises |
-| UA06 — promotion/release scope | Safeguard work authorized; execution pending | Close the release-safety gaps and track implementation/tests; final tagging/publication scope remains explicit |
+| UA06 — promotion/release scope | Accepted; publication complete | Reviewed/green develop-to-main promotion, immutable v0.6.0 and all required targets published/verified; existing crates token, PyPI/npm trusted publishing; protected back-sync remains; production excluded |
 
 This is an explicit revision of the acceptance timing for this release, not completion of the
 original observed-user gate. The automated evidence is accepted as the release acceptance method;
-the operating-limit decisions UA02–UA05 are accepted. Promotion/publication scope (UA06) remains
-to be confirmed. Existing review/CI requirements are unchanged. M1 release acceptance is not
-yet closed as a whole.
+the operating-limit decisions UA02–UA05 are accepted. The owner subsequently authorized the
+v0.6.0 all-target promotion/publication scope (UA06) and continued execution after the release
+sequence was presented. Engineering acceptance and all-target publication are closed; protected
+back-sync remains a separate integration step. Existing review/CI requirements are unchanged.
 
 Deferred gate **P01 — hands-on usability before production** remains open. Before production use,
 assign an accepting operator and record the tested build, all four journey outcomes, assistance,
@@ -207,12 +210,12 @@ the validation scope and must be planned explicitly.
 
 ### UA06 — What action should acceptance authorize?
 
-**Recorded instruction (2026-09-07 UTC):** the user authorized addressing the gaps needed for a
+**Initial instruction (2026-09-07 UTC):** the user authorized addressing the gaps needed for a
 safeguarded milestone/release and driving the features and plan accordingly. Implement and
 verify the [release-safeguard plan](release-safeguards.md). Do not interpret this as immediate
 tagging, publication, production deployment or a waiver of a remaining safeguard.
 
-**Recommendation now proposed for explicit approval:** release **v0.6.0** as the M1 engineering
+**Subsequently accepted scope:** release **v0.6.0** as the M1 engineering
 milestone with the accepted limitations. Integrate the acceptance record through a focused
 `develop` PR; validate publisher configuration and harden the publishing entry points using
 narrowly scoped release-tag protection and publisher-environment restrictions. Preserve required
@@ -222,7 +225,15 @@ GitHub binaries, PyPI, four Rust crates and npm/platform packages, verify actual
 back-sync `main` into `develop`. Production deployment is excluded. Stop for owner action if
 registry-side authorization cannot be established; do not silently omit a failed target.
 
-**Alternative:** authorize promotion only under the same review/CI gates, with tagging and all
+The owner explicitly retained the existing unrevoked crates token and restricted trusted
+publishing to PyPI/npm. Actual publication is authorized to validate reported registry settings;
+do not reopen a settings-confirmation hold or publish a throwaway version. All existing npm
+versions/packages remain intact. [PR #243](https://github.com/anvai-labs/sandhi/pull/243) records
+the reviewed promotion and exact-main CI. On 2026-09-08 UTC, immutable `v0.6.0` was created at
+verified main `9d40f01`; [release execution](release-safeguards.md#current-execution-checkpoint-2026-09-07)
+tracks the build/publish/verification outcome separately from this decision.
+
+**Alternative not selected:** authorize promotion only under the same review/CI gates, with tagging and all
 package publication deferred to a separate decision. This preserves the engineering checkpoint
 without activating publishers yet.
 
@@ -230,9 +241,8 @@ without activating publishers yet.
 0.8.1 update and npm bootstrap documentation. The latter documents publishing; it does not
 authorize publishing. M1 is not all later accounting/fleet/broker work.
 
-**Decision to record:** the approved promotion/publication scope, version, targets and narrowly
-scoped publishing-protection work, or any exclusions/hold. None of these new publishing actions
-is approved by accepting UA01–UA05 alone. Earlier merge bypass authorization covers only a
+**Authority boundary:** publication is authorized by the subsequent explicit continuation of the
+presented release sequence, not by accepting UA01–UA05 alone. Earlier merge bypass authorization covers only a
 missing approving review after clean review/green CI, never checks. Production rollout remains
 separate and subject to P01–P03 and the applicable deployment validations.
 
@@ -250,11 +260,11 @@ publication approval or proof that the next OIDC publish will succeed.
 | Publisher configuration | GitHub metadata lists `CARGO_REGISTRY_TOKEN`; `npm` and `pypi` environments exist | Token validity and registry-side trusted-publisher bindings were not verified; secret values were not read |
 | Publishing protections | `npm`/`pypi` environment API reports no deployment branch policy and no protection rules; repository rulesets query returns an empty list | Review tag/dispatch authorization and approve appropriate publishing restrictions before the tag; no settings changed and no claim of a complete organization-policy audit |
 
-UA06 should settle the release version/targets and the publishing-protection work as well as
-promotion scope. Recommendation: retain the planned unified release targets, validate publisher
-configuration and harden the publishing entry points before tagging. An explicitly narrower
-release scope would require documented workflow/verification changes, not a silently skipped
-publisher. Do not rerun an old publish workflow merely to test credentials.
+This historical preflight preceded the accepted UA06 decision and the applied SG06 ref controls;
+it is not a current hold. The selected scope retains every planned target and the hardened
+publishing entry points. A narrower release would require a new explicit decision and documented
+workflow/verification changes, not a silently skipped publisher. Do not rerun an old publish
+workflow merely to test credentials.
 
 ## Deferred observed-user session — P01, required before production
 
@@ -270,6 +280,6 @@ needed rather than quietly coaching every step into a pass. Use synthetic creden
 
 Record: reviewer/role, tested build, date, task outcomes, assistance, confusion/blockers, chosen
 UA01–UA06 outcomes and explicit accept/hold scope. Do not include tokens, keys or vault contents.
-UA01–UA05 are accepted; UA06 and pre-production gates P01–P03 remain **pending**.
+UA01–UA06 are accepted; pre-production gates P01–P03 remain **pending**.
 A screenshot review alone is
 an inspection, not an observed unassisted usability session; label it accordingly.
