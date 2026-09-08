@@ -1,12 +1,12 @@
 # Safeguarded milestone release
 
-Status: registry-mechanism correction integrated through PR #242; reviewed M1 promotion
-merged to `main` through PR #243. Reuse the existing crates token; trusted publishing applies
-only to PyPI/npm. Exact-main CI passed; immutable `v0.6.0` now resolves to the reviewed main
-commit. All builds passed. GitHub binaries, PyPI, all four crates and all three npm packages
-published and verified. The initial npm `ENEEDAUTH` failure was repaired after the owner
-configured each package's trusted-publisher binding; the successful retry emitted signed provenance.
-See the [current owner decision](#owner-correction-reuse-the-crates-token-2026-09-07).
+Status: v0.6.0 is fully published and back-synced. W05b is integrated on `develop`; the owner
+explicitly selected `v0.6.1` as a documented compatibility exception despite source-breaking
+public Rust API additions. Release preparation is in progress. Reuse the existing crates token;
+trusted publishing applies only to PyPI/npm. Promotion review, exact-source CI, complete
+publication verification and back-sync remain mandatory. Production is not authorized.
+See the [v0.6.1 checkpoint](#v061-compatibility-exception-execution-checkpoint-2026-09-08-utc)
+and the [current registry decision](#owner-correction-reuse-the-crates-token-2026-09-07).
 Tracker: [TD-0026](../td/TD-0026-gateway-product-evolution.md); publish mechanics:
 [TD-0023](../td/TD-0023-release-automation.md).
 
@@ -39,6 +39,30 @@ accepted product limits to expand M1.
 | SG07 | Validate the owner-selected registry authority | Owner-authorized existing crates token; PyPI/npm trusted bindings; artifact presence alone insufficient | Complete: crates token reuse, PyPI OIDC and npm OIDC all succeeded in actual publication; npm packages carry signed GitHub Actions provenance |
 | SG08 | Final milestone promotion and release | Version/target authority; fresh cumulative review/CI; main post-merge CI; publish/verify/back-sync; P01–P03 still open | Complete: initial [release run](https://github.com/anvai-labs/sandhi/actions/runs/34173783838) built every target and published GitHub/PyPI/crates; npm-only [repair](https://github.com/anvai-labs/sandhi/actions/runs/34188380114) published/verified npm; [PR #244](https://github.com/anvai-labs/sandhi/pull/244) back-sync and exact-develop [CI](https://github.com/anvai-labs/sandhi/actions/runs/34217140784) passed |
 
+## v0.6.1 compatibility-exception execution checkpoint (2026-09-08 UTC)
+
+The owner overrode the normal version recommendation and selected `v0.6.1`. This is an explicit
+release-label decision, not a claim that W05b is source-compatible with v0.6.0. The changelog must
+retain the migration warning. W05b remains opt-in and non-authoritative; no proxy wiring,
+persistence, settlement, pricing, export, UI or enforcement behavior is claimed. P01–P03 remain
+open and continue to block production authorization.
+
+- [x] Integrate W05b through PR #246; exact-head CI `34229915141` and post-merge CI
+  `34230690137` passed, and the fresh adversarial review was clean.
+- [x] Prepare the compatibility-exception record and pass local gates: 284 release-safeguard
+  tests, 618 workspace tests, strict all-feature/all-target Clippy, formatting and diff checks.
+- [ ] Merge this focused release-preparation record into `develop` after clean review and green
+  exact-head CI; verify post-merge `develop` CI.
+- [ ] Open and adversarially review the cumulative `develop` to `main` promotion; merge only
+  after required CI is green, then verify exact-main push CI.
+- [ ] Confirm `v0.6.1` is absent from the tag, GitHub release and every target registry; create
+  the immutable tag only at the verified `main` commit.
+- [ ] Monitor all builds and publishers: two GitHub archives, three PyPI wheel platforms, four
+  crates and the root plus two platform npm packages.
+- [ ] Run the independent all-target verifier and record artifact identities and any partial or
+  repaired publication without moving the tag.
+- [ ] Back-sync immutable release evidence from `main` to `develop` through a reviewed, green PR.
+
 ## Current execution checkpoint (2026-09-07)
 
 - [x] Registry-mechanism correction [PR #242](https://github.com/anvai-labs/sandhi/pull/242)
@@ -66,7 +90,7 @@ accepted product limits to expand M1.
   repair attempts failed `ENEEDAUTH`, the owner configured all three per-package trusted
   publishers. Npm-only run `34188380114` then published all three packages with signed provenance;
   its hosted verifier and an independent all-target verifier passed.
-- [ ] Record actual outcomes and back-sync main into develop through
+- [x] Record actual outcomes and back-sync main into develop through
   [PR #244](https://github.com/anvai-labs/sandhi/pull/244), with fresh exact-head review/CI.
 
 Pre-tag registry checks returned HTTP 404 for every required package's `0.6.0` version;
