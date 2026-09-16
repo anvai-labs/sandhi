@@ -54,7 +54,10 @@ use sandhi_core::{
     KeyStore, ParsedUsage, Policy, RequestMetadataV1, Reservation, Sink, UsageBasis,
     UsageCompleteness, UsageEvent, UsageV2, VirtualKey,
 };
-use sandhi_providers::{ProviderError, ProviderFamily, ProviderHandle, ProviderRuntime};
+use sandhi_providers::{
+    token_estimate::baseline_estimate, ProviderError, ProviderFamily, ProviderHandle,
+    ProviderRuntime, TokenEstimateCalibrator,
+};
 use sandhi_store::{hash_secret, AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
 
 use codec::{decode_request, encode_response, encode_stream_event, IngressDialect};
@@ -297,6 +300,8 @@ pub struct ProxyState {
     /// TD-0012 per-virtual-key request rate limiting. In-memory: with N replicas the effective
     /// limit is N × the configured value (D2).
     pub rate_limiter: Arc<ratelimit::RateLimiter>,
+    /// TD-0027 S3: per-(provider, model) input estimate learned only from final measured events.
+    token_estimator: Mutex<TokenEstimateCalibrator>,
     /// Declarative desired-state config file (`SANDHI_CONFIG`) backing `/admin/config` +
     /// `/admin/config/apply` — providers/budgets/alerts/vkeys as committable JSON, secrets
     /// referenced by env-var name rather than inlined. `None` disables both routes (404).
@@ -342,6 +347,7 @@ impl ProxyState {
             trusted_proxies: Vec::new(),
             metrics: Arc::new(metrics::Metrics::new()),
             rate_limiter: Arc::new(ratelimit::RateLimiter::new()),
+            token_estimator: Mutex::new(TokenEstimateCalibrator::default()),
             otel: None,
             config_path: None,
         }
@@ -2266,7 +2272,13 @@ async fn handle(
     // A scope is "capped" (for output-bounding) only under a `Block` policy: `Warn` never rejects,
     // so we do not shrink the client's request. An output maximum reduces exposure when the
     // client omitted it; it does not make the estimated total a strict cap (TD-0026 W03).
-    let (ceiling, effective_max) = reservation_ceiling(&request, body.len());
+    let input_len = body.len();
+    let estimated_input = state
+        .token_estimator
+        .lock()
+        .map(|estimator| estimator.estimate(provider.slug(), &request.model, input_len))
+        .unwrap_or_else(|_| baseline_estimate(input_len));
+    let (ceiling, effective_max) = reservation_ceiling(&request, estimated_input);
     // SQLite's transaction remains a synchronous correctness boundary, but it runs on Tokio's
     // blocking pool so its busy timeout never parks an async scheduler worker.
     let Some(mut pending) = reserve_budget(&state, &scope, ceiling, policy).await else {
@@ -2333,6 +2345,7 @@ async fn handle(
         dialect_label(dialect),
         plane,
     );
+    accounting.input_len = input_len;
     accounting.operation = Some(operation);
     // TD-0021 P4 (D1): the METER records the LOGICAL call once — a repeat of a settled
     // `(vkey, idempotency-key)` inside the window has its duplicate usage event dropped
@@ -2767,6 +2780,8 @@ struct RequestAccounting {
     reservation: Option<Reservation>,
     provider: String,
     model: String,
+    /// UTF-8 request-body length paired with the final event for estimate calibration.
+    input_len: usize,
     /// TD-0021 P4: when the call carried an `idempotency-key` AND this proxy already
     /// settled that `(vkey, key)` inside the window, the repeat is the SAME logical call
     /// — reusing the original settlement, metered once (D1). `None` otherwise.
@@ -2820,6 +2835,7 @@ impl RequestAccounting {
             reservation,
             provider,
             model: request.model.clone(),
+            input_len: 0,
             dedup: None,
             request_id: next_request_id(),
             metadata: request.metadata.clone(),
@@ -3030,13 +3046,17 @@ impl RequestAccounting {
                 self.finish_reason,
             );
         }
-        self.state.sink.emit(&usage_event(
+        let event = usage_event(
             &self.provider,
             &self.model,
             &self.metadata,
             &usage,
             Some(self.request_id.as_str()),
-        ));
+        );
+        if let Ok(mut estimator) = self.state.token_estimator.lock() {
+            estimator.observe(self.input_len, &event);
+        }
+        self.state.sink.emit(&event);
     }
 }
 
@@ -3188,7 +3208,7 @@ async fn stream_response(
         .expect("valid streaming response")
 }
 
-/// Coarse input-token estimate: bytes of the ingress request body / 4. This replaces a full
+/// Cold-start input-token estimate: bytes of the ingress request body / 4. This replaces a full
 /// re-serialization of the decoded `messages`+`tools` on every request (design audit A4) with a
 /// zero-allocation length read. Direction vs the old formula: dialect envelopes wrap the same
 /// content in their own field names, so for everything except schema-less tools the wire body
@@ -3199,9 +3219,11 @@ async fn stream_response(
 /// `body_length_estimate_stays_within_a_bounded_deficit` — and marginal against the
 /// `DEFAULT_OUTPUT_CEILING`-dominated ceiling, the load-bearing term (ADR-0005 D1); the /4
 /// heuristic's own accuracy error dwarfs it either way (undercounts CJK, overcounts verbose
-/// schemas). A model-aware/tokenizer estimator remains the follow-up.
+/// schemas). TD-0027 S3 keeps this exact rule for the first 31 measured model calls, then applies
+/// the bounded per-model calibration in [`TokenEstimateCalibrator`].
+#[cfg(test)]
 fn input_estimate(body_len: usize) -> u64 {
-    (body_len as u64).saturating_add(3) / 4
+    baseline_estimate(body_len)
 }
 
 /// The reservation **ceiling** (ADR-0005 D1): input estimate + the effective output max (the
@@ -3209,11 +3231,9 @@ fn input_estimate(body_len: usize) -> u64 {
 /// and the effective max so the caller can bound a capped scope's upstream request. This is a
 /// heuristic reservation, NOT a proven upper bound. Output controls alone cannot bound input,
 /// media, provider-added tools or separately reported reasoning across arbitrary providers.
-fn reservation_ceiling(request: &ChatRequestV1, body_len: usize) -> (u64, u64) {
+fn reservation_ceiling(request: &ChatRequestV1, estimated_input: u64) -> (u64, u64) {
     let effective_max = request.max_output_tokens.unwrap_or(DEFAULT_OUTPUT_CEILING);
-    let ceiling = input_estimate(body_len)
-        .saturating_add(effective_max)
-        .max(1);
+    let ceiling = estimated_input.saturating_add(effective_max).max(1);
     (ceiling, effective_max)
 }
 
@@ -3828,6 +3848,100 @@ mod partial_accounting_tests {
         assert_eq!(parts.cache_creation_tokens, 33);
         assert_eq!(parts.cache_read_tokens, 44);
         assert_eq!(parts.reasoning_tokens, 55);
+    }
+}
+
+#[cfg(test)]
+mod token_calibration_wiring_tests {
+    use super::*;
+    use sandhi_core::InMemorySink;
+
+    fn state() -> Arc<ProxyState> {
+        Arc::new(ProxyState::new(
+            KeyStore::new(),
+            ProxyLedger::in_memory(),
+            Arc::new(InMemorySink::new()),
+            HashMap::new(),
+            None,
+        ))
+    }
+
+    fn measured_accounting(
+        state: &Arc<ProxyState>,
+        input_len: usize,
+        input_tokens: u64,
+        output_tokens: u64,
+        reservation: Option<Reservation>,
+    ) {
+        let request: ChatRequestV1 =
+            serde_json::from_str(r#"{"model":"qwen","messages":[]}"#).unwrap();
+        let mut accounting = RequestAccounting::new(
+            Arc::clone(state),
+            "vk:test".into(),
+            reservation,
+            "inferflux".into(),
+            &request,
+            "openai",
+            metrics::Plane::Transparent,
+        );
+        accounting.input_len = input_len;
+        accounting.observe(&UsageV2 {
+            tokens_in: input_tokens,
+            tokens_out: output_tokens,
+            completeness: UsageCompleteness::Final,
+            ..Default::default()
+        });
+        accounting.set_outcome("success");
+        accounting.finalize();
+    }
+
+    fn reservation(ceiling: u64) -> Reservation {
+        Reservation {
+            id: 999_999,
+            scope: "vk:test".into(),
+            ceiling,
+            expires_at: OffsetDateTime::now_utc() + time::Duration::minutes(1),
+        }
+    }
+
+    #[test]
+    fn measured_events_train_the_next_reservation_and_reduce_overshoot_metric_growth() {
+        let calibrated = state();
+        for _ in 0..sandhi_providers::token_estimate::CALIBRATION_MIN_SAMPLES {
+            measured_accounting(&calibrated, 300, 100, 10, None);
+        }
+        let estimated_input =
+            calibrated
+                .token_estimator
+                .lock()
+                .unwrap()
+                .estimate("inferflux", "qwen", 300);
+        assert_eq!(estimated_input, 100);
+        measured_accounting(
+            &calibrated,
+            300,
+            100,
+            10,
+            Some(reservation(estimated_input + 10)),
+        );
+
+        let baseline = state();
+        measured_accounting(
+            &baseline,
+            300,
+            100,
+            10,
+            Some(reservation(input_estimate(300) + 10)),
+        );
+
+        assert!(calibrated
+            .metrics
+            .render()
+            .contains("sandhi_settle_overshoot_tokens_total 0"));
+        assert!(baseline
+            .metrics
+            .render()
+            .contains("sandhi_settle_overshoot_tokens_total 25"));
     }
 }
 

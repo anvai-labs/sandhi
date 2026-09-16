@@ -40,6 +40,7 @@ mod openai_responses_typed;
 pub mod openai_roles;
 pub mod raw;
 pub mod resilience;
+pub mod token_estimate;
 pub mod typed;
 pub use anthropic::{Anthropic, AnthropicAuthScheme};
 pub use attempt::{
@@ -61,6 +62,7 @@ mod linesplit;
 pub mod metering;
 pub use metering::MeteredProvider;
 pub use resilience::{CircuitBreaker, ResilientProvider, RetryConfig, TimeoutConfig};
+pub use token_estimate::TokenEstimateCalibrator;
 pub use typed::{
     ChatEventStream, ChatProvider, FamilyFacts, ProviderFamily, ProviderHandle, ProviderRuntime,
     ProviderTransportConfig, UsageCadence,
