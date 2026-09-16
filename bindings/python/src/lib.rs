@@ -675,6 +675,8 @@ impl Gateway {
             cache_read_tokens,
             reasoning_tokens: 0,
             reasoning_included: None,
+            duration_ms: None,
+            time_to_first_token_ms: None,
         };
         self.record_and_build(py, virtual_key, provider, model, parsed, session_id, route)
     }
@@ -796,6 +798,14 @@ fn parsed_from_pyobj(obj: &Bound<'_, PyAny>) -> ParsedUsage {
             .get_item("reasoning_included")
             .ok()
             .and_then(|v| v.extract::<bool>().ok()),
+        duration_ms: obj
+            .get_item("duration_ms")
+            .ok()
+            .and_then(|v| v.extract::<u64>().ok()),
+        time_to_first_token_ms: obj
+            .get_item("time_to_first_token_ms")
+            .ok()
+            .and_then(|v| v.extract::<u64>().ok()),
     }
 }
 
@@ -845,6 +855,8 @@ fn usage_to_dict<'py>(py: Python<'py>, u: &ParsedUsage) -> PyResult<Bound<'py, P
     d.set_item("cache_read_tokens", u.cache_read_tokens)?;
     d.set_item("reasoning_tokens", u.reasoning_tokens)?;
     d.set_item("reasoning_included", u.reasoning_included)?;
+    d.set_item("duration_ms", u.duration_ms)?;
+    d.set_item("time_to_first_token_ms", u.time_to_first_token_ms)?;
     Ok(d)
 }
 
@@ -885,6 +897,22 @@ fn event_to_dict<'py>(py: Python<'py>, e: &UsageEvent) -> PyResult<Bound<'py, Py
     d.set_item("outcome", e.outcome.clone())?;
     d.set_item("upstream_request_id", e.upstream_request_id.clone())?;
     d.set_item("gpu_seconds", e.gpu_seconds)?;
+    d.set_item("duration_ms", e.duration_ms)?;
+    d.set_item(
+        "duration_source",
+        e.duration_source.map(|source| match source {
+            sandhi_core::LatencySource::Origin => "origin",
+            sandhi_core::LatencySource::Boundary => "boundary",
+        }),
+    )?;
+    d.set_item("time_to_first_token_ms", e.time_to_first_token_ms)?;
+    d.set_item(
+        "time_to_first_token_source",
+        e.time_to_first_token_source.map(|source| match source {
+            sandhi_core::LatencySource::Origin => "origin",
+            sandhi_core::LatencySource::Boundary => "boundary",
+        }),
+    )?;
     Ok(d)
 }
 

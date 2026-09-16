@@ -239,7 +239,7 @@ async fn version_endpoint_is_unauthenticated_and_reports_the_contract() {
     let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["wire_contract_version"], "1");
     assert_eq!(value["chat_contract_version"], "1");
-    assert_eq!(value["chat_contract_minor"], 7);
+    assert_eq!(value["chat_contract_minor"], 8);
     let dialects = value["dialects"].as_array().unwrap();
     for expected in ["openai", "anthropic", "responses", "gemini"] {
         assert!(

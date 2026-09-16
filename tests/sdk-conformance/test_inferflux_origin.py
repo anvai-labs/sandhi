@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import socket
 import subprocess
 import threading
@@ -71,6 +72,7 @@ class ProxyRuntime:
     case: ReasoningCase
     base_url: str
     recorder: RecordingForwarder
+    store_path: Path
 
 
 def _free_port() -> int:
@@ -83,7 +85,9 @@ def _wait_ready(url: str, process: subprocess.Popen, timeout: float = 30.0) -> N
     deadline = time.time() + timeout
     while time.time() < deadline:
         if process.poll() is not None:
-            raise AssertionError(f"process exited early with status {process.returncode}")
+            raise AssertionError(
+                f"process exited early with status {process.returncode}"
+            )
         try:
             urllib.request.urlopen(url, timeout=2).read()
             return
@@ -196,14 +200,20 @@ def recording_origin(inferflux_origin):
 
 
 @pytest.fixture(scope="module")
-def inferflux_proxy(proxy_binary: Path, inferflux_origin, recording_origin):
+def inferflux_proxy(
+    proxy_binary: Path, inferflux_origin, recording_origin, tmp_path_factory
+):
     recorder, recording_base = recording_origin
     port = _free_port()
+    store_path = (
+        tmp_path_factory.mktemp(f"sandhi-{inferflux_origin.case.family}") / "usage.db"
+    )
     env = {
         **os.environ,
         "SANDHI_BIND": f"127.0.0.1:{port}",
         "SANDHI_INFERFLUX_KEY": "dev-key-123",
         "SANDHI_INFERFLUX_BASE": recording_base + "/v1",
+        "SANDHI_STORE": str(store_path),
     }
     process = subprocess.Popen(
         [str(proxy_binary)],
@@ -219,6 +229,7 @@ def inferflux_proxy(proxy_binary: Path, inferflux_origin, recording_origin):
             case=inferflux_origin.case,
             base_url=base_url + "/v1",
             recorder=recorder,
+            store_path=store_path,
         )
     finally:
         _stop(process)
@@ -240,6 +251,20 @@ def _request_options() -> dict:
     }
 
 
+def _latest_latency(proxy: ProxyRuntime, *, expect_ttft: bool):
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        with sqlite3.connect(proxy.store_path) as connection:
+            row = connection.execute(
+                "SELECT duration_ms,duration_source,time_to_first_token_ms,"
+                "time_to_first_token_source FROM usage_events ORDER BY rowid DESC LIMIT 1"
+            ).fetchone()
+        if row is not None and (row[2] is not None) == expect_ttft:
+            return row
+        time.sleep(0.05)
+    raise AssertionError("timed out waiting for the buffered usage event")
+
+
 def test_buffered_reasoning_and_usage_shape(inferflux_client, inferflux_proxy):
     response = inferflux_client.chat.completions.create(**_request_options())
     payload = response.to_dict()
@@ -250,6 +275,13 @@ def test_buffered_reasoning_and_usage_shape(inferflux_client, inferflux_proxy):
     usage = payload["usage"]
     assert usage["prompt_tokens_details"]["cached_tokens"] >= 0
     assert usage["completion_tokens_details"]["reasoning_tokens"] > 0
+    duration, duration_source, ttft, ttft_source = _latest_latency(
+        inferflux_proxy, expect_ttft=False
+    )
+    assert duration is not None
+    assert duration_source == "origin"
+    assert ttft is None
+    assert ttft_source is None
 
 
 def test_streaming_reasoning_and_terminal_usage(inferflux_client, inferflux_proxy):
@@ -273,6 +305,13 @@ def test_streaming_reasoning_and_terminal_usage(inferflux_client, inferflux_prox
     assert usage is not None, "terminal usage chunk missing"
     assert usage["prompt_tokens_details"]["cached_tokens"] >= 0
     assert usage["completion_tokens_details"]["reasoning_tokens"] > 0
+    duration, duration_source, ttft, ttft_source = _latest_latency(
+        inferflux_proxy, expect_ttft=True
+    )
+    assert duration is not None
+    assert duration_source == "origin"
+    assert ttft is not None
+    assert ttft_source == "origin"
 
 
 def test_correlation_and_trace_headers_round_trip(inferflux_client, inferflux_proxy):

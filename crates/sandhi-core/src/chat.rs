@@ -15,10 +15,11 @@ pub const CHAT_SCHEMA_VERSION_V1: &str = "1";
 /// `UsageV2` (#97), 4 = `reasoning_effort` + `thinking` typed request fields
 /// (W3d/G7), 5 = `UsageV2::basis` — measured vs estimated counts (TD-0013 D5),
 /// 6 = `RunCostTreeV1` — the ADR-0005 D7 agent-run cost tree;
-/// 7 = explicit reasoning inclusion in output (TD-0026 W03).
+/// 7 = explicit reasoning inclusion in output (TD-0026 W03), 8 = per-field latency provenance
+/// (TD-0027 S4).
 /// Consumers feature-detect the binding export and treat an absent fn as
 /// minor 0.
-pub const CHAT_CONTRACT_MINOR: u32 = 7;
+pub const CHAT_CONTRACT_MINOR: u32 = 8;
 
 fn schema_v1() -> String {
     CHAT_SCHEMA_VERSION_V1.to_owned()
@@ -284,6 +285,16 @@ pub enum UsageBasis {
     Estimated,
 }
 
+/// Which side of the provider boundary measured a latency field (TD-0027 S4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LatencySource {
+    /// Reported by the model-serving origin in its response usage object.
+    Origin,
+    /// Measured by Sandhi around the provider call because the origin omitted the field.
+    Boundary,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 pub struct UsageV2 {
     pub tokens_in: u64,
@@ -315,14 +326,20 @@ pub struct UsageV2 {
     pub outcome: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_request_id: Option<String>,
-    /// Wall-clock call duration measured at the typed boundary (W3b) — wire
-    /// truth, so clients stop self-measuring around the FFI.
+    /// Wall-clock call duration. Origin-reported when available; otherwise measured at Sandhi's
+    /// typed boundary (TD-0027 S4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
-    /// Time from request dispatch to the first streamed event (streaming
-    /// only; W3b). Absent on non-streaming calls.
+    /// Provenance for `duration_ms`; absent only on legacy/unmeasured records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_source: Option<LatencySource>,
+    /// Time from request dispatch to the first streamed event (streaming only). Origin-reported
+    /// when available; otherwise measured at Sandhi's typed boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_to_first_token_ms: Option<u64>,
+    /// Provenance for `time_to_first_token_ms`; absent only on legacy/unmeasured records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_to_first_token_source: Option<LatencySource>,
 }
 
 const fn one() -> u32 {
@@ -717,17 +734,23 @@ mod tests {
         }))
         .unwrap();
         assert!(usage.duration_ms.is_none());
+        assert!(usage.duration_source.is_none());
         assert!(usage.time_to_first_token_ms.is_none());
+        assert!(usage.time_to_first_token_source.is_none());
         let wire = serde_json::to_value(&usage).unwrap();
         assert!(wire.get("duration_ms").is_none());
         assert!(wire.get("time_to_first_token_ms").is_none());
 
         let mut stamped = usage.clone();
         stamped.duration_ms = Some(120);
+        stamped.duration_source = Some(LatencySource::Origin);
         stamped.time_to_first_token_ms = Some(45);
+        stamped.time_to_first_token_source = Some(LatencySource::Boundary);
         let wire = serde_json::to_value(&stamped).unwrap();
         assert_eq!(wire["duration_ms"], 120);
+        assert_eq!(wire["duration_source"], "origin");
         assert_eq!(wire["time_to_first_token_ms"], 45);
+        assert_eq!(wire["time_to_first_token_source"], "boundary");
     }
 
     #[test]
@@ -817,7 +840,7 @@ mod tests {
         let digest = fnv1a(concatenated.as_bytes());
         assert_eq!(
             (CHAT_CONTRACT_MINOR, digest),
-            (7, 0x47250214c49247b8_u64),
+            (8, 0xed01e3e85aaab146_u64),
             "contract schemas changed: bump CHAT_CONTRACT_MINOR and update this digest \
              (new digest = {digest:#x})"
         );

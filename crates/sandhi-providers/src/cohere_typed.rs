@@ -555,6 +555,8 @@ mod tests {
                         cache_creation_tokens: 0,
                         cache_read_tokens: 0,
                         reasoning_tokens: 0,
+                        duration_ms: None,
+                        time_to_first_token_ms: None,
                     }),
                     usage_running: None,
                     attempts: 1,

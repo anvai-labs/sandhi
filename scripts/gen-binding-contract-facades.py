@@ -43,6 +43,7 @@ Role = Literal["developer", "system", "user", "assistant", "tool", "function"]
 FinishReasonV1 = Literal["stop", "length", "tool_calls", "content_filter", "function_call", "unknown"]
 UsageCompleteness = Literal["final", "partial", "unavailable"]
 UsageBasis = Literal["provider_reported", "estimated"]
+LatencySource = Literal["origin", "boundary"]
 
 class TextPart(TypedDict):
     type: Literal["text"]
@@ -137,7 +138,9 @@ class UsageV2(TypedDict):
     outcome: NotRequired[str]
     upstream_request_id: NotRequired[str]
     duration_ms: NotRequired[int]
+    duration_source: NotRequired[LatencySource]
     time_to_first_token_ms: NotRequired[int]
+    time_to_first_token_source: NotRequired[LatencySource]
     audio_input_tokens: NotRequired[int]
     audio_output_tokens: NotRequired[int]
     reasoning_tokens: NotRequired[int]
@@ -241,6 +244,7 @@ export type Role = "developer" | "system" | "user" | "assistant" | "tool" | "fun
 export type FinishReasonV1 = "stop" | "length" | "tool_calls" | "content_filter" | "function_call" | "unknown"
 export type UsageCompleteness = "final" | "partial" | "unavailable"
 export type UsageBasis = "provider_reported" | "estimated"
+export type LatencySource = "origin" | "boundary"
 export type ContentPart =
   | {{ type: "text"; text: string }}
   | {{ type: "image_url"; image_url: string; detail?: string }}
@@ -268,7 +272,8 @@ export interface UsageV2 {{
   tokens_in: number; tokens_out: number; cache_creation_tokens: number; cache_read_tokens: number
   completeness?: UsageCompleteness; basis?: UsageBasis; attempts?: number; outcome?: string
   upstream_request_id?: string
-  duration_ms?: number; time_to_first_token_ms?: number
+  duration_ms?: number; duration_source?: LatencySource
+  time_to_first_token_ms?: number; time_to_first_token_source?: LatencySource
   audio_input_tokens?: number; audio_output_tokens?: number; reasoning_tokens?: number
   reasoning_included?: boolean
   accepted_prediction_tokens?: number; rejected_prediction_tokens?: number
