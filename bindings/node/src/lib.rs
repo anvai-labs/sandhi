@@ -417,6 +417,8 @@ pub struct UsageBreakdown {
     pub cache_read_tokens: u32,
     pub reasoning_tokens: f64,
     pub reasoning_included: Option<bool>,
+    pub duration_ms: Option<f64>,
+    pub time_to_first_token_ms: Option<f64>,
 }
 
 /// A neutral usage event (mirrors `usage-event.v1.schema.json`).
@@ -444,6 +446,10 @@ pub struct Event {
     pub outcome: Option<String>,
     pub upstream_request_id: Option<String>,
     pub gpu_seconds: Option<f64>,
+    pub duration_ms: Option<f64>,
+    pub duration_source: Option<String>,
+    pub time_to_first_token_ms: Option<f64>,
+    pub time_to_first_token_source: Option<String>,
 }
 
 /// The usage-event wire-contract major version this build targets.
@@ -648,6 +654,8 @@ impl Gateway {
             cache_read_tokens: u64::from(cache_read_tokens.unwrap_or(0)),
             reasoning_tokens: 0,
             reasoning_included: None,
+            duration_ms: None,
+            time_to_first_token_ms: None,
         };
         self.record_and_build(&virtual_key, &provider, &model, parsed, session_id, route)
     }
@@ -804,6 +812,8 @@ fn usage_breakdown(u: &ParsedUsage) -> UsageBreakdown {
         cache_read_tokens: u.cache_read_tokens as u32,
         reasoning_tokens: u.reasoning_tokens as f64,
         reasoning_included: u.reasoning_included,
+        duration_ms: u.duration_ms.map(|value| value as f64),
+        time_to_first_token_ms: u.time_to_first_token_ms.map(|value| value as f64),
     }
 }
 
@@ -839,5 +849,15 @@ fn event_to_napi(e: &UsageEvent) -> Event {
         outcome: e.outcome.clone(),
         upstream_request_id: e.upstream_request_id.clone(),
         gpu_seconds: e.gpu_seconds,
+        duration_ms: e.duration_ms.map(|value| value as f64),
+        duration_source: e.duration_source.map(|source| match source {
+            sandhi_core::LatencySource::Origin => "origin".to_string(),
+            sandhi_core::LatencySource::Boundary => "boundary".to_string(),
+        }),
+        time_to_first_token_ms: e.time_to_first_token_ms.map(|value| value as f64),
+        time_to_first_token_source: e.time_to_first_token_source.map(|source| match source {
+            sandhi_core::LatencySource::Origin => "origin".to_string(),
+            sandhi_core::LatencySource::Boundary => "boundary".to_string(),
+        }),
     }
 }

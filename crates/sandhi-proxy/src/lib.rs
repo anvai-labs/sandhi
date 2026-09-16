@@ -51,7 +51,7 @@ use time::OffsetDateTime;
 
 use sandhi_core::{
     billable, derive_session_id_scoped, AlertRegistry, Backend, ChatRequestV1, FinishReasonV1,
-    KeyStore, ParsedUsage, Policy, RequestMetadataV1, Reservation, Sink, UsageBasis,
+    KeyStore, LatencySource, ParsedUsage, Policy, RequestMetadataV1, Reservation, Sink, UsageBasis,
     UsageCompleteness, UsageEvent, UsageV2, VirtualKey,
 };
 use sandhi_providers::{
@@ -2517,6 +2517,7 @@ async fn transparent_complete_response(
     gemini: Option<GeminiRoute>,
     permit: Arc<AdmissionPermit>,
 ) -> Response {
+    let started = std::time::Instant::now();
     // Unary path: the permit lives exactly as long as this handler future, which is the whole
     // call. Held only so the compiler sees it alive to the last await.
     let _permit = permit;
@@ -2545,6 +2546,7 @@ async fn transparent_complete_response(
         .await
     {
         Ok((raw, mut usage)) => {
+            reconcile_boundary_duration(&mut usage, elapsed_ms(started));
             usage.completeness = UsageCompleteness::Final;
             usage.outcome.get_or_insert_with(|| "success".into());
             accounting.observe(&usage);
@@ -2575,6 +2577,7 @@ async fn transparent_stream_response(
     gemini: Option<GeminiRoute>,
     permit: Arc<AdmissionPermit>,
 ) -> Response {
+    let started = std::time::Instant::now();
     let Some(forwarder) = provider.raw_forwarder() else {
         accounting.set_outcome("error");
         accounting.finalize();
@@ -2615,17 +2618,21 @@ async fn transparent_stream_response(
         let _open = accounting.state.metrics.stream_open_guard();
         let mut seen_usage = false;
         let mut delta_bytes: u64 = 0;
+        let mut boundary_ttft_ms: Option<u64> = None;
         while let Some(item) = upstream.next().await {
             match item {
                 Ok(chunk) => {
                     if let Some(parsed) = chunk.usage {
                         // Terminal frame: the finalized, source-measured usage.
                         let mut usage: UsageV2 = parsed.into();
+                        reconcile_boundary_duration(&mut usage, elapsed_ms(started));
+                        reconcile_boundary_ttft(&mut usage, boundary_ttft_ms);
                         usage.completeness = UsageCompleteness::Final;
                         usage.outcome.get_or_insert_with(|| "success".into());
                         accounting.observe(&usage);
                         seen_usage = true;
                     } else if !chunk.data.is_empty() {
+                        boundary_ttft_ms.get_or_insert_with(|| elapsed_ms(started));
                         // Running Partial so a disconnect settles accrued spend. `usage_running`
                         // carries whatever the family has already announced — for Anthropic that
                         // is input plus the full cache split from `message_start`, which is the
@@ -3289,6 +3296,8 @@ fn reported_parts(usage: &UsageV2) -> ParsedUsage {
         cache_read_tokens: usage.cache_read_tokens,
         reasoning_tokens: usage.reasoning_tokens.unwrap_or(0),
         reasoning_included: usage.reasoning_included,
+        duration_ms: None,
+        time_to_first_token_ms: None,
     }
 }
 
@@ -3384,6 +3393,31 @@ fn usage_event(
     )
     .with_basis(usage.basis)
     .with_latency(usage.duration_ms, usage.time_to_first_token_ms)
+    .with_latency_sources(usage.duration_source, usage.time_to_first_token_source)
+}
+
+fn elapsed_ms(started: std::time::Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn reconcile_boundary_duration(usage: &mut UsageV2, boundary_ms: u64) {
+    if usage.duration_ms.is_some() {
+        usage.duration_source.get_or_insert(LatencySource::Origin);
+    } else {
+        usage.duration_ms = Some(boundary_ms);
+        usage.duration_source = Some(LatencySource::Boundary);
+    }
+}
+
+fn reconcile_boundary_ttft(usage: &mut UsageV2, boundary_ms: Option<u64>) {
+    if usage.time_to_first_token_ms.is_some() {
+        usage
+            .time_to_first_token_source
+            .get_or_insert(LatencySource::Origin);
+    } else if let Some(boundary_ms) = boundary_ms {
+        usage.time_to_first_token_ms = Some(boundary_ms);
+        usage.time_to_first_token_source = Some(LatencySource::Boundary);
+    }
 }
 
 #[cfg(test)]
@@ -3399,7 +3433,9 @@ mod usage_event_tests {
         // unconditionally) and the store/query layer is fully built to consume it.
         let usage = UsageV2 {
             duration_ms: Some(1234),
+            duration_source: Some(LatencySource::Origin),
             time_to_first_token_ms: Some(56),
+            time_to_first_token_source: Some(LatencySource::Boundary),
             ..UsageV2::default()
         };
         let event = usage_event(
@@ -3410,7 +3446,12 @@ mod usage_event_tests {
             None,
         );
         assert_eq!(event.duration_ms, Some(1234));
+        assert_eq!(event.duration_source, Some(LatencySource::Origin));
         assert_eq!(event.time_to_first_token_ms, Some(56));
+        assert_eq!(
+            event.time_to_first_token_source,
+            Some(LatencySource::Boundary)
+        );
     }
 
     #[test]
@@ -3705,6 +3746,8 @@ mod partial_accounting_tests {
         cache_creation_tokens: 2048,
         cache_read_tokens: 4096,
         reasoning_tokens: 0,
+        duration_ms: None,
+        time_to_first_token_ms: None,
     };
 
     /// The audit flagged this factor as unverified. It is an estimate by construction; what must be

@@ -38,13 +38,24 @@
       "minimum": 0.0
     },
     "duration_ms": {
-      "description": "Wall-clock duration of the logical call in milliseconds, measured at the adapter boundary (includes retries; excludes host-side queueing).",
+      "description": "Wall-clock duration of the logical call in milliseconds. See `duration_source`.",
       "type": [
         "integer",
         "null"
       ],
       "format": "uint64",
       "minimum": 0.0
+    },
+    "duration_source": {
+      "description": "Whether duration was measured at the origin or at Sandhi's provider boundary.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/LatencySource"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "gpu_seconds": {
       "description": "Self-hosted backends only: GPU-seconds (the cost basis there).",
@@ -155,13 +166,24 @@
       ]
     },
     "time_to_first_token_ms": {
-      "description": "Streams only: milliseconds from request start to the first delivered item.",
+      "description": "Streams only: milliseconds from request start to the first delivered item. See `time_to_first_token_source`.",
       "type": [
         "integer",
         "null"
       ],
       "format": "uint64",
       "minimum": 0.0
+    },
+    "time_to_first_token_source": {
+      "description": "Whether TTFT was measured at the origin or at Sandhi's provider boundary.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/LatencySource"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "tokens_in": {
       "type": "integer",
@@ -229,6 +251,25 @@
           "type": "string",
           "enum": [
             "self_hosted"
+          ]
+        }
+      ]
+    },
+    "LatencySource": {
+      "description": "Which side of the provider boundary measured a latency field (TD-0027 S4).",
+      "oneOf": [
+        {
+          "description": "Reported by the model-serving origin in its response usage object.",
+          "type": "string",
+          "enum": [
+            "origin"
+          ]
+        },
+        {
+          "description": "Measured by Sandhi around the provider call because the origin omitted the field.",
+          "type": "string",
+          "enum": [
+            "boundary"
           ]
         }
       ]

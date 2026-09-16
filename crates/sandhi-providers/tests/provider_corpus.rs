@@ -25,6 +25,8 @@ fn parse_expected(s: &str) -> ParsedUsage {
         cache_creation_tokens: v["cache_creation_tokens"].as_u64().unwrap(),
         cache_read_tokens: v["cache_read_tokens"].as_u64().unwrap(),
         reasoning_tokens: 0,
+        duration_ms: None,
+        time_to_first_token_ms: None,
     }
 }
 
@@ -250,7 +252,7 @@ async fn ollama_stream_fixture_yields_expected_and_forwards_verbatim() {
 // InferFlux's tolerated deviations from OpenAI's streaming shape remain visible (content
 // chunks carry no `"usage": null` sibling; first delta has no `role`) and the stream test
 // still asserts byte-exact passthrough of the real frame, timings included (I3 rides the
-// same usage frame; the typed boundary stamps its own latency separately, `typed.rs`).
+// same usage frame; origin timings survive and the typed boundary is fallback-only, `typed.rs`).
 
 #[tokio::test]
 async fn inferflux_complete_fixture_meters_the_cache_split() {
@@ -269,10 +271,9 @@ async fn inferflux_complete_fixture_meters_the_cache_split() {
         ))
         .await
         .unwrap();
-    assert_eq!(
-        out.usage,
-        parse_expected(include_str!("fixtures/inferflux/expected_usage.json"))
-    );
+    let mut expected = parse_expected(include_str!("fixtures/inferflux/expected_usage.json"));
+    expected.duration_ms = Some(418);
+    assert_eq!(out.usage, expected);
     // The split, spelled out: the whole prompt was a cache hit.
     assert_eq!(out.usage.cache_read_tokens, 50);
     assert_eq!(out.usage.tokens_in, 0);
@@ -298,9 +299,9 @@ async fn inferflux_stream_fixture_yields_expected_and_forwards_verbatim() {
         .unwrap();
     let (forwarded, usage) = drain(stream).await;
     assert_eq!(forwarded, sse.as_bytes());
-    assert_eq!(
-        usage,
-        parse_expected(include_str!("fixtures/inferflux/expected_usage.json"))
-    );
+    let mut expected = parse_expected(include_str!("fixtures/inferflux/expected_usage.json"));
+    expected.duration_ms = Some(423);
+    expected.time_to_first_token_ms = Some(31);
+    assert_eq!(usage, expected);
     assert_eq!(usage.cache_read_tokens, 50, "the stream split meters too");
 }

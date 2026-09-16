@@ -688,6 +688,8 @@ mod tests {
                 cache_creation_tokens: 4,
                 cache_read_tokens: 5,
                 reasoning_tokens: 0,
+                duration_ms: None,
+                time_to_first_token_ms: None,
             },
             "fallback",
         )
@@ -737,6 +739,8 @@ mod tests {
                         cache_creation_tokens: 4,
                         cache_read_tokens: 5,
                         reasoning_tokens: 0,
+                        duration_ms: None,
+                        time_to_first_token_ms: None,
                     }),
                     usage_running: None,
                     attempts: 1,

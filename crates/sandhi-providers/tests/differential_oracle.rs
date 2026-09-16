@@ -33,6 +33,8 @@ fn parse_expected(s: &str) -> ParsedUsage {
         cache_creation_tokens: v["cache_creation_tokens"].as_u64().unwrap(),
         cache_read_tokens: v["cache_read_tokens"].as_u64().unwrap(),
         reasoning_tokens: 0,
+        duration_ms: None,
+        time_to_first_token_ms: None,
     }
 }
 
@@ -53,6 +55,8 @@ fn oracle_openai(usage: &Value) -> ParsedUsage {
         cache_creation_tokens: 0,
         cache_read_tokens: cached.max(0) as u64,
         reasoning_tokens: 0,
+        duration_ms: None,
+        time_to_first_token_ms: None,
     }
 }
 
@@ -65,6 +69,8 @@ fn oracle_anthropic(usage: &Value) -> ParsedUsage {
         cache_creation_tokens: u.cache_creation_input_tokens.unwrap_or(0).max(0) as u64,
         cache_read_tokens: u.cache_read_input_tokens.unwrap_or(0).max(0) as u64,
         reasoning_tokens: 0,
+        duration_ms: None,
+        time_to_first_token_ms: None,
     }
 }
 
