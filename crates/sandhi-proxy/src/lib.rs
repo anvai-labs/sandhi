@@ -2520,12 +2520,14 @@ async fn transparent_complete_response(
     // catalog-declared vendor affinity header when one exists. Attribution (subject/group/
     // virtual key) is key-authoritative metering input consumed by `usage_event`, never
     // forwarded (ADR-0001 §4).
+    let call_headers = accounting.per_call_wire_headers();
     match forwarder
-        .forward_metered(
+        .forward_metered_with_headers(
             &upstream_path(provider.family(), gemini.as_ref()),
             body,
             session.as_deref(),
             Some(accounting.request_id.as_str()),
+            &call_headers,
         )
         .await
     {
@@ -2572,12 +2574,14 @@ async fn transparent_stream_response(
     // Only the neutral conversation key crosses this seam (ADR-0008 D3): it maps onto the
     // catalog-declared vendor affinity header when one exists. Attribution is metering
     // input, never forwarded (ADR-0001 §4).
+    let call_headers = accounting.per_call_wire_headers();
     let raw = match forwarder
-        .forward_stream_metered(
+        .forward_stream_metered_with_headers(
             &upstream_path(provider.family(), gemini.as_ref()),
             body,
             session.as_deref(),
             Some(accounting.request_id.as_str()),
+            &call_headers,
         )
         .await
     {
@@ -2854,12 +2858,11 @@ impl RequestAccounting {
         matches!(self.state.ledger.lock().map(|l| l.is_volatile()), Ok(true))
     }
 
-    /// Per-call wire headers for the typed plane (TD-0022 D1, caller-owned injection):
+    /// Per-call wire headers for both forwarding planes (TD-0022 D1, caller-owned injection):
     /// this call's minted id on the vendor's declared correlation header (ADR-0008 D6;
     /// empty when the upstream declares none) plus the caller's W3C `traceparent`, so the
     /// upstream can emit a *child* of the caller's span and the echoed trace context
-    /// genuinely links back. (The transparent plane rebuilds request headers from transport
-    /// config and does not forward the caller's traceparent — a known, documented gap.)
+    /// genuinely links back.
     fn per_call_wire_headers(&self) -> HeaderMap {
         let mut out = HeaderMap::new();
         if let Some(name) = sandhi_providers::client_request_id_header(&self.provider) {

@@ -1,123 +1,321 @@
-"""Three-way conformance: InferFlux origin behind Sandhi proxy behind the openai SDK.
+"""Pinned InferFlux origin behind the real Sandhi proxy and OpenAI SDK.
 
-Skips when INFERFLUX_SERVER_BIN is not set (needs a built inferfluxd binary).
-Launches InferFlux in stub mode (no GGUF required), configures Sandhi to proxy
-to it via the ADR-0008 catalog path, and drives the openai SDK through the
-proxy. Pins: usage echo fidelity, cached_tokens propagation, include_usage
-injection, session + client-request-id header mapping.
+The suite is skip-gated by ``INFERFLUX_SERVER_BIN``. CI builds the exact commit
+recorded in ``inferflux_pin`` in CPU/stub mode; local runs may point at any
+compatible ``inferfluxd``. Two canned completion families must produce the same
+public reasoning/content shape.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import signal
+import re
 import socket
 import subprocess
-import sys
+import threading
 import time
+import urllib.error
 import urllib.request
+from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
 pytest.importorskip("openai")
 
 INFERFLUX_BIN = os.environ.get("INFERFLUX_SERVER_BIN", "")
+INFERFLUX_CONFIG = os.environ.get("INFERFLUX_CONFIG", "config/server.yaml")
+REPO_ROOT = Path(__file__).resolve().parents[2]
+TRACE_ID = "4bf92f3577b34da6a3ce929d0e0e4736"
+TRACEPARENT = f"00-{TRACE_ID}-00f067aa0ba902b7-01"
+
+
+@dataclass(frozen=True)
+class ReasoningCase:
+    family: str
+    completion: str
+
+
+REASONING_CASES = (
+    ReasoningCase("think-tags", "<think>chain of thought</think>visible answer"),
+    ReasoningCase(
+        "harmony-channels",
+        "<|channel|>analysis<|message|>chain of thought<|end|>"
+        "<|start|>assistant<|channel|>final<|message|>visible answer<|return|>",
+    ),
+)
+
+
+@dataclass
+class RecordedRequest:
+    headers: dict[str, str]
+    body: dict
+
+
+@dataclass
+class RecordingForwarder:
+    origin: str
+    requests: list[RecordedRequest] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class OriginRuntime:
+    case: ReasoningCase
+    base_url: str
+
+
+@dataclass(frozen=True)
+class ProxyRuntime:
+    case: ReasoningCase
+    base_url: str
+    recorder: RecordingForwarder
 
 
 def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
-def _wait_ready(port: int, timeout: float = 30.0) -> bool:
-    import urllib.error
+def _wait_ready(url: str, process: subprocess.Popen, timeout: float = 30.0) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if process.poll() is not None:
+            raise AssertionError(f"process exited early with status {process.returncode}")
         try:
-            urllib.request.urlopen(f"http://127.0.0.1:{port}/readyz", timeout=2)
-            return True
+            urllib.request.urlopen(url, timeout=2).read()
+            return
         except urllib.error.HTTPError:
-            return True  # responding (even 503 means the server is up)
-        except Exception:
+            return
+        except (urllib.error.URLError, ConnectionError, TimeoutError):
             time.sleep(0.2)
-    return False
+    raise AssertionError(f"process did not become ready at {url}")
+
+
+def _stop(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def _recording_handler(recorder: RecordingForwarder):
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_POST(self):  # noqa: N802 - stdlib callback name
+            length = int(self.headers.get("content-length", "0"))
+            raw = self.rfile.read(length) if length else b"{}"
+            recorder.requests.append(
+                RecordedRequest(
+                    headers={key.lower(): value for key, value in self.headers.items()},
+                    body=json.loads(raw),
+                )
+            )
+            forwarded_headers = {
+                key: value
+                for key, value in self.headers.items()
+                if key.lower() not in {"host", "content-length", "connection"}
+            }
+            forwarded_headers["Accept-Encoding"] = "identity"
+            request = urllib.request.Request(
+                recorder.origin + self.path,
+                data=raw,
+                headers=forwarded_headers,
+                method="POST",
+            )
+            try:
+                upstream = urllib.request.urlopen(request, timeout=30)
+            except urllib.error.HTTPError as error:
+                upstream = error
+            payload = upstream.read()
+            self.send_response(upstream.status)
+            for key, value in upstream.headers.items():
+                if key.lower() not in {
+                    "connection",
+                    "content-length",
+                    "keep-alive",
+                    "transfer-encoding",
+                }:
+                    self.send_header(key, value)
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    return Handler
+
+
+@pytest.fixture(scope="module", params=REASONING_CASES, ids=lambda case: case.family)
+def inferflux_origin(request, tmp_path_factory):
+    if not INFERFLUX_BIN:
+        pytest.skip("INFERFLUX_SERVER_BIN not set")
+    case = request.param
+    port = _free_port()
+    policy_store = tmp_path_factory.mktemp(f"inferflux-{case.family}") / "policy.conf"
+    env = {
+        **os.environ,
+        "INFERFLUX_MODEL_PATH": "",
+        "INFERFLUX_PORT_OVERRIDE": str(port),
+        "INFERFLUX_DISABLE_STARTUP_ADVISOR": "true",
+        "INFERFLUX_STUB_COMPLETION": case.completion,
+        "INFERFLUX_POLICY_STORE": str(policy_store),
+    }
+    process = subprocess.Popen(
+        [INFERFLUX_BIN, "--config", INFERFLUX_CONFIG],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        _wait_ready(f"http://127.0.0.1:{port}/readyz", process)
+        yield OriginRuntime(case=case, base_url=f"http://127.0.0.1:{port}")
+    finally:
+        _stop(process)
 
 
 @pytest.fixture(scope="module")
-def inferflux_port():
-    """Launch inferfluxd in stub mode; yield the port; clean up."""
-    if not INFERFLUX_BIN:
-        pytest.skip("INFERFLUX_SERVER_BIN not set")
+def recording_origin(inferflux_origin):
     port = _free_port()
-    env = dict(
-        os.environ,
-        INFERFLUX_MODEL_PATH="",
-        INFERFLUX_PORT_OVERRIDE=str(port),
-        INFERFLUX_DISABLE_STARTUP_ADVISOR="true",
-    )
-    proc = subprocess.Popen(
-        [INFERFLUX_BIN, "--config", os.environ.get("INFERFLUX_CONFIG", "config/server.yaml")],
-        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    recorder = RecordingForwarder(origin=inferflux_origin.base_url)
+    server = ThreadingHTTPServer(("127.0.0.1", port), _recording_handler(recorder))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield recorder, f"http://127.0.0.1:{port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.fixture(scope="module")
+def inferflux_proxy(proxy_binary: Path, inferflux_origin, recording_origin):
+    recorder, recording_base = recording_origin
+    port = _free_port()
+    env = {
+        **os.environ,
+        "SANDHI_BIND": f"127.0.0.1:{port}",
+        "SANDHI_INFERFLUX_KEY": "dev-key-123",
+        "SANDHI_INFERFLUX_BASE": recording_base + "/v1",
+    }
+    process = subprocess.Popen(
+        [str(proxy_binary)],
+        cwd=REPO_ROOT,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     try:
-        if not _wait_ready(port):
-            pytest.skip("inferfluxd did not become ready")
-        yield port
+        base_url = f"http://127.0.0.1:{port}"
+        _wait_ready(base_url + "/healthz", process)
+        yield ProxyRuntime(
+            case=inferflux_origin.case,
+            base_url=base_url + "/v1",
+            recorder=recorder,
+        )
     finally:
-        proc.send_signal(signal.SIGTERM)
-        proc.wait(timeout=10)
+        _stop(process)
 
 
-class TestInferFluxOrigin:
-    """Pins the InferFlux-origin contract through the Sandhi proxy."""
+@pytest.fixture(scope="module")
+def inferflux_client(inferflux_proxy):
+    import openai
 
-    def test_usage_echo_non_streaming(self, inferflux_port):
-        """Non-streaming usage from InferFlux passes through Sandhi verbatim."""
-        import openai
-        client = openai.OpenAI(
-            base_url=f"http://127.0.0.1:{inferflux_port}/v1",
-            api_key="dev-key-123",
-        )
-        resp = client.chat.completions.create(
-            model="default", messages=[{"role": "user", "content": "hi"}],
-            max_tokens=5, temperature=0,
-        )
-        assert resp.usage is not None
-        assert resp.usage.prompt_tokens > 0
-        assert resp.usage.completion_tokens > 0
+    return openai.OpenAI(base_url=inferflux_proxy.base_url, api_key="vk_inferflux_demo")
 
-    def test_usage_chunk_streaming(self, inferflux_port):
-        """Streaming with include_usage=true produces a terminal usage chunk."""
-        import openai
-        client = openai.OpenAI(
-            base_url=f"http://127.0.0.1:{inferflux_port}/v1",
-            api_key="dev-key-123",
-        )
-        stream = client.chat.completions.create(
-            model="default",
-            messages=[{"role": "user", "content": "hi"}],
-            max_tokens=5, temperature=0,
-            stream=True, stream_options={"include_usage": True},
-        )
-        usage = None
-        for chunk in stream:
-            if chunk.usage is not None:
-                usage = chunk.usage
-        assert usage is not None, "terminal usage chunk missing"
-        assert usage.prompt_tokens > 0
 
-    def test_error_envelope_openai_shape(self, inferflux_port):
-        """Errors through Sandhi use the OpenAI envelope (message/type/code)."""
-        import openai
-        client = openai.OpenAI(
-            base_url=f"http://127.0.0.1:{inferflux_port}/v1",
-            api_key="dev-key-123",
+def _request_options() -> dict:
+    return {
+        "model": "default",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 64,
+        "temperature": 0,
+    }
+
+
+def test_buffered_reasoning_and_usage_shape(inferflux_client, inferflux_proxy):
+    response = inferflux_client.chat.completions.create(**_request_options())
+    payload = response.to_dict()
+    message = payload["choices"][0]["message"]
+    assert message["reasoning_content"] == "chain of thought"
+    assert message["content"] == "visible answer"
+    assert "chain of thought" not in message["content"]
+    usage = payload["usage"]
+    assert usage["prompt_tokens_details"]["cached_tokens"] >= 0
+    assert usage["completion_tokens_details"]["reasoning_tokens"] > 0
+
+
+def test_streaming_reasoning_and_terminal_usage(inferflux_client, inferflux_proxy):
+    stream = inferflux_client.chat.completions.create(
+        **_request_options(),
+        stream=True,
+        stream_options={"include_usage": True},
+    )
+    reasoning, content, usage = [], [], None
+    for chunk in stream:
+        payload = chunk.to_dict()
+        if payload.get("usage"):
+            usage = payload["usage"]
+        if payload.get("choices"):
+            delta = payload["choices"][0].get("delta") or {}
+            reasoning.append(delta.get("reasoning_content") or "")
+            content.append(delta.get("content") or "")
+    assert "".join(reasoning) == "chain of thought"
+    assert "".join(content) == "visible answer"
+    assert "chain of thought" not in "".join(content)
+    assert usage is not None, "terminal usage chunk missing"
+    assert usage["prompt_tokens_details"]["cached_tokens"] >= 0
+    assert usage["completion_tokens_details"]["reasoning_tokens"] > 0
+
+
+def test_correlation_and_trace_headers_round_trip(inferflux_client, inferflux_proxy):
+    raw = inferflux_client.chat.completions.with_raw_response.create(
+        **_request_options(),
+        extra_headers={"traceparent": TRACEPARENT},
+    )
+    payload = raw.parse().to_dict()
+    correlation = raw.headers["x-inferflux-client-request-id"]
+    assert correlation.startswith("req_")
+    assert payload["client_request_id"] == correlation
+    child = raw.headers["traceparent"]
+    assert re.fullmatch(rf"00-{TRACE_ID}-[0-9a-f]{{16}}-01", child)
+    assert child != TRACEPARENT
+
+
+def test_key_attribution_never_crosses_provider_seam(inferflux_client, inferflux_proxy):
+    inferflux_client.chat.completions.create(**_request_options())
+    request = inferflux_proxy.recorder.requests[-1]
+    assert request.headers["authorization"] == "Bearer dev-key-123"
+    assert not any(name.startswith("x-sandhi-") for name in request.headers)
+    forbidden = {
+        "subject_id",
+        "group_id",
+        "virtual_key_id",
+        "run_id",
+        "step_id",
+        "parent_id",
+    }
+    assert forbidden.isdisjoint(request.body)
+
+
+def test_origin_error_envelope_openai_shape(inferflux_origin):
+    import openai
+
+    client = openai.OpenAI(
+        base_url=inferflux_origin.base_url + "/v1", api_key="dev-key-123"
+    )
+    with pytest.raises(openai.NotFoundError) as caught:
+        client.chat.completions.create(
+            **{**_request_options(), "model": "nonexistent-model"}
         )
-        with pytest.raises(openai.NotFoundError):
-            client.chat.completions.create(
-                model="nonexistent-model",
-                messages=[{"role": "user", "content": "hi"}],
-                max_tokens=5,
-            )
+    error = caught.value.body
+    assert error["message"]
+    assert error["type"] == "inferflux_error"
+    assert error["code"] == "model_not_found"

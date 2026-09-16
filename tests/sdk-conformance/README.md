@@ -74,6 +74,26 @@ and suite success. They contain synthetic data, are not a general redaction guar
 not record human acceptance. See the [decision packet](../../docs/product/m1-acceptance-decisions.md)
 for the remaining owner choices and observed-user tasks.
 
+## Pinned InferFlux origin contract
+
+`test_inferflux_origin.py` adds a real OpenAI SDK → Sandhi → InferFlux path. It launches the
+CPU/stub server recorded by `inferflux_pin` twice: once with a `<think>` completion and once with
+gpt-oss/harmony channels. Both fixtures pin buffered and streaming reasoning separation,
+terminal usage/cache details, request and trace correlation, credential/attribution isolation,
+and the direct origin error envelope. CI checks out and builds that exact full commit SHA with
+ccache; no model or GPU is required.
+
+For a local focused run, build the pinned InferFlux checkout and provide both paths:
+
+```sh
+INFERFLUX_SERVER_BIN=/absolute/inferflux/build/inferfluxd \
+INFERFLUX_CONFIG=/absolute/inferflux/config/server.yaml \
+  python -m pytest tests/sdk-conformance/test_inferflux_origin.py -q
+```
+
+A contract-changing PR must update `inferflux_pin` in the same PR or a same-day follow-up, and
+the new revision must pass this focused suite before the pin moves.
+
 ## Optional AgentBrowser integration
 
 Use a built sibling checkout with Node 22 and its Chromium installed. Reviewed source revision:
