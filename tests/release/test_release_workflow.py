@@ -179,7 +179,7 @@ def check_verification(document):
 def check_ci(document):
     job = document["jobs"]["release-safeguards"]
     assert job["name"] == "Release safeguards"
-    assert job["runs-on"] == "ubuntu-latest"
+    assert job["runs-on"] == "ubuntu-24.04"
     assert needs(job) == {"changes"}
     assert job["if"] == "${{ always() && needs.changes.result == 'success' }}", "safeguards must not be path-filtered"
     assert "python -m pytest tests/release -q" in commands(job)
