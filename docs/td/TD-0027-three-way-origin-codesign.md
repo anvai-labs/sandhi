@@ -1,8 +1,9 @@
 # TD-0027: Three-way origin co-design — InferFlux producer contract, reasoning separation, conformance
 
-- **Status:** **Complete** (2026-09-16). InferFlux's producer contract, Sandhi lanes S1-S4,
-  and Victor's consumer-contract pin are merged. The scorecard below records the exact closure
-  evidence; no GPU build or loaded model is required for this model-free wire-contract slice.
+- **Status:** **In progress** (release follow-through, 2026-09-16). S1-S5 were integrated into
+  Sandhi `develop`, not released. The cumulative adversarial review found consumer semantics and
+  conformance-evidence gaps; see the [review and delivery gates](../reviews/three-way-release-review-2026-09-16.md).
+  Model-free wire tests do not establish loaded-model accuracy, performance, or production readiness.
 - **Relates to:** [inferflux-issue-drafts.md](../upstream/inferflux-issue-drafts.md) (drafts 1-7),
   [integration-handoff.md](../upstream/integration-handoff.md) (archived predecessor — that
   document covered a different, earlier integration slice: session affinity, auth
@@ -70,7 +71,7 @@ and the reasoning_content/delta rows immediately below it.
 | InferFlux origin producer contract | Exact usage/cache/reasoning, identity, error shape, resolved model, and latency fields shipped; model-free gaps closed by InferFlux #176 | **Closed** |
 | S1 · Seed record and conformance skeleton | Sandhi #255 merged after the skipped-check routing diagnosis | **Closed** |
 | S2 · Pinned origin conformance | Exact InferFlux commit `273780835f120cbe1a8da4860d72905861e71e29`; CPU/stub build driven through the real Sandhi proxy and OpenAI SDK in CI | **Closed** — Sandhi #256 |
-| S3 · Reservation calibration | Per-`(provider, model)` EWMA uses only final, measured origin events; cold-start/floor/bounds retained; CJK overshoot regression pinned | **Closed** — Sandhi #258 |
+| S3 · Reservation calibration | Per-`(provider, model)` EWMA uses only final, measured origin events; cold-start/floor/bounds retained; synthetic low-ratio overshoot regression pinned | **Integrated** — Sandhi #258; release pending |
 | S4 · Latency semantics | Origin timing wins independently per field and carries `origin` provenance; Sandhi boundary timing fills only absent fields and carries `boundary` | **Closed** — Sandhi #259 |
 | Auth header compatibility | Secured exact-pin e2e succeeds through reqwest's lowercase `authorization`; InferFlux unit coverage also pins header and bearer-scheme casing | **Closed** — InferFlux #52 |
 | Victor consumer boundary | Reasoning frames stay separate from visible content and reasoning usage is contract-pinned | **Closed** — Victor #1066 |
@@ -101,8 +102,9 @@ PR #258 merged at `704d9c50a5ba03219799f8b89cebae0994dcb536`. Sandhi now keeps a
 chars-per-token estimate per `(provider_slug, model)`, updated only from `Final`, measured usage
 (cached input included) and applied only to the input reservation term. Cold start remains 32
 samples, bounds remain `[1.5, 8.0]`, and the 75%-of-baseline floor prevents an optimistic
-reservation collapse. Corpus replay asserts coverage does not regress, while a CJK-heavy test
-pins a reduction in actual `sandhi_settle_overshoot_tokens_total` growth. No tokenizer was added.
+reservation collapse. Synthetic replay checks estimator arithmetic and a low-bytes/token case
+pins a reduction in `sandhi_settle_overshoot_tokens_total` growth. These are not captured
+request/tokenizer pairs or a real CJK corpus. No tokenizer was added.
 
 ### Lane S4 — W8: latency-semantics reconciliation
 
@@ -125,9 +127,13 @@ separate product decision rather than an unclosed producer-contract item.
 
 - Sandhi PRs #255, #256, #258, and #259 all merged with aggregate `CI Success` green.
 - S4's local and CI gates passed `cargo test --workspace`, fmt, clippy, generated-schema/facade
-  drift, Node (24 tests), Python (37 tests), and 86.8% Rust line coverage (threshold 75%).
+  drift, Node (24 tests), Python (37 tests), and 88.32% Rust line coverage (86.80% region
+  coverage; line threshold 75%).
 - The exact pinned InferFlux CPU/stub build passed all ten origin cases locally and the complete
   vendor-SDK/dashboard CI job. This is the authoritative e2e for the model-free contract; GPU
   runners, a loaded model, and Windows packaging are intentionally outside this TD.
-- The S3 replay tests measure reservation coverage and the CJK overshoot counter directly;
-  origin reasoning separation is pinned for both supported fixture families.
+- The S3 synthetic replay measures reservation coverage on its selected ratios, not general
+  workload accuracy. Origin reasoning separation is pinned for both supported fixture families.
+- The release review strengthens the origin suite to 16 cases: a progressive, case-preserving
+  recorder, direct mixed-case auth probes, injected attribution headers, and exact rounded
+  persisted latency comparisons. The original ten cases did not prove all those properties.

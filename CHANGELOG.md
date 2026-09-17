@@ -18,6 +18,26 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+### Added
+
+- Per-provider/model input-reservation calibration from final measured usage, retaining cold
+  start and bounded estimates; no additional tokenizer calls.
+- Per-field origin/boundary latency provenance across events, SQLite, schemas, and bindings
+  (chat contract minor 8), plus pinned InferFlux reasoning/auth/usage conformance.
+
+### Fixed
+
+- Missing origin timing no longer clears existing boundary measurements; malformed timing
+  outside SQLite's signed range is ignored.
+- Origin conformance now preserves streaming delivery and header spelling, injects attribution
+  spoof attempts, and compares persisted timing with the origin's rounded values.
+
+### Compatibility
+
+- New fields on public Rust usage structs require literal/destructuring callers to update.
+  The approved release target is 0.7.0; JSON fields remain additive and optional. Source
+  manifests remain development versions because the release workflow stages tag versions.
+
 ## [0.6.1] — 2026-09-08
 
 **Compatibility exception:** the owner explicitly selected `0.6.1` for this release despite

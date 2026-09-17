@@ -8,7 +8,9 @@ public reasoning/content shape.
 
 from __future__ import annotations
 
+import http.client
 import json
+import math
 import os
 import re
 import sqlite3
@@ -18,6 +20,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -129,29 +132,34 @@ def _recording_handler(recorder: RecordingForwarder):
                 if key.lower() not in {"host", "content-length", "connection"}
             }
             forwarded_headers["Accept-Encoding"] = "identity"
-            request = urllib.request.Request(
-                recorder.origin + self.path,
-                data=raw,
-                headers=forwarded_headers,
-                method="POST",
+            origin = urlsplit(recorder.origin)
+            connection = http.client.HTTPConnection(
+                origin.hostname, origin.port, timeout=30
             )
             try:
-                upstream = urllib.request.urlopen(request, timeout=30)
-            except urllib.error.HTTPError as error:
-                upstream = error
-            payload = upstream.read()
-            self.send_response(upstream.status)
-            for key, value in upstream.headers.items():
-                if key.lower() not in {
-                    "connection",
-                    "content-length",
-                    "keep-alive",
-                    "transfer-encoding",
-                }:
-                    self.send_header(key, value)
-            self.send_header("content-length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+                # http.client preserves header spelling. urllib title-cases it, masking the
+                # secured-origin lowercase Authorization regression this suite must catch.
+                connection.request(
+                    "POST", self.path, body=raw, headers=forwarded_headers
+                )
+                upstream = connection.getresponse()
+                self.send_response(upstream.status)
+                for key, value in upstream.getheaders():
+                    if key.lower() not in {
+                        "connection",
+                        "content-length",
+                        "keep-alive",
+                        "transfer-encoding",
+                    }:
+                        self.send_header(key, value)
+                self.send_header("connection", "close")
+                self.end_headers()
+                # Preserve progressive delivery instead of collecting the whole SSE body.
+                while payload := upstream.read1(65536):
+                    self.wfile.write(payload)
+                    self.wfile.flush()
+            finally:
+                connection.close()
 
     return Handler
 
@@ -278,7 +286,7 @@ def test_buffered_reasoning_and_usage_shape(inferflux_client, inferflux_proxy):
     duration, duration_source, ttft, ttft_source = _latest_latency(
         inferflux_proxy, expect_ttft=False
     )
-    assert duration is not None
+    assert duration == math.floor(usage["duration_ms"] + 0.5)
     assert duration_source == "origin"
     assert ttft is None
     assert ttft_source is None
@@ -291,12 +299,17 @@ def test_streaming_reasoning_and_terminal_usage(inferflux_client, inferflux_prox
         stream_options={"include_usage": True},
     )
     reasoning, content, usage = [], [], None
+    saw_content = False
     for chunk in stream:
         payload = chunk.to_dict()
         if payload.get("usage"):
             usage = payload["usage"]
         if payload.get("choices"):
             delta = payload["choices"][0].get("delta") or {}
+            if delta.get("reasoning_content"):
+                assert not saw_content, "reasoning arrived after visible answer content"
+                assert not delta.get("content"), "reasoning and answer share a frame"
+            saw_content |= bool(delta.get("content"))
             reasoning.append(delta.get("reasoning_content") or "")
             content.append(delta.get("content") or "")
     assert "".join(reasoning) == "chain of thought"
@@ -308,9 +321,9 @@ def test_streaming_reasoning_and_terminal_usage(inferflux_client, inferflux_prox
     duration, duration_source, ttft, ttft_source = _latest_latency(
         inferflux_proxy, expect_ttft=True
     )
-    assert duration is not None
+    assert duration == math.floor(usage["duration_ms"] + 0.5)
     assert duration_source == "origin"
-    assert ttft is not None
+    assert ttft == math.floor(usage["time_to_first_token_ms"] + 0.5)
     assert ttft_source == "origin"
 
 
@@ -329,7 +342,15 @@ def test_correlation_and_trace_headers_round_trip(inferflux_client, inferflux_pr
 
 
 def test_key_attribution_never_crosses_provider_seam(inferflux_client, inferflux_proxy):
-    inferflux_client.chat.completions.create(**_request_options())
+    inferflux_client.chat.completions.create(
+        **_request_options(),
+        extra_headers={
+            "x-sandhi-subject": "spoofed-subject",
+            "x-sandhi-group": "spoofed-group",
+            "x-sandhi-run-id": "private-run",
+            "x-sandhi-step-id": "private-step",
+        },
+    )
     request = inferflux_proxy.recorder.requests[-1]
     assert request.headers["authorization"] == "Bearer dev-key-123"
     assert not any(name.startswith("x-sandhi-") for name in request.headers)
@@ -342,6 +363,23 @@ def test_key_attribution_never_crosses_provider_seam(inferflux_client, inferflux
         "parent_id",
     }
     assert forbidden.isdisjoint(request.body)
+
+
+@pytest.mark.parametrize("header", ["Authorization", "authorization", "AUTHORIZATION"])
+def test_secured_origin_accepts_header_casing(inferflux_origin, header):
+    origin = urlsplit(inferflux_origin.base_url)
+    connection = http.client.HTTPConnection(origin.hostname, origin.port, timeout=5)
+    try:
+        connection.request("GET", "/v1/models", headers={header: "bEaReR dev-key-123"})
+        response = connection.getresponse()
+        response.read()
+        assert response.status == 200
+        connection.request("GET", "/v1/models", headers={header: "Bearer invalid-key"})
+        response = connection.getresponse()
+        response.read()
+        assert response.status == 401
+    finally:
+        connection.close()
 
 
 def test_origin_error_envelope_openai_shape(inferflux_origin):
