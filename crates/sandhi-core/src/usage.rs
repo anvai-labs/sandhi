@@ -70,13 +70,15 @@ impl ParsedUsage {
             .with_tokens(self.tokens_in, self.tokens_out)
             .with_cache(self.cache_creation_tokens, self.cache_read_tokens)
             .with_reasoning((self.reasoning_tokens > 0).then_some(self.reasoning_tokens))
-            .with_reasoning_included(self.reasoning_included)
-            .with_latency(self.duration_ms, self.time_to_first_token_ms)
-            .with_latency_sources(
-                self.duration_ms.map(|_| crate::chat::LatencySource::Origin),
-                self.time_to_first_token_ms
-                    .map(|_| crate::chat::LatencySource::Origin),
-            );
+            .with_reasoning_included(self.reasoning_included);
+        if let Some(duration) = self.duration_ms {
+            event.duration_ms = Some(duration);
+            event.duration_source = Some(crate::chat::LatencySource::Origin);
+        }
+        if let Some(ttft) = self.time_to_first_token_ms {
+            event.time_to_first_token_ms = Some(ttft);
+            event.time_to_first_token_source = Some(crate::chat::LatencySource::Origin);
+        }
         if event.usage_completeness == crate::chat::UsageCompleteness::Unavailable {
             event.usage_completeness = crate::chat::UsageCompleteness::Final;
         }
@@ -116,7 +118,9 @@ pub fn u64_at(v: &Value, key: &str) -> u64 {
 /// misleading boundary measurement.
 fn millis_at(v: &Value, key: &str) -> Option<u64> {
     let value = v.get(key)?.as_f64()?;
-    if !value.is_finite() || value < 0.0 || value > u64::MAX as f64 {
+    // SQLite stores these fields as signed 64-bit integers. Exclude its upper bound after
+    // float rounding too, so malformed origin values cannot persist as negative durations.
+    if !value.is_finite() || value < 0.0 || value.round() >= i64::MAX as f64 {
         return None;
     }
     Some(value.round() as u64)
@@ -374,6 +378,41 @@ pub fn parse_bedrock_usage(response: &Value) -> Option<ParsedUsage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn origin_latency_rejects_values_that_cannot_be_persisted() {
+        for value in [
+            serde_json::json!(-1),
+            serde_json::json!(u64::MAX),
+            serde_json::json!(1e100),
+        ] {
+            let parsed =
+                parse_openai_usage(&serde_json::json!({"usage": {"duration_ms": value}})).unwrap();
+            assert_eq!(parsed.duration_ms, None);
+        }
+    }
+
+    #[test]
+    fn absent_origin_latency_preserves_existing_boundary_measurement() {
+        let base = UsageEvent::new("r", "now", "p", "m", crate::Backend::External)
+            .with_latency(Some(500), Some(20))
+            .with_latency_sources(
+                Some(crate::LatencySource::Boundary),
+                Some(crate::LatencySource::Boundary),
+            );
+        let event = ParsedUsage {
+            duration_ms: Some(123),
+            ..Default::default()
+        }
+        .apply(base);
+        assert_eq!(event.duration_ms, Some(123));
+        assert_eq!(event.duration_source, Some(crate::LatencySource::Origin));
+        assert_eq!(event.time_to_first_token_ms, Some(20));
+        assert_eq!(
+            event.time_to_first_token_source,
+            Some(crate::LatencySource::Boundary)
+        );
+    }
     use crate::event::Backend;
     use serde_json::json;
     use std::sync::{Arc, Mutex};

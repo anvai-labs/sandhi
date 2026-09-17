@@ -165,9 +165,9 @@ mod tests {
     }
 
     #[test]
-    fn replay_corpus_never_reduces_coverage_and_reduces_cjk_overshoot() {
-        // Representative final observations from the provider corpus plus InferFlux's OpenAI
-        // origin shapes. `input_len` is the serialized request length retained at admission.
+    fn synthetic_replay_preserves_coverage_and_reduces_low_ratio_overshoot() {
+        // Synthetic observations exercise the estimator arithmetic; these are not captured
+        // request/tokenizer pairs and do not establish production or language-corpus coverage.
         let corpus = [
             ("openai", "gpt", 408usize, 102u64, 16u64),
             ("anthropic", "claude", 520, 130, 20),
