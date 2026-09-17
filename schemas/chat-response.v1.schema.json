@@ -181,6 +181,25 @@
         "unknown"
       ]
     },
+    "LatencySource": {
+      "description": "Which side of the provider boundary measured a latency field (TD-0027 S4).",
+      "oneOf": [
+        {
+          "description": "Reported by the model-serving origin in its response usage object.",
+          "type": "string",
+          "enum": [
+            "origin"
+          ]
+        },
+        {
+          "description": "Measured by Sandhi around the provider call because the origin omitted the field.",
+          "type": "string",
+          "enum": [
+            "boundary"
+          ]
+        }
+      ]
+    },
     "MessageContent": {
       "anyOf": [
         {
@@ -312,13 +331,24 @@
           ]
         },
         "duration_ms": {
-          "description": "Wall-clock call duration measured at the typed boundary (W3b) — wire truth, so clients stop self-measuring around the FFI.",
+          "description": "Wall-clock call duration. Origin-reported when available; otherwise measured at Sandhi's typed boundary (TD-0027 S4).",
           "type": [
             "integer",
             "null"
           ],
           "format": "uint64",
           "minimum": 0.0
+        },
+        "duration_source": {
+          "description": "Provenance for `duration_ms`; absent only on legacy/unmeasured records.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LatencySource"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "outcome": {
           "type": [
@@ -350,13 +380,24 @@
           "minimum": 0.0
         },
         "time_to_first_token_ms": {
-          "description": "Time from request dispatch to the first streamed event (streaming only; W3b). Absent on non-streaming calls.",
+          "description": "Time from request dispatch to the first streamed event (streaming only). Origin-reported when available; otherwise measured at Sandhi's typed boundary.",
           "type": [
             "integer",
             "null"
           ],
           "format": "uint64",
           "minimum": 0.0
+        },
+        "time_to_first_token_source": {
+          "description": "Provenance for `time_to_first_token_ms`; absent only on legacy/unmeasured records.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LatencySource"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "tokens_in": {
           "type": "integer",

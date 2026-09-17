@@ -25,6 +25,12 @@ pub struct ParsedUsage {
     /// None is reserved for legacy/custom measurements without an explicit convention.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_included: Option<bool>,
+    /// Origin-reported duration, when present in the provider usage object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// Origin-reported TTFT, when present in the provider usage object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_to_first_token_ms: Option<u64>,
 }
 
 impl From<ParsedUsage> for crate::chat::UsageV2 {
@@ -36,6 +42,14 @@ impl From<ParsedUsage> for crate::chat::UsageV2 {
             cache_read_tokens: value.cache_read_tokens,
             reasoning_tokens: (value.reasoning_tokens > 0).then_some(value.reasoning_tokens),
             reasoning_included: value.reasoning_included,
+            duration_ms: value.duration_ms,
+            duration_source: value
+                .duration_ms
+                .map(|_| crate::chat::LatencySource::Origin),
+            time_to_first_token_ms: value.time_to_first_token_ms,
+            time_to_first_token_source: value
+                .time_to_first_token_ms
+                .map(|_| crate::chat::LatencySource::Origin),
             completeness: crate::chat::UsageCompleteness::Final,
             ..Self::default()
         }
@@ -57,6 +71,14 @@ impl ParsedUsage {
             .with_cache(self.cache_creation_tokens, self.cache_read_tokens)
             .with_reasoning((self.reasoning_tokens > 0).then_some(self.reasoning_tokens))
             .with_reasoning_included(self.reasoning_included);
+        if let Some(duration) = self.duration_ms {
+            event.duration_ms = Some(duration);
+            event.duration_source = Some(crate::chat::LatencySource::Origin);
+        }
+        if let Some(ttft) = self.time_to_first_token_ms {
+            event.time_to_first_token_ms = Some(ttft);
+            event.time_to_first_token_source = Some(crate::chat::LatencySource::Origin);
+        }
         if event.usage_completeness == crate::chat::UsageCompleteness::Unavailable {
             event.usage_completeness = crate::chat::UsageCompleteness::Final;
         }
@@ -90,6 +112,20 @@ pub fn u64_at(v: &Value, key: &str) -> u64 {
     }
 }
 
+/// Read a non-negative millisecond value while accepting the fractional JSON numbers emitted by
+/// model servers whose scheduler uses floating-point durations. Round to the nearest millisecond;
+/// invalid, negative, non-finite, or out-of-range values stay absent rather than becoming a
+/// misleading boundary measurement.
+fn millis_at(v: &Value, key: &str) -> Option<u64> {
+    let value = v.get(key)?.as_f64()?;
+    // SQLite stores these fields as signed 64-bit integers. Exclude its upper bound after
+    // float rounding too, so malformed origin values cannot persist as negative durations.
+    if !value.is_finite() || value < 0.0 || value.round() >= i64::MAX as f64 {
+        return None;
+    }
+    Some(value.round() as u64)
+}
+
 /// Split a total prompt token count into `(fresh_input, inconsistent)` given the cached portion.
 /// When `cached > prompt` (a malformed/inconsistent usage shape) fresh input saturates to `0` and
 /// `inconsistent` is `true` so the caller can surface it — a silent zero-fresh-input is exactly
@@ -110,6 +146,8 @@ fn split_prompt(prompt: u64, cached: u64) -> (u64, bool) {
 /// `usage` object (e.g. an error body).
 pub fn parse_openai_usage(response: &Value) -> Option<ParsedUsage> {
     let usage = response.get("usage")?;
+    let duration_ms = millis_at(usage, "duration_ms");
+    let time_to_first_token_ms = millis_at(usage, "time_to_first_token_ms");
     let completion = u64_at(usage, "completion_tokens");
     let reasoning = usage
         .get("completion_tokens_details")
@@ -133,6 +171,8 @@ pub fn parse_openai_usage(response: &Value) -> Option<ParsedUsage> {
             cache_read_tokens: hit,
             reasoning_tokens: reasoning,
             reasoning_included: Some(true),
+            duration_ms,
+            time_to_first_token_ms,
         });
     }
     let prompt = u64_at(usage, "prompt_tokens");
@@ -155,6 +195,8 @@ pub fn parse_openai_usage(response: &Value) -> Option<ParsedUsage> {
         cache_read_tokens: cached,
         reasoning_tokens: reasoning,
         reasoning_included: Some(true),
+        duration_ms,
+        time_to_first_token_ms,
     })
 }
 
@@ -190,6 +232,8 @@ pub fn parse_openai_responses_usage(response: &Value) -> Option<ParsedUsage> {
         cache_read_tokens: cached,
         reasoning_tokens: reasoning,
         reasoning_included: Some(true),
+        duration_ms: None,
+        time_to_first_token_ms: None,
     })
 }
 
@@ -214,6 +258,8 @@ pub fn parse_anthropic_usage(response: &Value) -> Option<ParsedUsage> {
         cache_read_tokens: u.cache_read_input_tokens.unwrap_or(0).max(0) as u64,
         reasoning_tokens: 0, // Anthropic folds thinking tokens into output_tokens
         reasoning_included: Some(true),
+        duration_ms: None,
+        time_to_first_token_ms: None,
     })
 }
 
@@ -239,6 +285,8 @@ pub fn parse_gemini_usage(response: &Value) -> Option<ParsedUsage> {
         cache_read_tokens: cached,
         reasoning_tokens: u64_at(usage, "thoughtsTokenCount"),
         reasoning_included: Some(false),
+        duration_ms: None,
+        time_to_first_token_ms: None,
     })
 }
 
@@ -265,6 +313,8 @@ pub fn parse_cohere_usage(response: &Value) -> Option<ParsedUsage> {
         cache_read_tokens: 0,
         reasoning_tokens: 0,
         reasoning_included: Some(true),
+        duration_ms: None,
+        time_to_first_token_ms: None,
     })
 }
 
@@ -282,6 +332,8 @@ pub fn parse_ollama_usage(response: &Value) -> Option<ParsedUsage> {
         cache_read_tokens: 0,
         reasoning_tokens: 0,
         reasoning_included: Some(true),
+        duration_ms: None,
+        time_to_first_token_ms: None,
     })
 }
 
@@ -299,6 +351,8 @@ pub fn parse_bedrock_usage(response: &Value) -> Option<ParsedUsage> {
             cache_read_tokens: u64_at(usage, "cache_read_input_tokens"),
             reasoning_tokens: 0,
             reasoning_included: Some(true),
+            duration_ms: None,
+            time_to_first_token_ms: None,
         });
     }
     if response.get("inputTextTokenCount").is_some() {
@@ -314,6 +368,8 @@ pub fn parse_bedrock_usage(response: &Value) -> Option<ParsedUsage> {
             cache_read_tokens: 0,
             reasoning_tokens: 0,
             reasoning_included: Some(true),
+            duration_ms: None,
+            time_to_first_token_ms: None,
         });
     }
     None
@@ -322,6 +378,41 @@ pub fn parse_bedrock_usage(response: &Value) -> Option<ParsedUsage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn origin_latency_rejects_values_that_cannot_be_persisted() {
+        for value in [
+            serde_json::json!(-1),
+            serde_json::json!(u64::MAX),
+            serde_json::json!(1e100),
+        ] {
+            let parsed =
+                parse_openai_usage(&serde_json::json!({"usage": {"duration_ms": value}})).unwrap();
+            assert_eq!(parsed.duration_ms, None);
+        }
+    }
+
+    #[test]
+    fn absent_origin_latency_preserves_existing_boundary_measurement() {
+        let base = UsageEvent::new("r", "now", "p", "m", crate::Backend::External)
+            .with_latency(Some(500), Some(20))
+            .with_latency_sources(
+                Some(crate::LatencySource::Boundary),
+                Some(crate::LatencySource::Boundary),
+            );
+        let event = ParsedUsage {
+            duration_ms: Some(123),
+            ..Default::default()
+        }
+        .apply(base);
+        assert_eq!(event.duration_ms, Some(123));
+        assert_eq!(event.duration_source, Some(crate::LatencySource::Origin));
+        assert_eq!(event.time_to_first_token_ms, Some(20));
+        assert_eq!(
+            event.time_to_first_token_source,
+            Some(crate::LatencySource::Boundary)
+        );
+    }
     use crate::event::Backend;
     use serde_json::json;
     use std::sync::{Arc, Mutex};
@@ -336,6 +427,33 @@ mod tests {
             }
         });
         assert_eq!(parse_openai_usage(&resp).unwrap().reasoning_tokens, 30);
+    }
+
+    #[test]
+    fn openai_parses_fractional_origin_latency_without_touching_tokens() {
+        let parsed = parse_openai_usage(&json!({
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "duration_ms": 123.6,
+                "time_to_first_token_ms": 45.2
+            }
+        }))
+        .unwrap();
+        assert_eq!(parsed.tokens_in, 10);
+        assert_eq!(parsed.tokens_out, 5);
+        assert_eq!(parsed.duration_ms, Some(124));
+        assert_eq!(parsed.time_to_first_token_ms, Some(45));
+
+        let neutral: crate::chat::UsageV2 = parsed.into();
+        assert_eq!(
+            neutral.duration_source,
+            Some(crate::chat::LatencySource::Origin)
+        );
+        assert_eq!(
+            neutral.time_to_first_token_source,
+            Some(crate::chat::LatencySource::Origin)
+        );
     }
 
     #[test]

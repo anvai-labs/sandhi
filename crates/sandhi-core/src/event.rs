@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::chat::{UsageBasis, UsageCompleteness, UsageV2};
+use crate::chat::{LatencySource, UsageBasis, UsageCompleteness, UsageV2};
 
 /// The single billable-token definition (ADR-0005 D4), used identically by reserve, settle,
 /// and the durable aggregate — closing the budget-vs-event divergence.
@@ -167,13 +167,19 @@ pub struct UsageEvent {
     /// Self-hosted backends only: GPU-seconds (the cost basis there).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_seconds: Option<f64>,
-    /// Wall-clock duration of the logical call in milliseconds, measured at the adapter
-    /// boundary (includes retries; excludes host-side queueing).
+    /// Wall-clock duration of the logical call in milliseconds. See `duration_source`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
-    /// Streams only: milliseconds from request start to the first delivered item.
+    /// Whether duration was measured at the origin or at Sandhi's provider boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_source: Option<LatencySource>,
+    /// Streams only: milliseconds from request start to the first delivered item. See
+    /// `time_to_first_token_source`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_to_first_token_ms: Option<u64>,
+    /// Whether TTFT was measured at the origin or at Sandhi's provider boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_to_first_token_source: Option<LatencySource>,
     /// Provider-reported reasoning count (OpenAI `reasoning_tokens`, Gemini
     /// `thoughtsTokenCount`). Inclusion in output is specified by `reasoning_included`;
     /// absent when no separate count is reported.
@@ -224,7 +230,9 @@ impl UsageEvent {
             upstream_request_id: None,
             gpu_seconds: None,
             duration_ms: None,
+            duration_source: None,
             time_to_first_token_ms: None,
+            time_to_first_token_source: None,
             reasoning_tokens: None,
             reasoning_included: None,
         }
@@ -277,6 +285,18 @@ impl UsageEvent {
     ) -> Self {
         self.duration_ms = duration_ms;
         self.time_to_first_token_ms = time_to_first_token_ms;
+        self
+    }
+
+    /// Record latency provenance independently for duration and TTFT.
+    #[must_use]
+    pub fn with_latency_sources(
+        mut self,
+        duration_source: Option<LatencySource>,
+        time_to_first_token_source: Option<LatencySource>,
+    ) -> Self {
+        self.duration_source = duration_source;
+        self.time_to_first_token_source = time_to_first_token_source;
         self
     }
 

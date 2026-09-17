@@ -23,6 +23,10 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'push' }}
 
 jobs:
+  # Keep public/plain-PR jobs on the explicit hosted image. The public-overflow
+  # self-hosted pool carries a colliding ubuntu-latest label but does not meet
+  # the workflow's current glibc/CMake floor; the private route selects that
+  # pool explicitly where intended.
   trust-route:
     # Decides WHICH environment authorizes the privileged path — BEFORE any PR-head code
     # runs anywhere. Runs on ubuntu-latest, touches no pool and no secrets beyond the
@@ -34,7 +38,7 @@ jobs:
     if: >-
       github.event_name == 'pull_request_target' &&
       vars.OWNER_PRIVATE_CI_ENABLED == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       gatekeeper: ${{ steps.route.outputs.gatekeeper }}
     steps:
@@ -74,7 +78,7 @@ jobs:
       (github.event.pull_request.base.ref == 'develop' ||
        github.event.pull_request.base.ref == 'main')
     needs: trust-route
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: ${{ needs.trust-route.outputs.gatekeeper == 'true' && 'owner-private-ci' || 'ci-trusted' }}
     steps:
       - name: Verify immutable owner and same-repository head
@@ -109,7 +113,7 @@ jobs:
           vars.OWNER_PRIVATE_CI_ENABLED == 'true' &&
           needs.authorize-owner.result == 'success')
       )
-    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
+    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-24.04' }}
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       python: ${{ steps.filter.outputs.python }}
@@ -170,7 +174,7 @@ jobs:
   rust:
     needs: changes
     if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.rust == 'true' }}
-    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
+    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -204,7 +208,7 @@ jobs:
   schema:
     needs: changes
     if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.schema == 'true' }}
-    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
+    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -223,7 +227,7 @@ jobs:
   python-binding:
     needs: changes
     if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.python == 'true' }}
-    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
+    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-24.04' }}
     env:
       # Self-hosted runners persist user-site packages across jobs. A sandhi-gateway left
       # there by any other work must never shadow the wheel this job just built — the
@@ -290,7 +294,7 @@ jobs:
           vars.OWNER_PRIVATE_CI_ENABLED == 'true' &&
           needs.authorize-owner.result == 'success')
       )
-    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
+    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -318,7 +322,7 @@ jobs:
     # newly reported advisories against unchanged dependencies between workflow runs.
     needs: changes
     if: ${{ always() && needs.changes.result == 'success' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.python == 'true' || needs.changes.outputs.node == 'true') }}
-    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
+    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -355,7 +359,7 @@ jobs:
           vars.OWNER_PRIVATE_CI_ENABLED == 'true' &&
           needs.authorize-owner.result == 'success')
       )
-    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
+    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-24.04' }}
     steps:
       - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.0
         env:
@@ -377,7 +381,7 @@ jobs:
   node-binding:
     needs: changes
     if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.node == 'true' }}
-    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
+    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -408,7 +412,7 @@ jobs:
   coverage:
     needs: changes
     if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.rust == 'true' }}
-    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
+    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -428,7 +432,7 @@ jobs:
   codegen-drift:
     needs: changes
     if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.codegen == 'true' }}
-    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
+    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -460,7 +464,7 @@ jobs:
     name: SDK conformance (real vendor SDKs)
     needs: changes
     if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.sdk_conformance == 'true' }}
-    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
+    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -471,6 +475,52 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
+      - name: Resolve the pinned InferFlux revision
+        id: inferflux-pin
+        run: |
+          ref=$(tr -d '[:space:]' < tests/sdk-conformance/inferflux_pin)
+          [[ "$ref" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "inferflux_pin must contain one full lowercase commit SHA"
+            exit 1
+          }
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+      - name: Checkout pinned InferFlux (with submodules)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: anvai-labs/inferflux
+          ref: ${{ steps.inferflux-pin.outputs.ref }}
+          path: .inferflux-pinned
+          submodules: recursive
+          persist-credentials: false
+      - name: Install InferFlux CPU build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake libssl-dev libyaml-cpp-dev ccache
+      - name: Restore InferFlux ccache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.ccache
+          key: inferflux-ccache-${{ runner.os }}-${{ hashFiles('tests/sdk-conformance/inferflux_pin') }}
+          restore-keys: |
+            inferflux-ccache-${{ runner.os }}-
+      - name: Build pinned InferFlux CPU stub server
+        working-directory: .inferflux-pinned
+        run: |
+          ccache --max-size=500M
+          ccache --zero-stats
+          cmake -S . -B build-sandhi \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DENABLE_CUDA=OFF \
+            -DENABLE_ROCM=OFF \
+            -DENABLE_MPS=OFF \
+            -DENABLE_BLAS=OFF \
+            -DENABLE_VULKAN=OFF \
+            -DENABLE_MTMD=OFF \
+            -DENABLE_SBOM=OFF
+          cmake --build build-sandhi --target inferfluxd -j2
+          ccache --show-stats
       # The vendors' own clients decide how a request is shaped. Pinning majors keeps a vendor
       # release from turning this gate red without a code change, while still tracking real SDKs.
       - name: Install the vendor SDKs and browser test driver
@@ -478,13 +528,16 @@ jobs:
       - name: Install the dashboard test browser
         run: python -m playwright install --with-deps chromium
       - name: Drive the proxy with vendor SDKs and the served dashboard
+        env:
+          INFERFLUX_SERVER_BIN: ${{ github.workspace }}/.inferflux-pinned/build-sandhi/inferfluxd
+          INFERFLUX_CONFIG: ${{ github.workspace }}/.inferflux-pinned/config/server.yaml
         run: python -m pytest tests/sdk-conformance/ -q
 
   release-safeguards:
     name: Release safeguards
     needs: changes
     if: ${{ always() && needs.changes.result == 'success' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -512,7 +565,7 @@ jobs:
 
   ci-success:
     name: CI Success
-    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-latest' }}
+    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-24.04' }}
     if: >-
       always() && (
         github.event_name == 'push' ||

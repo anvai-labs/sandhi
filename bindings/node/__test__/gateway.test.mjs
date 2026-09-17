@@ -482,11 +482,15 @@ test("usage parsing and metering retain cache attribution", () => {
         prompt_tokens: 100,
         completion_tokens: 20,
         prompt_tokens_details: { cached_tokens: 60 },
+        duration_ms: 418.293085,
+        time_to_first_token_ms: 30.605327,
       },
     }),
   );
   assert.equal(usage.tokensIn, 40);
   assert.equal(usage.cacheReadTokens, 60);
+  assert.equal(usage.durationMs, 418);
+  assert.equal(usage.timeToFirstTokenMs, 31);
 
   const gateway = new Gateway();
   gateway.addVirtualKey("vk", "alice", "platform", "openai");
@@ -496,6 +500,24 @@ test("usage parsing and metering retain cache attribution", () => {
   assert.equal(event.sessionId, "s1");
   // D4 billable counts the cache split: 40 fresh in + 60 cache-read + 20 out = 120.
   assert.equal(gateway.spent("group:platform"), 120);
+
+  const measured = gateway.meter(
+    "vk",
+    "openai",
+    "m",
+    JSON.stringify({
+      usage: {
+        prompt_tokens: 100,
+        completion_tokens: 20,
+        duration_ms: 418.293085,
+        time_to_first_token_ms: 30.605327,
+      },
+    }),
+  );
+  assert.equal(measured.durationMs, 418);
+  assert.equal(measured.durationSource, "origin");
+  assert.equal(measured.timeToFirstTokenMs, 31);
+  assert.equal(measured.timeToFirstTokenSource, "origin");
 });
 
 test("separate reasoning survives parsing, events and accumulated spend", () => {

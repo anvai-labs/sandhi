@@ -51,10 +51,13 @@ use time::OffsetDateTime;
 
 use sandhi_core::{
     billable, derive_session_id_scoped, AlertRegistry, Backend, ChatRequestV1, FinishReasonV1,
-    KeyStore, ParsedUsage, Policy, RequestMetadataV1, Reservation, Sink, UsageBasis,
+    KeyStore, LatencySource, ParsedUsage, Policy, RequestMetadataV1, Reservation, Sink, UsageBasis,
     UsageCompleteness, UsageEvent, UsageV2, VirtualKey,
 };
-use sandhi_providers::{ProviderError, ProviderFamily, ProviderHandle, ProviderRuntime};
+use sandhi_providers::{
+    token_estimate::baseline_estimate, ProviderError, ProviderFamily, ProviderHandle,
+    ProviderRuntime, TokenEstimateCalibrator,
+};
 use sandhi_store::{hash_secret, AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
 
 use codec::{decode_request, encode_response, encode_stream_event, IngressDialect};
@@ -297,6 +300,8 @@ pub struct ProxyState {
     /// TD-0012 per-virtual-key request rate limiting. In-memory: with N replicas the effective
     /// limit is N × the configured value (D2).
     pub rate_limiter: Arc<ratelimit::RateLimiter>,
+    /// TD-0027 S3: per-(provider, model) input estimate learned only from final measured events.
+    token_estimator: Mutex<TokenEstimateCalibrator>,
     /// Declarative desired-state config file (`SANDHI_CONFIG`) backing `/admin/config` +
     /// `/admin/config/apply` — providers/budgets/alerts/vkeys as committable JSON, secrets
     /// referenced by env-var name rather than inlined. `None` disables both routes (404).
@@ -342,6 +347,7 @@ impl ProxyState {
             trusted_proxies: Vec::new(),
             metrics: Arc::new(metrics::Metrics::new()),
             rate_limiter: Arc::new(ratelimit::RateLimiter::new()),
+            token_estimator: Mutex::new(TokenEstimateCalibrator::default()),
             otel: None,
             config_path: None,
         }
@@ -2266,7 +2272,13 @@ async fn handle(
     // A scope is "capped" (for output-bounding) only under a `Block` policy: `Warn` never rejects,
     // so we do not shrink the client's request. An output maximum reduces exposure when the
     // client omitted it; it does not make the estimated total a strict cap (TD-0026 W03).
-    let (ceiling, effective_max) = reservation_ceiling(&request, body.len());
+    let input_len = body.len();
+    let estimated_input = state
+        .token_estimator
+        .lock()
+        .map(|estimator| estimator.estimate(provider.slug(), &request.model, input_len))
+        .unwrap_or_else(|_| baseline_estimate(input_len));
+    let (ceiling, effective_max) = reservation_ceiling(&request, estimated_input);
     // SQLite's transaction remains a synchronous correctness boundary, but it runs on Tokio's
     // blocking pool so its busy timeout never parks an async scheduler worker.
     let Some(mut pending) = reserve_budget(&state, &scope, ceiling, policy).await else {
@@ -2333,6 +2345,7 @@ async fn handle(
         dialect_label(dialect),
         plane,
     );
+    accounting.input_len = input_len;
     accounting.operation = Some(operation);
     // TD-0021 P4 (D1): the METER records the LOGICAL call once — a repeat of a settled
     // `(vkey, idempotency-key)` inside the window has its duplicate usage event dropped
@@ -2504,6 +2517,7 @@ async fn transparent_complete_response(
     gemini: Option<GeminiRoute>,
     permit: Arc<AdmissionPermit>,
 ) -> Response {
+    let started = std::time::Instant::now();
     // Unary path: the permit lives exactly as long as this handler future, which is the whole
     // call. Held only so the compiler sees it alive to the last await.
     let _permit = permit;
@@ -2520,16 +2534,19 @@ async fn transparent_complete_response(
     // catalog-declared vendor affinity header when one exists. Attribution (subject/group/
     // virtual key) is key-authoritative metering input consumed by `usage_event`, never
     // forwarded (ADR-0001 §4).
+    let call_headers = accounting.per_call_wire_headers();
     match forwarder
-        .forward_metered(
+        .forward_metered_with_headers(
             &upstream_path(provider.family(), gemini.as_ref()),
             body,
             session.as_deref(),
             Some(accounting.request_id.as_str()),
+            &call_headers,
         )
         .await
     {
         Ok((raw, mut usage)) => {
+            reconcile_boundary_duration(&mut usage, elapsed_ms(started));
             usage.completeness = UsageCompleteness::Final;
             usage.outcome.get_or_insert_with(|| "success".into());
             accounting.observe(&usage);
@@ -2560,6 +2577,7 @@ async fn transparent_stream_response(
     gemini: Option<GeminiRoute>,
     permit: Arc<AdmissionPermit>,
 ) -> Response {
+    let started = std::time::Instant::now();
     let Some(forwarder) = provider.raw_forwarder() else {
         accounting.set_outcome("error");
         accounting.finalize();
@@ -2572,12 +2590,14 @@ async fn transparent_stream_response(
     // Only the neutral conversation key crosses this seam (ADR-0008 D3): it maps onto the
     // catalog-declared vendor affinity header when one exists. Attribution is metering
     // input, never forwarded (ADR-0001 §4).
+    let call_headers = accounting.per_call_wire_headers();
     let raw = match forwarder
-        .forward_stream_metered(
+        .forward_stream_metered_with_headers(
             &upstream_path(provider.family(), gemini.as_ref()),
             body,
             session.as_deref(),
             Some(accounting.request_id.as_str()),
+            &call_headers,
         )
         .await
     {
@@ -2598,17 +2618,21 @@ async fn transparent_stream_response(
         let _open = accounting.state.metrics.stream_open_guard();
         let mut seen_usage = false;
         let mut delta_bytes: u64 = 0;
+        let mut boundary_ttft_ms: Option<u64> = None;
         while let Some(item) = upstream.next().await {
             match item {
                 Ok(chunk) => {
                     if let Some(parsed) = chunk.usage {
                         // Terminal frame: the finalized, source-measured usage.
                         let mut usage: UsageV2 = parsed.into();
+                        reconcile_boundary_duration(&mut usage, elapsed_ms(started));
+                        reconcile_boundary_ttft(&mut usage, boundary_ttft_ms);
                         usage.completeness = UsageCompleteness::Final;
                         usage.outcome.get_or_insert_with(|| "success".into());
                         accounting.observe(&usage);
                         seen_usage = true;
                     } else if !chunk.data.is_empty() {
+                        boundary_ttft_ms.get_or_insert_with(|| elapsed_ms(started));
                         // Running Partial so a disconnect settles accrued spend. `usage_running`
                         // carries whatever the family has already announced — for Anthropic that
                         // is input plus the full cache split from `message_start`, which is the
@@ -2763,6 +2787,8 @@ struct RequestAccounting {
     reservation: Option<Reservation>,
     provider: String,
     model: String,
+    /// UTF-8 request-body length paired with the final event for estimate calibration.
+    input_len: usize,
     /// TD-0021 P4: when the call carried an `idempotency-key` AND this proxy already
     /// settled that `(vkey, key)` inside the window, the repeat is the SAME logical call
     /// — reusing the original settlement, metered once (D1). `None` otherwise.
@@ -2816,6 +2842,7 @@ impl RequestAccounting {
             reservation,
             provider,
             model: request.model.clone(),
+            input_len: 0,
             dedup: None,
             request_id: next_request_id(),
             metadata: request.metadata.clone(),
@@ -2854,12 +2881,11 @@ impl RequestAccounting {
         matches!(self.state.ledger.lock().map(|l| l.is_volatile()), Ok(true))
     }
 
-    /// Per-call wire headers for the typed plane (TD-0022 D1, caller-owned injection):
+    /// Per-call wire headers for both forwarding planes (TD-0022 D1, caller-owned injection):
     /// this call's minted id on the vendor's declared correlation header (ADR-0008 D6;
     /// empty when the upstream declares none) plus the caller's W3C `traceparent`, so the
     /// upstream can emit a *child* of the caller's span and the echoed trace context
-    /// genuinely links back. (The transparent plane rebuilds request headers from transport
-    /// config and does not forward the caller's traceparent — a known, documented gap.)
+    /// genuinely links back.
     fn per_call_wire_headers(&self) -> HeaderMap {
         let mut out = HeaderMap::new();
         if let Some(name) = sandhi_providers::client_request_id_header(&self.provider) {
@@ -3027,13 +3053,17 @@ impl RequestAccounting {
                 self.finish_reason,
             );
         }
-        self.state.sink.emit(&usage_event(
+        let event = usage_event(
             &self.provider,
             &self.model,
             &self.metadata,
             &usage,
             Some(self.request_id.as_str()),
-        ));
+        );
+        if let Ok(mut estimator) = self.state.token_estimator.lock() {
+            estimator.observe(self.input_len, &event);
+        }
+        self.state.sink.emit(&event);
     }
 }
 
@@ -3185,7 +3215,7 @@ async fn stream_response(
         .expect("valid streaming response")
 }
 
-/// Coarse input-token estimate: bytes of the ingress request body / 4. This replaces a full
+/// Cold-start input-token estimate: bytes of the ingress request body / 4. This replaces a full
 /// re-serialization of the decoded `messages`+`tools` on every request (design audit A4) with a
 /// zero-allocation length read. Direction vs the old formula: dialect envelopes wrap the same
 /// content in their own field names, so for everything except schema-less tools the wire body
@@ -3196,9 +3226,11 @@ async fn stream_response(
 /// `body_length_estimate_stays_within_a_bounded_deficit` — and marginal against the
 /// `DEFAULT_OUTPUT_CEILING`-dominated ceiling, the load-bearing term (ADR-0005 D1); the /4
 /// heuristic's own accuracy error dwarfs it either way (undercounts CJK, overcounts verbose
-/// schemas). A model-aware/tokenizer estimator remains the follow-up.
+/// schemas). TD-0027 S3 keeps this exact rule for the first 31 measured model calls, then applies
+/// the bounded per-model calibration in [`TokenEstimateCalibrator`].
+#[cfg(test)]
 fn input_estimate(body_len: usize) -> u64 {
-    (body_len as u64).saturating_add(3) / 4
+    baseline_estimate(body_len)
 }
 
 /// The reservation **ceiling** (ADR-0005 D1): input estimate + the effective output max (the
@@ -3206,11 +3238,9 @@ fn input_estimate(body_len: usize) -> u64 {
 /// and the effective max so the caller can bound a capped scope's upstream request. This is a
 /// heuristic reservation, NOT a proven upper bound. Output controls alone cannot bound input,
 /// media, provider-added tools or separately reported reasoning across arbitrary providers.
-fn reservation_ceiling(request: &ChatRequestV1, body_len: usize) -> (u64, u64) {
+fn reservation_ceiling(request: &ChatRequestV1, estimated_input: u64) -> (u64, u64) {
     let effective_max = request.max_output_tokens.unwrap_or(DEFAULT_OUTPUT_CEILING);
-    let ceiling = input_estimate(body_len)
-        .saturating_add(effective_max)
-        .max(1);
+    let ceiling = estimated_input.saturating_add(effective_max).max(1);
     (ceiling, effective_max)
 }
 
@@ -3266,6 +3296,8 @@ fn reported_parts(usage: &UsageV2) -> ParsedUsage {
         cache_read_tokens: usage.cache_read_tokens,
         reasoning_tokens: usage.reasoning_tokens.unwrap_or(0),
         reasoning_included: usage.reasoning_included,
+        duration_ms: None,
+        time_to_first_token_ms: None,
     }
 }
 
@@ -3361,6 +3393,31 @@ fn usage_event(
     )
     .with_basis(usage.basis)
     .with_latency(usage.duration_ms, usage.time_to_first_token_ms)
+    .with_latency_sources(usage.duration_source, usage.time_to_first_token_source)
+}
+
+fn elapsed_ms(started: std::time::Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn reconcile_boundary_duration(usage: &mut UsageV2, boundary_ms: u64) {
+    if usage.duration_ms.is_some() {
+        usage.duration_source.get_or_insert(LatencySource::Origin);
+    } else {
+        usage.duration_ms = Some(boundary_ms);
+        usage.duration_source = Some(LatencySource::Boundary);
+    }
+}
+
+fn reconcile_boundary_ttft(usage: &mut UsageV2, boundary_ms: Option<u64>) {
+    if usage.time_to_first_token_ms.is_some() {
+        usage
+            .time_to_first_token_source
+            .get_or_insert(LatencySource::Origin);
+    } else if let Some(boundary_ms) = boundary_ms {
+        usage.time_to_first_token_ms = Some(boundary_ms);
+        usage.time_to_first_token_source = Some(LatencySource::Boundary);
+    }
 }
 
 #[cfg(test)]
@@ -3376,7 +3433,9 @@ mod usage_event_tests {
         // unconditionally) and the store/query layer is fully built to consume it.
         let usage = UsageV2 {
             duration_ms: Some(1234),
+            duration_source: Some(LatencySource::Origin),
             time_to_first_token_ms: Some(56),
+            time_to_first_token_source: Some(LatencySource::Boundary),
             ..UsageV2::default()
         };
         let event = usage_event(
@@ -3387,7 +3446,12 @@ mod usage_event_tests {
             None,
         );
         assert_eq!(event.duration_ms, Some(1234));
+        assert_eq!(event.duration_source, Some(LatencySource::Origin));
         assert_eq!(event.time_to_first_token_ms, Some(56));
+        assert_eq!(
+            event.time_to_first_token_source,
+            Some(LatencySource::Boundary)
+        );
     }
 
     #[test]
@@ -3682,6 +3746,8 @@ mod partial_accounting_tests {
         cache_creation_tokens: 2048,
         cache_read_tokens: 4096,
         reasoning_tokens: 0,
+        duration_ms: None,
+        time_to_first_token_ms: None,
     };
 
     /// The audit flagged this factor as unverified. It is an estimate by construction; what must be
@@ -3825,6 +3891,100 @@ mod partial_accounting_tests {
         assert_eq!(parts.cache_creation_tokens, 33);
         assert_eq!(parts.cache_read_tokens, 44);
         assert_eq!(parts.reasoning_tokens, 55);
+    }
+}
+
+#[cfg(test)]
+mod token_calibration_wiring_tests {
+    use super::*;
+    use sandhi_core::InMemorySink;
+
+    fn state() -> Arc<ProxyState> {
+        Arc::new(ProxyState::new(
+            KeyStore::new(),
+            ProxyLedger::in_memory(),
+            Arc::new(InMemorySink::new()),
+            HashMap::new(),
+            None,
+        ))
+    }
+
+    fn measured_accounting(
+        state: &Arc<ProxyState>,
+        input_len: usize,
+        input_tokens: u64,
+        output_tokens: u64,
+        reservation: Option<Reservation>,
+    ) {
+        let request: ChatRequestV1 =
+            serde_json::from_str(r#"{"model":"qwen","messages":[]}"#).unwrap();
+        let mut accounting = RequestAccounting::new(
+            Arc::clone(state),
+            "vk:test".into(),
+            reservation,
+            "inferflux".into(),
+            &request,
+            "openai",
+            metrics::Plane::Transparent,
+        );
+        accounting.input_len = input_len;
+        accounting.observe(&UsageV2 {
+            tokens_in: input_tokens,
+            tokens_out: output_tokens,
+            completeness: UsageCompleteness::Final,
+            ..Default::default()
+        });
+        accounting.set_outcome("success");
+        accounting.finalize();
+    }
+
+    fn reservation(ceiling: u64) -> Reservation {
+        Reservation {
+            id: 999_999,
+            scope: "vk:test".into(),
+            ceiling,
+            expires_at: OffsetDateTime::now_utc() + time::Duration::minutes(1),
+        }
+    }
+
+    #[test]
+    fn measured_events_train_the_next_reservation_and_reduce_overshoot_metric_growth() {
+        let calibrated = state();
+        for _ in 0..sandhi_providers::token_estimate::CALIBRATION_MIN_SAMPLES {
+            measured_accounting(&calibrated, 300, 100, 10, None);
+        }
+        let estimated_input =
+            calibrated
+                .token_estimator
+                .lock()
+                .unwrap()
+                .estimate("inferflux", "qwen", 300);
+        assert_eq!(estimated_input, 100);
+        measured_accounting(
+            &calibrated,
+            300,
+            100,
+            10,
+            Some(reservation(estimated_input + 10)),
+        );
+
+        let baseline = state();
+        measured_accounting(
+            &baseline,
+            300,
+            100,
+            10,
+            Some(reservation(input_estimate(300) + 10)),
+        );
+
+        assert!(calibrated
+            .metrics
+            .render()
+            .contains("sandhi_settle_overshoot_tokens_total 0"));
+        assert!(baseline
+            .metrics
+            .render()
+            .contains("sandhi_settle_overshoot_tokens_total 25"));
     }
 }
 

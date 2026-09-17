@@ -102,6 +102,22 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
         });
         eprintln!("sandhi-proxy: registered openai upstream + vk_openai_demo");
     }
+    if let Ok(key) = std::env::var("SANDHI_INFERFLUX_KEY") {
+        let base = std::env::var("SANDHI_INFERFLUX_BASE")
+            .unwrap_or_else(|_| "http://127.0.0.1:8080/v1".into());
+        providers.insert(
+            "inferflux".into(),
+            runtime.openai_compat("inferflux", base, key, Default::default(), None, None, None),
+        );
+        keys.insert(VirtualKey {
+            id: "vk_inferflux_demo".into(),
+            subject_id: Some("demo".into()),
+            group_id: Some("demo".into()),
+            upstream_ref: "inferflux".into(),
+            ..Default::default()
+        });
+        eprintln!("sandhi-proxy: registered inferflux upstream + vk_inferflux_demo");
+    }
     if let Ok(key) = std::env::var("SANDHI_ANTHROPIC_KEY") {
         // Symmetric with SANDHI_OPENAI_BASE. Without an override the Anthropic upstream could
         // only ever be the public API — no Anthropic-compatible gateway, no local mock, and no

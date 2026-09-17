@@ -216,18 +216,20 @@ impl RawForwarder {
     /// Non-streaming forward: POST the (envelope-normalized) body bytes to `{base_url}{path}`,
     /// return the status + raw body bytes + curated headers.
     pub async fn forward(&self, path: &str, body: Bytes) -> Result<RawResponse, ProviderError> {
-        self.forward_with_session(path, body, None, None, None, None)
+        self.forward_with_session(path, body, None, None, &HeaderMap::new(), None, None)
             .await
     }
 
     /// Session-aware core of [`Self::forward`]: `session` is the neutral conversation key
     /// mapped onto the catalog-declared vendor affinity header, when one exists.
+    #[allow(clippy::too_many_arguments)]
     async fn forward_with_session(
         &self,
         path: &str,
         body: Bytes,
         session: Option<&str>,
         correlation: Option<&str>,
+        call_headers: &HeaderMap,
         attempt_facts: Option<&crate::attempt::AttemptResponseFacts>,
         response_request_id_header: Option<&str>,
     ) -> Result<RawResponse, ProviderError> {
@@ -235,7 +237,7 @@ impl RawForwarder {
         let out_body = normalize_envelope(self.family, &body, false);
         match tokio::time::timeout(self.complete_timeout, async {
             let resp = self
-                .send_with_session(&url, out_body, session, correlation)
+                .send_with_session(&url, out_body, session, correlation, call_headers)
                 .await?;
             let status = resp.status().as_u16();
             if let Some(facts) = attempt_facts {
@@ -302,6 +304,21 @@ impl RawForwarder {
         session: Option<&str>,
         correlation: Option<&str>,
     ) -> Result<(RawResponse, sandhi_core::UsageV2), ProviderError> {
+        self.forward_metered_with_headers(path, body, session, correlation, &HeaderMap::new())
+            .await
+    }
+
+    /// [`Self::forward_metered`] with per-call wire headers. The supplied map is merged over
+    /// transport defaults after credential/framing names are stripped; catalog-declared
+    /// correlation and session headers are then applied last so their authoritative values win.
+    pub async fn forward_metered_with_headers(
+        &self,
+        path: &str,
+        body: Bytes,
+        session: Option<&str>,
+        correlation: Option<&str>,
+        call_headers: &HeaderMap,
+    ) -> Result<(RawResponse, sandhi_core::UsageV2), ProviderError> {
         let attempt = self.attempt.as_ref();
         let context = attempt.map(|attempt| attempt.context.fresh_call());
         let provider = attempt.map_or("transparent", |attempt| attempt.provider.as_str());
@@ -314,6 +331,7 @@ impl RawForwarder {
                     body,
                     session,
                     correlation,
+                    call_headers,
                     Some(&facts),
                     response_request_id_header,
                 )
@@ -341,6 +359,26 @@ impl RawForwarder {
         session: Option<&str>,
         correlation: Option<&str>,
     ) -> Result<RawMeteredStreamResponse, ProviderError> {
+        self.forward_stream_metered_with_headers(
+            path,
+            body,
+            session,
+            correlation,
+            &HeaderMap::new(),
+        )
+        .await
+    }
+
+    /// [`Self::forward_stream_metered`] with per-call wire headers. This is the transparent
+    /// plane's counterpart to the typed adapters' per-call header map.
+    pub async fn forward_stream_metered_with_headers(
+        &self,
+        path: &str,
+        body: Bytes,
+        session: Option<&str>,
+        correlation: Option<&str>,
+        call_headers: &HeaderMap,
+    ) -> Result<RawMeteredStreamResponse, ProviderError> {
         let attempt = self.attempt.as_ref();
         let context = attempt.map(|attempt| attempt.context.fresh_call());
         let provider = attempt.map_or("transparent", |attempt| attempt.provider.as_str());
@@ -351,7 +389,7 @@ impl RawForwarder {
         let out_body = normalize_envelope(self.family, &body, true);
         let resp = match tokio::time::timeout(
             self.stream_setup_timeout,
-            self.send_with_session(&url, out_body, session, correlation),
+            self.send_with_session(&url, out_body, session, correlation, call_headers),
         )
         .await
         {
@@ -417,7 +455,7 @@ impl RawForwarder {
         url: &str,
         body: Bytes,
     ) -> impl std::future::Future<Output = Result<reqwest::Response, ProviderError>> {
-        self.send_with_session(url, body, None, None)
+        self.send_with_session(url, body, None, None, &HeaderMap::new())
     }
 
     /// Session-aware send: when a catalog-declared affinity header exists and the call
@@ -432,8 +470,9 @@ impl RawForwarder {
         body: Bytes,
         session: Option<&str>,
         correlation: Option<&str>,
+        call_headers: &HeaderMap,
     ) -> impl std::future::Future<Output = Result<reqwest::Response, ProviderError>> {
-        let mut headers = self.extra_headers.clone();
+        let mut headers = crate::merge_call_headers(&self.extra_headers, call_headers);
         // ADR-0008 D6: the caller-minted correlation id rides the vendor's declared header —
         // the same id that becomes the usage event's `request_id`.
         if let (Some(name), Some(value)) = (self.client_request_id_header, correlation) {
@@ -634,13 +673,11 @@ fn is_passthrough_header(name: &str) -> bool {
         || lower == "retry-after"
         || lower == "request-id"
         || lower == "x-request-id"
+        || lower == "x-inferflux-client-request-id"
         || lower == "x-should-retry"
-        // W3C trace context: an upstream's echoed `traceparent` passes through verbatim. On
-        // the typed plane the proxy forwards the caller's traceparent per call, so the echo
-        // is a genuine child span; the transparent plane rebuilds request headers from
-        // transport config and does NOT forward the caller's traceparent — its echo is the
-        // upstream's own root (a documented gap). `tracestate` stays stripped either way:
-        // per-hop routing state, not linkage.
+        // W3C trace context: an upstream's echoed `traceparent` passes through verbatim. Both
+        // forwarding planes send the caller's traceparent per call, so the echo is a genuine
+        // child span. `tracestate` stays stripped: per-hop routing state, not linkage.
         || lower == "traceparent"
         || lower.starts_with("x-ratelimit-")
         || lower.starts_with("ratelimit-")
@@ -732,6 +769,10 @@ mod tests {
         headers.insert("content-type", "application/json".parse().unwrap());
         headers.insert("retry-after", "30".parse().unwrap());
         headers.insert("x-request-id", "req-123".parse().unwrap());
+        headers.insert(
+            "x-inferflux-client-request-id",
+            "req-inferflux-123".parse().unwrap(),
+        );
         headers.insert("x-ratelimit-remaining-requests", "100".parse().unwrap());
         // W3C trace context linkage survives (the child span an upstream echoes); the
         // per-hop `tracestate` does not.
@@ -753,6 +794,7 @@ mod tests {
         assert!(filtered.contains_key("content-type"));
         assert!(filtered.contains_key("retry-after"));
         assert!(filtered.contains_key("x-request-id"));
+        assert!(filtered.contains_key("x-inferflux-client-request-id"));
         assert!(filtered.contains_key("x-ratelimit-remaining-requests"));
         assert!(filtered.contains_key("traceparent"));
         assert!(!filtered.contains_key("tracestate"));

@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use futures_core::Stream;
 use sandhi_core::{
     AssistantOutputV1, ChatMessageV1, ChatRequestV1, ChatResponseV1, ChatStreamEventV1,
-    ContentPart, FinishReasonV1, MessageContent, ProviderErrorV1, ToolCallV1, ToolChoiceMode,
-    ToolChoiceV1, UsageCompleteness, UsageV2,
+    ContentPart, FinishReasonV1, LatencySource, MessageContent, ProviderErrorV1, ToolCallV1,
+    ToolChoiceMode, ToolChoiceV1, UsageCompleteness, UsageV2,
 };
 use serde_json::{json, Map, Value};
 use std::{collections::BTreeMap, pin::Pin, sync::Arc};
@@ -323,7 +323,7 @@ impl ProviderHandle {
         // boundary (W3b) — the one seam every binding and the proxy call.
         let started = std::time::Instant::now();
         let mut response = self.inner.complete(request, call_headers).await?;
-        response.usage.duration_ms = Some(elapsed_ms(started));
+        reconcile_duration(&mut response.usage, elapsed_ms(started));
         Ok(response)
     }
 
@@ -352,7 +352,7 @@ impl ProviderHandle {
             .inner
             .complete_observed(request, call_headers, attempt_context)
             .await?;
-        response.usage.duration_ms = Some(elapsed_ms(started));
+        reconcile_duration(&mut response.usage, elapsed_ms(started));
         Ok(response)
     }
 
@@ -376,6 +376,26 @@ fn elapsed_ms(started: std::time::Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
+fn reconcile_duration(usage: &mut UsageV2, boundary_ms: u64) {
+    if usage.duration_ms.is_some() {
+        usage.duration_source.get_or_insert(LatencySource::Origin);
+    } else {
+        usage.duration_ms = Some(boundary_ms);
+        usage.duration_source = Some(LatencySource::Boundary);
+    }
+}
+
+fn reconcile_ttft(usage: &mut UsageV2, boundary_ms: Option<u64>) {
+    if usage.time_to_first_token_ms.is_some() {
+        usage
+            .time_to_first_token_source
+            .get_or_insert(LatencySource::Origin);
+    } else if let Some(boundary_ms) = boundary_ms {
+        usage.time_to_first_token_ms = Some(boundary_ms);
+        usage.time_to_first_token_source = Some(LatencySource::Boundary);
+    }
+}
+
 /// Rewrite the terminal `Usage` event with wire-truth latency (W3b): duration
 /// spans request dispatch to the usage emission; time-to-first-token is the
 /// first delivered event (parity with the metering decorator's TTFT
@@ -393,8 +413,8 @@ fn stamp_stream_latency(inner: ChatEventStream, started: std::time::Instant) -> 
             }
             match event {
                 ChatStreamEventV1::Usage { mut usage } => {
-                    usage.duration_ms = Some(elapsed_ms(started));
-                    usage.time_to_first_token_ms = ttft_ms;
+                    reconcile_duration(&mut usage, elapsed_ms(started));
+                    reconcile_ttft(&mut usage, ttft_ms);
                     yield ChatStreamEventV1::Usage { usage };
                 }
                 other => yield other,
@@ -1560,6 +1580,8 @@ mod tests {
                         cache_creation_tokens: 0,
                         cache_read_tokens: 4,
                         reasoning_tokens: 0,
+                        duration_ms: None,
+                        time_to_first_token_ms: None,
                     }),
                     usage_running: None,
                     attempts: 3,
@@ -2075,6 +2097,7 @@ mod tests {
             .await
             .unwrap();
         assert!(out.usage.duration_ms.is_some());
+        assert_eq!(out.usage.duration_source, Some(LatencySource::Boundary));
         assert!(out.usage.time_to_first_token_ms.is_none()); // streaming-only
     }
 
@@ -2118,7 +2141,77 @@ mod tests {
         let usage = usage.expect("terminal usage event");
         assert!(usage.duration_ms.is_some());
         assert!(usage.time_to_first_token_ms.is_some());
+        assert_eq!(usage.duration_source, Some(LatencySource::Boundary));
+        assert_eq!(
+            usage.time_to_first_token_source,
+            Some(LatencySource::Boundary)
+        );
         assert!(usage.time_to_first_token_ms <= usage.duration_ms);
+    }
+
+    struct OriginTimedChat;
+
+    #[async_trait]
+    impl ChatProvider for OriginTimedChat {
+        fn slug(&self) -> &str {
+            "inferflux"
+        }
+
+        async fn complete(
+            &self,
+            _: ChatRequestV1,
+            _: http::HeaderMap,
+        ) -> Result<ChatResponseV1, ProviderError> {
+            let mut response = CannedChat
+                .complete(request(), http::HeaderMap::new())
+                .await?;
+            response.usage.duration_ms = Some(123);
+            Ok(response)
+        }
+
+        async fn stream(
+            &self,
+            _: ChatRequestV1,
+            _: http::HeaderMap,
+        ) -> Result<ChatEventStream, ProviderError> {
+            let events = vec![
+                Ok(ChatStreamEventV1::TextDelta { delta: "hi".into() }),
+                Ok(ChatStreamEventV1::Usage {
+                    usage: UsageV2 {
+                        tokens_in: 1,
+                        tokens_out: 1,
+                        duration_ms: Some(456),
+                        time_to_first_token_ms: Some(78),
+                        ..Default::default()
+                    },
+                }),
+            ];
+            Ok(Box::pin(futures_util::stream::iter(events)))
+        }
+    }
+
+    #[tokio::test]
+    async fn origin_latency_wins_over_boundary_timing_and_is_tagged() {
+        let handle = ProviderHandle::new(Arc::new(OriginTimedChat));
+        let completed = handle.complete(request()).await.unwrap();
+        assert_eq!(completed.usage.duration_ms, Some(123));
+        assert_eq!(completed.usage.duration_source, Some(LatencySource::Origin));
+
+        let mut stream = handle.stream(request()).await.unwrap();
+        let mut terminal = None;
+        while let Some(event) = stream.next().await {
+            if let ChatStreamEventV1::Usage { usage } = event.unwrap() {
+                terminal = Some(usage);
+            }
+        }
+        let usage = terminal.unwrap();
+        assert_eq!(usage.duration_ms, Some(456));
+        assert_eq!(usage.time_to_first_token_ms, Some(78));
+        assert_eq!(usage.duration_source, Some(LatencySource::Origin));
+        assert_eq!(
+            usage.time_to_first_token_source,
+            Some(LatencySource::Origin)
+        );
     }
 
     /// Minimal ChatProvider mock for handle tests (never actually completes a call).

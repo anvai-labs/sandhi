@@ -239,7 +239,7 @@ async fn version_endpoint_is_unauthenticated_and_reports_the_contract() {
     let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["wire_contract_version"], "1");
     assert_eq!(value["chat_contract_version"], "1");
-    assert_eq!(value["chat_contract_minor"], 7);
+    assert_eq!(value["chat_contract_minor"], 8);
     let dialects = value["dialects"].as_array().unwrap();
     for expected in ["openai", "anthropic", "responses", "gemini"] {
         assert!(
@@ -1324,6 +1324,10 @@ async fn inferflux_attribution_never_reaches_the_upstream() {
                 .header("authorization", "Bearer vk_demo")
                 .header("content-type", "application/json")
                 .header("x-sandhi-session", "conv_1")
+                .header(
+                    "traceparent",
+                    "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+                )
                 .body(Body::from(
                     r#"{"model":"llama3-8b","messages":[{"role":"user","content":"hi"}],"stream":true}"#,
                 ))
@@ -1357,6 +1361,13 @@ async fn inferflux_attribution_never_reaches_the_upstream() {
     );
     // And the session key rides the affinity header, never the body.
     assert!(sent.headers.contains_key("x-inferflux-session-id"));
+    assert_eq!(
+        sent.headers
+            .get("traceparent")
+            .and_then(|value| value.to_str().ok()),
+        Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"),
+        "the transparent plane forwards the caller's W3C trace context per call"
+    );
     let body: serde_json::Value = serde_json::from_slice(&sent.body).unwrap();
     assert!(
         [

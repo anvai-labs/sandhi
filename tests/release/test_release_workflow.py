@@ -29,6 +29,17 @@ def workflow(name):
     return yaml.load((ROOT / ".github/workflows" / name).read_text(), Loader=yaml.BaseLoader)
 
 
+def test_release_linux_jobs_avoid_colliding_generic_runner_label():
+    # The organization's persistent runners also advertise ubuntu-latest. Release builds
+    # need the same explicit hosted image as CI, not that older-glibc overflow pool.
+    document = workflow("release.yml")
+    assert "ubuntu-latest" not in str(document)
+    for job in document["jobs"].values():
+        if "matrix" not in job.get("strategy", {}):
+            assert job["runs-on"] == "ubuntu-24.04"
+
+
+
 def needs(job):
     value = job.get("needs", [])
     return {value} if isinstance(value, str) else set(value)
@@ -179,7 +190,7 @@ def check_verification(document):
 def check_ci(document):
     job = document["jobs"]["release-safeguards"]
     assert job["name"] == "Release safeguards"
-    assert job["runs-on"] == "ubuntu-latest"
+    assert job["runs-on"] == "ubuntu-24.04"
     assert needs(job) == {"changes"}
     assert job["if"] == "${{ always() && needs.changes.result == 'success' }}", "safeguards must not be path-filtered"
     assert "python -m pytest tests/release -q" in commands(job)

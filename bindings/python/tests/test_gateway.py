@@ -61,17 +61,18 @@ def test_catalog_serves_curated_model_data():
 
 
 def test_parse_usage_keeps_cache_split_single_sourced():
+    response = {
+        "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "prompt_tokens_details": {"cached_tokens": 60},
+            "duration_ms": 418.293085,
+            "time_to_first_token_ms": 30.605327,
+        }
+    }
     openai = sg.parse_usage(
         "openai",
-        json.dumps(
-            {
-                "usage": {
-                    "prompt_tokens": 100,
-                    "completion_tokens": 20,
-                    "prompt_tokens_details": {"cached_tokens": 60},
-                }
-            }
-        ),
+        json.dumps(response),
     )
     assert openai == {
         "tokens_in": 40,
@@ -80,7 +81,17 @@ def test_parse_usage_keeps_cache_split_single_sourced():
         "cache_read_tokens": 60,
         "reasoning_tokens": 0,
         "reasoning_included": True,
+        "duration_ms": 418,
+        "time_to_first_token_ms": 31,
     }
+
+    gateway = sg.Gateway()
+    gateway.add_virtual_key("vk", subject="alice", group="platform", upstream="openai")
+    event = gateway.meter("vk", "openai", "m", json.dumps(response))
+    assert event["duration_ms"] == 418
+    assert event["duration_source"] == "origin"
+    assert event["time_to_first_token_ms"] == 31
+    assert event["time_to_first_token_source"] == "origin"
 
 
 def test_persistent_typed_provider_complete_and_stream():
@@ -1014,6 +1025,8 @@ def test_parse_usage_exercises_every_builtin_provider_parser():
         "cache_read_tokens": 0,
         "reasoning_tokens": 0,
         "reasoning_included": True,
+        "duration_ms": None,
+        "time_to_first_token_ms": None,
     }
     # Remaining parsers are selected by slug; missing fields default to zero via unwrap_or_default,
     # so a minimal body still exercises each match arm.
@@ -1033,6 +1046,8 @@ def test_parse_usage_exercises_every_builtin_provider_parser():
             "cache_read_tokens": 0,
             "reasoning_tokens": 0,
             "reasoning_included": None,
+            "duration_ms": None,
+            "time_to_first_token_ms": None,
         }
     with pytest.raises(ValueError):
         sg.parse_usage("openai", "{nope")

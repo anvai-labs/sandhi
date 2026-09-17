@@ -8,9 +8,12 @@ lights up in Sandhi (and everything downstream of it) with **zero** further chan
 Filing these on the InferFlux tracker is an outward-facing action — confirm before
 posting. Drafts below are ready to paste.
 
+Status (2026-09-14): Drafts 1-3 SHIPPED in InferFlux develop.
+Drafts 4-7 (below) are the next co-design asks.
+
 ---
 
-## Draft 1 — Per-request prompt-cache split in the usage object
+## Draft 1 — SHIPPED: Per-request prompt-cache split in the usage object
 
 **Title:** Report per-request prompt-cache hit/miss tokens in the chat-completions
 `usage` object
@@ -59,7 +62,7 @@ blocking fact for accurate per-request cache attribution.
 
 ---
 
-## Draft 2 — Per-request duration / time-to-first-token in the usage frame
+## Draft 2 — SHIPPED: Per-request duration / time-to-first-token in the usage frame
 
 **Title:** Include per-request `duration_ms` and `time_to_first_token_ms` in the
 usage object (or a sibling field)
@@ -127,3 +130,81 @@ provider with `x-inferflux-session-id` session-affinity mapping). Sandhi measure
 latency itself at the gateway regardless; draft 2 removes the discrepancy between
 gateway-measured and server-measured timings. Draft 3 was verified against a live
 `inferfluxd` v0.1.0 build on 2026-08-31.*
+
+---
+
+## Draft 4 — Reasoning separation (`reasoning_content` + `reasoning_tokens`)
+
+**Title:** Separate `<think>` reasoning from user-facing content and report reasoning tokens
+
+**Body:**
+
+Reasoning models (Qwen3, LFM2.5) emit `<think>...</think>` blocks that currently
+leak into the user-visible `content` field. Gateways and agent frameworks need
+the reasoning text separated so `content` carries only the answer.
+
+**Ask:** at the completion body builder, split `<think>` blocks from `content`:
+
+```jsonc
+"choices": [{
+  "message": {
+    "role": "assistant",
+    "content": "The answer is 255.",
+    "reasoning_content": "15 * 17 = 15 * 10 + 15 * 7 = 150 + 105 = 255."
+  }
+}],
+"usage": {
+  "completion_tokens_details": { "reasoning_tokens": 42 }
+}
+```
+
+Non-breaking: when no `<think>` block is present, `reasoning_content` and
+`reasoning_tokens` are omitted.
+
+---
+
+## Draft 5 — Unique completion ids + `client_request_id` echo
+
+**Title:** Unique completion ids and `client_request_id` echo for request-response correlation
+
+**Body:**
+
+Completion ids use `<prefix><epoch-seconds>`, which collides for concurrent
+requests. And `client_request_id` (accepted from body or the
+`x-inferflux-client-request-id` header) is stored but never echoed.
+
+**Ask:** id = `<prefix><epoch-ms>-<counter>` (unique per call, survives same-ms
+bursts). Echo `client_request_id` in the response body and as a response header
+so gateways can join request-response pairs without guessing.
+
+---
+
+## Draft 6 — Resolved model on completion bodies
+
+**Title:** Report the resolved model (post-capability-fallback) on completion bodies
+
+**Body:**
+
+Completion bodies currently echo the requested model string (or `"unknown"`).
+When capability fallback changes the backend, the gateway cannot tell which
+model actually served. `GET /v1/embeddings` already returns the resolved id.
+
+**Ask:** set the completion body's `model` field to the resolved model id
+(matching the embeddings endpoint's existing behavior).
+
+---
+
+## Draft 7 — Always-emit streaming usage + OpenAI error envelope + rate-limit headers
+
+**Title:** Three gateway-facing contract fixes (usage chunk on stub path, error envelope, rate headers)
+
+**Body:**
+
+Three small changes that make InferFlux a drop-in origin for metering gateways:
+
+1. Emit the terminal streaming usage chunk on every path including the
+   no-backend/stub path (currently the stub path omits it even when
+   `stream_options.include_usage=true`).
+2. Use the OpenAI error envelope `{"error":{"message","type","code"}}` instead
+   of `{"error":"string"}` so SDK clients parse errors correctly.
+3. Add `Retry-After` and `X-RateLimit-Remaining: 0` headers to 429 responses.

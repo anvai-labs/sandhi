@@ -25,7 +25,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use futures_util::Stream;
-use sandhi_core::{Backend, Sink, UsageEvent};
+use sandhi_core::{Backend, LatencySource, Sink, UsageEvent};
 
 use crate::{
     ByteStream, ParsedUsage, Provider, ProviderError, ProviderRequest, ProviderResponse,
@@ -87,16 +87,12 @@ impl Provider for MeteredProvider {
         let resp = self.inner.complete(req).await?;
         let duration_ms = started.elapsed().as_millis() as u64;
         self.sink.emit(
-            &resp
-                .usage
-                .apply(base)
-                .with_latency(Some(duration_ms), None)
-                .with_measurement(
-                    sandhi_core::UsageCompleteness::Final,
-                    resp.attempts,
-                    Some("success".into()),
-                    None,
-                ),
+            &reconcile_event_latency(resp.usage.apply(base), duration_ms, None).with_measurement(
+                sandhi_core::UsageCompleteness::Final,
+                resp.attempts,
+                Some("success".into()),
+                None,
+            ),
         );
         Ok(resp)
     }
@@ -152,14 +148,42 @@ impl MeteredStream {
             };
             let duration_ms = pending.started.elapsed().as_millis() as u64;
             self.sink.emit(
-                &pending
-                    .usage
-                    .apply(pending.base)
-                    .with_latency(Some(duration_ms), pending.ttft_ms)
-                    .with_measurement(completeness, pending.attempts, Some(outcome.into()), None),
+                &reconcile_event_latency(
+                    pending.usage.apply(pending.base),
+                    duration_ms,
+                    pending.ttft_ms,
+                )
+                .with_measurement(
+                    completeness,
+                    pending.attempts,
+                    Some(outcome.into()),
+                    None,
+                ),
             );
         }
     }
+}
+
+fn reconcile_event_latency(
+    mut event: UsageEvent,
+    boundary_duration_ms: u64,
+    boundary_ttft_ms: Option<u64>,
+) -> UsageEvent {
+    if event.duration_ms.is_some() {
+        event.duration_source.get_or_insert(LatencySource::Origin);
+    } else {
+        event.duration_ms = Some(boundary_duration_ms);
+        event.duration_source = Some(LatencySource::Boundary);
+    }
+    if event.time_to_first_token_ms.is_some() {
+        event
+            .time_to_first_token_source
+            .get_or_insert(LatencySource::Origin);
+    } else if let Some(boundary_ttft_ms) = boundary_ttft_ms {
+        event.time_to_first_token_ms = Some(boundary_ttft_ms);
+        event.time_to_first_token_source = Some(LatencySource::Boundary);
+    }
+    event
 }
 
 impl Stream for MeteredStream {
@@ -252,6 +276,8 @@ mod tests {
                 cache_creation_tokens: 5,
                 cache_read_tokens: 60,
                 reasoning_tokens: 0,
+                duration_ms: None,
+                time_to_first_token_ms: None,
             },
             attempts: 1,
         }
@@ -319,7 +345,21 @@ mod tests {
 
         let ev = &sink.events()[0];
         assert!(ev.duration_ms.is_some(), "duration must be measured");
+        assert_eq!(ev.duration_source, Some(LatencySource::Boundary));
         assert!(ev.time_to_first_token_ms.is_none(), "TTFT is streams-only");
+    }
+
+    #[tokio::test]
+    async fn complete_origin_duration_wins_over_meter_boundary() {
+        let sink = Arc::new(InMemorySink::new());
+        let mut response = ok_resp();
+        response.usage.duration_ms = Some(789);
+        let p = MeteredProvider::new(Scripted::new(vec![Ok(response)]), sink.clone());
+        p.complete(attributed_req()).await.unwrap();
+
+        let ev = &sink.events()[0];
+        assert_eq!(ev.duration_ms, Some(789));
+        assert_eq!(ev.duration_source, Some(LatencySource::Origin));
     }
 
     #[tokio::test]
@@ -342,10 +382,12 @@ mod tests {
 
         let ev = &sink.events()[0];
         assert!(ev.duration_ms.is_some(), "duration must be measured");
+        assert_eq!(ev.duration_source, Some(LatencySource::Boundary));
         assert!(
             ev.time_to_first_token_ms.is_some(),
             "TTFT set on first item"
         );
+        assert_eq!(ev.time_to_first_token_source, Some(LatencySource::Boundary));
         assert!(ev.time_to_first_token_ms.unwrap() <= ev.duration_ms.unwrap());
     }
 

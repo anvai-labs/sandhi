@@ -16,7 +16,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use rusqlite::{params, Connection};
-use sandhi_core::{Backend, LatencySummary, Sink, UsageAggregateV1, UsageEvent};
+use sandhi_core::{Backend, LatencySource, LatencySummary, Sink, UsageAggregateV1, UsageEvent};
 
 pub use alerts::{AlertRuleRecord, AlertStore, CreateAlertRequest};
 pub use ledger::{BudgetRow, ReserveOutcome, SqliteLedger};
@@ -29,6 +29,14 @@ pub use vkeys::{MintRequest, MintedKey, VirtualKeyRecord, VirtualKeyStore};
 /// Raw latency samples for one group key: `(duration_ms, time_to_first_token_ms)`.
 /// TTFT is shorter than duration whenever a call was non-streaming.
 type LatencySamples = (Vec<u64>, Vec<u64>);
+
+const fn latency_source_label(source: Option<LatencySource>) -> Option<&'static str> {
+    match source {
+        Some(LatencySource::Origin) => Some("origin"),
+        Some(LatencySource::Boundary) => Some("boundary"),
+        None => None,
+    }
+}
 
 /// Most-recent calls sampled per query when summarising latency (TD-0009 D3).
 const LATENCY_SAMPLE_LIMIT: usize = 10_000;
@@ -138,7 +146,9 @@ impl SqliteStore {
                 virtual_key_id TEXT, subject_id TEXT, group_id TEXT, route TEXT, session_id TEXT,
                 tokens_in INTEGER, tokens_out INTEGER,
                 cache_creation_tokens INTEGER, cache_read_tokens INTEGER, gpu_seconds REAL,
-                duration_ms INTEGER, time_to_first_token_ms INTEGER, reasoning_tokens INTEGER,
+                duration_ms INTEGER, duration_source TEXT,
+                time_to_first_token_ms INTEGER, time_to_first_token_source TEXT,
+                reasoning_tokens INTEGER,
                 run_id TEXT, step_id TEXT, parent_id TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_usage_subject ON usage_events(subject_id);
@@ -154,7 +164,9 @@ impl SqliteStore {
         // EXISTS — attempt and ignore the duplicate-column error so init stays idempotent.
         for ddl in [
             "ALTER TABLE usage_events ADD COLUMN duration_ms INTEGER",
+            "ALTER TABLE usage_events ADD COLUMN duration_source TEXT",
             "ALTER TABLE usage_events ADD COLUMN time_to_first_token_ms INTEGER",
+            "ALTER TABLE usage_events ADD COLUMN time_to_first_token_source TEXT",
             "ALTER TABLE usage_events ADD COLUMN reasoning_tokens INTEGER",
             "ALTER TABLE usage_events ADD COLUMN reasoning_included INTEGER",
             "ALTER TABLE usage_events ADD COLUMN run_id TEXT",
@@ -183,9 +195,10 @@ impl SqliteStore {
                 request_id, occurred_at, provider, model, backend,
                 virtual_key_id, subject_id, group_id, route, session_id,
                 tokens_in, tokens_out, cache_creation_tokens, cache_read_tokens, gpu_seconds,
-                duration_ms, time_to_first_token_ms, reasoning_tokens,
+                duration_ms, duration_source, time_to_first_token_ms,
+                time_to_first_token_source, reasoning_tokens,
                 run_id, step_id, parent_id, reasoning_included
-            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)",
             params![
                 e.request_id,
                 e.occurred_at,
@@ -203,7 +216,9 @@ impl SqliteStore {
                 e.cache_read_tokens as i64,
                 e.gpu_seconds,
                 e.duration_ms.map(|v| v as i64),
+                latency_source_label(e.duration_source),
                 e.time_to_first_token_ms.map(|v| v as i64),
+                latency_source_label(e.time_to_first_token_source),
                 e.reasoning_tokens.map(|v| v as i64),
                 e.run_id,
                 e.step_id,
@@ -523,19 +538,32 @@ mod tests {
         let store = SqliteStore::in_memory().unwrap();
         let event = ev("openai", "alice", "team-a", 100, 20)
             .with_latency(Some(1234), Some(210))
+            .with_latency_sources(Some(LatencySource::Origin), Some(LatencySource::Boundary))
             .with_reasoning(Some(33));
         store.emit(&event);
 
         let conn = store.conn.lock().unwrap();
-        let (duration, ttft, reasoning): (Option<i64>, Option<i64>, Option<i64>) = conn
+        let persisted = conn
             .query_row(
-                "SELECT duration_ms, time_to_first_token_ms, reasoning_tokens FROM usage_events",
+                "SELECT duration_ms, duration_source, time_to_first_token_ms, \
+                 time_to_first_token_source, reasoning_tokens FROM usage_events",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                    ))
+                },
             )
             .unwrap();
+        let (duration, duration_source, ttft, ttft_source, reasoning) = persisted;
         assert_eq!(duration, Some(1234));
+        assert_eq!(duration_source.as_deref(), Some("origin"));
         assert_eq!(ttft, Some(210));
+        assert_eq!(ttft_source.as_deref(), Some("boundary"));
         assert_eq!(reasoning, Some(33));
     }
 
