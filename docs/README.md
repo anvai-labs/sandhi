@@ -18,7 +18,8 @@ mistaken for shipped behavior.
 | What product evolution is proposed and how is it tracked? | [TD-0026 delivery plan](td/TD-0026-gateway-product-evolution.md), [product specification](product/gateway-vision-and-requirements.md), and [2026-09-04 review](reviews/gateway-review-2026-09-04.md); proposals, not shipped claims |
 | What evidence gates the M1 checkpoint? | [Workload and acceptance](product/m1-acceptance.md); UA01 accepts engineering evidence for this release and defers hands-on usability until before production |
 | Which acceptance decisions remain, and why? | [M1 decision packet](product/m1-acceptance-decisions.md); automated evidence, operating-limit choices and a focused user-review script |
-| What is the milestone release state? | [Release safeguards](product/release-safeguards.md); v0.6.0 is fully published and verified across GitHub, PyPI, four crates and three npm packages; protected back-sync remains |
+| What is the milestone release state? | [Release safeguards](product/release-safeguards.md); v0.7.0 is promoted, published and independently verified; evidence back-sync remains |
+| What is the three-way co-design state? | [TD-0027](td/TD-0027-three-way-origin-codesign.md) and [delivery review](reviews/three-way-release-review-2026-09-16.md); original lanes integrated, cross-repository release follow-through in progress |
 | What adversarial checks cover the first checkpoint? | [2026-09-05 checkpoint review](reviews/checkpoint-adversarial-review-2026-09-05.md); findings, corrections and remaining integration gates |
 
 ADRs record durable decisions. Their context sections describe the repository at the time the
@@ -91,7 +92,7 @@ All current ADRs are accepted; ADR-0007 is an accepted **negative** decision.
 
 ## Technical-design status
 
-Status was reconciled with `develop` on 2026-09-02; TD-0026 was added on 2026-09-04.
+Status was reconciled with `develop` on 2026-09-17 for the active TD-0026/0027 delivery checkpoints.
 “Complete” means the TD's required scope is
 shipped; a deliberately transferred or optional follow-up is named in the TD instead of keeping it
 perpetually open.
@@ -123,7 +124,8 @@ perpetually open.
 | [0023](td/TD-0023-release-automation.md) | Complete | Publish mechanics implemented; safeguarded all-target v0.6.0 execution tracked separately in TD-0026 |
 | [0024](td/TD-0024-reservation-retention-and-rollup.md) | Proposed | Bounded reservation history and rollups |
 | [0025](td/TD-0025-ingress-funnel-and-family-registry.md) | Proposed | Family registry and funnel decomposition |
-| [0026](td/TD-0026-gateway-product-evolution.md) | In progress | Accepted M1 milestone promoted/tagged as v0.6.0 and fully published/verified; protected back-sync remains. W05a remains inactive; P01–P03 remain pre-production gates |
+| [0026](td/TD-0026-gateway-product-evolution.md) | In progress | v0.6.0/v0.6.1 fully verified and back-synced; W05b opt-in diagnostics shipped, W05a remains inactive; W05c–e and P01–P03 remain open |
+| [0027](td/TD-0027-three-way-origin-codesign.md) | In progress | S1–S5 and review fixes published/verified in v0.7.0; back-sync and rebased InferFlux/Victor release follow-through open |
 
 TD-0026 slice completion means implementation/local verification. Its separate C01/C02 checkpoint
 table tracks remote CI, merge and release; C01 [PR #230](https://github.com/anvai-labs/sandhi/pull/230)
@@ -144,7 +146,13 @@ The [browser–gateway–vault co-design](upstream/browser-gateway-vault-codesig
 AgentBrowser smoke coverage and proposed destination-bound secrets and correlated action evidence;
 it does not imply a live three-product integration.
 
-The existing implementation roadmap, which TD-0026 proposes reprioritizing, is:
+The immediate delivery work is TD-0027's verified three-repository release follow-through.
+It does not close TD-0026's authoritative attempt accounting, scoped security, hierarchical
+policy, live broker interoperability or hands-on production acceptance. Calibration identity,
+bounded key storage and provenance-separated latency analytics remain explicit optimization
+follow-ups in the co-design review, not shipped guarantees.
+
+The longer-term implementation roadmap, which TD-0026 proposes reprioritizing, is:
 
 1. Establish proxy/load/fault measurements (TD-0015), then use them to choose fairness,
    operational, and throughput changes (TD-0014/0016/0020).

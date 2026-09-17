@@ -1,7 +1,9 @@
 # TD-0026: Gateway product evolution and delivery plan
 
 Status: In progress — M1 v0.6.0 published and back-synced; M2/W05b integrated; owner-approved
-v0.6.1 compatibility-exception release fully published, verified and back-synced.
+v0.6.1 compatibility-exception release fully published, verified and back-synced. TD-0027's
+origin-contract follow-through is published and independently verified as v0.7.0; back-sync is pending
+(2026-09-17). W05c–e and P01–P03 remain open.
 Date: 2026-09-04
 Baseline: `ed1781e` (Sandhi); source review, not a release certification.
 
@@ -88,6 +90,19 @@ initial W06 evidence and M1 release decisions were recorded. P01 still gates pro
 Preserve required reviews, environment approvals and branch protections for subsequent work.
 
 ## Decision log
+
+### Adjacent origin-contract checkpoint (2026-09-17)
+
+[TD-0027](TD-0027-three-way-origin-codesign.md) closes the original S1–S5 implementation
+lanes: exact-origin conformance, calibrated input reservations and per-field timing provenance.
+Sandhi #261/#262 integrated review fixes and promoted main `e05d7c5`; exact-main CI passed and
+v0.7.0 publication and independent all-target verification passed. The
+[delivery review](../reviews/three-way-release-review-2026-09-16.md)
+tracks remaining evidence back-sync and rebased InferFlux/Victor releases.
+
+This does not activate W05a, make W05b authoritative, complete W05c–e, or close W07/W08.
+TD-0027's historical W7/W8 labels are a different namespace (calibration/latency), not this
+plan's scoped security/hierarchical policy work. Production acceptance P01–P03 is unchanged.
 
 | ID | Working decision | State |
 |---|---|---|

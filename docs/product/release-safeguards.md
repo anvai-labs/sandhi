@@ -1,6 +1,7 @@
 # Safeguarded milestone release
 
-Status: v0.6.1 is fully published, independently verified and back-synced as the owner-approved
+Status (2026-09-17): v0.7.0 is promoted, published and independently verified across every
+required target; protected evidence back-sync remains. v0.6.1 was fully back-synced as the owner-approved
 compatibility exception for W05b's source-breaking public Rust API additions. Reuse of the existing
 crates token and PyPI/npm trusted publishing succeeded. Production is not authorized.
 See the [v0.6.1 checkpoint](#v061-compatibility-exception-execution-checkpoint-2026-09-08-utc)
@@ -9,6 +10,18 @@ Tracker: [TD-0026](../td/TD-0026-gateway-product-evolution.md); publish mechanic
 [TD-0023](../td/TD-0023-release-automation.md).
 
 ## Outcome and authority
+
+### v0.7.0 origin-contract checkpoint
+
+The owner-approved all-target release uses immutable tag `v0.7.0` at main
+`e05d7c5f16b1577da2ecb445642cd1ef9ea608a7`, promoted by #262 after independent review and
+green exact-main [push CI](https://github.com/anvai-labs/sandhi/actions/runs/35193468410).
+[Release run 35203459727](https://github.com/anvai-labs/sandhi/actions/runs/35203459727)
+published both GitHub archives, Linux/macOS/Windows wheels, four crates and all three npm packages.
+The initial verifier saw an npm platform-package 404; subsequent independent verification and
+the read-only verifier retry passed. No publisher rerun, tag movement or credential change was
+needed. See the [cross-repository delivery record](../reviews/three-way-release-review-2026-09-16.md)
+for remaining back-sync/consumer gates. This does not authorize production or close P01–P03.
 
 A milestone must publish the reviewed, CI-verified source and a complete, installable set of
 declared artifacts without granting build jobs unnecessary publishing authority. A failed or
