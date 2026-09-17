@@ -29,6 +29,17 @@ def workflow(name):
     return yaml.load((ROOT / ".github/workflows" / name).read_text(), Loader=yaml.BaseLoader)
 
 
+def test_release_linux_jobs_avoid_colliding_generic_runner_label():
+    # The organization's persistent runners also advertise ubuntu-latest. Release builds
+    # need the same explicit hosted image as CI, not that older-glibc overflow pool.
+    document = workflow("release.yml")
+    assert "ubuntu-latest" not in str(document)
+    for job in document["jobs"].values():
+        if "matrix" not in job.get("strategy", {}):
+            assert job["runs-on"] == "ubuntu-24.04"
+
+
+
 def needs(job):
     value = job.get("needs", [])
     return {value} if isinstance(value, str) else set(value)

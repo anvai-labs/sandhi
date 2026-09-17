@@ -38,6 +38,9 @@ unrelated develop changes are excluded from the focused release. No immutable ta
 6. **Evidence — overstated calibration/coverage claims.** S3's tuples are synthetic, not a
    captured provider/CJK corpus. Label them accurately. S4 coverage was 88.32% lines and 86.80%
    regions, not 86.8% lines. Keep product validation distinct from wire-contract conformance.
+7. **Release routing — the S1 runner-label collision also remained in release jobs.** Organization
+   runners still advertise `ubuntu-latest`; use explicit `ubuntu-24.04` across Sandhi release
+   builds/publishers, matching CI, and pin the rule in a workflow regression test.
 
 ## Verified local evidence
 
