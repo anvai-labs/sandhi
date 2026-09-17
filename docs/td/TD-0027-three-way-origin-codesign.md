@@ -1,8 +1,10 @@
 # TD-0027: Three-way origin co-design — InferFlux producer contract, reasoning separation, conformance
 
-- **Status:** **In progress** (release follow-through, 2026-09-16). S1-S5 were integrated into
-  Sandhi `develop`, not released. The cumulative adversarial review found consumer semantics and
-  conformance-evidence gaps; see the [review and delivery gates](../reviews/three-way-release-review-2026-09-16.md).
+- **Status:** **In progress** (release follow-through, 2026-09-17). S1-S5 and Sandhi review
+  fixes are promoted to `main` via #261/#262. Exact-main CI passed; immutable `v0.7.0`
+  is published and independently verified across all required targets. InferFlux and Victor release candidates
+  were rebased onto their current `develop` branches and retain review/CI/publication gates;
+  see the [review and delivery gates](../reviews/three-way-release-review-2026-09-16.md).
   Model-free wire tests do not establish loaded-model accuracy, performance, or production readiness.
 - **Relates to:** [inferflux-issue-drafts.md](../upstream/inferflux-issue-drafts.md) (drafts 1-7),
   [integration-handoff.md](../upstream/integration-handoff.md) (archived predecessor — that
@@ -64,17 +66,20 @@ reasoning-content consumption and display, pricing.
 Full wire contract: `docs/API_SURFACE.md` in the InferFlux repo, §5 (usage extensions table)
 and the reasoning_content/delta rows immediately below it.
 
-## Completion scorecard (2026-09-16)
+## Implementation scorecard (2026-09-17)
+
+“Closed” below means the original implementation lane, not registry publication or production
+acceptance. The release checkpoint and remaining roadmap follow the lane record.
 
 | Seam | State | Verdict |
 |---|---|---|
 | InferFlux origin producer contract | Exact usage/cache/reasoning, identity, error shape, resolved model, and latency fields shipped; model-free gaps closed by InferFlux #176 | **Closed** |
 | S1 · Seed record and conformance skeleton | Sandhi #255 merged after the skipped-check routing diagnosis | **Closed** |
 | S2 · Pinned origin conformance | Exact InferFlux commit `273780835f120cbe1a8da4860d72905861e71e29`; CPU/stub build driven through the real Sandhi proxy and OpenAI SDK in CI | **Closed** — Sandhi #256 |
-| S3 · Reservation calibration | Per-`(provider, model)` EWMA uses only final, measured origin events; cold-start/floor/bounds retained; synthetic low-ratio overshoot regression pinned | **Integrated** — Sandhi #258; release pending |
+| S3 · Reservation calibration | Per-`(provider, model)` EWMA uses only final, measured origin events; cold-start/floor/bounds retained; synthetic low-ratio overshoot regression pinned | **Closed** — Sandhi #258, promoted in #262, published in v0.7.0 |
 | S4 · Latency semantics | Origin timing wins independently per field and carries `origin` provenance; Sandhi boundary timing fills only absent fields and carries `boundary` | **Closed** — Sandhi #259 |
 | Auth header compatibility | Secured exact-pin e2e succeeds through reqwest's lowercase `authorization`; InferFlux unit coverage also pins header and bearer-scheme casing | **Closed** — InferFlux #52 |
-| Victor consumer boundary | Reasoning frames stay separate from visible content and reasoning usage is contract-pinned | **Closed** — Victor #1066 |
+| Victor consumer boundary | Original reasoning separation merged in #1066; later review found inclusion-flag coercion, aggregate billing and timing provenance gaps | **Original lane closed; follow-up pending** — corrected v0.9.5 candidate still needs CI/promotion/publication |
 
 ## Lanes — completion record (dependency order)
 
@@ -122,6 +127,31 @@ This completion update adds the scorecard and cross-links Victor's merged consum
 from PR #1066 (`3b5aa2b0dfd0947ea261802158aa39f6091caf90`). Victor pins reasoning-event
 ordering/separation and `reasoning_tokens`; context replay/trimming remains an explicitly
 separate product decision rather than an unclosed producer-contract item.
+
+## Release checkpoint and remaining roadmap
+
+- Sandhi [#261](https://github.com/anvai-labs/sandhi/pull/261) merged review fixes into
+  `develop`; [#262](https://github.com/anvai-labs/sandhi/pull/262) promoted them to main
+  `e05d7c5f16b1577da2ecb445642cd1ef9ea608a7`. Exact-main
+  [push CI](https://github.com/anvai-labs/sandhi/actions/runs/35193468410) passed with
+  executed `CI Success` and `Release safeguards`; a skipped mirror is not this evidence.
+- Immutable `v0.7.0` points to that commit. All-target
+  [release run](https://github.com/anvai-labs/sandhi/actions/runs/35203459727) passed on attempt 2:
+  all publishers succeeded on attempt 1; only read-only verification was retried after an npm
+  platform-package 404. Independent all-target verification also passed. Protected back-sync
+  remains open at this checkpoint.
+- The latest-develop release scope includes InferFlux tool-call/reasoning/KV-capacity and
+  Victor curated-tool/session-context regressions discovered during the expanded review.
+  Fix candidates and CPU/local tests do not imply merged or released fixes.
+- Next: back-sync Sandhi evidence; validate Victor against the published binding; complete
+  independent review and fresh rebased CI, promotion, native release gates and publication for
+  InferFlux v0.3.0 and Victor v0.9.5. Record each exact source and outcome separately.
+- Deferred optimization: bound calibration-key cardinality, evaluate resolved-model identity,
+  collect real multilingual calibration pairs, and separate latency aggregates by provenance.
+  These are follow-ups, not completed S3/S4 guarantees. TD-0026 P01–P03 remain production gates.
+
+TD-0027's historical “W7/W8” labels mean reservation calibration/latency. They do **not** close
+TD-0026 W07 scoped security or W08 hierarchical policy, which remain separate planned work.
 
 ## Verification
 

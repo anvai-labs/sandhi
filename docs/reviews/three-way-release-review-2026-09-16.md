@@ -2,7 +2,8 @@
 
 Review scope: InferFlux producer → Sandhi proxy/typed binding → Victor consumption and pricing,
 including S1-S5's cumulative diff against Sandhi main. This is a same-session code/behavior
-review, not an independent reviewer attestation. No claim of loaded-model or GPU validation.
+review, not itself an independent reviewer attestation. Subsequent independent reviews and
+remote evidence are recorded below. No claim of loaded-model or GPU validation from CPU tests.
 
 ## Release inventory at review start
 
@@ -13,8 +14,32 @@ review, not an independent reviewer attestation. No claim of loaded-model or GPU
 | Victor | #1066 `3b5aa2b0d` is in main and v0.9.4 | v0.9.4 | Package still pins sandhi-gateway 0.5.0 |
 
 The earlier TD “Complete” meant integration, not delivery. Owner approved Sandhi v0.7.0 on
-all four target groups, InferFlux v0.3.0, and focused Victor v0.9.5 after green gates. Victor's
-unrelated develop changes are excluded from the focused release. No immutable tag is to be moved.
+all four target groups, InferFlux v0.3.0, and Victor v0.9.5 after green gates. The later explicit
+rebase-first instruction supersedes the original main-only Victor scope: the release candidates
+now include current develop, requiring fresh cumulative review and CI. No immutable tag is moved.
+
+## Current delivery checkpoint (2026-09-17)
+
+| Repository | Completed evidence | Still open |
+|---|---|---|
+| Sandhi | Independent review clean; #261 integrated at `db74cf91`; #262 promoted to `e05d7c5`; exact-main [CI 35193468410](https://github.com/anvai-labs/sandhi/actions/runs/35193468410) passed; v0.7.0 [all-target publication 35203459727](https://github.com/anvai-labs/sandhi/actions/runs/35203459727) and independent verifier passed | Protected evidence back-sync |
+| InferFlux | Original release preparation #180 merged at `274b74bc`; broader candidate rebased onto develop `d10b5bbc`; 47 CPU CTest groups pass; independent commit-bound review clean at `3f45fed87` | [PR #181](https://github.com/anvai-labs/inferflux/pull/181) hosted CI, promotion, exact-source CUDA/ROCm and native packaging/install smoke, v0.3.0 publication |
+| Victor | Candidate rebased onto develop `2311fa1f2`; inclusion/provenance and per-call accounting fixes present; curated-tool/session-context fixes independently reviewed with 125 tests and additional cancellation probes | Published Sandhi 0.7.0 dependency validation, final commit-bound review, fresh CI, promotion and v0.9.5 publication |
+
+Sandhi's initial hosted verification failed after six npm platform-package HTTP 404s, although
+publication jobs succeeded. The independent verifier subsequently passed all targets; retrying
+only the read-only failed verifier produced successful attempt 2. No artifacts were republished
+and no tag was moved. GitHub archive sizes/SHA-256, required PyPI platforms, four non-yanked crate
+versions and all npm versions/dependencies passed `verify-release.py v0.7.0 --targets
+pypi,crates,npm,github --repo anvai-labs/sandhi`.
+
+The rebased InferFlux candidate passed all 18 local three-way probes (16 origin SDK cases plus
+2 actual Victor-provider cases) through the candidate Sandhi wheel. This is CPU/stub wire evidence,
+not a test of the published 0.7.0 wheel or GPU/model behavior. Sandhi's reproducibility pin remains
+`273780835f120cbe1a8da4860d72905861e71e29`; testing a newer candidate does not silently move it.
+
+The local independent-review hook checks the actual pushed commit/tree, including annotated
+tags. It is an unsigned local process guard, not a GitHub approval or tamper-proof trust boundary.
 
 ## Findings and corrective work
 
@@ -41,6 +66,16 @@ unrelated develop changes are excluded from the focused release. No immutable ta
 7. **Release routing — the S1 runner-label collision also remained in release jobs.** Organization
    runners still advertise `ubuntu-latest`; use explicit `ubuntu-24.04` across Sandhi release
    builds/publishers, matching CI, and pin the rule in a workflow regression test.
+8. **Rebased InferFlux regressions.** Mixed-format tool calls could reorder; streamed tool calls
+   could lose reasoning/prose/usage; a global KV bound could cross-contaminate model capacities;
+   ordinary nested JSON could be misclassified as a tool call. The independently reviewed local
+   fixes preserve encounter order, stream fields and per-context/per-request capacity. CPU tests
+   pass; release-platform evidence remains open.
+9. **Rebased Victor regressions.** Default-off pruning could widen caller-curated tool supply;
+   streaming subagents could leak their session ContextVar across outward yields and fail cleanup
+   in a different context. Fixes use authoritative curated supply with finalized tracing, and
+   scoped setup/stream-advance/cleanup with real ContextVar regressions. Independent source
+   review passed; fresh exact-commit CI and publication remain open.
 
 ## Verified local evidence
 
@@ -70,12 +105,15 @@ unrelated develop changes are excluded from the focused release. No immutable ta
 - The optional Victor probe must use an explicitly selected source checkout and candidate wheel;
   ordinary SDK CI must not silently import an arbitrary installed Victor.
 
-## Delivery gates (open until remote evidence is recorded)
+## Delivery gates
 
-- Focused review fixes merged through green PR checks; exact post-merge CI verified.
-- Cumulative Sandhi develop→main promotion reviewed, approved as required, and exact-main CI green.
-- InferFlux v0.3.0 source/version and artifacts verified; original pin remains reproducible.
-- Sandhi v0.7.0 GitHub, PyPI, all four crates, all three npm packages verified by release verifier.
-- Victor exact pin advanced to Sandhi 0.7.0, known contract minor updated, focused main release
-  tested with actual binding, and v0.9.5 published. Back-sync protected branches afterward.
-- Release notes/status updated only when these gates really complete.
+- [x] Sandhi review fixes merged through green PR checks; exact post-merge CI verified.
+- [x] Cumulative Sandhi develop→main promotion independently reviewed; exact-main CI green.
+- [ ] InferFlux v0.3.0 source/version and artifacts verified; original pin remains reproducible.
+- [x] Sandhi v0.7.0 GitHub, PyPI, all four crates, all three npm packages verified by hosted and independent release verifiers.
+- [ ] Victor exact Sandhi 0.7.0 pin and contract minor tested with the published binding; latest-develop
+  candidate reviewed/green/promoted and v0.9.5 published.
+- [ ] Back-sync protected branches and record final release evidence.
+
+Open optimization items above are a separate backlog, not prerequisites invented for this
+model-free contract release. Product acceptance P01–P03 in TD-0026 still gates production use.

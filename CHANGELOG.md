@@ -18,6 +18,11 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-09-17
+
+Published to GitHub, PyPI, all four crates and all three npm packages; hosted and independent
+all-target verification passed. See the [delivery record](docs/reviews/three-way-release-review-2026-09-16.md).
+
 ### Added
 
 - Per-provider/model input-reservation calibration from final measured usage, retaining cold
@@ -1145,7 +1150,8 @@ inline reverse-proxy, the durable store, and both language bindings.
   ([#9](https://github.com/anvai-labs/sandhi/pull/9),
   [#10](https://github.com/anvai-labs/sandhi/pull/10))
 
-[Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/anvai-labs/sandhi/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/anvai-labs/sandhi/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/anvai-labs/sandhi/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/anvai-labs/sandhi/compare/v0.5.0...v0.5.1
