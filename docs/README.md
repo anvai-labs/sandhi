@@ -76,7 +76,8 @@ by `GET /version` so a future split cannot silently invalidate a consumer handsh
 
 ## Architecture decisions
 
-All current ADRs are accepted; ADR-0007 is an accepted **negative** decision.
+ADRs 0001–0009 are accepted; ADR-0007 is an accepted **negative** decision.
+ADR-0010 is proposed and does not yet change the cache usage contract.
 
 | ADR | Decision |
 |---|---|
@@ -89,6 +90,7 @@ All current ADRs are accepted; ADR-0007 is an accepted **negative** decision.
 | [0007](adr/0007-embedding-modality-admission.md) | Embeddings are not admitted on current evidence |
 | [0008](adr/0008-inferflux-admission-and-session-affinity.md) | OpenAI-compatible catalog admission and session-affinity facts |
 | [0009](adr/0009-http1-only-listener.md) | No h2c sniffing; cleartext listener is HTTP/1 only |
+| [0010](adr/0010-cache-read-reporting-availability.md) | Proposed: additive cache-read observation and same-population reporting coverage |
 
 ## Technical-design status
 
