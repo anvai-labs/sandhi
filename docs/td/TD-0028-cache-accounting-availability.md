@@ -29,8 +29,8 @@ InferFlux; that producer-side investigation remains independently owned upstream
 
 | Slice | Bounded change | Acceptance | State |
 |---|---|---|---|
-| C1 | Extend existing InferFlux corpus with the 18 sanitized usage objects | Explicit zero/partial/full cache accounting; both forwarding paths; unchanged response bytes and one late terminal SSE usage emission | Locally verified; independent review/PR/CI/merge pending |
-| C2 | ADR and additive cache-read availability/source contract | Define reported zero, absent, malformed and explicitly unsupported; preserve legacy numeric defaults; parser/event/UsageV2/SQLite/API/generated bindings/schema agreement | Design next, before contract changes |
+| C1 | Extend existing InferFlux corpus with the 18 sanitized usage objects | Explicit zero/partial/full cache accounting; both forwarding paths; unchanged response bytes and one late terminal SSE usage emission | Locally verified and independently reviewed; [PR #268](https://github.com/anvai-labs/sandhi/pull/268) CI/merge pending |
+| C2 | ADR and additive cache-read availability/source contract | Define reported zero, absent, malformed and explicitly unsupported; preserve legacy numeric defaults; parser/event/UsageV2/SQLite/API/generated bindings/schema agreement | [ADR-0010](../adr/0010-cache-read-reporting-availability.md) proposed; no contract implementation yet |
 | C3 | Dashboard availability and coverage | `n_reported/n_total` over the same filtered call population; honest cache read/write and neutral-unit labels | After C2 |
 | C4 | Bounded credential-free diagnostic lookup/export | Authorized request/session/run correlation, source-labelled timings and counters; explicit late/aborted stream semantics; prompt/body capture opt-in and bounded | After C2; authorization/redaction design required |
 | C5 | Joint replay after InferFlux investigation | One actual member trace, same ready model, direct and gateway; cache counts, correlation/session mapping and usage conservation | Needs sanitized trace and approved remote Mac access; not run |
