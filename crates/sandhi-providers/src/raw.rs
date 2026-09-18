@@ -503,6 +503,9 @@ impl RawForwarder {
             .client
             .post(url)
             .header(ACCEPT_ENCODING, "identity")
+            // Every supported raw endpoint accepts a JSON envelope. `.body(bytes)`
+            // does not set this header, and strict upstreams reject an untyped body.
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
             .headers(headers)
             .body(body);
         let builder = self.apply_auth(builder);
@@ -835,6 +838,7 @@ mod tests {
             .and(path("/v1/chat/completions"))
             .and(body_bytes(client_body.to_vec()))
             .and(header("accept-encoding", "identity"))
+            .and(header("content-type", "application/json"))
             .and(header("authorization", "Bearer sk-test"))
             .respond_with(
                 ResponseTemplate::new(200)
@@ -898,6 +902,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/v1/chat/completions"))
             .and(header("accept-encoding", "identity"))
+            .and(header("content-type", "application/json"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "text/event-stream")
@@ -954,6 +959,7 @@ mod tests {
         // the gzip feature, and we explicitly request identity, the upstream returns plaintext.
         Mock::given(method("POST"))
             .and(header("accept-encoding", "identity"))
+            .and(header("content-type", "application/json"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "application/json")
@@ -1005,6 +1011,7 @@ mod tests {
             .and(header("x-api-key", "ak-test"))
             .and(header("anthropic-version", "2023-06-01"))
             .and(header("accept-encoding", "identity"))
+            .and(header("content-type", "application/json"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "content": [{"type": "text", "text": "hi"}],
                 "usage": {"input_tokens": 5, "output_tokens": 3}
