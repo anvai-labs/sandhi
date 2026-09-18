@@ -77,7 +77,8 @@ by `GET /version` so a future split cannot silently invalidate a consumer handsh
 ## Architecture decisions
 
 ADRs 0001–0009 are accepted; ADR-0007 is an accepted **negative** decision.
-ADR-0010 is proposed and does not yet change the cache usage contract.
+ADR-0010 defines the implemented additive cache observation/coverage contract (minor 9);
+TD-0028 keeps its merge/deployment gates separate from the remaining diagnostic and replay scope.
 
 | ADR | Decision |
 |---|---|
@@ -90,7 +91,7 @@ ADR-0010 is proposed and does not yet change the cache usage contract.
 | [0007](adr/0007-embedding-modality-admission.md) | Embeddings are not admitted on current evidence |
 | [0008](adr/0008-inferflux-admission-and-session-affinity.md) | OpenAI-compatible catalog admission and session-affinity facts |
 | [0009](adr/0009-http1-only-listener.md) | No h2c sniffing; cleartext listener is HTTP/1 only |
-| [0010](adr/0010-cache-read-reporting-availability.md) | Proposed: additive cache-read observation and same-population reporting coverage |
+| [0010](adr/0010-cache-read-reporting-availability.md) | Accepted: additive cache-read observation and same-population reporting coverage |
 
 ## Technical-design status
 
@@ -128,7 +129,7 @@ perpetually open.
 | [0025](td/TD-0025-ingress-funnel-and-family-registry.md) | Proposed | Family registry and funnel decomposition |
 | [0026](td/TD-0026-gateway-product-evolution.md) | In progress | v0.6.0/v0.6.1 fully verified and back-synced; W05b opt-in diagnostics shipped, W05a remains inactive; W05c–e and P01–P03 remain open |
 | [0027](td/TD-0027-three-way-origin-codesign.md) | In progress | Sandhi v0.7.0 published/verified and evidence synchronized; InferFlux v0.3.0 packaging correction awaits approval/native verification; focused Victor v0.9.5 awaits approval/CI/promotion; sibling publication remains open |
-| [0028](td/TD-0028-cache-accounting-availability.md) | In progress | Cache corpus increment locally verified; additive availability design, dashboard coverage, bounded diagnostics and joint live replay remain gated |
+| [0028](td/TD-0028-cache-accounting-availability.md) | In progress | Corpus merged; availability and dashboard implemented locally with PR/CI gates pending; bounded diagnostics and actual-member replay remain open |
 
 TD-0026 slice completion means implementation/local verification. Its separate C01/C02 checkpoint
 table tracks remote CI, merge and release; C01 [PR #230](https://github.com/anvai-labs/sandhi/pull/230)

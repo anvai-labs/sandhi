@@ -27,6 +27,9 @@ mod anthropic_schema {
 fn parse_expected(s: &str) -> ParsedUsage {
     let v: Value = serde_json::from_str(s).unwrap();
     ParsedUsage {
+        cache_read_observation: Some(
+            serde_json::from_value(v["cache_read_observation"].clone()).unwrap(),
+        ),
         reasoning_included: Some(true),
         tokens_in: v["tokens_in"].as_u64().unwrap(),
         tokens_out: v["tokens_out"].as_u64().unwrap(),
@@ -49,6 +52,13 @@ fn oracle_openai(usage: &Value) -> ParsedUsage {
         .map(|d| d.cached_tokens)
         .unwrap_or(0);
     ParsedUsage {
+        cache_read_observation: Some(sandhi_core::CacheReadObservation::origin(
+            if u.prompt_tokens_details.is_some() {
+                sandhi_core::CacheReadStatus::Reported
+            } else {
+                sandhi_core::CacheReadStatus::Absent
+            },
+        )),
         reasoning_included: Some(true),
         tokens_in: (u.prompt_tokens - cached).max(0) as u64,
         tokens_out: u.completion_tokens.max(0) as u64,
@@ -63,6 +73,13 @@ fn oracle_openai(usage: &Value) -> ParsedUsage {
 fn oracle_anthropic(usage: &Value) -> ParsedUsage {
     let u: anthropic_schema::AnthropicMessageUsage = serde_json::from_value(usage.clone()).unwrap();
     ParsedUsage {
+        cache_read_observation: Some(sandhi_core::CacheReadObservation::origin(
+            if u.cache_read_input_tokens.is_some() {
+                sandhi_core::CacheReadStatus::Reported
+            } else {
+                sandhi_core::CacheReadStatus::Absent
+            },
+        )),
         reasoning_included: Some(true),
         tokens_in: u.input_tokens.max(0) as u64,
         tokens_out: u.output_tokens.max(0) as u64,

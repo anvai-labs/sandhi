@@ -81,6 +81,7 @@ mod tests {
                 status: 200,
                 body: json!({ "model": req.model }),
                 usage: ParsedUsage {
+                    cache_read_observation: None,
                     tokens_in: 3,
                     tokens_out: 4,
                     ..Default::default()

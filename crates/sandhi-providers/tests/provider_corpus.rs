@@ -19,6 +19,9 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 fn parse_expected(s: &str) -> ParsedUsage {
     let v: serde_json::Value = serde_json::from_str(s).unwrap();
     ParsedUsage {
+        cache_read_observation: v
+            .get("cache_read_observation")
+            .map(|value| serde_json::from_value(value.clone()).unwrap()),
         reasoning_included: v["reasoning_included"].as_bool().or(Some(true)),
         tokens_in: v["tokens_in"].as_u64().unwrap(),
         tokens_out: v["tokens_out"].as_u64().unwrap(),
@@ -320,10 +323,16 @@ fn cache_audit_cases() -> Vec<CacheAuditCase> {
     struct Corpus {
         cases: Vec<CacheAuditCase>,
     }
-    let corpus: Corpus = serde_json::from_str(include_str!(
+    let mut corpus: Corpus = serde_json::from_str(include_str!(
         "fixtures/inferflux/cache-audit-2026-09-18.json"
     ))
     .unwrap();
+    // Every captured InferFlux audit response explicitly reports cached_tokens, including zero.
+    for case in &mut corpus.cases {
+        case.expected.cache_read_observation = Some(sandhi_core::CacheReadObservation::origin(
+            sandhi_core::CacheReadStatus::Reported,
+        ));
+    }
     assert_eq!(corpus.cases.len(), 18);
     assert!(corpus
         .cases

@@ -18,6 +18,15 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+### Added
+
+- Optional cache-read reporting observations distinguish explicit zero, absent and malformed
+  origin fields without changing neutral token arithmetic. Legacy/manual counts remain unknown
+  unless explicitly annotated; unsupported reporting is never inferred from missing usage.
+- Same-population cache reporting coverage across SQLite, run trees, Python/Node bindings,
+  dashboard and CLI. Contract minor 9 adds optional JSON fields; public Rust struct literals
+  require the new fields or defaults. This is not a release-version approval.
+
 ## [0.7.0] — 2026-09-17
 
 Published to GitHub, PyPI, all four crates and all three npm packages; hosted and independent

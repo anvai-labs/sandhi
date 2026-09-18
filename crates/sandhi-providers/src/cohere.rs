@@ -81,12 +81,13 @@ impl Provider for Cohere {
                     .json()
                     .await
                     .map_err(|e| ProviderError::Transport(e.to_string()))?;
-                let observed_usage = parse_cohere_usage(&body);
+                let (response_usage, observed_usage) =
+                    crate::buffered_usage(sandhi_core::CacheReadFamily::Cohere, &body);
                 Ok((
                     ProviderResponse {
                         status,
                         body,
-                        usage: observed_usage.unwrap_or_default(),
+                        usage: response_usage,
                         attempts: 1,
                     },
                     observed_usage,
@@ -134,12 +135,13 @@ pub(crate) fn sniff_usage_line(line: &[u8], usage: &mut ParsedUsage) -> bool {
     let Some(v) = sse_data_json(line) else {
         return false;
     };
+    crate::observe_stream_cache(sandhi_core::CacheReadFamily::Cohere, &v, usage);
     let obj = v
         .get("usage")
         .or_else(|| v.get("delta").and_then(|d| d.get("usage")));
     if let Some(uo) = obj {
         if let Some(u) = parse_cohere_usage(&json!({ "usage": uo })) {
-            *usage = u;
+            crate::replace_numeric_usage(usage, u);
             return true;
         }
     }
@@ -154,6 +156,10 @@ mod tests {
     use wiremock::matchers::{header, method, path};
 
     const EXPECTED: ParsedUsage = ParsedUsage {
+        cache_read_observation: Some(sandhi_core::CacheReadObservation {
+            status: sandhi_core::CacheReadStatus::Absent,
+            source: sandhi_core::CacheReadSource::OriginUsage,
+        }),
         reasoning_included: Some(true),
         tokens_in: 300,
         tokens_out: 120,

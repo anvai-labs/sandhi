@@ -7,6 +7,7 @@ import { readFileSync, rmSync } from "node:fs";
 
 import { Gateway, parseUsage, wireContractVersion } from "../index.js";
 import { ProviderRuntime } from "../sandhi.js";
+import "./cache-read-observation.test.mjs";
 
 function localServer(responses) {
   return new Promise((resolve) => {
@@ -231,9 +232,14 @@ test("persistent typed provider completes and streams neutral documents", async 
     const response = JSON.parse(await provider.completeJson(request));
     assert.equal(response.output.content, "hello");
     assert.equal(response.usage.tokens_in, 6);
+    assert.deepEqual(response.usage.cache_read_observation, {
+      status: "reported", source: "origin_usage",
+    });
 
     const events = [];
     for await (const event of provider.streamJson(request)) events.push(JSON.parse(event));
+    assert.deepEqual(events.find(event => event.event === "usage").usage.cache_read_observation,
+      response.usage.cache_read_observation);
     assert.deepEqual(events.map((event) => event.event), [
       "response_start",
       "text_delta",

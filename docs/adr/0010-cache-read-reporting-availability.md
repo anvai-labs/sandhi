@@ -4,8 +4,9 @@ Date: 2026-09-18
 
 ## Status
 
-**Proposed.** Consumer decisions for TD-0028 C2, to be reviewed before changing
-contracts. This document does not change runtime behavior or authorize a release.
+**Accepted for implementation.** Consumer decisions for TD-0028 C2 were independently
+reviewed before implementation. The additive contract is implemented at minor 9;
+merge, deployment and release gates remain distinct. This does not authorize a release.
 The preceding corpus increment is [PR #268](https://github.com/anvai-labs/sandhi/pull/268).
 
 Relates to [TD-0028](../td/TD-0028-cache-accounting-availability.md),
@@ -174,8 +175,9 @@ existing admin authorization, bound returned rows/bytes, avoid raw keys/prompts/
 by default, and do not invent historical completeness or raw reported fields that
 were never persisted. Prompt capture, if introduced, is a separate opt-in bounded path.
 
-C5 requires the approved Mac route and a sanitized actual member replay after the
-InferFlux investigation. Model-free corpus tests cannot close that live gate. No
+C5 uses the owner-selected isolated WSL gateway instead of requiring Mac access, and
+still requires a sanitized actual member replay after the InferFlux investigation.
+Model-free corpus tests or synthetic live probes cannot close that live gate. No
 shared cache clearing, server restart or credential export is authorized by this ADR.
 
 ## Required regression matrix before acceptance

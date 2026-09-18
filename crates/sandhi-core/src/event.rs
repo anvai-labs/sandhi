@@ -147,6 +147,12 @@ pub struct UsageEvent {
     pub cache_creation_tokens: u64,
     #[serde(default)]
     pub cache_read_tokens: u64,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::cache_read_observation_is_unknown",
+        deserialize_with = "crate::deserialize_cache_read_observation"
+    )]
+    pub cache_read_observation: Option<crate::CacheReadObservation>,
     /// Whether token counts are final, partial, or unavailable for this logical call.
     #[serde(default)]
     pub usage_completeness: UsageCompleteness,
@@ -223,6 +229,7 @@ impl UsageEvent {
             tokens_out: 0,
             cache_creation_tokens: 0,
             cache_read_tokens: 0,
+            cache_read_observation: None,
             usage_completeness: UsageCompleteness::Unavailable,
             usage_basis: UsageBasis::ProviderReported,
             attempts: 1,
@@ -348,6 +355,15 @@ impl UsageEvent {
     pub fn with_cache(mut self, creation: u64, read: u64) -> Self {
         self.cache_creation_tokens = creation;
         self.cache_read_tokens = read;
+        self
+    }
+
+    #[must_use]
+    pub fn with_cache_read_observation(
+        mut self,
+        observation: Option<crate::CacheReadObservation>,
+    ) -> Self {
+        self.cache_read_observation = observation.and_then(crate::CacheReadObservation::validated);
         self
     }
 

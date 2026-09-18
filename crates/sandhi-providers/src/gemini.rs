@@ -108,12 +108,13 @@ impl Provider for Gemini {
                     .json()
                     .await
                     .map_err(|e| ProviderError::Transport(e.to_string()))?;
-                let observed_usage = parse_gemini_usage(&body);
+                let (response_usage, observed_usage) =
+                    crate::buffered_usage(sandhi_core::CacheReadFamily::Gemini, &body);
                 Ok((
                     ProviderResponse {
                         status,
                         body,
-                        usage: observed_usage.unwrap_or_default(),
+                        usage: response_usage,
                         attempts: 1,
                     },
                     observed_usage,
@@ -157,8 +158,9 @@ impl Provider for Gemini {
 /// `usageMetadata` (typically the final one) holds the full counts; last wins.
 pub(crate) fn sniff_usage_line(line: &[u8], usage: &mut ParsedUsage) -> bool {
     if let Some(v) = sse_data_json(line) {
+        crate::observe_stream_cache(sandhi_core::CacheReadFamily::Gemini, &v, usage);
         if let Some(u) = parse_gemini_usage(&v) {
-            *usage = u;
+            crate::replace_numeric_usage(usage, u);
             return true;
         }
     }
@@ -173,6 +175,10 @@ mod tests {
     use http::header::{HeaderName, HeaderValue};
 
     const EXPECTED: ParsedUsage = ParsedUsage {
+        cache_read_observation: Some(sandhi_core::CacheReadObservation {
+            status: sandhi_core::CacheReadStatus::Reported,
+            source: sandhi_core::CacheReadSource::OriginUsage,
+        }),
         reasoning_included: Some(false),
         tokens_in: 200,
         tokens_out: 250,

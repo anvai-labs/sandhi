@@ -1,7 +1,6 @@
 //! Anthropic adapter — the Messages API. Validates the prompt-cache split
 //! (`cache_creation_input_tokens` / `cache_read_input_tokens`) the meter depends on.
 
-use crate::parse_anthropic_usage;
 use crate::{
     error_for_response, metered_passthrough, ByteStream, ParsedUsage, Provider, ProviderError,
     ProviderRequest, ProviderResponse,
@@ -113,12 +112,13 @@ impl Provider for Anthropic {
                     .json()
                     .await
                     .map_err(|e| ProviderError::Transport(e.to_string()))?;
-                let observed_usage = parse_anthropic_usage(&body);
+                let (response_usage, observed_usage) =
+                    crate::buffered_usage(sandhi_core::CacheReadFamily::Anthropic, &body);
                 Ok((
                     ProviderResponse {
                         status,
                         body,
-                        usage: observed_usage.unwrap_or_default(),
+                        usage: response_usage,
                         attempts: 1,
                     },
                     observed_usage,
@@ -184,6 +184,7 @@ pub(crate) fn sniff_usage_line(line: &[u8], acc: &mut ParsedUsage) -> bool {
     let Ok(v) = serde_json::from_str::<Value>(payload.trim()) else {
         return false;
     };
+    crate::observe_stream_cache(sandhi_core::CacheReadFamily::Anthropic, &v, acc);
     match v.get("type").and_then(Value::as_str) {
         Some("message_start") => {
             if let Some(u) = v.get("message").and_then(|m| m.get("usage")) {
@@ -218,6 +219,10 @@ mod tests {
     use http::header::{HeaderName, HeaderValue};
 
     const EXPECTED: ParsedUsage = ParsedUsage {
+        cache_read_observation: Some(sandhi_core::CacheReadObservation {
+            status: sandhi_core::CacheReadStatus::Reported,
+            source: sandhi_core::CacheReadSource::OriginUsage,
+        }),
         reasoning_included: Some(true),
         tokens_in: 1024,
         tokens_out: 256,

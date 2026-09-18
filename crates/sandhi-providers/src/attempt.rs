@@ -615,6 +615,7 @@ mod tests {
     async fn complete_emits_dispatch_and_bounded_terminal_measurement() {
         let (context, receiver) = context();
         let usage = ParsedUsage {
+            cache_read_observation: None,
             tokens_in: 2,
             tokens_out: 3,
             ..ParsedUsage::default()
@@ -649,10 +650,12 @@ mod tests {
     async fn dropped_stream_records_partial_cancellation_once() {
         let (context, receiver) = context();
         let partial = ParsedUsage {
+            cache_read_observation: None,
             tokens_in: 7,
             ..ParsedUsage::default()
         };
         let inner: ByteStream = Box::pin(stream::iter(vec![Ok(StreamChunk {
+            cache_read_observation: None,
             data: bytes::Bytes::from_static(b"data"),
             usage: None,
             usage_running: Some(partial),
@@ -787,6 +790,7 @@ mod tests {
         let (context, receiver) = context();
         let inner: ByteStream = Box::pin(stream::iter(vec![
             Ok(StreamChunk {
+                cache_read_observation: None,
                 data: bytes::Bytes::new(),
                 usage: None,
                 usage_running: None,
@@ -821,6 +825,7 @@ mod tests {
         let (context, receiver) = context();
         let inner: ByteStream = Box::pin(stream::iter(vec![
             Ok(StreamChunk {
+                cache_read_observation: None,
                 data: bytes::Bytes::new(),
                 usage: None,
                 usage_running: None,

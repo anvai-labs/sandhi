@@ -1,6 +1,6 @@
 # TD-0028: Cache accounting availability and bounded diagnostics
 
-- **Status:** In progress (2026-09-18). Regression increment locally verified;
+- **Status:** In progress (2026-09-18). Regression increment merged; availability and dashboard implemented locally;
   CI/review gates remain distinct from merge, deployment and the joint live replay.
 - **Scope:** Sandhi items in the [cache co-design handoff](../upstream/inferflux-cache-codesign-2026-09-18.md).
 - **Related:** TD-0013 (measurement fidelity), TD-0027 (origin co-design),
@@ -29,11 +29,11 @@ InferFlux; that producer-side investigation remains independently owned upstream
 
 | Slice | Bounded change | Acceptance | State |
 |---|---|---|---|
-| C1 | Extend existing InferFlux corpus with the 18 sanitized usage objects | Explicit zero/partial/full cache accounting; both forwarding paths; unchanged response bytes and one late terminal SSE usage emission | Locally verified and independently reviewed; [PR #268](https://github.com/anvai-labs/sandhi/pull/268) CI/merge pending |
-| C2 | ADR and additive cache-read availability/source contract | Define reported zero, absent, malformed and explicitly unsupported; preserve legacy numeric defaults; parser/event/UsageV2/SQLite/API/generated bindings/schema agreement | [ADR-0010](../adr/0010-cache-read-reporting-availability.md) proposed; no contract implementation yet |
-| C3 | Dashboard availability and coverage | `n_reported/n_total` over the same filtered call population; honest cache read/write and neutral-unit labels | After C2 |
+| C1 | Extend existing InferFlux corpus with the 18 sanitized usage objects | Explicit zero/partial/full cache accounting; both forwarding paths; unchanged response bytes and one late terminal SSE usage emission | [PR #268](https://github.com/anvai-labs/sandhi/pull/268) merged after clean independent review and real CI pass |
+| C2 | ADR and additive cache-read availability/source contract | Define reported zero, absent, malformed and explicitly unsupported; preserve legacy numeric defaults; parser/event/UsageV2/SQLite/API/generated bindings/schema agreement | [ADR-0010](../adr/0010-cache-read-reporting-availability.md) accepted; implemented locally, PR/CI gates pending |
+| C3 | Dashboard availability and coverage | `n_reported/n_total` over the same filtered call population; honest cache read/write and neutral-unit labels | Implemented locally; 25 real-browser dashboard regressions pass; PR/CI gates pending |
 | C4 | Bounded credential-free diagnostic lookup/export | Authorized request/session/run correlation, source-labelled timings and counters; explicit late/aborted stream semantics; prompt/body capture opt-in and bounded | After C2; authorization/redaction design required |
-| C5 | Joint replay after InferFlux investigation | One actual member trace, same ready model, direct and gateway; cache counts, correlation/session mapping and usage conservation | Needs sanitized trace and approved remote Mac access; not run |
+| C5 | Joint replay after InferFlux investigation | One actual member trace, same ready model, direct and gateway; cache counts, correlation/session mapping and usage conservation | Owner selected an isolated local WSL gateway instead of Mac access. Actual sanitized member trace and producer investigation remain prerequisites; synthetic local probes do not close this gate |
 
 The C1 non-stream envelopes and SSE frames are constructed around recorded usage
 objects. The original audit did not retain full response bodies or live SSE captures.
@@ -47,7 +47,25 @@ and whitespace checks passed. All 18 fixture usage objects equal the saved evide
 all nine gateway expectations match its SQLite projections, including rounded origin
 durations. No live gateway was contacted and no deployed binary was changed.
 
-## Contract decisions required before C2 code
+Local C2/C3 validation (2026-09-18): 645 workspace tests passed with four existing
+opt-in tests ignored; strict workspace Clippy, formatting and generated-facade checks
+passed. Python binding tests: 84 passed; Node: 54 passed. All 25 real-browser dashboard
+tests passed. Independent cross-review findings on stream corrections, invalid SQLite
+metadata and schema status/source pairs were fixed and rechecked before checkpointing.
+
+An isolated WSL gateway was launched at `127.0.0.1:18789`, with its own SQLite state and
+admin authentication. One synthetic direct call followed by two buffered gateway calls
+and one streaming gateway call used the ready local `qwen3-coder-30b` model. Each origin
+response explicitly reported 588 prompt, zero cached and one output token. All three
+gateway events preserved those counts and `reported/origin_usage`; coverage was 3/3,
+with one terminal SSE usage report. Thus the current live probe is **reported zero**,
+not missing reporting and not evidence of a Sandhi accounting error. It does not prove
+cache reuse or explain the earlier member trace. The shared InferFlux service and Mac
+gateway were not restarted, reconfigured or cleared. Sanitized runtime evidence is
+retained locally at `/tmp/sandhi-local-cache.q6l7xr/smoke-evidence.json`; no credentials
+or prompt/response text are exported there.
+
+## Contract decisions implemented by C2
 
 Do not infer unsupported capability from a missing counter or a reported zero. Define
 how validated wire presence and an explicit producer/catalog capability declaration
@@ -69,7 +87,11 @@ gateway on this host. Do not probe those loopbacks here as deployment evidence.
 Keep Qwen available; never clear shared cache or restart the shared server to force
 a test. No secrets, prompts or full provider bodies enter default metering records.
 
-The live gateway's JSON Content-Type correction is separate PR #265. This test-only
-increment does not import or claim that unmerged fix. Each slice targets `develop`
-through normal CI and review. No blanket merge-review or release bypass applies.
+The independently reviewed JSON Content-Type correction from PR #265 is included as
+a local-launch dependency (one header plus four byte-preserving regressions); that
+older PR is not separately merged or treated as approved. Each slice targets `develop`
+through real CI and independent adversarial review. The owner explicitly authorized
+a narrowly scoped proxy-review merge exception for the new Sandhi cache-work PRs;
+branch protections stay unchanged and failed/pending CI cannot be bypassed.
+No release exception or new version approval is implied.
 TD-0026 production gates and existing sibling release gates remain open separately.

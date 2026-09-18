@@ -79,6 +79,7 @@ def test_parse_usage_keeps_cache_split_single_sourced():
         "tokens_out": 20,
         "cache_creation_tokens": 0,
         "cache_read_tokens": 60,
+        "cache_read_observation": {"status": "reported", "source": "origin_usage"},
         "reasoning_tokens": 0,
         "reasoning_included": True,
         "duration_ms": 418,
@@ -158,6 +159,11 @@ def test_persistent_typed_provider_complete_and_stream():
         assert provider.provider == "openai"
         assert response["output"]["content"] == "hello"
         assert response["usage"]["tokens_in"] == 6
+        assert response["usage"]["cache_read_observation"] == {
+            "status": "reported", "source": "origin_usage"
+        }
+        usage = next(event["usage"] for event in events if event["event"] == "usage")
+        assert usage["cache_read_observation"] == response["usage"]["cache_read_observation"]
         assert [event["event"] for event in events] == [
             "response_start",
             "text_delta",
@@ -1023,6 +1029,7 @@ def test_parse_usage_exercises_every_builtin_provider_parser():
         "tokens_out": 3,
         "cache_creation_tokens": 0,
         "cache_read_tokens": 0,
+        "cache_read_observation": {"status": "absent", "source": "origin_usage"},
         "reasoning_tokens": 0,
         "reasoning_included": True,
         "duration_ms": None,
@@ -1044,6 +1051,7 @@ def test_parse_usage_exercises_every_builtin_provider_parser():
             "tokens_out": 0,
             "cache_creation_tokens": 0,
             "cache_read_tokens": 0,
+            "cache_read_observation": {"status": "absent", "source": "origin_usage"},
             "reasoning_tokens": 0,
             "reasoning_included": None,
             "duration_ms": None,
