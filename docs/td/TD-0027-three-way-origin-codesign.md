@@ -2,8 +2,10 @@
 
 - **Status:** **In progress** (release follow-through, 2026-09-17). S1-S5 and Sandhi review
   fixes are promoted to `main` via #261/#262. Exact-main CI passed; immutable `v0.7.0`
-  is published and independently verified across all required targets. InferFlux and Victor release candidates
-  were rebased onto their current `develop` branches and retain review/CI/publication gates;
+  is published and independently verified across all required targets; #263/#264 synchronized
+  the release evidence across protected branches. InferFlux v0.3.0 has passed main/GPU gates
+  but needs its packaging correction approved and verified; the owner-selected focused Victor
+  v0.9.5 cut retains second-account approval, CI, main-promotion and publication gates;
   see the [review and delivery gates](../reviews/three-way-release-review-2026-09-16.md).
   Model-free wire tests do not establish loaded-model accuracy, performance, or production readiness.
 - **Relates to:** [inferflux-issue-drafts.md](../upstream/inferflux-issue-drafts.md) (drafts 1-7),
@@ -79,7 +81,7 @@ acceptance. The release checkpoint and remaining roadmap follow the lane record.
 | S3 · Reservation calibration | Per-`(provider, model)` EWMA uses only final, measured origin events; cold-start/floor/bounds retained; synthetic low-ratio overshoot regression pinned | **Closed** — Sandhi #258, promoted in #262, published in v0.7.0 |
 | S4 · Latency semantics | Origin timing wins independently per field and carries `origin` provenance; Sandhi boundary timing fills only absent fields and carries `boundary` | **Closed** — Sandhi #259 |
 | Auth header compatibility | Secured exact-pin e2e succeeds through reqwest's lowercase `authorization`; InferFlux unit coverage also pins header and bearer-scheme casing | **Closed** — InferFlux #52 |
-| Victor consumer boundary | Original reasoning separation merged in #1066; later review found inclusion-flag coercion, aggregate billing and timing provenance gaps | **Original lane closed; follow-up pending** — corrected v0.9.5 candidate still needs CI/promotion/publication |
+| Victor consumer boundary | Original reasoning separation merged in #1066; focused inclusion/provenance and per-call accounting fixes independently reviewed from main `4e4e0d640` | **Original lane closed; release follow-through pending** — owner selected focused v0.9.5, excluding the broader v0.10.0 scope; approval/CI/promotion/publication remain open |
 
 ## Lanes — completion record (dependency order)
 
@@ -138,14 +140,31 @@ separate product decision rather than an unclosed producer-contract item.
 - Immutable `v0.7.0` points to that commit. All-target
   [release run](https://github.com/anvai-labs/sandhi/actions/runs/35203459727) passed on attempt 2:
   all publishers succeeded on attempt 1; only read-only verification was retried after an npm
-  platform-package 404. Independent all-target verification also passed. Protected back-sync
-  remains open at this checkpoint.
-- The latest-develop release scope includes InferFlux tool-call/reasoning/KV-capacity and
-  Victor curated-tool/session-context regressions discovered during the expanded review.
-  Fix candidates and CPU/local tests do not imply merged or released fixes.
-- Next: back-sync Sandhi evidence; validate Victor against the published binding; complete
-  independent review and fresh rebased CI, promotion, native release gates and publication for
-  InferFlux v0.3.0 and Victor v0.9.5. Record each exact source and outcome separately.
+  platform-package 404. Independent all-target verification also passed. Evidence synchronization
+  completed through [#263](https://github.com/anvai-labs/sandhi/pull/263) (`develop` `48c0c1f2`)
+  and [#264](https://github.com/anvai-labs/sandhi/pull/264) (`main` `079db9df`); exact push CI
+  [35222663146](https://github.com/anvai-labs/sandhi/actions/runs/35222663146) and
+  [35243214744](https://github.com/anvai-labs/sandhi/actions/runs/35243214744) passed respectively.
+- InferFlux [#182](https://github.com/anvai-labs/inferflux/pull/182) merged as `12cf6f97`;
+  exact-main CI `35258419838` and GPU gates `35258419858` passed. Packaging `35260030376`
+  failed Linux DEB-prefix and macOS installer checks. Corrective
+  [#183](https://github.com/anvai-labs/inferflux/pull/183) at `cccb8fd26` has green required
+  CI `35279415459` but awaits second-account approval; native packaging success remains open.
+- The owner explicitly selected a focused Victor v0.9.5 cut from main `4e4e0d640`, carrying
+  only consumer inclusion/billing/provenance fixes, tests, pins and release records. Broader
+  v0.10.0 PRs #1104/#1106 are closed with their branches preserved; unrelated develop changes
+  and the historical tool/session/policy/team findings are excluded from this release cut.
+  Replacement [#1116](https://github.com/anvai-labs/victor/pull/1116) is independently reviewed
+  at `79c33c4cf`; full collection passed (32,560 tests, zero errors). Hosted CI and approval
+  remain separate gates.
+- Fresh focused Victor validation passed all 18 three-repository CPU/stub probes using the
+  published Sandhi 0.7.0 binding and earlier reviewed InferFlux `3f45fed87` runtime binary,
+  not a new build of exact-main `12cf6f97`. This is separate from older candidate-wheel evidence,
+  exact-main hosted GPU evidence and still-pending sibling publication verification.
+- Next: obtain second-account approving reviews without admin bypass; complete InferFlux's
+  packaging correction and fresh main/native gates, and Victor's focused CI/main gates, then
+  publish/verify InferFlux v0.3.0 and Victor v0.9.5 and synchronize their release evidence.
+  Record each exact source and outcome separately; do not infer readiness from another lane.
 - Deferred optimization: bound calibration-key cardinality, evaluate resolved-model identity,
   collect real multilingual calibration pairs, and separate latency aggregates by provenance.
   These are follow-ups, not completed S3/S4 guarantees. TD-0026 P01–P03 remain production gates.
@@ -161,7 +180,8 @@ TD-0026 W07 scoped security or W08 hierarchical policy, which remain separate pl
   coverage; line threshold 75%).
 - The exact pinned InferFlux CPU/stub build passed all ten origin cases locally and the complete
   vendor-SDK/dashboard CI job. This is the authoritative e2e for the model-free contract; GPU
-  runners, a loaded model, and Windows packaging are intentionally outside this TD.
+  runners, a loaded model, and Windows packaging were outside that original conformance lane;
+  sibling release-platform gates are tracked separately above.
 - The S3 synthetic replay measures reservation coverage on its selected ratios, not general
   workload accuracy. Origin reasoning separation is pinned for both supported fixture families.
 - The release review strengthens the origin suite to 16 cases: a progressive, case-preserving
