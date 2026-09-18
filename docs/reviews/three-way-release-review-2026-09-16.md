@@ -14,17 +14,21 @@ remote evidence are recorded below. No claim of loaded-model or GPU validation f
 | Victor | #1066 `3b5aa2b0d` is in main and v0.9.4 | v0.9.4 | Package still pins sandhi-gateway 0.5.0 |
 
 The earlier TD “Complete” meant integration, not delivery. Owner approved Sandhi v0.7.0 on
-all four target groups, InferFlux v0.3.0, and Victor v0.9.5 after green gates. The later explicit
-rebase-first instruction supersedes the original main-only Victor scope: the release candidates
-now include current develop, requiring fresh cumulative review and CI. No immutable tag is moved.
+all four target groups, InferFlux v0.3.0, and Victor v0.9.5 after green gates. A subsequent
+rebase-first investigation prepared a broader v0.10.0 candidate, but the owner's final scope
+decision explicitly selects a **focused Victor v0.9.5 cut from main `4e4e0d640`**, excluding
+unrelated develop changes. Superseded Victor #1104/#1106 are closed and their branches retained;
+their source reviews remain historical, not approval to include that scope. Further merges
+require the second account's approving review; no admin review bypass is authorized.
+No immutable tag is moved.
 
 ## Current delivery checkpoint (2026-09-17)
 
 | Repository | Completed evidence | Still open |
 |---|---|---|
-| Sandhi | Independent review clean; #261 integrated at `db74cf91`; #262 promoted to `e05d7c5`; exact-main [CI 35193468410](https://github.com/anvai-labs/sandhi/actions/runs/35193468410) passed; v0.7.0 [all-target publication 35203459727](https://github.com/anvai-labs/sandhi/actions/runs/35203459727) and independent verifier passed | Protected evidence back-sync |
-| InferFlux | Original release preparation #180 merged at `274b74bc`; broader candidate rebased onto develop `d10b5bbc`; 47 CPU CTest groups pass; independent commit-bound review clean at `3f45fed87` | [PR #181](https://github.com/anvai-labs/inferflux/pull/181) hosted CI, promotion, exact-source CUDA/ROCm and native packaging/install smoke, v0.3.0 publication |
-| Victor | Candidate rebased onto develop `2311fa1f2`; inclusion/provenance and per-call accounting fixes present; curated-tool/session-context fixes independently reviewed with 125 tests and additional cancellation probes | Published Sandhi 0.7.0 dependency validation, final commit-bound review, fresh CI, promotion and v0.9.5 publication |
+| Sandhi | Independent review clean; #261/#262 promoted `e05d7c5`; exact-main [CI 35193468410](https://github.com/anvai-labs/sandhi/actions/runs/35193468410) passed; v0.7.0 [all-target publication 35203459727](https://github.com/anvai-labs/sandhi/actions/runs/35203459727) and independent verifier passed; #263/#264 synchronized evidence with green exact push CI | No Sandhi release gate remains; sibling releases and production acceptance are separate |
+| InferFlux | Reviewed [#182](https://github.com/anvai-labs/inferflux/pull/182) merged as main `12cf6f976206bae84081a9d4b155e906f3610af2`; exact-main [CI 35258419838](https://github.com/anvai-labs/inferflux/actions/runs/35258419838) and [GPU gates 35258419858](https://github.com/anvai-labs/inferflux/actions/runs/35258419858) passed. Packaging failed; corrective [#183](https://github.com/anvai-labs/inferflux/pull/183) at `cccb8fd26c7ed7986c1be77c0a4491ab0bb3e623` has green required [CI 35279415459](https://github.com/anvai-labs/inferflux/actions/runs/35279415459) | Second-account approval and merge of #183, fresh exact-main evidence and successful native packaging/install smoke, then v0.3.0 publication and artifact verification |
+| Victor | Focused v0.9.5 [#1116](https://github.com/anvai-labs/victor/pull/1116), commit `79c33c4cf7b7828d9aabb6ad47d1bd24825a69b7`, tree `b1dfdb7b017ff0c701583fccf2e778c56bfb0cc8`, from main `4e4e0d6405b4ff2a353aafa9adce1aac8aa4e993` independently reviewed and pushed; only inclusion/billing/provenance fixes, tests, Sandhi 0.7.0 pins and focused records carried. Fresh published-binding CPU/stub probes and full collection (32,560 tests, zero errors) passed | Second-account approval, exact-candidate CI, main promotion and exact-main CI, v0.9.5 publication and verification of declared artifacts |
 
 Sandhi's initial hosted verification failed after six npm platform-package HTTP 404s, although
 publication jobs succeeded. The independent verifier subsequently passed all targets; retrying
@@ -33,10 +37,30 @@ and no tag was moved. GitHub archive sizes/SHA-256, required PyPI platforms, fou
 versions and all npm versions/dependencies passed `verify-release.py v0.7.0 --targets
 pypi,crates,npm,github --repo anvai-labs/sandhi`.
 
+Sandhi evidence synchronization completed through [#263](https://github.com/anvai-labs/sandhi/pull/263)
+at develop `48c0c1f2` and [#264](https://github.com/anvai-labs/sandhi/pull/264) at main `079db9df`.
+Their identical tree is `dff7bc7aed1c25d55a0ebd05065a92b301172628`; exact push CI
+[35222663146](https://github.com/anvai-labs/sandhi/actions/runs/35222663146) and
+[35243214744](https://github.com/anvai-labs/sandhi/actions/runs/35243214744) passed respectively.
+The v0.7.0 tag remains at the original release commit, not either documentation merge.
+
+InferFlux [packaging run 35260030376](https://github.com/anvai-labs/inferflux/actions/runs/35260030376)
+failed on the Linux DEB install prefix and macOS installer path/metadata checks. Main CI and GPU
+success did not establish installer readiness. PR #183 corrects those bounded packaging defects;
+its green required CI does not replace a successful native packaging run after approved merge.
+
 The rebased InferFlux candidate passed all 18 local three-way probes (16 origin SDK cases plus
 2 actual Victor-provider cases) through the candidate Sandhi wheel. This is CPU/stub wire evidence,
 not a test of the published 0.7.0 wheel or GPU/model behavior. Sandhi's reproducibility pin remains
 `273780835f120cbe1a8da4860d72905861e71e29`; testing a newer candidate does not silently move it.
+Subsequently, the published Sandhi 0.7.0 Linux wheel was installed in the isolated review
+environment and passed all 18 three-repository CPU/stub probes. That later published-wheel
+evidence does not replace the historical candidate-wheel result or establish final sibling
+candidate CI, loaded-model validation or publication success.
+The new focused Victor v0.9.5 source was then tested afresh: all 18 three-repository CPU/stub
+probes passed with the published Sandhi binding and the earlier reviewed InferFlux `3f45fed87`
+runtime binary. That binary is not a build of exact-main `12cf6f97`; this is model-free wire
+evidence, separate from InferFlux's exact-main hosted GPU evidence above.
 
 The local independent-review hook checks the actual pushed commit/tree, including annotated
 tags. It is an unsigned local process guard, not a GitHub approval or tamper-proof trust boundary.
@@ -71,11 +95,21 @@ tags. It is an unsigned local process guard, not a GitHub approval or tamper-pro
    ordinary nested JSON could be misclassified as a tool call. The independently reviewed local
    fixes preserve encounter order, stream fields and per-context/per-request capacity. CPU tests
    pass; release-platform evidence remains open.
-9. **Rebased Victor regressions.** Default-off pruning could widen caller-curated tool supply;
+9. **Historical broader Victor regressions — excluded from the focused v0.9.5 cut.** Default-off pruning could widen caller-curated tool supply;
    streaming subagents could leak their session ContextVar across outward yields and fail cleanup
    in a different context. Fixes use authoritative curated supply with finalized tracing, and
    scoped setup/stream-advance/cleanup with real ContextVar regressions. Independent source
-   review passed; fresh exact-commit CI and publication remain open.
+   review passed for that broader candidate. Its tool/session changes are not carried into the focused release.
+10. **Historical frozen v0.10.0 cut regressions — excluded from v0.9.5.** Lazy tool-pruning policy must honor explicit
+    configuration before settings/environment; chat curated sets must fail closed when unavailable;
+    concurrent teams must retain per-call goals and use the actual formation accessor. The bounded
+    corrections and regression tests passed independent review for the broader cut, which is retained separately.
+11. **InferFlux release evidence and metadata.** Installer smoke now gates package uploads.
+    The reviewed release guard checks actual CI run/attempt provenance, tag/main ancestry,
+    CMake version and exact-SHA trusted-main GPU evidence before publication, then rechecks the
+    live tag immediately before publishing. Package metadata uses the real repository and pinned
+    recursive Git source with static bundled libraries. Offline tests verify these guards, not
+    a completed hosted package build or release.
 
 ## Verified local evidence
 
@@ -109,11 +143,16 @@ tags. It is an unsigned local process guard, not a GitHub approval or tamper-pro
 
 - [x] Sandhi review fixes merged through green PR checks; exact post-merge CI verified.
 - [x] Cumulative Sandhi develop→main promotion independently reviewed; exact-main CI green.
-- [ ] InferFlux v0.3.0 source/version and artifacts verified; original pin remains reproducible.
 - [x] Sandhi v0.7.0 GitHub, PyPI, all four crates, all three npm packages verified by hosted and independent release verifiers.
-- [ ] Victor exact Sandhi 0.7.0 pin and contract minor tested with the published binding; latest-develop
-  candidate reviewed/green/promoted and v0.9.5 published.
-- [ ] Back-sync protected branches and record final release evidence.
+- [x] Sandhi protected-branch release-evidence synchronization and exact push CI verified.
+- [x] Victor exact Sandhi 0.7.0 pin and contract minor tested with the published binding.
+- [x] Focused Victor v0.9.5 source and InferFlux #182 independently source-reviewed.
+- [x] InferFlux #182 promoted; exact-main CI and CUDA/ROCm gates passed at `12cf6f97`.
+- [ ] Second-account approval and merge of InferFlux packaging fix #183; fresh exact-main evidence and successful native installer gates.
+- [ ] Focused Victor commit/PR identity, second-account approval, exact-candidate CI, main promotion and exact-main CI.
+- [ ] InferFlux v0.3.0 publication and declared artifacts verified.
+- [ ] Victor v0.9.5 publication and all declared artifacts verified.
+- [ ] Synchronize sibling protected branches and record their final release evidence.
 
 Open optimization items above are a separate backlog, not prerequisites invented for this
 model-free contract release. Product acceptance P01–P03 in TD-0026 still gates production use.

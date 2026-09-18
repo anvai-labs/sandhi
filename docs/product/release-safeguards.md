@@ -1,7 +1,8 @@
 # Safeguarded milestone release
 
 Status (2026-09-17): v0.7.0 is promoted, published and independently verified across every
-required target; protected evidence back-sync remains. v0.6.1 was fully back-synced as the owner-approved
+required target; protected-branch evidence synchronization is complete through #263/#264.
+v0.6.1 was fully back-synced as the owner-approved
 compatibility exception for W05b's source-breaking public Rust API additions. Reuse of the existing
 crates token and PyPI/npm trusted publishing succeeded. Production is not authorized.
 See the [v0.6.1 checkpoint](#v061-compatibility-exception-execution-checkpoint-2026-09-08-utc)
@@ -21,7 +22,11 @@ published both GitHub archives, Linux/macOS/Windows wheels, four crates and all 
 The initial verifier saw an npm platform-package 404; subsequent independent verification and
 the read-only verifier retry passed. No publisher rerun, tag movement or credential change was
 needed. See the [cross-repository delivery record](../reviews/three-way-release-review-2026-09-16.md)
-for remaining back-sync/consumer gates. This does not authorize production or close P01–P03.
+for completed Sandhi synchronization and remaining sibling CI/promotion/publication gates.
+The owner selected focused Victor v0.9.5 from main; InferFlux v0.3.0 still needs successful
+native packaging after its corrective PR. Further merges require second-account approval,
+without an admin review bypass.
+This does not authorize production or close P01–P03.
 
 A milestone must publish the reviewed, CI-verified source and a complete, installable set of
 declared artifacts without granting build jobs unnecessary publishing authority. A failed or

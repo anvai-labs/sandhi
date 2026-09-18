@@ -18,7 +18,7 @@ mistaken for shipped behavior.
 | What product evolution is proposed and how is it tracked? | [TD-0026 delivery plan](td/TD-0026-gateway-product-evolution.md), [product specification](product/gateway-vision-and-requirements.md), and [2026-09-04 review](reviews/gateway-review-2026-09-04.md); proposals, not shipped claims |
 | What evidence gates the M1 checkpoint? | [Workload and acceptance](product/m1-acceptance.md); UA01 accepts engineering evidence for this release and defers hands-on usability until before production |
 | Which acceptance decisions remain, and why? | [M1 decision packet](product/m1-acceptance-decisions.md); automated evidence, operating-limit choices and a focused user-review script |
-| What is the milestone release state? | [Release safeguards](product/release-safeguards.md); v0.7.0 is promoted, published and independently verified; evidence back-sync remains |
+| What is the milestone release state? | [Release safeguards](product/release-safeguards.md); v0.7.0 is promoted, published and independently verified; protected-branch evidence synchronization is complete |
 | What is the three-way co-design state? | [TD-0027](td/TD-0027-three-way-origin-codesign.md) and [delivery review](reviews/three-way-release-review-2026-09-16.md); original lanes integrated, cross-repository release follow-through in progress |
 | What adversarial checks cover the first checkpoint? | [2026-09-05 checkpoint review](reviews/checkpoint-adversarial-review-2026-09-05.md); findings, corrections and remaining integration gates |
 
@@ -125,7 +125,7 @@ perpetually open.
 | [0024](td/TD-0024-reservation-retention-and-rollup.md) | Proposed | Bounded reservation history and rollups |
 | [0025](td/TD-0025-ingress-funnel-and-family-registry.md) | Proposed | Family registry and funnel decomposition |
 | [0026](td/TD-0026-gateway-product-evolution.md) | In progress | v0.6.0/v0.6.1 fully verified and back-synced; W05b opt-in diagnostics shipped, W05a remains inactive; W05c–e and P01–P03 remain open |
-| [0027](td/TD-0027-three-way-origin-codesign.md) | In progress | S1–S5 and review fixes published/verified in v0.7.0; back-sync and rebased InferFlux/Victor release follow-through open |
+| [0027](td/TD-0027-three-way-origin-codesign.md) | In progress | Sandhi v0.7.0 published/verified and evidence synchronized; InferFlux v0.3.0 packaging correction awaits approval/native verification; focused Victor v0.9.5 awaits approval/CI/promotion; sibling publication remains open |
 
 TD-0026 slice completion means implementation/local verification. Its separate C01/C02 checkpoint
 table tracks remote CI, merge and release; C01 [PR #230](https://github.com/anvai-labs/sandhi/pull/230)
@@ -146,7 +146,9 @@ The [browser–gateway–vault co-design](upstream/browser-gateway-vault-codesig
 AgentBrowser smoke coverage and proposed destination-bound secrets and correlated action evidence;
 it does not imply a live three-product integration.
 
-The immediate delivery work is TD-0027's verified three-repository release follow-through.
+The immediate delivery work is TD-0027's InferFlux v0.3.0 packaging correction and focused
+Victor v0.9.5 approval/CI/promotion/publication gates. Further merges require the second account's
+approving review. Sandhi v0.7.0 and its evidence synchronization are complete.
 It does not close TD-0026's authoritative attempt accounting, scoped security, hierarchical
 policy, live broker interoperability or hands-on production acceptance. Calibration identity,
 bounded key storage and provenance-separated latency analytics remain explicit optimization
