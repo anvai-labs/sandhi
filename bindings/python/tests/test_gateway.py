@@ -14,11 +14,130 @@ import pytest
 import sandhi_gateway as sg
 
 
+def _assert_complete_openai_stream(events, *, cached=False):
+    """Keep metadata-only updates separate from the one final numeric verdict."""
+    semantic = []
+    final_usages = []
+    counts = ("tokens_in", "tokens_out", "cache_creation_tokens", "cache_read_tokens")
+    zero_counts = dict.fromkeys(counts, 0)
+    metadata_updates = 0
+    for event in events:
+        if event["event"] == "usage" and event["usage"]["completeness"] == "unavailable":
+            usage = event["usage"]
+            observation = usage["cache_read_observation"]
+            assert observation["source"] == "origin_usage"
+            assert observation["status"] in (("reported", "absent") if cached else ("absent",))
+            assert {key: usage[key] for key in counts} == zero_counts
+            for key in ("reasoning_tokens", "audio_input_tokens", "audio_output_tokens",
+                        "accepted_prediction_tokens", "rejected_prediction_tokens"):
+                value = usage.get(key)
+                assert value is None or (type(value) is int and value == 0)
+            metadata_updates += 1
+            continue
+        if event["event"] == "usage":
+            assert event["usage"]["completeness"] == "final"
+            final_usages.append(event["usage"])
+        semantic.append(event["event"])
+    assert metadata_updates == 1
+    assert events[1]["event"] == "usage"
+    assert events[1]["usage"]["completeness"] == "unavailable"
+    assert len(final_usages) == 1
+    assert final_usages[0]["cache_read_observation"] == {
+        "status": "reported" if cached else "absent", "source": "origin_usage"
+    }
+    assert semantic == ["response_start", "text_delta", "usage", "finish"]
+    assert "".join(event["delta"] for event in events if event["event"] == "text_delta") == "he"
+    return final_usages[0]
+
+
+@pytest.mark.parametrize("corruption", [
+    "duplicate_metadata", "wrong_position", "malformed", "partial", "second_final",
+    "changed_counts", "reasoning",
+])
+def test_complete_stream_assertions_reject_invalid_usage(corruption):
+    counts = dict.fromkeys(("tokens_in", "tokens_out", "cache_creation_tokens", "cache_read_tokens"), 0)
+    observation = {"status": "absent", "source": "origin_usage"}
+    events = [
+        {"event": "response_start"},
+        {"event": "usage", "usage": {**counts, "completeness": "unavailable", "cache_read_observation": observation.copy()}},
+        {"event": "text_delta", "delta": "he"},
+        {"event": "usage", "usage": {**counts, "tokens_in": 10, "tokens_out": 3,
+                                      "completeness": "final", "cache_read_observation": observation.copy()}},
+        {"event": "finish"},
+    ]
+    _assert_complete_openai_stream(events)
+    if corruption == "duplicate_metadata":
+        events.insert(2, events[1])
+    elif corruption == "wrong_position":
+        events[0], events[1] = events[1], events[0]
+    elif corruption == "malformed":
+        events[1]["usage"]["cache_read_observation"]["status"] = "malformed"
+    elif corruption == "partial":
+        events[1]["usage"]["completeness"] = "partial"
+    elif corruption == "second_final":
+        events.insert(4, events[3])
+    elif corruption == "changed_counts":
+        events[1]["usage"]["tokens_in"] = 1
+    else:
+        events[1]["usage"]["reasoning_tokens"] = 1
+    with pytest.raises(AssertionError):
+        _assert_complete_openai_stream(events)
+
+
 def _start_server(handler_cls):
     """Start an HTTPServer on an ephemeral port with ``handler_cls`` (serves forever)."""
     server = HTTPServer(("127.0.0.1", 0), handler_cls)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
+
+
+def test_cache_observation_precedes_consumer_stopping_at_first_content():
+    frame = {"id": "r", "model": "gpt-test",
+             "choices": [{"delta": {"content": "he"}, "finish_reason": None}],
+             "usage": {"prompt_tokens": 9, "completion_tokens": 0,
+                       "prompt_tokens_details": {"cached_tokens": 0}}}
+    body = f"data: {json.dumps(frame)}\n\n".encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.send_response(200)
+            self.send_header("content-type", "text/event-stream")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = _start_server(Handler)
+    try:
+        provider = sg.ProviderRuntime().openai_compat(
+            "openai", f"http://127.0.0.1:{server.server_port}/v1", "key", max_retries=0
+        )
+
+        async def consume():
+            received = []
+            request = json.dumps({"model": "gpt-test", "messages": [{"role": "user", "content": "hi"}]})
+            async for value in provider.stream_json(request):
+                event = json.loads(value)
+                received.append(event)
+                if event["event"] == "text_delta":
+                    break
+            return received
+
+        received = asyncio.run(consume())
+        assert [event["event"] for event in received] == ["response_start", "usage", "text_delta"]
+        usage = received[1]["usage"]
+        assert usage["completeness"] == "unavailable"
+        assert usage["cache_read_observation"] == {"status": "reported", "source": "origin_usage"}
+        assert all(usage[key] == 0 for key in (
+            "tokens_in", "tokens_out", "cache_creation_tokens", "cache_read_tokens"
+        ))
+        assert received[2]["delta"] == "he"
+        # Delivered-event ordering, not cancellation of the native producer task.
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_contract_discovery_and_schemas():
@@ -162,14 +281,9 @@ def test_persistent_typed_provider_complete_and_stream():
         assert response["usage"]["cache_read_observation"] == {
             "status": "reported", "source": "origin_usage"
         }
-        usage = next(event["usage"] for event in events if event["event"] == "usage")
+        usage = _assert_complete_openai_stream(events, cached=True)
         assert usage["cache_read_observation"] == response["usage"]["cache_read_observation"]
-        assert [event["event"] for event in events] == [
-            "response_start",
-            "text_delta",
-            "usage",
-            "finish",
-        ]
+        assert (usage["tokens_in"], usage["tokens_out"], usage["cache_read_tokens"]) == (6, 3, 4)
         assert Handler.calls == 2
     finally:
         server.shutdown()
@@ -246,12 +360,8 @@ def test_per_call_wire_headers_ride_and_cannot_override_the_credential():
 
         response, events = asyncio.run(run())
         assert response["output"]["content"] == "hello"
-        assert [event["event"] for event in events] == [
-            "response_start",
-            "text_delta",
-            "usage",
-            "finish",
-        ]
+        usage = _assert_complete_openai_stream(events)
+        assert (usage["tokens_in"], usage["tokens_out"]) == (10, 3)
         # Both calls carried the per-call headers; the credential override never landed.
         for sent in seen_headers[:2]:
             sent = {name.lower(): value for name, value in sent.items()}

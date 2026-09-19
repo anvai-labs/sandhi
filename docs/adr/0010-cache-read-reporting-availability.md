@@ -90,6 +90,15 @@ promotes completeness from unavailable/partial to final.
 
 ## D3. Streaming observes fields, not frames or latency
 
+Canonical streams (including Python/Node `stream_json` / `streamJson`) may emit an
+accounting-only `Usage` update with `completeness=unavailable` and a validated cache
+observation before content or after a numeric measurement. This carries field metadata,
+not another numeric verdict: consumers retain their prior numeric measurement and merge
+the observation. `ResponseStart` remains first; callers must not assume a fixed total
+event count. These updates are suppressed on translated provider wire responses, and
+transparent SSE remains byte-exact. Exactly one final numeric usage report remains one
+final report; metadata updates do not become additional logical-call events.
+
 Preserve the existing family-specific snapshot/delta accounting semantics. Do not sum
 cumulative snapshots or count each SSE frame as another call. Normal content/finish
 frames without a usage object do not erase earlier observations. OpenAI's legal

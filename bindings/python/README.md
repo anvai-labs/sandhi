@@ -64,6 +64,13 @@ failures raise `SandhiProviderError`, whose message contains a serialized `Provi
 `runtime.provider()` resolves a known endpoint from Sandhi's catalog;
 `runtime.openai_compat()` is the explicit custom-endpoint escape hatch.
 
+Canonical streams may emit accounting-only `usage` events before content or after a
+numeric usage snapshot. When `usage.completeness` is `"unavailable"` and a valid
+`cache_read_observation` is present, merge that metadata without adding its counters or replacing the last
+numeric snapshot/completeness. It is not a second final usage verdict. These events
+preserve evidence for consumers that stop reading after content; transparent and
+translated provider wire responses are unchanged.
+
 `provider_spec()` exposes stable Rust-owned wire facts (canonical slug, aliases, base URL, and
 model endpoint routing). Static and per-call headers cannot override credentials or other
 transport-owned framing. Sandhi validates typed request invariants before HTTP; callers still own

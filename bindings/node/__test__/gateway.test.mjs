@@ -9,6 +9,69 @@ import { Gateway, parseUsage, wireContractVersion } from "../index.js";
 import { ProviderRuntime } from "../sandhi.js";
 import "./cache-read-observation.test.mjs";
 
+function assertCompleteOpenAiStream(events, cached = false) {
+  // Availability can precede content. It is not another numeric usage verdict.
+  const semantic = [];
+  const finalUsages = [];
+  const counts = ["tokens_in", "tokens_out", "cache_creation_tokens", "cache_read_tokens"];
+  const zeroCounts = Object.fromEntries(counts.map(key => [key, 0]));
+  let metadataUpdates = 0;
+  for (const event of events) {
+    if (event.event === "usage" && event.usage.completeness === "unavailable") {
+      const usage = event.usage;
+      assert.equal(usage.cache_read_observation?.source, "origin_usage");
+      assert.ok((cached ? ["reported", "absent"] : ["absent"]).includes(usage.cache_read_observation?.status));
+      assert.deepEqual(Object.fromEntries(counts.map(key => [key, usage[key]])), zeroCounts);
+      for (const key of ["reasoning_tokens", "audio_input_tokens", "audio_output_tokens",
+        "accepted_prediction_tokens", "rejected_prediction_tokens"])
+        assert.equal(usage[key] ?? 0, 0, `metadata must not add ${key}`);
+      metadataUpdates++;
+      continue;
+    }
+    if (event.event === "usage") {
+      assert.equal(event.usage.completeness, "final");
+      finalUsages.push(event.usage);
+    }
+    semantic.push(event.event);
+  }
+  assert.equal(metadataUpdates, 1, "one metadata-only update for these two-frame fixtures");
+  assert.equal(events[1].event, "usage");
+  assert.equal(events[1].usage.completeness, "unavailable", "availability precedes delivered content");
+  assert.equal(finalUsages.length, 1, "exactly one final numeric usage verdict");
+  assert.deepEqual(finalUsages[0].cache_read_observation, {
+    status: cached ? "reported" : "absent", source: "origin_usage",
+  });
+  assert.deepEqual(semantic, ["response_start", "text_delta", "usage", "finish"]);
+  assert.equal(events.filter(event => event.event === "text_delta").map(event => event.delta).join(""), "he");
+  return finalUsages[0];
+}
+
+test("healthy stream assertions reject invalid metadata and duplicate final usage", () => {
+  const counts = { tokens_in: 0, tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0 };
+  const observation = { status: "absent", source: "origin_usage" };
+  const healthy = [
+    { event: "response_start" },
+    { event: "usage", usage: { ...counts, completeness: "unavailable", cache_read_observation: observation } },
+    { event: "text_delta", delta: "he" },
+    { event: "usage", usage: { ...counts, tokens_in: 10, tokens_out: 3, completeness: "final", cache_read_observation: observation } },
+    { event: "finish" },
+  ];
+  assertCompleteOpenAiStream(healthy);
+  for (const corrupt of [
+    events => events.splice(2, 0, structuredClone(events[1])),
+    events => [events[0], events[1]] = [events[1], events[0]],
+    events => events[1].usage.cache_read_observation.status = "malformed",
+    events => events[1].usage.completeness = "partial",
+    events => events.splice(4, 0, structuredClone(events[3])),
+    events => events[1].usage.tokens_in = 1,
+    events => events[1].usage.reasoning_tokens = 1,
+  ]) {
+    const events = structuredClone(healthy);
+    corrupt(events);
+    assert.throws(() => assertCompleteOpenAiStream(events), assert.AssertionError);
+  }
+});
+
 function localServer(responses) {
   return new Promise((resolve) => {
     let calls = 0;
@@ -33,6 +96,35 @@ function localServer(responses) {
     });
   });
 }
+
+test("cache observation is delivered before a consumer stops at first content", async () => {
+  const frame = {
+    id: "r", model: "gpt-test", choices: [{ delta: { content: "he" }, finish_reason: null }],
+    usage: { prompt_tokens: 9, completion_tokens: 0, prompt_tokens_details: { cached_tokens: 0 } },
+  };
+  const server = await localServer([{ contentType: "text/event-stream", body: `data: ${JSON.stringify(frame)}\n\n` }]);
+  try {
+    const provider = new ProviderRuntime().openaiCompat("openai", server.baseUrl, "key", undefined, 0);
+    const received = [];
+    for await (const value of provider.streamJson(JSON.stringify({
+      model: "gpt-test", messages: [{ role: "user", content: "hi" }],
+    }))) {
+      const event = JSON.parse(value);
+      received.push(event);
+      if (event.event === "text_delta") break;
+    }
+    assert.deepEqual(received.map(event => event.event), ["response_start", "usage", "text_delta"]);
+    const usage = received[1].usage;
+    assert.equal(usage.completeness, "unavailable");
+    assert.deepEqual(usage.cache_read_observation, { status: "reported", source: "origin_usage" });
+    for (const key of ["tokens_in", "tokens_out", "cache_creation_tokens", "cache_read_tokens"])
+      assert.equal(usage[key], 0);
+    assert.equal(received[2].delta, "he");
+    // This pins delivered-event ordering, not cancellation of the native producer task.
+  } finally {
+    await server.close();
+  }
+});
 
 test("per-call wire headers ride and cannot override the credential (TD-0022)", async () => {
   const server = await localServer([
@@ -117,12 +209,9 @@ test("streamJson per-call wire headers ride and cannot override the credential (
     )) {
       events.push(JSON.parse(event));
     }
-    assert.deepEqual(events.map((event) => event.event), [
-      "response_start",
-      "text_delta",
-      "usage",
-      "finish",
-    ]);
+    const finalUsage = assertCompleteOpenAiStream(events);
+    assert.equal(finalUsage.tokens_in, 10);
+    assert.equal(finalUsage.tokens_out, 3);
     const sent = server.lastHeaders();
     assert.equal(sent["x-sandhi-run-id"], "run-9");
     assert.equal(sent["x-sandhi-step-id"], "step-7");
@@ -238,14 +327,12 @@ test("persistent typed provider completes and streams neutral documents", async 
 
     const events = [];
     for await (const event of provider.streamJson(request)) events.push(JSON.parse(event));
-    assert.deepEqual(events.find(event => event.event === "usage").usage.cache_read_observation,
+    const finalUsage = assertCompleteOpenAiStream(events, true);
+    assert.deepEqual(finalUsage.cache_read_observation,
       response.usage.cache_read_observation);
-    assert.deepEqual(events.map((event) => event.event), [
-      "response_start",
-      "text_delta",
-      "usage",
-      "finish",
-    ]);
+    assert.equal(finalUsage.tokens_in, 6);
+    assert.equal(finalUsage.tokens_out, 3);
+    assert.equal(finalUsage.cache_read_tokens, 4);
     assert.equal(server.calls(), 2);
   } finally {
     await server.close();
@@ -661,7 +748,9 @@ test("TypedEventStream.read() drains a healthy stream to exhaustion", async () =
       if (chunk === null || chunk === undefined) break;
       events.push(JSON.parse(chunk));
     }
-    assert.deepEqual(events.map((e) => e.event), ["response_start", "text_delta", "usage", "finish"]);
+    const finalUsage = assertCompleteOpenAiStream(events);
+    assert.equal(finalUsage.tokens_in, 3);
+    assert.equal(finalUsage.tokens_out, 1);
   } finally {
     await server.close();
   }

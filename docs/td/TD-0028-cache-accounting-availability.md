@@ -49,9 +49,13 @@ durations. No live gateway was contacted and no deployed binary was changed.
 
 Local C2/C3 validation (2026-09-18): 645 workspace tests passed with four existing
 opt-in tests ignored; strict workspace Clippy, formatting and generated-facade checks
-passed. Python binding tests: 84 passed; Node: 54 passed. All 25 real-browser dashboard
+passed. Fresh final-source Python binding tests: 92 passed; Node: 56 passed. All 25 real-browser dashboard
 tests passed. Independent cross-review findings on stream corrections, invalid SQLite
 metadata and schema status/source pairs were fixed and rechecked before checkpointing.
+The first PR CI run exposed stale fixed-event-sequence binding assertions after the
+canonical metadata-only stream update. Tests now validate those updates explicitly,
+reject duplicate numeric verdicts and cover stop-after-content consumers; both native
+bindings were rebuilt from final provider source before the counts above were recorded.
 
 An isolated WSL gateway was launched at `127.0.0.1:18789`, with its own SQLite state and
 admin authentication. One synthetic direct call followed by two buffered gateway calls
