@@ -8,6 +8,35 @@ const orDash = s => (s === null || s === undefined || s === "") ? "—" : esc(s)
 const lat = l => (!l || !l.samples) ? "—"
   : `${fmt(l.p50_ms)} / ${fmt(l.p95_ms)} ms <span class="muted">(n=${fmt(l.samples)})</span>`;
 
+// Reporting coverage is a call count, not a cache hit rate or a token discount. Legacy
+// aggregates have no observation evidence, including when their numeric cache count is > 0.
+function cacheCoverage(row) {
+  const c = row.cache_read_coverage;
+  const fields = ["reported", "absent", "malformed", "unsupported", "unknown"];
+  if (!c || !Number.isSafeInteger(row.calls) || row.calls < 0
+      || fields.some(k => !Number.isSafeInteger(c[k]) || c[k] < 0)
+      || fields.reduce((n, k) => n + c[k], 0) !== row.calls) return null;
+  return c;
+}
+function cacheRead(row) {
+  const c = cacheCoverage(row);
+  if (!c) return "unknown";
+  if (!row.calls) return "—";
+  if (c.reported === row.calls) return fmt(row.cache_read_tokens);
+  if (c.absent === row.calls) return "not reported";
+  if (c.malformed === row.calls) return "malformed";
+  if (c.unsupported === row.calls) return "unsupported";
+  if (c.unknown === row.calls) return "unknown";
+  return `${fmt(row.cache_read_tokens)} <span class="muted">(mixed reporting)</span>`;
+}
+function cacheCoverageLabel(row) {
+  const c = cacheCoverage(row);
+  if (!c) return `unknown / ${fmt(row.calls)} calls`;
+  return `${fmt(c.reported)} / ${fmt(row.calls)} reported`
+    + ` <span class="muted">(not reported ${fmt(c.absent)}; malformed ${fmt(c.malformed)};`
+    + ` unsupported ${fmt(c.unsupported)}; unknown ${fmt(c.unknown)})</span>`;
+}
+
 // The token lives only in memory. Editing/clearing it cancels reads and hides all prior
 // privileged data immediately. Old responses cannot repopulate a new authentication session.
 const tokenEl = document.getElementById("admin-token");
@@ -161,16 +190,17 @@ function requireFields(data, arrays, objects = []) {
 function tbl(title, rows) {
   const body = rows.map(r => `<tr><td>${esc(r.key)}</td><td class="num">${fmt(r.calls)}</td>`
     + `<td class="num">${fmt(r.tokens_in)}</td><td class="num">${fmt(r.tokens_out)}</td>`
-    + `<td class="num">${fmt(r.cache_creation_tokens)}</td><td class="num">${fmt(r.cache_read_tokens)}</td>`
+    + `<td class="num">${fmt(r.cache_creation_tokens)}</td><td class="num">${cacheRead(r)}</td>`
+    + `<td>${cacheCoverageLabel(r)}</td>`
     + `<td class="num">${fmt(r.billable_tokens)}</td>`
     + `<td class="num">${lat(r.latency)}</td></tr>`).join("");
   return `<h3>${title}</h3><table><thead><tr><th>key</th><th class="num">calls</th>`
     + `<th class="num">in</th><th class="num">out</th><th class="num">cache write</th>`
-    + `<th class="num">cache read</th><th class="num" title="ADR-0005 D4: the quantity budgets `
+    + `<th class="num">cache read</th><th>cache reporting coverage</th><th class="num" title="ADR-0005 D4: the quantity budgets `
     + `are enforced on — fresh input + cache split + output (+ unfolded reasoning)">billable`
     + `</th><th class="num" title="p50 / p95 milliseconds over the sampled calls that reported a `
     + `duration — approximate by design; tokens above are exact">latency</th></tr></thead>`
-    + `<tbody>${body || '<tr><td colspan=8>no data yet</td></tr>'}</tbody></table>`;
+    + `<tbody>${body || '<tr><td colspan=10>no data yet</td></tr>'}</tbody></table>`;
 }
 
 function loadUsage() {
@@ -179,10 +209,10 @@ function loadUsage() {
     const t = d.total;
     return '<div class="cards" id="cards">' +
       [["calls", fmt(t.calls)], ["tokens in", fmt(t.tokens_in)], ["tokens out", fmt(t.tokens_out)],
-       ["cache read", fmt(t.cache_read_tokens)], ["billable", fmt(t.billable_tokens)],
+       ["cache read", cacheRead(t)], ["cache reporting coverage", cacheCoverageLabel(t)], ["billable", fmt(t.billable_tokens)],
        ["latency p50/p95", lat(t.latency)]]
       .map(([l, n]) => `<div class="card"><div class="n">${n}</div><div class="l">${l}</div></div>`).join("")
-      + `</div><h3>Attribution</h3><div id="tables">`
+      + `</div><p class="muted">Cache read is reported cache-read input (origin or explicit caller observation), not proof of backend reuse; cache write is an explicit accounting category, not proof of new KV state. Counts are neutral tokens, not prices or savings. Reporting coverage counts calls in each displayed aggregate; it is not a cache hit rate. Mixed totals retain legacy numeric accounting.</p><h3>Attribution</h3><div id="tables">`
       + tbl("By user (subject)", d.by_subject || [])
       + tbl("By team (group)", d.by_group || [])
       + tbl("By provider", d.by_provider || [])

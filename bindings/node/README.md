@@ -86,4 +86,11 @@ for await (const eventJson of provider.streamJson(request)) {
 credentials cannot be overridden. Invalid documents fail before network I/O; provider failures
 throw `SandhiProviderError` with a structured `ProviderErrorV1` payload.
 
+Canonical streams may emit accounting-only `usage` events before content or after a
+numeric usage snapshot. When `usage.completeness` is `"unavailable"` and a valid
+`cache_read_observation` is present, merge that metadata without adding its counters or replacing the last
+numeric snapshot/completeness. It is not a second final usage verdict. These events
+preserve evidence for consumers that stop reading after content; transparent and
+translated provider wire responses are unchanged.
+
 Apache-2.0. The transport surface links `sandhi-providers` (async HTTP stack) into the addon.

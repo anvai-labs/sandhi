@@ -26,6 +26,7 @@ pub use sandhi_core::usage::{
 pub mod anthropic;
 mod anthropic_typed;
 pub mod attempt;
+mod cache_read;
 pub mod catalog;
 pub mod cohere;
 mod cohere_typed;
@@ -220,6 +221,33 @@ pub struct ProviderResponse {
     pub attempts: u32,
 }
 
+fn buffered_usage(
+    family: sandhi_core::CacheReadFamily,
+    body: &serde_json::Value,
+) -> (ParsedUsage, Option<ParsedUsage>) {
+    let observed = sandhi_core::observe_usage(family, body);
+    let mut usage = observed.usage.unwrap_or_default();
+    usage.cache_read_observation = observed.cache_read_observation;
+    (usage, observed.usage)
+}
+
+fn observe_stream_cache(
+    family: sandhi_core::CacheReadFamily,
+    frame: &serde_json::Value,
+    usage: &mut ParsedUsage,
+) {
+    sandhi_core::merge_cache_read_observation(
+        &mut usage.cache_read_observation,
+        sandhi_core::observe_cache_read_stream(family, frame),
+    );
+}
+
+fn replace_numeric_usage(usage: &mut ParsedUsage, mut next: ParsedUsage) {
+    // The sniffer already reduced this frame's metadata, independently of numeric matching.
+    next.cache_read_observation = usage.cache_read_observation;
+    *usage = next;
+}
+
 /// One item of a streaming response: raw bytes to forward verbatim, plus the usage counts —
 /// finalized on the terminal item, running on every item before it.
 #[derive(Debug, Clone, Default)]
@@ -242,6 +270,8 @@ pub struct StreamChunk {
     /// family that only reports at the end this stays `None` for the whole stream, so no caller
     /// has to know which family it is talking to — the absence of a number *is* the signal.
     pub usage_running: Option<ParsedUsage>,
+    /// Field-level reporting evidence, independent of whether numeric usage was measured.
+    pub cache_read_observation: Option<sandhi_core::CacheReadObservation>,
     /// Upstream stream-setup attempts made for this logical call.
     pub attempts: u32,
     /// `true` only for the adapter-generated end-of-stream measurement item.
@@ -484,10 +514,16 @@ where
             if splitter.over_budget() {
                 splitter.reset();
             }
+            if !chunk.is_empty() {
+                // Response bytes were inspected. Even if the caller aborts before EOF,
+                // absence of a cache field is not the no-response/unknown state.
+                usage.cache_read_observation.get_or_insert_with(|| sandhi_core::CacheReadObservation::origin(sandhi_core::CacheReadStatus::Absent));
+            }
             yield StreamChunk {
                 data: chunk,
                 usage: None,
                 usage_running: sniffed.then_some(usage),
+                cache_read_observation: usage.cache_read_observation,
                 attempts: 1,
                 terminal: false,
             };
@@ -506,10 +542,12 @@ where
         // `None` when nothing was ever sniffed. Previously this yielded `Some(default())`, an
         // all-zero *finalized* usage that overwrote whatever the caller had accrued — so a stream
         // whose usage frame was never matched settled 0 after a full response (TD-0013 P1).
+        usage.cache_read_observation.get_or_insert_with(|| sandhi_core::CacheReadObservation::origin(sandhi_core::CacheReadStatus::Absent));
         yield StreamChunk {
             data: Bytes::new(),
             usage: sniffed.then_some(usage),
             usage_running: sniffed.then_some(usage),
+            cache_read_observation: usage.cache_read_observation,
             attempts: 1,
             terminal: true,
         };
@@ -1002,6 +1040,9 @@ mod streaming_usage_fidelity_tests {
         assert_eq!(
             chunks.last().unwrap().usage,
             Some(ParsedUsage {
+                cache_read_observation: Some(sandhi_core::CacheReadObservation::origin(
+                    sandhi_core::CacheReadStatus::Absent
+                )),
                 reasoning_included: Some(true),
                 ..ParsedUsage::default()
             }),

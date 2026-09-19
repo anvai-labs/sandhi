@@ -123,6 +123,8 @@ pub struct UsageAggregateV1 {
     pub tokens_out: u64,
     pub cache_creation_tokens: u64,
     pub cache_read_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_coverage: Option<crate::CacheReadCoverage>,
     pub reasoning_tokens: u64,
     /// The ADR-0005 D4 quantity budgets are enforced on, summed **per call**. Not derivable from
     /// the fields above: the reasoning fold is a per-call decision, so comparing summed reasoning
@@ -145,6 +147,11 @@ impl UsageAggregateV1 {
 
     /// Fold one event into this row. The only place an aggregate grows.
     pub fn add(&mut self, e: &UsageEvent) {
+        let coverage = self
+            .cache_read_coverage
+            .get_or_insert_with(|| crate::CacheReadCoverage::unknown(self.calls));
+        *coverage = coverage.normalized(self.calls);
+        coverage.add(e.cache_read_observation);
         self.calls += 1;
         self.tokens_in += e.tokens_in;
         self.tokens_out += e.tokens_out;
@@ -167,6 +174,15 @@ impl UsageAggregateV1 {
     /// which loses the per-event semantics of [`billable_parts_with_reasoning`]. Latency percentiles are
     /// not mergeable and are left untouched.
     pub fn merge(&mut self, other: &Self) {
+        let other_coverage = other
+            .cache_read_coverage
+            .unwrap_or_default()
+            .normalized(other.calls);
+        let coverage = self
+            .cache_read_coverage
+            .get_or_insert_with(|| crate::CacheReadCoverage::unknown(self.calls));
+        *coverage = coverage.normalized(self.calls);
+        coverage.merge(&other_coverage);
         self.calls += other.calls;
         self.tokens_in += other.tokens_in;
         self.tokens_out += other.tokens_out;

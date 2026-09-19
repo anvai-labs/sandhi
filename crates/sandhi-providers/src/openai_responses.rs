@@ -123,12 +123,13 @@ impl Provider for OpenAiResponses {
                     .json()
                     .await
                     .map_err(|error| ProviderError::Transport(error.to_string()))?;
-                let observed_usage = parse_openai_responses_usage(&body);
+                let (response_usage, observed_usage) =
+                    crate::buffered_usage(sandhi_core::CacheReadFamily::OpenAiResponses, &body);
                 Ok((
                     ProviderResponse {
                         status,
                         body,
-                        usage: observed_usage.unwrap_or_default(),
+                        usage: response_usage,
                         attempts: 1,
                     },
                     observed_usage,
@@ -180,6 +181,7 @@ pub(crate) fn sniff_responses_usage_line(line: &[u8], usage: &mut ParsedUsage) -
     let Some(event) = sse_data_json(line) else {
         return false;
     };
+    crate::observe_stream_cache(sandhi_core::CacheReadFamily::OpenAiResponses, &event, usage);
     let response = event.get("response").unwrap_or(&event);
     // The null guard its Chat counterpart has always had. `response.created` and
     // `response.in_progress` carry `"usage": null`, which parses to all-zeros and would otherwise
@@ -192,7 +194,7 @@ pub(crate) fn sniff_responses_usage_line(line: &[u8], usage: &mut ParsedUsage) -
         Some(_) => {}
     }
     if let Some(parsed) = parse_openai_responses_usage(response) {
-        *usage = parsed;
+        crate::replace_numeric_usage(usage, parsed);
         return true;
     }
     false

@@ -1,1 +1,2 @@
-{"tokens_in":0,"tokens_out":24,"cache_creation_tokens":0,"cache_read_tokens":50}
+{
+  "cache_read_observation": {"status": "reported", "source": "origin_usage"},"tokens_in":0,"tokens_out":24,"cache_creation_tokens":0,"cache_read_tokens":50}

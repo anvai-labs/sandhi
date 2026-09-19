@@ -18,10 +18,8 @@ use pyo3::types::{PyAny, PyDict};
 use std::sync::Arc;
 
 use sandhi_core::{
-    parse_anthropic_usage, parse_bedrock_usage, parse_cohere_usage, parse_gemini_usage,
-    parse_ollama_usage, parse_openai_responses_usage, parse_openai_usage, Backend, Budget,
-    BudgetLedger, Dimension, KeyStore, ParsedUsage, UsageAggregateV1, UsageAggregator, UsageEvent,
-    VirtualKey,
+    observe_usage, Backend, Budget, BudgetLedger, CacheReadFamily, CacheReadObservation, Dimension,
+    KeyStore, ParsedUsage, UsageAggregateV1, UsageAggregator, UsageEvent, VirtualKey,
 };
 use sandhi_providers::{
     resolve_openai_compat_provider, AnthropicAuthScheme, GeminiAuthScheme, ProviderError,
@@ -653,7 +651,8 @@ impl Gateway {
     /// Meter from token counts you supply directly (bypass parsing entirely) — the simplest escape
     /// hatch for any provider. Same attribution + budget + emit as `meter()`.
     #[pyo3(signature = (virtual_key, provider, model, tokens_in, tokens_out,
-        cache_creation_tokens=0, cache_read_tokens=0, session_id=None, route=None))]
+        cache_creation_tokens=0, cache_read_tokens=0, session_id=None, route=None,
+        cache_read_observation=None))]
     #[allow(clippy::too_many_arguments)]
     fn meter_tokens<'py>(
         &self,
@@ -667,12 +666,14 @@ impl Gateway {
         cache_read_tokens: u64,
         session_id: Option<String>,
         route: Option<String>,
+        cache_read_observation: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let parsed = ParsedUsage {
             tokens_in,
             tokens_out,
             cache_creation_tokens,
             cache_read_tokens,
+            cache_read_observation: cache_read_observation.and_then(observation_from_pyobj),
             reasoning_tokens: 0,
             reasoning_included: None,
             duration_ms: None,
@@ -793,6 +794,11 @@ fn parsed_from_pyobj(obj: &Bound<'_, PyAny>) -> ParsedUsage {
         tokens_out: get("tokens_out"),
         cache_creation_tokens: get("cache_creation_tokens"),
         cache_read_tokens: get("cache_read_tokens"),
+        cache_read_observation: obj
+            .get_item("cache_read_observation")
+            .ok()
+            .as_ref()
+            .and_then(observation_from_pyobj),
         reasoning_tokens: get("reasoning_tokens"),
         reasoning_included: obj
             .get_item("reasoning_included")
@@ -807,6 +813,28 @@ fn parsed_from_pyobj(obj: &Bound<'_, PyAny>) -> ParsedUsage {
             .ok()
             .and_then(|v| v.extract::<u64>().ok()),
     }
+}
+
+/// Optional/future metadata must not reject otherwise valid numeric usage.
+fn observation_from_pyobj(obj: &Bound<'_, PyAny>) -> Option<CacheReadObservation> {
+    let status = obj.get_item("status").ok()?.extract::<String>().ok()?;
+    let source = obj.get_item("source").ok()?.extract::<String>().ok()?;
+    serde_json::from_value::<CacheReadObservation>(serde_json::json!({
+        "status": status, "source": source
+    }))
+    .ok()?
+    .validated()
+}
+
+fn observation_to_pydict<'py>(
+    py: Python<'py>,
+    observation: CacheReadObservation,
+) -> PyResult<Bound<'py, PyDict>> {
+    let value = serde_json::to_value(observation).expect("cache observation serializes");
+    let result = PyDict::new(py);
+    result.set_item("status", value["status"].as_str().unwrap_or_default())?;
+    result.set_item("source", value["source"].as_str().unwrap_or_default())?;
+    Ok(result)
 }
 
 /// Fold recorded events into aggregate rows for one dimension. Mirrors the Node binding exactly
@@ -828,16 +856,19 @@ fn fold_usage(
 }
 
 fn parse_for(provider: &str, value: &serde_json::Value) -> ParsedUsage {
-    match provider {
-        "anthropic" => parse_anthropic_usage(value),
-        "gemini" => parse_gemini_usage(value),
-        "cohere" => parse_cohere_usage(value),
-        "ollama" => parse_ollama_usage(value),
-        "bedrock" => parse_bedrock_usage(value),
-        "openai_responses" | "responses" => parse_openai_responses_usage(value),
-        _ => parse_openai_usage(value),
-    }
-    .unwrap_or_default()
+    let family = match provider {
+        "anthropic" => CacheReadFamily::Anthropic,
+        "gemini" => CacheReadFamily::Gemini,
+        "cohere" => CacheReadFamily::Cohere,
+        "ollama" => CacheReadFamily::Ollama,
+        "bedrock" => CacheReadFamily::Bedrock,
+        "openai_responses" | "responses" => CacheReadFamily::OpenAiResponses,
+        _ => CacheReadFamily::OpenAi,
+    };
+    let observed = observe_usage(family, value);
+    let mut parsed = observed.usage.unwrap_or_default();
+    parsed.cache_read_observation = observed.cache_read_observation;
+    parsed
 }
 
 fn now_rfc3339() -> String {
@@ -853,6 +884,15 @@ fn usage_to_dict<'py>(py: Python<'py>, u: &ParsedUsage) -> PyResult<Bound<'py, P
     d.set_item("tokens_out", u.tokens_out)?;
     d.set_item("cache_creation_tokens", u.cache_creation_tokens)?;
     d.set_item("cache_read_tokens", u.cache_read_tokens)?;
+    if let Some(observation) = u
+        .cache_read_observation
+        .and_then(CacheReadObservation::validated)
+    {
+        d.set_item(
+            "cache_read_observation",
+            observation_to_pydict(py, observation)?,
+        )?;
+    }
     d.set_item("reasoning_tokens", u.reasoning_tokens)?;
     d.set_item("reasoning_included", u.reasoning_included)?;
     d.set_item("duration_ms", u.duration_ms)?;
@@ -885,6 +925,15 @@ fn event_to_dict<'py>(py: Python<'py>, e: &UsageEvent) -> PyResult<Bound<'py, Py
     d.set_item("reasoning_included", e.reasoning_included)?;
     d.set_item("cache_creation_tokens", e.cache_creation_tokens)?;
     d.set_item("cache_read_tokens", e.cache_read_tokens)?;
+    if let Some(observation) = e
+        .cache_read_observation
+        .and_then(CacheReadObservation::validated)
+    {
+        d.set_item(
+            "cache_read_observation",
+            observation_to_pydict(py, observation)?,
+        )?;
+    }
     d.set_item(
         "usage_completeness",
         match e.usage_completeness {

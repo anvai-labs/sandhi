@@ -2619,12 +2619,15 @@ async fn transparent_stream_response(
         let mut seen_usage = false;
         let mut delta_bytes: u64 = 0;
         let mut boundary_ttft_ms: Option<u64> = None;
+        let mut cache_read_observation = None;
         while let Some(item) = upstream.next().await {
             match item {
                 Ok(chunk) => {
+                    sandhi_core::merge_cache_read_observation(&mut cache_read_observation, chunk.cache_read_observation);
                     if let Some(parsed) = chunk.usage {
                         // Terminal frame: the finalized, source-measured usage.
                         let mut usage: UsageV2 = parsed.into();
+                        usage.cache_read_observation = cache_read_observation;
                         reconcile_boundary_duration(&mut usage, elapsed_ms(started));
                         reconcile_boundary_ttft(&mut usage, boundary_ttft_ms);
                         usage.completeness = UsageCompleteness::Final;
@@ -2640,8 +2643,17 @@ async fn transparent_stream_response(
                         // (TD-0013 D4).
                         delta_bytes = delta_bytes.saturating_add(chunk.data.len() as u64);
                         if !seen_usage {
-                            accounting.observe(&partial_usage(chunk.usage_running, delta_bytes));
+                            let mut usage = partial_usage(chunk.usage_running, delta_bytes);
+                            usage.cache_read_observation = cache_read_observation;
+                            accounting.observe(&usage);
                         }
+                    }
+                    // Observation-only terminal frames must reach the meter without turning
+                    // missing numeric usage into a finalized zero-token measurement.
+                    if let Some(usage) = accounting.usage.as_mut() {
+                        usage.cache_read_observation = cache_read_observation;
+                    } else if cache_read_observation.is_some() {
+                        accounting.observe(&UsageV2 { cache_read_observation, ..UsageV2::default() });
                     }
                     if !chunk.data.is_empty() {
                         yield Ok::<Bytes, std::io::Error>(chunk.data);
@@ -3130,6 +3142,7 @@ async fn stream_response(
         // What the family has reported so far, for families that report before the end
         // (TD-0013 D3). `None` for a terminal-only family, for the whole stream.
         let mut running_reported: Option<ParsedUsage> = None;
+        let mut cache_read_observation = None;
         // A non-final `Usage` event is accounting-only and must not reach the client (TD-0013 D7):
         // the ingress wire shape is a TD-0010 parity guarantee, and a metering improvement that
         // adds frames to a caller's stream has broken something more important than it fixed.
@@ -3144,10 +3157,14 @@ async fn stream_response(
                             if usage.completeness != UsageCompleteness::Final =>
                         {
                             // Progress, not a verdict: it must not supersede the terminal frame.
-                            running_reported = Some(reported_parts(usage));
+                            sandhi_core::merge_cache_read_observation(&mut cache_read_observation, usage.cache_read_observation);
+                            if usage.completeness != UsageCompleteness::Unavailable || usage.cache_read_observation.and_then(sandhi_core::CacheReadObservation::validated).is_none() {
+                                running_reported = Some(reported_parts(usage));
+                            }
                             accounting_only = true;
                         }
                         sandhi_core::ChatStreamEventV1::Usage { usage } => {
+                            sandhi_core::merge_cache_read_observation(&mut cache_read_observation, usage.cache_read_observation);
                             // Terminal, authoritative usage — replaces any running partial estimate.
                             accounting.observe(usage);
                             last_usage = Some(usage.clone());
@@ -3174,7 +3191,11 @@ async fn stream_response(
                     // real numbers where the family has reported them, the byte estimate only for
                     // output and only as far as it must (TD-0013 D4). The terminal frame overrides.
                     if last_usage.is_none() {
-                        accounting.observe(&partial_usage(running_reported, delta_out_bytes));
+                        let mut usage = partial_usage(running_reported, delta_out_bytes);
+                        usage.cache_read_observation = cache_read_observation;
+                        accounting.observe(&usage);
+                    } else if let Some(usage) = accounting.usage.as_mut() {
+                        usage.cache_read_observation = cache_read_observation;
                     }
                     if accounting_only {
                         continue;
@@ -3294,6 +3315,7 @@ fn reported_parts(usage: &UsageV2) -> ParsedUsage {
         tokens_out: usage.tokens_out,
         cache_creation_tokens: usage.cache_creation_tokens,
         cache_read_tokens: usage.cache_read_tokens,
+        cache_read_observation: usage.cache_read_observation,
         reasoning_tokens: usage.reasoning_tokens.unwrap_or(0),
         reasoning_included: usage.reasoning_included,
         duration_ms: None,
@@ -3315,6 +3337,7 @@ fn partial_usage(reported: Option<ParsedUsage>, delta_out_bytes: u64) -> UsageV2
         tokens_in: reported.tokens_in,
         cache_creation_tokens: reported.cache_creation_tokens,
         cache_read_tokens: reported.cache_read_tokens,
+        cache_read_observation: reported.cache_read_observation,
         tokens_out: reported.tokens_out.max(estimated_out),
         reasoning_tokens: (reported.reasoning_tokens > 0).then_some(reported.reasoning_tokens),
         reasoning_included: reported.reasoning_included,
@@ -3385,6 +3408,7 @@ fn usage_event(
     .with_reasoning(usage.reasoning_tokens)
     .with_reasoning_included(usage.reasoning_included)
     .with_cache(usage.cache_creation_tokens, usage.cache_read_tokens)
+    .with_cache_read_observation(usage.cache_read_observation)
     .with_measurement(
         usage.completeness,
         usage.attempts,
@@ -3745,6 +3769,7 @@ mod partial_accounting_tests {
         tokens_out: 0,
         cache_creation_tokens: 2048,
         cache_read_tokens: 4096,
+        cache_read_observation: None,
         reasoning_tokens: 0,
         duration_ms: None,
         time_to_first_token_ms: None,

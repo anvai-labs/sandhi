@@ -11,6 +11,7 @@
 
 pub mod alerts;
 pub mod budget;
+pub mod cache_read;
 pub mod chat;
 pub mod conformance;
 pub mod event;
@@ -27,6 +28,7 @@ pub use alerts::{
     WebhookSender, DEFAULT_COOLDOWN_SECS,
 };
 pub use budget::{Budget, BudgetExceeded, BudgetLedger, Policy, Window};
+pub use cache_read::*;
 pub use chat::*;
 pub use event::{billable, billable_parts, billable_parts_with_reasoning, Backend, UsageEvent};
 pub use keys::{KeyStore, VirtualKey};

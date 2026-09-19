@@ -129,6 +129,35 @@ def connect(page, dashboard):
     expect(page.locator("#usage")).to_have_attribute("data-state", "ready")
 
 
+@pytest.mark.parametrize("status,label", [
+    ("reported", "0"), ("absent", "not reported"), ("malformed", "malformed"),
+    ("unsupported", "unsupported"), ("unknown", "unknown"), (None, "unknown"),
+])
+def test_cache_reporting_is_not_inferred_from_zero(page, dashboard, status, label):
+    connect(page, dashboard)
+    row = {"calls": 1, "cache_read_tokens": 0}
+    if status:
+        row["cache_read_coverage"] = dict.fromkeys(
+            ("reported", "absent", "malformed", "unsupported", "unknown"), 0)
+        row["cache_read_coverage"][status] = 1
+    assert page.evaluate("row => cacheRead(row)", row) == label
+    assert page.evaluate("row => cacheCoverageLabel(row)", row).startswith(
+        "1 / 1 reported" if status == "reported" else "unknown / 1 calls" if status is None else "0 / 1 reported")
+    row["cache_read_tokens"] = 17
+    if status is None:
+        assert page.evaluate("row => cacheRead(row)", row) == "unknown"
+
+
+def test_cache_reporting_mixed_and_invalid_coverage(page, dashboard):
+    connect(page, dashboard)
+    row = {"calls": 5, "cache_read_tokens": 25, "cache_read_coverage": {
+        "reported": 1, "absent": 1, "malformed": 1, "unsupported": 1, "unknown": 1}}
+    assert "mixed reporting" in page.evaluate("row => cacheRead(row)", row)
+    assert "1 / 5 reported" in page.evaluate("row => cacheCoverageLabel(row)", row)
+    row["cache_read_coverage"]["reported"] = 2
+    assert page.evaluate("row => cacheRead(row)", row) == "unknown"
+
+
 def test_authenticated_keyboard_journey_and_one_time_key(page, dashboard):
     page.goto(dashboard.base + "/dashboard")
     expect(page.locator("#usage")).to_have_attribute("data-state", "locked")

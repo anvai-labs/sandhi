@@ -136,12 +136,13 @@ impl Provider for OpenAiCompat {
                     .json()
                     .await
                     .map_err(|e| ProviderError::Transport(e.to_string()))?;
-                let observed_usage = parse_openai_usage(&body);
+                let (response_usage, observed_usage) =
+                    crate::buffered_usage(sandhi_core::CacheReadFamily::OpenAi, &body);
                 Ok((
                     ProviderResponse {
                         status,
                         body,
-                        usage: observed_usage.unwrap_or_default(),
+                        usage: response_usage,
                         attempts: 1,
                     },
                     observed_usage,
@@ -210,9 +211,10 @@ pub(crate) fn sniff_usage_line(line: &[u8], usage: &mut ParsedUsage) -> bool {
     let Some(v) = sse_data_json(line) else {
         return false;
     };
+    crate::observe_stream_cache(sandhi_core::CacheReadFamily::OpenAi, &v, usage);
     if v.get("usage").is_some_and(|u| !u.is_null()) {
         if let Some(u) = parse_openai_usage(&v) {
-            *usage = u;
+            crate::replace_numeric_usage(usage, u);
             return true;
         }
     }
@@ -226,6 +228,10 @@ mod tests {
     use futures_util::StreamExt;
 
     const EXPECTED: ParsedUsage = ParsedUsage {
+        cache_read_observation: Some(sandhi_core::CacheReadObservation {
+            status: sandhi_core::CacheReadStatus::Reported,
+            source: sandhi_core::CacheReadSource::OriginUsage,
+        }),
         reasoning_included: Some(true),
         tokens_in: 200,
         tokens_out: 250,

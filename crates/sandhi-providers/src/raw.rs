@@ -336,10 +336,11 @@ impl RawForwarder {
                     response_request_id_header,
                 )
                 .await?;
-            let observed_usage = serde_json::from_slice::<Value>(&raw.body)
+            let (usage, observed_usage) = serde_json::from_slice::<Value>(&raw.body)
                 .ok()
-                .and_then(|value| parse_usage_for_family(self.family, &value));
-            let usage = observed_usage.unwrap_or_default().into();
+                .map(|value| crate::buffered_usage(cache_read_family(self.family), &value))
+                .unwrap_or_default();
+            let usage = usage.into();
             Ok(((raw, usage), observed_usage))
         })
         .await
@@ -503,6 +504,9 @@ impl RawForwarder {
             .client
             .post(url)
             .header(ACCEPT_ENCODING, "identity")
+            // Every supported raw endpoint accepts a JSON envelope. `.body(bytes)`
+            // does not set this header, and strict upstreams reject an untyped body.
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
             .headers(headers)
             .body(body);
         let builder = self.apply_auth(builder);
@@ -602,14 +606,14 @@ fn sniff_for_family(family: ProviderFamily) -> fn(&[u8], &mut crate::ParsedUsage
 }
 
 /// The family's non-streaming usage parser (the public `sandhi-core` per-family parsers).
-fn parse_usage_for_family(family: ProviderFamily, value: &Value) -> Option<crate::ParsedUsage> {
+fn cache_read_family(family: ProviderFamily) -> sandhi_core::CacheReadFamily {
     match family {
-        ProviderFamily::OpenAiCompat => crate::parse_openai_usage(value),
-        ProviderFamily::OpenAiResponses => crate::parse_openai_responses_usage(value),
-        ProviderFamily::Anthropic => crate::parse_anthropic_usage(value),
-        ProviderFamily::Cohere => crate::parse_cohere_usage(value),
-        ProviderFamily::Gemini => crate::parse_gemini_usage(value),
-        ProviderFamily::Ollama => crate::parse_ollama_usage(value),
+        ProviderFamily::OpenAiCompat => sandhi_core::CacheReadFamily::OpenAi,
+        ProviderFamily::OpenAiResponses => sandhi_core::CacheReadFamily::OpenAiResponses,
+        ProviderFamily::Anthropic => sandhi_core::CacheReadFamily::Anthropic,
+        ProviderFamily::Cohere => sandhi_core::CacheReadFamily::Cohere,
+        ProviderFamily::Gemini => sandhi_core::CacheReadFamily::Gemini,
+        ProviderFamily::Ollama => sandhi_core::CacheReadFamily::Ollama,
     }
 }
 
@@ -835,6 +839,7 @@ mod tests {
             .and(path("/v1/chat/completions"))
             .and(body_bytes(client_body.to_vec()))
             .and(header("accept-encoding", "identity"))
+            .and(header("content-type", "application/json"))
             .and(header("authorization", "Bearer sk-test"))
             .respond_with(
                 ResponseTemplate::new(200)
@@ -898,6 +903,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/v1/chat/completions"))
             .and(header("accept-encoding", "identity"))
+            .and(header("content-type", "application/json"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "text/event-stream")
@@ -954,6 +960,7 @@ mod tests {
         // the gzip feature, and we explicitly request identity, the upstream returns plaintext.
         Mock::given(method("POST"))
             .and(header("accept-encoding", "identity"))
+            .and(header("content-type", "application/json"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "application/json")
@@ -1005,6 +1012,7 @@ mod tests {
             .and(header("x-api-key", "ak-test"))
             .and(header("anthropic-version", "2023-06-01"))
             .and(header("accept-encoding", "identity"))
+            .and(header("content-type", "application/json"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "content": [{"type": "text", "text": "hi"}],
                 "usage": {"input_tokens": 5, "output_tokens": 3}

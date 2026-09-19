@@ -459,6 +459,43 @@ fn latency_cell(b: &Value) -> String {
     }
 }
 
+fn cache_read_cell(row: &Value) -> String {
+    let calls = row.get("calls").and_then(Value::as_u64).unwrap_or(0);
+    let coverage = row
+        .get("cache_read_coverage")
+        .cloned()
+        .and_then(|v| serde_json::from_value::<sandhi_core::CacheReadCoverage>(v).ok())
+        .map(|c| c.normalized(calls));
+    let Some(c) = coverage else {
+        return "unknown".into();
+    };
+    if calls == 0 {
+        return "—".into();
+    }
+    let count = row
+        .get("cache_read_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if c.reported == calls {
+        return format!("{count} ({calls}/{calls} reported)");
+    }
+    let label = if c.absent == calls {
+        "not reported"
+    } else if c.malformed == calls {
+        "malformed"
+    } else if c.unsupported == calls {
+        "unsupported"
+    } else if c.unknown == calls {
+        "unknown"
+    } else {
+        "mixed reporting"
+    };
+    format!(
+        "{label} ({}/{} reported; numeric total {count})",
+        c.reported, calls
+    )
+}
+
 fn render_usage(response: &Value, format: &Format) {
     if matches!(format, Format::Json) {
         print_json(response);
@@ -477,7 +514,7 @@ fn render_usage(response: &Value, format: &Format) {
             u64_at(total, "tokens_in"),
             u64_at(total, "tokens_out"),
             u64_at(total, "cache_creation_tokens"),
-            u64_at(total, "cache_read_tokens"),
+            cache_read_cell(total),
             u64_at(total, "billable_tokens"),
         );
     }
@@ -485,13 +522,14 @@ fn render_usage(response: &Value, format: &Format) {
         println!();
         for b in buckets {
             println!(
-                "{:<28} {:>6} calls  {:>8} in  {:>8} out  {:>10} billable  {:>16}",
+                "{:<28} {:>6} calls  {:>8} in  {:>8} out  {:>10} billable  {:>16}  cache read {}",
                 b.get("key").and_then(Value::as_str).unwrap_or("?"),
                 u64_at(b, "calls"),
                 u64_at(b, "tokens_in"),
                 u64_at(b, "tokens_out"),
                 u64_at(b, "billable_tokens"),
                 latency_cell(b),
+                cache_read_cell(b),
             );
         }
     }
@@ -517,7 +555,7 @@ fn render_run_tree(response: &Value, format: &Format) {
             u64_at(total, "tokens_in"),
             u64_at(total, "tokens_out"),
             u64_at(total, "cache_creation_tokens"),
-            u64_at(total, "cache_read_tokens"),
+            cache_read_cell(total),
             u64_at(total, "billable_tokens"),
         );
     }
@@ -585,6 +623,28 @@ use admin as _;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_read_labels_do_not_infer_reporting_from_numeric_zero() {
+        let mut row = serde_json::json!({"calls":1,"cache_read_tokens":0});
+        assert_eq!(cache_read_cell(&row), "unknown");
+        row["cache_read_coverage"] =
+            serde_json::json!({"reported":1,"absent":0,"malformed":0,"unsupported":0,"unknown":0});
+        assert_eq!(cache_read_cell(&row), "0 (1/1 reported)");
+        for (status, label) in [
+            ("absent", "not reported"),
+            ("malformed", "malformed"),
+            ("unsupported", "unsupported"),
+            ("unknown", "unknown"),
+        ] {
+            let mut coverage = serde_json::json!({"reported":0,"absent":0,"malformed":0,"unsupported":0,"unknown":0});
+            coverage[status] = 1.into();
+            row["cache_read_coverage"] = coverage;
+            assert!(cache_read_cell(&row).starts_with(label));
+        }
+        row["cache_read_tokens"] = 17.into();
+        assert!(cache_read_cell(&row).starts_with("unknown"));
+    }
 
     fn url() -> &'static str {
         "http://localhost:8787"

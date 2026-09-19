@@ -1165,7 +1165,13 @@ fn u64_opt(value: &Value, key: &str) -> Option<u64> {
     value.get(key).and_then(Value::as_u64)
 }
 
-fn decode_openai_stream(mut raw: ByteStream, requested_model: String) -> ChatEventStream {
+// Unavailable Usage updates emitted by the shared decorator carry only availability
+// corrections; reducers must not replace a previous numeric verdict with them.
+fn decode_openai_stream(raw: ByteStream, requested_model: String) -> ChatEventStream {
+    crate::cache_read::decode_with_observation(raw, requested_model, decode_openai_stream_inner)
+}
+
+fn decode_openai_stream_inner(mut raw: ByteStream, requested_model: String) -> ChatEventStream {
     use futures_util::StreamExt;
     let stream = async_stream::try_stream! {
         // TD-0014 P1: the shared bounded splitter. One ceiling across both planes; only the
@@ -1184,6 +1190,7 @@ fn decode_openai_stream(mut raw: ByteStream, requested_model: String) -> ChatEve
             let chunk = if chunks_ended {
                 tail_pending = false;
                 crate::StreamChunk {
+                    cache_read_observation: None,
                     data: bytes::Bytes::new(),
                     usage: None,
                     usage_running: None,
@@ -1330,6 +1337,84 @@ impl ProviderError {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn received_content_before_cancellation_exposes_cache_absence() {
+        use futures_util::StreamExt;
+        use sandhi_core::{CacheReadStatus, ChatStreamEventV1, UsageCompleteness};
+        let upstream =
+            futures_util::stream::iter(vec![Ok::<_, reqwest::Error>(bytes::Bytes::from_static(
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}],\"usage\":null}\n\n",
+            ))])
+            .chain(futures_util::stream::pending());
+        let raw = crate::metered_passthrough(Box::pin(upstream), crate::openai::sniff_usage_line);
+        let mut events = super::decode_openai_stream(raw, "m".into());
+        let mut observation = None;
+        loop {
+            match events.next().await.unwrap().unwrap() {
+                ChatStreamEventV1::Usage { usage } => {
+                    assert_eq!(usage.completeness, UsageCompleteness::Unavailable);
+                    observation = usage.cache_read_observation;
+                }
+                ChatStreamEventV1::TextDelta { .. } => break,
+                _ => {}
+            }
+        }
+        drop(events);
+        assert_eq!(observation.unwrap().status, CacheReadStatus::Absent);
+    }
+    #[tokio::test]
+    async fn cache_observation_late_malformed_is_not_a_second_numeric_final() {
+        use futures_util::StreamExt;
+        use sandhi_core::{CacheReadStatus, ChatStreamEventV1, UsageCompleteness};
+        let frames = [
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":4}}}\n\n",
+            "data: {\"choices\":[],\"usage\":null}\n\n",
+        ];
+        let upstream = futures_util::stream::iter(
+            frames
+                .into_iter()
+                .map(|f| Ok::<_, reqwest::Error>(bytes::Bytes::from_static(f.as_bytes()))),
+        );
+        let raw = crate::metered_passthrough(upstream, crate::openai::sniff_usage_line);
+        let events: Vec<_> = super::decode_openai_stream(raw, "m".into())
+            .map(Result::unwrap)
+            .collect()
+            .await;
+        let usages: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                ChatStreamEventV1::Usage { usage } => Some(usage),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            usages
+                .iter()
+                .filter(|u| u.completeness == UsageCompleteness::Final)
+                .count(),
+            1
+        );
+        assert_eq!(
+            usages.last().unwrap().completeness,
+            UsageCompleteness::Unavailable
+        );
+        assert_eq!(
+            usages
+                .last()
+                .unwrap()
+                .cache_read_observation
+                .unwrap()
+                .status,
+            CacheReadStatus::Malformed
+        );
+        assert_eq!(
+            (
+                usages.last().unwrap().tokens_in,
+                usages.last().unwrap().cache_read_tokens
+            ),
+            (5, 4)
+        );
+    }
 
     /// TD-0014 P1, the opposing guard. The six `..._is_bounded_and_errors_...` tests pin the
     /// ceiling from BELOW; on their own they would all still pass with the bound set to 1 KiB,
@@ -1347,6 +1432,7 @@ mod tests {
             .chunks(16 * 1024)
             .map(|c| {
                 Ok(crate::StreamChunk {
+                    cache_read_observation: None,
                     data: bytes::Bytes::copy_from_slice(c),
                     usage: None,
                     usage_running: None,
@@ -1392,6 +1478,7 @@ mod tests {
         let chunks: Vec<_> = (0..256)
             .map(|_| {
                 Ok(crate::StreamChunk {
+                    cache_read_observation: None,
                     data: filler.clone(),
                     usage: None,
                     usage_running: None,
@@ -1558,6 +1645,7 @@ mod tests {
         for split in 0..=sse.len() {
             let raw: ByteStream = Box::pin(futures_util::stream::iter(vec![
                 Ok(crate::StreamChunk {
+                    cache_read_observation: None,
                     data: Bytes::copy_from_slice(&sse[..split]),
                     usage: None,
                     usage_running: None,
@@ -1565,6 +1653,7 @@ mod tests {
                     terminal: false,
                 }),
                 Ok(crate::StreamChunk {
+                    cache_read_observation: None,
                     data: Bytes::copy_from_slice(&sse[split..]),
                     usage: None,
                     usage_running: None,
@@ -1572,8 +1661,10 @@ mod tests {
                     terminal: false,
                 }),
                 Ok(crate::StreamChunk {
+                    cache_read_observation: None,
                     data: Bytes::new(),
                     usage: Some(ParsedUsage {
+                        cache_read_observation: None,
                         reasoning_included: Some(true),
                         tokens_in: 6,
                         tokens_out: 5,

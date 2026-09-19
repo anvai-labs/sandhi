@@ -374,7 +374,11 @@ fn decode_stop_reason(reason: &str) -> FinishReasonV1 {
     }
 }
 
-fn decode_anthropic_stream(mut raw: ByteStream, requested_model: String) -> ChatEventStream {
+fn decode_anthropic_stream(raw: ByteStream, requested_model: String) -> ChatEventStream {
+    crate::cache_read::decode_with_observation(raw, requested_model, decode_anthropic_stream_inner)
+}
+
+fn decode_anthropic_stream_inner(mut raw: ByteStream, requested_model: String) -> ChatEventStream {
     use futures_util::StreamExt;
     let stream = async_stream::try_stream! {
         // TD-0014 P1: the shared bounded splitter. One ceiling across both planes; only the
@@ -395,6 +399,7 @@ fn decode_anthropic_stream(mut raw: ByteStream, requested_model: String) -> Chat
             let chunk = if chunks_ended {
                 tail_pending = false;
                 crate::StreamChunk {
+                    cache_read_observation: None,
                     data: bytes::Bytes::new(),
                     usage: None,
                     usage_running: None,
@@ -535,6 +540,7 @@ mod tests {
             .chunks(16 * 1024)
             .map(|c| {
                 Ok(crate::StreamChunk {
+                    cache_read_observation: None,
                     data: bytes::Bytes::copy_from_slice(c),
                     usage: None,
                     usage_running: None,
@@ -580,6 +586,7 @@ mod tests {
         let chunks: Vec<_> = (0..256)
             .map(|_| {
                 Ok(crate::StreamChunk {
+                    cache_read_observation: None,
                     data: filler.clone(),
                     usage: None,
                     usage_running: None,
@@ -682,6 +689,7 @@ mod tests {
         let out = decode_anthropic_response(
             body,
             ParsedUsage {
+                cache_read_observation: None,
                 reasoning_included: Some(true),
                 tokens_in: 2,
                 tokens_out: 3,
@@ -717,6 +725,7 @@ mod tests {
         for split in 0..=sse.len() {
             let raw: ByteStream = Box::pin(futures_util::stream::iter(vec![
                 Ok(crate::StreamChunk {
+                    cache_read_observation: None,
                     data: Bytes::copy_from_slice(&sse[..split]),
                     usage: None,
                     usage_running: None,
@@ -724,6 +733,7 @@ mod tests {
                     terminal: false,
                 }),
                 Ok(crate::StreamChunk {
+                    cache_read_observation: None,
                     data: Bytes::copy_from_slice(&sse[split..]),
                     usage: None,
                     usage_running: None,
@@ -731,8 +741,10 @@ mod tests {
                     terminal: false,
                 }),
                 Ok(crate::StreamChunk {
+                    cache_read_observation: None,
                     data: Bytes::new(),
                     usage: Some(ParsedUsage {
+                        cache_read_observation: None,
                         reasoning_included: Some(true),
                         tokens_in: 2,
                         tokens_out: 3,
