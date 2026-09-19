@@ -130,7 +130,7 @@ perpetually open.
 | [0025](td/TD-0025-ingress-funnel-and-family-registry.md) | Proposed | Family registry and funnel decomposition |
 | [0026](td/TD-0026-gateway-product-evolution.md) | In progress | v0.6.0/v0.6.1 fully verified and back-synced; W05b opt-in diagnostics shipped, W05a remains inactive; W05c–e and P01–P03 remain open |
 | [0027](td/TD-0027-three-way-origin-codesign.md) | In progress | Sandhi v0.7.0 published/verified and evidence synchronized; InferFlux v0.3.0 packaging correction awaits approval/native verification; focused Victor v0.9.5 awaits approval/CI/promotion; sibling publication remains open |
-| [0028](td/TD-0028-cache-accounting-availability.md) | In progress | C1–C4 merged; new actual-member preserved-runtime replay and C4 joins verified; updated-runtime/lifecycle/mixed-team C5 gates remain open |
+| [0028](td/TD-0028-cache-accounting-availability.md) | In progress | C1–C4 merged; actual-member baseline verified; C5 terminal-stream accounting reproduced and locally repaired, CI/deployment/rerun pending; Mac mixed-team and timeout assessment remain explicit gates |
 
 TD-0026 slice completion means implementation/local verification. Its separate C01/C02 checkpoint
 table tracks remote CI, merge and release; C01 [PR #230](https://github.com/anvai-labs/sandhi/pull/230)

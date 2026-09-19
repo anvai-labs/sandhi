@@ -425,7 +425,11 @@ impl RawForwarder {
             return Err(error);
         }
         let headers = filter_response_headers(resp.headers());
-        let stream = crate::metered_passthrough(resp.bytes_stream(), sniff_for_family(self.family));
+        let stream = if self.family == ProviderFamily::OpenAiCompat {
+            crate::metered_openai_passthrough(resp.bytes_stream(), sniff_for_family(self.family))
+        } else {
+            crate::metered_passthrough(resp.bytes_stream(), sniff_for_family(self.family))
+        };
         let stream = with_idle_timeout(stream, self.stream_idle_timeout);
         let stream = match guard {
             Some(guard) => guard.wrap_stream(stream),
