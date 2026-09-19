@@ -932,6 +932,88 @@ pub(crate) async fn usage(
     .into_response()
 }
 
+/// Run admitted work off the async executor. The blocking closure owns admission, so dropping
+/// its HTTP waiter cannot release the slot while SQLite still runs (ADR-0011).
+async fn admitted_diagnostic<T: Send + 'static>(
+    permit: tokio::sync::OwnedSemaphorePermit,
+    operation: crate::lifecycle::OperationGuard,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, tokio::task::JoinError> {
+    tokio::task::spawn_blocking(move || {
+        let _operation = operation;
+        let _permit = permit;
+        work()
+    })
+    .await
+}
+
+/// Read-only POST keeps correlation IDs out of URL/access-log query strings. Only persisted,
+/// bounded fields are returned: no raw body capture or inferred historical measurements.
+pub(crate) async fn usage_diagnostics(
+    State(state): State<Arc<ProxyState>>,
+    request: axum::extract::Request,
+) -> Response {
+    use sandhi_store::diagnostics::{DiagnosticQuery, MAX_REQUEST_BYTES};
+    if let Err(response) = require_admin(&state, request.headers()) {
+        return response;
+    }
+    let Some(store) = state.store.clone() else {
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "usage store not configured",
+        );
+    };
+    let Some(operation) = state.lifecycle.try_operation() else {
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "gateway draining; diagnostic not admitted",
+        );
+    };
+    let permit = match state.diagnostics_reader.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "diagnostic operation already in progress",
+            )
+        }
+    };
+    // Include decoding in admission and bound body-read time as well as size. This timeout
+    // does not apply to the later SQL work, whose permit remains inside the blocking task.
+    let body = match tokio::time::timeout(
+        Duration::from_secs(5),
+        axum::body::to_bytes(request.into_body(), MAX_REQUEST_BYTES),
+    )
+    .await
+    {
+        Ok(Ok(body)) => body,
+        Ok(Err(_)) => {
+            return err(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "diagnostic request unreadable or too large",
+            )
+        }
+        Err(_) => {
+            return err(
+                StatusCode::REQUEST_TIMEOUT,
+                "diagnostic request body timed out",
+            )
+        }
+    };
+    let query: DiagnosticQuery = match serde_json::from_slice(&body) {
+        Ok(query) => query,
+        Err(_) => return err(StatusCode::BAD_REQUEST, "invalid diagnostic query"),
+    };
+    if query.validate().is_err() {
+        return err(StatusCode::BAD_REQUEST, "invalid diagnostic query");
+    }
+    match admitted_diagnostic(permit, operation, move || store.diagnostics(&query)).await {
+        Ok(Ok(response)) => Json(response).into_response(),
+        // Never include SQL, selector values, paths, or panic details in the response.
+        _ => err(StatusCode::INTERNAL_SERVER_ERROR, "diagnostic query failed"),
+    }
+}
+
 /// `GET /admin/usage/run/{run_id}` — the ADR-0005 D7 agent cost tree for one run: per-step
 /// spend assembled by `parent_id`, with subtree-inclusive rollups. 404 when no usage event
 /// carries the run id (including events recorded before the identity columns existed — that
@@ -2074,5 +2156,61 @@ mod ct_tests {
         assert!(!constant_time_eq(b"admin", b"admin-secret"));
         assert!(!constant_time_eq(b"admin-secret", b"admin"));
         assert!(!constant_time_eq(b"", b"x"));
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_admission_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelled_waiter_does_not_release_running_blocking_work() {
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let lifecycle = Arc::new(crate::lifecycle::Lifecycle::new());
+        let operation = lifecycle.try_operation().unwrap();
+        let permit = slots.clone().try_acquire_owned().unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let waiter = tokio::spawn(admitted_diagnostic(permit, operation, move || {
+            let _ = started_tx.send(());
+            let _ = release_rx.recv();
+        }));
+        started_rx.await.unwrap();
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        assert_eq!(slots.available_permits(), 0);
+        assert!(slots.clone().try_acquire_owned().is_err());
+        lifecycle.begin_quiesce(Duration::from_secs(2));
+        assert_eq!(lifecycle.active_operations(), 1);
+        assert!(lifecycle.try_operation().is_none());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), lifecycle.wait_idle())
+                .await
+                .is_err()
+        );
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), lifecycle.wait_idle())
+            .await
+            .unwrap();
+        assert_eq!(lifecycle.active_operations(), 0);
+        let _permit = tokio::time::timeout(Duration::from_secs(2), slots.acquire())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_blocking_work_releases_admission() {
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let lifecycle = Arc::new(crate::lifecycle::Lifecycle::new());
+        let operation = lifecycle.try_operation().unwrap();
+        let permit = slots.clone().try_acquire_owned().unwrap();
+        assert!(
+            admitted_diagnostic(permit, operation, || panic!("fixed test failure"))
+                .await
+                .is_err()
+        );
+        assert_eq!(slots.available_permits(), 1);
+        assert_eq!(lifecycle.active_operations(), 0);
     }
 }

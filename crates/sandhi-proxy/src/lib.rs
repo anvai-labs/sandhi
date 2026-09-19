@@ -236,6 +236,8 @@ pub struct ProxyState {
     /// One admitted credential mutation (no waiting queue). Held through persistence/publication,
     /// even if its HTTP caller disconnects. Keeps blocking vault work off async workers and bounded.
     pub vault_writer: Arc<tokio::sync::Semaphore>,
+    /// One bounded persisted-usage diagnostic operation, with no waiting queue.
+    pub diagnostics_reader: Arc<tokio::sync::Semaphore>,
     /// Durable virtual-key store (hashes + scope), rehydrates `keys` on startup.
     pub vkeys: Option<Arc<VirtualKeyStore>>,
     /// Builds typed upstream handles from vault-resolved credentials.
@@ -329,6 +331,7 @@ impl ProxyState {
             store,
             vault: None,
             vault_writer: Arc::new(tokio::sync::Semaphore::new(1)),
+            diagnostics_reader: Arc::new(tokio::sync::Semaphore::new(1)),
             vkeys: None,
             runtime: ProviderRuntime::new(),
             admin_token: None,
@@ -686,6 +689,10 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         )
         .route("/admin/budget/usage", get(operator::budget_usage))
         .route("/admin/usage", get(operator::usage))
+        .route(
+            "/admin/usage/diagnostics",
+            post(operator::usage_diagnostics),
+        )
         // ADR-0005 D7: the agent cost tree for one run (per-step rollups by parent_id).
         .route("/admin/usage/run/:run_id", get(operator::usage_run))
         // TD-0003 P2 alert rules.

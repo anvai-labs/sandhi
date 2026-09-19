@@ -1,6 +1,6 @@
 # TD-0028: Cache accounting availability and bounded diagnostics
 
-- **Status:** In progress (2026-09-18). Regression increment merged; availability and dashboard implemented locally;
+- **Status:** In progress (2026-09-18). Regression, availability and dashboard increments merged;
   CI/review gates remain distinct from merge, deployment and the joint live replay.
 - **Scope:** Sandhi items in the [cache co-design handoff](../upstream/inferflux-cache-codesign-2026-09-18.md).
 - **Related:** TD-0013 (measurement fidelity), TD-0027 (origin co-design),
@@ -30,9 +30,9 @@ InferFlux; that producer-side investigation remains independently owned upstream
 | Slice | Bounded change | Acceptance | State |
 |---|---|---|---|
 | C1 | Extend existing InferFlux corpus with the 18 sanitized usage objects | Explicit zero/partial/full cache accounting; both forwarding paths; unchanged response bytes and one late terminal SSE usage emission | [PR #268](https://github.com/anvai-labs/sandhi/pull/268) merged after clean independent review and real CI pass |
-| C2 | ADR and additive cache-read availability/source contract | Define reported zero, absent, malformed and explicitly unsupported; preserve legacy numeric defaults; parser/event/UsageV2/SQLite/API/generated bindings/schema agreement | [ADR-0010](../adr/0010-cache-read-reporting-availability.md) accepted; implemented locally, PR/CI gates pending |
-| C3 | Dashboard availability and coverage | `n_reported/n_total` over the same filtered call population; honest cache read/write and neutral-unit labels | Implemented locally; 25 real-browser dashboard regressions pass; PR/CI gates pending |
-| C4 | Bounded credential-free diagnostic lookup/export | Authorized request/session/run correlation, source-labelled timings and counters; explicit late/aborted stream semantics; prompt/body capture opt-in and bounded | After C2; authorization/redaction design required |
+| C2 | ADR and additive cache-read availability/source contract | Define reported zero, absent, malformed and explicitly unsupported; preserve legacy numeric defaults; parser/event/UsageV2/SQLite/API/generated bindings/schema agreement | [PR #269](https://github.com/anvai-labs/sandhi/pull/269) merged after exact-head CI and clean independent review |
+| C3 | Dashboard availability and coverage | `n_reported/n_total` over the same filtered call population; honest cache read/write and neutral-unit labels | Merged in #269; 25 real-browser dashboard regressions pass |
+| C4 | Bounded credential-field-free diagnostic lookup/export | Admin-authorized persisted request/session/run projection, source-labelled timings and normalized counters; unavailable historical evidence stated explicitly; no prompt/body capture added | Implemented per [ADR-0011](../adr/0011-bounded-persisted-usage-diagnostics.md), independently reviewed and locally validated; PR CI/merge gates pending |
 | C5 | Joint replay after InferFlux investigation | One actual member trace, same ready model, direct and gateway; cache counts, correlation/session mapping and usage conservation | Owner selected an isolated local WSL gateway instead of Mac access. Actual sanitized member trace and producer investigation remain prerequisites; synthetic local probes do not close this gate |
 
 The C1 non-stream envelopes and SSE frames are constructed around recorded usage
@@ -56,6 +56,11 @@ The first PR CI run exposed stale fixed-event-sequence binding assertions after 
 canonical metadata-only stream update. Tests now validate those updates explicitly,
 reject duplicate numeric verdicts and cover stop-after-content consumers; both native
 bindings were rebuilt from final provider source before the counts above were recorded.
+Exact-head PR CI [35412103862](https://github.com/anvai-labs/sandhi/actions/runs/35412103862)
+passed for `8d4190f`; #269 merged as `a49df36`, with the same reviewed tree. The next
+worktree starts from that merged `develop`, not the earlier CI-failing checkpoint.
+Post-merge `develop` CI [35412748884](https://github.com/anvai-labs/sandhi/actions/runs/35412748884)
+also passed at `a49df36`.
 
 An isolated WSL gateway was launched at `127.0.0.1:18789`, with its own SQLite state and
 admin authentication. One synthetic direct call followed by two buffered gateway calls
@@ -68,6 +73,21 @@ cache reuse or explain the earlier member trace. The shared InferFlux service an
 gateway were not restarted, reconfigured or cleared. Sanitized runtime evidence is
 retained locally at `/tmp/sandhi-local-cache.q6l7xr/smoke-evidence.json`; no credentials
 or prompt/response text are exported there.
+
+## Bounded diagnostics validation
+
+Local C4 validation (2026-09-18): all 677 workspace tests passed, with four existing
+opt-in tests ignored; strict workspace Clippy and formatting passed. Independent
+cross-review found and resolved a shutdown-tracking gap: diagnostic work now retains
+both admission and lifecycle guards until SQLite finishes, even after HTTP cancellation.
+Regression tests cover admin-first authorization, cutoff, malformed SQLite fields,
+indexed exact selectors, byte/row bounds, duplicate IDs and private CLI failures.
+
+Only the isolated local gateway at `127.0.0.1:18789` was restarted with the C4 build;
+its private SQLite data was retained. HTTP and `sandhi diagnose` returned identical
+three-row evidence from the earlier synthetic probe (2,212 serialized HTTP bytes,
+reported-zero cache status). Missing admin authorization returned 401; responses
+were `no-store`. This check made no new origin calls and does not close C5.
 
 ## Contract decisions implemented by C2
 

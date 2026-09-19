@@ -20,6 +20,10 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ### Added
 
+- Admin-only bounded persisted usage diagnostics by request, session or run, with explicit
+  historical evidence limits and no new prompt/body capture or retention. The operator CLI
+  bounds response reads and suppresses raw error bodies for this export path.
+
 - Optional cache-read reporting observations distinguish explicit zero, absent and malformed
   origin fields without changing neutral token arithmetic. Legacy/manual counts remain unknown
   unless explicitly annotated; unsupported reporting is never inferred from missing usage.
