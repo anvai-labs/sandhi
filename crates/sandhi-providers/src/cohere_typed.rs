@@ -313,7 +313,11 @@ fn decode_finish_reason(reason: &str) -> FinishReasonV1 {
     }
 }
 
-fn decode_cohere_stream(mut raw: ByteStream, requested_model: String) -> ChatEventStream {
+fn decode_cohere_stream(raw: ByteStream, requested_model: String) -> ChatEventStream {
+    crate::cache_read::decode_with_observation(raw, requested_model, decode_cohere_stream_inner)
+}
+
+fn decode_cohere_stream_inner(mut raw: ByteStream, requested_model: String) -> ChatEventStream {
     use futures_util::StreamExt;
     let stream = async_stream::try_stream! {
         // TD-0014 P1: the shared bounded splitter. One ceiling across both planes; only the
@@ -332,6 +336,7 @@ fn decode_cohere_stream(mut raw: ByteStream, requested_model: String) -> ChatEve
             let chunk = if chunks_ended {
                 tail_pending = false;
                 crate::StreamChunk {
+                    cache_read_observation: None,
                     data: bytes::Bytes::new(),
                     usage: None,
                     usage_running: None,
@@ -446,6 +451,7 @@ mod tests {
             .chunks(16 * 1024)
             .map(|c| {
                 Ok(crate::StreamChunk {
+                    cache_read_observation: None,
                     data: bytes::Bytes::copy_from_slice(c),
                     usage: None,
                     usage_running: None,
@@ -491,6 +497,7 @@ mod tests {
         let chunks: Vec<_> = (0..256)
             .map(|_| {
                 Ok(crate::StreamChunk {
+                    cache_read_observation: None,
                     data: filler.clone(),
                     usage: None,
                     usage_running: None,
@@ -533,6 +540,7 @@ mod tests {
         for split in 0..=wire.len() {
             let raw: crate::ByteStream = Box::pin(futures_util::stream::iter(vec![
                 Ok(crate::StreamChunk {
+                    cache_read_observation: None,
                     data: bytes::Bytes::copy_from_slice(&wire[..split]),
                     usage: None,
                     usage_running: None,
@@ -540,6 +548,7 @@ mod tests {
                     terminal: false,
                 }),
                 Ok(crate::StreamChunk {
+                    cache_read_observation: None,
                     data: bytes::Bytes::copy_from_slice(&wire[split..]),
                     usage: None,
                     usage_running: None,
@@ -547,8 +556,10 @@ mod tests {
                     terminal: false,
                 }),
                 Ok(crate::StreamChunk {
+                    cache_read_observation: None,
                     data: bytes::Bytes::new(),
                     usage: Some(crate::ParsedUsage {
+                        cache_read_observation: None,
                         reasoning_included: Some(true),
                         tokens_in: 2,
                         tokens_out: 3,
@@ -659,6 +670,7 @@ mod tests {
                 "message":{"content":[{"type":"text","text":"ok"}]}
             }),
             ParsedUsage {
+                cache_read_observation: None,
                 tokens_in: 2,
                 tokens_out: 3,
                 ..ParsedUsage::default()

@@ -97,12 +97,13 @@ impl Provider for Ollama {
                     .json()
                     .await
                     .map_err(|e| ProviderError::Transport(e.to_string()))?;
-                let observed_usage = parse_ollama_usage(&body);
+                let (response_usage, observed_usage) =
+                    crate::buffered_usage(sandhi_core::CacheReadFamily::Ollama, &body);
                 Ok((
                     ProviderResponse {
                         status,
                         body,
-                        usage: observed_usage.unwrap_or_default(),
+                        usage: response_usage,
                         attempts: 1,
                     },
                     observed_usage,
@@ -149,8 +150,9 @@ pub(crate) fn sniff_usage_line(line: &[u8], usage: &mut ParsedUsage) -> bool {
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(s.trim()).ok())
     {
+        crate::observe_stream_cache(sandhi_core::CacheReadFamily::Ollama, &v, usage);
         if let Some(u) = parse_ollama_usage(&v) {
-            *usage = u;
+            crate::replace_numeric_usage(usage, u);
             return true;
         }
     }
@@ -166,6 +168,10 @@ mod tests {
     use wiremock::matchers::{header, method, path};
 
     const EXPECTED: ParsedUsage = ParsedUsage {
+        cache_read_observation: Some(sandhi_core::CacheReadObservation {
+            status: sandhi_core::CacheReadStatus::Absent,
+            source: sandhi_core::CacheReadSource::OriginUsage,
+        }),
         reasoning_included: Some(true),
         tokens_in: 512,
         tokens_out: 128,

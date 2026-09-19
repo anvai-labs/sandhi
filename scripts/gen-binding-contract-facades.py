@@ -44,6 +44,18 @@ FinishReasonV1 = Literal["stop", "length", "tool_calls", "content_filter", "func
 UsageCompleteness = Literal["final", "partial", "unavailable"]
 UsageBasis = Literal["provider_reported", "estimated"]
 LatencySource = Literal["origin", "boundary"]
+CacheReadStatus = Literal["reported", "absent", "malformed", "unsupported"]
+CacheReadSource = Literal["origin_usage", "caller_supplied", "explicit_capability"]
+
+class CacheReadObservation(TypedDict):
+    status: CacheReadStatus
+    source: CacheReadSource
+class CacheReadCoverage(TypedDict):
+    reported: int
+    absent: int
+    malformed: int
+    unsupported: int
+    unknown: int
 
 class TextPart(TypedDict):
     type: Literal["text"]
@@ -132,6 +144,7 @@ class UsageV2(TypedDict):
     tokens_out: int
     cache_creation_tokens: int
     cache_read_tokens: int
+    cache_read_observation: NotRequired[CacheReadObservation]
     completeness: NotRequired[UsageCompleteness]
     basis: NotRequired[UsageBasis]
     attempts: NotRequired[int]
@@ -159,6 +172,7 @@ class UsageAggregateV1(TypedDict):
     tokens_out: int
     cache_creation_tokens: int
     cache_read_tokens: int
+    cache_read_coverage: NotRequired[CacheReadCoverage]
     reasoning_tokens: int
     billable_tokens: int
     latency: NotRequired[LatencySummary]
@@ -220,9 +234,9 @@ class Gateway:
     def set_budget(self, scope: str, tokens: int) -> None: ...
     def check_budget(self, scope: str, add: int) -> bool: ...
     def spent(self, scope: str) -> int: ...
-    def register_parser(self, provider: str, parser: Callable[[str], dict[str, int]]) -> None: ...
+    def register_parser(self, provider: str, parser: Callable[[str], dict[str, JsonValue]]) -> None: ...
     def meter(self, virtual_key: str, provider: str, model: str, response_json: str, session_id: str | None = ..., route: str | None = ...) -> dict[str, JsonValue]: ...
-    def meter_tokens(self, virtual_key: str, provider: str, model: str, tokens_in: int, tokens_out: int, cache_creation_tokens: int = ..., cache_read_tokens: int = ..., session_id: str | None = ..., route: str | None = ...) -> dict[str, JsonValue]: ...
+    def meter_tokens(self, virtual_key: str, provider: str, model: str, tokens_in: int, tokens_out: int, cache_creation_tokens: int = ..., cache_read_tokens: int = ..., session_id: str | None = ..., route: str | None = ..., cache_read_observation: CacheReadObservation | None = ...) -> dict[str, JsonValue]: ...
     def events(self) -> list[dict[str, JsonValue]]: ...
     def usage_snapshot_json(self, dimension: Literal["subject", "user", "group", "provider", "model", "key", "virtual_key", "session", "total"], cap: int | None = ...) -> str:
         """A JSON array of UsageAggregateV1 rows folded from the events recorded so far."""
@@ -245,6 +259,10 @@ export type FinishReasonV1 = "stop" | "length" | "tool_calls" | "content_filter"
 export type UsageCompleteness = "final" | "partial" | "unavailable"
 export type UsageBasis = "provider_reported" | "estimated"
 export type LatencySource = "origin" | "boundary"
+export type CacheReadStatus = "reported" | "absent" | "malformed" | "unsupported"
+export type CacheReadSource = "origin_usage" | "caller_supplied" | "explicit_capability"
+export interface CacheReadObservation {{ status: CacheReadStatus; source: CacheReadSource }}
+export interface CacheReadCoverage {{ reported: number; absent: number; malformed: number; unsupported: number; unknown: number }}
 export type ContentPart =
   | {{ type: "text"; text: string }}
   | {{ type: "image_url"; image_url: string; detail?: string }}
@@ -270,6 +288,7 @@ export interface ChatRequestV1 {{
 }}
 export interface UsageV2 {{
   tokens_in: number; tokens_out: number; cache_creation_tokens: number; cache_read_tokens: number
+  cache_read_observation?: CacheReadObservation
   completeness?: UsageCompleteness; basis?: UsageBasis; attempts?: number; outcome?: string
   upstream_request_id?: string
   duration_ms?: number; duration_source?: LatencySource
@@ -282,6 +301,7 @@ export interface LatencySummary {{ samples: number; p50_ms: number; p95_ms: numb
 export interface UsageAggregateV1 {{
   key: string; calls: number; tokens_in: number; tokens_out: number;
   cache_creation_tokens: number; cache_read_tokens: number; reasoning_tokens: number;
+  cache_read_coverage?: CacheReadCoverage
   billable_tokens: number; latency?: LatencySummary
 }}
 export interface AssistantOutputV1 {{ content?: MessageContent; tool_calls?: ToolCallV1[]; refusal?: string }}

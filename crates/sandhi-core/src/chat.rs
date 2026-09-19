@@ -16,10 +16,10 @@ pub const CHAT_SCHEMA_VERSION_V1: &str = "1";
 /// (W3d/G7), 5 = `UsageV2::basis` — measured vs estimated counts (TD-0013 D5),
 /// 6 = `RunCostTreeV1` — the ADR-0005 D7 agent-run cost tree;
 /// 7 = explicit reasoning inclusion in output (TD-0026 W03), 8 = per-field latency provenance
-/// (TD-0027 S4).
+/// (TD-0027 S4); 9 = cache-read observation and same-population coverage (TD-0028 C2).
 /// Consumers feature-detect the binding export and treat an absent fn as
 /// minor 0.
-pub const CHAT_CONTRACT_MINOR: u32 = 8;
+pub const CHAT_CONTRACT_MINOR: u32 = 9;
 
 fn schema_v1() -> String {
     CHAT_SCHEMA_VERSION_V1.to_owned()
@@ -301,6 +301,12 @@ pub struct UsageV2 {
     pub tokens_out: u64,
     pub cache_creation_tokens: u64,
     pub cache_read_tokens: u64,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::cache_read_observation_is_unknown",
+        deserialize_with = "crate::deserialize_cache_read_observation"
+    )]
+    pub cache_read_observation: Option<crate::CacheReadObservation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -840,7 +846,7 @@ mod tests {
         let digest = fnv1a(concatenated.as_bytes());
         assert_eq!(
             (CHAT_CONTRACT_MINOR, digest),
-            (8, 0xed01e3e85aaab146_u64),
+            (9, 0x3d36fa7158767a6e_u64),
             "contract schemas changed: bump CHAT_CONTRACT_MINOR and update this digest \
              (new digest = {digest:#x})"
         );

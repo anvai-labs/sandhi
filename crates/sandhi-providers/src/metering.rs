@@ -197,10 +197,20 @@ impl Stream for MeteredStream {
                         pending.ttft_ms = Some(pending.started.elapsed().as_millis() as u64);
                     }
                     pending.attempts = chunk.attempts;
+                    let mut observation = pending.usage.cache_read_observation;
                     if let Some(usage) = &chunk.usage {
                         pending.usage = *usage;
                         pending.usage_seen = true;
+                        sandhi_core::merge_cache_read_observation(
+                            &mut observation,
+                            usage.cache_read_observation,
+                        );
                     }
+                    sandhi_core::merge_cache_read_observation(
+                        &mut observation,
+                        chunk.cache_read_observation,
+                    );
+                    pending.usage.cache_read_observation = observation;
                 }
                 Poll::Ready(Some(Ok(chunk)))
             }
@@ -245,6 +255,29 @@ fn next_request_id() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn raw_cancellation_preserves_cache_availability_without_inventing_final_counts() {
+        use sandhi_core::CacheReadStatus;
+        for (frame, expected) in [
+            ("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}],\"usage\":null}\n\n", CacheReadStatus::Absent),
+            ("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"prompt_tokens_details\":{\"cached_tokens\":4}}}\n\n", CacheReadStatus::Reported),
+        ] {
+            let upstream = stream::iter(vec![Ok::<_, reqwest::Error>(bytes::Bytes::from_static(frame.as_bytes()))]).chain(stream::pending());
+            let raw = crate::metered_passthrough(Box::pin(upstream), crate::openai::sniff_usage_line);
+            let sink = Arc::new(InMemorySink::new());
+            let provider = MeteredProvider::new(Arc::new(StreamOnce(Mutex::new(Some(Ok(raw))))), sink.clone());
+            let mut stream = provider.stream(attributed_req()).await.unwrap();
+            stream.next().await.unwrap().unwrap();
+            drop(stream);
+            let events = sink.events();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].cache_read_observation.unwrap().status, expected);
+            // This decorator historically records terminal counts only. Availability remains
+            // independent, and this change must not turn running usage into finalized counts.
+            assert_eq!(events[0].cache_read_tokens, 0);
+            assert_eq!(events[0].usage_completeness, sandhi_core::UsageCompleteness::Unavailable);
+        }
+    }
     use super::*;
     use crate::{Attribution, ResilientProvider};
     use futures_util::{stream, StreamExt};
@@ -270,6 +303,7 @@ mod tests {
             status: 200,
             body: serde_json::json!({}),
             usage: ParsedUsage {
+                cache_read_observation: None,
                 reasoning_included: Some(true),
                 tokens_in: 100,
                 tokens_out: 20,
@@ -329,6 +363,7 @@ mod tests {
 
     fn chunk_with(data: &str, usage: Option<ParsedUsage>) -> StreamChunk {
         StreamChunk {
+            cache_read_observation: None,
             data: bytes::Bytes::copy_from_slice(data.as_bytes()),
             usage,
             usage_running: None,
@@ -366,6 +401,7 @@ mod tests {
     async fn stream_event_carries_ttft_and_duration() {
         let sink = Arc::new(InMemorySink::new());
         let terminal = ParsedUsage {
+            cache_read_observation: None,
             tokens_in: 10,
             tokens_out: 7,
             ..Default::default()
@@ -512,6 +548,7 @@ mod tests {
     async fn stream_emits_one_event_with_terminal_usage() {
         let sink = Arc::new(InMemorySink::new());
         let terminal = ParsedUsage {
+            cache_read_observation: None,
             tokens_in: 10,
             tokens_out: 7,
             ..Default::default()
@@ -535,6 +572,7 @@ mod tests {
     async fn mid_stream_error_emits_one_event_with_partial_usage() {
         let sink = Arc::new(InMemorySink::new());
         let partial = ParsedUsage {
+            cache_read_observation: None,
             tokens_in: 42, // e.g. Anthropic message_start already delivered input counts
             ..Default::default()
         };

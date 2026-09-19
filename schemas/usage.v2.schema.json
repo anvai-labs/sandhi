@@ -53,6 +53,16 @@
       "format": "uint64",
       "minimum": 0.0
     },
+    "cache_read_observation": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/CacheReadObservation"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "cache_read_tokens": {
       "type": "integer",
       "format": "uint64",
@@ -153,6 +163,78 @@
     }
   },
   "definitions": {
+    "CacheReadObservation": {
+      "type": "object",
+      "oneOf": [
+        {
+          "properties": {
+            "source": {
+              "const": "origin_usage"
+            },
+            "status": {
+              "enum": [
+                "reported",
+                "absent",
+                "malformed"
+              ]
+            }
+          }
+        },
+        {
+          "properties": {
+            "source": {
+              "const": "caller_supplied"
+            },
+            "status": {
+              "enum": [
+                "reported"
+              ]
+            }
+          }
+        },
+        {
+          "properties": {
+            "source": {
+              "const": "explicit_capability"
+            },
+            "status": {
+              "enum": [
+                "unsupported"
+              ]
+            }
+          }
+        }
+      ],
+      "required": [
+        "source",
+        "status"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "#/definitions/CacheReadSource"
+        },
+        "status": {
+          "$ref": "#/definitions/CacheReadStatus"
+        }
+      }
+    },
+    "CacheReadSource": {
+      "type": "string",
+      "enum": [
+        "origin_usage",
+        "caller_supplied",
+        "explicit_capability"
+      ]
+    },
+    "CacheReadStatus": {
+      "type": "string",
+      "enum": [
+        "reported",
+        "absent",
+        "malformed",
+        "unsupported"
+      ]
+    },
     "LatencySource": {
       "description": "Which side of the provider boundary measured a latency field (TD-0027 S4).",
       "oneOf": [

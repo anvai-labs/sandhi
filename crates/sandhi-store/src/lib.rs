@@ -4,6 +4,7 @@
 //! so the language bindings' wheels never pull in bundled SQLite.
 
 pub mod alerts;
+pub mod diagnostics;
 pub mod ledger;
 pub mod sharded;
 pub use sharded::ShardedLedger;
@@ -16,7 +17,10 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use rusqlite::{params, Connection};
-use sandhi_core::{Backend, LatencySource, LatencySummary, Sink, UsageAggregateV1, UsageEvent};
+use sandhi_core::{
+    Backend, CacheReadCoverage, CacheReadObservation, LatencySource, LatencySummary, Sink,
+    UsageAggregateV1, UsageEvent,
+};
 
 pub use alerts::{AlertRuleRecord, AlertStore, CreateAlertRequest};
 pub use ledger::{BudgetRow, ReserveOutcome, SqliteLedger};
@@ -48,6 +52,40 @@ const BILLABLE_SQL: &str = "COALESCE(SUM(tokens_in + cache_creation_tokens + cac
      + tokens_out + CASE WHEN reasoning_included = 0 OR \
      (reasoning_included IS NULL AND COALESCE(reasoning_tokens,0) > tokens_out) \
      THEN COALESCE(reasoning_tokens,0) ELSE 0 END),0)";
+
+// Only canonical status/source pairs count as known. Legacy, partial-migration and future
+// values remain unknown, even if their numeric cache-read count happens to be positive.
+const CACHE_COVERAGE_SQL: &str = "\
+ COALESCE(SUM(CASE WHEN cache_read_status='reported' AND cache_read_source IN ('origin_usage','caller_supplied') THEN 1 ELSE 0 END),0),\
+ COALESCE(SUM(CASE WHEN cache_read_status='absent' AND cache_read_source='origin_usage' THEN 1 ELSE 0 END),0),\
+ COALESCE(SUM(CASE WHEN cache_read_status='malformed' AND cache_read_source='origin_usage' THEN 1 ELSE 0 END),0),\
+ COALESCE(SUM(CASE WHEN cache_read_status='unsupported' AND cache_read_source='explicit_capability' THEN 1 ELSE 0 END),0)";
+
+fn cache_coverage(
+    row: &rusqlite::Row<'_>,
+    start: usize,
+    calls: u64,
+) -> rusqlite::Result<CacheReadCoverage> {
+    let reported = row.get::<_, i64>(start)? as u64;
+    let absent = row.get::<_, i64>(start + 1)? as u64;
+    let malformed = row.get::<_, i64>(start + 2)? as u64;
+    let unsupported = row.get::<_, i64>(start + 3)? as u64;
+    Ok(CacheReadCoverage {
+        reported,
+        absent,
+        malformed,
+        unsupported,
+        unknown: calls.saturating_sub(reported + absent + malformed + unsupported),
+    })
+}
+
+fn cache_observation(status: Option<&str>, source: Option<&str>) -> Option<CacheReadObservation> {
+    serde_json::from_value::<CacheReadObservation>(
+        serde_json::json!({"status": status?, "source": source?}),
+    )
+    .ok()
+    .and_then(CacheReadObservation::validated)
+}
 
 /// One aggregation row (or the grand total).
 ///
@@ -172,6 +210,8 @@ impl SqliteStore {
             "ALTER TABLE usage_events ADD COLUMN run_id TEXT",
             "ALTER TABLE usage_events ADD COLUMN step_id TEXT",
             "ALTER TABLE usage_events ADD COLUMN parent_id TEXT",
+            "ALTER TABLE usage_events ADD COLUMN cache_read_status TEXT",
+            "ALTER TABLE usage_events ADD COLUMN cache_read_source TEXT",
         ] {
             match conn.execute(ddl, []) {
                 Ok(_) => {}
@@ -180,7 +220,10 @@ impl SqliteStore {
             }
         }
         // After the columns exist (either path above), the run index can be created.
-        conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_usage_run ON usage_events(run_id);")?;
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_usage_run ON usage_events(run_id);
+             CREATE INDEX IF NOT EXISTS idx_usage_request ON usage_events(request_id);",
+        )?;
         Ok(())
     }
 
@@ -190,6 +233,10 @@ impl SqliteStore {
             Backend::SelfHosted => "self_hosted",
         };
         let conn = self.conn.lock().unwrap();
+        let observation = e
+            .cache_read_observation
+            .and_then(CacheReadObservation::validated)
+            .map(|value| serde_json::to_value(value).expect("bounded cache observation"));
         conn.execute(
             "INSERT INTO usage_events (
                 request_id, occurred_at, provider, model, backend,
@@ -197,8 +244,8 @@ impl SqliteStore {
                 tokens_in, tokens_out, cache_creation_tokens, cache_read_tokens, gpu_seconds,
                 duration_ms, duration_source, time_to_first_token_ms,
                 time_to_first_token_source, reasoning_tokens,
-                run_id, step_id, parent_id, reasoning_included
-            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)",
+                run_id, step_id, parent_id, reasoning_included, cache_read_status, cache_read_source
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)",
             params![
                 e.request_id,
                 e.occurred_at,
@@ -224,6 +271,8 @@ impl SqliteStore {
                 e.step_id,
                 e.parent_id,
                 e.reasoning_included,
+                observation.as_ref().and_then(|v| v["status"].as_str()),
+                observation.as_ref().and_then(|v| v["source"].as_str()),
             ],
         )?;
         Ok(())
@@ -249,7 +298,7 @@ impl SqliteStore {
             "SELECT COALESCE({col}, '(none)') AS k, COUNT(*), \
                 COALESCE(SUM(tokens_in),0), COALESCE(SUM(tokens_out),0), \
                 COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(cache_read_tokens),0), \
-                COALESCE(SUM(reasoning_tokens),0), {BILLABLE_SQL} \
+                COALESCE(SUM(reasoning_tokens),0), {BILLABLE_SQL}, {CACHE_COVERAGE_SQL} \
              FROM usage_events {where_clause} GROUP BY k \
              ORDER BY {BILLABLE_SQL} DESC"
         );
@@ -266,6 +315,7 @@ impl SqliteStore {
                 reasoning_tokens: r.get::<_, i64>(6)? as u64,
                 billable_tokens: r.get::<_, i64>(7)? as u64,
                 latency: None,
+                cache_read_coverage: Some(cache_coverage(r, 8, r.get::<_, i64>(1)? as u64)?),
             })
         })?;
         let mut buckets: Vec<Bucket> = rows.collect::<rusqlite::Result<_>>()?;
@@ -399,17 +449,20 @@ impl SqliteStore {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT tokens_in, tokens_out, cache_creation_tokens, cache_read_tokens, \
-                    reasoning_tokens, step_id, parent_id, reasoning_included \
+                    reasoning_tokens, step_id, parent_id, reasoning_included, cache_read_status, cache_read_source \
              FROM usage_events WHERE run_id = ?1",
         )?;
         let events: Vec<UsageEvent> = stmt
             .query_map(params![run_id], |r| {
-                Ok(UsageEvent::new("", "", "", "", Backend::External)
+                let mut event = UsageEvent::new("", "", "", "", Backend::External)
                     .with_tokens(r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)
                     .with_cache(r.get::<_, i64>(2)? as u64, r.get::<_, i64>(3)? as u64)
                     .with_reasoning(r.get::<_, Option<i64>>(4)?.map(|v| v as u64))
                     .with_reasoning_included(r.get(7)?)
-                    .with_identity(None, Some(run_id.to_string()), r.get(5)?, r.get(6)?, None))
+                    .with_identity(None, Some(run_id.to_string()), r.get(5)?, r.get(6)?, None);
+                event.cache_read_observation =
+                    cache_observation(r.get_ref(8)?.as_str().ok(), r.get_ref(9)?.as_str().ok());
+                Ok(event)
             })?
             .collect::<rusqlite::Result<_>>()?;
         if events.is_empty() {
@@ -433,7 +486,7 @@ impl SqliteStore {
             &format!(
                 "SELECT COUNT(*), COALESCE(SUM(tokens_in),0), COALESCE(SUM(tokens_out),0), \
                     COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(cache_read_tokens),0), \
-                    COALESCE(SUM(reasoning_tokens),0), {BILLABLE_SQL} FROM usage_events"
+                    COALESCE(SUM(reasoning_tokens),0), {BILLABLE_SQL}, {CACHE_COVERAGE_SQL} FROM usage_events"
             ),
             [],
             |r| {
@@ -447,6 +500,7 @@ impl SqliteStore {
                     reasoning_tokens: r.get::<_, i64>(5)? as u64,
                     billable_tokens: r.get::<_, i64>(6)? as u64,
                     latency: latency.clone(),
+                    cache_read_coverage: Some(cache_coverage(r, 7, r.get::<_, i64>(0)? as u64)?),
                 })
             },
         )
@@ -500,6 +554,117 @@ mod tests {
         .with_attribution(Some("vk".into()), Some(subject.into()), Some(group.into()))
         .with_tokens(tin, tout)
         .with_cache(0, 5)
+    }
+
+    #[test]
+    fn cache_coverage_matches_core_including_legacy_and_invalid_pairs() {
+        use sandhi_core::{CacheReadSource, CacheReadStatus};
+        let store = SqliteStore::in_memory().unwrap();
+        let mut events = Vec::new();
+        for observation in [
+            Some(CacheReadObservation::origin(CacheReadStatus::Reported)),
+            Some(CacheReadObservation::origin(CacheReadStatus::Absent)),
+            Some(CacheReadObservation::origin(CacheReadStatus::Malformed)),
+            Some(CacheReadObservation {
+                status: CacheReadStatus::Unsupported,
+                source: CacheReadSource::ExplicitCapability,
+            }),
+            None,
+            Some(CacheReadObservation {
+                status: CacheReadStatus::Absent,
+                source: CacheReadSource::CallerSupplied,
+            }),
+        ] {
+            let mut event = ev("inferflux", "cache", "test", 10, 1).with_identity(
+                None,
+                Some("cache-run".into()),
+                Some("step".into()),
+                None,
+                None,
+            );
+            event.cache_read_observation = observation;
+            store.emit(&event);
+            events.push(event);
+        }
+        let tree = sandhi_core::RunCostTreeV1::from_events("cache-run", &events);
+        let coverage = tree.total.cache_read_coverage;
+        assert_eq!(store.grand_total().unwrap().cache_read_coverage, coverage);
+        assert_eq!(
+            store.totals_by_provider().unwrap()[0].cache_read_coverage,
+            coverage
+        );
+        assert_eq!(store.run_cost_tree("cache-run").unwrap().unwrap(), tree);
+        let empty = store
+            .totals_since("provider", "2099-01-01T00:00:00Z")
+            .unwrap()
+            .unwrap();
+        assert!(empty.is_empty());
+        let expected = CacheReadCoverage {
+            reported: 1,
+            absent: 1,
+            malformed: 1,
+            unsupported: 1,
+            unknown: 2,
+        };
+        assert_eq!(coverage, Some(expected));
+        // Corrupt/future stored metadata is unknown, not an inferred hit/miss.
+        store.conn.lock().unwrap().execute("UPDATE usage_events SET cache_read_status='future' WHERE cache_read_status='reported'", []).unwrap();
+        let changed = store.grand_total().unwrap().cache_read_coverage.unwrap();
+        assert_eq!(
+            (changed.reported, changed.unknown, changed.total()),
+            (0, 3, 6)
+        );
+        assert_eq!(
+            store
+                .run_cost_tree("cache-run")
+                .unwrap()
+                .unwrap()
+                .total
+                .cache_read_coverage,
+            Some(changed)
+        );
+        store.conn.lock().unwrap().execute("UPDATE usage_events SET cache_read_status=x'80', cache_read_source=42 WHERE cache_read_status='absent'", []).unwrap();
+        let invalid_type_coverage = store.grand_total().unwrap().cache_read_coverage;
+        assert_eq!(invalid_type_coverage.unwrap().unknown, 4);
+        assert_eq!(
+            store
+                .run_cost_tree("cache-run")
+                .unwrap()
+                .unwrap()
+                .total
+                .cache_read_coverage,
+            invalid_type_coverage
+        );
+    }
+
+    #[test]
+    fn cache_metadata_migration_is_additive_and_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        SqliteStore::init(&conn).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE usage_events DROP COLUMN cache_read_source;
+            ALTER TABLE usage_events DROP COLUMN cache_read_status;
+            INSERT INTO usage_events(tokens_in,tokens_out,cache_creation_tokens,cache_read_tokens)
+            VALUES(1,2,0,17);
+            ALTER TABLE usage_events ADD COLUMN cache_read_status TEXT;",
+        )
+        .unwrap();
+        // Simulate an interrupted migration: one of the two nullable columns already exists.
+        SqliteStore::init(&conn).unwrap();
+        SqliteStore::init(&conn).unwrap();
+        let store = SqliteStore::from_conn(conn);
+        let total = store.grand_total().unwrap();
+        assert_eq!(total.cache_read_tokens, 17);
+        assert_eq!(
+            total.cache_read_coverage,
+            Some(CacheReadCoverage::unknown(1))
+        );
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA query_only=ON").unwrap();
+        assert!(
+            SqliteStore::init(&conn).is_err(),
+            "migration errors must not be swallowed"
+        );
     }
 
     #[test]

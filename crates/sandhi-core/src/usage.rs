@@ -18,6 +18,12 @@ pub struct ParsedUsage {
     pub cache_creation_tokens: u64,
     /// Prompt-cache read tokens (priced ~0.1x fresh input).
     pub cache_read_tokens: u64,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::cache_read_observation_is_unknown",
+        deserialize_with = "crate::deserialize_cache_read_observation"
+    )]
+    pub cache_read_observation: Option<crate::CacheReadObservation>,
     /// Provider-reported reasoning count (0 when not reported). See `reasoning_included`
     /// to determine whether this count is already part of output.
     pub reasoning_tokens: u64,
@@ -40,6 +46,9 @@ impl From<ParsedUsage> for crate::chat::UsageV2 {
             tokens_out: value.tokens_out,
             cache_creation_tokens: value.cache_creation_tokens,
             cache_read_tokens: value.cache_read_tokens,
+            cache_read_observation: value
+                .cache_read_observation
+                .and_then(crate::CacheReadObservation::validated),
             reasoning_tokens: (value.reasoning_tokens > 0).then_some(value.reasoning_tokens),
             reasoning_included: value.reasoning_included,
             duration_ms: value.duration_ms,
@@ -66,6 +75,9 @@ impl ParsedUsage {
     /// previously it unconditionally stamped `success`/`Final`, clobbering any caller-set value.
     #[must_use]
     pub fn apply(self, mut event: UsageEvent) -> UsageEvent {
+        event.cache_read_observation = self
+            .cache_read_observation
+            .and_then(crate::CacheReadObservation::validated);
         event = event
             .with_tokens(self.tokens_in, self.tokens_out)
             .with_cache(self.cache_creation_tokens, self.cache_read_tokens)
@@ -92,7 +104,7 @@ impl ParsedUsage {
 /// in the millions of tokens). Treating a larger value as `0` + a warning keeps a malformed or
 /// adversarial upstream from injecting garbage into the meter; the ceiling sits ~1000× above any
 /// real call, so legitimate counts are unaffected.
-const MAX_PLAUSIBLE_TOKENS: u64 = 50_000_000_000;
+pub(crate) const MAX_PLAUSIBLE_TOKENS: u64 = 50_000_000_000;
 
 /// Read an unsigned integer at `key`, defaulting to `0`. Absurd values (above
 /// [`MAX_PLAUSIBLE_TOKENS`]) clamp to `0` with a warning rather than being trusted — they would
@@ -169,6 +181,10 @@ pub fn parse_openai_usage(response: &Value) -> Option<ParsedUsage> {
             tokens_out: completion,
             cache_creation_tokens: 0,
             cache_read_tokens: hit,
+            cache_read_observation: Some(crate::observe_cache_read(
+                crate::CacheReadFamily::OpenAi,
+                response,
+            )),
             reasoning_tokens: reasoning,
             reasoning_included: Some(true),
             duration_ms,
@@ -196,6 +212,10 @@ pub fn parse_openai_usage(response: &Value) -> Option<ParsedUsage> {
         reasoning_tokens: reasoning,
         reasoning_included: Some(true),
         duration_ms,
+        cache_read_observation: Some(crate::observe_cache_read(
+            crate::CacheReadFamily::OpenAi,
+            response,
+        )),
         time_to_first_token_ms,
     })
 }
@@ -233,6 +253,10 @@ pub fn parse_openai_responses_usage(response: &Value) -> Option<ParsedUsage> {
         reasoning_tokens: reasoning,
         reasoning_included: Some(true),
         duration_ms: None,
+        cache_read_observation: Some(crate::observe_cache_read(
+            crate::CacheReadFamily::OpenAiResponses,
+            response,
+        )),
         time_to_first_token_ms: None,
     })
 }
@@ -256,6 +280,10 @@ pub fn parse_anthropic_usage(response: &Value) -> Option<ParsedUsage> {
         tokens_out: u.output_tokens.unwrap_or(0).max(0) as u64,
         cache_creation_tokens: u.cache_creation_input_tokens.unwrap_or(0).max(0) as u64,
         cache_read_tokens: u.cache_read_input_tokens.unwrap_or(0).max(0) as u64,
+        cache_read_observation: Some(crate::observe_cache_read(
+            crate::CacheReadFamily::Anthropic,
+            response,
+        )),
         reasoning_tokens: 0, // Anthropic folds thinking tokens into output_tokens
         reasoning_included: Some(true),
         duration_ms: None,
@@ -284,6 +312,10 @@ pub fn parse_gemini_usage(response: &Value) -> Option<ParsedUsage> {
         cache_creation_tokens: 0,
         cache_read_tokens: cached,
         reasoning_tokens: u64_at(usage, "thoughtsTokenCount"),
+        cache_read_observation: Some(crate::observe_cache_read(
+            crate::CacheReadFamily::Gemini,
+            response,
+        )),
         reasoning_included: Some(false),
         duration_ms: None,
         time_to_first_token_ms: None,
@@ -311,6 +343,10 @@ pub fn parse_cohere_usage(response: &Value) -> Option<ParsedUsage> {
         tokens_out,
         cache_creation_tokens: 0,
         cache_read_tokens: 0,
+        cache_read_observation: Some(crate::observe_cache_read(
+            crate::CacheReadFamily::Cohere,
+            response,
+        )),
         reasoning_tokens: 0,
         reasoning_included: Some(true),
         duration_ms: None,
@@ -327,6 +363,10 @@ pub fn parse_ollama_usage(response: &Value) -> Option<ParsedUsage> {
     }
     Some(ParsedUsage {
         tokens_in: u64_at(response, "prompt_eval_count"),
+        cache_read_observation: Some(crate::observe_cache_read(
+            crate::CacheReadFamily::Ollama,
+            response,
+        )),
         tokens_out: u64_at(response, "eval_count"),
         cache_creation_tokens: 0,
         cache_read_tokens: 0,
@@ -349,6 +389,10 @@ pub fn parse_bedrock_usage(response: &Value) -> Option<ParsedUsage> {
             tokens_out: u64_at(usage, "output_tokens"),
             cache_creation_tokens: u64_at(usage, "cache_creation_input_tokens"),
             cache_read_tokens: u64_at(usage, "cache_read_input_tokens"),
+            cache_read_observation: Some(crate::observe_cache_read(
+                crate::CacheReadFamily::Bedrock,
+                response,
+            )),
             reasoning_tokens: 0,
             reasoning_included: Some(true),
             duration_ms: None,
@@ -363,6 +407,10 @@ pub fn parse_bedrock_usage(response: &Value) -> Option<ParsedUsage> {
             .unwrap_or(0);
         return Some(ParsedUsage {
             tokens_in: u64_at(response, "inputTextTokenCount"),
+            cache_read_observation: Some(crate::observe_cache_read(
+                crate::CacheReadFamily::Bedrock,
+                response,
+            )),
             tokens_out: out,
             cache_creation_tokens: 0,
             cache_read_tokens: 0,

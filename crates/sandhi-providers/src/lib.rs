@@ -26,6 +26,7 @@ pub use sandhi_core::usage::{
 pub mod anthropic;
 mod anthropic_typed;
 pub mod attempt;
+mod cache_read;
 pub mod catalog;
 pub mod cohere;
 mod cohere_typed;
@@ -220,6 +221,33 @@ pub struct ProviderResponse {
     pub attempts: u32,
 }
 
+fn buffered_usage(
+    family: sandhi_core::CacheReadFamily,
+    body: &serde_json::Value,
+) -> (ParsedUsage, Option<ParsedUsage>) {
+    let observed = sandhi_core::observe_usage(family, body);
+    let mut usage = observed.usage.unwrap_or_default();
+    usage.cache_read_observation = observed.cache_read_observation;
+    (usage, observed.usage)
+}
+
+fn observe_stream_cache(
+    family: sandhi_core::CacheReadFamily,
+    frame: &serde_json::Value,
+    usage: &mut ParsedUsage,
+) {
+    sandhi_core::merge_cache_read_observation(
+        &mut usage.cache_read_observation,
+        sandhi_core::observe_cache_read_stream(family, frame),
+    );
+}
+
+fn replace_numeric_usage(usage: &mut ParsedUsage, mut next: ParsedUsage) {
+    // The sniffer already reduced this frame's metadata, independently of numeric matching.
+    next.cache_read_observation = usage.cache_read_observation;
+    *usage = next;
+}
+
 /// One item of a streaming response: raw bytes to forward verbatim, plus the usage counts —
 /// finalized on the terminal item, running on every item before it.
 #[derive(Debug, Clone, Default)]
@@ -242,9 +270,13 @@ pub struct StreamChunk {
     /// family that only reports at the end this stays `None` for the whole stream, so no caller
     /// has to know which family it is talking to — the absence of a number *is* the signal.
     pub usage_running: Option<ParsedUsage>,
+    /// Field-level reporting evidence, independent of whether numeric usage was measured.
+    pub cache_read_observation: Option<sandhi_core::CacheReadObservation>,
     /// Upstream stream-setup attempts made for this logical call.
     pub attempts: u32,
-    /// `true` only for the adapter-generated end-of-stream measurement item.
+    /// `true` once, at protocol completion or transport EOF. The item may also carry data
+    /// (OpenAI's `[DONE]` bytes): observe its usage before exposing those bytes to a caller
+    /// that can disconnect immediately. Later transport bytes carry no new measurement.
     ///
     /// Raw data may legitimately contain an empty chunk, so `data.is_empty()` is not a
     /// lifecycle signal. Consumers that need to distinguish a completed stream from a dropped
@@ -252,7 +284,7 @@ pub struct StreamChunk {
     pub terminal: bool,
 }
 
-/// A streaming response: a stream of [`StreamChunk`]s ending with a usage-bearing terminal item.
+/// A streaming response with one measurement-terminal item; transport bytes can follow it.
 pub type ByteStream = Pin<Box<dyn Stream<Item = Result<StreamChunk, ProviderError>> + Send>>;
 
 #[derive(Debug)]
@@ -449,8 +481,19 @@ pub(crate) const MAX_STREAM_LINE_BYTES: usize = 8 * 1024 * 1024;
 /// `sniff(line, &mut usage)` updates the running accumulator (SSE `data:` lines, Anthropic
 /// events, NDJSON, or the terminal JSON array — the per-adapter parser decides).
 pub(crate) fn metered_passthrough<S>(
+    upstream: S,
+    sniff: impl FnMut(&[u8], &mut ParsedUsage) -> bool + Send + 'static,
+) -> ByteStream
+where
+    S: Stream<Item = reqwest::Result<Bytes>> + Send + Unpin + 'static,
+{
+    metered_passthrough_inner(upstream, sniff, false)
+}
+
+fn metered_passthrough_inner<S>(
     mut upstream: S,
     mut sniff: impl FnMut(&[u8], &mut ParsedUsage) -> bool + Send + 'static,
+    openai_done: bool,
 ) -> ByteStream
 where
     S: Stream<Item = reqwest::Result<Bytes>> + Send + Unpin + 'static,
@@ -464,10 +507,37 @@ where
         // Has any line moved the accumulator? Distinguishes "reported zero" from "reported
         // nothing" on the terminal item, and gates `usage_running` before it.
         let mut sniffed = false;
+        let mut finalized = false;
+        let mut discarded_line = false;
+        let mut event_has_data = false;
         while let Some(chunk) = upstream.next().await {
             let chunk = chunk.map_err(|e| ProviderError::Transport(e.to_string()))?;
-            splitter.push(&chunk);
+            let mut terminal = false;
+            if !finalized {
+                splitter.push(&chunk);
+            }
             while let Some(line) = splitter.next_line() {
+                if discarded_line {
+                    // After a budget reset, this is the suffix of the discarded line, not
+                    // a new SSE field. A DONE-looking suffix must not finalize a call.
+                    discarded_line = false;
+                    continue;
+                }
+                // Family-scoped, complete data line only: neither text mentioning DONE nor
+                // a finish_reason is completion. Publish before yielding this same chunk.
+                if openai_done && !event_has_data && openai_done_line(&line) {
+                    finalized = true;
+                    terminal = true;
+                    splitter.reset();
+                    break;
+                }
+                if openai_done {
+                    if line == b"\n" || line == b"\r\n" {
+                        event_has_data = false;
+                    } else if line.starts_with(b"data:") || line == b"data\n" || line == b"data\r\n" {
+                        event_has_data = true;
+                    }
+                }
                 // Guard: skip the JSON parse for lines that can't carry a usage object.
                 if line_contains_usage(&line) {
                     // The sniffer reports whether it recorded anything — comparing the accumulator
@@ -483,21 +553,34 @@ where
             // The bytes were already forwarded verbatim via `chunk` above.
             if splitter.over_budget() {
                 splitter.reset();
+                discarded_line = openai_done;
+                if openai_done { event_has_data = true; }
+            }
+            if !chunk.is_empty() {
+                // Response bytes were inspected. Even if the caller aborts before EOF,
+                // absence of a cache field is not the no-response/unknown state.
+                usage.cache_read_observation.get_or_insert_with(|| sandhi_core::CacheReadObservation::origin(sandhi_core::CacheReadStatus::Absent));
             }
             yield StreamChunk {
                 data: chunk,
-                usage: None,
+                usage: (terminal && sniffed).then_some(usage),
                 usage_running: sniffed.then_some(usage),
+                cache_read_observation: usage.cache_read_observation,
                 attempts: 1,
-                terminal: false,
+                terminal,
             };
+        }
+        // DONE already published the measurement. Draining HTTP EOF must not emit it twice,
+        // and post-DONE usage-looking bytes must never replace the authoritative snapshot.
+        if finalized {
+            return;
         }
         // Transport-shape awareness: on stream end, sniff any remaining buffered bytes. Handles
         // NDJSON without a trailing newline and the single-JSON-array transport (Gemini's
         // non-`?alt=sse` stream). If within the budget, the sniff closure gets one final shot;
         // otherwise we degrade gracefully (default zero usage) rather than blowing memory.
         let remainder = splitter.remainder();
-        if !remainder.is_empty()
+        if !discarded_line && !remainder.is_empty()
             && remainder.len() <= MAX_STREAM_LINE_BYTES
             && line_contains_usage(remainder)
         {
@@ -506,15 +589,202 @@ where
         // `None` when nothing was ever sniffed. Previously this yielded `Some(default())`, an
         // all-zero *finalized* usage that overwrote whatever the caller had accrued — so a stream
         // whose usage frame was never matched settled 0 after a full response (TD-0013 P1).
+        usage.cache_read_observation.get_or_insert_with(|| sandhi_core::CacheReadObservation::origin(sandhi_core::CacheReadStatus::Absent));
         yield StreamChunk {
             data: Bytes::new(),
             usage: sniffed.then_some(usage),
             usage_running: sniffed.then_some(usage),
+            cache_read_observation: usage.cache_read_observation,
             attempts: 1,
             terminal: true,
         };
     };
     Box::pin(s)
+}
+
+/// OpenAI Chat's protocol-terminal variant (the wire terminator may precede HTTP EOF).
+pub(crate) fn metered_openai_passthrough<S>(
+    upstream: S,
+    sniff: impl FnMut(&[u8], &mut ParsedUsage) -> bool + Send + 'static,
+) -> ByteStream
+where
+    S: Stream<Item = reqwest::Result<Bytes>> + Send + Unpin + 'static,
+{
+    metered_passthrough_inner(upstream, sniff, true)
+}
+
+fn openai_done_line(line: &[u8]) -> bool {
+    line.strip_suffix(b"\n")
+        .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
+        .and_then(|line| line.strip_prefix(b"data:"))
+        .map(|data| data.strip_prefix(b" ").unwrap_or(data))
+        .is_some_and(|data| data == b"[DONE]")
+}
+
+#[cfg(test)]
+mod terminal_before_eof_tests {
+    use super::*;
+    use futures_util::{stream, StreamExt};
+
+    const USAGE: &[u8] = b"data: {\"usage\":{\"prompt_tokens\":24,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":4}}}\n\n";
+
+    async fn collect(chunks: Vec<Bytes>, openai: bool) -> Vec<StreamChunk> {
+        let upstream = stream::iter(chunks.into_iter().map(Ok));
+        let mut output =
+            metered_passthrough_inner(upstream, crate::openai::sniff_usage_line, openai);
+        let mut result = Vec::new();
+        while let Some(item) = output.next().await {
+            result.push(item.unwrap());
+        }
+        result
+    }
+
+    #[test]
+    fn done_marker_is_a_complete_exact_data_line() {
+        for line in [b"data: [DONE]\n".as_slice(), b"data:[DONE]\r\n"] {
+            assert!(openai_done_line(line));
+        }
+        for line in [
+            b"data: [DONE]".as_slice(),
+            b": data: [DONE]\n",
+            b"data:  [DONE]\n",
+            b"data:\t[DONE]\n",
+            b"data: [DONE] \n",
+            b"data: \"[DONE]\"\n",
+        ] {
+            assert!(!openai_done_line(line));
+        }
+    }
+
+    #[tokio::test]
+    async fn done_freezes_usage_and_metadata_without_losing_trailing_bytes_or_double_emitting() {
+        let tail = b"data: {\"usage\":{\"prompt_tokens\":99,\"completion_tokens\":999,\"prompt_tokens_details\":{\"cached_tokens\":\"bad\"}}}\n\ndata: [DONE]\n\n";
+        for same_chunk in [true, false] {
+            let first = [USAGE, b"data: [DONE]\r\n\r\n"].concat();
+            let wire = [first.as_slice(), tail].concat();
+            let chunks = if same_chunk {
+                vec![Bytes::from(wire.clone())]
+            } else {
+                vec![Bytes::from(first), Bytes::from_static(tail)]
+            };
+            let result = collect(chunks, true).await;
+            assert_eq!(
+                result
+                    .iter()
+                    .flat_map(|item| item.data.iter().copied())
+                    .collect::<Vec<_>>(),
+                wire
+            );
+            assert_eq!(result.iter().filter(|item| item.terminal).count(), 1);
+            let usage: Vec<_> = result.iter().filter_map(|item| item.usage).collect();
+            assert_eq!(usage.len(), 1);
+            assert_eq!(usage[0].tokens_out, 2);
+            assert_eq!(
+                usage[0].cache_read_observation.unwrap().status,
+                sandhi_core::CacheReadStatus::Reported
+            );
+            assert!(result
+                .iter()
+                .all(|item| item.cache_read_observation == usage[0].cache_read_observation));
+        }
+    }
+
+    #[tokio::test]
+    async fn reported_zero_missing_usage_and_other_family_eof_remain_distinct() {
+        for (prefix, expected) in [
+            (b"".as_slice(), None),
+            (
+                b"data: {\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0}}\n\n",
+                Some(0),
+            ),
+        ] {
+            let result = collect(
+                vec![Bytes::from([prefix, b"data: [DONE]\n\n"].concat())],
+                true,
+            )
+            .await;
+            assert_eq!(result.len(), 1);
+            assert!(result[0].terminal);
+            assert_eq!(result[0].usage.map(|u| u.tokens_out), expected);
+        }
+        let result = collect(
+            vec![Bytes::from([USAGE, b"data: [DONE]\n\n"].concat())],
+            false,
+        )
+        .await;
+        assert!(!result[0].terminal && result[0].usage.is_none());
+        assert!(result[1].terminal && result[1].data.is_empty());
+        assert_eq!(result[1].usage.unwrap().tokens_out, 2);
+    }
+
+    #[tokio::test]
+    async fn finish_text_and_multiline_data_are_not_done_markers() {
+        for bytes in [b"data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{\"content\":\"data: [DONE]\"}}]}\n\n".as_slice(), b"data: other\ndata: [DONE]\n\n", b"data\ndata: [DONE]\n\n", b"data\r\ndata: [DONE]\r\n\r\n", b": data: [DONE]\n\n"] {
+            let chunks = collect(vec![Bytes::copy_from_slice(bytes)], true).await;
+            assert!(!chunks[0].terminal);
+            assert!(chunks[1].terminal && chunks[1].usage.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn discarded_oversized_line_suffix_cannot_finalize_usage() {
+        let mut oversized = vec![b'x'; MAX_STREAM_LINE_BYTES + 1];
+        oversized[0] = b':';
+        let result = collect(
+            vec![
+                Bytes::copy_from_slice(USAGE),
+                Bytes::from(oversized),
+                Bytes::from_static(b"data: [DONE]\n\n"),
+            ],
+            true,
+        )
+        .await;
+        assert!(result[..3]
+            .iter()
+            .all(|item| !item.terminal && item.usage.is_none()));
+        assert!(result[3].terminal && result[3].data.is_empty());
+        assert_eq!(result[3].usage.unwrap().tokens_out, 2);
+    }
+
+    #[tokio::test]
+    async fn openai_done_carries_authoritative_usage_before_delayed_eof() {
+        let wire = b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":24,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":4}}}\n\ndata: [DONE]\n\n";
+        for split in 1..wire.len() {
+            let upstream = stream::iter(vec![
+                Ok(Bytes::copy_from_slice(&wire[..split])),
+                Ok(Bytes::copy_from_slice(&wire[split..])),
+            ])
+            .chain(stream::pending());
+            let mut output = metered_openai_passthrough(upstream, crate::openai::sniff_usage_line);
+            let mut forwarded = Vec::new();
+            let mut measured = Vec::new();
+            while forwarded.len() < wire.len() {
+                let chunk = tokio::time::timeout(std::time::Duration::from_secs(1), output.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                forwarded.extend_from_slice(&chunk.data);
+                if let Some(usage) = chunk.usage {
+                    measured.push(usage);
+                }
+            }
+            assert_eq!(forwarded, wire);
+            assert_eq!(
+                measured.len(),
+                1,
+                "split {split}: terminal usage must arrive before EOF"
+            );
+            assert_eq!(
+                (
+                    measured[0].tokens_in,
+                    measured[0].cache_read_tokens,
+                    measured[0].tokens_out
+                ),
+                (20, 4, 2)
+            );
+        }
+    }
 }
 
 /// Check whether a byte slice could carry a usage object — a cheap pre-filter that avoids the
@@ -1002,6 +1272,9 @@ mod streaming_usage_fidelity_tests {
         assert_eq!(
             chunks.last().unwrap().usage,
             Some(ParsedUsage {
+                cache_read_observation: Some(sandhi_core::CacheReadObservation::origin(
+                    sandhi_core::CacheReadStatus::Absent
+                )),
                 reasoning_included: Some(true),
                 ..ParsedUsage::default()
             }),

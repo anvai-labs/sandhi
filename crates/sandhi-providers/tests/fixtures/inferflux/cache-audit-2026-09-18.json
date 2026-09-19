@@ -1,0 +1,402 @@
+{
+  "provenance": "Sanitized non-stream usage projections from 2026-09-18 audit; envelopes/SSE in tests are constructed, not live captures.",
+  "evidence_sha256": "0064a0c0ecfe5609599e5c164e7ebf0b59b8377710dfb1b659bd0f3b48b25a6e",
+  "cases": [
+    {
+      "name": "direct-cold-0",
+      "usage": {
+        "completion_tokens": 1,
+        "duration_ms": 155.187395,
+        "prompt_tokens": 451,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 452
+      },
+      "expected": {
+        "tokens_in": 451,
+        "tokens_out": 1,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "reasoning_tokens": 0,
+        "reasoning_included": true,
+        "duration_ms": 155,
+        "time_to_first_token_ms": null
+      }
+    },
+    {
+      "name": "direct-repeat-0",
+      "usage": {
+        "completion_tokens": 1,
+        "duration_ms": 51.168085,
+        "prompt_tokens": 451,
+        "prompt_tokens_details": {
+          "cached_tokens": 426
+        },
+        "total_tokens": 452
+      },
+      "expected": {
+        "tokens_in": 25,
+        "tokens_out": 1,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 426,
+        "reasoning_tokens": 0,
+        "reasoning_included": true,
+        "duration_ms": 51,
+        "time_to_first_token_ms": null
+      }
+    },
+    {
+      "name": "direct-append-0",
+      "usage": {
+        "completion_tokens": 1,
+        "duration_ms": 62.588018,
+        "prompt_tokens": 488,
+        "prompt_tokens_details": {
+          "cached_tokens": 426
+        },
+        "total_tokens": 489
+      },
+      "expected": {
+        "tokens_in": 62,
+        "tokens_out": 1,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 426,
+        "reasoning_tokens": 0,
+        "reasoning_included": true,
+        "duration_ms": 63,
+        "time_to_first_token_ms": null
+      }
+    },
+    {
+      "name": "sandhi-cold-0",
+      "usage": {
+        "completion_tokens": 1,
+        "duration_ms": 55.81256,
+        "prompt_tokens": 451,
+        "prompt_tokens_details": {
+          "cached_tokens": 426
+        },
+        "total_tokens": 452
+      },
+      "expected": {
+        "tokens_in": 25,
+        "tokens_out": 1,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 426,
+        "reasoning_tokens": 0,
+        "reasoning_included": true,
+        "duration_ms": 56,
+        "time_to_first_token_ms": null
+      }
+    },
+    {
+      "name": "sandhi-repeat-0",
+      "usage": {
+        "completion_tokens": 1,
+        "duration_ms": 56.074154,
+        "prompt_tokens": 451,
+        "prompt_tokens_details": {
+          "cached_tokens": 426
+        },
+        "total_tokens": 452
+      },
+      "expected": {
+        "tokens_in": 25,
+        "tokens_out": 1,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 426,
+        "reasoning_tokens": 0,
+        "reasoning_included": true,
+        "duration_ms": 56,
+        "time_to_first_token_ms": null
+      }
+    },
+    {
+      "name": "sandhi-append-0",
+      "usage": {
+        "completion_tokens": 1,
+        "duration_ms": 62.430023,
+        "prompt_tokens": 488,
+        "prompt_tokens_details": {
+          "cached_tokens": 426
+        },
+        "total_tokens": 489
+      },
+      "expected": {
+        "tokens_in": 62,
+        "tokens_out": 1,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 426,
+        "reasoning_tokens": 0,
+        "reasoning_included": true,
+        "duration_ms": 62,
+        "time_to_first_token_ms": null
+      }
+    },
+    {
+      "name": "direct-tools-1",
+      "usage": {
+        "completion_tokens": 5,
+        "duration_ms": 252.637458,
+        "prompt_tokens": 587,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 592
+      },
+      "expected": {
+        "tokens_in": 587,
+        "tokens_out": 5,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "reasoning_tokens": 0,
+        "reasoning_included": true,
+        "duration_ms": 253,
+        "time_to_first_token_ms": null
+      }
+    },
+    {
+      "name": "direct-tools-2",
+      "usage": {
+        "completion_tokens": 5,
+        "duration_ms": 94.047284,
+        "prompt_tokens": 587,
+        "prompt_tokens_details": {
+          "cached_tokens": 514
+        },
+        "total_tokens": 592
+      },
+      "expected": {
+        "tokens_in": 73,
+        "tokens_out": 5,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 514,
+        "reasoning_tokens": 0,
+        "reasoning_included": true,
+        "duration_ms": 94,
+        "time_to_first_token_ms": null
+      }
+    },
+    {
+      "name": "sandhi-tools-1",
+      "usage": {
+        "completion_tokens": 5,
+        "duration_ms": 93.795432,
+        "prompt_tokens": 587,
+        "prompt_tokens_details": {
+          "cached_tokens": 514
+        },
+        "total_tokens": 592
+      },
+      "expected": {
+        "tokens_in": 73,
+        "tokens_out": 5,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 514,
+        "reasoning_tokens": 0,
+        "reasoning_included": true,
+        "duration_ms": 94,
+        "time_to_first_token_ms": null
+      }
+    },
+    {
+      "name": "sandhi-tools-2",
+      "usage": {
+        "completion_tokens": 5,
+        "duration_ms": 93.151068,
+        "prompt_tokens": 587,
+        "prompt_tokens_details": {
+          "cached_tokens": 514
+        },
+        "total_tokens": 592
+      },
+      "expected": {
+        "tokens_in": 73,
+        "tokens_out": 5,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 514,
+        "reasoning_tokens": 0,
+        "reasoning_included": true,
+        "duration_ms": 93,
+        "time_to_first_token_ms": null
+      }
+    },
+    {
+      "name": "direct-json-1",
+      "usage": {
+        "completion_tokens": 5,
+        "duration_ms": 347.623384,
+        "prompt_tokens": 436,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 441
+      },
+      "expected": {
+        "tokens_in": 436,
+        "tokens_out": 5,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "reasoning_tokens": 0,
+        "reasoning_included": true,
+        "duration_ms": 348,
+        "time_to_first_token_ms": null
+      }
+    },
+    {
+      "name": "direct-json-2",
+      "usage": {
+        "completion_tokens": 5,
+        "duration_ms": 305.565956,
+        "prompt_tokens": 436,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 441
+      },
+      "expected": {
+        "tokens_in": 436,
+        "tokens_out": 5,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "reasoning_tokens": 0,
+        "reasoning_included": true,
+        "duration_ms": 306,
+        "time_to_first_token_ms": null
+      }
+    },
+    {
+      "name": "sandhi-json-1",
+      "usage": {
+        "completion_tokens": 5,
+        "duration_ms": 302.445493,
+        "prompt_tokens": 436,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 441
+      },
+      "expected": {
+        "tokens_in": 436,
+        "tokens_out": 5,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "reasoning_tokens": 0,
+        "reasoning_included": true,
+        "duration_ms": 302,
+        "time_to_first_token_ms": null
+      }
+    },
+    {
+      "name": "sandhi-json-2",
+      "usage": {
+        "completion_tokens": 5,
+        "duration_ms": 300.216525,
+        "prompt_tokens": 436,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 441
+      },
+      "expected": {
+        "tokens_in": 436,
+        "tokens_out": 5,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "reasoning_tokens": 0,
+        "reasoning_included": true,
+        "duration_ms": 300,
+        "time_to_first_token_ms": null
+      }
+    },
+    {
+      "name": "direct-logprobs-1",
+      "usage": {
+        "completion_tokens": 5,
+        "duration_ms": 215.701632,
+        "prompt_tokens": 436,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 441
+      },
+      "expected": {
+        "tokens_in": 436,
+        "tokens_out": 5,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "reasoning_tokens": 0,
+        "reasoning_included": true,
+        "duration_ms": 216,
+        "time_to_first_token_ms": null
+      }
+    },
+    {
+      "name": "direct-logprobs-2",
+      "usage": {
+        "completion_tokens": 5,
+        "duration_ms": 212.473272,
+        "prompt_tokens": 436,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 441
+      },
+      "expected": {
+        "tokens_in": 436,
+        "tokens_out": 5,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "reasoning_tokens": 0,
+        "reasoning_included": true,
+        "duration_ms": 212,
+        "time_to_first_token_ms": null
+      }
+    },
+    {
+      "name": "sandhi-logprobs-1",
+      "usage": {
+        "completion_tokens": 5,
+        "duration_ms": 219.679719,
+        "prompt_tokens": 436,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 441
+      },
+      "expected": {
+        "tokens_in": 436,
+        "tokens_out": 5,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "reasoning_tokens": 0,
+        "reasoning_included": true,
+        "duration_ms": 220,
+        "time_to_first_token_ms": null
+      }
+    },
+    {
+      "name": "sandhi-logprobs-2",
+      "usage": {
+        "completion_tokens": 5,
+        "duration_ms": 218.566908,
+        "prompt_tokens": 436,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 441
+      },
+      "expected": {
+        "tokens_in": 436,
+        "tokens_out": 5,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "reasoning_tokens": 0,
+        "reasoning_included": true,
+        "duration_ms": 219,
+        "time_to_first_token_ms": null
+      }
+    }
+  ]
+}

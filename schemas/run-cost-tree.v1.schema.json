@@ -28,6 +28,44 @@
     }
   },
   "definitions": {
+    "CacheReadCoverage": {
+      "description": "Fixed-size coverage over exactly the aggregate's existing call population.",
+      "type": "object",
+      "required": [
+        "absent",
+        "malformed",
+        "reported",
+        "unknown",
+        "unsupported"
+      ],
+      "properties": {
+        "absent": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "malformed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "reported": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "unknown": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "unsupported": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
     "LatencySummary": {
       "description": "Latency over the calls in an aggregate.\n\n**Percentiles are approximate** — computed over the sampled calls counted by `samples`, which is carried precisely so a consumer can see the approximation's weight instead of inferring a confidence it does not have. Tokens are exact because budgets enforce on them; latency informs (TD-0009 D3: approximate what informs, never what enforces).",
       "type": "object",
@@ -132,6 +170,16 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0.0
+        },
+        "cache_read_coverage": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CacheReadCoverage"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "cache_read_tokens": {
           "type": "integer",

@@ -239,7 +239,7 @@ async fn version_endpoint_is_unauthenticated_and_reports_the_contract() {
     let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["wire_contract_version"], "1");
     assert_eq!(value["chat_contract_version"], "1");
-    assert_eq!(value["chat_contract_minor"], 8);
+    assert_eq!(value["chat_contract_minor"], 9);
     let dialects = value["dialects"].as_array().unwrap();
     for expected in ["openai", "anthropic", "responses", "gemini"] {
         assert!(
@@ -2963,6 +2963,15 @@ async fn a_disconnect_after_message_start_settles_the_reported_cache_split() {
     assert_eq!(events[0].tokens_in, PACED_FRAMES_INPUT);
     assert_eq!(events[0].cache_read_tokens, PACED_FRAMES_CACHE_READ);
     assert_eq!(events[0].cache_creation_tokens, PACED_FRAMES_CACHE_CREATION);
+    assert_eq!(
+        events[0].cache_read_observation,
+        Some(sandhi_core::CacheReadObservation::origin(
+            sandhi_core::CacheReadStatus::Reported
+        ))
+    );
+    let mut aggregate = sandhi_core::UsageAggregateV1::default();
+    aggregate.add(&events[0]);
+    assert_eq!(aggregate.cache_read_coverage.unwrap().reported, 1);
 }
 
 /// The second integrity hole TD-0013 closes, at the layer where it costs money.

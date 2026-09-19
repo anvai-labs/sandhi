@@ -9,13 +9,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use napi::bindgen_prelude::*;
+use napi::JsUnknown;
 use napi_derive::napi;
 
 use sandhi_core::{
-    parse_anthropic_usage, parse_bedrock_usage, parse_cohere_usage, parse_gemini_usage,
-    parse_ollama_usage, parse_openai_responses_usage, parse_openai_usage, Backend, Budget,
-    BudgetLedger, Dimension, KeyStore, ParsedUsage, UsageAggregateV1, UsageAggregator, UsageEvent,
-    VirtualKey,
+    observe_usage, Backend, Budget, BudgetLedger, CacheReadFamily,
+    CacheReadObservation as CoreCacheReadObservation, Dimension, KeyStore, ParsedUsage,
+    UsageAggregateV1, UsageAggregator, UsageEvent, VirtualKey,
 };
 use sandhi_providers::{
     AnthropicAuthScheme, GeminiAuthScheme, ProviderError, ProviderFamily, ProviderHandle,
@@ -410,11 +410,18 @@ impl TypedEventStream {
 
 /// The neutral token breakdown parsed from a provider response.
 #[napi(object)]
+pub struct CacheReadObservationValue {
+    pub status: String,
+    pub source: String,
+}
+
+#[napi(object)]
 pub struct UsageBreakdown {
     pub tokens_in: u32,
     pub tokens_out: u32,
     pub cache_creation_tokens: u32,
     pub cache_read_tokens: u32,
+    pub cache_read_observation: Option<CacheReadObservationValue>,
     pub reasoning_tokens: f64,
     pub reasoning_included: Option<bool>,
     pub duration_ms: Option<f64>,
@@ -441,6 +448,7 @@ pub struct Event {
     pub reasoning_included: Option<bool>,
     pub cache_creation_tokens: u32,
     pub cache_read_tokens: u32,
+    pub cache_read_observation: Option<CacheReadObservationValue>,
     pub usage_completeness: String,
     pub attempts: u32,
     pub outcome: Option<String>,
@@ -646,12 +654,14 @@ impl Gateway {
         cache_read_tokens: Option<u32>,
         session_id: Option<String>,
         route: Option<String>,
+        cache_read_observation: Option<JsUnknown>,
     ) -> Result<Event> {
         let parsed = ParsedUsage {
             tokens_in: u64::from(tokens_in),
             tokens_out: u64::from(tokens_out),
             cache_creation_tokens: u64::from(cache_creation_tokens.unwrap_or(0)),
             cache_read_tokens: u64::from(cache_read_tokens.unwrap_or(0)),
+            cache_read_observation: cache_read_observation.and_then(observation_from_napi),
             reasoning_tokens: 0,
             reasoning_included: None,
             duration_ms: None,
@@ -785,16 +795,42 @@ fn fold_usage(
 }
 
 fn parse_for(provider: &str, value: &serde_json::Value) -> ParsedUsage {
-    match provider {
-        "anthropic" => parse_anthropic_usage(value),
-        "gemini" => parse_gemini_usage(value),
-        "cohere" => parse_cohere_usage(value),
-        "ollama" => parse_ollama_usage(value),
-        "bedrock" => parse_bedrock_usage(value),
-        "openai_responses" | "responses" => parse_openai_responses_usage(value),
-        _ => parse_openai_usage(value),
+    let family = match provider {
+        "anthropic" => CacheReadFamily::Anthropic,
+        "gemini" => CacheReadFamily::Gemini,
+        "cohere" => CacheReadFamily::Cohere,
+        "ollama" => CacheReadFamily::Ollama,
+        "bedrock" => CacheReadFamily::Bedrock,
+        "openai_responses" | "responses" => CacheReadFamily::OpenAiResponses,
+        _ => CacheReadFamily::OpenAi,
+    };
+    let observed = observe_usage(family, value);
+    let mut parsed = observed.usage.unwrap_or_default();
+    parsed.cache_read_observation = observed.cache_read_observation;
+    parsed
+}
+
+/// Read optional metadata leniently; invalid/future shapes do not reject numeric usage.
+fn observation_from_napi(value: JsUnknown) -> Option<CoreCacheReadObservation> {
+    if value.get_type().ok()? != napi::ValueType::Object {
+        return None;
     }
-    .unwrap_or_default()
+    let object = value.coerce_to_object().ok()?;
+    let status: String = object.get_named_property("status").ok()?;
+    let source: String = object.get_named_property("source").ok()?;
+    serde_json::from_value::<CoreCacheReadObservation>(serde_json::json!({
+        "status": status, "source": source
+    }))
+    .ok()?
+    .validated()
+}
+
+fn observation_to_napi(value: CoreCacheReadObservation) -> Option<CacheReadObservationValue> {
+    let value = serde_json::to_value(value.validated()?).ok()?;
+    Some(CacheReadObservationValue {
+        status: value["status"].as_str()?.to_owned(),
+        source: value["source"].as_str()?.to_owned(),
+    })
 }
 
 fn now_rfc3339() -> String {
@@ -810,6 +846,7 @@ fn usage_breakdown(u: &ParsedUsage) -> UsageBreakdown {
         tokens_out: u.tokens_out as u32,
         cache_creation_tokens: u.cache_creation_tokens as u32,
         cache_read_tokens: u.cache_read_tokens as u32,
+        cache_read_observation: u.cache_read_observation.and_then(observation_to_napi),
         reasoning_tokens: u.reasoning_tokens as f64,
         reasoning_included: u.reasoning_included,
         duration_ms: u.duration_ms.map(|value| value as f64),
@@ -839,6 +876,7 @@ fn event_to_napi(e: &UsageEvent) -> Event {
         reasoning_included: e.reasoning_included,
         cache_creation_tokens: e.cache_creation_tokens as u32,
         cache_read_tokens: e.cache_read_tokens as u32,
+        cache_read_observation: e.cache_read_observation.and_then(observation_to_napi),
         usage_completeness: match e.usage_completeness {
             sandhi_core::UsageCompleteness::Final => "final",
             sandhi_core::UsageCompleteness::Partial => "partial",

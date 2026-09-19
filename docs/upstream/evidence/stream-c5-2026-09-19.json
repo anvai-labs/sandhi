@@ -1,0 +1,373 @@
+{
+  "passed": true,
+  "run_id": "req_stream_overlap_e6eeb367a55a",
+  "source": "c5d4eb89f71dcfb3064b974d63b88c4ce88f42a1",
+  "origin_port": 8081,
+  "gateway_port": 18797,
+  "generation_call_limit": 5,
+  "planned_calls": 5,
+  "overall_budget_seconds": 180,
+  "request_phase_budget_seconds": 160,
+  "scope": "Bounded complete gateway SSE and measured same/different-session submitted-request overlap; delivered-content overlap is optional. No cache-hit requirement, historical attribution, completion-tokenizer correctness, cold-cache or GPU-kernel-concurrency claim.",
+  "origin_pid": 2254917,
+  "inferflux_binary_sha256": "312f49e63dae7609dd804e3b74aa4a4b2dd06b72aebf8aa6a322ed619e974de6",
+  "sandhi_binary_sha256": "ac5ace8bcc767c5e99646dd7429d4bbb962880dbbc383a022b1fa04f753ecb80",
+  "accepted_run_id": 35431794400,
+  "model_before": {
+    "id": "qwen3-coder-30b",
+    "backend": "llama_cpp_cuda",
+    "fallback": false,
+    "context_tokens_per_sequence": 16384,
+    "sequence_capacity": 2,
+    "session_handles_enabled": false
+  },
+  "same_session_overlap": {
+    "request_inflight_overlap_ms": 6055.836,
+    "delivered_content_overlap_observed": false,
+    "content_to_first_finish_overlap_ms": 0,
+    "scope": "Measured simultaneous outstanding submitted HTTP requests. Delivered-content overlap is optional; serialized decoding is valid. This does not prove simultaneous GPU kernels or scheduler batching."
+  },
+  "different_session_overlap": {
+    "request_inflight_overlap_ms": 4969.208,
+    "delivered_content_overlap_observed": false,
+    "content_to_first_finish_overlap_ms": 0,
+    "scope": "Measured simultaneous outstanding submitted HTTP requests. Delivered-content overlap is optional; serialized decoding is valid. This does not prove simultaneous GPU kernels or scheduler batching."
+  },
+  "c4": {
+    "rows": [
+      {
+        "request_id": "req_1789820017959_4",
+        "session_id": "req_stream_overlap_e6eeb367a55a_different_0",
+        "run_id": "req_stream_overlap_e6eeb367a55a",
+        "step_id": "different_0",
+        "model": "qwen3-coder-30b",
+        "tokens_in": 24,
+        "tokens_out": 64,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_read_observation": {
+          "source": "origin_usage",
+          "status": "reported"
+        }
+      },
+      {
+        "request_id": "req_1789820017955_3",
+        "session_id": "req_stream_overlap_e6eeb367a55a_different_1",
+        "run_id": "req_stream_overlap_e6eeb367a55a",
+        "step_id": "different_1",
+        "model": "qwen3-coder-30b",
+        "tokens_in": 24,
+        "tokens_out": 64,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_read_observation": {
+          "source": "origin_usage",
+          "status": "reported"
+        }
+      },
+      {
+        "request_id": "req_1789820006847_2",
+        "session_id": "req_stream_overlap_e6eeb367a55a_same",
+        "run_id": "req_stream_overlap_e6eeb367a55a",
+        "step_id": "same_1",
+        "model": "qwen3-coder-30b",
+        "tokens_in": 24,
+        "tokens_out": 64,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_read_observation": {
+          "source": "origin_usage",
+          "status": "reported"
+        }
+      },
+      {
+        "request_id": "req_1789820006843_1",
+        "session_id": "req_stream_overlap_e6eeb367a55a_same",
+        "run_id": "req_stream_overlap_e6eeb367a55a",
+        "step_id": "same_0",
+        "model": "qwen3-coder-30b",
+        "tokens_in": 24,
+        "tokens_out": 64,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_read_observation": {
+          "source": "origin_usage",
+          "status": "reported"
+        }
+      },
+      {
+        "request_id": "req_1789819996896_0",
+        "session_id": "req_stream_overlap_e6eeb367a55a_single",
+        "run_id": "req_stream_overlap_e6eeb367a55a",
+        "step_id": "single",
+        "model": "qwen3-coder-30b",
+        "tokens_in": 24,
+        "tokens_out": 32,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_read_observation": {
+          "source": "origin_usage",
+          "status": "reported"
+        }
+      }
+    ],
+    "unavailable_evidence": [
+      "raw_origin_usage",
+      "completeness",
+      "basis",
+      "outcome",
+      "physical_attempts",
+      "request_id_provenance",
+      "separate_upstream_request_id",
+      "separate_admission_request_id"
+    ],
+    "snapshot_notice": "Best-effort persisted logical-call rows, newest insertion first. Active streams may have no row; missing rows do not prove no traffic. Reporting does not prove backend reuse. Caller/origin strings may be sensitive; this export is not anonymized.",
+    "request_id_notice": "Persisted request_id is upstream-preferred, otherwise admission/late-minted; provenance is not persisted and IDs are not unique.",
+    "truncated": false
+  },
+  "sqlite_rows": [
+    {
+      "request_id": "req_1789819996896_0",
+      "session_id": "req_stream_overlap_e6eeb367a55a_single",
+      "run_id": "req_stream_overlap_e6eeb367a55a",
+      "step_id": "single",
+      "model": "qwen3-coder-30b",
+      "tokens_in": 24,
+      "tokens_out": 32,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "cache_read_observation": {
+        "status": "reported",
+        "source": "origin_usage"
+      }
+    },
+    {
+      "request_id": "req_1789820006843_1",
+      "session_id": "req_stream_overlap_e6eeb367a55a_same",
+      "run_id": "req_stream_overlap_e6eeb367a55a",
+      "step_id": "same_0",
+      "model": "qwen3-coder-30b",
+      "tokens_in": 24,
+      "tokens_out": 64,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "cache_read_observation": {
+        "status": "reported",
+        "source": "origin_usage"
+      }
+    },
+    {
+      "request_id": "req_1789820006847_2",
+      "session_id": "req_stream_overlap_e6eeb367a55a_same",
+      "run_id": "req_stream_overlap_e6eeb367a55a",
+      "step_id": "same_1",
+      "model": "qwen3-coder-30b",
+      "tokens_in": 24,
+      "tokens_out": 64,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "cache_read_observation": {
+        "status": "reported",
+        "source": "origin_usage"
+      }
+    },
+    {
+      "request_id": "req_1789820017955_3",
+      "session_id": "req_stream_overlap_e6eeb367a55a_different_1",
+      "run_id": "req_stream_overlap_e6eeb367a55a",
+      "step_id": "different_1",
+      "model": "qwen3-coder-30b",
+      "tokens_in": 24,
+      "tokens_out": 64,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "cache_read_observation": {
+        "status": "reported",
+        "source": "origin_usage"
+      }
+    },
+    {
+      "request_id": "req_1789820017959_4",
+      "session_id": "req_stream_overlap_e6eeb367a55a_different_0",
+      "run_id": "req_stream_overlap_e6eeb367a55a",
+      "step_id": "different_0",
+      "model": "qwen3-coder-30b",
+      "tokens_in": 24,
+      "tokens_out": 64,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "cache_read_observation": {
+        "status": "reported",
+        "source": "origin_usage"
+      }
+    }
+  ],
+  "dashboard": {
+    "calls": 5,
+    "tokens_in": 120,
+    "tokens_out": 288,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "cache_read_coverage": {
+      "absent": 0,
+      "malformed": 0,
+      "reported": 5,
+      "unknown": 0,
+      "unsupported": 0
+    }
+  },
+  "model_after": {
+    "id": "qwen3-coder-30b",
+    "backend": "llama_cpp_cuda",
+    "fallback": false,
+    "context_tokens_per_sequence": 16384,
+    "sequence_capacity": 2,
+    "session_handles_enabled": false
+  },
+  "backend_diagnostics": {
+    "available": [],
+    "unavailable_request_ids": [
+      "req_1789819996896_0",
+      "req_1789820006843_1",
+      "req_1789820006847_2",
+      "req_1789820017959_4",
+      "req_1789820017955_3"
+    ],
+    "scope": "Optional bounded evidence; diagnostic budget64 may already be exhausted. Missing evidence is not zero reuse."
+  },
+  "gateway_stopped": true,
+  "workers_stopped": true,
+  "records": [
+    {
+      "step_id": "different_0",
+      "session_id": "req_stream_overlap_e6eeb367a55a_different_0",
+      "max_tokens": 64,
+      "sent_ms": 21267.582,
+      "sent_complete_ms": 21267.949,
+      "headers_ms": 21281.319,
+      "http_status": 200,
+      "request_id": "req_1789820017959_4",
+      "first_content_ms": 26755.235,
+      "finish_ms": 30996.7,
+      "usage": {
+        "prompt_tokens": 24,
+        "completion_tokens": 64,
+        "total_tokens": 88,
+        "cached_tokens": 0
+      },
+      "terminal_usage_ms": 30996.734,
+      "done_ms": 30996.742,
+      "frames": 67,
+      "bytes_read": 12729,
+      "first_content_seen": true,
+      "finish_seen": true,
+      "terminal_usage_seen": true,
+      "done_seen": true
+    },
+    {
+      "step_id": "different_1",
+      "session_id": "req_stream_overlap_e6eeb367a55a_different_1",
+      "max_tokens": 64,
+      "sent_ms": 21267.72,
+      "sent_complete_ms": 21268.004,
+      "headers_ms": 21277.57,
+      "http_status": 200,
+      "request_id": "req_1789820017955_3",
+      "first_content_ms": 21794.772,
+      "finish_ms": 26237.16,
+      "usage": {
+        "prompt_tokens": 24,
+        "completion_tokens": 64,
+        "total_tokens": 88,
+        "cached_tokens": 0
+      },
+      "terminal_usage_ms": 26237.204,
+      "done_ms": 26237.212,
+      "frames": 67,
+      "bytes_read": 12728,
+      "first_content_seen": true,
+      "finish_seen": true,
+      "terminal_usage_seen": true,
+      "done_seen": true
+    },
+    {
+      "step_id": "same_0",
+      "session_id": "req_stream_overlap_e6eeb367a55a_same",
+      "max_tokens": 64,
+      "sent_ms": 10153.721,
+      "sent_complete_ms": 10154.262,
+      "headers_ms": 10165.201,
+      "http_status": 200,
+      "request_id": "req_1789820006843_1",
+      "first_content_ms": 10786.997,
+      "finish_ms": 16210.048,
+      "usage": {
+        "prompt_tokens": 24,
+        "completion_tokens": 64,
+        "total_tokens": 88,
+        "cached_tokens": 0
+      },
+      "terminal_usage_ms": 16210.089,
+      "done_ms": 16210.098,
+      "frames": 67,
+      "bytes_read": 12728,
+      "first_content_seen": true,
+      "finish_seen": true,
+      "terminal_usage_seen": true,
+      "done_seen": true
+    },
+    {
+      "step_id": "same_1",
+      "session_id": "req_stream_overlap_e6eeb367a55a_same",
+      "max_tokens": 64,
+      "sent_ms": 10153.878,
+      "sent_complete_ms": 10154.129,
+      "headers_ms": 10168.86,
+      "http_status": 200,
+      "request_id": "req_1789820006847_2",
+      "first_content_ms": 16837.791,
+      "finish_ms": 21266.801,
+      "usage": {
+        "prompt_tokens": 24,
+        "completion_tokens": 64,
+        "total_tokens": 88,
+        "cached_tokens": 0
+      },
+      "terminal_usage_ms": 21266.838,
+      "done_ms": 21266.846,
+      "frames": 67,
+      "bytes_read": 12729,
+      "first_content_seen": true,
+      "finish_seen": true,
+      "terminal_usage_seen": true,
+      "done_seen": true
+    },
+    {
+      "step_id": "single",
+      "session_id": "req_stream_overlap_e6eeb367a55a_single",
+      "max_tokens": 32,
+      "sent_ms": 211.05,
+      "sent_complete_ms": 211.171,
+      "headers_ms": 218.574,
+      "http_status": 200,
+      "request_id": "req_1789819996896_0",
+      "first_content_ms": 7116.341,
+      "finish_ms": 10152.959,
+      "usage": {
+        "prompt_tokens": 24,
+        "completion_tokens": 32,
+        "total_tokens": 56,
+        "cached_tokens": 0
+      },
+      "terminal_usage_ms": 10153.0,
+      "done_ms": 10153.009,
+      "frames": 35,
+      "bytes_read": 6617,
+      "first_content_seen": true,
+      "finish_seen": true,
+      "terminal_usage_seen": true,
+      "done_seen": true
+    }
+  ],
+  "elapsed_ms": 32124.189
+}

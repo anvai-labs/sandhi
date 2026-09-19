@@ -545,7 +545,17 @@ async fn aggregate_stream(mut stream: ChatEventStream) -> Result<ChatResponseV1,
                 }
             }
             ChatStreamEventV1::ToolCallEnd { .. } => {}
-            ChatStreamEventV1::Usage { usage: final_usage } => usage = final_usage,
+            ChatStreamEventV1::Usage { usage: update } => {
+                let mut observation = usage.cache_read_observation;
+                sandhi_core::merge_cache_read_observation(
+                    &mut observation,
+                    update.cache_read_observation,
+                );
+                if update.completeness != UsageCompleteness::Unavailable {
+                    usage = update;
+                }
+                usage.cache_read_observation = observation;
+            }
             ChatStreamEventV1::Finish { reason } => finish_reason = Some(reason),
             ChatStreamEventV1::Error { error } => {
                 return Err(ProviderError::Transport(error.message));
@@ -570,7 +580,11 @@ async fn aggregate_stream(mut stream: ChatEventStream) -> Result<ChatResponseV1,
     })
 }
 
-fn decode_responses_stream(mut raw: ByteStream, requested_model: String) -> ChatEventStream {
+fn decode_responses_stream(raw: ByteStream, requested_model: String) -> ChatEventStream {
+    crate::cache_read::decode_with_observation(raw, requested_model, decode_responses_stream_inner)
+}
+
+fn decode_responses_stream_inner(mut raw: ByteStream, requested_model: String) -> ChatEventStream {
     use futures_util::StreamExt;
     let stream = async_stream::try_stream! {
         // TD-0014 P1: the shared bounded splitter. One ceiling across both planes; only the
@@ -590,6 +604,7 @@ fn decode_responses_stream(mut raw: ByteStream, requested_model: String) -> Chat
             let chunk = if chunks_ended {
                 tail_pending = false;
                 crate::StreamChunk {
+                    cache_read_observation: None,
                     data: bytes::Bytes::new(),
                     usage: None,
                     usage_running: None,
@@ -726,6 +741,45 @@ fn decode_responses_stream(mut raw: ByteStream, requested_model: String) -> Chat
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn aggregate_keeps_numeric_final_after_metadata_only_correction() {
+        use sandhi_core::{
+            CacheReadObservation, CacheReadStatus, ChatStreamEventV1, UsageCompleteness, UsageV2,
+        };
+        let events = vec![
+            Ok(ChatStreamEventV1::Usage {
+                usage: UsageV2 {
+                    tokens_in: 8,
+                    cache_read_tokens: 3,
+                    completeness: UsageCompleteness::Final,
+                    cache_read_observation: Some(CacheReadObservation::origin(
+                        CacheReadStatus::Reported,
+                    )),
+                    ..Default::default()
+                },
+            }),
+            Ok(ChatStreamEventV1::Usage {
+                usage: UsageV2 {
+                    cache_read_observation: Some(CacheReadObservation::origin(
+                        CacheReadStatus::Malformed,
+                    )),
+                    ..Default::default()
+                },
+            }),
+        ];
+        let response = super::aggregate_stream(Box::pin(futures_util::stream::iter(events)))
+            .await
+            .unwrap();
+        assert_eq!(
+            (response.usage.tokens_in, response.usage.cache_read_tokens),
+            (8, 3)
+        );
+        assert_eq!(response.usage.completeness, UsageCompleteness::Final);
+        assert_eq!(
+            response.usage.cache_read_observation.unwrap().status,
+            CacheReadStatus::Malformed
+        );
+    }
 
     /// TD-0014 P1 regression. OpenAI Responses puts the COMPLETE response object — all generated
     /// output included — in the single `response.completed` SSE line, and that is also the line
@@ -755,6 +809,7 @@ mod tests {
             .chunks(16 * 1024)
             .map(|c| {
                 Ok(crate::StreamChunk {
+                    cache_read_observation: None,
                     data: bytes::Bytes::copy_from_slice(c),
                     usage: None,
                     usage_running: None,
@@ -804,6 +859,7 @@ mod tests {
         let chunks: Vec<_> = (0..256)
             .map(|_| {
                 Ok(crate::StreamChunk {
+                    cache_read_observation: None,
                     data: filler.clone(),
                     usage: None,
                     usage_running: None,
@@ -923,6 +979,7 @@ mod tests {
         for split in 0..=sse.len() {
             let chunks = vec![
                 Ok(crate::StreamChunk {
+                    cache_read_observation: None,
                     data: Bytes::copy_from_slice(&sse.as_bytes()[..split]),
                     usage: None,
                     usage_running: None,
@@ -930,6 +987,7 @@ mod tests {
                     terminal: false,
                 }),
                 Ok(crate::StreamChunk {
+                    cache_read_observation: None,
                     data: Bytes::copy_from_slice(&sse.as_bytes()[split..]),
                     usage: None,
                     usage_running: None,

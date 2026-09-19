@@ -536,6 +536,7 @@ mod tests {
                 }
                 Ok(Box::pin(stream::once(async {
                     Ok(StreamChunk {
+                        cache_read_observation: None,
                         data: bytes::Bytes::new(),
                         usage: Some(ParsedUsage::default()),
                         usage_running: None,
@@ -884,6 +885,7 @@ mod tests {
 
     fn chunk(data: &str) -> StreamChunk {
         StreamChunk {
+            cache_read_observation: None,
             data: bytes::Bytes::copy_from_slice(data.as_bytes()),
             usage: None,
             usage_running: None,
@@ -894,8 +896,10 @@ mod tests {
 
     fn terminal_chunk() -> StreamChunk {
         StreamChunk {
+            cache_read_observation: None,
             data: bytes::Bytes::new(),
             usage: Some(ParsedUsage {
+                cache_read_observation: None,
                 tokens_in: 1,
                 tokens_out: 2,
                 ..Default::default()

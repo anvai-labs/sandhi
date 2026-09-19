@@ -7,13 +7,16 @@
 //!
 //! The arg→HTTP mapping lives in [`admin_request`] so it can be unit-tested without a network.
 
-use std::io::{BufRead, IsTerminal};
+use std::io::{BufRead, IsTerminal, Read};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
 
 use sandhi_proxy::admin;
+use sandhi_store::diagnostics::{
+    DiagnosticQuery, DiagnosticSelector, DEFAULT_LIMIT, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES,
+};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -40,6 +43,10 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Print bounded persisted usage evidence as JSON (not an anonymized export).
+    #[command(group(clap::ArgGroup::new("diagnostic_selector")
+        .args(["request", "session", "run"]).required(true).multiple(false)))]
+    Diagnose(DiagnoseArgs),
     /// Provider credential vault.
     Keys {
         #[command(subcommand)]
@@ -77,6 +84,40 @@ enum Command {
         #[command(subcommand)]
         action: AlertsAction,
     },
+}
+
+#[derive(clap::Args, Debug)]
+#[group(skip)]
+struct DiagnoseArgs {
+    /// Match a persisted request ID exactly (IDs need not be unique).
+    #[arg(long)]
+    request: Option<String>,
+    /// Match a session ID exactly.
+    #[arg(long)]
+    session: Option<String>,
+    /// Match a run ID exactly.
+    #[arg(long)]
+    run: Option<String>,
+    /// Maximum rows, from 1 through 500; response bytes are bounded separately.
+    #[arg(long, default_value_t = DEFAULT_LIMIT)]
+    limit: usize,
+}
+
+impl DiagnoseArgs {
+    fn query(&self) -> Result<DiagnosticQuery, &'static str> {
+        let selector = match (&self.request, &self.session, &self.run) {
+            (Some(value), None, None) => DiagnosticSelector::Request(value.clone()),
+            (None, Some(value), None) => DiagnosticSelector::Session(value.clone()),
+            (None, None, Some(value)) => DiagnosticSelector::Run(value.clone()),
+            _ => return Err("exactly one diagnostic selector is required"),
+        };
+        let query = DiagnosticQuery {
+            selector,
+            limit: self.limit,
+        };
+        query.validate()?;
+        Ok(query)
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -193,6 +234,8 @@ pub(crate) struct AdminRequest {
 /// Pure mapping from a parsed CLI command to the admin API call. Public to the crate's tests.
 pub(crate) fn admin_request(base_url: &str, command: &Command) -> AdminRequest {
     let (method, path, body): (&str, String, Option<Value>) = match command {
+        // Diagnose validates its query and never enters the legacy unbounded executor.
+        Command::Diagnose(_) => unreachable!("separate diagnostic request path"),
         Command::Keys {
             action:
                 KeysAction::Add {
@@ -331,12 +374,39 @@ fn csv_to_list(csv: &str) -> Vec<String> {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let args: Vec<_> = std::env::args_os().collect();
+    let cli = match Cli::try_parse_from(&args) {
+        Ok(cli) => cli,
+        Err(error) => {
+            // Clap can echo invalid values (including identifiers or credentials). Only
+            // diagnose changes error presentation; ordinary help/version remain available.
+            if args.iter().any(|arg| arg == "diagnose") && error.use_stderr() {
+                eprintln!("error: invalid diagnostic arguments; see sandhi diagnose --help");
+                return ExitCode::from(2);
+            }
+            error.exit();
+        }
+    };
 
     let Some(token) = cli.admin_token.clone() else {
         eprintln!("error: --admin-token (or SANDHI_ADMIN_TOKEN) is required");
         return ExitCode::from(2);
     };
+
+    if let Command::Diagnose(args) = &cli.command {
+        return match diagnostic_request(&cli.admin_url, args)
+            .and_then(|request| execute_diagnostic(&request, &token))
+        {
+            Ok(response) => {
+                print_json(&response);
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("error: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
 
     // For `keys add`, fill the secret from stdin when `--secret` is absent.
     let command = fill_secret_from_stdin(cli.command);
@@ -422,6 +492,64 @@ fn execute(req: &AdminRequest, token: &str) -> Result<Value, String> {
     Ok(json)
 }
 
+fn diagnostic_request(base_url: &str, args: &DiagnoseArgs) -> Result<AdminRequest, &'static str> {
+    let query = args.query()?;
+    let body = serde_json::to_string(&query).map_err(|_| "invalid diagnostic request")?;
+    if body.len() > MAX_REQUEST_BYTES {
+        return Err("diagnostic request exceeds byte limit");
+    }
+    Ok(AdminRequest {
+        method: "POST",
+        path: format!("{}/admin/usage/diagnostics", base_url.trim_end_matches('/')),
+        body: Some(body),
+    })
+}
+
+/// Read at most the byte budget plus one overflow probe byte, even without Content-Length.
+/// No JSON parsing, raw response display, or unbounded `.text()` occurs on this path.
+fn read_diagnostic_response(reader: impl Read) -> Result<Value, &'static str> {
+    let mut bytes = Vec::new();
+    reader
+        .take((MAX_RESPONSE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "could not read diagnostic response")?;
+    if bytes.len() > MAX_RESPONSE_BYTES {
+        return Err("diagnostic response exceeds byte limit");
+    }
+    let value: Value = serde_json::from_slice(&bytes).map_err(|_| "invalid diagnostic response")?;
+    if !value.is_object() || value.get("error").is_some() {
+        return Err("invalid diagnostic response");
+    }
+    Ok(value)
+}
+
+fn execute_diagnostic(req: &AdminRequest, token: &str) -> Result<Value, &'static str> {
+    let client = reqwest::blocking::Client::builder()
+        // Redirects must not forward the selector to an unrelated endpoint.
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|_| "could not initialize diagnostic client")?;
+    let response = client
+        .post(&req.path)
+        .bearer_auth(token)
+        .header("content-type", "application/json")
+        .body(req.body.clone().ok_or("invalid diagnostic request")?)
+        .send()
+        .map_err(|_| "diagnostic request failed")?;
+    if !response.status().is_success() {
+        // Never read or relay an error body, including JSON with no `error` key.
+        return Err("diagnostic request rejected");
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+    {
+        return Err("diagnostic response exceeds byte limit");
+    }
+    read_diagnostic_response(response)
+}
+
 fn render(command: &Command, response: &Value, _base_url: &str) {
     match command {
         Command::Usage {
@@ -459,6 +587,43 @@ fn latency_cell(b: &Value) -> String {
     }
 }
 
+fn cache_read_cell(row: &Value) -> String {
+    let calls = row.get("calls").and_then(Value::as_u64).unwrap_or(0);
+    let coverage = row
+        .get("cache_read_coverage")
+        .cloned()
+        .and_then(|v| serde_json::from_value::<sandhi_core::CacheReadCoverage>(v).ok())
+        .map(|c| c.normalized(calls));
+    let Some(c) = coverage else {
+        return "unknown".into();
+    };
+    if calls == 0 {
+        return "—".into();
+    }
+    let count = row
+        .get("cache_read_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if c.reported == calls {
+        return format!("{count} ({calls}/{calls} reported)");
+    }
+    let label = if c.absent == calls {
+        "not reported"
+    } else if c.malformed == calls {
+        "malformed"
+    } else if c.unsupported == calls {
+        "unsupported"
+    } else if c.unknown == calls {
+        "unknown"
+    } else {
+        "mixed reporting"
+    };
+    format!(
+        "{label} ({}/{} reported; numeric total {count})",
+        c.reported, calls
+    )
+}
+
 fn render_usage(response: &Value, format: &Format) {
     if matches!(format, Format::Json) {
         print_json(response);
@@ -477,7 +642,7 @@ fn render_usage(response: &Value, format: &Format) {
             u64_at(total, "tokens_in"),
             u64_at(total, "tokens_out"),
             u64_at(total, "cache_creation_tokens"),
-            u64_at(total, "cache_read_tokens"),
+            cache_read_cell(total),
             u64_at(total, "billable_tokens"),
         );
     }
@@ -485,13 +650,14 @@ fn render_usage(response: &Value, format: &Format) {
         println!();
         for b in buckets {
             println!(
-                "{:<28} {:>6} calls  {:>8} in  {:>8} out  {:>10} billable  {:>16}",
+                "{:<28} {:>6} calls  {:>8} in  {:>8} out  {:>10} billable  {:>16}  cache read {}",
                 b.get("key").and_then(Value::as_str).unwrap_or("?"),
                 u64_at(b, "calls"),
                 u64_at(b, "tokens_in"),
                 u64_at(b, "tokens_out"),
                 u64_at(b, "billable_tokens"),
                 latency_cell(b),
+                cache_read_cell(b),
             );
         }
     }
@@ -517,7 +683,7 @@ fn render_run_tree(response: &Value, format: &Format) {
             u64_at(total, "tokens_in"),
             u64_at(total, "tokens_out"),
             u64_at(total, "cache_creation_tokens"),
-            u64_at(total, "cache_read_tokens"),
+            cache_read_cell(total),
             u64_at(total, "billable_tokens"),
         );
     }
@@ -585,6 +751,158 @@ use admin as _;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn diagnose(args: &[&str]) -> DiagnoseArgs {
+        let cli = Cli::try_parse_from(
+            ["sandhi", "diagnose"]
+                .into_iter()
+                .chain(args.iter().copied()),
+        )
+        .unwrap();
+        let Command::Diagnose(args) = cli.command else {
+            panic!("expected diagnose");
+        };
+        args
+    }
+
+    #[test]
+    fn diagnostic_selectors_map_to_tagged_post_bodies_not_urls() {
+        for kind in ["request", "session", "run"] {
+            let flag = format!("--{kind}");
+            let args = diagnose(&[&flag, "id / ? secret", "--limit", "500"]);
+            let request = diagnostic_request("http://localhost:8787/", &args).unwrap();
+            assert_eq!(request.method, "POST");
+            assert_eq!(
+                request.path,
+                "http://localhost:8787/admin/usage/diagnostics"
+            );
+            assert_eq!(
+                serde_json::from_str::<Value>(request.body.as_deref().unwrap()).unwrap(),
+                json!({"selector":{"kind":kind,"value":"id / ? secret"},"limit":500})
+            );
+        }
+        assert_eq!(diagnose(&["--request", "id"]).query().unwrap().limit, 100);
+    }
+
+    #[test]
+    fn diagnostic_selector_group_requires_exactly_one_even_with_a_limit() {
+        for args in [
+            vec![],
+            vec!["--limit", "100"],
+            vec!["--request", "a", "--session", "b"],
+            vec!["--session", "a", "--run", "b"],
+            vec!["--request", "a", "--run", "b"],
+            vec!["--request", "a", "--request", "b"],
+            vec!["--request", "a", "--limit", "100", "--limit", "200"],
+            vec!["--request", "a", "--limit", "not-a-number"],
+            vec!["--request", "a", "--limit", "-1"],
+            vec!["--request", "a", "--unknown", "value"],
+        ] {
+            assert!(Cli::try_parse_from(["sandhi", "diagnose"].into_iter().chain(args)).is_err());
+        }
+    }
+
+    #[test]
+    fn diagnostic_validation_uses_utf8_bytes_and_store_limits() {
+        for value in [
+            "".to_owned(),
+            " \t".into(),
+            "a\nb".into(),
+            "x".repeat(257),
+            "é".repeat(129),
+        ] {
+            let args = diagnose(&["--request", &value]);
+            assert_eq!(
+                diagnostic_request("http://unused", &args).unwrap_err(),
+                "invalid diagnostic selector"
+            );
+        }
+        for value in ["x".repeat(256), "é".repeat(128)] {
+            assert!(diagnose(&["--request", &value]).query().is_ok());
+        }
+        let largest = usize::MAX.to_string();
+        for limit in ["0", "501", largest.as_str()] {
+            assert!(diagnose(&["--run", "id", "--limit", limit])
+                .query()
+                .is_err());
+        }
+        let invalid = DiagnoseArgs {
+            request: None,
+            session: None,
+            run: None,
+            limit: 100,
+        };
+        assert!(invalid.query().is_err());
+    }
+
+    #[test]
+    fn diagnostic_reads_accept_exact_byte_limit_and_stop_after_overflow_probe() {
+        let mut exact = b"{}".to_vec();
+        exact.resize(MAX_RESPONSE_BYTES, b' ');
+        assert_eq!(
+            read_diagnostic_response(exact.as_slice()).unwrap(),
+            json!({})
+        );
+
+        // An unbounded peer must not cause an unbounded read or reach JSON parsing.
+        let mut unbounded = std::io::repeat(b' ');
+        assert_eq!(
+            read_diagnostic_response(&mut unbounded).unwrap_err(),
+            "diagnostic response exceeds byte limit"
+        );
+        let mut cursor = std::io::Cursor::new(vec![b' '; MAX_RESPONSE_BYTES * 2]);
+        assert!(read_diagnostic_response(&mut cursor).is_err());
+        assert_eq!(cursor.position(), (MAX_RESPONSE_BYTES + 1) as u64);
+    }
+
+    #[test]
+    fn diagnostic_parse_and_read_errors_never_echo_body_or_io_details() {
+        for body in [
+            b"BODY_SECRET".as_slice(),
+            b"{\"error\":\"BODY_SECRET\"}",
+            b"\"BODY_SECRET\"",
+            b"[]",
+            b"",
+            b"\xff",
+        ] {
+            assert_eq!(
+                read_diagnostic_response(body).unwrap_err(),
+                "invalid diagnostic response"
+            );
+        }
+        struct Broken;
+        impl Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("IO_SECRET"))
+            }
+        }
+        assert_eq!(
+            read_diagnostic_response(Broken).unwrap_err(),
+            "could not read diagnostic response"
+        );
+    }
+
+    #[test]
+    fn cache_read_labels_do_not_infer_reporting_from_numeric_zero() {
+        let mut row = serde_json::json!({"calls":1,"cache_read_tokens":0});
+        assert_eq!(cache_read_cell(&row), "unknown");
+        row["cache_read_coverage"] =
+            serde_json::json!({"reported":1,"absent":0,"malformed":0,"unsupported":0,"unknown":0});
+        assert_eq!(cache_read_cell(&row), "0 (1/1 reported)");
+        for (status, label) in [
+            ("absent", "not reported"),
+            ("malformed", "malformed"),
+            ("unsupported", "unsupported"),
+            ("unknown", "unknown"),
+        ] {
+            let mut coverage = serde_json::json!({"reported":0,"absent":0,"malformed":0,"unsupported":0,"unknown":0});
+            coverage[status] = 1.into();
+            row["cache_read_coverage"] = coverage;
+            assert!(cache_read_cell(&row).starts_with(label));
+        }
+        row["cache_read_tokens"] = 17.into();
+        assert!(cache_read_cell(&row).starts_with("unknown"));
+    }
 
     fn url() -> &'static str {
         "http://localhost:8787"

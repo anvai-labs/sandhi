@@ -1,0 +1,35 @@
+{
+  "manual": [
+    {"name":"legacy omission", "expected":null},
+    {"name":"explicit null", "observation":null, "expected":null},
+    {"name":"reported zero", "observation":{"status":"reported","source":"caller_supplied"}, "expected":{"status":"reported","source":"caller_supplied"}},
+    {"name":"origin reported", "observation":{"status":"reported","source":"origin_usage"}, "expected":{"status":"reported","source":"origin_usage"}},
+    {"name":"absent", "observation":{"status":"absent","source":"origin_usage"}, "expected":{"status":"absent","source":"origin_usage"}},
+    {"name":"malformed", "observation":{"status":"malformed","source":"origin_usage"}, "expected":{"status":"malformed","source":"origin_usage"}},
+    {"name":"explicit unsupported", "observation":{"status":"unsupported","source":"explicit_capability"}, "expected":{"status":"unsupported","source":"explicit_capability"}},
+    {"name":"future status", "observation":{"status":"future","source":"origin_usage"}, "expected":null},
+    {"name":"future source", "observation":{"status":"reported","source":"future"}, "expected":null},
+    {"name":"missing source", "observation":{"status":"reported"}, "expected":null},
+    {"name":"missing status", "observation":{"source":"origin_usage"}, "expected":null},
+    {"name":"invalid unsupported source", "observation":{"status":"unsupported","source":"origin_usage"}, "expected":null},
+    {"name":"invalid reported source", "observation":{"status":"reported","source":"explicit_capability"}, "expected":null},
+    {"name":"invalid absent source", "observation":{"status":"absent","source":"caller_supplied"}, "expected":null},
+    {"name":"string metadata", "observation":"reported", "expected":null},
+    {"name":"array metadata", "observation":[], "expected":null},
+    {"name":"boolean status", "observation":{"status":true,"source":"origin_usage"}, "expected":null}
+  ],
+  "parsed": [
+    {"name":"OpenAI zero", "provider":"openai", "response":{"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":0}}}, "cached":0,"status":"reported"},
+    {"name":"OpenAI positive", "provider":"openai", "response":{"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":4}}}, "cached":4,"status":"reported"},
+    {"name":"OpenAI absent field", "provider":"openai", "response":{"usage":{"prompt_tokens":10,"completion_tokens":2}}, "cached":0,"status":"absent"},
+    {"name":"OpenAI absent usage", "provider":"openai", "response":{}, "cached":0,"status":"absent"},
+    {"name":"OpenAI malformed field", "provider":"openai", "response":{"usage":{"prompt_tokens":10,"prompt_tokens_details":{"cached_tokens":"4"}}}, "cached":0,"status":"malformed"},
+    {"name":"OpenAI malformed usage", "provider":"openai", "response":{"usage":null}, "cached":0,"status":"malformed"},
+    {"name":"Responses zero", "provider":"responses", "response":{"usage":{"input_tokens":10,"output_tokens":2,"input_tokens_details":{"cached_tokens":0}}}, "cached":0,"status":"reported"},
+    {"name":"Anthropic positive", "provider":"anthropic", "response":{"usage":{"input_tokens":6,"output_tokens":2,"cache_read_input_tokens":4}}, "cached":4,"status":"reported"},
+    {"name":"Anthropic malformed usage", "provider":"anthropic", "response":{"usage":null}, "cached":0,"status":"malformed"},
+    {"name":"Gemini zero", "provider":"gemini", "response":{"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"cachedContentTokenCount":0}}, "cached":0,"status":"reported"},
+    {"name":"DeepSeek precedence", "provider":"deepseek", "response":{"usage":{"prompt_tokens":10,"prompt_cache_hit_tokens":0,"prompt_tokens_details":{"cached_tokens":4}}}, "cached":0,"status":"reported"},
+    {"name":"Ollama no reporting", "provider":"ollama", "response":{"prompt_eval_count":10,"eval_count":2}, "cached":0,"status":"absent"}
+  ]
+}

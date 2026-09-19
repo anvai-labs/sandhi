@@ -19,6 +19,9 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 fn parse_expected(s: &str) -> ParsedUsage {
     let v: serde_json::Value = serde_json::from_str(s).unwrap();
     ParsedUsage {
+        cache_read_observation: v
+            .get("cache_read_observation")
+            .map(|value| serde_json::from_value(value.clone()).unwrap()),
         reasoning_included: v["reasoning_included"].as_bool().or(Some(true)),
         tokens_in: v["tokens_in"].as_u64().unwrap(),
         tokens_out: v["tokens_out"].as_u64().unwrap(),
@@ -304,4 +307,198 @@ async fn inferflux_stream_fixture_yields_expected_and_forwards_verbatim() {
     expected.time_to_first_token_ms = Some(31);
     assert_eq!(usage, expected);
     assert_eq!(usage.cache_read_tokens, 50, "the stream split meters too");
+}
+
+// Live non-stream usage projections from the Qwen/ROCm audit. The response envelopes and
+// terminal SSE frames below are CONSTRUCTED regressions, not claimed live SSE captures.
+#[derive(serde::Deserialize)]
+struct CacheAuditCase {
+    name: String,
+    usage: serde_json::Value,
+    expected: ParsedUsage,
+}
+
+fn cache_audit_cases() -> Vec<CacheAuditCase> {
+    #[derive(serde::Deserialize)]
+    struct Corpus {
+        cases: Vec<CacheAuditCase>,
+    }
+    let mut corpus: Corpus = serde_json::from_str(include_str!(
+        "fixtures/inferflux/cache-audit-2026-09-18.json"
+    ))
+    .unwrap();
+    // Every captured InferFlux audit response explicitly reports cached_tokens, including zero.
+    for case in &mut corpus.cases {
+        case.expected.cache_read_observation = Some(sandhi_core::CacheReadObservation::origin(
+            sandhi_core::CacheReadStatus::Reported,
+        ));
+    }
+    assert_eq!(corpus.cases.len(), 18);
+    assert!(corpus
+        .cases
+        .iter()
+        .any(|c| c.expected.cache_read_tokens == 0));
+    assert!(corpus
+        .cases
+        .iter()
+        .any(|c| c.expected.cache_read_tokens > 0));
+    corpus.cases
+}
+
+impl CacheAuditCase {
+    fn complete_body(&self) -> String {
+        // Whitespace and an unknown field make a raw parse/reserialize regression visible.
+        format!(
+            "\n{}\n",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "id": "cache-audit-fixture", "object": "chat.completion",
+                "model": "qwen3-coder-30b", "fixture_extension": {"keep": true},
+                "choices": [{"index": 0, "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "fixture"}}],
+                "usage": self.usage,
+            }))
+            .unwrap()
+        )
+    }
+
+    fn stream_body(&self) -> String {
+        // Usage arrives AFTER finish_reason, as in the existing real InferFlux SSE corpus.
+        format!(
+            ": fixture keepalive\n\ndata: {{\"choices\":[{{\"delta\":{{\"content\":\"fixture\"}},\"index\":0}}]}}\n\n\
+             data: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"stop\",\"index\":0}}]}}\n\n\
+             data: {{\"choices\":[],\"fixture_extension\":true,\"usage\":{}}}\n\ndata: [DONE]\n\n",
+            self.usage
+        )
+    }
+
+    fn assert_usage(&self, actual: ParsedUsage) {
+        assert_eq!(actual, self.expected, "{}", self.name);
+        assert_eq!(
+            actual.tokens_in + actual.cache_read_tokens,
+            self.usage["prompt_tokens"].as_u64().unwrap(),
+            "{}: inclusive prompt must split exactly once",
+            self.name
+        );
+        assert_eq!(
+            actual.tokens_in + actual.cache_read_tokens + actual.tokens_out,
+            self.usage["total_tokens"].as_u64().unwrap(),
+            "{}: neutral counts conserve the reported total",
+            self.name
+        );
+        assert_eq!(actual.cache_creation_tokens, 0);
+    }
+}
+
+async fn drain_cache_audit(mut stream: ByteStream) -> (Vec<u8>, ParsedUsage) {
+    let mut bytes = Vec::new();
+    let mut usage = None;
+    while let Some(item) = stream.next().await {
+        let chunk = item.unwrap();
+        bytes.extend_from_slice(&chunk.data);
+        if let Some(measured) = chunk.usage {
+            assert!(usage.replace(measured).is_none(), "usage emitted twice");
+        }
+    }
+    (bytes, usage.expect("late terminal usage must be measured"))
+}
+
+fn cache_audit_forwarder(server: &MockServer) -> sandhi_providers::raw::RawForwarder {
+    let spec = sandhi_providers::resolve_openai_compat_provider("inferflux").unwrap();
+    sandhi_providers::raw::RawForwarder::new(
+        sandhi_providers::ProviderFamily::OpenAiCompat,
+        server.uri(),
+        "fixture-key",
+    )
+    .with_session_header(spec.session_header)
+    .with_client_request_id_header(spec.client_request_id_header)
+}
+
+#[tokio::test]
+async fn inferflux_cache_audit_complete_typed_and_raw_agree() {
+    for case in cache_audit_cases() {
+        let server = MockServer::start().await;
+        let body = case.complete_body();
+        mock(&server, "/chat/completions", "application/json", &body).await;
+        let typed = OpenAiCompat::new("inferflux", server.uri(), "fixture-key")
+            .complete(ProviderRequest::new(
+                "qwen3-coder-30b",
+                serde_json::json!({"messages": []}),
+            ))
+            .await
+            .unwrap();
+        case.assert_usage(typed.usage);
+        assert_eq!(
+            typed.body,
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()
+        );
+
+        let (raw, measured) = cache_audit_forwarder(&server)
+            .forward_metered(
+                "/chat/completions",
+                bytes::Bytes::from_static(b"{\"model\":\"qwen3-coder-30b\",\"messages\":[]}"),
+                Some("audit-member"),
+                Some("audit-request"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(raw.body.as_ref(), body.as_bytes(), "{}", case.name);
+        assert_eq!(
+            measured,
+            sandhi_core::UsageV2::from(case.expected),
+            "{}",
+            case.name
+        );
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[1].headers["x-inferflux-session-id"],
+            "audit-member"
+        );
+        assert_eq!(
+            requests[1].headers["x-inferflux-client-request-id"],
+            "audit-request"
+        );
+    }
+}
+
+#[tokio::test]
+async fn inferflux_cache_audit_late_terminal_usage_typed_and_raw_agree() {
+    for case in cache_audit_cases() {
+        let server = MockServer::start().await;
+        let body = case.stream_body();
+        mock(&server, "/chat/completions", "text/event-stream", &body).await;
+        let typed = OpenAiCompat::new("inferflux", server.uri(), "fixture-key")
+            .stream(ProviderRequest::new(
+                "qwen3-coder-30b",
+                serde_json::json!({"messages": []}),
+            ))
+            .await
+            .unwrap();
+        let (bytes, measured) = drain_cache_audit(typed).await;
+        assert_eq!(bytes, body.as_bytes(), "{}", case.name);
+        case.assert_usage(measured);
+
+        let raw = cache_audit_forwarder(&server)
+            .forward_stream_metered(
+                "/chat/completions",
+                bytes::Bytes::from_static(b"{\"model\":\"qwen3-coder-30b\",\"messages\":[]}"),
+                Some("audit-member"),
+                Some("audit-request"),
+            )
+            .await
+            .unwrap();
+        let (bytes, measured) = drain_cache_audit(raw.stream).await;
+        assert_eq!(bytes, body.as_bytes(), "{}", case.name);
+        case.assert_usage(measured);
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[1].headers["x-inferflux-session-id"],
+            "audit-member"
+        );
+        assert_eq!(
+            requests[1].headers["x-inferflux-client-request-id"],
+            "audit-request"
+        );
+    }
 }
