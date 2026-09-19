@@ -129,6 +129,11 @@ jobs:
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.0
         id: filter
         with:
+          # Both protected push branches compare immutable event endpoints. The default
+          # branch is develop: comparing main to develop after promotion sees no changes.
+          # PR events retain the action's changed-files API (no base/ref override).
+          base: ${{ github.event_name == 'push' && github.event.before || '' }}
+          ref: ${{ github.event_name == 'push' && github.sha || '' }}
           filters: |
             rust:
               - 'crates/**'
