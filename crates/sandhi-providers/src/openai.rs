@@ -3,8 +3,8 @@
 //! OpenRouter, vLLM, LM Studio, Ollama, Cerebras…). One adapter, many providers.
 
 use crate::{
-    error_for_response, metered_passthrough, sse_data_json, ByteStream, ParsedUsage, Provider,
-    ProviderError, ProviderRequest, ProviderResponse,
+    error_for_response, metered_openai_passthrough as metered_passthrough, sse_data_json,
+    ByteStream, ParsedUsage, Provider, ProviderError, ProviderRequest, ProviderResponse,
 };
 use crate::{parse_openai_usage, validate_openai_chat_messages};
 use async_trait::async_trait;

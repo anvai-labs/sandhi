@@ -1,7 +1,8 @@
 # TD-0028: Cache accounting availability and bounded diagnostics
 
 - **Status:** In progress (2026-09-19). C1–C4 merged; new actual-member baseline and C4 joins verified;
-  CI/review gates remain distinct from merge, deployment and the joint live replay.
+  C5 terminal-stream accounting reproduced and locally repaired; CI/merge, deployment,
+  strict rerun and the originating Mac mixed-team gate remain distinct.
 - **Scope:** Sandhi items in the [cache co-design handoff](../upstream/inferflux-cache-codesign-2026-09-18.md).
 - **Related:** TD-0013 (measurement fidelity), TD-0027 (origin co-design),
   [ADR-0008](../adr/0008-inferflux-admission-and-session-affinity.md) (catalog-owned affinity).
@@ -33,7 +34,7 @@ InferFlux; that producer-side investigation remains independently owned upstream
 | C2 | ADR and additive cache-read availability/source contract | Define reported zero, absent, malformed and explicitly unsupported; preserve legacy numeric defaults; parser/event/UsageV2/SQLite/API/generated bindings/schema agreement | [PR #269](https://github.com/anvai-labs/sandhi/pull/269) merged after exact-head CI and clean independent review |
 | C3 | Dashboard availability and coverage | `n_reported/n_total` over the same filtered call population; honest cache read/write and neutral-unit labels | Merged in #269; 25 real-browser dashboard regressions pass |
 | C4 | Bounded credential-field-free diagnostic lookup/export | Admin-authorized persisted request/session/run projection, source-labelled timings and normalized counters; unavailable historical evidence stated explicitly; no prompt/body capture added | [PR #270](https://github.com/anvai-labs/sandhi/pull/270) merged after clean independent review and exact-head CI; isolated WSL HTTP/CLI validation passed |
-| C5 | Joint replay after InferFlux investigation | One actual member trace, same ready model, direct and gateway; cache counts, correlation/session mapping and usage conservation | New approved actual-member bundle received; preserved-runtime direct/gateway replay and C4 request/session/run joins pass. Updated InferFlux runtime acceptance and broader lifecycle/mixed-team gates remain open below |
+| C5 | Joint replay after InferFlux investigation | One actual member trace, same ready model, direct and gateway; cache counts, correlation/session mapping and usage conservation | Actual-member baseline passes; subsequent accepted-runtime five-stream oracle exposed terminal accounting failure. Local regression/repair verified; CI, deployment/rerun and broader mixed-team gates remain open below |
 
 The C1 non-stream envelopes and SSE frames are constructed around recorded usage
 objects. The original audit did not retain full response bodies or live SSE captures.
@@ -196,7 +197,8 @@ preserved Qwen process used here. The bundle's statement that #194/#195 were ope
 a dated snapshot, not current status. Wire/C4 conservation is reporting consistency;
 it does not prove the older runtime's prompt-tokenizer units are accurate.
 
-Remaining acceptance belongs to the coordinated origin/Victor sessions:
+At that baseline checkpoint, remaining acceptance belonged to the coordinated origin/Victor sessions
+(the subsequent accepted-runtime update below supersedes its runtime prerequisite):
 
 1. InferFlux owns trusted exact-main-SHA CUDA/ROCm gates and any controlled diagnostic
    deployment/rollback. Re-run this actual-member bundle and C4 joins on that accepted
@@ -212,6 +214,69 @@ Remaining acceptance belongs to the coordinated origin/Victor sessions:
    sanitized counters, correlation IDs, fingerprints and artifact locations only. C5 is
    partially verified, not complete, until the target-runtime and remaining gates have
    their own acceptance evidence.
+
+### Accepted-runtime streaming finding and repair (2026-09-19)
+
+InferFlux subsequently accepted source `c5d4eb89f71dcfb3064b974d63b88c4ce88f42a1`,
+PID `2254917`, at `http://127.0.0.1:8081`, ready model `qwen3-coder-30b` on
+`llama_cpp_cuda`. Binary SHA-256:
+`312f49e63dae7609dd804e3b74aa4a4b2dd06b72aebf8aa6a322ed619e974de6`.
+Its exact-source GPU acceptance passed. This is a separate accepted process, not a
+replacement or restart of shared Qwen8080. Coordination is tracked in
+[InferFlux #184](https://github.com/anvai-labs/inferflux/issues/184) and the
+[Sandhi #272 finding](https://github.com/anvai-labs/sandhi/pull/272#issuecomment-5740849386).
+
+The five-stream oracle on Sandhi `647d7d5` delivered valid finish, terminal usage
+and `[DONE]` for all calls, but persisted **14,387 output tokens versus 288 on wire**.
+Prompt/cache counts matched. Preserved evidence is
+`/tmp/inferflux-deployed-stream-overlap-fh_gryvj/{report.json,failure-supplement.json,failure-supplement.md}`.
+Independent review confirmed the discrepancy. Physical upstream EOF was not traced
+in that run; the original EOF-race explanation was source-supported inference.
+
+A deterministic delayed-EOF regression now reproduces that path: closing after DONE
+persisted 86 output tokens for a wire report of 7, while draining EOF was correct.
+The local fix publishes observed usage before yielding the complete OpenAI-compatible
+DONE data line. EOF does not emit a second terminal measurement; post-DONE bytes remain
+transparent without changing the finalized numeric or cache observations. Genuine
+preterminal cancellation and missing-usage DONE retain partial estimates, not final zero.
+This is the OpenAI single-data-line event profile, not a general SSE event parser.
+Non-OpenAI families retain EOF completion. Legacy `MeteredProvider` Drop outcome/
+completeness classification is separate and is not claimed resolved by the raw-proxy fix.
+
+Six provider regressions cover every two-chunk split, CRLF, marker false positives,
+oversized-line suffixes, missing/zero usage and post-DONE updates. Four real-TCP proxy
+tests cover 24 scenarios: close-at-DONE, drain-to-EOF, cancellation before and after
+usage but before DONE, and missing usage. They assert unchanged bytes, exactly one
+sink/SQLite row, authoritative prompt/cache/output counts, ledger settlement and boundary
+TTFT (including a coalesced first chunk). Local workspace validation passes 687 tests
+with four existing opt-in tests ignored; strict Clippy passes. Independent source review
+is clean. These are regression results, **not a successful deployed rerun**.
+
+Next gates: review before push, real green exact-head CI and merge, then deploy an
+isolated updated Sandhi binary and repeat the unchanged five-call oracle on accepted
+8081. Reconcile wire, SQLite, C4 and dashboard with exact runtime fingerprints. Preserve
+the failed evidence, all origin cache state and privately held credentials. Buffered
+actual-member replay and client-close/recovery checks reported by the origin session
+do not close this streaming finding. The originating Victor/Mac session still owns the
+full six-Qwen/one-ZAI run; C5 remains open.
+
+### Buffered timeout assessment for the Mac mixed-team run
+
+The stock raw buffered upstream deadline covers the request **and response body** and
+is 120 seconds (`raw.rs`); typed resilient completion also defaults to 120 seconds per
+attempt. A replay client allowing 900 seconds does not override either gateway limit;
+gateway timeout maps to HTTP 504. `ProviderRuntime` and bindings can configure
+`timeout_secs`, but the stock standalone provider configuration currently exposes no
+upstream-timeout knob. `SANDHI_HEADER_READ_TIMEOUT_SECS` only covers incoming headers.
+No production timeout has been changed here.
+
+Before the mixed-team run, the originating session must choose a bounded configuration
+supported by its gateway construction or explicitly accept the 120-second limit and
+record timeouts. A longer isolated per-provider deadline must leave room below the
+900-second reservation TTL and client deadline, including any retries; blindly matching
+900 seconds is unsafe because expired reservation settlement is a no-op. Streaming is
+not an unconditional workaround: setup remains 30 seconds and the default inter-chunk
+idle deadline is 90 seconds. Queued or non-flushing origins can still time out.
 
 ## Contract decisions implemented by C2
 

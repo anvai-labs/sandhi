@@ -18,6 +18,13 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+### Fixed
+
+- OpenAI-compatible raw streams finalize observed usage at the complete `[DONE]` data
+  line, before forwarding it, so clients closing there retain authoritative counts
+  without waiting for upstream EOF. Missing usage and genuine preterminal disconnects
+  retain partial estimates; bytes and non-OpenAI EOF behavior remain unchanged.
+
 ### Added
 
 - Admin-only bounded persisted usage diagnostics by request, session or run, with explicit

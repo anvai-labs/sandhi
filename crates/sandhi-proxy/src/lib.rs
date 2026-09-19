@@ -2631,6 +2631,11 @@ async fn transparent_stream_response(
             match item {
                 Ok(chunk) => {
                     sandhi_core::merge_cache_read_observation(&mut cache_read_observation, chunk.cache_read_observation);
+                    // A coalesced first chunk can carry both content and protocol-terminal
+                    // usage. Capture boundary timing before either accounting branch.
+                    if !chunk.data.is_empty() {
+                        boundary_ttft_ms.get_or_insert_with(|| elapsed_ms(started));
+                    }
                     if let Some(parsed) = chunk.usage {
                         // Terminal frame: the finalized, source-measured usage.
                         let mut usage: UsageV2 = parsed.into();
@@ -2642,7 +2647,6 @@ async fn transparent_stream_response(
                         accounting.observe(&usage);
                         seen_usage = true;
                     } else if !chunk.data.is_empty() {
-                        boundary_ttft_ms.get_or_insert_with(|| elapsed_ms(started));
                         // Running Partial so a disconnect settles accrued spend. `usage_running`
                         // carries whatever the family has already announced — for Anthropic that
                         // is input plus the full cache split from `message_start`, which is the
