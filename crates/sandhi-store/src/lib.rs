@@ -4,6 +4,7 @@
 //! so the language bindings' wheels never pull in bundled SQLite.
 
 pub mod alerts;
+pub mod diagnostics;
 pub mod ledger;
 pub mod sharded;
 pub use sharded::ShardedLedger;
@@ -219,7 +220,10 @@ impl SqliteStore {
             }
         }
         // After the columns exist (either path above), the run index can be created.
-        conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_usage_run ON usage_events(run_id);")?;
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_usage_run ON usage_events(run_id);
+             CREATE INDEX IF NOT EXISTS idx_usage_request ON usage_events(request_id);",
+        )?;
         Ok(())
     }
 

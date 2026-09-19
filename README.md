@@ -127,6 +127,32 @@ are added when they pass, never in advance.
 
 No dollars, no tier/SKU names. Full schema: [`schemas/usage-event.v1.schema.json`](schemas/usage-event.v1.schema.json).
 
+## Persisted usage diagnostics
+
+With a configured SQLite usage store and `SANDHI_ADMIN_TOKEN` in your environment:
+
+```bash
+sandhi --admin-url http://127.0.0.1:8787 diagnose --run example-run --limit 100
+```
+
+Choose exactly one of `--request`, `--session`, or `--run`. This read-only command calls
+`POST /admin/usage/diagnostics` with a tagged selector, for example
+`{"selector":{"kind":"run","value":"example-run"},"limit":100}`. It requires admin
+authorization even when the dashboard is public. Identifiers match literally; duplicate
+request IDs are preserved, newest insertion first.
+
+Limits are 256 UTF-8 bytes per selector, 4 KiB request bodies, 500 rows (default 100), and
+256 KiB serialized responses. The response identifies row/byte truncation and unavailable
+historical evidence. Only one query is admitted at a time; concurrent queries and queries
+during shutdown return 503. Body reads time out after five seconds; SQLite has no additional
+hard query deadline. The CLI bounds reads and prints JSON without saving or uploading it.
+
+This projection excludes credential fields, attribution, arbitrary metadata, prompts and
+response bodies, but identifiers/model strings can still be sensitive: it is **not anonymized**.
+Active streams may not yet have a persisted row; missing rows do not prove no traffic, and
+cache reporting does not prove backend reuse. See [ADR-0011](docs/adr/0011-bounded-persisted-usage-diagnostics.md)
+for the evidence and privacy boundaries. This feature is in the unreleased development line.
+
 ## Where it fits
 
 Sandhi is part of the **anvai-labs** family, alongside
