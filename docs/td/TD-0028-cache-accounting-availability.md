@@ -1,8 +1,8 @@
 # TD-0028: Cache accounting availability and bounded diagnostics
 
 - **Status:** In progress (2026-09-19). C1–C4 merged; new actual-member baseline and C4 joins verified;
-  C5 terminal-stream accounting reproduced and locally repaired; CI/merge, deployment,
-  strict rerun and the originating Mac mixed-team gate remain distinct.
+  C5 terminal-stream repair merged after clean review/green CI, with strict accepted-runtime
+  rerun passed; the originating Mac mixed-team gate remains open.
 - **Scope:** Sandhi items in the [cache co-design handoff](../upstream/inferflux-cache-codesign-2026-09-18.md).
 - **Related:** TD-0013 (measurement fidelity), TD-0027 (origin co-design),
   [ADR-0008](../adr/0008-inferflux-admission-and-session-affinity.md) (catalog-owned affinity).
@@ -34,7 +34,7 @@ InferFlux; that producer-side investigation remains independently owned upstream
 | C2 | ADR and additive cache-read availability/source contract | Define reported zero, absent, malformed and explicitly unsupported; preserve legacy numeric defaults; parser/event/UsageV2/SQLite/API/generated bindings/schema agreement | [PR #269](https://github.com/anvai-labs/sandhi/pull/269) merged after exact-head CI and clean independent review |
 | C3 | Dashboard availability and coverage | `n_reported/n_total` over the same filtered call population; honest cache read/write and neutral-unit labels | Merged in #269; 25 real-browser dashboard regressions pass |
 | C4 | Bounded credential-field-free diagnostic lookup/export | Admin-authorized persisted request/session/run projection, source-labelled timings and normalized counters; unavailable historical evidence stated explicitly; no prompt/body capture added | [PR #270](https://github.com/anvai-labs/sandhi/pull/270) merged after clean independent review and exact-head CI; isolated WSL HTTP/CLI validation passed |
-| C5 | Joint replay after InferFlux investigation | One actual member trace, same ready model, direct and gateway; cache counts, correlation/session mapping and usage conservation | Actual-member baseline passes; subsequent accepted-runtime five-stream oracle exposed terminal accounting failure. Local regression/repair verified; CI, deployment/rerun and broader mixed-team gates remain open below |
+| C5 | Joint replay after InferFlux investigation | One actual member trace, same ready model, direct and gateway; cache counts, correlation/session mapping and usage conservation | Actual-member baseline passes; terminal-stream repair #274 merged and unchanged accepted-runtime five-call oracle passes across wire/SQLite/C4/dashboard. Originating Mac mixed-team and broader limitations remain open below |
 
 The C1 non-stream envelopes and SSE frames are constructed around recorded usage
 objects. The original audit did not retain full response bodies or live SSE captures.
@@ -252,13 +252,80 @@ TTFT (including a coalesced first chunk). Local workspace validation passes 687 
 with four existing opt-in tests ignored; strict Clippy passes. Independent source review
 is clean. These are regression results, **not a successful deployed rerun**.
 
-Next gates: review before push, real green exact-head CI and merge, then deploy an
-isolated updated Sandhi binary and repeat the unchanged five-call oracle on accepted
-8081. Reconcile wire, SQLite, C4 and dashboard with exact runtime fingerprints. Preserve
-the failed evidence, all origin cache state and privately held credentials. Buffered
-actual-member replay and client-close/recovery checks reported by the origin session
-do not close this streaming finding. The originating Victor/Mac session still owns the
-full six-Qwen/one-ZAI run; C5 remains open.
+The repair subsequently passed those gates in [PR #274](https://github.com/anvai-labs/sandhi/pull/274):
+independent review before push and substantive exact-head CI
+[35437781469](https://github.com/anvai-labs/sandhi/actions/runs/35437781469), then merge
+`eb38ff4b4c90121ac3f2e2e033ac5d5b2d057e2d`. The merged tree exactly matches reviewed tree
+`0afcb9817cf6bcf6c3cd49d750a6f84a4f6c6777`. Post-merge CI
+[35438787466](https://github.com/anvai-labs/sandhi/actions/runs/35438787466) also passed;
+Rust, coverage, Python/Node, SDK/dashboard, security and release safeguards actually ran.
+The inactive all-skipped workflow mirror was not used as acceptance evidence.
+
+### Strict five-call deployed rerun: passed, full C5 still open
+
+The clean merged source above was built with locked dependencies. Its binary at
+`/tmp/sandhi-terminal-stream-accounting/target/debug/sandhi-proxy` has SHA-256
+`ac5ace8bcc767c5e99646dd7429d4bbb962880dbbc383a022b1fa04f753ecb80`.
+This build-source association was recorded locally; it is not a signed build attestation.
+An independently reviewed wrapper changed **only** the Sandhi binary path/hash pins
+in the original five-call oracle. Original harness SHA-256:
+`433684dab19515ab060e8f81f2dab191039e43eaba6949ae986232eb4a7307ab`;
+wrapper SHA-256: `d46665f6ff807aa1574afdf1c56ca1215e214ccda537e33a5ab6b82f7790b18c`.
+Payloads, order, close-at-DONE behavior, assertions, five-call cap and deadlines were unchanged.
+
+Run `req_stream_overlap_e6eeb367a55a` finished in 32.124 seconds on accepted Qwen8081.
+All five calls returned HTTP 200, content, finish, exactly one terminal usage report
+and DONE. Five unique request IDs joined exactly one persisted row each, preserving
+session/run/step/model identity. C4 returned no warnings or truncation. Direct read-only
+SQLite rows and dashboard totals matched C4 and every wire counter:
+
+| Projection | Calls | Inclusive prompt / fresh input | Cache read / creation | Output |
+|---|---:|---:|---:|---:|
+| Wire terminal usage | 5 | 120 / 120 | 0 / 0 | 288 |
+| SQLite | 5 | 120 / 120 | 0 / 0 | 288 |
+| C4 diagnostics | 5 | 120 / 120 | 0 / 0 | 288 |
+| Dashboard | 5 | 120 / 120 | 0 / 0 | 288 |
+
+Output was 32 for the single call and 64 for each concurrent-pair call. Cache availability
+was explicitly `reported/origin_usage` for all five, with dashboard coverage 5/5, not
+missing reporting. Same-session outstanding requests overlapped by 6,055.836 ms;
+different-session requests by 4,969.208 ms. Delivered-content overlap was not observed;
+the unchanged oracle permits serialized decoding and makes no GPU-concurrency claim.
+
+Sanitized [full acceptance report](../upstream/evidence/stream-c5-2026-09-19.json), SHA-256
+`7a28ea786175efe0c81f9c15bb3ee6cb6fd4b9813be24fbba1c10fe6eb16426b`, is identical to
+`/tmp/inferflux-deployed-stream-overlap-j2x2_dmh/report.json`. The local private SQLite
+remains beside it and is not committed. The failed baseline is retained separately,
+not relabeled a pass. The new isolated gateway on 18797 and its workers stopped cleanly;
+no existing Mac or WSL gateway was replaced. Both Qwen8081 and shared Qwen8080 were
+ready afterward with unchanged PIDs, start times and executable fingerprints. No cache
+clear, origin restart, configuration change or credential transfer occurred.
+
+This closes the **scoped raw-gateway terminal-accounting finding**, not full C5.
+Optional origin completed-cache diagnostics were unavailable for all five requests;
+missing evidence is not zero executed reuse (the bounded diagnostic budget may be
+exhausted). Wire reported zero is established; its backend cause is not newly established
+by this run. C4 still cannot supply completeness, basis, outcome or physical attempts;
+the regression sink tests, not this persisted projection, validate Final classification.
+Historical forty-call causation, exact sampled completion-tokenizer units, positive reuse,
+enabled-session lease behavior, origin cancellation and broader fault-injection gates
+are not certified here. Legacy `MeteredProvider` Drop classification remains separate.
+
+### Originating Victor/Mac session: next actions
+
+1. Build/deploy Sandhi `eb38ff4` or a descendant containing #274 in the existing Mac
+   gateway, preserving its state and private configuration. The WSL binary is not a Mac
+   artifact; no Mac deployment has been performed here.
+2. Use the accepted origin through `ssh -N -L 18081:127.0.0.1:8081 aiserver1`, with that
+   Mac gateway's InferFlux upstream `http://127.0.0.1:18081/v1`. Reuse credentials already
+   held by the originating session; transfer none. Retain old 18080→8080 as rollback.
+3. Resolve the buffered-timeout choice below before running Victor's
+   `scripts/validation/multiagent_gateway_live.py --mixed`: six Qwen members and one ZAI
+   through the existing approved private ZAI connection. Preserve deliverable tests,
+   strict usage conservation, request/session correlation and C4/dashboard reconciliation.
+4. Record runtime/build identities, timeout configuration, actual member outcomes and
+   unavailable evidence. Keep C5 open until that mixed-team verdict and its remaining
+   acceptance scope have their own evidence. No release or main promotion is implied.
 
 ### Buffered timeout assessment for the Mac mixed-team run
 
