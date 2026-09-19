@@ -1,6 +1,6 @@
 # TD-0028: Cache accounting availability and bounded diagnostics
 
-- **Status:** In progress (2026-09-18). Regression, availability, dashboard and diagnostics merged;
+- **Status:** In progress (2026-09-19). C1–C4 merged; new actual-member baseline and C4 joins verified;
   CI/review gates remain distinct from merge, deployment and the joint live replay.
 - **Scope:** Sandhi items in the [cache co-design handoff](../upstream/inferflux-cache-codesign-2026-09-18.md).
 - **Related:** TD-0013 (measurement fidelity), TD-0027 (origin co-design),
@@ -33,7 +33,7 @@ InferFlux; that producer-side investigation remains independently owned upstream
 | C2 | ADR and additive cache-read availability/source contract | Define reported zero, absent, malformed and explicitly unsupported; preserve legacy numeric defaults; parser/event/UsageV2/SQLite/API/generated bindings/schema agreement | [PR #269](https://github.com/anvai-labs/sandhi/pull/269) merged after exact-head CI and clean independent review |
 | C3 | Dashboard availability and coverage | `n_reported/n_total` over the same filtered call population; honest cache read/write and neutral-unit labels | Merged in #269; 25 real-browser dashboard regressions pass |
 | C4 | Bounded credential-field-free diagnostic lookup/export | Admin-authorized persisted request/session/run projection, source-labelled timings and normalized counters; unavailable historical evidence stated explicitly; no prompt/body capture added | [PR #270](https://github.com/anvai-labs/sandhi/pull/270) merged after clean independent review and exact-head CI; isolated WSL HTTP/CLI validation passed |
-| C5 | Joint replay after InferFlux investigation | One actual member trace, same ready model, direct and gateway; cache counts, correlation/session mapping and usage conservation | Isolated WSL diagnostics complete; actual-member replay remains open with originating-Mac handoff below. Approved ordered member artifact and producer findings for replay remain prerequisites |
+| C5 | Joint replay after InferFlux investigation | One actual member trace, same ready model, direct and gateway; cache counts, correlation/session mapping and usage conservation | New approved actual-member bundle received; preserved-runtime direct/gateway replay and C4 request/session/run joins pass. Updated InferFlux runtime acceptance and broader lifecycle/mixed-team gates remain open below |
 
 The C1 non-stream envelopes and SSE frames are constructed around recorded usage
 objects. The original audit did not retain full response bodies or live SSE captures.
@@ -97,37 +97,121 @@ all-skipped mirror was not accepted as evidence. Post-merge CI
 [35414947570](https://github.com/anvai-labs/sandhi/actions/runs/35414947570) also passed
 at `52bd8ec`, including the substantive jobs and `CI Success`.
 
-## Originating Mac session handoff: remaining C5 gate
+## Originating Mac session handoff: prerequisite received, C5 partially verified
 
 The owner requested completing independent work on WSL and handing origin-dependent
 work back to the originating Mac session. C1–C4 are merged into `develop`, not released.
 The local diagnostics gateway is `127.0.0.1:18789` on WSL; the Mac gateway and its tunnel
 were not modified. No Mac deployment is implied by the local launch.
 
-The referenced local evidence was rechecked: it contains 18 controlled-probe usage
-records and nine SQLite rows, but no ordered actual-member request replay. Controlled
+The original local evidence contains 18 controlled-probe usage records and nine
+SQLite rows, but no ordered actual-member request replay. Controlled
 plain/tool cache reuse and JSON/logprob zero reporting are verified; the original 40
 Victor zero-cache calls remain unexplained because their request/response bodies were
 not retained. Do not treat the historical usage projections or the new synthetic smoke
 as an actual-member trace.
 
-For the originating session:
+On 2026-09-19 the originating session supplied
+`/tmp/victor-member-replay-63ad80a3f502/`: five approved ordered request payloads from
+**one new actual Victor writer member**, manifest, checksum inventory, producer findings
+and Mac direct/gateway baseline. All supplied SHA256SUMS entries passed before and after
+the WSL replay; the bundle was not modified. Victor capture source is
+`3d42bd03b9701161f62d36854165cf7a25329f81`; the recorded member deliverable check passed
+one pytest test. That verdict belongs to the supplied capture, not a new WSL member run.
+Manifest SHA-256: `9257a1d1276eb3a8e6a76b499dcb9c9f4d4452e4e62f9523d5e175776933a73f`.
+The missing-artifact prerequisite is therefore resolved; this is not a reconstruction
+of the historical 40 calls, and their cause remains unproven.
 
-1. Locate an approved, sanitized ordered request replay from one actual Victor member.
-   If unavailable, arrange an explicitly approved new member capture and label it as new
-   evidence, not a reconstruction of the historical run. Do not enable unrestricted
-   prompt/body capture or export credentials.
-2. Return the safe artifact location and the InferFlux producer-investigation findings,
-   distinguishing matched prefixes from reuse actually executed. Preserve request order,
-   prompt/tool/options shape, session mapping and request correlation for the joint gate.
-3. Once prerequisites are available, coordinate direct and gateway replay against the
-   same ready model. Verify explicit origin cache counts, normalized usage conservation,
-   request IDs and session affinity. Record warm/cold provenance without clearing shared
-   cache or restarting shared InferFlux; latency alone is not proof of reuse.
-4. Keep tokens, keys, vault secrets and unapproved prompt/response content private. Mac
-   loopbacks `18788`/`18080` are not local WSL endpoints. Share sanitized findings and safe
-   artifact locations, not credentials. Mark C5 complete only when this actual-member gate
-   has evidence; it is not closed by diagnostics availability.
+### WSL baseline replay and C4 acceptance
+
+Replay `member-joint-e7a3f553602c` ran on 2026-09-19 at 04:29 UTC. For each original
+ordinal it sent the same checksum-verified payload directly, then through Sandhi,
+preserving order within each arm. Captured tool outcomes were frozen: no returned tools
+were executed, and generated responses were not fed into later requests. Session IDs
+were explicitly remapped to `<replay-run>-direct` and `<replay-run>-gateway`; the latter
+was also the Sandhi run ID. This is a replay of actual-member inputs, not a fresh
+autonomous member run or an output-equivalence test.
+
+All ten requests returned HTTP 200 against ready `qwen3-coder-30b` (`llama_cpp_rocm`).
+All explicitly included `prompt_tokens_details.cached_tokens=0`. Identical payloads
+reported identical prompt counts in both arms, matching the supplied capture baseline:
+
+| Ordinal | Inclusive prompt, both arms | Direct output | Gateway output | Cache read, both arms | C4 fresh input | C4 availability |
+|---|---:|---:|---:|---:|---:|---|
+| 0 | 1701 | 197 | 197 | 0 | 1701 | reported / origin_usage |
+| 1 | 1932 | 140 | 140 | 0 | 1932 | reported / origin_usage |
+| 2 | 2443 | 37 | 105 | 0 | 2443 | reported / origin_usage |
+| 3 | 3099 | 126 | 18 | 0 | 3099 | reported / origin_usage |
+| 4 | 4026 | 25 | 45 | 0 | 4026 | reported / origin_usage |
+
+Each echoed gateway correlation ID matched **exactly one** C4 request diagnostic row;
+session and run selectors returned exactly the same five IDs, without truncation.
+Every row preserved provider/model, session/run identity, origin-sourced rounded duration,
+and `fresh + cache_read + cache_creation = reported prompt`, with matching output counts.
+Coverage is 5/5 reported, not missing or inferred availability. HTTP responses were
+`no-store`; `sandhi diagnose --run` matched the HTTP JSON. This verifies persisted
+logical-call correlation, not the execution of an origin session lease or its affinity.
+No direct SQLite query was used for this WSL reconciliation: the wire artifact correctly
+says `ledger_checked=false`; the separate diagnostics artifact supplies that verification.
+
+Sanitized, prompt/body/credential-free evidence:
+
+- [Wire outcomes](../upstream/evidence/member-c5-2026-09-19-wire.json), SHA-256
+  `559aace81f221036d14ba7474c2e55a9a6fa8515fda2d445603faef9a73d66e0`.
+- [C4 joins and runtime fingerprints](../upstream/evidence/member-c5-2026-09-19-diagnostics.json),
+  SHA-256 `ab9252d46d74df5bea19b20f005f9ae1fdab217a88992ec075d3b9b58db3832b`.
+- Local verifier and preflight records remain under `/tmp/sandhi-member-c5-evidence.eTEFHC/`;
+  approved request bodies remain only in the supplied bundle, not in this repository.
+
+The supplied runner initially stopped **before any model call**: Sandhi's environment
+demo key has an empty static `/v1/models` catalog, not live InferFlux discovery. Source
+inspection and a private process-setting check verified its upstream route was exactly
+the same `127.0.0.1:8080/v1` origin. A local copy of the runner recorded empty gateway
+discovery and used independently checked origin readiness; it did not invent a gateway
+model response. Its initial bundle-path mistake also stopped before model calls. Only
+the successful ten-call replay reached inference. The unchanged supplied replay script
+and adapted script hashes are retained in the diagnostics artifact. This is a harness
+discovery limitation, not a runtime catalog fix or a claim of live gateway discovery.
+
+### Runtime identities and remaining owner handoff
+
+Fetched Sandhi `develop` was `647d7d5df064b3b3c3e74ee8635521f82d3552cb` (#271).
+The C4 serving build's source was `324090639998d39a1512899e3c15f2ab8c23aa1e`, tree
+`c9c1541daad0dd0c3143a37d43421ce9f98c3975`; runtime source under `crates/` and Cargo
+manifests is unchanged between that build and fetched develop. PID 1499867 and binary
+SHA-256 `604155cecdc0b122c8fdc972f23926e8ac1465d1cc2b9c63f8798c43c25ff9e7`
+were unchanged before/after. InferFlux PID 554660 remained at launch checkout
+`aea7a24d035fd386ce24db4f8cc68710b4b11543`, with executable SHA-256
+`cff60d525a60d26574013696f012d27a63a1ad1c7cfa1cbde634bbec19ed499d`.
+These are verified preserved launch checkouts and executable fingerprints, not signed
+embedded build attestations. Origin health remained ready. Neither service was restarted,
+reconfigured or replaced, and shared cache was not cleared. No Mac deployment occurred.
+
+The supplied InferFlux findings cover #185–#192. Subsequent read-only reconciliation
+verified tokenizer-unit repair [#194](https://github.com/anvai-labs/inferflux/pull/194)
+merged as `930f580e0caeacdc3c583a1fd4d7fb98ec47a11d`, and promotion
+[#195](https://github.com/anvai-labs/inferflux/pull/195) merged to main
+`9edab96b45aad7b9f1e4fc7bcd333ba59a5e41d8`. Those fixes were **not deployed** to the
+preserved Qwen process used here. The bundle's statement that #194/#195 were open is
+a dated snapshot, not current status. Wire/C4 conservation is reporting consistency;
+it does not prove the older runtime's prompt-tokenizer units are accurate.
+
+Remaining acceptance belongs to the coordinated origin/Victor sessions:
+
+1. InferFlux owns trusted exact-main-SHA CUDA/ROCm gates and any controlled diagnostic
+   deployment/rollback. Re-run this actual-member bundle and C4 joins on that accepted
+   runtime, recording exact binary/source identities and executed reuse versus candidates.
+   Do not replace or restart shared Qwen merely to force a cold sample.
+2. Verify tokenized prefix/accepted reuse and origin lease/session execution with origin
+   diagnostics. This frozen buffered zero-cache baseline proves neither positive reuse nor
+   tokenizer accuracy, cold-cache behavior, contention/eviction handling or lease affinity.
+3. Keep stream/late-usage/cancellation and the broader tools/JSON/logprobs/session matrix
+   separate. Complete the full six-Qwen/one-ZAI mixed-team gate through the originating
+   session's approved connection; no ZAI credentials are transferred here.
+4. Preserve the new-versus-historical distinction and private capture boundary. Share
+   sanitized counters, correlation IDs, fingerprints and artifact locations only. C5 is
+   partially verified, not complete, until the target-runtime and remaining gates have
+   their own acceptance evidence.
 
 ## Contract decisions implemented by C2
 
