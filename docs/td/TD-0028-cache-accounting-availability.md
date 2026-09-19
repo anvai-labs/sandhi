@@ -1,6 +1,6 @@
 # TD-0028: Cache accounting availability and bounded diagnostics
 
-- **Status:** In progress (2026-09-18). Regression, availability and dashboard increments merged;
+- **Status:** In progress (2026-09-18). Regression, availability, dashboard and diagnostics merged;
   CI/review gates remain distinct from merge, deployment and the joint live replay.
 - **Scope:** Sandhi items in the [cache co-design handoff](../upstream/inferflux-cache-codesign-2026-09-18.md).
 - **Related:** TD-0013 (measurement fidelity), TD-0027 (origin co-design),
@@ -32,8 +32,8 @@ InferFlux; that producer-side investigation remains independently owned upstream
 | C1 | Extend existing InferFlux corpus with the 18 sanitized usage objects | Explicit zero/partial/full cache accounting; both forwarding paths; unchanged response bytes and one late terminal SSE usage emission | [PR #268](https://github.com/anvai-labs/sandhi/pull/268) merged after clean independent review and real CI pass |
 | C2 | ADR and additive cache-read availability/source contract | Define reported zero, absent, malformed and explicitly unsupported; preserve legacy numeric defaults; parser/event/UsageV2/SQLite/API/generated bindings/schema agreement | [PR #269](https://github.com/anvai-labs/sandhi/pull/269) merged after exact-head CI and clean independent review |
 | C3 | Dashboard availability and coverage | `n_reported/n_total` over the same filtered call population; honest cache read/write and neutral-unit labels | Merged in #269; 25 real-browser dashboard regressions pass |
-| C4 | Bounded credential-field-free diagnostic lookup/export | Admin-authorized persisted request/session/run projection, source-labelled timings and normalized counters; unavailable historical evidence stated explicitly; no prompt/body capture added | Implemented per [ADR-0011](../adr/0011-bounded-persisted-usage-diagnostics.md), independently reviewed and locally validated; PR CI/merge gates pending |
-| C5 | Joint replay after InferFlux investigation | One actual member trace, same ready model, direct and gateway; cache counts, correlation/session mapping and usage conservation | Owner selected an isolated local WSL gateway instead of Mac access. Actual sanitized member trace and producer investigation remain prerequisites; synthetic local probes do not close this gate |
+| C4 | Bounded credential-field-free diagnostic lookup/export | Admin-authorized persisted request/session/run projection, source-labelled timings and normalized counters; unavailable historical evidence stated explicitly; no prompt/body capture added | [PR #270](https://github.com/anvai-labs/sandhi/pull/270) merged after clean independent review and exact-head CI; isolated WSL HTTP/CLI validation passed |
+| C5 | Joint replay after InferFlux investigation | One actual member trace, same ready model, direct and gateway; cache counts, correlation/session mapping and usage conservation | Isolated WSL diagnostics complete; actual-member replay remains open with originating-Mac handoff below. Approved ordered member artifact and producer findings for replay remain prerequisites |
 
 The C1 non-stream envelopes and SSE frames are constructed around recorded usage
 objects. The original audit did not retain full response bodies or live SSE captures.
@@ -89,6 +89,46 @@ three-row evidence from the earlier synthetic probe (2,212 serialized HTTP bytes
 reported-zero cache status). Missing admin authorization returned 401; responses
 were `no-store`. This check made no new origin calls and does not close C5.
 
+Exact-head PR CI [35414465068](https://github.com/anvai-labs/sandhi/actions/runs/35414465068)
+passed for `3240906`; #270 merged as `52bd8ec`, preserving reviewed tree
+`c9c1541daad0dd0c3143a37d43421ce9f98c3975`. Rust, coverage, Python/Node,
+SDK/dashboard, security and release-safeguard jobs actually passed; the inactive
+all-skipped mirror was not accepted as evidence. Post-merge CI
+[35414947570](https://github.com/anvai-labs/sandhi/actions/runs/35414947570) also passed
+at `52bd8ec`, including the substantive jobs and `CI Success`.
+
+## Originating Mac session handoff: remaining C5 gate
+
+The owner requested completing independent work on WSL and handing origin-dependent
+work back to the originating Mac session. C1–C4 are merged into `develop`, not released.
+The local diagnostics gateway is `127.0.0.1:18789` on WSL; the Mac gateway and its tunnel
+were not modified. No Mac deployment is implied by the local launch.
+
+The referenced local evidence was rechecked: it contains 18 controlled-probe usage
+records and nine SQLite rows, but no ordered actual-member request replay. Controlled
+plain/tool cache reuse and JSON/logprob zero reporting are verified; the original 40
+Victor zero-cache calls remain unexplained because their request/response bodies were
+not retained. Do not treat the historical usage projections or the new synthetic smoke
+as an actual-member trace.
+
+For the originating session:
+
+1. Locate an approved, sanitized ordered request replay from one actual Victor member.
+   If unavailable, arrange an explicitly approved new member capture and label it as new
+   evidence, not a reconstruction of the historical run. Do not enable unrestricted
+   prompt/body capture or export credentials.
+2. Return the safe artifact location and the InferFlux producer-investigation findings,
+   distinguishing matched prefixes from reuse actually executed. Preserve request order,
+   prompt/tool/options shape, session mapping and request correlation for the joint gate.
+3. Once prerequisites are available, coordinate direct and gateway replay against the
+   same ready model. Verify explicit origin cache counts, normalized usage conservation,
+   request IDs and session affinity. Record warm/cold provenance without clearing shared
+   cache or restarting shared InferFlux; latency alone is not proof of reuse.
+4. Keep tokens, keys, vault secrets and unapproved prompt/response content private. Mac
+   loopbacks `18788`/`18080` are not local WSL endpoints. Share sanitized findings and safe
+   artifact locations, not credentials. Mark C5 complete only when this actual-member gate
+   has evidence; it is not closed by diagnostics availability.
+
 ## Contract decisions implemented by C2
 
 Do not infer unsupported capability from a missing counter or a reported zero. Define
@@ -113,7 +153,8 @@ a test. No secrets, prompts or full provider bodies enter default metering recor
 
 The independently reviewed JSON Content-Type correction from PR #265 is included as
 a local-launch dependency (one header plus four byte-preserving regressions); that
-older PR is not separately merged or treated as approved. Each slice targets `develop`
+older PR was closed as superseded after verifying its entire patch is in #269, not
+separately merged or treated as approved; its branch was retained. Each slice targets `develop`
 through real CI and independent adversarial review. The owner explicitly authorized
 a narrowly scoped proxy-review merge exception for the new Sandhi cache-work PRs;
 branch protections stay unchanged and failed/pending CI cannot be bypassed.

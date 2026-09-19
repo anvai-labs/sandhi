@@ -1,6 +1,6 @@
 # Sandhi cache accounting and dashboard co-design handoff
 
-Status: **Investigation verified; follow-up implementation pending.** Owner: Sandhi.
+Status: **Dated investigation snapshot; Sandhi C1–C4 merged, joint replay C5 open.** Owner: Sandhi.
 Companion: /home/vsingh/code/inferflux/docs/planning/SANDHI_CACHE_CODESIGN_HANDOFF_2026-09-18.md.
 
 Execution tracking: [TD-0028](../td/TD-0028-cache-accounting-availability.md).
@@ -8,6 +8,9 @@ The first regression increment preserves the sanitized non-stream usage projecti
 its constructed SSE replay is not a live streaming capture. Contract, dashboard,
 diagnostic-export and joint live gates remain separate. The investigation below is
 a dated snapshot, not an assertion that those checkouts still serve the same source.
+Current execution status and the originating-Mac replay handoff are recorded in TD-0028;
+the historical missing-field behavior and checkout identities below are not current
+implementation/deployment claims.
 
 ```mermaid
 flowchart LR
