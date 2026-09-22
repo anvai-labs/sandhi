@@ -12,11 +12,35 @@ prompt-cache split, GPU-seconds) and never dollars. See
 architecture and the measure-vs-price boundary this changelog respects.
 
 One tag `vX.Y.Z` drives the required binary, PyPI, four-crate and three-package npm release.
-Versions are derived from the tag at build time, never hand-edited; see
+Versions are committed and reviewed together before tagging; release tags must match
+the source version. See
 [RELEASING.md](RELEASING.md). PyPI/npm use trusted publishing; crates reuse the existing token.
 A partly published release remains incomplete even when some artifacts are available.
 
 ## [Unreleased]
+
+## [0.8.0] — 2026-09-22
+
+### Security and access
+
+- The standalone proxy defaults to OIDC and fails startup when its configuration is
+  missing or invalid. Browser sign-in uses authorization code flow with PKCE and
+  server-held sessions; explicit viewer, operator and admin roles control dashboard
+  access. Agent access uses separately authorized, short-lived OAuth credentials and
+  bounded introspection. See the [SSO deployment guide](docs/operator/oidc-sso.md).
+- Gateway routing and authentication are independent choices. Direct origin access
+  requires origin credentials; authentication failures never trigger a weaker route.
+  Existing deployments can deliberately select `SANDHI_AUTH_MODE=tokens` during
+  migration. Embedded library construction retains its existing behavior.
+- RSA verification has a narrowly scoped, CI-enforced advisory assessment expiring
+  2026-10-22. The dependency is not patched; see the
+  [assessment and re-review requirements](docs/security/oidc-rsa-advisory.md).
+
+### Changed
+
+- One committed version now identifies both executables, HTTP package identity, Rust
+  crates and Python/Node bindings. Release builds verify it rather than rewriting it.
+  Homebrew consumes the same immutable executable archives.
 
 ### Fixed
 
@@ -36,7 +60,7 @@ A partly published release remains incomplete even when some artifacts are avail
   unless explicitly annotated; unsupported reporting is never inferred from missing usage.
 - Same-population cache reporting coverage across SQLite, run trees, Python/Node bindings,
   dashboard and CLI. Contract minor 9 adds optional JSON fields; public Rust struct literals
-  require the new fields or defaults. This is not a release-version approval.
+  require the new fields or defaults.
 
 ## [0.7.0] — 2026-09-17
 
