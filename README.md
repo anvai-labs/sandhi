@@ -177,17 +177,22 @@ docs/td/                             # implementation designs and phase status
 docs/README.md                       # documentation map + current status index
 ```
 
-Run the proxy with `SANDHI_STORE=usage.db` to persist events to SQLite and serve a self-hosted
+Configure [OIDC SSO](docs/operator/oidc-sso.md) and run the proxy with `SANDHI_STORE=usage.db` to persist events to SQLite and serve a self-hosted
 usage **dashboard** at `/dashboard` (per-user / per-team / per-provider totals; neutral units, no
 pricing).
 
 ## Operating it
 
-For a local Ollama-backed instance with persistent state, run `./scripts/quickstart.sh`. For the
+Standalone deployments default to OIDC SSO with explicit viewer, operator and administrator
+roles. Missing or invalid authentication configuration prevents startup. Follow the
+[SSO setup and migration guide](docs/operator/oidc-sso.md).
+
+For an explicitly selected local Ollama/token compatibility instance with persistent state,
+run `SANDHI_AUTH_MODE=tokens ./scripts/quickstart.sh`. For the
 complete production-facing flow—listener/TLS configuration, credential registration, virtual-key
 minting, budgets, client setup, metrics, OTLP, security, and troubleshooting—use the
 [proxy operator guide](docs/operator/proxy-guide.adoc). `GET /version` exposes public contract
-versions; the admin-gated `GET /admin/version` adds enabled capabilities.
+versions and `package_version`; the protected `GET /admin/version` adds enabled capabilities.
 
 ## Tests & coverage
 

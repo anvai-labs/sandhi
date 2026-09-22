@@ -43,6 +43,9 @@ fn main() {
         .expect("create proxy runtime");
     let shutdown = Arc::new(ShutdownWatchdog::new());
     let status = runtime.block_on(run(Arc::clone(&shutdown)));
+    // Configuration failures can return before a listener arms shutdown. Give runtime
+    // cleanup a bounded deadline too; arm() never extends an existing shutdown deadline.
+    shutdown.arm(Instant::now() + DEFAULT_SHUTDOWN_GRACE);
     runtime.shutdown_timeout(shutdown.remaining());
     if status == 124 || !shutdown.complete() {
         std::process::exit(124);

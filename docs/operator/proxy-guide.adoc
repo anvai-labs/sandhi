@@ -24,6 +24,11 @@ plane — nothing here involves dollars.
 
 == How it fits
 
+Standalone deployments default to OIDC SSO. Follow link:oidc-sso.md[SSO setup and migration]
+for browser login, role assignment and short-lived agent access tokens. The virtual-key
+bootstrap examples below require explicitly selecting `SANDHI_AUTH_MODE=tokens`; they do not
+override an OIDC failure or grant access to an OIDC deployment.
+
 Sandhi sits between your callers and the real provider. Callers authenticate with a
 per-user *virtual key*; Sandhi holds the *real* upstream key server-side, forwards the
 request, meters it as the bytes pass through, and reconciles the caller's budget.
@@ -229,6 +234,10 @@ link:../product/attempt-accounting-and-evidence.md[accounting/evidence gates] be
 
 When `SANDHI_VAULT_BACKEND=sentinelpass`, native IPC reads `SENTINELPASS_CLIENT_TOKEN`,
 `SANDHI_SENTINELPASS_CLIENT_ID` (default `sandhi`), and `SANDHI_SENTINELPASS_SOCKET`. Set
+`SANDHI_SENTINELPASS_TOKEN_FILE` to use an explicit private daemon-token file (for example in a
+container). An invalid or empty explicit file fails configuration; it never falls back to the
+user's platform configuration directory. Without this option the protocol's existing default
+token location is unchanged. Set
 `SANDHI_SENTINELPASS_FALLBACK_CLI=1` to force the legacy CLI backend; its executable override is
 `SANDHI_SENTINELPASS_BIN` (default `sentinelpass`). Native IPC is enabled in release binaries and in
 source builds made with `--features sentinelpass-ipc`.

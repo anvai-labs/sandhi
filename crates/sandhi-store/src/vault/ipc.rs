@@ -39,8 +39,9 @@ impl SentinelPassIpcVault {
         let millis = std::env::var("SANDHI_SENTINELPASS_TIMEOUT_MS")
             .map(|v| v.parse::<u64>().map_err(|_| VaultError::Configuration))
             .unwrap_or(Ok(DEFAULT_TIMEOUT_MS))?;
-        let client = IpcClient::new(socket)
-            .map_err(|_| VaultError::Configuration)?
+        let token_file =
+            std::env::var_os("SANDHI_SENTINELPASS_TOKEN_FILE").map(std::path::PathBuf::from);
+        let client = client_with_token_file(socket, token_file.as_deref())?
             .with_context(Some(client_token), Some(Origin::Cli));
         Self::from_client(client_id, client, Duration::from_millis(millis))
     }
@@ -124,6 +125,34 @@ impl SentinelPassIpcVault {
                 mpsc::RecvTimeoutError::Disconnected => VaultError::Configuration,
             })?
     }
+}
+
+/// An explicit daemon token file is authoritative; an invalid file never tries the user's
+/// default configuration directory. Useful for isolated broker deployments and test fixtures.
+fn client_with_token_file(
+    socket: std::path::PathBuf,
+    token_file: Option<&std::path::Path>,
+) -> Result<IpcClient, VaultError> {
+    let Some(path) = token_file else {
+        return IpcClient::new(socket).map_err(|_| VaultError::Configuration);
+    };
+    use std::io::Read;
+    if !std::fs::metadata(path)
+        .map_err(|_| VaultError::Configuration)?
+        .is_file()
+    {
+        return Err(VaultError::Configuration);
+    }
+    let mut token = String::new();
+    std::fs::File::open(path)
+        .map_err(|_| VaultError::Configuration)?
+        .take(4097)
+        .read_to_string(&mut token)
+        .map_err(|_| VaultError::Configuration)?;
+    if token.len() > 4096 || token.trim().is_empty() {
+        return Err(VaultError::Configuration);
+    }
+    Ok(IpcClient::new_with_token(socket, token.trim().to_owned()))
 }
 
 impl Vault for SentinelPassIpcVault {
@@ -321,6 +350,24 @@ mod tests {
 
     #[test]
     fn configuration_and_unsupported_delete_fail_before_transport() {
+        let directory = tempfile::tempdir().unwrap();
+        let token_file = directory.path().join("daemon-token");
+        for data in [Vec::new(), b"  \n".to_vec(), vec![b'x'; 4097], vec![0xff]] {
+            std::fs::write(&token_file, data).unwrap();
+            assert!(matches!(
+                client_with_token_file("unused".into(), Some(&token_file)),
+                Err(VaultError::Configuration)
+            ));
+        }
+        for path in [
+            directory.path().join("missing"),
+            directory.path().to_owned(),
+        ] {
+            assert!(matches!(
+                client_with_token_file("unused".into(), Some(&path)),
+                Err(VaultError::Configuration)
+            ));
+        }
         assert!(matches!(
             SentinelPassIpcVault::from_client(
                 "sandhi".into(),

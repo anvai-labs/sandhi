@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import ssl
 import subprocess
 import time
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ import pytest
 from playwright.sync_api import Error, expect, sync_playwright
 
 from conftest import REAL_GEMINI_KEY, REAL_OPENAI_KEY, REPO_ROOT, VK_OPENAI, _free_port
+from oidc_fixture import oidc_authority  # noqa: F401 - shared HTTPS authority fixture
 
 
 ADMIN_TOKEN = "dashboard-test-admin"
@@ -30,10 +32,11 @@ class Dashboard:
     base: str
     database: Path
     process: subprocess.Popen
+    admin_token: str = ADMIN_TOKEN
 
     @property
     def headers(self):
-        return {"Authorization": f"Bearer {ADMIN_TOKEN}"}
+        return {"Authorization": f"Bearer {self.admin_token}"}
 
 
 @pytest.fixture
@@ -58,15 +61,33 @@ def dashboard(proxy_binary, upstream, tmp_path, request):
         env["SANDHI_STORE"] = str(database)
     if options.get("public"):
         env["SANDHI_DASHBOARD_PUBLIC"] = "1"
+    authority = request.getfixturevalue("oidc_authority") if options.get("oidc") else None
+    if authority:
+        authority.redirect = f"https://localhost:{port}/auth/callback"
+        policy = tmp_path / "oidc.json"
+        policy.write_text(json.dumps({
+            "issuer": authority.issuer, "client_id": "sandhi-browser",
+            "redirect_url": authority.redirect, "ca_file": str(authority.certificate),
+            "subjects": {role: {"role": role, "grants": {
+                "fixture": {"upstream": "openai", "models": ["gpt-mock"]}
+            } if role == "admin" else {}} for role in ("viewer", "operator", "admin")},
+        }))
+        config.write_text(json.dumps({"tls": {
+            "cert": str(authority.certificate), "key": str(authority.key),
+        }}))
+        env.pop("SANDHI_AUTH_MODE")  # Exercise the shipped SSO default.
+        env["SANDHI_OIDC_CONFIG"] = str(policy)
     for option, variable in [("usage_capacity", "SANDHI_USAGE_BUFFER_CAPACITY"),
                              ("alert_capacity", "SANDHI_ALERT_BUFFER_CAPACITY")]:
         if option in options:
             env[variable] = str(options[option])
     proc = subprocess.Popen([str(proxy_binary)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    server = Dashboard(f"http://127.0.0.1:{port}", database, proc)
+    server = Dashboard(f"https://localhost:{port}" if authority else f"http://127.0.0.1:{port}",
+                       database, proc, "fixture-access" if authority else ADMIN_TOKEN)
     try:
         deadline = time.monotonic() + 15
-        with httpx.Client(base_url=server.base, timeout=2) as client:
+        verify = ssl.create_default_context(cafile=authority.certificate) if authority else True
+        with httpx.Client(base_url=server.base, timeout=2, verify=verify) as client:
             while True:
                 if proc.poll() is not None:
                     pytest.fail(f"proxy exited: {proc.stderr.read().decode()}")
@@ -85,7 +106,7 @@ def dashboard(proxy_binary, upstream, tmp_path, request):
                         "policy": "warn", "window": "total",
                     })
                     assert response.status_code == 200, response.text
-                response = client.post("/v1/chat/completions", headers={"Authorization": f"Bearer {VK_OPENAI}"}, json={
+                response = client.post("/v1/chat/completions", headers=server.headers if authority else {"Authorization": f"Bearer {VK_OPENAI}"}, json={
                     "model": "gpt-mock", "messages": [{"role": "user", "content": "ping"}],
                 })
                 assert response.status_code == 200, response.text
@@ -112,8 +133,9 @@ def browser():
 
 
 @pytest.fixture
-def page(browser):
-    context = browser.new_context()
+def page(browser, request):
+    # Only disposable browser-fixture certificates; the proxy verifies its IdP CA normally.
+    context = browser.new_context(ignore_https_errors=getattr(request, "param", {}).get("tls", False))
     page = context.new_page()
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
@@ -127,6 +149,50 @@ def connect(page, dashboard):
     page.get_by_label("Admin token", exact=True).fill(ADMIN_TOKEN)
     page.get_by_label("Admin token", exact=True).press("Enter")
     expect(page.locator("#usage")).to_have_attribute("data-state", "ready")
+
+
+@pytest.mark.parametrize("dashboard", [{"oidc": True}], indirect=True)
+@pytest.mark.parametrize("page", [{"tls": True}], indirect=True)
+@pytest.mark.parametrize("role", ["viewer", "operator", "admin"])
+def test_sso_browser_roles_cookie_mutations_and_logout(page, dashboard, oidc_authority, role):
+    oidc_authority.subject = role
+    page.goto(dashboard.base + "/dashboard")
+    expect(page.get_by_label("Admin token", exact=True)).to_be_hidden()
+    page.get_by_role("link", name="Sign in with SSO").click()
+    expect(page.locator("#usage")).to_have_attribute("data-state", "ready")
+    expect(page.locator("#auth-status")).to_contain_text(role)
+    assert oidc_authority.exchanges == 1
+    cookie = next(c for c in page.context.cookies() if c["name"] == "__Host-sandhi-session")
+    assert cookie["secure"] and cookie["httpOnly"] and cookie["sameSite"] == "Lax"
+    assert "__Host-sandhi-session" not in page.evaluate("document.cookie")
+    expect(page.locator("#config")).to_have_attribute("data-state", "ready" if role == "admin" else "forbidden")
+    page.get_by_text("Set a budget", exact=True).click()
+    budget = page.get_by_role("button", name="Set budget", exact=True)
+    if role == "viewer":
+        expect(budget).to_be_disabled()
+    else:
+        page.get_by_label("Scope", exact=True).fill("group:sso-browser")
+        page.get_by_label("Limit (tokens)").fill("700")
+        budget.click()
+        expect(page.locator("#budgets")).to_contain_text("group:sso-browser")
+    page.get_by_role("button", name="Sign out").click()
+    expect(page.locator("#usage")).to_have_attribute("data-state", "locked")
+    assert "gpt-mock" not in page.locator("body").inner_text()
+    page.reload()
+    expect(page.get_by_role("link", name="Sign in with SSO")).to_be_visible()
+    assert page.evaluate("sessionStorage.length + localStorage.length") == 0
+
+
+@pytest.mark.parametrize("dashboard", [{"oidc": True}], indirect=True)
+@pytest.mark.parametrize("page", [{"tls": True}], indirect=True)
+def test_sso_expiry_clears_visible_data_without_refresh(page, dashboard, oidc_authority):
+    oidc_authority.lifetime = 3
+    page.goto(dashboard.base + "/dashboard")
+    page.get_by_role("link", name="Sign in with SSO").click()
+    expect(page.locator("#usage")).to_have_attribute("data-state", "ready")
+    expect(page.locator("#usage")).to_have_attribute("data-state", "locked", timeout=6000)
+    assert "gpt-mock" not in page.locator("body").inner_text()
+    expect(page.get_by_role("link", name="Sign in with SSO")).to_be_visible()
 
 
 @pytest.mark.parametrize("status,label", [

@@ -242,8 +242,9 @@ impl Oidc {
         config.validate()?;
         let mut builder = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(10))
-            .connect_timeout(Duration::from_secs(3));
+            // One total deadline includes DNS, connection, TLS and response reads.
+            // A shorter connection cap rejected valid macOS .local DNS resolution.
+            .timeout(Duration::from_secs(10));
         if let Some(path) = &config.ca_file {
             let pem = std::fs::read(path).map_err(|_| "cannot read OIDC public CA")?;
             builder = builder.add_root_certificate(
@@ -301,7 +302,17 @@ impl Oidc {
             .body(body)
             .send()
             .await
-            .map_err(|_| Error::other("OIDC HTTP request failed"))?;
+            .map_err(|error| {
+                // Endpoint query strings can contain secrets even without URL userinfo.
+                // Omit the URL as well as request headers and bodies from diagnostics.
+                let error = error.without_url();
+                tracing::warn!(?error, "OIDC authority request failed");
+                Error::other("OIDC HTTP request failed")
+            })?;
+        if response.status().is_server_error() || response.status() == StatusCode::TOO_MANY_REQUESTS
+        {
+            return Err(Error::other("OIDC authority unavailable"));
+        }
         let mut builder = axum::http::Response::builder().status(response.status());
         *builder
             .headers_mut()
@@ -412,7 +423,15 @@ impl Oidc {
             ("client_id", &self.config.client_id),
         ]);
         if let Some(secret) = &self.secret {
-            request = request.basic_auth(&self.config.client_id, Some(secret.secret()));
+            // RFC 6749 §2.3.1: encode each component before HTTP Basic encoding.
+            let encode = |value: &str| {
+                openidconnect::url::form_urlencoded::byte_serialize(value.as_bytes())
+                    .collect::<String>()
+            };
+            request = request.basic_auth(
+                encode(&self.config.client_id),
+                Some(encode(secret.secret())),
+            );
         }
         let request = request.build().map_err(|_| unavailable())?;
         let mut wire = axum::http::Request::builder()
@@ -429,7 +448,9 @@ impl Oidc {
             .await
             .map_err(|_| unavailable())?;
         if !response.status().is_success() {
-            return Err(unauthorized());
+            // Introspection authenticates this client. An inactive caller token is
+            // reported by a successful response with active=false, not HTTP 401.
+            return Err(unavailable());
         }
         let value: Value = serde_json::from_slice(response.body()).map_err(|_| unavailable())?;
         self.introspection_subject(&value).ok_or_else(unauthorized)
@@ -651,7 +672,12 @@ pub(crate) async fn callback(
         .await
     {
         Ok(v) => v,
-        Err(_) => return unauthorized(),
+        Err(openidconnect::RequestTokenError::ServerResponse(error))
+            if error.error().as_ref() == "invalid_grant" =>
+        {
+            return unauthorized();
+        }
+        Err(_) => return unavailable(),
     };
     let Some(id) = token.id_token() else {
         return unauthorized();

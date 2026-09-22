@@ -140,6 +140,17 @@ async fn dashboard_roles_and_csrf_are_enforced_at_real_handlers() {
         for (method, path, body, csrf, expected) in [
             ("GET", "/dashboard/api/usage", "", false, StatusCode::OK),
             (
+                "GET",
+                "/admin/config",
+                "",
+                false,
+                if subject == "admin-id" {
+                    StatusCode::NOT_FOUND
+                } else {
+                    StatusCode::FORBIDDEN
+                },
+            ),
+            (
                 "POST",
                 "/admin/budget",
                 r#"{"scope":"user:test","limit_tokens":100}"#,
@@ -192,9 +203,16 @@ struct IdpState {
     tokens: HashMap<String, Value>,
     codes: HashMap<String, Value>,
     verifier: Option<String>,
+    introspection_auth: Option<String>,
+    introspection_status: Option<StatusCode>,
+    token_failure: Option<(StatusCode, String)>,
+    token_delay: Duration,
 }
 impl Authority {
     async fn start() -> Self {
+        Self::start_with_tls_delay(Duration::ZERO).await
+    }
+    async fn start_with_tls_delay(handshake_delay: Duration) -> Self {
         use openidconnect::{core::CoreRsaPrivateSigningKey, PrivateSigningKey};
         use rsa::{pkcs1::EncodeRsaPrivateKey, pkcs8::DecodePrivateKey};
         let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tls");
@@ -223,6 +241,10 @@ impl Authority {
             tokens: HashMap::new(),
             codes: HashMap::new(),
             verifier: None,
+            introspection_auth: None,
+            introspection_status: None,
+            token_failure: None,
+            token_delay: Duration::ZERO,
         }));
         let app = axum::Router::new()
             .route(
@@ -245,6 +267,7 @@ impl Authority {
                 let accept = tls.acceptor.clone();
                 let app = app.clone();
                 connections.spawn(async move {
+                    tokio::time::sleep(handshake_delay).await;
                     if let Ok(stream) = accept.accept(socket).await {
                         let _ = hyper::server::conn::http1::Builder::new()
                             .serve_connection(
@@ -330,11 +353,23 @@ impl Authority {
         token
     }
 }
+
+#[tokio::test]
+async fn slow_authority_connection_uses_the_bounded_request_deadline() {
+    let authority = Authority::start_with_tls_delay(Duration::from_millis(3200)).await;
+    assert!(Oidc::new(authority.config.clone()).await.is_ok());
+    let stalled = Authority::start_with_tls_delay(Duration::from_secs(30)).await;
+    let bounded =
+        tokio::time::timeout(Duration::from_secs(15), Oidc::new(stalled.config.clone())).await;
+    assert!(bounded
+        .expect("authority deadline exceeded outer bound")
+        .is_err());
+}
 async fn idp_metadata(State(state): State<Arc<Mutex<IdpState>>>) -> Json<Value> {
     let state = state.lock().unwrap();
     let root = state.issuer.trim_end_matches("/oidc");
     Json(
-        json!({"issuer":state.issuer,"authorization_endpoint":format!("{root}/authorize"),"token_endpoint":format!("{root}/token"),
+        json!({"issuer":state.issuer,"authorization_endpoint":format!("{root}/authorize"),"token_endpoint":format!("{root}/token?diagnostic=fixture-secret"),
         "jwks_uri":format!("{root}/jwks"),"introspection_endpoint":format!("{root}/introspect"),"response_types_supported":["code"],
         "subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256","ES256"],"code_challenge_methods_supported":["S256"]}),
     )
@@ -346,8 +381,13 @@ async fn idp_token(
     State(state): State<Arc<Mutex<IdpState>>>,
     axum::Form(data): axum::Form<HashMap<String, String>>,
 ) -> Response {
+    let delay = state.lock().unwrap().token_delay;
+    tokio::time::sleep(delay).await;
     let mut state = state.lock().unwrap();
     state.verifier = data.get("code_verifier").cloned();
+    if let Some((status, error)) = &state.token_failure {
+        return (*status, Json(json!({"error":error}))).into_response();
+    }
     match data.get("code").and_then(|code| state.codes.remove(code)) {
         Some(v) => Json(v).into_response(),
         None => (
@@ -359,13 +399,51 @@ async fn idp_token(
 }
 async fn idp_introspect(
     State(state): State<Arc<Mutex<IdpState>>>,
+    headers: HeaderMap,
     axum::Form(data): axum::Form<HashMap<String, String>>,
-) -> Json<Value> {
+) -> Response {
+    if let Some(status) = state.lock().unwrap().introspection_status {
+        return (status, Json(json!({"error":"authority_failure"}))).into_response();
+    }
+    if state
+        .lock()
+        .unwrap()
+        .introspection_auth
+        .as_deref()
+        .is_some_and(|expected| {
+            headers.get("authorization").and_then(|v| v.to_str().ok()) != Some(expected)
+        })
+    {
+        return unauthorized();
+    }
     Json(
         data.get("token")
             .and_then(|token| state.lock().unwrap().tokens.get(token).cloned())
             .unwrap_or_else(|| json!({"active":false})),
     )
+    .into_response()
+}
+
+#[tokio::test]
+async fn confidential_introspection_encodes_oauth_client_credentials() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let mut authority = Authority::start().await;
+    authority.config.client_id = "client:name".into();
+    let mut oidc = Oidc::new(authority.config.clone()).await.unwrap();
+    oidc.secret = Some(ClientSecret::new("a+b %".into()));
+    {
+        let mut state = authority.state.lock().unwrap();
+        state.introspection_auth = Some(format!(
+            "Basic {}",
+            STANDARD.encode("client%3Aname:a%2Bb+%25")
+        ));
+        state.tokens.insert(
+            "access".into(),
+            json!({"active":true,"iss":authority.config.issuer,
+        "aud":"client:name","sub":"agent-id","exp":unix_now()+60,"token_type":"Bearer"}),
+        );
+    }
+    assert!(oidc.inference("access", &HeaderMap::new()).await.is_ok());
 }
 async fn start_login(app: &axum::Router) -> (String, HashMap<String, String>) {
     use tower::ServiceExt;
@@ -538,6 +616,79 @@ async fn signed_identity_and_browser_binding_fail_closed() {
             "{overrides}"
         );
     }
+    for (status, error, expected) in [
+        (
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            StatusCode::UNAUTHORIZED,
+            "invalid_client",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            StatusCode::BAD_REQUEST,
+            "temporarily_unavailable",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "invalid_grant",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            "slow_down",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+    ] {
+        authority.state.lock().unwrap().token_failure = Some((status, error.into()));
+        let (cookie, query) = start_login(&app).await;
+        assert_eq!(
+            finish_login(&app, &cookie, &query["state"], "failure")
+                .await
+                .status(),
+            expected,
+            "{status} {error}"
+        );
+    }
+    authority.state.lock().unwrap().token_failure = None;
+    // Exercise a real token-transport timeout and prove URL query secrets do not
+    // appear in diagnostics. This extends the existing failed-login owner.
+    #[derive(Clone)]
+    struct LogCapture(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for LogCapture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let captured = LogCapture(Arc::new(Mutex::new(Vec::new())));
+    let writer = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    authority.state.lock().unwrap().token_delay = Duration::from_secs(30);
+    let (cookie, query) = start_login(&app).await;
+    use tracing::instrument::WithSubscriber;
+    let response = tokio::time::timeout(
+        Duration::from_secs(15),
+        finish_login(&app, &cookie, &query["state"], "timeout").with_subscriber(subscriber),
+    )
+    .await
+    .expect("token request exceeded its deadline");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let logs = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    assert!(logs.contains("OIDC authority request failed"));
+    assert!(!logs.contains("fixture-secret"));
+    assert!(!logs.contains("https://"));
+    authority.state.lock().unwrap().token_delay = Duration::ZERO;
     let (cookie, query) = start_login(&app).await;
     authority.issue("good", &query["nonce"], json!({}));
     assert_eq!(
@@ -602,6 +753,23 @@ async fn introspection_requires_access_token_identity_and_explicit_grant() {
             .status(),
         StatusCode::UNAUTHORIZED
     );
+    for status in [
+        StatusCode::INTERNAL_SERVER_ERROR,
+        StatusCode::SERVICE_UNAVAILABLE,
+        StatusCode::TOO_MANY_REQUESTS,
+        StatusCode::UNAUTHORIZED,
+    ] {
+        authority.state.lock().unwrap().introspection_status = Some(status);
+        assert_eq!(
+            oidc.inference("access", &HeaderMap::new())
+                .await
+                .unwrap_err()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "introspection {status}"
+        );
+    }
+    authority.state.lock().unwrap().introspection_status = None;
     let permit = oidc.permits.acquire_many(16).await.unwrap();
     assert_eq!(
         oidc.inference("access", &HeaderMap::new())
