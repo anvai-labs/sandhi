@@ -1,6 +1,6 @@
 # TD-0029: OIDC login and role-based gateway access
 
-Status: In progress — implementation and local protocol/browser coverage present; dedicated Kanidm registration and live browser acceptance passed. A live machine-to-ZAI integration check passed; upstream OIDC, full reconciliation, independent final review and release acceptance remain open.
+Status: In progress — implementation and local protocol/browser coverage present; dedicated Kanidm registration and live browser acceptance passed. A live machine-to-ZAI integration check passed; upstream OIDC, final-binary acceptance, independent final review and release acceptance remain open.
 
 ## Context and evidence
 
@@ -38,7 +38,7 @@ On 2026-09-22, Kanidm 1.11.1 on dataserver3 served verified HTTPS discovery for 
   restored the process and `/auth/session` through the existing SSH tunnel. This 502
   did not establish an OIDC rejection. Earlier discovery timeouts were addressed by
   removing the shorter connection deadline while retaining the ten-second total bound.
-- All-feature workspace coverage reports 89.17% lines. The 55 dashboard/startup tests
+- All-feature workspace coverage reports 89.18% lines. The 55 dashboard/startup tests
   passed; all 36 broker/recovery/acceptance tests passed with short macOS socket paths
   and an explicit fixture token file. `SANDHI_SENTINELPASS_TOKEN_FILE` avoids reading
   the developer's default daemon credential in these fixtures; invalid explicit files
@@ -57,7 +57,7 @@ Test ownership: extend existing operator authorization and dashboard browser sui
 
 ## Open gaps
 
-- The corrected machine integration run passed OAuth exchange, ZAI inference and forbidden admin access; full request/run/dashboard reconciliation and final-binary acceptance remain required. Preserve the failed 502 and wrong-route harness evidence.
+- The corrected machine integration run passed OAuth exchange, ZAI inference and forbidden admin access; final-binary acceptance and origin request correlation remain required. Preserve the failed 502 and wrong-route harness evidence.
 - InferFlux TLS hostname verification, strict token claims, discovered JWKS, explicit OIDC-only policy and safe audit identity require their own fixes before SSO acceptance.
 - Session revocation is local until expiry/restart; distributed sessions, IdP backchannel logout and refresh are out of scope and must remain documented.
 - Server-side subject role/grant configuration requires restart. IdP group-to-role synchronization is not implied.
@@ -90,3 +90,11 @@ Consolidated SDK/browser validation: 269 passed, 19 optional integrations skippe
 The release suite exposed a pre-existing brittle drift fixture: it changed the first
 matching version in Cargo.lock, which can belong to a third-party package. The fixture
 now targets the named sandhi-core package; no production version check was weakened.
+
+The same successful run was subsequently reconciled through a fresh, TLS-verified
+Kanidm browser session: the protected run API and visible dashboard both showed one
+call, 23 input, 24 output, zero cache read and 47 billable tokens. Reporting coverage
+was explicit for 1/1 calls, with 21 reasoning tokens included in output. Evidence is
+retained on dataserver3 as `oidc-machine-1790114383462918686-dashboard-evidence.json`.
+This closes the machine integration's wire/SQLite/run/dashboard comparison without
+repeating inference; origin request-ID joins and actual-member acceptance remain open.
