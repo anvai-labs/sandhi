@@ -431,6 +431,7 @@ impl Oidc {
         sessions.prune();
         Ok(sessions.active.get(&digest(&cookie)).cloned())
     }
+    #[allow(clippy::result_large_err)] // Ready-to-return axum denial; consistent with session().
     async fn bearer_subject(&self, token: &str) -> Result<String, Response> {
         if token.is_empty() || token.len() > MAX_TOKEN_BYTES {
             return Err(unauthorized());
@@ -505,6 +506,7 @@ impl Oidc {
         }
         Some(sub.into())
     }
+    #[allow(clippy::result_large_err)] // Ready-to-return axum denial; consistent with session().
     async fn identity(&self, headers: &HeaderMap, mutation: bool) -> Result<String, Response> {
         let bearer = unique_header(headers, "authorization")?;
         let session = self.session(headers)?;
@@ -530,6 +532,7 @@ impl Oidc {
         }
         Ok(session.subject)
     }
+    #[allow(clippy::result_large_err)] // Ready-to-return axum denial; consistent with session().
     pub async fn authorize(
         &self,
         headers: &HeaderMap,
@@ -546,6 +549,7 @@ impl Oidc {
             ))
         }
     }
+    #[allow(clippy::result_large_err)] // Ready-to-return axum denial; consistent with session().
     pub async fn inference(
         &self,
         token: &str,

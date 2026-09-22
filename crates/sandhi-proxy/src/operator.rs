@@ -193,6 +193,7 @@ pub(crate) async fn version_capabilities(
 }
 
 /// OIDC takes precedence over all compatibility token/public settings.
+#[allow(clippy::result_large_err)] // Same ready-to-return axum denial as the existing authorization gates.
 pub(crate) async fn require_access(
     state: &ProxyState,
     headers: &HeaderMap,

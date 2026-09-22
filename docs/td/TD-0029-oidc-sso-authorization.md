@@ -98,3 +98,15 @@ was explicit for 1/1 calls, with 21 reasoning tokens included in output. Evidenc
 retained on dataserver3 as `oidc-machine-1790114383462918686-dashboard-evidence.json`.
 This closes the machine integration's wire/SQLite/run/dashboard comparison without
 repeating inference; origin request-ID joins and actual-member acceptance remain open.
+
+### Dependency advisory applicability
+
+PR #281's initial security check identified RUSTSEC-2023-0071 in the maintained
+OIDC library's RSA dependency. Independent operation review found only public-key
+verification in production; the private-key timing attack has no private key to
+recover on that path. This is not a patched dependency. The explicit assessment
+expires on 2026-10-22 and is bound to package checksums, production dependency
+routes and the reviewed adapter. The security job runs the drift/expiry guard
+before cargo-deny; every other advisory remains fatal. See the [assessment and
+limitations](../security/oidc-rsa-advisory.md). Reassessment is required before
+private-key operations or additional OIDC/RSA consumers are introduced.

@@ -1,0 +1,20 @@
+{
+  "advisory": "RUSTSEC-2023-0071",
+  "status": "not_affected_under_reviewed_usage",
+  "reviewed_on": "2026-09-22",
+  "expires_on": "2026-10-22",
+  "adapter": "crates/sandhi-proxy/src/auth.rs",
+  "adapter_sha256": "aea54d9df53286e5b86e1e64408b145b48e8e65f57009ab2c30ac4846626a551",
+  "packages": {
+    "openidconnect": {
+      "version": "4.0.1",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "checksum": "0d8c6709ba2ea764bbed26bce1adf3c10517113ddea6f2d4196e4851757ef2b2"
+    },
+    "rsa": {
+      "version": "0.9.10",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "checksum": "b8573f03f5883dcaebdfcf4725caa1ecb9c15b2ef50c43a07b816e06799bb12d"
+    }
+  }
+}
