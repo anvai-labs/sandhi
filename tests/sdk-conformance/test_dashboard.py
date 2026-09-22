@@ -45,7 +45,7 @@ def dashboard(proxy_binary, upstream, tmp_path, request):
     port = _free_port()
     env = {k: v for k, v in os.environ.items() if not k.startswith(("SANDHI_", "SENTINELPASS_"))}
     env.update({
-        "SANDHI_BIND": f"127.0.0.1:{port}",
+        "SANDHI_AUTH_MODE": "tokens", "SANDHI_BIND": f"127.0.0.1:{port}",
         "SANDHI_OPENAI_KEY": REAL_OPENAI_KEY,
         "SANDHI_OPENAI_BASE": upstream.base_url,
         "SANDHI_GEMINI_KEY": REAL_GEMINI_KEY,

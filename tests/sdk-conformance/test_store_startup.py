@@ -32,7 +32,7 @@ def store_process(store_startup_binary, gated_provider, tmp_path):
     def launch(store=None, *, shards=1):
         env = {key: value for key, value in os.environ.items()
                if not key.startswith(("SANDHI_", "SENTINELPASS_"))}
-        env.update(SANDHI_BIND=f"127.0.0.1:{_free_port()}",
+        env.update(SANDHI_AUTH_MODE="tokens", SANDHI_BIND=f"127.0.0.1:{_free_port()}",
                    SANDHI_ADMIN_TOKEN="store-startup-admin",
                    SANDHI_VAULT_BACKEND="store-fixture-unavailable",
                    SANDHI_OPENAI_KEY=REAL_OPENAI_KEY, SANDHI_OPENAI_BASE=gated_provider.base,

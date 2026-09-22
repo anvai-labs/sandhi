@@ -64,7 +64,7 @@ def test_budget_commit_and_failed_update_survive_restart(dashboard, proxy_binary
     dashboard.process.communicate(timeout=10)
     port = _free_port()
     env = {k: v for k, v in os.environ.items() if not k.startswith(("SANDHI_", "SENTINELPASS_"))}
-    env.update(SANDHI_BIND=f"127.0.0.1:{port}", SANDHI_STORE=str(dashboard.database),
+    env.update(SANDHI_AUTH_MODE="tokens", SANDHI_BIND=f"127.0.0.1:{port}", SANDHI_STORE=str(dashboard.database),
                SANDHI_ADMIN_TOKEN=ADMIN_TOKEN)
     process = subprocess.Popen([str(proxy_binary)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     try:

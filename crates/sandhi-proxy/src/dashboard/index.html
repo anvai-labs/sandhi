@@ -11,7 +11,9 @@
     <h1>Sandhi</h1>
     <span class="tagline">the metering layer for AI agents — neutral units, no pricing</span>
   </div>
-  <form class="token-box" id="token-form">
+  <div id="sso-box" hidden><a class="btn primary" id="sso-login" href="/auth/login">Sign in with SSO</a>
+    <button class="btn" id="sso-logout" type="button" data-action="logout" hidden>Sign out</button></div>
+  <form class="token-box" id="token-form" hidden>
     <span class="dot" id="token-dot" aria-hidden="true"></span>
     <label for="admin-token">Admin token</label>
     <input id="admin-token" type="password" placeholder="Enter token" autocomplete="off"
@@ -20,7 +22,7 @@
     <button class="btn" type="button" data-action="clearToken">Clear token</button>
   </form>
   <button class="btn" type="button" data-action="refresh">Refresh</button>
-  <span id="auth-status" role="status">No token supplied.</span>
+  <span id="auth-status" role="status">Checking access…</span>
 </header>
 <div class="wrap">
 
@@ -92,10 +94,9 @@
 </section>
 
 <footer>
-  Reads require the admin token when configured, unless public dashboard access is enabled.
-  Changes, config previews and run queries always require admin access. The token is kept only
-  in this page's memory and is cleared when you leave. Changes use the same
-  <code>/admin/*</code> API as the <code>sandhi</code> CLI.
+  SSO access follows your assigned role: viewers can inspect usage, operators can manage budgets
+  and alerts, and administrators can manage credentials and configuration. Sign out ends this
+  dashboard session. Token access is available only in the explicit compatibility mode.
 </footer>
 </div>
 <div class="toast-wrap" id="toasts" role="status" aria-live="polite"></div>

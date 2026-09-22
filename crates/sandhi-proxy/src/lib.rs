@@ -8,6 +8,7 @@
 /// Software release identity, independent of wire/chat contract versions.
 pub const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod auth;
 mod codec;
 pub mod config;
 pub mod ledger;
@@ -247,6 +248,8 @@ pub struct ProxyState {
     pub runtime: ProviderRuntime,
     /// Admin-API bearer token (distinct from virtual keys). `None` disables the admin API.
     pub admin_token: Option<String>,
+    /// Explicit OIDC authority. When set, legacy token/public gates cannot bypass it.
+    pub oidc: Option<Arc<auth::Oidc>>,
     /// Operator-set budgets (scope → spec). The live [`ProxyLedger`] enforces them; this map is the
     /// metadata surface (policy lookup, dashboard, alert thresholds) and is rehydrated from the
     /// durable ledger on startup.
@@ -338,6 +341,7 @@ impl ProxyState {
             vkeys: None,
             runtime: ProviderRuntime::new(),
             admin_token: None,
+            oidc: None,
             budgets: Mutex::new(HashMap::new()),
             public_url: "http://localhost:8787".into(),
             alerts: None,
@@ -656,6 +660,10 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         // behind the admin gate at /admin/version.
         .route("/version", get(version))
         .route("/catalog/models", get(catalog_models))
+        .route("/auth/login", get(auth::login))
+        .route("/auth/callback", get(auth::callback))
+        .route("/auth/session", get(auth::session_status))
+        .route("/auth/logout", post(auth::logout))
         .route("/dashboard", get(dashboard_html))
         .route("/dashboard/assets/dashboard.js", get(dashboard_script))
         .route("/dashboard/assets/dashboard.css", get(dashboard_style))
@@ -1592,7 +1600,10 @@ async fn catalog_models(Query(query): Query<CatalogQuery>) -> Response {
 /// operator explicitly opted back into the open, masked-only model (`dashboard_public`).
 /// No admin token configured → open (nothing to present; single-node dev trust).
 #[allow(clippy::result_large_err)] // axum::Response is intentionally large; idiomatic shape.
-fn require_dashboard_access(state: &ProxyState, headers: &HeaderMap) -> Result<(), Response> {
+async fn require_dashboard_access(state: &ProxyState, headers: &HeaderMap) -> Result<(), Response> {
+    if let Some(oidc) = &state.oidc {
+        return oidc.authorize(headers, auth::Permission::Read, false).await;
+    }
     if state.dashboard_public || state.admin_token.is_none() {
         return Ok(());
     }
@@ -1601,7 +1612,7 @@ fn require_dashboard_access(state: &ProxyState, headers: &HeaderMap) -> Result<(
 
 /// Usage aggregates for the dashboard (JSON). 404 when no durable store is configured.
 async fn dashboard_api(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -> Response {
-    if let Err(denied) = require_dashboard_access(&state, &headers) {
+    if let Err(denied) = require_dashboard_access(&state, &headers).await {
         return denied;
     }
     let Some(store) = state.store.clone() else {
@@ -1631,7 +1642,7 @@ async fn dashboard_api(State(state): State<Arc<ProxyState>>, headers: HeaderMap)
 /// `GET /dashboard/api/keys` — masked virtual keys + masked vault entries (no secrets, no hashes).
 /// 404 when neither the vault nor the virtual-key store is configured.
 async fn dashboard_keys(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -> Response {
-    if let Err(denied) = require_dashboard_access(&state, &headers) {
+    if let Err(denied) = require_dashboard_access(&state, &headers).await {
         return denied;
     }
     let (vault, vkeys) = (state.vault.clone(), state.vkeys.clone());
@@ -1668,7 +1679,7 @@ async fn dashboard_keys(State(state): State<Arc<ProxyState>>, headers: HeaderMap
 /// `GET /dashboard/api/budgets` — every configured scope with limit / window / policy + live spent
 /// (from the budget ledger). Neutral tokens; no pricing.
 async fn dashboard_budgets(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -> Response {
-    if let Err(denied) = require_dashboard_access(&state, &headers) {
+    if let Err(denied) = require_dashboard_access(&state, &headers).await {
         return denied;
     }
     dashboard_read(move || {
@@ -1697,7 +1708,7 @@ async fn dashboard_budgets(State(state): State<Arc<ProxyState>>, headers: Header
 /// `GET /dashboard/api/alerts` — recent fired alerts (rules whose threshold has tripped) plus all
 /// configured rules. 404 when the alert store is not configured.
 async fn dashboard_alerts(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -> Response {
-    if let Err(denied) = require_dashboard_access(&state, &headers) {
+    if let Err(denied) = require_dashboard_access(&state, &headers).await {
         return denied;
     }
     let Some(store) = state.alert_store.clone() else {
@@ -1735,6 +1746,9 @@ async fn dashboard_read(read: impl FnOnce() -> Result<Value, String> + Send + 's
 }
 
 async fn management_no_store(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert("referrer-policy", "no-referrer".parse().unwrap());
     response
         .headers_mut()
         .insert("cache-control", "no-store".parse().unwrap());
@@ -1849,7 +1863,7 @@ async fn readiness(State(state): State<Arc<ProxyState>>) -> Response {
 
 /// Metrics keep their existing authorization even during quiesce.
 async fn metrics_endpoint(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -> Response {
-    if let Err(denied) = require_dashboard_access(&state, &headers) {
+    if let Err(denied) = require_dashboard_access(&state, &headers).await {
         return denied;
     }
     let mut rendered = state.metrics.render();
@@ -1887,7 +1901,7 @@ async fn list_models(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -
     } else {
         IngressDialect::OpenAi
     };
-    let (vk, provider) = match resolve_for_discovery(&state, dialect, &headers) {
+    let (vk, provider) = match resolve_for_discovery(&state, dialect, &headers).await {
         Ok(pair) => pair,
         Err(response) => return response,
     };
@@ -1915,7 +1929,8 @@ async fn list_models(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -
 
 /// `GET /v1beta/models` — Gemini discovery (TD-0010 D3).
 async fn list_models_gemini(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -> Response {
-    let (vk, provider) = match resolve_for_discovery(&state, IngressDialect::Gemini, &headers) {
+    let (vk, provider) = match resolve_for_discovery(&state, IngressDialect::Gemini, &headers).await
+    {
         Ok(pair) => pair,
         Err(response) => return response,
     };
@@ -1933,7 +1948,7 @@ async fn list_models_gemini(State(state): State<Arc<ProxyState>>, headers: Heade
 
 /// Shared auth + upstream resolution for the discovery endpoints.
 #[allow(clippy::result_large_err)] // axum::Response is intentionally large; idiomatic shape.
-fn resolve_for_discovery(
+async fn resolve_for_discovery(
     state: &Arc<ProxyState>,
     dialect: IngressDialect,
     headers: &HeaderMap,
@@ -1948,7 +1963,14 @@ fn resolve_for_discovery(
             ),
         ));
     };
-    let vk = match resolve_virtual_key(state, token) {
+    let vk = match resolve_virtual_key(state, token, headers).await {
+        VirtualKeyResolution::Denied(status) => {
+            return Err(ingress_error(
+                dialect,
+                status,
+                "OIDC inference authorization failed",
+            ))
+        }
         VirtualKeyResolution::Found(vk) => vk,
         VirtualKeyResolution::Expired => {
             return Err(ingress_error(
@@ -2114,7 +2136,10 @@ async fn handle(
             ),
         );
     };
-    let vk = match resolve_virtual_key(&state, vk_token) {
+    let vk = match resolve_virtual_key(&state, vk_token, &headers).await {
+        VirtualKeyResolution::Denied(status) => {
+            return ingress_error(dialect, status, "OIDC inference authorization failed")
+        }
         VirtualKeyResolution::Found(vk) => vk,
         VirtualKeyResolution::Expired => {
             return ingress_error(dialect, StatusCode::UNAUTHORIZED, "virtual key expired");
@@ -3543,11 +3568,22 @@ enum VirtualKeyResolution {
     Found(VirtualKey),
     NotFound,
     Expired,
+    Denied(StatusCode),
 }
 
 /// Resolve a presented virtual-key token: exact (legacy demo) then by hash (operator-minted).
 /// Filters out expired keys.
-fn resolve_virtual_key(state: &ProxyState, token: &str) -> VirtualKeyResolution {
+async fn resolve_virtual_key(
+    state: &ProxyState,
+    token: &str,
+    headers: &HeaderMap,
+) -> VirtualKeyResolution {
+    if let Some(oidc) = &state.oidc {
+        return match oidc.inference(token, headers).await {
+            Ok(grant) => VirtualKeyResolution::Found(grant),
+            Err(r) => VirtualKeyResolution::Denied(r.status()),
+        };
+    }
     let vk = state
         .keys
         .resolve(token)

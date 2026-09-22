@@ -218,7 +218,7 @@ def inferflux_proxy(
     )
     env = {
         **os.environ,
-        "SANDHI_BIND": f"127.0.0.1:{port}",
+        "SANDHI_AUTH_MODE": "tokens", "SANDHI_BIND": f"127.0.0.1:{port}",
         "SANDHI_INFERFLUX_KEY": "dev-key-123",
         "SANDHI_INFERFLUX_BASE": recording_base + "/v1",
         "SANDHI_STORE": str(store_path),
