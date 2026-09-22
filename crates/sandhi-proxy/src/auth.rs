@@ -215,6 +215,7 @@ pub struct Oidc {
     http: reqwest::Client,
     secret: Option<ClientSecret>,
     introspection_url: String,
+    introspection_client_auth: bool,
     sessions: Mutex<Sessions>,
     permits: tokio::sync::Semaphore,
 }
@@ -264,6 +265,7 @@ impl Oidc {
             .transpose()?;
         let mut result = Self {
             introspection_url: String::new(),
+            introspection_client_auth: false,
             config,
             http: builder
                 .build()
@@ -275,7 +277,9 @@ impl Oidc {
             }),
             permits: tokio::sync::Semaphore::new(16),
         };
-        result.introspection_url = result.discover().await?.1;
+        let (_, url, client_auth) = result.discover().await?;
+        result.introspection_url = url;
+        result.introspection_client_auth = client_auth;
         Ok(result)
     }
     async fn fetch(
@@ -332,7 +336,7 @@ impl Oidc {
             .body(bytes)
             .map_err(|_| Error::other("invalid OIDC response"))
     }
-    async fn discover(&self) -> Result<(Client, String), String> {
+    async fn discover(&self) -> Result<(Client, String, bool), String> {
         let issuer = IssuerUrl::new(self.config.issuer.clone()).map_err(|_| "invalid issuer")?;
         // Fetch once as JSON to validate extensions and same-origin endpoints before the library fetches JWKS.
         let endpoint = format!(
@@ -374,6 +378,23 @@ impl Oidc {
             .as_str()
             .ok_or("missing introspection endpoint")?
             .to_owned();
+        // RFC 8414 provides no default for introspection authentication.
+        // Require an explicit advertised method, including public/no-auth access.
+        let methods = metadata
+            .get("introspection_endpoint_auth_methods_supported")
+            .ok_or("missing introspection authentication methods")?
+            .as_array()
+            .filter(|methods| methods.iter().all(Value::is_string))
+            .ok_or("invalid introspection authentication methods")?;
+        let client_auth = if self.secret.is_some()
+            && methods.iter().any(|method| method == "client_secret_basic")
+        {
+            true
+        } else if methods.iter().any(|method| method == "none") {
+            false
+        } else {
+            return Err("no supported introspection authentication method".into());
+        };
         let metadata: CoreProviderMetadata =
             serde_json::from_value(metadata).map_err(|_| "invalid OIDC metadata")?;
         if metadata.issuer() != &issuer {
@@ -399,7 +420,7 @@ impl Oidc {
             RedirectUrl::new(self.config.redirect_url.clone())
                 .map_err(|_| "invalid redirect URL")?,
         );
-        Ok((client, introspection))
+        Ok((client, introspection, client_auth))
     }
     #[allow(clippy::result_large_err)] // Ready-to-return axum denial, same as other authorization gates.
     fn session(&self, headers: &HeaderMap) -> Result<Option<Session>, Response> {
@@ -422,7 +443,8 @@ impl Oidc {
             ("token_type_hint", "access_token"),
             ("client_id", &self.config.client_id),
         ]);
-        if let Some(secret) = &self.secret {
+        if self.introspection_client_auth {
+            let secret = self.secret.as_ref().ok_or_else(unavailable)?;
             // RFC 6749 §2.3.1: encode each component before HTTP Basic encoding.
             let encode = |value: &str| {
                 openidconnect::url::form_urlencoded::byte_serialize(value.as_bytes())
@@ -448,8 +470,17 @@ impl Oidc {
             .await
             .map_err(|_| unavailable())?;
         if !response.status().is_success() {
-            // Introspection authenticates this client. An inactive caller token is
-            // reported by a successful response with active=false, not HTTP 401.
+            // Kanidm's advertised no-auth endpoint also returns 400/401 for
+            // malformed/invalid-signature caller tokens. With client auth, a 401
+            // instead denotes a gateway credential/configuration failure.
+            if !self.introspection_client_auth
+                && matches!(
+                    response.status(),
+                    StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED
+                )
+            {
+                return Err(unauthorized());
+            }
             return Err(unavailable());
         }
         let value: Value = serde_json::from_slice(response.body()).map_err(|_| unavailable())?;
@@ -584,7 +615,7 @@ pub(crate) async fn login(State(state): State<Arc<ProxyState>>) -> Response {
     let Ok(_permit) = oidc.permits.try_acquire() else {
         return unavailable();
     };
-    let (client, _) = match oidc.discover().await {
+    let (client, _, _) = match oidc.discover().await {
         Ok(v) => v,
         Err(_) => return unavailable(),
     };
@@ -659,7 +690,7 @@ pub(crate) async fn callback(
     let Ok(_permit) = oidc.permits.try_acquire() else {
         return unavailable();
     };
-    let (client, _) = match oidc.discover().await {
+    let (client, _, _) = match oidc.discover().await {
         Ok(v) => v,
         Err(_) => return unavailable(),
     };

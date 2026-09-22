@@ -27,7 +27,10 @@ kanidm group add-members sandhi_users YOUR_ACCOUNT
 
 Kanidm's issuer is client-specific: `https://IDP/oauth2/openid/sandhi`. Modern Kanidm
 discovery advertises S256 and ES256, and its introspection endpoint advertises `none`
-authentication. A confidential client can instead use `client_secret_env` in the
+authentication. Sandhi selects the advertised introspection method independently of
+login-client authentication: `none` or `client_secret_basic`. RFC 8414 provides no default
+for this endpoint; missing or unsupported methods fail startup. A confidential client
+can use `client_secret_env` in the
 configuration below; keep that secret in the deployment's private environment.
 
 ## Configure Sandhi

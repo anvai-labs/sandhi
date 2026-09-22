@@ -53,6 +53,7 @@ def oidc_authority():
                     "token_endpoint": authority.base + "/token",
                     "jwks_uri": authority.base + "/jwks",
                     "introspection_endpoint": authority.base + "/introspect",
+                    "introspection_endpoint_auth_methods_supported": ["none"],
                     "response_types_supported": ["code"],
                     "subject_types_supported": ["public"],
                     "id_token_signing_alg_values_supported": ["RS256"],

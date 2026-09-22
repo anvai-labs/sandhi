@@ -74,6 +74,7 @@ fn offline_oidc() -> Oidc {
         http: reqwest::Client::new(),
         secret: None,
         introspection_url: "https://sso.example.test/introspect".into(),
+        introspection_client_auth: false,
         sessions: Mutex::new(Sessions {
             pending: HashMap::new(),
             active: HashMap::new(),
@@ -207,6 +208,7 @@ struct IdpState {
     introspection_status: Option<StatusCode>,
     token_failure: Option<(StatusCode, String)>,
     token_delay: Duration,
+    introspection_methods: Value,
 }
 impl Authority {
     async fn start() -> Self {
@@ -245,6 +247,7 @@ impl Authority {
             introspection_status: None,
             token_failure: None,
             token_delay: Duration::ZERO,
+            introspection_methods: json!(["none"]),
         }));
         let app = axum::Router::new()
             .route(
@@ -368,11 +371,16 @@ async fn slow_authority_connection_uses_the_bounded_request_deadline() {
 async fn idp_metadata(State(state): State<Arc<Mutex<IdpState>>>) -> Json<Value> {
     let state = state.lock().unwrap();
     let root = state.issuer.trim_end_matches("/oidc");
-    Json(
-        json!({"issuer":state.issuer,"authorization_endpoint":format!("{root}/authorize"),"token_endpoint":format!("{root}/token?diagnostic=fixture-secret"),
-        "jwks_uri":format!("{root}/jwks"),"introspection_endpoint":format!("{root}/introspect"),"response_types_supported":["code"],
-        "subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256","ES256"],"code_challenge_methods_supported":["S256"]}),
-    )
+    let mut metadata = json!({"issuer":state.issuer,"authorization_endpoint":format!("{root}/authorize"),"token_endpoint":format!("{root}/token?diagnostic=fixture-secret"),
+        "jwks_uri":format!("{root}/jwks"),"introspection_endpoint":format!("{root}/introspect"),"introspection_endpoint_auth_methods_supported":state.introspection_methods,"response_types_supported":["code"],
+        "subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256","ES256"],"code_challenge_methods_supported":["S256"]});
+    if state.introspection_methods.is_null() {
+        metadata
+            .as_object_mut()
+            .unwrap()
+            .remove("introspection_endpoint_auth_methods_supported");
+    }
+    Json(metadata)
 }
 async fn idp_jwks(State(state): State<Arc<Mutex<IdpState>>>) -> Json<Value> {
     Json(state.lock().unwrap().jwks.clone())
@@ -431,6 +439,7 @@ async fn confidential_introspection_encodes_oauth_client_credentials() {
     authority.config.client_id = "client:name".into();
     let mut oidc = Oidc::new(authority.config.clone()).await.unwrap();
     oidc.secret = Some(ClientSecret::new("a+b %".into()));
+    authority.state.lock().unwrap().introspection_methods = json!(["client_secret_basic"]);
     {
         let mut state = authority.state.lock().unwrap();
         state.introspection_auth = Some(format!(
@@ -443,7 +452,40 @@ async fn confidential_introspection_encodes_oauth_client_credentials() {
         "aud":"client:name","sub":"agent-id","exp":unix_now()+60,"token_type":"Bearer"}),
         );
     }
+    let (_, url, client_auth) = oidc.discover().await.unwrap();
+    oidc.introspection_url = url;
+    oidc.introspection_client_auth = client_auth;
+    assert!(client_auth);
     assert!(oidc.inference("access", &HeaderMap::new()).await.is_ok());
+    authority.state.lock().unwrap().introspection_status = Some(StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        oidc.inference("access", &HeaderMap::new())
+            .await
+            .unwrap_err()
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    // A confidential login client can still advertise public introspection.
+    authority.state.lock().unwrap().introspection_methods = json!(["none"]);
+    let (_, _, client_auth) = oidc.discover().await.unwrap();
+    assert!(!client_auth);
+    oidc.introspection_client_auth = client_auth;
+    assert_eq!(
+        oidc.inference("bad", &HeaderMap::new())
+            .await
+            .unwrap_err()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    for methods in [
+        json!([]),
+        json!(["private_key_jwt"]),
+        json!([42]),
+        json!(null),
+    ] {
+        authority.state.lock().unwrap().introspection_methods = methods;
+        assert!(oidc.discover().await.is_err());
+    }
 }
 async fn start_login(app: &axum::Router) -> (String, HashMap<String, String>) {
     use tower::ServiceExt;
@@ -757,7 +799,7 @@ async fn introspection_requires_access_token_identity_and_explicit_grant() {
         StatusCode::INTERNAL_SERVER_ERROR,
         StatusCode::SERVICE_UNAVAILABLE,
         StatusCode::TOO_MANY_REQUESTS,
-        StatusCode::UNAUTHORIZED,
+        StatusCode::NOT_FOUND,
     ] {
         authority.state.lock().unwrap().introspection_status = Some(status);
         assert_eq!(
@@ -767,6 +809,17 @@ async fn introspection_requires_access_token_identity_and_explicit_grant() {
                 .status(),
             StatusCode::SERVICE_UNAVAILABLE,
             "introspection {status}"
+        );
+    }
+    for status in [StatusCode::BAD_REQUEST, StatusCode::UNAUTHORIZED] {
+        authority.state.lock().unwrap().introspection_status = Some(status);
+        assert_eq!(
+            oidc.inference("malformed", &HeaderMap::new())
+                .await
+                .unwrap_err()
+                .status(),
+            StatusCode::UNAUTHORIZED,
+            "public introspection {status}"
         );
     }
     authority.state.lock().unwrap().introspection_status = None;

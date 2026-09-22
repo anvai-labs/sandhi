@@ -1,6 +1,6 @@
 # TD-0029: OIDC login and role-based gateway access
 
-Status: In progress — implementation and local protocol/browser coverage present; dedicated Kanidm registration and live browser acceptance passed. Live machine inference, upstream OIDC, independent final review and release acceptance remain open.
+Status: In progress — implementation and local protocol/browser coverage present; dedicated Kanidm registration and live browser acceptance passed. A live machine-to-ZAI integration check passed; upstream OIDC, full reconciliation, independent final review and release acceptance remain open.
 
 ## Context and evidence
 
@@ -49,7 +49,7 @@ On 2026-09-22, Kanidm 1.11.1 on dataserver3 served verified HTTPS discovery for 
 | Increment | Evidence required | Status |
 |---|---|---|
 | S1 discovery/login/session and role enforcement | Signed mock IdP protocol tests; state/nonce/PKCE/replay/expiry/issuer/audience negatives; backend role matrix; CSRF/logout | Implemented and locally tested; final review pending |
-| S2 OIDC inference grants and compatibility | Actual proxy transport tests retain model allowlist, attribution, budgets, correlation; explicit token profile regression | Local protocol/compatibility coverage present; live machine inference pending |
+| S2 OIDC inference grants and compatibility | Actual proxy transport tests retain model allowlist, attribution, budgets, correlation; explicit token profile regression | Local protocol/compatibility coverage and live machine-to-ZAI integration passed; final review pending |
 | S3 dashboard and deployment | Browser login/role/expiry/logout tests; dedicated Kanidm registration; verified HTTPS; preserve existing state and rollback | Browser suite and live Kanidm browser pass; release/cutover pending |
 | S4 multi-provider co-design | Direct and optional Sandhi InferFlux acceptance, all formation cohorts, C5 six-Qwen/one-ZAI reconciliation | Pending; separate Victor/InferFlux ownership |
 
@@ -66,7 +66,8 @@ Test ownership: extend existing operator authorization and dashboard browser sui
 ### Reviewed corrections and machine check
 
 Authority transport failures, HTTP 5xx/429 and introspection client-auth failures now
-return 503; an inactive access token or rejected authorization grant remains 401.
+return 503. Discovery determines whether introspection uses client authentication;
+Kanidm no-auth HTTP 400/401 responses for malformed caller tokens remain 401; an inactive access token or rejected authorization grant remains 401.
 Endpoint URLs are stripped from error diagnostics, including query-string secrets.
 Existing HTTPS protocol test owners cover these distinctions, a real token timeout,
 the total request deadline and captured-log redaction. Tests first reproduced the
