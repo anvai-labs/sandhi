@@ -17,6 +17,26 @@ alone do not close remote authority setup or authorize a release tag.
 | crates.io | `sandhi-core`, `sandhi-providers`, `sandhi-store`, `sandhi-proxy`, all non-yanked |
 | npm | `@anvailabs/sandhi`, `@anvailabs/sandhi-linux-x64-gnu`, `@anvailabs/sandhi-darwin-arm64`; root optional dependencies pin both platform packages exactly |
 
+The committed `[workspace.package].version` in `Cargo.toml` is the software version authority.
+The CLI, proxy `--version`, HTTP `/version.package_version`, Rust crates and binding manifests
+must agree. Wire/chat contract versions are independent. CI runs
+`python3 scripts/check-release-version.py`; new release tags must match the committed value.
+Release jobs do not rewrite binary/wheel versions behind the source tag.
+
+Prepare a version bump in an isolated worktree, before review and tagging:
+
+```bash
+python3 scripts/stage-crates-release.py --workspace "$PWD" --version X.Y.Z
+python3 scripts/check-release-version.py --sync
+python3 scripts/check-release-version.py --version X.Y.Z
+```
+
+Commit the manifests and all three Cargo lockfiles plus npm lockfile. Binary release smoke
+checks both executable versions and HTTP identity against the approved release version.
+Homebrew consumes those immutable release archives; a custom running gateway is a separate
+installation and must be restarted from the verified build to adopt its version. Alignment of
+source versions does not publish a release, rewrite historical tags, or upgrade a running service.
+
 Bindings remain separate Cargo workspaces. Published crate manifests must use registry versions,
 not git-source dependencies; see [TD-0023](docs/td/TD-0023-release-automation.md).
 
@@ -78,7 +98,7 @@ Actions are pinned by full commit SHA and checkout credentials are not persisted
   This is **not** a packaged-crate installation test; registry resolution/package checks still
   occur at publish time. The helper leaves the lockfile unchanged; Cargo refreshes local package
   entries during checking/publication (publication does not use `--locked`). Other unprivileged
-  build jobs continue to use pinned cargo-edit for version staging.
+  build jobs require the committed package version to match the authorized release tag.
 
 Serializing each release tag avoids overlapping publication runs, without canceling an active
 release. All builds must pass before the GitHub release is created or any registry is written

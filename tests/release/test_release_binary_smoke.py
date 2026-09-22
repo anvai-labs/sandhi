@@ -173,6 +173,8 @@ class BinarySmokeTests(unittest.TestCase):
                 self.assertIs(child, process)
                 self.assertTrue(spawn.call_args.args[2].is_dir())
             with patch.object(smoke, "unused_loopback_port", return_value=1234), \
+                    patch.object(smoke, "check_version", return_value="0.7.0"), \
+                    patch.object(smoke, "check_http_version") as identity, \
                     patch.object(smoke, "check_cli", side_effect=help_check), \
                     patch.object(smoke, "start", return_value=process) as spawn, \
                     patch.object(smoke, "wait_ready") as ready, \
@@ -183,6 +185,25 @@ class BinarySmokeTests(unittest.TestCase):
             self.assertFalse(spawn.call_args.args[2].exists())
             ready.assert_called_once_with(process, 1234, 15)
             shutdown.assert_called_once_with(process, 8)
+            identity.assert_called_once_with(1234, "0.7.0")
+
+    def test_http_version_rejects_protocol_only_or_mismatched_identity(self):
+        for value in [b'{"wire_contract_version":"1"}', b'{"package_version":"0.3.0"}', b'[]', b'invalid']:
+            with patch.object(smoke, "probe", return_value=value), self.assertRaises(smoke.SmokeFailure):
+                smoke.check_http_version(1234, "0.7.0")
+        with patch.object(smoke, "probe", return_value=b'{"package_version":"0.7.0"}'):
+            smoke.check_http_version(1234, "0.7.0")
+
+    def test_versions_must_match_before_a_listener_starts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for name in ("sandhi", "sandhi-proxy"):
+                binary = Path(directory) / name
+                binary.touch(); binary.chmod(0o700)
+            for versions in [("0.7.0", "0.3.0"), ("0.3.0", "0.3.0")]:
+                with patch.object(smoke, "check_version", side_effect=versions), patch.object(smoke, "start") as start:
+                    with self.assertRaisesRegex(smoke.SmokeFailure, "versions disagree"):
+                        smoke.run_smoke(Path(directory), expected_version="0.7.0")
+                    start.assert_not_called()
 
     def test_invalid_binary_directory_and_timeouts(self):
         with tempfile.TemporaryDirectory() as directory, self.assertRaises(smoke.SmokeFailure):

@@ -26,7 +26,14 @@ use sandhi_proxy::{
 };
 use sandhi_store::{AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
 
+#[derive(clap::Parser)]
+#[command(name = "sandhi-proxy", version = sandhi_proxy::PACKAGE_VERSION,
+    about = "Sandhi usage gateway. Configure the listener, providers and authentication through SANDHI_* environment variables.")]
+struct Args {}
+
 fn main() {
+    // Informational flags must exit before runtime, credentials, config or listener initialization.
+    let _ = <Args as clap::Parser>::parse();
     // Owning the runtime explicitly prevents Tokio's implicit, potentially unbounded wait for
     // spawn_blocking tasks after async main returns. The process watchdog remains armed through
     // runtime teardown, including destructors which do not cooperate with async cancellation.

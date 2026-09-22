@@ -21,7 +21,7 @@ use sandhi_store::diagnostics::{
 #[derive(Parser, Debug)]
 #[command(
     name = "sandhi",
-    version,
+    version = sandhi_proxy::PACKAGE_VERSION,
     about = "Sandhi operator CLI — keys, virtual keys, budgets, usage (TD-0003)"
 )]
 struct Cli {

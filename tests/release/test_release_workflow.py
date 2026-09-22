@@ -226,10 +226,13 @@ def test_non_npm_publish_paths_are_skipped_for_repair():
     check_verification(workflow("release.yml"))
 
 
-def test_no_nonexistent_proxy_help_smoke():
-    # The proxy is env-configured and does not parse --help: that starts a server.
-    assert not re.search(r"sandhi-proxy[\"']?\s+--help", commands(workflow("release.yml")["jobs"]["binaries"]))
-    assert 'python3 .release-controls/scripts/smoke-release-binaries.py --binary-dir "target/$TARGET/release"' in commands(workflow("release.yml")["jobs"]["binaries"])
+def test_release_checks_package_and_binary_identity_before_publishing():
+    assert 'python3 .release-controls/scripts/smoke-release-binaries.py --binary-dir "target/$TARGET/release" --expected-version "$RELEASE_VERSION"' in commands(workflow("release.yml")["jobs"]["binaries"])
+    release = workflow("release.yml")
+    assert 'python3 scripts/check-release-version.py --version "$RELEASE_VERSION"' in commands(release["jobs"]["authorize"])
+    for name in ("binaries", "pypi-build", "npm-build"):
+        assert "set-version" not in commands(release["jobs"][name])
+        assert "npm version" not in commands(release["jobs"][name])
 
 
 def test_ci_always_checks_release_safeguards():

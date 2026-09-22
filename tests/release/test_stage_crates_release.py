@@ -24,6 +24,8 @@ def workspace(tmp_path):
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / relative, target)
     shutil.copyfile(ROOT / "Cargo.lock", tmp_path / "Cargo.lock")
+    # Fixed old-version fixture keeps mutation cases independent of future release bumps.
+    stager.stage(tmp_path, "0.3.0")
     (tmp_path / "untouched.bin").write_bytes(bytes(range(256)))
     return tmp_path
 
@@ -183,3 +185,42 @@ def test_no_subprocess_or_network_used(workspace, monkeypatch):
     monkeypatch.setattr(subprocess, "Popen", denied)
     monkeypatch.setattr(socket, "socket", denied)
     assert stager.stage(workspace, "0.6.0") == 4
+
+# Version consistency is the same packaging concern as staging, so keep its drift
+# regressions in this existing owner rather than cloning release workflow tests.
+IDENTITY_SPEC = importlib.util.spec_from_file_location("release_identity", ROOT / "scripts/check-release-version.py")
+identity = importlib.util.module_from_spec(IDENTITY_SPEC)
+IDENTITY_SPEC.loader.exec_module(identity)
+
+
+def test_committed_package_versions_are_consistent():
+    assert identity.check(ROOT) == tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]["version"]
+
+
+@pytest.mark.parametrize("relative", ["bindings/python/Cargo.toml", "bindings/node/Cargo.toml",
+    "bindings/node/package.json", "bindings/node/package-lock.json", "Cargo.lock",
+    "bindings/python/Cargo.lock", "bindings/node/Cargo.lock"])
+def test_binding_and_lock_drift_is_detected_and_sync_preserves_external_versions(tmp_path, relative):
+    import json
+    files = (*stager.MANIFESTS, "Cargo.lock", "bindings/python/Cargo.toml", "bindings/node/Cargo.toml",
+             "bindings/node/package.json", "bindings/node/package-lock.json", "bindings/python/Cargo.lock", "bindings/node/Cargo.lock")
+    for name in files:
+        target = tmp_path / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / name, target)
+    version = identity.check(tmp_path)
+    path = tmp_path / relative
+    raw = path.read_text()
+    old = f'"version": "{version}"' if relative.endswith('.json') else f'version = "{version}"'
+    assert old in raw
+    path.write_text(raw.replace(old, old.replace(version, "9.9.9"), 1))
+    before = snapshot(tmp_path)
+    with pytest.raises(ValueError, match="drift"):
+        identity.check(tmp_path)
+    assert snapshot(tmp_path) == before
+    with pytest.raises(ValueError, match="tag disagrees"):
+        identity.check(tmp_path, "8.8.8", sync=True)
+    assert snapshot(tmp_path) == before
+    identity.check(tmp_path, sync=True)
+    assert identity.check(tmp_path) == version
+    assert path.read_text() == raw
