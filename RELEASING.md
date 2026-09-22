@@ -2,7 +2,8 @@
 
 A stable `vX.Y.Z` tag on protected `main` drives one **required** release train:
 GitHub binaries, PyPI, all four Rust crates and all three npm packages. Missing credentials do
-not remove a target from the contract. Versions are staged from the tag, not committed by hand.
+not remove a target from the contract. Prepare and commit the version before tagging; the tag
+must match that reviewed source version.
 
 The current safeguard implementation is tracked in
 [release-safeguards.md](docs/product/release-safeguards.md). Implementation or green unit tests
@@ -82,7 +83,8 @@ Build jobs have read-only GitHub permissions, no publishing environment, and no 
 Actions are pinned by full commit SHA and checkout credentials are not persisted.
 
 - Binary builds enable `sentinelpass-ipc`; smoke checks use the operator CLI plus an isolated,
-  loopback-only proxy health/readiness/start/stop drill. The proxy does not implement `--help`.
+  loopback-only proxy health/readiness/start/stop drill. Both binaries implement `--help` and
+  `--version` without loading service configuration or starting a listener.
 - Wheels are installed/imported on each build host before upload.
 - Native npm addons are loaded on their build hosts. An unprivileged packaging job requires both
   architectures, complete loaders/types, exact manifests/dependencies, and allowed packed files.
