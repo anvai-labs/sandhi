@@ -82,7 +82,7 @@ pin-bump PR. Same-repo `GITHUB_TOKEN` — no cross-repo secrets.
 sentinelpass tag v*  ──▶ crates-publish job ──▶ sentinelpass-protocol on crates.io
 crates.io release    ──▶ update-protocol-pin ──▶ version-bump PR on sandhi (build-gated)
 sandhi tag v*        ──▶ release.yml ──▶ crates (idempotent) + binaries + PyPI
-sandhi release       ──▶ homebrew tap bump (scheduled) ──▶ brew users
+sandhi release       ──▶ homebrew tap bump (manual workflow dispatch) ──▶ brew users
 ```
 
 ## Manual residue (D5)
@@ -108,3 +108,13 @@ release published all four crates in order — verified at the registry:
 crates.io `core/providers/store/proxy` all at 0.3.0, with store 0.3.0's
 published manifest carrying `sentinelpass-protocol ^0.8 (optional)` and no
 git source.
+
+## Committed software identity (2026-09-22 follow-up)
+
+Source manifests previously retained 0.3.0/0.0.0 while release builds rewrote them to
+0.7.0. They now align with the existing 0.7.0 milestone. `Cargo.toml` is authoritative;
+CI and new-tag authorization reject binding/lock/tag drift. Both binaries and the
+public HTTP version response expose that package identity, separately from protocol
+versions. Release smoke verifies the actual binaries and running process identity.
+See [release preparation](../../RELEASING.md). Existing releases remain immutable;
+this change is not a new release or an upgrade of the separately launched Mac gateway.

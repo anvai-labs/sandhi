@@ -5,6 +5,9 @@
 //! normalizes the request through Sandhi's typed runtime, then emits one neutral usage event and
 //! reconciles the budget. It is *in-path*, not a redirect: a client cannot bypass the meter.
 
+/// Software release identity, independent of wire/chat contract versions.
+pub const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 mod codec;
 pub mod config;
 pub mod ledger;
@@ -1551,6 +1554,7 @@ async fn contract_version_header(
 /// detail (D5) is gated at `/admin/version` (R2).
 async fn version() -> Response {
     let body = json!({
+        "package_version": PACKAGE_VERSION,
         "wire_contract_version": sandhi_core::UsageEvent::SCHEMA_VERSION,
         "chat_contract_version": sandhi_core::CHAT_SCHEMA_VERSION_V1,
         "chat_contract_minor": sandhi_core::CHAT_CONTRACT_MINOR,
