@@ -542,7 +542,7 @@ def run_acceptance(binary: Path, config: Config, binary_revision=None):
                 cleanup.callback(stop_process, mock)
                 wait_ready(mock, mock_url, min(deadline, time.monotonic() + 10))
                 environment = clean_environment()
-                environment.update({"SANDHI_BIND": f"127.0.0.1:{proxy_port}", "SANDHI_STORE": str(database),
+                environment.update({"SANDHI_AUTH_MODE": "tokens", "SANDHI_BIND": f"127.0.0.1:{proxy_port}", "SANDHI_STORE": str(database),
                     "SANDHI_GEMINI_KEY": UPSTREAM_KEY, "SANDHI_GEMINI_BASE": mock_url,
                     "SANDHI_ADMIN_TOKEN": ADMIN, "SANDHI_LOG": "error",
                     "SANDHI_SHUTDOWN_GRACE_SECS": "3", "SANDHI_SHUTDOWN_QUIESCE_MS": "0",

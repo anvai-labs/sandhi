@@ -43,6 +43,9 @@ fn main() {
         .expect("create proxy runtime");
     let shutdown = Arc::new(ShutdownWatchdog::new());
     let status = runtime.block_on(run(Arc::clone(&shutdown)));
+    // Configuration failures can return before a listener arms shutdown. Give runtime
+    // cleanup a bounded deadline too; arm() never extends an existing shutdown deadline.
+    shutdown.arm(Instant::now() + DEFAULT_SHUTDOWN_GRACE);
     runtime.shutdown_timeout(shutdown.remaining());
     if status == 124 || !shutdown.complete() {
         std::process::exit(124);
@@ -68,6 +71,31 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
         // anything a caller might pipe, and operators expect logs on fd 2.
         .with_writer(std::io::stderr)
         .init();
+
+    // SSO is the standalone default. Compatibility is deliberate and never a recovery path.
+    let oidc = match std::env::var("SANDHI_AUTH_MODE")
+        .unwrap_or_else(|_| "oidc".into())
+        .as_str()
+    {
+        "oidc" => {
+            let Some(path) = std::env::var_os("SANDHI_OIDC_CONFIG") else {
+                eprintln!("sandhi-proxy: OIDC mode requires SANDHI_OIDC_CONFIG; select SANDHI_AUTH_MODE=tokens explicitly for compatibility");
+                return 1;
+            };
+            match sandhi_proxy::auth::Oidc::from_file(std::path::Path::new(&path)).await {
+                Ok(oidc) => Some(Arc::new(oidc)),
+                Err(error) => {
+                    eprintln!("sandhi-proxy: OIDC configuration error: {error}");
+                    return 1;
+                }
+            }
+        }
+        "tokens" => None,
+        _ => {
+            eprintln!("sandhi-proxy: SANDHI_AUTH_MODE must be oidc or tokens");
+            return 1;
+        }
+    };
 
     // The shipped enforcement ledger and request limiter are deliberately single-node. Refuse a
     // declared multi-replica topology rather than silently multiplying rate limits or allowing
@@ -300,6 +328,7 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
     state.alert_writer = buffered_alert_store.clone();
     state.alerts = alerts;
     state.admin_token = admin_token;
+    state.oidc = oidc;
     state.public_url = public_url;
     // ADR-0004 D4: dashboard read endpoints follow the admin token unless explicitly re-opened.
     state.dashboard_public = std::env::var("SANDHI_DASHBOARD_PUBLIC").as_deref() == Ok("1");
@@ -354,7 +383,11 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
     // usage aggregates, masked vkey metadata) stay open. That is the documented single-node dev
     // trust posture, but it must not be silent when a real store is configured — surface it loudly
     // rather than fail-closed (which would break every dev who sets SANDHI_STORE without a token).
-    if state.store.is_some() && state.admin_token.is_none() && !state.dashboard_public {
+    if state.oidc.is_none()
+        && state.store.is_some()
+        && state.admin_token.is_none()
+        && !state.dashboard_public
+    {
         eprintln!(
             "sandhi-proxy: WARNING: SANDHI_STORE is set without SANDHI_ADMIN_TOKEN — the \
              /dashboard/api/* read endpoints (subject/group usage, masked vkey metadata) are open \

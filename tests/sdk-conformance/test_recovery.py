@@ -69,7 +69,7 @@ def recovery_gateway(proxy_binary, gated_provider, tmp_path):
         env = {key: value for key, value in os.environ.items()
                if not key.startswith(("SANDHI_", "SENTINELPASS_"))}
         env.update({
-            "SANDHI_BIND": f"127.0.0.1:{_free_port()}",
+            "SANDHI_AUTH_MODE": "tokens", "SANDHI_BIND": f"127.0.0.1:{_free_port()}",
             "SANDHI_STORE": str(database), "SANDHI_LEDGER_SHARDS": str(shards),
             "SANDHI_CONFIG": str(config), "SANDHI_ADMIN_TOKEN": "recovery-test-admin",
             "SANDHI_SHUTDOWN_GRACE_SECS": "3", "SANDHI_SHUTDOWN_QUIESCE_MS": "100",

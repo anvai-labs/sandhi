@@ -14,7 +14,7 @@ import time
 import httpx
 import pytest
 
-from conftest import REAL_OPENAI_KEY, VK_OPENAI, _free_port
+from conftest import REAL_OPENAI_KEY, VK_OPENAI, REPO_ROOT, _free_port
 from test_shutdown import BODY, gated_provider  # noqa: F401 - synthetic provider fixture
 
 
@@ -26,13 +26,71 @@ def store_startup_binary(proxy_binary, tmp_path_factory):
     return executable
 
 
+@pytest.mark.parametrize("mode,config", [(None, None), ("oidc", None),
+                                         (None, "missing"), (None, "invalid"), ("typo", None)])
+def test_authentication_startup_is_explicit_and_fails_before_state_changes(store_startup_binary, tmp_path, mode, config):
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("SANDHI_", "SENTINELPASS_"))}
+    bind = f"127.0.0.1:{_free_port()}"
+    database = tmp_path / "must-not-open.db"
+    env.update(SANDHI_BIND=bind, SANDHI_STORE=str(database))
+    if mode is not None:
+        env["SANDHI_AUTH_MODE"] = mode
+    if config:
+        path = tmp_path / "oidc.json"
+        if config == "invalid":
+            path.write_text("{not valid JSON")
+        env["SANDHI_OIDC_CONFIG"] = str(path)
+    result = subprocess.run([str(store_startup_binary)], env=env, cwd=tmp_path,
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 1, result.stderr
+    assert "OIDC" in result.stderr or "SANDHI_AUTH_MODE" in result.stderr
+    assert not database.exists()
+    with httpx.Client(timeout=1) as client, pytest.raises(httpx.TransportError):
+        client.get("http://" + bind + "/readyz")
+
+
+@pytest.mark.parametrize("flag", ["--help", "--version"])
+def test_informational_flags_precede_authentication_configuration(store_startup_binary, tmp_path, flag):
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("SANDHI_", "SENTINELPASS_"))}
+    env.update(SANDHI_AUTH_MODE="invalid", SANDHI_OIDC_CONFIG=str(tmp_path / "missing.json"),
+               SANDHI_BIND="not-an-address")
+    result = subprocess.run([str(store_startup_binary), flag], env=env,
+                            capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    assert "sandhi" in result.stdout.lower()
+
+
+@pytest.mark.parametrize("mode", [None, "oidc"])
+def test_legacy_quickstart_requires_explicit_token_profile(tmp_path, mode):
+    # No build/provider action may precede the compatibility decision.
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    script = scripts / "quickstart.sh"
+    shutil.copy2(REPO_ROOT / "scripts/quickstart.sh", script)
+    binaries = tmp_path / "target/release"
+    binaries.mkdir(parents=True)
+    for name in ("sandhi", "sandhi-proxy"):
+        binary = binaries / name
+        binary.write_text("#!/bin/sh\nexit 99\n")
+        binary.chmod(0o700)
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("SANDHI_", "SENTINELPASS_"))}
+    state = tmp_path / "private-state"
+    env["SANDHI_HOME"] = str(state)
+    if mode is not None:
+        env["SANDHI_AUTH_MODE"] = mode
+    result = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True, timeout=15)
+    assert result.returncode == 1
+    assert "SANDHI_AUTH_MODE=tokens" in result.stdout + result.stderr
+    assert not state.exists()
+
+
 @pytest.fixture
 def store_process(store_startup_binary, gated_provider, tmp_path):
     @contextmanager
     def launch(store=None, *, shards=1):
         env = {key: value for key, value in os.environ.items()
                if not key.startswith(("SANDHI_", "SENTINELPASS_"))}
-        env.update(SANDHI_BIND=f"127.0.0.1:{_free_port()}",
+        env.update(SANDHI_AUTH_MODE="tokens", SANDHI_BIND=f"127.0.0.1:{_free_port()}",
                    SANDHI_ADMIN_TOKEN="store-startup-admin",
                    SANDHI_VAULT_BACKEND="store-fixture-unavailable",
                    SANDHI_OPENAI_KEY=REAL_OPENAI_KEY, SANDHI_OPENAI_BASE=gated_provider.base,

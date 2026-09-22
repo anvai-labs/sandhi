@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Opinionated, minimal-resource launch for a single-node Sandhi proxy.
 #
-# Zero-arg usage: ./scripts/quickstart.sh
+# Explicit local token compatibility: SANDHI_AUTH_MODE=tokens ./scripts/quickstart.sh
 #   - builds the release binaries if missing (smaller/faster than debug)
 #   - sets up persistent state under ~/.sandhi (admin token, SQLite usage store)
 #   - starts sandhi-proxy in the background if not already running
@@ -68,6 +68,15 @@ if [ "$cmd" = "status" ]; then
     log "not running"
   fi
   exit 0
+fi
+
+if [ "$cmd" != "start" ]; then
+  log "usage: $0 [start|status|stop]"; exit 1
+fi
+if [ "${SANDHI_AUTH_MODE:-oidc}" != "tokens" ]; then
+  log "This local bootstrap requires explicit SANDHI_AUTH_MODE=tokens."
+  log "For default SSO deployment, configure SANDHI_OIDC_CONFIG and follow docs/operator/oidc-sso.md."
+  exit 1
 fi
 
 mkdir -p "$SANDHI_HOME"

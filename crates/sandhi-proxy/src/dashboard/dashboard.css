@@ -110,3 +110,5 @@
     .token-box input { width: 12rem; max-width: 100%; }
     .token-box { width: 100%; }
   }
+
+[hidden] { display: none !important; }

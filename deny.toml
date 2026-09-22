@@ -14,4 +14,6 @@ yanked = "deny"
 unmaintained = "none"
 # Escape hatch: add RUSTSEC-IDs or `yanked@<crate-version>` here when an advisory is a deliberate
 # accept (e.g. no patched release yet). Empty = no blanket ignores.
-ignore = []
+# Public-key verification only; no production private RSA operation. The paired
+# CI drift/expiry gate is mandatory; see docs/security/oidc-rsa-advisory.md.
+ignore = ["RUSTSEC-2023-0071"]

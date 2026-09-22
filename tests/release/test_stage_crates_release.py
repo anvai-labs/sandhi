@@ -212,6 +212,10 @@ def test_binding_and_lock_drift_is_detected_and_sync_preserves_external_versions
     path = tmp_path / relative
     raw = path.read_text()
     old = f'"version": "{version}"' if relative.endswith('.json') else f'version = "{version}"'
+    if relative.endswith('Cargo.lock'):
+        # Third-party packages can legitimately share our version. Corrupt the
+        # named first-party package, not whichever version happens to come first.
+        old = f'name = "sandhi-core"\nversion = "{version}"'
     assert old in raw
     path.write_text(raw.replace(old, old.replace(version, "9.9.9"), 1))
     before = snapshot(tmp_path)
