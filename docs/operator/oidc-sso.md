@@ -90,6 +90,62 @@ Roles are deployment-wide, not tenant isolation. A successful login grants no im
 role. Subject bindings are server configuration and require restart; IdP groups control
 client admission but are not automatically synchronized to Sandhi roles.
 
+### Onboard a human dashboard user
+
+Two independent permissions are required: the identity provider must admit the account
+to the Sandhi application, and Sandhi must bind its verified subject to a role. A working
+administrator test login does not establish access for another account.
+
+1. Add the account to a group mapped to the Sandhi client's `openid` and `profile`
+   scopes. For the setup above, use `kanidm group add-members sandhi_users YOUR_ACCOUNT`.
+   An existing deployment may use separate groups such as `sandhi_viewers`; use its
+   actual client scope mapping rather than creating another group or changing another
+   application's registration. Group names do not grant Sandhi roles automatically.
+2. Obtain the account's UUID with `kanidm person get YOUR_ACCOUNT -o json`. Verify that
+   it is the intended account under the configured issuer. Do not use a username,
+   email address, group name or an unverified token payload as the subject binding.
+3. Back up the private file referenced by `SANDHI_OIDC_CONFIG`, then add an entry to its
+   existing `subjects` object. Preserve the issuer, client, callback, CA, existing
+   administrators and agent grants. For read-only dashboard access, the entry is:
+
+   ```json
+   "VERIFIED_PERSON_UUID": {"role": "viewer"}
+   ```
+
+   This is a JSON object entry, not a replacement configuration file. Choose
+   `"operator"` for budget/alert management or `"admin"` for full gateway administration.
+   These choices use the role table above; none implicitly grants model inference.
+   Keep both the configuration and its backup private, for example mode `0600`.
+4. Restart the gateway instance that reads that file, using the deployment's service
+   manager. Verify its binary/version and readiness. A restart invalidates existing
+   Sandhi browser sessions; preserve the usage database, vault and rollback files.
+5. Start a new login from `/dashboard`. Verify the displayed role and an authorized
+   read. A viewer must still be denied budget changes, credentials and configuration.
+   Confirm the intended human account, not only a separate test administrator.
+
+### Change roles and recover access
+
+In 0.9.1, role and inference-grant changes require deployment configuration access and
+a restart. There is **no dashboard role editor or administrative API for OIDC subject
+bindings**. The admin role's configuration permission does not rewrite
+`SANDHI_OIDC_CONFIG`. Use the same subject entry to change `viewer`, `operator` or `admin`;
+do not add a second identity registry, share the administrator's password, or switch to
+token mode to bypass a failed login. Keep an authorized deployment recovery path and
+the prior private configuration before changing the account used to administer Sandhi.
+
+An IdP page saying **Access Denied** with an operation ID can occur after successful
+authentication but before the callback. Have an authorized IdP administrator correlate
+that ID with server audit logs. A requested-scope denial with no available scopes means
+the account needs the Sandhi application's mapped access group. Do not widen global
+scopes or disable TLS verification. After correcting membership, start a fresh login
+from the dashboard instead of replaying the old authorization URL.
+
+If the callback reaches Sandhi but access is denied, check the verified issuer/subject
+binding and required permission. A viewer's denial on an administrative operation is
+expected. If startup/readiness fails, investigate that separately; a longer browser
+timeout or a different role does not repair an unavailable gateway. Never put passwords,
+access tokens, browser cookies or complete authorization URLs in support reports.
+
 For automated accounting, explicitly give a dedicated subject `"role": "viewer"`
 and `"allow_diagnostics": true`. This adds only the bounded read-only C4
 `POST /admin/usage/diagnostics` permission; it grants no budget writes, credential
