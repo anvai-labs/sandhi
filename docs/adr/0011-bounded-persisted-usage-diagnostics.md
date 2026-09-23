@@ -1,4 +1,4 @@
-# ADR-0011: Bounded, admin-only persisted usage diagnostics
+# ADR-0011: Bounded, explicitly authorized persisted usage diagnostics
 
 Date: 2026-09-18
 
@@ -16,10 +16,25 @@ Add `POST /admin/usage/diagnostics` with exactly one tagged selector:
 {"selector":{"kind":"request","value":"example-id"},"limit":100}
 ```
 
-Kinds are `request`, `session`, or `run`. Authenticate with the existing admin gate before
-decoding or querying; virtual keys and correlation IDs are not authorization. The optional
+Kinds are `request`, `session`, or `run`. Authorize before decoding or querying;
+virtual keys and correlation IDs are not authorization. The existing admin gate
+remains required in token compatibility mode. OIDC administrators retain access;
+other subjects require the explicit `allow_diagnostics` permission described below. The optional
 public-dashboard setting must never open this endpoint. Every response is `no-store`.
 POST keeps identifiers out of URL query strings; this endpoint performs no mutation.
+
+### OIDC permission amendment (post-0.8.0)
+
+Actual-member accounting needs C4 without granting a harness authority to change
+credentials, configuration or budgets. Add `allow_diagnostics: false` to the
+strict OIDC subject binding, with explicit true granting only `Permission::Diagnostics`.
+Viewer/operator roles do not imply it. A dedicated viewer plus this permission can
+read dashboard totals, run trees and bounded diagnostics without any writes or
+inference grants. No fourth role or second authorization dispatcher is introduced.
+This remains deployment-wide diagnostic access, not tenant/run isolation. Cookie
+Origin/CSRF enforcement, OAuth introspection on every request, fail-fast admission,
+body/query/response bounds and no-store responses remain unchanged. The original
+0.8.0 release retains the admin-only contract and rejects this new config field.
 
 Hard limits: 4 KiB request body; selector 1–256 UTF-8 bytes, rejecting controls and
 whitespace-only values; default 100, maximum 500 rows; final serialized JSON at most

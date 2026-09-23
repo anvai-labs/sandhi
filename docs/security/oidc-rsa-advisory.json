@@ -4,7 +4,7 @@
   "reviewed_on": "2026-09-22",
   "expires_on": "2026-10-22",
   "adapter": "crates/sandhi-proxy/src/auth.rs",
-  "adapter_sha256": "aea54d9df53286e5b86e1e64408b145b48e8e65f57009ab2c30ac4846626a551",
+  "adapter_sha256": "a2470fac63d156414a76421da8d4a6a5fe0f0eab70e556feb2e638a68070abe7",
   "packages": {
     "openidconnect": {
       "version": "4.0.1",

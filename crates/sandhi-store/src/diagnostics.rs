@@ -218,7 +218,7 @@ fn project(row: &Row<'_>) -> rusqlite::Result<Value> {
 }
 
 impl SqliteStore {
-    /// Bounded diagnostic rows; caller must perform admin authentication and fail-fast admission.
+    /// Bounded rows; caller must authorize diagnostics and perform fail-fast admission.
     pub fn diagnostics(&self, query: &DiagnosticQuery) -> rusqlite::Result<DiagnosticResponse> {
         query
             .validate()

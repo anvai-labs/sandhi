@@ -6,6 +6,8 @@ fn config() -> Config {
         "issuer": "https://sso.example.test/oauth2/openid/sandhi",
         "client_id": "sandhi", "redirect_url": "https://gateway.example.test/auth/callback",
         "subjects": {"viewer-id": {"role":"viewer"}, "operator-id": {"role":"operator"},
+            "accounting-id": {"role":"viewer", "allow_diagnostics":true},
+            "diagnostics-id": {"allow_diagnostics":true},
             "admin-id": {"role":"admin"}, "agent-id": {"grants": {"local": {
                 "upstream": "inferflux:local", "models": ["qwen3-coder-30b"], "group": "team-a"
             }}}}
@@ -43,25 +45,37 @@ fn configuration_rejects_ambiguous_or_insecure_authority() {
     let mut data = serde_json::to_value(&c).unwrap();
     data["allow_insecure"] = json!(true);
     assert!(serde_json::from_value::<Config>(data).is_err());
+    let mut data = serde_json::to_value(&c).unwrap();
+    data["subjects"]["accounting-id"]["allow_diagnostics"] = json!("true");
+    assert!(serde_json::from_value::<Config>(data).is_err());
 }
 
 #[test]
 fn roles_are_explicit_and_inference_does_not_imply_operator_access() {
     let c = config();
     for (subject, expected) in [
-        ("viewer-id", vec![true, false, false]),
-        ("operator-id", vec![true, true, false]),
-        ("admin-id", vec![true, true, true]),
-        ("agent-id", vec![false, false, false]),
-        ("unknown", vec![false, false, false]),
+        ("viewer-id", vec![true, false, false, false]),
+        ("operator-id", vec![true, true, false, false]),
+        ("admin-id", vec![true, true, true, true]),
+        ("accounting-id", vec![true, false, false, true]),
+        ("diagnostics-id", vec![false, false, false, true]),
+        ("agent-id", vec![false, false, false, false]),
+        ("unknown", vec![false, false, false, false]),
     ] {
-        let actual: Vec<_> = [Permission::Read, Permission::Operate, Permission::Admin]
-            .into_iter()
-            .map(|p| c.permits(subject, p))
-            .collect();
+        let actual: Vec<_> = [
+            Permission::Read,
+            Permission::Operate,
+            Permission::Admin,
+            Permission::Diagnostics,
+        ]
+        .into_iter()
+        .map(|p| c.permits(subject, p))
+        .collect();
         assert_eq!(actual, expected, "{subject}");
     }
     assert!(c.grant("viewer-id", None).is_none());
+    assert!(c.grant("accounting-id", None).is_none());
+    assert!(c.grant("diagnostics-id", None).is_none());
     let first = c.grant("agent-id", None).unwrap();
     assert_eq!(first, c.grant("agent-id", None).unwrap());
     assert!(first.permits_attribution(Some("agent-id"), Some("team-a")));
@@ -125,6 +139,7 @@ async fn dashboard_roles_and_csrf_are_enforced_at_real_handlers() {
     use tower::ServiceExt;
     for (subject, expected_write) in [
         ("viewer-id", StatusCode::FORBIDDEN),
+        ("accounting-id", StatusCode::FORBIDDEN),
         ("operator-id", StatusCode::OK),
         ("admin-id", StatusCode::OK),
     ] {
@@ -139,6 +154,7 @@ async fn dashboard_roles_and_csrf_are_enforced_at_real_handlers() {
         );
         let app = crate::build_app(app_state(oidc));
         for (method, path, body, csrf, expected) in [
+            ("GET", "/auth/session", "", false, StatusCode::OK),
             ("GET", "/dashboard/api/usage", "", false, StatusCode::OK),
             (
                 "GET",
@@ -147,6 +163,24 @@ async fn dashboard_roles_and_csrf_are_enforced_at_real_handlers() {
                 false,
                 if subject == "admin-id" {
                     StatusCode::NOT_FOUND
+                } else {
+                    StatusCode::FORBIDDEN
+                },
+            ),
+            (
+                "POST",
+                "/admin/usage/diagnostics",
+                r#"{"selector":{"kind":"run","value":"run-test"}}"#,
+                false,
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                "POST",
+                "/admin/usage/diagnostics",
+                r#"{"selector":{"kind":"run","value":"run-test"}}"#,
+                true,
+                if matches!(subject, "admin-id" | "accounting-id") {
+                    StatusCode::OK
                 } else {
                     StatusCode::FORBIDDEN
                 },
@@ -182,6 +216,20 @@ async fn dashboard_roles_and_csrf_are_enforced_at_real_handlers() {
                 .await
                 .unwrap();
             assert_eq!(response.status(), expected, "{subject} {path} csrf={csrf}");
+            if path == "/auth/session" {
+                let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                    .await
+                    .unwrap();
+                let session: Value = serde_json::from_slice(&bytes).unwrap();
+                let expected_permissions = match subject {
+                    "viewer-id" => json!(["read"]),
+                    "accounting-id" => json!(["read", "diagnostics"]),
+                    "operator-id" => json!(["read", "operate"]),
+                    "admin-id" => json!(["read", "operate", "admin"]),
+                    _ => unreachable!(),
+                };
+                assert_eq!(session["permissions"], expected_permissions);
+            }
         }
     }
 }
@@ -839,6 +887,78 @@ async fn introspection_requires_access_token_identity_and_explicit_grant() {
             .unwrap_err()
             .status(),
         StatusCode::SERVICE_UNAVAILABLE
+    );
+}
+
+#[tokio::test]
+async fn diagnostics_access_token_cannot_write_or_infer_and_revocation_is_checked() {
+    use tower::ServiceExt;
+    let authority = Authority::start().await;
+    let state = app_state(Oidc::new(authority.config.clone()).await.unwrap());
+    let mut token = json!({"active":true,"iss":authority.config.issuer,"aud":"sandhi","sub":"accounting-id","exp":unix_now()+60,"token_type":"Bearer"});
+    authority
+        .state
+        .lock()
+        .unwrap()
+        .tokens
+        .insert("accounting-access".into(), token.clone());
+    let app = crate::build_app(state.clone());
+    for (path, body, expected) in [
+        (
+            "/admin/usage/diagnostics",
+            r#"{"selector":{"kind":"run","value":"test-run"}}"#,
+            StatusCode::OK,
+        ),
+        (
+            "/admin/budget",
+            r#"{"scope":"user:test","limit_tokens":100}"#,
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "/admin/keys",
+            r#"{"provider":"openai","secret":"test-only"}"#,
+            StatusCode::FORBIDDEN,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("authorization", "Bearer accounting-access")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected, "{path}");
+        assert_eq!(response.headers()["cache-control"], "no-store");
+    }
+    let oidc = state.oidc.as_ref().unwrap();
+    assert_eq!(
+        oidc.inference("accounting-access", &HeaderMap::new())
+            .await
+            .unwrap_err()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    token["active"] = json!(false);
+    authority
+        .state
+        .lock()
+        .unwrap()
+        .tokens
+        .insert("accounting-access".into(), token);
+    let mut headers = HeaderMap::new();
+    headers.insert("authorization", "Bearer accounting-access".parse().unwrap());
+    assert_eq!(
+        oidc.authorize(&headers, Permission::Diagnostics, true)
+            .await
+            .unwrap_err()
+            .status(),
+        StatusCode::UNAUTHORIZED
     );
 }
 
