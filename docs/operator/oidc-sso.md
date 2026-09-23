@@ -96,14 +96,16 @@ Two independent permissions are required: the identity provider must admit the a
 to the Sandhi application, and Sandhi must bind its verified subject to a role. A working
 administrator test login does not establish access for another account.
 
-1. Add the account to a group mapped to the Sandhi client's `openid` and `profile`
+1. Obtain the account's UUID with `kanidm person get YOUR_ACCOUNT -o json`. Verify that
+   it is the intended account under the configured issuer before granting access.
+   Do not use a username, email address, group name or an unverified token payload
+   as the subject binding.
+2. Add the account to a group mapped to the Sandhi client's `openid` and `profile`
    scopes. For the setup above, use `kanidm group add-members sandhi_users YOUR_ACCOUNT`.
    An existing deployment may use separate groups such as `sandhi_viewers`; use its
    actual client scope mapping rather than creating another group or changing another
    application's registration. Group names do not grant Sandhi roles automatically.
-2. Obtain the account's UUID with `kanidm person get YOUR_ACCOUNT -o json`. Verify that
-   it is the intended account under the configured issuer. Do not use a username,
-   email address, group name or an unverified token payload as the subject binding.
+   Read back the membership and confirm the account UUID still matches.
 3. Back up the private file referenced by `SANDHI_OIDC_CONFIG`, then add an entry to its
    existing `subjects` object. Preserve the issuer, client, callback, CA, existing
    administrators and agent grants. For read-only dashboard access, the entry is:
