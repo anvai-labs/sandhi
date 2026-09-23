@@ -1533,18 +1533,33 @@ pub(crate) async fn config_preview(
             json!({ "upstream": v.upstream, "subject": v.subject, "group": v.group, "action": action })
         })
         .collect();
-    Json(json!({
+    let mut payload = json!({
         "path": state.config_path.as_ref().map(|p| p.display().to_string()),
         "providers": providers_plan,
         "budgets": budgets_plan,
         "alerts": alerts_plan,
         "vkeys": vkeys_plan,
-        // Listener TLS is the one startup-only section (see `config` module docs): desired-state
+        // Listener TLS is a startup-only section (see `config` module docs): desired-state
         // apply cannot activate it, so it is reported as `restart required` — never silently
         // ignored. Live replacement is TD-0017 P2.
         "tls": if cfg.tls.is_some() { "restart required" } else { "not configured" },
-    }))
-    .into_response()
+    });
+    add_deadline_status(&mut payload, &state, &cfg);
+    Json(payload).into_response()
+}
+
+fn add_deadline_status(
+    payload: &mut Value,
+    state: &ProxyState,
+    cfg: &crate::config::SandhiFileConfig,
+) {
+    if state.buffered_deadlines.is_some() || cfg.buffered_deadlines.is_some() {
+        payload["buffered_deadlines"] = json!({
+            "activation": "restart required",
+            "active": state.buffered_deadlines.as_ref().map(|policy| policy.report()),
+            "desired": cfg.buffered_deadlines.as_ref().map(|policy| policy.report()),
+        });
+    }
 }
 
 /// `POST /admin/config/apply` — additive-only: creates/updates everything declared, never
@@ -1737,6 +1752,7 @@ pub(crate) async fn config_apply(
         // listener TLS activates only at process bootstrap (TD-0017 P1), never mid-flight.
         "tls": if cfg.tls.is_some() { "restart required" } else { "not configured" },
     });
+    add_deadline_status(&mut payload, &state, &cfg);
     if !complete {
         payload["error"] = json!("config apply incomplete; committed items were not rolled back; inspect results before retrying");
     }

@@ -25,7 +25,7 @@ use sandhi_store::{ReserveOutcome, ShardedLedger};
 /// Lease TTL. Must exceed the longest legitimate call (a slow stream can run minutes) so a lease is
 /// only reclaimed well after the request could still be settling (ADR-0005 D2). The proxy settles
 /// every request — including `Partial`-on-disconnect — via the `Drop` finalizer long before this.
-const RESERVATION_TTL_SECS: i64 = 900; // 15 minutes
+pub(crate) const RESERVATION_TTL_SECS: i64 = 900; // 15 minutes
 
 /// Outcome of admitting one call against the ledger (ADR-0005 D1/D6).
 pub enum Admission {
