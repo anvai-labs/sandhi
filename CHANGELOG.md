@@ -23,6 +23,9 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ### Fixed
 
+- A cancelled older dashboard session check no longer clears a newly submitted
+  token. Failures of the current session check still clear protected data. Browser
+  regressions now identify the held authenticated request before clearing a token.
 - Raw streaming requests now collect non-success response bodies within the original
   setup deadline. An upstream that sends error headers and then stalls can no longer
   evade the setup and idle guards. Timeout observations retain the received status
