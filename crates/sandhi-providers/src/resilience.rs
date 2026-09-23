@@ -184,7 +184,25 @@ async fn bounded<T>(
     attempt_context: Option<&AttemptContext>,
     fut: impl std::future::Future<Output = Result<T, ProviderError>>,
 ) -> Result<T, ProviderError> {
-    match select(Box::pin(fut), Box::pin(tokio::time::sleep(bound))).await {
+    bounded_until(
+        bound,
+        tokio::time::Instant::now() + bound,
+        attempt_context,
+        fut,
+    )
+    .await
+}
+
+async fn bounded_until<T>(
+    bound: Duration,
+    deadline: tokio::time::Instant,
+    attempt_context: Option<&AttemptContext>,
+    fut: impl Future<Output = Result<T, ProviderError>>,
+) -> Result<T, ProviderError> {
+    if deadline <= tokio::time::Instant::now() {
+        return Err(ProviderError::Timeout(bound));
+    }
+    match select(Box::pin(fut), Box::pin(tokio::time::sleep_until(deadline))).await {
         Either::Left((result, _timeout)) => result,
         Either::Right(((), in_flight)) => {
             // Mark before the in-flight adapter future is dropped so its transport guard emits
@@ -285,6 +303,7 @@ impl Provider for ResilientProvider {
     }
 
     async fn complete(&self, req: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        let deadline = crate::BufferedDeadline::current();
         if !self.breaker.allow() {
             return Err(ProviderError::CircuitOpen);
         }
@@ -294,8 +313,11 @@ impl Provider for ResilientProvider {
             attempt_req.attempt_context =
                 req.attempt_context.as_ref().map(AttemptContext::fresh_call);
             let attempt_context = attempt_req.attempt_context.clone();
-            match bounded(
-                self.timeouts.complete,
+            let bound =
+                deadline.unwrap_or_else(|| crate::BufferedDeadline::new(self.timeouts.complete));
+            match bounded_until(
+                bound.timeout,
+                bound.at,
                 attempt_context.as_ref(),
                 self.inner.complete(attempt_req),
             )
@@ -309,7 +331,15 @@ impl Provider for ResilientProvider {
                 Err(e) => {
                     if is_retryable(&e) && attempt < self.retry.max_retries {
                         attempt += 1;
-                        sleep(backoff(self.retry.base_backoff, attempt)).await;
+                        let wait = sleep(backoff(self.retry.base_backoff, attempt));
+                        if let Some(deadline) = deadline {
+                            if tokio::time::timeout_at(deadline.at, wait).await.is_err() {
+                                self.breaker.record_failure();
+                                return Err(ProviderError::Timeout(deadline.timeout));
+                            }
+                        } else {
+                            wait.await;
+                        }
                         continue;
                     }
                     self.breaker.record_failure();
@@ -567,6 +597,49 @@ mod tests {
         let out = p.complete(req()).await;
         assert!(matches!(out, Err(ProviderError::Timeout(_))));
         assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn buffered_deadline_replaces_inner_default_without_reset_or_replay() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let counter = calls.clone();
+        let provider =
+            ResilientProvider::new(Arc::new(crate::FnProvider::new("slow", move |_| {
+                counter.fetch_add(1, Ordering::Relaxed);
+                async {
+                    sleep(Duration::from_secs(121)).await;
+                    Ok(ok_resp())
+                }
+            })));
+        assert!(provider.complete(req()).await.is_err()); // default 120
+        assert!(crate::BufferedDeadline::new(Duration::from_secs(130))
+            .scope(provider.complete(req()))
+            .await
+            .is_ok());
+        let deadline = crate::BufferedDeadline::new(Duration::from_secs(130));
+        sleep(Duration::from_secs(20)).await;
+        assert!(deadline.scope(provider.complete(req())).await.is_err()); // only 110 left
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
+        let expired = crate::BufferedDeadline::new(Duration::from_secs(1));
+        sleep(Duration::from_secs(2)).await;
+        assert!(expired.scope(provider.complete(req())).await.is_err());
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            3,
+            "expired dispatch must never poll the provider"
+        );
+        let flaky = Flaky::new(vec![Err(ProviderError::RateLimited), Ok(ok_resp())]);
+        let retrying = ResilientProvider::new(flaky.clone()).with_retry(1, Duration::from_secs(30));
+        let start = tokio::time::Instant::now();
+        assert!(crate::BufferedDeadline::new(Duration::from_secs(1))
+            .scope(retrying.complete(req()))
+            .await
+            .is_err());
+        assert_eq!(flaky.calls(), 1);
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "backoff must not outlive the absolute deadline"
+        );
     }
 
     #[tokio::test]

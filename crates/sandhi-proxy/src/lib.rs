@@ -11,6 +11,7 @@ pub const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub mod auth;
 mod codec;
 pub mod config;
+pub mod deadlines;
 pub mod ledger;
 pub mod lifecycle;
 pub mod metrics;
@@ -218,6 +219,8 @@ pub fn plaintext_bind_warning(addr: SocketAddr, tls_enabled: bool) -> Option<&'s
 /// Shared server state: the virtual-key store, the budget ledger, the usage sink, and the
 /// registry of configured upstream providers (each already holding its real credential).
 pub struct ProxyState {
+    /// Validated startup-only buffered transport policy; absent preserves transport defaults.
+    pub buffered_deadlines: Option<deadlines::BufferedDeadlines>,
     /// One-shot lifecycle; dispatch authorization stops atomically at shutdown cutoff.
     pub lifecycle: Arc<lifecycle::Lifecycle>,
     /// Same-port probe window, included in the total grace and clamped to leave drain time.
@@ -329,6 +332,7 @@ impl ProxyState {
     ) -> Self {
         Self {
             lifecycle: Arc::new(lifecycle::Lifecycle::new()),
+            buffered_deadlines: None,
             shutdown_quiesce: Duration::from_secs(1),
             keys,
             ledger: Mutex::new(ledger),
@@ -2257,6 +2261,22 @@ async fn handle(
         );
     }
 
+    let buffered_deadline = if wants_stream {
+        None
+    } else {
+        state
+            .buffered_deadlines
+            .as_ref()
+            .map(|policy| policy.resolve(&vk.upstream_ref, &request.model))
+    };
+    if buffered_deadline.is_some() && provider.raw_forwarder().is_none() {
+        return ingress_error(
+            dialect,
+            StatusCode::BAD_GATEWAY,
+            "configured buffered deadlines require a built-in transport",
+        );
+    }
+
     // 5. Reserve an estimated liability (input bytes/4 + effective output maximum).
     //    Block rejects reservations exceeding the cap, but the input heuristic is NOT a proven
     //    token bound. Actual usage, including concurrent calls and separate reasoning, may exceed
@@ -2320,6 +2340,21 @@ async fn handle(
     let Some(mut pending) = reserve_budget(&state, &scope, ceiling, policy).await else {
         return draining_error(dialect);
     };
+    // Refusal still belongs to pending admission: drop rolls back the lease without
+    // fabricating usage for an upstream call that never happened.
+    let dispatch_deadline = buffered_deadline
+        .map(|effective| sandhi_providers::BufferedDeadline::new(effective.duration()));
+    if let (Some(deadline), Some(Admission::Leased(lease))) =
+        (buffered_deadline, pending.admission.as_ref())
+    {
+        if !deadline.fits_lease(lease.expires_at, time::OffsetDateTime::now_utc()) {
+            return ingress_error(
+                dialect,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "insufficient reservation lifetime for configured buffered deadline",
+            );
+        }
+    }
     // Final dispatch authorization shares the cutoff lock. A pending reservation owns its
     // rollback until this point, including if the blocking result outlives its HTTP caller.
     let Some(operation) = state.lifecycle.try_operation() else {
@@ -2406,55 +2441,61 @@ async fn handle(
         "plane selected"
     );
     let full_error_detail = state.error_detail_full;
-    match (transparent, wants_stream) {
-        (true, true) => {
-            transparent_stream_response(
-                provider,
-                body,
-                request.metadata.session_id.clone(),
-                dialect,
-                accounting,
-                full_error_detail,
-                gemini_route,
-                permit,
-            )
-            .await
+    let dispatch = async move {
+        match (transparent, wants_stream) {
+            (true, true) => {
+                transparent_stream_response(
+                    provider,
+                    body,
+                    request.metadata.session_id.clone(),
+                    dialect,
+                    accounting,
+                    full_error_detail,
+                    gemini_route,
+                    permit,
+                )
+                .await
+            }
+            (true, false) => {
+                transparent_complete_response(
+                    provider,
+                    body,
+                    request.metadata.session_id.clone(),
+                    dialect,
+                    accounting,
+                    full_error_detail,
+                    gemini_route,
+                    permit,
+                )
+                .await
+            }
+            (false, true) => {
+                stream_response(
+                    provider,
+                    request,
+                    dialect,
+                    accounting,
+                    full_error_detail,
+                    permit,
+                )
+                .await
+            }
+            (false, false) => {
+                complete_response(
+                    provider,
+                    request,
+                    dialect,
+                    accounting,
+                    full_error_detail,
+                    permit,
+                )
+                .await
+            }
         }
-        (true, false) => {
-            transparent_complete_response(
-                provider,
-                body,
-                request.metadata.session_id.clone(),
-                dialect,
-                accounting,
-                full_error_detail,
-                gemini_route,
-                permit,
-            )
-            .await
-        }
-        (false, true) => {
-            stream_response(
-                provider,
-                request,
-                dialect,
-                accounting,
-                full_error_detail,
-                permit,
-            )
-            .await
-        }
-        (false, false) => {
-            complete_response(
-                provider,
-                request,
-                dialect,
-                accounting,
-                full_error_detail,
-                permit,
-            )
-            .await
-        }
+    };
+    match dispatch_deadline {
+        Some(deadline) => deadline.scope(dispatch).await,
+        None => dispatch.await,
     }
 }
 

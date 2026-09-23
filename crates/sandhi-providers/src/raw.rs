@@ -235,7 +235,12 @@ impl RawForwarder {
     ) -> Result<RawResponse, ProviderError> {
         let url = self.url(path);
         let out_body = normalize_envelope(self.family, &body, false);
-        match tokio::time::timeout(self.complete_timeout, async {
+        let deadline = crate::BufferedDeadline::current()
+            .unwrap_or_else(|| crate::BufferedDeadline::new(self.complete_timeout));
+        if deadline.at <= tokio::time::Instant::now() {
+            return Err(ProviderError::Timeout(deadline.timeout));
+        }
+        match tokio::time::timeout_at(deadline.at, async {
             let resp = self
                 .send_with_session(&url, out_body, session, correlation, call_headers)
                 .await?;
@@ -260,7 +265,7 @@ impl RawForwarder {
         .await
         {
             Ok(result) => result,
-            Err(_) => Err(ProviderError::Timeout(self.complete_timeout)),
+            Err(_) => Err(ProviderError::Timeout(deadline.timeout)),
         }
     }
 
@@ -1331,6 +1336,23 @@ data: [DONE]\n\n";
             .await
             .unwrap_err();
         assert!(matches!(err, ProviderError::Timeout(d) if d == Duration::from_millis(10)));
+        // The same pooled forwarder can honor a longer call without retaining its
+        // shorter constructor timer or leaking policy into a concurrent/default call.
+        let (long, short) = tokio::join!(
+            crate::BufferedDeadline::new(Duration::from_secs(1))
+                .scope(forwarder.forward("/v1/chat/completions", Bytes::from_static(b"{}"))),
+            forwarder.forward("/v1/chat/completions", Bytes::from_static(b"{}"))
+        );
+        assert_eq!(long.unwrap().body, Bytes::from_static(b"{}"));
+        assert!(matches!(short, Err(ProviderError::Timeout(d)) if d == Duration::from_millis(10)));
+        let before = server.received_requests().await.unwrap().len();
+        let expired = crate::BufferedDeadline::new(Duration::from_millis(1));
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        assert!(expired
+            .scope(forwarder.forward("/v1/chat/completions", Bytes::from_static(b"{}")))
+            .await
+            .is_err());
+        assert_eq!(server.received_requests().await.unwrap().len(), before);
     }
 
     #[tokio::test]

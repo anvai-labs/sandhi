@@ -20,11 +20,11 @@ futures-util = "0.3"
 async-stream = "0.3"
 bytes = "1"
 http = "1"
-tokio = { version = "1", features = ["time"] }
+tokio = { version = "1", features = ["time", "rt"] }
 getrandom = "0.2"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
 wiremock = "0.6"
 # TD-0001 W2 differential oracle (ADR-0003 §3): typify generates an independent deserializer
 # from a byte-pinned provider schema; test-only, never linked into the shipped crate/bindings.

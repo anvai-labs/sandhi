@@ -19,7 +19,7 @@
 //! hash. Applying a vkey entry either mints a new key (if none matching its identity exists yet)
 //! or is a no-op (if one does) — it can never "update" a vkey's secret in place.
 //!
-//! Listener TLS is the one startup-only section: preview/apply reports it as
+//! Listener TLS and buffered deadlines are startup-only sections: preview/apply report them as
 //! `restart required`, while process bootstrap validates and activates it before bind. Live
 //! certificate replacement belongs to TD-0017 P2 and is not smuggled into desired-state apply.
 
@@ -30,6 +30,9 @@ use sandhi_store::{AlertRuleRecord, VirtualKeyRecord};
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 pub struct SandhiFileConfig {
+    /// Buffered upstream limits are validated at startup; apply requires a restart.
+    #[serde(default)]
+    pub buffered_deadlines: Option<crate::deadlines::BufferedDeadlines>,
     /// Optional listener TLS configuration. Paths are reviewable configuration,
     /// while the private-key bytes remain outside this file.
     #[serde(default)]
@@ -187,6 +190,73 @@ mod tests {
     fn missing_sections_default_to_empty_not_an_error() {
         let cfg: SandhiFileConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(cfg, SandhiFileConfig::default());
+    }
+
+    #[test]
+    fn buffered_deadlines_reject_invalid_or_unsupported_policy() {
+        for text in [
+            r#"{"buffered_deadlines":{"ceiling_ms":120000,"endpoints":{"zai:a":{},"zai:a":{}}}}"#,
+            r#"{"buffered_deadlines":{"ceiling_ms":120000,"endpoints":{"zai:a":{"models":{"m":1,"m":2}}}}}"#,
+        ] {
+            assert!(serde_json::from_str::<SandhiFileConfig>(text).is_err());
+        }
+        for policy in [
+            serde_json::json!({"ceiling_ms": 0}),
+            serde_json::json!({"ceiling_ms": 900000}),
+            serde_json::json!({"ceiling_ms": 120000, "default_ms": 120001}),
+            serde_json::json!({"ceiling_ms": 120000, "default_ms": 0}),
+            serde_json::json!({"ceiling_ms": 120000, "default_ms": 1.5}),
+            serde_json::json!({"ceiling_ms": 120000, "stream_idle_ms": 5000}),
+            serde_json::json!({"ceiling_ms": 120000, "endpoints": {"zai:local": {"models": {"glm": 120001}}}}),
+            serde_json::json!({"ceiling_ms": 120000, "endpoints": {"": {"default_ms": 1000}}}),
+        ] {
+            assert!(
+                serde_json::from_value::<SandhiFileConfig>(
+                    serde_json::json!({"buffered_deadlines": policy})
+                )
+                .is_err(),
+                "accepted {policy}"
+            );
+        }
+    }
+
+    #[test]
+    fn buffered_deadlines_resolve_exact_authorized_route_and_preserve_startup_projection() {
+        use crate::deadlines::{from_json, Source};
+        let text = r#"{"providers":"operator-owned", "buffered_deadlines":{
+            "ceiling_ms":600000,"default_ms":150000,
+            "endpoints":{"zai:one":{"default_ms":200000,"models":{"glm":300000}},
+                         "zai:two":{"models":{"glm":400000}}}}}"#;
+        let policy = from_json(text).unwrap().unwrap();
+        for (reference, model, milliseconds, source) in [
+            ("zai:one", "glm", 300000, Source::Model),
+            ("zai:one", "GLM", 200000, Source::Endpoint),
+            ("zai:two", "glm", 400000, Source::Model),
+            ("zai:two", "other", 150000, Source::Global),
+            ("zai:three", "glm", 150000, Source::Global),
+        ] {
+            let resolved = policy.resolve(reference, model);
+            assert_eq!(
+                (resolved.milliseconds, resolved.source),
+                (milliseconds, source)
+            );
+        }
+        assert!(policy.validate_endpoints(|id| id == "zai:one").is_err());
+        assert!(policy.validate_endpoints(|_| true).is_ok());
+        let builtin = from_json(r#"{"buffered_deadlines":{"ceiling_ms":120000}}"#)
+            .unwrap()
+            .unwrap();
+        let resolved = builtin.resolve("", "");
+        assert_eq!(resolved.source, Source::BuiltIn);
+        assert_eq!(resolved.milliseconds, 120000);
+        assert!(from_json(r#"{"buffered_deadlines":{"ceiling_ms":119999}}"#).is_err());
+        let now = time::OffsetDateTime::UNIX_EPOCH + time::Duration::milliseconds(500);
+        assert!(resolved.fits_lease(now + time::Duration::seconds(181), now));
+        assert!(!resolved.fits_lease(now + time::Duration::seconds(180), now));
+        assert!(!resolved.fits_lease(now, now));
+        assert!(from_json(r#"{"providers":"operator-owned"}"#)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
