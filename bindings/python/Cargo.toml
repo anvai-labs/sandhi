@@ -1,7 +1,7 @@
 [package]
 name = "sandhi-gateway-py"
 description = "PyO3 binding for Sandhi (published to PyPI as `sandhi-gateway`)."
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 # PyO3 itself needs 1.83; the locked time dependency sets this workspace's build floor.
 rust-version = "1.88"
