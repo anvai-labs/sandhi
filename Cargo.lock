@@ -2727,7 +2727,7 @@ dependencies = [
 
 [[package]]
 name = "sandhi-core"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "schemars 0.8.22",
  "serde",
@@ -2738,7 +2738,7 @@ dependencies = [
 
 [[package]]
 name = "sandhi-providers"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2760,7 +2760,7 @@ dependencies = [
 
 [[package]]
 name = "sandhi-proxy"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2797,7 +2797,7 @@ dependencies = [
 
 [[package]]
 name = "sandhi-store"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "criterion",
  "getrandom 0.2.17",

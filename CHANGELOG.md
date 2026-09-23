@@ -19,6 +19,24 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-09-23
+
+### Fixed
+
+- Raw streaming requests now collect non-success response bodies within the original
+  setup deadline. An upstream that sends error headers and then stalls can no longer
+  evade the setup and idle guards. Timeout observations retain the received status
+  and request ID, and the timed-out response connection is released.
+- Successful streaming bytes, default deadlines, retry policy, OIDC authorization
+  and public API/schema contracts remain unchanged. Global/endpoint/model deadline
+  overrides remain a separate planned feature, not part of this patch.
+
+### Release scope
+
+- Both executables, all four crates and both bindings use 0.9.1. This release includes
+  the source repair from [#291](https://github.com/anvai-labs/sandhi/pull/291); it does
+  not resolve Victor's separate buffered InferFlux liveness failure or close C5.
+
 ## [0.9.0] — 2026-09-23
 
 ### Security and access
