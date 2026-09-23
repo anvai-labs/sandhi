@@ -101,7 +101,7 @@ Session metadata advertises `diagnostics` only for explicit opt-in; the existing
 permission is deployment-wide: it does not restrict queries to that subject's runs.
 Cookie-authenticated diagnostic POSTs still require exact Origin and CSRF proof;
 automation uses a separately issued OAuth access token, never a browser cookie.
-This is a post-0.8.0 source addition: 0.8.0 binaries reject the new field. Explicit
+This requires 0.9.0 or later: 0.8.0 binaries reject the new field. Explicit
 token compatibility mode still requires its existing admin token for diagnostics.
 
 Open `/dashboard` and select **Sign in with SSO**. Tokens stay server-side. Browser

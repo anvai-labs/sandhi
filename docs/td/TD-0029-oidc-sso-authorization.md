@@ -52,7 +52,7 @@ On 2026-09-22, Kanidm 1.11.1 on dataserver3 served verified HTTPS discovery for 
 | S2 OIDC inference grants and compatibility | Actual proxy transport tests retain model allowlist, attribution, budgets, correlation; explicit token profile regression | Local protocol/compatibility coverage and live machine-to-ZAI integration passed; final review pending |
 | S3 dashboard and deployment | Browser login/role/expiry/logout tests; dedicated Kanidm registration; verified HTTPS; preserve existing state and rollback | Browser suite and live Kanidm browser pass; release/cutover pending |
 | S4 multi-provider co-design | Direct and optional Sandhi InferFlux acceptance, all formation cohorts, C5 six-Qwen/one-ZAI reconciliation | Pending; separate Victor/InferFlux ownership |
-| S5 scoped accounting diagnostics | Explicit subject permission without writes/inference; existing default-role and compatibility denials, CSRF, introspection/revocation and bounds | Post-0.8.0 source increment; review, CI and live deployment pending |
+| S5 scoped accounting diagnostics | Explicit subject permission without writes/inference; existing default-role and compatibility denials, CSRF, introspection/revocation and bounds | Source merged in #285 with clean review and green CI; prepared for 0.9.0, publication and live deployment pending |
 
 Test ownership: extend existing operator authorization and dashboard browser suites for their existing routes; keep OIDC protocol cases in one module. Existing compatibility tests cover virtual-key accounting and must not be cloned for each role. Remove tests only when an equivalent owner demonstrably preserves their assertions. Mock protocol acceptance is not live Kanidm or model acceptance.
 

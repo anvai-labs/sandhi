@@ -19,6 +19,27 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-09-23
+
+### Security and access
+
+- OIDC subject bindings can explicitly grant `allow_diagnostics` for bounded,
+  read-only persisted usage diagnostics. A separate accounting identity can combine
+  this permission with the viewer role without administrative writes or inference
+  access. This is not tenant/run isolation: permitted diagnostics remain gateway-wide.
+- Omitted `allow_diagnostics` defaults to false. Existing admin access, operator/viewer
+  permissions, browser CSRF checks, per-request OAuth introspection and explicit token
+  compatibility remain unchanged. Standalone OIDC remains the default.
+
+### Compatibility
+
+- Rust callers constructing `auth::Binding` literals must add `allow_diagnostics: false`
+  or use `..Default::default()`. Exhaustive matches on `auth::Permission` must handle
+  `Diagnostics`. These public Rust changes require the 0.9 minor version; existing JSON
+  configurations remain accepted with their existing authorization behavior.
+- All executables, crates and bindings use 0.9.0. Publication and deployment still need
+  their own acceptance; this release does not establish Victor formation or C5 results.
+
 ## [0.8.0] — 2026-09-22
 
 ### Security and access
