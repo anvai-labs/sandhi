@@ -26,14 +26,16 @@ def recovered_broker_process(binary, database, runtime_dir, daemon, *, token="re
     token_dir = runtime_dir / "config/PasswordManager"
     token_dir.mkdir(parents=True)
     (token_dir / "ipc.token").write_text("disposable-daemon-token")
+    (token_dir / "ipc.token").chmod(0o600)
     config = runtime_dir / "empty.json"
     config.write_text("{}")
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("SANDHI_", "SENTINELPASS_"))}
     port = _free_port()
     env.update(XDG_CONFIG_HOME=str(runtime_dir / "config"),
+               SANDHI_SENTINELPASS_TOKEN_FILE=str(token_dir / "ipc.token"),
                SANDHI_STORE=str(database), SANDHI_CONFIG=str(config),
-               SANDHI_BIND=f"127.0.0.1:{port}", SANDHI_ADMIN_TOKEN="broker-test-admin",
+               SANDHI_AUTH_MODE="tokens", SANDHI_BIND=f"127.0.0.1:{port}", SANDHI_ADMIN_TOKEN="broker-test-admin",
                SANDHI_VAULT_BACKEND="sentinelpass", SANDHI_SENTINELPASS_SOCKET=daemon.path,
                SANDHI_SENTINELPASS_TIMEOUT_MS="250", SENTINELPASS_CLIENT_TOKEN=token,
                SANDHI_SHUTDOWN_QUIESCE_MS="0", SANDHI_SHUTDOWN_GRACE_SECS="3")

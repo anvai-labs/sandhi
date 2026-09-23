@@ -25,7 +25,7 @@ def verbose_proxy(proxy_binary, upstream: MockUpstream):
     port = _free_port()
     env = {
         **os.environ,
-        "SANDHI_BIND": f"127.0.0.1:{port}",
+        "SANDHI_AUTH_MODE": "tokens", "SANDHI_BIND": f"127.0.0.1:{port}",
         "SANDHI_OPENAI_KEY": REAL_OPENAI_KEY,
         "SANDHI_OPENAI_BASE": upstream.base_url,
         "SANDHI_LOG": "debug",

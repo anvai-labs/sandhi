@@ -3,8 +3,8 @@
 
 Run with --binary-dir PATH on Linux/macOS. This checks `sandhi --help`, actual
 /healthz and /readyz responses from sandhi-proxy, and a zero-exit SIGTERM shutdown.
-It does not assert artifact version, provider connectivity, persistence, or load.
-The proxy has no --help/--version switch. Child output is discarded, never logged.
+Both --version commands and HTTP package_version must agree with --expected-version
+when provided. It does not assert provider connectivity, persistence, or load. Child output is discarded, never logged.
 No caller environment is inherited. The only HTTP destination is IPv4 loopback;
 HTTP proxy environment settings are not consulted. Use a CI job timeout as an
 additional outer bound for OS-level stalls. No binaries are downloaded here.
@@ -15,6 +15,8 @@ from __future__ import annotations
 import argparse
 import http.client
 import io
+import json
+import re
 import math
 import os
 from pathlib import Path
@@ -42,6 +44,7 @@ def isolated_environment(directory, port):
         "XDG_CONFIG_HOME": str(directory / "config"),
         "XDG_CACHE_HOME": str(directory / "cache"),
         "SANDHI_CONFIG": str(directory / "empty.json"),
+        "SANDHI_AUTH_MODE": "tokens",
         "SANDHI_BIND": f"127.0.0.1:{port}",
         "SANDHI_LOG": "off",
         "SANDHI_SHUTDOWN_GRACE_SECS": "3",
@@ -87,6 +90,35 @@ def check_cli(binary, directory, environment, timeout=5):
         reap_failed_child(process)
 
 
+def check_version(binary, directory, environment):
+    # Capture only bounded informational output in a private temporary file; never echo it.
+    with tempfile.TemporaryFile() as output:
+        process = subprocess.Popen([str(binary), "--version"], cwd=directory, env=environment,
+            stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.DEVNULL, start_new_session=True)
+        try:
+            try:
+                code = process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                raise SmokeFailure("binary --version exceeded its deadline") from None
+            output.seek(0)
+            text = output.read(257)
+            match = re.fullmatch(re.escape(binary.name.encode()) + rb" ([0-9]+\.[0-9]+\.[0-9]+)\n", text)
+            if code != 0 or len(text) > 256 or not match:
+                raise SmokeFailure("binary --version is invalid")
+            return match.group(1).decode("ascii")
+        finally:
+            reap_failed_child(process)
+
+
+def check_http_version(port, expected):
+    try:
+        value = json.loads(probe(port, "/version", None, 2))
+    except (ValueError, TypeError):
+        raise SmokeFailure("proxy software identity is invalid") from None
+    if not isinstance(value, dict) or value.get("package_version") != expected:
+        raise SmokeFailure("proxy HTTP software identity disagrees with release version")
+
+
 def probe(port, path, expected_body, timeout):
     # Socket-level absolute deadline covers header AND body trickles. Parse only
     # after bounded bytes are in memory; HTTPResponse can then perform no network IO.
@@ -113,11 +145,12 @@ def probe(port, path, expected_body, timeout):
 
     with http.client.HTTPResponse(BufferedSocket()) as response:
         response.begin()
-        body = response.read(65)
-        if response.status != 200 or body != expected_body:
+        body = response.read(4097)
+        if response.status != 200 or (expected_body is not None and body != expected_body):
             raise SmokeFailure("proxy probe returned an unexpected status or body")
         if path == "/readyz" and response.getheader("Cache-Control") != "no-store":
             raise SmokeFailure("readiness response lacks its no-store contract")
+        return body
 
 
 def wait_ready(process, port, timeout, *, clock=time.monotonic, sleep=time.sleep):
@@ -151,7 +184,7 @@ def graceful_shutdown(process, timeout):
         raise SmokeFailure("proxy SIGTERM shutdown returned a nonzero exit status")
 
 
-def run_smoke(binary_directory, startup_timeout=15, shutdown_timeout=8):
+def run_smoke(binary_directory, startup_timeout=15, shutdown_timeout=8, expected_version=None):
     directory = Path(binary_directory).resolve()
     binaries = [directory / name for name in ("sandhi", "sandhi-proxy")]
     if any(not binary.is_file() or not os.access(binary, os.X_OK) for binary in binaries):
@@ -160,12 +193,17 @@ def run_smoke(binary_directory, startup_timeout=15, shutdown_timeout=8):
         isolated = Path(temporary)
         (isolated / "empty.json").write_text("{}\n", encoding="utf-8")
         environment = isolated_environment(isolated, 0)
+        versions = [check_version(binary, isolated, environment) for binary in binaries]
+        expected = expected_version or versions[0]
+        if any(version != expected for version in versions):
+            raise SmokeFailure("binary versions disagree with the expected release")
         check_cli(binaries[0], isolated, environment)
         environment["SANDHI_BIND"] = f"127.0.0.1:{unused_loopback_port()}"
         process = start(binaries[1], [], isolated, environment)
         try:
             port = int(environment["SANDHI_BIND"].rsplit(":", 1)[1])
             wait_ready(process, port, startup_timeout)
+            check_http_version(port, expected)
             graceful_shutdown(process, shutdown_timeout)
         finally:
             reap_failed_child(process)
@@ -181,13 +219,14 @@ def bounded_timeout(raw):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary-dir", required=True, type=Path)
+    parser.add_argument("--expected-version")
     parser.add_argument("--startup-timeout-seconds", type=bounded_timeout, default=15)
     parser.add_argument("--shutdown-timeout-seconds", type=bounded_timeout, default=8)
     args = parser.parse_args(argv)
     if os.name != "posix":
         parser.error("this native-binary smoke requires Linux or macOS SIGTERM semantics")
     try:
-        run_smoke(args.binary_dir, args.startup_timeout_seconds, args.shutdown_timeout_seconds)
+        run_smoke(args.binary_dir, args.startup_timeout_seconds, args.shutdown_timeout_seconds, args.expected_version)
     except SmokeFailure as error:
         print(f"FAIL: {error}", file=sys.stderr)
         return 1
@@ -195,7 +234,7 @@ def main(argv=None):
         # Never print child output, paths, caller environment, or OS exception text.
         print("FAIL: binary smoke OS/process operation failed", file=sys.stderr)
         return 1
-    print("PASS: sandhi --help; proxy /healthz + /readyz; zero-exit graceful SIGTERM (isolated volatile mode)")
+    print("PASS: both binary versions + HTTP package identity; sandhi --help; proxy /healthz + /readyz; zero-exit graceful SIGTERM (isolated volatile mode)")
     return 0
 
 

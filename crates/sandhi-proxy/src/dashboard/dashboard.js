@@ -42,15 +42,30 @@ function cacheCoverageLabel(row) {
 const tokenEl = document.getElementById("admin-token");
 const dotEl = document.getElementById("token-dot");
 let activeToken = "";
+let authMode = "loading";
+let ssoSession = null;
+let expiryTimer;
+const actionPermissions = { lookupRun: "read", ackAlert: "operate", setBudget: "operate" };
+function permits(permission) {
+  return authMode === "tokens" ? !!activeToken : !!ssoSession?.permissions?.includes(permission);
+}
+function signedIn() { return authMode === "tokens" ? !!activeToken : !!ssoSession?.subject; }
+
 let authRevision = 0;
 const pending = new Set();
 const panels = new Map();
 try { sessionStorage.removeItem("sandhi_admin_token"); } catch { /* Storage may be disabled. */ }
 function refreshTokenState() {
-  const on = activeToken.length > 0;
+  const on = signedIn();
   dotEl.classList.toggle("on", on);
   dotEl.title = on ? "Token supplied; each request is authorized by the server" : "No token supplied";
-  document.querySelectorAll("[data-needs-token]").forEach(b => b.disabled = !on || b.dataset.revoked === "true");
+  document.querySelectorAll("[data-needs-token]").forEach(b => b.disabled = !permits(actionPermissions[b.dataset.action] || "admin") || b.dataset.revoked === "true");
+  document.getElementById("token-form").hidden = authMode !== "tokens";
+  document.getElementById("sso-box").hidden = authMode !== "oidc";
+  document.getElementById("sso-login").hidden = !!ssoSession?.subject;
+  document.getElementById("sso-logout").hidden = !ssoSession?.subject;
+  if (authMode === "oidc") document.getElementById("auth-status").textContent = ssoSession?.subject
+    ? `${ssoSession.subject} — ${ssoSession.role}` : "Sign in with SSO to view protected data.";
 }
 function resetAuth(token) {
   activeToken = token;
@@ -64,7 +79,7 @@ function resetAuth(token) {
     el.dataset.state = "locked";
     el.setAttribute("aria-busy", "false");
     const message = document.createElement("p");
-    message.textContent = "Select Use token to load protected data, or Refresh for public data.";
+    message.textContent = authMode === "oidc" ? "Sign in with SSO to view protected data." : "Select Use token to load protected data, or Refresh for public data.";
     el.append(message);
   }
   document.querySelectorAll("[data-sensitive]").forEach(el => el.replaceChildren());
@@ -102,15 +117,17 @@ async function requestJSON(method, path, body) {
   try {
     const resp = await fetch(path, {
       method, headers: {
-        ...(activeToken ? { "Authorization": "Bearer " + activeToken } : {}),
+        ...(authMode === "tokens" && activeToken ? { "Authorization": "Bearer " + activeToken } : {}),
+        ...(authMode === "oidc" && ssoSession?.csrf && method !== "GET" ? { "X-Sandhi-CSRF": ssoSession.csrf } : {}),
         ...(body === undefined ? {} : { "Content-Type": "application/json" }),
       },
       body: body === undefined ? undefined : JSON.stringify(body),
-      cache: "no-store", redirect: "error", signal: controller.signal,
+      credentials: "same-origin", cache: "no-store", redirect: "error", signal: controller.signal,
     });
     const data = await resp.json().catch(() => null);
     if (revision !== authRevision) throw new DOMException("Authentication changed", "AbortError");
     if (!resp.ok) {
+      if (resp.status === 401 && authMode === "oidc") { ssoSession = null; resetAuth(""); }
       const message = typeof data?.error === "string" ? data.error : data?.error?.message;
       throw new ApiError(resp.status, message || `Request failed (${resp.status})`, data);
     }
@@ -123,14 +140,14 @@ async function requestJSON(method, path, body) {
 }
 
 function failureMessage(error) {
-  if (error.status === 401) return "Authentication required. Enter a valid admin token and select Use token.";
+  if (error.status === 401) return authMode === "oidc" ? "Session expired or missing. Sign in with SSO." : "Authentication required. Enter a valid admin token and select Use token.";
   if (error.status === 403) return "Access denied. This operation is not available with the current access configuration.";
   if (error.status === 404) return "Not configured or not found. " + error.message;
   return "Data unavailable. Retry with Refresh. " + (error.name === "AbortError" ? "Request timed out." : error.message);
 }
 
 async function adminCall(method, path, body, allowPartial = false) {
-  if (!activeToken) { toast("Enter the admin token and select Use token first.", false); return null; }
+  if (!signedIn()) { toast(authMode === "oidc" ? "Sign in with SSO first." : "Enter the admin token and select Use token first.", false); return null; }
   const revision = authRevision;
   try { return await requestJSON(method, path, body); }
   catch (error) {
@@ -140,7 +157,7 @@ async function adminCall(method, path, body, allowPartial = false) {
   }
 }
 
-async function loadPanel(id, path, render, adminOnly = false) {
+async function loadPanel(id, path, render, permission = null) {
   const el = document.getElementById(id);
   const revision = authRevision;
   const previous = panels.get(id);
@@ -150,7 +167,7 @@ async function loadPanel(id, path, render, adminOnly = false) {
   el.dataset.state = "loading";
   el.textContent = "Loading…";
   try {
-    if (adminOnly && !activeToken) throw new ApiError(401, "Authentication required");
+    if (permission && !permits(permission)) throw new ApiError(signedIn() ? 403 : 401, "Role does not allow this operation");
     const data = await requestJSON("GET", path);
     if (revision !== authRevision || panels.get(id) !== ticket) return;
     // Validate required fields before treating a response as a successful empty dataset.
@@ -379,7 +396,7 @@ function loadConfig() {
     + configPlanTable("Alerts", data.alerts, ["scope", "threshold_pct"])
     + configPlanTable("Virtual keys", data.vkeys, ["upstream", "subject", "group"])
     + `<div class="form-row" style="margin-top:1rem"><button class="btn primary" data-needs-token data-action="applyConfig">Apply config</button></div>`;
-  }, true);
+  }, "admin");
 }
 async function applyConfig() {
   document.getElementById("config-result").replaceChildren();
@@ -432,10 +449,26 @@ function lookupRun() {
     const roots = run.roots.map(renderNode).join("");
     return `<div class="callout info">Total: ${fmt(run.total.billable_tokens)} billable tokens across ${fmt(run.total.calls)} calls</div>`
       + `<ul class="tree" style="margin-top:.6rem">${roots || '<li class="muted">no steps recorded for this run</li>'}</ul>`;
-  }, true);
+  }, "read");
 }
 
-function refreshAll() {
+async function refreshIdentity() {
+  const status = await requestJSON("GET", "/auth/session");
+  if (!["oidc", "tokens"].includes(status.mode)) throw new ApiError(502, "Invalid authentication mode");
+  if (status.mode === "oidc" && status.subject && (!Array.isArray(status.permissions) || typeof status.csrf !== "string" || !Number.isSafeInteger(status.expires_at))) {
+    throw new ApiError(502, "Invalid session response");
+  }
+  const changed = authMode !== status.mode || ssoSession?.subject !== status.subject || ssoSession?.csrf !== status.csrf;
+  authMode = status.mode;
+  ssoSession = status.mode === "oidc" && status.subject ? status : null;
+  if (changed) resetAuth("");
+  clearTimeout(expiryTimer);
+  if (ssoSession) expiryTimer = setTimeout(() => { ssoSession = null; resetAuth(""); }, Math.max(0, ssoSession.expires_at * 1000 - Date.now()));
+  refreshTokenState();
+}
+async function refreshAll() {
+  try { await refreshIdentity(); }
+  catch { ssoSession = null; resetAuth(""); document.getElementById("auth-status").textContent = "Access verification unavailable. Retry with Refresh."; return; }
   return Promise.all([loadUsage(), loadKeys(), loadBudgets(), loadAlerts(), loadConfig()]);
 }
 
@@ -443,6 +476,10 @@ function refreshAll() {
 // dispatches events, including buttons created when tables are refreshed.
 const actions = {
   refresh: refreshAll,
+  logout: async () => {
+    await requestJSON("POST", "/auth/logout", {});
+    ssoSession = null; resetAuth(""); await refreshIdentity();
+  },
   clearToken: () => { tokenEl.value = ""; resetAuth(""); refreshAll(); tokenEl.focus(); },
   revokeVkey: button => revokeVkey(button.dataset.id),
   revokeCred: button => revokeCred(button.dataset.provider, button.dataset.label),
@@ -459,7 +496,7 @@ document.addEventListener("click", async event => {
   catch { toast("Action could not be completed. Refresh to check the current state.", false); }
   finally { busyButtons.delete(button); button.disabled = false; refreshTokenState(); }
 });
-window.addEventListener("pagehide", () => { tokenEl.value = ""; resetAuth(""); });
+window.addEventListener("pagehide", () => { tokenEl.value = ""; ssoSession = null; clearTimeout(expiryTimer); resetAuth(""); });
 window.addEventListener("pageshow", event => { if (event.persisted) refreshAll(); });
 refreshTokenState();
 refreshAll();

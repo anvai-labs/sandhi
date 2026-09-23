@@ -37,11 +37,12 @@ otel-otlp = [
 ]
 
 [dependencies]
+openidconnect = { version = "4.0.1", default-features = false, features = ["reqwest", "rustls-tls"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-sandhi-core = { path = "../sandhi-core", version = "0.3.0" }
-sandhi-providers = { path = "../sandhi-providers", version = "0.3.0" }
-sandhi-store = { path = "../sandhi-store", version = "0.3.0" }
+sandhi-core = { path = "../sandhi-core", version = "0.8.0" }
+sandhi-providers = { path = "../sandhi-providers", version = "0.8.0" }
+sandhi-store = { path = "../sandhi-store", version = "0.8.0" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 axum = "0.7"
 futures-util = "0.3"
@@ -102,6 +103,9 @@ opentelemetry-otlp = { version = "0.32", optional = true, default-features = fal
 ] }
 
 [dev-dependencies]
+p256 = { version = "0.13", features = ["ecdsa"] }
+base64 = "0.22"
+rsa = { version = "0.9", features = ["pem"] }
 tower = { version = "0.5", features = ["limit", "util"] }
 wiremock = "0.6"
 async-trait = "0.1"

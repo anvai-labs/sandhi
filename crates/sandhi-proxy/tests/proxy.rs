@@ -237,6 +237,7 @@ async fn version_endpoint_is_unauthenticated_and_reports_the_contract() {
         .await
         .unwrap();
     let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["package_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(value["wire_contract_version"], "1");
     assert_eq!(value["chat_contract_version"], "1");
     assert_eq!(value["chat_contract_minor"], 9);

@@ -163,7 +163,7 @@ pub(crate) async fn version_capabilities(
     State(state): State<Arc<ProxyState>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(r) = require_admin(&state, &headers) {
+    if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Read, false).await {
         return r;
     }
     let body = serde_json::json!({
@@ -177,7 +177,7 @@ pub(crate) async fn version_capabilities(
             // Durable + crash-safe when SANDHI_STORE is set; volatile otherwise.
             "durable_ledger": state.store.is_some(),
             "alerts": state.alerts.is_some(),
-            "admin_api": state.admin_token.is_some(),
+            "admin_api": state.oidc.is_some() || state.admin_token.is_some(),
             // TD-0012: per-vkey token bucket, in-memory (N replicas multiply it).
             "rate_limits": true,
             // Compiled only with the otel-otlp feature AND initialized at startup.
@@ -190,6 +190,20 @@ pub(crate) async fn version_capabilities(
         },
     });
     Json(body).into_response()
+}
+
+/// OIDC takes precedence over all compatibility token/public settings.
+#[allow(clippy::result_large_err)] // Same ready-to-return axum denial as the existing authorization gates.
+pub(crate) async fn require_access(
+    state: &ProxyState,
+    headers: &HeaderMap,
+    permission: crate::auth::Permission,
+    mutation: bool,
+) -> Result<(), Response> {
+    if let Some(oidc) = &state.oidc {
+        return oidc.authorize(headers, permission, mutation).await;
+    }
+    require_admin(state, headers)
 }
 
 // The Err is a ready-to-return HTTP Response (status + shaped body) — it is handed
@@ -433,7 +447,7 @@ pub(crate) async fn add_key(
     headers: HeaderMap,
     Json(req): Json<admin::AddKeyRequest>,
 ) -> Response {
-    if let Err(r) = require_admin(&state, &headers) {
+    if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Admin, true).await {
         return r;
     }
     register_credential(
@@ -454,7 +468,7 @@ pub(crate) async fn register_reference(
     headers: HeaderMap,
     Json(req): Json<admin::RegisterReferenceRequest>,
 ) -> Response {
-    if let Err(r) = require_admin(&state, &headers) {
+    if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Admin, true).await {
         return r;
     }
     register_credential(state, req, None).await
@@ -583,7 +597,7 @@ pub(crate) async fn list_keys(
     State(state): State<Arc<ProxyState>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(r) = require_admin(&state, &headers) {
+    if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Read, false).await {
         return r;
     }
     let Some(vault) = state.vault.clone() else {
@@ -604,7 +618,7 @@ pub(crate) async fn revoke_key(
     headers: HeaderMap,
     Path((provider, label)): Path<(String, String)>,
 ) -> Response {
-    if let Err(r) = require_admin(&state, &headers) {
+    if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Admin, true).await {
         return r;
     }
     let operation = match admit_mutation(&state) {
@@ -644,7 +658,7 @@ pub(crate) async fn share_key(
     headers: HeaderMap,
     Json(req): Json<admin::ShareKeyRequest>,
 ) -> Response {
-    if let Err(r) = require_admin(&state, &headers) {
+    if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Admin, true).await {
         return r;
     }
     let _operation = match admit_mutation(&state) {
@@ -733,7 +747,7 @@ pub(crate) async fn list_virtual_keys(
     State(state): State<Arc<ProxyState>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(r) = require_admin(&state, &headers) {
+    if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Read, false).await {
         return r;
     }
     let Some(vkeys) = state.vkeys.clone() else {
@@ -753,7 +767,7 @@ pub(crate) async fn revoke_virtual_key(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    if let Err(r) = require_admin(&state, &headers) {
+    if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Admin, true).await {
         return r;
     }
     let _operation = match admit_mutation(&state) {
@@ -781,7 +795,7 @@ pub(crate) async fn set_budget(
     headers: HeaderMap,
     Json(req): Json<admin::SetBudgetRequest>,
 ) -> Response {
-    if let Err(r) = require_admin(&state, &headers) {
+    if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Operate, true).await {
         return r;
     }
     let _operation = match admit_mutation(&state) {
@@ -859,7 +873,7 @@ pub(crate) async fn list_budgets(
     State(state): State<Arc<ProxyState>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(r) = require_admin(&state, &headers) {
+    if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Read, false).await {
         return r;
     }
     let specs: Vec<BudgetSpec> = state
@@ -878,7 +892,7 @@ pub(crate) async fn budget_usage(
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    if let Err(r) = require_admin(&state, &headers) {
+    if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Read, false).await {
         return r;
     }
     let Some(scope) = params.get("scope") else {
@@ -909,7 +923,7 @@ pub(crate) async fn usage(
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    if let Err(r) = require_admin(&state, &headers) {
+    if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Read, false).await {
         return r;
     }
     let Some(store) = state.store.clone() else {
@@ -954,7 +968,14 @@ pub(crate) async fn usage_diagnostics(
     request: axum::extract::Request,
 ) -> Response {
     use sandhi_store::diagnostics::{DiagnosticQuery, MAX_REQUEST_BYTES};
-    if let Err(response) = require_admin(&state, request.headers()) {
+    if let Err(response) = require_access(
+        &state,
+        request.headers(),
+        crate::auth::Permission::Admin,
+        true,
+    )
+    .await
+    {
         return response;
     }
     let Some(store) = state.store.clone() else {
@@ -1023,7 +1044,7 @@ pub(crate) async fn usage_run(
     headers: HeaderMap,
     Path(run_id): Path<String>,
 ) -> Response {
-    if let Err(r) = require_admin(&state, &headers) {
+    if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Read, false).await {
         return r;
     }
     let Some(store) = state.store.clone() else {
@@ -1179,7 +1200,7 @@ pub(crate) async fn list_alerts(
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    if let Err(r) = require_admin(&state, &headers) {
+    if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Read, false).await {
         return r;
     }
     let Some(store) = state.alert_store.clone() else {
@@ -1202,7 +1223,7 @@ pub(crate) async fn create_alert(
     headers: HeaderMap,
     Json(req): Json<admin::CreateAlertRequest>,
 ) -> Response {
-    if let Err(r) = require_admin(&state, &headers) {
+    if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Operate, true).await {
         return r;
     }
     let _operation = match admit_mutation(&state) {
@@ -1244,7 +1265,7 @@ pub(crate) async fn ack_alert(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    if let Err(r) = require_admin(&state, &headers) {
+    if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Operate, true).await {
         return r;
     }
     let _operation = match admit_mutation(&state) {
@@ -1272,7 +1293,7 @@ pub(crate) async fn delete_alert(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    if let Err(r) = require_admin(&state, &headers) {
+    if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Operate, true).await {
         return r;
     }
     let _operation = match admit_mutation(&state) {
@@ -1428,7 +1449,7 @@ pub(crate) async fn config_preview(
     State(state): State<Arc<ProxyState>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(r) = require_admin(&state, &headers) {
+    if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Admin, false).await {
         return r;
     }
     let cfg = match read_config_file(&state) {
@@ -1534,7 +1555,7 @@ pub(crate) async fn config_apply(
     State(state): State<Arc<ProxyState>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(r) = require_admin(&state, &headers) {
+    if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Admin, true).await {
         return r;
     }
     let _operation = match admit_mutation(&state) {

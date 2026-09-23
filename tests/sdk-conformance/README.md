@@ -4,7 +4,7 @@ The suite starts a real Sandhi binary with disposable stores and local synthetic
 No provider account, real key, OS vault or external model request is needed.
 
 Install the SDK test dependencies from the `sdk-conformance` CI job and Python
-`playwright==1.58.0`, then install its Chromium:
+`playwright==1.58.0` and `PyJWT[crypto]>=2.10,<3`, then install its Chromium:
 
 ```sh
 python -m playwright install chromium
@@ -14,7 +14,10 @@ python -m pytest tests/sdk-conformance/ -q
 `test_dashboard.py` covers authentication, keyboard usage, public/disabled modes, mutation
 feedback, one-time key visibility, token clearing and stale replies, hostile metadata, failed
 database reads, served CSP/assets and mobile overflow. A synthetic-data screenshot is written
-under `target/dashboard-authenticated.png`. Requires loopback sockets and headless Chromium.
+under `target/dashboard-authenticated.png`. Its HTTPS authority fixture also drives real
+default-mode SSO login, all three dashboard roles, cookie-authorized writes, logout and expiry.
+Only the disposable browser certificate is exempted from browser trust; the proxy verifies
+the fixture IdP certificate normally. Requires loopback sockets and headless Chromium.
 
 `test_management.py` adds durable-write fault injection, invalid policy checks, concurrent
 budget writers, actual process restart comparison, partial config/alert reports, sequential
@@ -31,8 +34,9 @@ leases. They validate accounting, not real-provider token bounds or strict-cap e
 socket daemon. It tests synthetic read/write grants, locked/denied/missing states, timeout and
 overlapping mutations, redaction, reference registration (API/CLI/browser), unsupported deletion,
 namespace rejection, scheme aliases and metadata faults. Config-apply cases retain canonical
-reconciliation facts for storage failure and ambiguous write timeout. Its daemon token lives only under a disposable XDG
-configuration directory. No user vault or daemon is contacted. Unix coverage is not Windows
+reconciliation facts for storage failure and ambiguous write timeout. Its daemon token lives only in a disposable private fixture file selected explicitly
+with `SANDHI_SENTINELPASS_TOKEN_FILE`, including on macOS where the platform configuration
+directory does not follow XDG. No user vault or daemon is contacted. Unix coverage is not Windows
 named-pipe or live broker certification; those remain joint gates.
 
 `test_buffer_metrics.py` drives the real binary to check configured usage/alert capacities,
