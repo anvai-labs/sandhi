@@ -44,6 +44,7 @@ pub enum Permission {
     Read,
     Operate,
     Admin,
+    Diagnostics,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -56,7 +57,7 @@ impl Role {
     fn permits(self, p: Permission) -> bool {
         match self {
             Self::Admin => true,
-            Self::Operator => p != Permission::Admin,
+            Self::Operator => matches!(p, Permission::Read | Permission::Operate),
             Self::Viewer => p == Permission::Read,
         }
     }
@@ -74,6 +75,8 @@ pub struct Grant {
 #[serde(deny_unknown_fields)]
 pub struct Binding {
     pub role: Option<Role>,
+    #[serde(default)]
+    pub allow_diagnostics: bool,
     #[serde(default)]
     pub grants: HashMap<String, Grant>,
 }
@@ -103,8 +106,12 @@ impl Config {
             return Err("invalid OIDC issuer, client ID or exact /auth/callback URL".into());
         }
         for (subject, binding) in &self.subjects {
-            if subject.is_empty() || (binding.role.is_none() && binding.grants.is_empty()) {
-                return Err("each nonempty OIDC subject needs a role or inference grant".into());
+            if subject.is_empty()
+                || (binding.role.is_none()
+                    && binding.grants.is_empty()
+                    && !binding.allow_diagnostics)
+            {
+                return Err("each nonempty OIDC subject needs a role, inference grant or diagnostics permission".into());
             }
             for (name, g) in &binding.grants {
                 if name.is_empty()
@@ -123,10 +130,10 @@ impl Config {
         Ok(())
     }
     pub fn permits(&self, subject: &str, p: Permission) -> bool {
-        self.subjects
-            .get(subject)
-            .and_then(|b| b.role)
-            .is_some_and(|r| r.permits(p))
+        self.subjects.get(subject).is_some_and(|b| {
+            b.role.is_some_and(|r| r.permits(p))
+                || (p == Permission::Diagnostics && b.allow_diagnostics)
+        })
     }
     fn grant(&self, subject: &str, selector: Option<&str>) -> Option<sandhi_core::VirtualKey> {
         let grants = &self.subjects.get(subject)?.grants;
@@ -773,10 +780,25 @@ pub(crate) async fn session_status(
         return Json(json!({"mode":"tokens"})).into_response();
     };
     match oidc.session(&headers) {
-        Ok(Some(s)) => Json(json!({"mode":"oidc","subject":s.subject,"role":oidc.config.subjects.get(&s.subject).and_then(|b| b.role),
-            "permissions":([Permission::Read,Permission::Operate,Permission::Admin].into_iter().filter(|p|oidc.config.permits(&s.subject,*p)).collect::<Vec<_>>()),
-            "csrf":s.csrf,"expires_at":s.expires})).into_response(),
-        Ok(None) => Json(json!({"mode":"oidc","permissions":[]})).into_response(), Err(r)=>r
+        Ok(Some(s)) => {
+            let binding = oidc.config.subjects.get(&s.subject);
+            let mut permissions = [Permission::Read, Permission::Operate, Permission::Admin]
+                .into_iter()
+                .filter(|p| oidc.config.permits(&s.subject, *p))
+                .collect::<Vec<_>>();
+            // Preserve existing session responses unless the capability is explicitly enabled.
+            // Admin already implies diagnostics, as it did before this opt-in extension.
+            if binding.is_some_and(|b| b.allow_diagnostics) {
+                permissions.push(Permission::Diagnostics);
+            }
+            Json(
+                json!({"mode":"oidc","subject":s.subject,"role":binding.and_then(|b| b.role),
+                "permissions":permissions,"csrf":s.csrf,"expires_at":s.expires}),
+            )
+            .into_response()
+        }
+        Ok(None) => Json(json!({"mode":"oidc","permissions":[]})).into_response(),
+        Err(r) => r,
     }
 }
 pub(crate) async fn logout(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -> Response {

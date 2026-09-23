@@ -52,8 +52,19 @@ On 2026-09-22, Kanidm 1.11.1 on dataserver3 served verified HTTPS discovery for 
 | S2 OIDC inference grants and compatibility | Actual proxy transport tests retain model allowlist, attribution, budgets, correlation; explicit token profile regression | Local protocol/compatibility coverage and live machine-to-ZAI integration passed; final review pending |
 | S3 dashboard and deployment | Browser login/role/expiry/logout tests; dedicated Kanidm registration; verified HTTPS; preserve existing state and rollback | Browser suite and live Kanidm browser pass; release/cutover pending |
 | S4 multi-provider co-design | Direct and optional Sandhi InferFlux acceptance, all formation cohorts, C5 six-Qwen/one-ZAI reconciliation | Pending; separate Victor/InferFlux ownership |
+| S5 scoped accounting diagnostics | Explicit subject permission without writes/inference; existing default-role and compatibility denials, CSRF, introspection/revocation and bounds | Source merged in #285 with clean review and green CI; prepared for 0.9.0, publication and live deployment pending |
 
 Test ownership: extend existing operator authorization and dashboard browser suites for their existing routes; keep OIDC protocol cases in one module. Existing compatibility tests cover virtual-key accounting and must not be cloned for each role. Remove tests only when an equivalent owner demonstrably preserves their assertions. Mock protocol acceptance is not live Kanidm or model acceptance.
+
+S5 addresses Victor G49's permission mismatch: C4 diagnostics was admin-only even
+though the operation is read-only. The additive `allow_diagnostics` subject flag
+uses the existing permission dispatcher and defaults to false. A dedicated viewer
+with this flag may perform accounting reads but cannot change credentials, budgets
+or configuration and receives no inference grant. Existing role/CSRF tests own
+the expanded matrix; the HTTPS authority fixture checks bearer access and revocation.
+Compatibility/admin-first bounds tests remain their original owners. No duplicate
+diagnostic projection, accounting or browser tests are added. This does not establish
+renewable Victor credentials, final-binary deployment or actual-member C5 acceptance.
 
 ## Open gaps
 

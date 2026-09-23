@@ -26,6 +26,12 @@ The supplemental source-pattern check is not a formal call-graph proof. Changes
 to build-time code generation or operation reachability require fresh review.
 Do not regenerate the record mechanically to make a failed check pass.
 
+The post-0.8.0 scoped diagnostics amendment was independently reassessed before
+updating the adapter fingerprint. Its changes affect subject authorization and
+session permission projection only. ID-token verification, production public-key
+RSA operations, test-only private signing and dependency manifests/locks are
+unchanged. The existing expiry remains 2026-10-22; it was not extended.
+
 `deny.toml` exempts only this advisory. Every other vulnerability and yanked-crate
 failure remains fatal. A patched maintained dependency should replace this
 exception when available. Replacing the OIDC protocol library with custom claim
