@@ -467,8 +467,16 @@ async function refreshIdentity() {
   refreshTokenState();
 }
 async function refreshAll() {
+  const revision = authRevision;
   try { await refreshIdentity(); }
-  catch { ssoSession = null; resetAuth(""); document.getElementById("auth-status").textContent = "Access verification unavailable. Retry with Refresh."; return; }
+  catch {
+    // A cancelled check belongs to its old authentication session. It must not
+    // clear a newer token/session or cancel the newer session's pending reads.
+    if (revision !== authRevision) return;
+    ssoSession = null; resetAuth("");
+    document.getElementById("auth-status").textContent = "Access verification unavailable. Retry with Refresh.";
+    return;
+  }
   return Promise.all([loadUsage(), loadKeys(), loadBudgets(), loadAlerts(), loadConfig()]);
 }
 
