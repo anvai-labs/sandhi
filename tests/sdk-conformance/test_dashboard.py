@@ -151,6 +151,21 @@ def connect(page, dashboard):
     expect(page.locator("#usage")).to_have_attribute("data-state", "ready")
 
 
+def hold_authenticated_request(page, dashboard, path):
+    """Expose a browser barrier only after intercepting the fixture's authenticated read."""
+    held = []
+
+    def intercept(route):
+        if not held and route.request.headers.get("authorization") == dashboard.headers["Authorization"]:
+            held.append(route)
+            page.evaluate("document.documentElement.dataset.heldRequest = 'true'")
+        else:
+            route.continue_()
+
+    page.route("**" + path, intercept)
+    return held
+
+
 @pytest.mark.parametrize("dashboard", [{"oidc": True}], indirect=True)
 @pytest.mark.parametrize("page", [{"tls": True}], indirect=True)
 @pytest.mark.parametrize("role", ["viewer", "operator", "admin"])
@@ -310,19 +325,47 @@ def test_old_authenticated_response_cannot_restore_data_after_clear(page, dashbo
     connect(page, dashboard)
     with httpx.Client() as client:
         old_data = client.get(dashboard.base + "/dashboard/api/usage", headers=dashboard.headers).json()
-    held = []
-    page.route("**/dashboard/api/usage", lambda route: held.append(route), times=1)
+    held = hold_authenticated_request(page, dashboard, "/dashboard/api/usage")
     page.get_by_role("button", name="Refresh", exact=True).click()
+    # Loading is set before fetch reaches interception. Wait for the actual old
+    # authenticated request, never the anonymous refresh started by Clear token.
+    expect(page.locator("html")).to_have_attribute("data-held-request", "true")
     expect(page.locator("#usage")).to_have_attribute("data-state", "loading")
+    assert held[0].request.headers["authorization"] == dashboard.headers["Authorization"]
     page.get_by_role("button", name="Clear token", exact=True).click()
     expect(page.locator("#usage")).to_have_attribute("data-state", "locked")
-    assert held
     try:
         held[0].fulfill(json=old_data)
     except Error:
         pass  # Cancellation may have already closed the routed request.
     expect(page.locator("#usage")).to_have_attribute("data-state", "locked")
     assert "gpt-mock" not in page.locator("#usage").inner_text()
+    assert page.locator("#cards").count() == 0
+
+
+@pytest.mark.parametrize("superseded", [False, True], ids=["current-fails-closed", "old-cancelled"])
+def test_session_check_failure_only_invalidates_its_own_auth_revision(page, dashboard, superseded):
+    connect(page, dashboard)
+    held = hold_authenticated_request(page, dashboard, "/auth/session")
+    page.get_by_role("button", name="Refresh", exact=True).click()
+    expect(page.locator("html")).to_have_attribute("data-held-request", "true")
+    assert held[0].request.headers["authorization"] == dashboard.headers["Authorization"]
+    if superseded:
+        # A fresh token submission cancels the pending check in the same event turn.
+        page.get_by_label("Admin token", exact=True).press("Enter")
+    try:
+        held[0].abort("failed")
+    except Error:
+        pass  # A newer submission can already have cancelled the old request.
+    if superseded:
+        expect(page.locator("#usage")).to_have_attribute("data-state", "ready")
+        expect(page.locator("#usage")).to_contain_text("gpt-mock")
+        expect(page.locator("#config")).to_have_attribute("data-state", "ready")
+    else:
+        for panel in ("usage", "keys", "budgets", "alerts", "config", "run-tree"):
+            expect(page.locator(f"#{panel}")).to_have_attribute("data-state", "locked")
+        expect(page.locator("#auth-status")).to_contain_text("Access verification unavailable")
+        assert page.locator("#cards").count() == 0
 
 
 def test_credential_metadata_is_inert_and_actions_preserve_exact_labels(page, dashboard):

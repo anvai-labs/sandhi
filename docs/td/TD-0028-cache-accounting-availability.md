@@ -345,6 +345,40 @@ record timeouts. A longer isolated per-provider deadline must leave room below t
 not an unconditional workaround: setup remains 30 seconds and the default inter-chunk
 idle deadline is 90 seconds. Queued or non-flushing origins can still time out.
 
+### Streaming rejection-body deadline repair and policy follow-up
+
+The 2026-09-23 timeout audit found that both raw streaming entry points in 0.9.0
+stopped their setup timer at response headers, then collected a non-success
+response body outside setup and idle bounds. A peer could send error headers and
+stall forever. The source repair keeps that body collection inside the **same**
+setup timer, retaining the observed status/request ID and one terminal timeout
+observation. Successful stream bytes, idle behavior, default limits and retry-free
+forwarding are unchanged. The existing raw timeout suite owns the regression:
+both entry points, stalled body, cumulative header/body budget, connection release
+and retained attempt facts. The existing rate-limit test also covers both streaming
+entry points; no duplicate timeout suite was added.
+
+Operator-configurable deadlines remain a separate design requirement, not a
+shipped feature: resolve exact model-within-credential endpoint → endpoint → global
+defaults once after authorization; reject invalid or above-ceiling values; expose
+effective limits and their source to authorized operators. Reuse existing pooled
+transports and timeout machinery across transparent and translated forwarding.
+Keep buffered, stream-setup and stream-idle bounds distinct. Do not promise an
+end-to-end deadline from a per-attempt transport timer, allow request headers to
+raise limits, silently clamp policy, or wrap an unchanged inner 120-second bound
+with a longer outer timer. The configured ceiling must leave settlement headroom
+inside the budget-reservation lifetime; longer workloads require an explicit lease
+lifecycle design. Timeout responses do not establish origin cancellation and must
+not silently replay ambiguous inference POSTs.
+
+Victor [#1174](https://github.com/anvai-labs/victor/pull/1174) retains two new ZAI/OIDC
+15/15 passes and a separate failed/interrupted Qwen3 attempt. The latter ended with
+four gateway HTTP 504 observations; its earlier cancellation-time accounting did
+not reconcile. Qwen14 and C5 are held for origin-liveness investigation on
+[InferFlux #184](https://github.com/anvai-labs/inferflux/issues/184). This streaming
+boundary repair neither changes that buffered verdict nor proves the local model
+is unable to perform the task. No shared cache was cleared or timeout increased.
+
 ## Contract decisions implemented by C2
 
 Do not infer unsupported capability from a missing counter or a reported zero. Define

@@ -275,15 +275,20 @@ impl RawForwarder {
     ) -> Result<RawChunkStream, ProviderError> {
         let url = self.url(path);
         let out_body = normalize_envelope(self.family, &body, true);
-        let resp = match tokio::time::timeout(self.stream_setup_timeout, self.send(&url, out_body))
-            .await
+        let resp = match tokio::time::timeout(self.stream_setup_timeout, async {
+            let response = self.send(&url, out_body).await?;
+            // Rejection-body collection is still setup: there is no successful
+            // stream to which an idle deadline could apply yet.
+            if !response.status().is_success() {
+                return Err(error_for_response(response, None).await);
+            }
+            Ok(response)
+        })
+        .await
         {
             Ok(result) => result?,
             Err(_) => return Err(ProviderError::Timeout(self.stream_setup_timeout)),
         };
-        if !resp.status().is_success() {
-            return Err(error_for_response(resp, None).await);
-        }
         use futures_util::TryStreamExt;
         let stream = resp
             .bytes_stream()
@@ -388,10 +393,26 @@ impl RawForwarder {
         let mut guard = context.and_then(|context| context.begin(provider, model));
         let url = self.url(path);
         let out_body = normalize_envelope(self.family, &body, true);
-        let resp = match tokio::time::timeout(
-            self.stream_setup_timeout,
-            self.send_with_session(&url, out_body, session, correlation, call_headers),
-        )
+        let resp = match tokio::time::timeout(self.stream_setup_timeout, async {
+            let response = self
+                .send_with_session(&url, out_body, session, correlation, call_headers)
+                .await?;
+            let facts = crate::attempt::AttemptResponseFacts::default();
+            facts.record_headers(
+                response.status().as_u16(),
+                response.headers(),
+                response_request_id_header,
+            );
+            if let Some(guard) = guard.as_mut() {
+                guard.set_response_facts(&facts);
+            }
+            // Keep one setup budget across headers and a rejected response body;
+            // retain the observed status/correlation if body collection expires.
+            if !response.status().is_success() {
+                return Err(error_for_response(response, response_request_id_header).await);
+            }
+            Ok(response)
+        })
         .await
         {
             Ok(result) => match result {
@@ -412,18 +433,6 @@ impl RawForwarder {
             }
         };
         let status = resp.status().as_u16();
-        let facts = crate::attempt::AttemptResponseFacts::default();
-        facts.record_headers(status, resp.headers(), response_request_id_header);
-        if let Some(guard) = guard.as_mut() {
-            guard.set_response_facts(&facts);
-        }
-        if !resp.status().is_success() {
-            let error = error_for_response(resp, response_request_id_header).await;
-            if let Some(guard) = guard.as_mut() {
-                guard.finish_error(&error);
-            }
-            return Err(error);
-        }
         let headers = filter_response_headers(resp.headers());
         let stream = if self.family == ProviderFamily::OpenAiCompat {
             crate::metered_openai_passthrough(resp.bytes_stream(), sniff_for_family(self.family))
@@ -1003,6 +1012,23 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ProviderError::RateLimited));
+        let err = forwarder
+            .forward_stream("/v1/chat/completions", Bytes::from_static(b"{}"))
+            .await
+            .err()
+            .expect("plain stream rejects rate limits");
+        assert!(matches!(err, ProviderError::RateLimited));
+        let err = forwarder
+            .forward_stream_metered(
+                "/v1/chat/completions",
+                Bytes::from_static(b"{}"),
+                None,
+                None,
+            )
+            .await
+            .err()
+            .expect("metered stream rejects rate limits");
+        assert!(matches!(err, ProviderError::RateLimited));
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -1336,6 +1362,125 @@ data: [DONE]\n\n";
             .err()
             .expect("stream setup should time out");
         assert!(matches!(err, ProviderError::Timeout(d) if d == Duration::from_millis(10)));
+    }
+
+    #[tokio::test]
+    async fn stream_setup_deadline_includes_stalled_error_body_in_both_raw_paths() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let mut timed_out = Vec::new();
+        for (header_delay, body_delay) in [
+            (Duration::ZERO, None),
+            (Duration::from_millis(250), Some(Duration::from_millis(250))),
+        ] {
+            for metered in [false, true] {
+                // Wiremock delays headers and body together. This peer sends error headers
+                // promptly, then stalls only the body: the previously unbounded phase.
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let mut peer = tokio::spawn(async move {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut head = Vec::new();
+                    while !head.ends_with(b"\r\n\r\n") {
+                        head.push(socket.read_u8().await.unwrap());
+                    }
+                    let head = String::from_utf8(head).unwrap();
+                    let length: usize = head
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse().unwrap())
+                        })
+                        .unwrap();
+                    socket.read_exact(&mut vec![0; length]).await.unwrap();
+                    tokio::time::sleep(header_delay).await;
+                    socket
+                    .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 100\r\nx-request-id: stalled-error\r\n\r\n")
+                    .await
+                    .unwrap();
+                    // Two individually sub-bound phases must still share one budget.
+                    if let Some(delay) = body_delay {
+                        tokio::select! {
+                            closed = socket.read_u8() => {
+                                assert!(matches!(closed, Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof));
+                                return;
+                            }
+                            _ = tokio::time::sleep(delay) => {
+                                socket.write_all(&[b'x'; 100]).await.unwrap();
+                            }
+                        }
+                    }
+                    // A locally timed-out request must release the upstream connection.
+                    let closed =
+                        tokio::time::timeout(Duration::from_secs(2), socket.read_u8()).await;
+                    assert!(
+                        matches!(closed, Ok(Err(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof)
+                    );
+                });
+                let (context, receiver) =
+                    crate::AttemptContext::channel("stalled_error", 4).unwrap();
+                let forwarder = RawForwarder::new(
+                    ProviderFamily::OpenAiCompat,
+                    format!("http://{address}"),
+                    "test",
+                )
+                .with_provider_request_id_header(Some("x-request-id"))
+                .with_timeouts(Duration::from_secs(1), Duration::from_millis(400), None)
+                .with_metered_attempt_context(
+                    "openai",
+                    Some("test".into()),
+                    context,
+                );
+                let result = tokio::time::timeout(Duration::from_secs(1), async {
+                    if metered {
+                        forwarder
+                            .forward_stream_metered(
+                                "/v1/chat/completions",
+                                Bytes::from_static(b"{}"),
+                                None,
+                                None,
+                            )
+                            .await
+                            .err()
+                    } else {
+                        forwarder
+                            .forward_stream("/v1/chat/completions", Bytes::from_static(b"{}"))
+                            .await
+                            .err()
+                    }
+                })
+                .await;
+                timed_out.push(matches!(result, Ok(Some(ProviderError::Timeout(d))) if d == Duration::from_millis(400)));
+                let closed = tokio::time::timeout(Duration::from_secs(3), &mut peer).await;
+                if closed.is_err() {
+                    peer.abort();
+                    let _ = peer.await;
+                }
+                closed
+                    .expect("upstream must close while the client is still alive")
+                    .unwrap();
+                drop(forwarder);
+                if metered && timed_out.last() == Some(&true) {
+                    let observations = receiver.drain();
+                    assert_eq!(observations.len(), 2);
+                    assert!(matches!(
+                        &observations[1].phase,
+                        crate::AttemptPhase::Terminal {
+                            outcome: crate::AttemptOutcome::Timeout,
+                            provider_status: Some(503),
+                            provider_request_id: Some(id),
+                            ..
+                        } if id == "stalled-error"
+                    ));
+                }
+            }
+        }
+        assert_eq!(
+            timed_out, [true; 4],
+            "plain and metered paths must enforce their own bound"
+        );
     }
 
     #[tokio::test]
