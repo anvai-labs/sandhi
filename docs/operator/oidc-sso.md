@@ -90,6 +90,20 @@ Roles are deployment-wide, not tenant isolation. A successful login grants no im
 role. Subject bindings are server configuration and require restart; IdP groups control
 client admission but are not automatically synchronized to Sandhi roles.
 
+For automated accounting, explicitly give a dedicated subject `"role": "viewer"`
+and `"allow_diagnostics": true`. This adds only the bounded read-only C4
+`POST /admin/usage/diagnostics` permission; it grants no budget writes, credential
+management, configuration access or inference. The flag defaults to false and does
+not change existing viewer/operator access. Admin retains its existing access.
+Session metadata advertises `diagnostics` only for explicit opt-in; the existing
+`admin` permission continues to imply diagnostics, preserving default responses.
+`allow_diagnostics` alone grants diagnostics without other viewer reads. The
+permission is deployment-wide: it does not restrict queries to that subject's runs.
+Cookie-authenticated diagnostic POSTs still require exact Origin and CSRF proof;
+automation uses a separately issued OAuth access token, never a browser cookie.
+This is a post-0.8.0 source addition: 0.8.0 binaries reject the new field. Explicit
+token compatibility mode still requires its existing admin token for diagnostics.
+
 Open `/dashboard` and select **Sign in with SSO**. Tokens stay server-side. Browser
 sessions use Secure, HttpOnly, SameSite=Lax `__Host-` cookies. Writes require both a CSRF
 proof and the exact configured Origin. **Sign out** invalidates this Sandhi session; it

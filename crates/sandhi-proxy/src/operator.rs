@@ -971,7 +971,7 @@ pub(crate) async fn usage_diagnostics(
     if let Err(response) = require_access(
         &state,
         request.headers(),
-        crate::auth::Permission::Admin,
+        crate::auth::Permission::Diagnostics,
         true,
     )
     .await

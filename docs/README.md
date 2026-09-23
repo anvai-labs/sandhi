@@ -92,7 +92,7 @@ TD-0028 keeps its merge/deployment gates separate from the remaining diagnostic 
 | [0008](adr/0008-inferflux-admission-and-session-affinity.md) | OpenAI-compatible catalog admission and session-affinity facts |
 | [0009](adr/0009-http1-only-listener.md) | No h2c sniffing; cleartext listener is HTTP/1 only |
 | [0010](adr/0010-cache-read-reporting-availability.md) | Accepted: additive cache-read observation and same-population reporting coverage |
-| [0011](adr/0011-bounded-persisted-usage-diagnostics.md) | Accepted design: bounded admin-only persisted usage lookup; no new capture or retention |
+| [0011](adr/0011-bounded-persisted-usage-diagnostics.md) | Accepted design: bounded persisted usage lookup; post-0.8.0 explicit OIDC diagnostics permission, token mode remains admin-only; no new capture or retention |
 
 ## Technical-design status
 
