@@ -1,6 +1,6 @@
 # TD-0029: OIDC login and role-based gateway access
 
-Status: In progress — implementation and local protocol/browser coverage present; dedicated Kanidm registration and live browser acceptance passed. A live machine-to-ZAI integration check passed; upstream OIDC, final-binary acceptance, independent final review and release acceptance remain open.
+Status: In progress — OIDC, role enforcement and scoped diagnostics are reviewed and released in 0.9.1. Published-binary Kanidm browser and ZAI actual-member checks passed. Human-account onboarding requires both IdP admission and a Sandhi role binding; runtime role management, bounded startup and full InferFlux/C5 acceptance remain open.
 
 ## Context and evidence
 
@@ -48,11 +48,11 @@ On 2026-09-22, Kanidm 1.11.1 on dataserver3 served verified HTTPS discovery for 
 
 | Increment | Evidence required | Status |
 |---|---|---|
-| S1 discovery/login/session and role enforcement | Signed mock IdP protocol tests; state/nonce/PKCE/replay/expiry/issuer/audience negatives; backend role matrix; CSRF/logout | Implemented and locally tested; final review pending |
-| S2 OIDC inference grants and compatibility | Actual proxy transport tests retain model allowlist, attribution, budgets, correlation; explicit token profile regression | Local protocol/compatibility coverage and live machine-to-ZAI integration passed; final review pending |
-| S3 dashboard and deployment | Browser login/role/expiry/logout tests; dedicated Kanidm registration; verified HTTPS; preserve existing state and rollback | Browser suite and live Kanidm browser pass; release/cutover pending |
+| S1 discovery/login/session and role enforcement | Signed mock IdP protocol tests; state/nonce/PKCE/replay/expiry/issuer/audience negatives; backend role matrix; CSRF/logout | Reviewed and released; published 0.9.1 browser login/logout and eight authorization checks passed |
+| S2 OIDC inference grants and compatibility | Actual proxy transport tests retain model allowlist, attribution, budgets, correlation; explicit token profile regression | Reviewed and released; new 0.9.1 sequential actual-member case passed six calls and six accounting joins |
+| S3 dashboard and deployment | Browser login/role/expiry/logout tests; dedicated Kanidm registration; verified HTTPS; preserve existing state and rollback | Published binary and actual-member browser lookup passed; initial 25-second startup acceptance failed and remains separate |
 | S4 multi-provider co-design | Direct and optional Sandhi InferFlux acceptance, all formation cohorts, C5 six-Qwen/one-ZAI reconciliation | Pending; separate Victor/InferFlux ownership |
-| S5 scoped accounting diagnostics | Explicit subject permission without writes/inference; existing default-role and compatibility denials, CSRF, introspection/revocation and bounds | Source merged in #285 with clean review and green CI; prepared for 0.9.0, publication and live deployment pending |
+| S5 scoped accounting diagnostics | Explicit subject permission without writes/inference; existing default-role and compatibility denials, CSRF, introspection/revocation and bounds | Source #285 released in 0.9.0/0.9.1; separate viewer plus diagnostics passes live accounting while mutation/inference remain denied |
 
 Test ownership: extend existing operator authorization and dashboard browser suites for their existing routes; keep OIDC protocol cases in one module. Existing compatibility tests cover virtual-key accounting and must not be cloned for each role. Remove tests only when an equivalent owner demonstrably preserves their assertions. Mock protocol acceptance is not live Kanidm or model acceptance.
 
@@ -63,16 +63,45 @@ with this flag may perform accounting reads but cannot change credentials, budge
 or configuration and receives no inference grant. Existing role/CSRF tests own
 the expanded matrix; the HTTPS authority fixture checks bearer access and revocation.
 Compatibility/admin-first bounds tests remain their original owners. No duplicate
-diagnostic projection, accounting or browser tests are added. This does not establish
-renewable Victor credentials, final-binary deployment or actual-member C5 acceptance.
+diagnostic projection, accounting or browser tests are added. The source increment
+alone did not establish renewable Victor credentials or final-binary deployment;
+subsequent release evidence is recorded below. Actual-member C5 remains open.
 
 ## Open gaps
 
-- The corrected machine integration run passed OAuth exchange, ZAI inference and forbidden admin access; final-binary acceptance and origin request correlation remain required. Preserve the failed 502 and wrong-route harness evidence.
-- InferFlux TLS hostname verification, strict token claims, discovered JWKS, explicit OIDC-only policy and safe audit identity require their own fixes before SSO acceptance.
+- Published 0.9.1 ZAI acceptance below does not establish full mixed-provider origin correlation. Preserve the failed 502 and wrong-route harness evidence.
+- InferFlux's strict token/identity boundaries ([#212](https://github.com/anvai-labs/inferflux/pull/212)), outbound TLS peer verification ([#213](https://github.com/anvai-labs/inferflux/pull/213)) and safe audit identity ([#214](https://github.com/anvai-labs/inferflux/pull/214)) are merged source fixes. Discovered JWKS, explicit OIDC-only policy and direct-origin Kanidm interoperability still require their own acceptance; the current origin uses its explicitly configured private API-key path.
 - Session revocation is local until expiry/restart; distributed sessions, IdP backchannel logout and refresh are out of scope and must remain documented.
-- Server-side subject role/grant configuration requires restart. IdP group-to-role synchronization is not implied.
+- Server-side subject role/grant configuration requires restart. IdP group-to-role synchronization is not implied. A future role editor/API must be admin-only, preserve one authoritative binding store, require CSRF/Origin for browser mutations, audit actor/target/change without credentials, reject concurrent stale updates, and define revocation and recovery/last-admin behavior. This is a design requirement, not shipped functionality.
+- The published gateway twice missed a 25-second startup-readiness window while its process stayed alive; later exact-process/version/readiness checks passed. Preserve both failures. Startup phase timing and repeatable bounded acceptance remain open; the cause is not established as OIDC or keyring access.
 - C5 remains open. Successful discovery, login, unit tests or the earlier five-call replay cannot establish full mixed-team acceptance.
+
+### Published 0.9.1 and human onboarding, 2026-09-23
+
+Reviewed promotion [#293](https://github.com/anvai-labs/sandhi/pull/293) and exact-main
+CI produced source `4968fd045550539f0bddfb1892e9c4f3f226ce5f`. All release targets verified;
+the first verification saw npm propagation 404 and the read-only verifier later passed
+without republishing. [Tap #68](https://github.com/anvai-labs/homebrew-tap/pull/68) and
+its actual install/tests passed before the Mac upgrade. Both commands report 0.9.1;
+the serving proxy SHA-256 is `ff4d7bd68ce4ea33a593416899acb431b845e2d217255451f98bb42593885b63`.
+Private configuration, usage data, provider credentials and rollback binaries were retained.
+
+The new Victor sequential case `matrix-9099a9446a` passed six HTTP-200 calls and six
+wire/SQLite/C4 joins, with two distinct member sessions, two deliverables, two passing
+pytest checks and two numeric oracles. Fresh/cache-read/output totals are 5067/13248/535,
+with explicit cache reporting 6/6. A TLS-verified admin browser login displayed one new
+member's three calls with matching totals and logged out successfully. This is one new
+release smoke case, not a rerun of the preserved 15-case cohorts or C5 acceptance.
+
+A subsequent human login exposed a provisioning omission: Kanidm authenticated the
+account but reported no available application scopes, and the subject had no Sandhi
+role binding. The repair adds only the verified account to the existing mapped viewer
+group and a `viewer` subject entry, preserving other bindings. Administrator browser
+success is not evidence of another person's access. Follow the
+[two-stage onboarding and role-change guide](../operator/oidc-sso.md#onboard-a-human-dashboard-user);
+the person's fresh login is a separate verification step. After the repair and
+restart, the user confirmed that the dashboard opened. This is user-reported human
+login evidence, distinct from the automated administrator browser check.
 
 ### Reviewed corrections and machine check
 
