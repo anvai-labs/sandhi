@@ -19,6 +19,19 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+## [0.10.1] — 2026-09-24
+
+### Fixed
+
+- Dashboard primary-action labels retain contrast on hover in light and dark themes.
+- Overview cards distinguish token totals from cache reporting and latency details;
+  narrow screens keep attribution tables independently scrollable and keyboard accessible.
+
+### Added
+
+- Dashboard section navigation, a skip link, larger controls and reduced-motion support.
+  The standalone dashboard retains existing OIDC roles and accounting behavior.
+
 ## [0.10.0] — 2026-09-24
 
 ### Added
