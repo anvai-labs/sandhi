@@ -6,6 +6,7 @@
 <link rel="stylesheet" href="/dashboard/assets/dashboard.css">
 </head>
 <body>
+<a class="skip-link" href="#overview">Skip to overview</a>
 <header>
   <div class="brand">
     <h1>Sandhi</h1>
@@ -24,16 +25,21 @@
   <button class="btn" type="button" data-action="refresh">Refresh</button>
   <span id="auth-status" role="status">Checking access…</span>
 </header>
-<div class="wrap">
+<main class="wrap">
+<nav class="section-nav" aria-label="Dashboard sections">
+  <a href="#overview">Overview</a><a href="#configuration">Configuration</a>
+  <a href="#access">Keys &amp; credentials</a><a href="#budget-section">Budgets</a>
+  <a href="#alert-section">Alerts</a><a href="#run-section">Run lookup</a>
+</nav>
 
-<h2>Overview</h2>
+<h2 id="overview" tabindex="-1">Overview</h2>
 <section class="panel" id="usage" aria-label="Usage overview"></section>
 
-<h2>Declarative config <span class="hint">providers, budgets, alerts &amp; vkeys declared in a committed JSON file</span></h2>
+<h2 id="configuration">Declarative config <span class="hint">providers, budgets, alerts &amp; vkeys declared in a committed JSON file</span></h2>
 <section class="panel" id="config"></section>
 <div id="config-result" data-sensitive role="status"></div>
 
-<h2>Virtual keys &amp; credentials <span class="hint">who has access, and where calls actually go</span></h2>
+<h2 id="access">Virtual keys &amp; credentials <span class="hint">who has access, and where calls actually go</span></h2>
 <section class="panel"><div id="keys"></div>
 <details class="actions"><summary>Mint a virtual key</summary>
         <div class="form-row">
@@ -61,7 +67,7 @@
       </details>
 </section>
 
-<h2>Budgets <span class="hint">neutral-token caps per scope</span></h2>
+<h2 id="budget-section">Budgets <span class="hint">neutral-token caps per scope</span></h2>
 <section class="panel">
   <div id="budgets"></div>
   <p class="callout info">Admission uses estimated reservations, not strict token bounds.
@@ -81,10 +87,10 @@
   </details>
 </section>
 
-<h2>Alerts <span class="hint">threshold rules on budget scopes</span></h2>
+<h2 id="alert-section">Alerts <span class="hint">threshold rules on budget scopes</span></h2>
 <section class="panel" id="alerts"></section>
 
-<h2>Run cost tree <span class="hint">one agent run's spend, per step, own vs subtree</span></h2>
+<h2 id="run-section">Run cost tree <span class="hint">one agent run's spend, per step, own vs subtree</span></h2>
 <section class="panel">
   <div class="form-row" style="margin-top:0">
     <div class="field"><label for="run-id">Run ID</label><input id="run-id" placeholder="run_01HK..." style="width:16rem"></div>
@@ -98,7 +104,7 @@
   and alerts, and administrators can manage credentials and configuration. Sign out ends this
   dashboard session. Token access is available only in the explicit compatibility mode.
 </footer>
-</div>
+</main>
 <div class="toast-wrap" id="toasts" role="status" aria-live="polite"></div>
 
 <script src="/dashboard/assets/dashboard.js" defer></script>
