@@ -376,6 +376,17 @@ inside the budget-reservation lifetime; longer workloads require an explicit lea
 lifecycle design. Timeout responses do not establish origin cancellation and must
 not silently replay ambiguous inference POSTs.
 
+The next streaming increment adds an opt-in Rust
+[body lifetime owner](../operator/stream-body-lifetime.md) shared by both planes.
+An unread or backpressured response no longer prevents upstream closure under
+that opt-in policy. Cleanup moves off the async worker after dropping the source,
+while admission and lifecycle guards continue to count unfinished settlement.
+This is not a durable receipt, a bounded settlement guarantee, or proof of origin
+GPU cancellation. Default behavior and deployed gateway settings are unchanged;
+standalone streaming policy and full C5 acceptance remain open. The existing
+terminal-accounting fixture and a focused controller suite own the regressions;
+no duplicate lease/parser suite was introduced.
+
 Victor [#1174](https://github.com/anvai-labs/victor/pull/1174) retains two new ZAI/OIDC
 15/15 passes and a separate failed/interrupted Qwen3 attempt. The latter ended with
 four gateway HTTP 504 observations; its earlier cancellation-time accounting did

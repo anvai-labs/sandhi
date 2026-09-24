@@ -190,11 +190,20 @@ impl EffectiveDeadline {
     /// Refuse, never clamp, if the actual lease cannot cover dispatch plus headroom.
     /// SQLite persists expiry in seconds, so discard fractional precision here too.
     pub fn fits_lease(self, expires_at: time::OffsetDateTime, now: time::OffsetDateTime) -> bool {
-        let expires_at = time::OffsetDateTime::from_unix_timestamp(expires_at.unix_timestamp())
-            .expect("valid reservation timestamp");
-        (expires_at - now).whole_milliseconds()
-            >= i128::from(self.milliseconds + SETTLEMENT_HEADROOM_MS)
+        fits_lease(self.duration(), expires_at, now)
     }
+}
+
+/// Shared actual-lease check for buffered and streaming body policies.
+pub(crate) fn fits_lease(
+    duration: Duration,
+    expires_at: time::OffsetDateTime,
+    now: time::OffsetDateTime,
+) -> bool {
+    let expires_at = time::OffsetDateTime::from_unix_timestamp(expires_at.unix_timestamp())
+        .expect("valid reservation timestamp");
+    (expires_at - now).whole_nanoseconds()
+        >= (duration + Duration::from_millis(SETTLEMENT_HEADROOM_MS)).as_nanos() as i128
 }
 
 /// Only project startup policy: unrelated desired-state sections retain their existing lifecycle.

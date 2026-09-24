@@ -18,6 +18,7 @@ pub mod metrics;
 pub mod operator;
 pub mod persistence;
 pub mod ratelimit;
+pub mod streaming;
 
 /// First-party OTel/OTLP export of `gen_ai.*` spans + metrics (Scope 5, TD-0011 P3). Feature-gated
 /// (`otel-otlp`, default off); provides no-op stubs when the feature is off so call sites compile
@@ -221,6 +222,8 @@ pub fn plaintext_bind_warning(addr: SocketAddr, tls_enabled: bool) -> Option<&'s
 pub struct ProxyState {
     /// Validated startup-only buffered transport policy; absent preserves transport defaults.
     pub buffered_deadlines: Option<deadlines::BufferedDeadlines>,
+    /// Opt-in body lifetime owner for built-in streaming transports (no standalone configuration yet).
+    pub stream_body_lifetime: Option<streaming::StreamBodyLifetime>,
     /// One-shot lifecycle; dispatch authorization stops atomically at shutdown cutoff.
     pub lifecycle: Arc<lifecycle::Lifecycle>,
     /// Same-port probe window, included in the total grace and clamped to leave drain time.
@@ -333,6 +336,7 @@ impl ProxyState {
         Self {
             lifecycle: Arc::new(lifecycle::Lifecycle::new()),
             buffered_deadlines: None,
+            stream_body_lifetime: None,
             shutdown_quiesce: Duration::from_secs(1),
             keys,
             ledger: Mutex::new(ledger),
@@ -2277,6 +2281,14 @@ async fn handle(
         );
     }
 
+    if wants_stream && state.stream_body_lifetime.is_some() && provider.raw_forwarder().is_none() {
+        return ingress_error(
+            dialect,
+            StatusCode::BAD_GATEWAY,
+            "configured stream body lifetime requires a built-in transport",
+        );
+    }
+
     // 5. Reserve an estimated liability (input bytes/4 + effective output maximum).
     //    Block rejects reservations exceeding the cap, but the input heuristic is NOT a proven
     //    token bound. Actual usage, including concurrent calls and separate reasoning, may exceed
@@ -2352,6 +2364,23 @@ async fn handle(
                 dialect,
                 StatusCode::SERVICE_UNAVAILABLE,
                 "insufficient reservation lifetime for configured buffered deadline",
+            );
+        }
+    }
+    if let (true, Some(lifetime), Some(Admission::Leased(lease))) = (
+        wants_stream,
+        state.stream_body_lifetime,
+        pending.admission.as_ref(),
+    ) {
+        if !deadlines::fits_lease(
+            lifetime.duration(),
+            lease.expires_at,
+            time::OffsetDateTime::now_utc(),
+        ) {
+            return ingress_error(
+                dialect,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "insufficient reservation lifetime for configured stream body lifetime",
             );
         }
     }
@@ -2687,70 +2716,70 @@ async fn transparent_stream_response(
     };
     let mut upstream = raw.stream;
 
-    let body_stream = async_stream::stream! {
-        // TD-0014 P2: the admission slot lives in the BODY, not the handler future. It is
-        // released whenever this generator drops — completion, client disconnect, or
-        // graceful-drain cancellation — and the gauge tracks exactly that lifetime.
-        let _permit = permit;
-        let _open = accounting.state.metrics.stream_open_guard();
-        let mut seen_usage = false;
-        let mut delta_bytes: u64 = 0;
-        let mut boundary_ttft_ms: Option<u64> = None;
-        let mut cache_read_observation = None;
-        while let Some(item) = upstream.next().await {
-            match item {
-                Ok(chunk) => {
-                    sandhi_core::merge_cache_read_observation(&mut cache_read_observation, chunk.cache_read_observation);
-                    // A coalesced first chunk can carry both content and protocol-terminal
-                    // usage. Capture boundary timing before either accounting branch.
-                    if !chunk.data.is_empty() {
-                        boundary_ttft_ms.get_or_insert_with(|| elapsed_ms(started));
-                    }
-                    if let Some(parsed) = chunk.usage {
-                        // Terminal frame: the finalized, source-measured usage.
-                        let mut usage: UsageV2 = parsed.into();
-                        usage.cache_read_observation = cache_read_observation;
-                        reconcile_boundary_duration(&mut usage, elapsed_ms(started));
-                        reconcile_boundary_ttft(&mut usage, boundary_ttft_ms);
-                        usage.completeness = UsageCompleteness::Final;
-                        usage.outcome.get_or_insert_with(|| "success".into());
-                        accounting.observe(&usage);
-                        seen_usage = true;
-                    } else if !chunk.data.is_empty() {
-                        // Running Partial so a disconnect settles accrued spend. `usage_running`
-                        // carries whatever the family has already announced — for Anthropic that
-                        // is input plus the full cache split from `message_start`, which is the
-                        // dominant term on a cached prompt and used to be settled as zero
-                        // (TD-0013 D4).
-                        delta_bytes = delta_bytes.saturating_add(chunk.data.len() as u64);
-                        if !seen_usage {
-                            let mut usage = partial_usage(chunk.usage_running, delta_bytes);
+    let body_stream = streaming::body(accounting, permit, None, move |accounting| {
+        Box::pin(async_stream::stream! {
+            let mut seen_usage = false;
+            let mut delta_bytes: u64 = 0;
+            let mut boundary_ttft_ms: Option<u64> = None;
+            let mut cache_read_observation = None;
+            while let Some(item) = upstream.next().await {
+                match item {
+                    Ok(chunk) => {
+                        sandhi_core::merge_cache_read_observation(&mut cache_read_observation, chunk.cache_read_observation);
+                        // A coalesced first chunk can carry both content and protocol-terminal
+                        // usage. Capture boundary timing before either accounting branch.
+                        if !chunk.data.is_empty() {
+                            boundary_ttft_ms.get_or_insert_with(|| elapsed_ms(started));
+                        }
+                        if let Some(parsed) = chunk.usage {
+                            // Terminal frame: the finalized, source-measured usage.
+                            let mut usage: UsageV2 = parsed.into();
                             usage.cache_read_observation = cache_read_observation;
+                            reconcile_boundary_duration(&mut usage, elapsed_ms(started));
+                            reconcile_boundary_ttft(&mut usage, boundary_ttft_ms);
+                            usage.completeness = UsageCompleteness::Final;
+                            usage.outcome.get_or_insert_with(|| "success".into());
                             accounting.observe(&usage);
+                            seen_usage = true;
+                        } else if !chunk.data.is_empty() {
+                            // Running Partial so a disconnect settles accrued spend. `usage_running`
+                            // carries whatever the family has already announced — for Anthropic that
+                            // is input plus the full cache split from `message_start`, which is the
+                            // dominant term on a cached prompt and used to be settled as zero
+                            // (TD-0013 D4).
+                            delta_bytes = delta_bytes.saturating_add(chunk.data.len() as u64);
+                            if !seen_usage {
+                                let mut usage = partial_usage(chunk.usage_running, delta_bytes);
+                                usage.cache_read_observation = cache_read_observation;
+                                accounting.observe(&usage);
+                            }
+                        }
+                        // Observation-only terminal frames must reach the meter without turning
+                        // missing numeric usage into a finalized zero-token measurement.
+                        if let Some(usage) = accounting.usage.as_mut() {
+                            usage.cache_read_observation = cache_read_observation;
+                        } else if cache_read_observation.is_some() {
+                            accounting.observe(&UsageV2 { cache_read_observation, ..UsageV2::default() });
+                        }
+                        if !chunk.data.is_empty() {
+                            yield Ok::<Bytes, std::io::Error>(chunk.data);
                         }
                     }
-                    // Observation-only terminal frames must reach the meter without turning
-                    // missing numeric usage into a finalized zero-token measurement.
-                    if let Some(usage) = accounting.usage.as_mut() {
-                        usage.cache_read_observation = cache_read_observation;
-                    } else if cache_read_observation.is_some() {
-                        accounting.observe(&UsageV2 { cache_read_observation, ..UsageV2::default() });
+                    Err(_) => {
+                        accounting.set_outcome("error");
+                        break;
                     }
-                    if !chunk.data.is_empty() {
-                        yield Ok::<Bytes, std::io::Error>(chunk.data);
-                    }
-                }
-                Err(_) => {
-                    accounting.set_outcome("error");
-                    break;
                 }
             }
-        }
-        if accounting.outcome != "error" {
-            accounting.set_outcome("success");
-        }
-        accounting.finalize();
-    };
+            if accounting.outcome != "error" {
+                accounting.set_outcome("success");
+            } else if accounting.state.stream_body_lifetime.is_some() {
+                // The owner must distinguish failed upstream EOF before scheduling a tail.
+                // Leave legacy pull-driven wire behavior unchanged when the policy is absent.
+                yield Err(std::io::Error::other("upstream stream failed"));
+            }
+        })
+    });
 
     let headers = sandhi_providers::raw::filter_response_headers(&raw.headers);
     let mut builder = Response::builder().status(raw.status);
@@ -2760,9 +2789,7 @@ async fn transparent_stream_response(
     if !headers.contains_key("content-type") {
         builder = builder.header("content-type", "text/event-stream");
     }
-    builder
-        .body(Body::from_stream(body_stream))
-        .expect("valid streaming response")
+    builder.body(body_stream).expect("valid streaming response")
 }
 
 /// The enforcement policy configured for a scope (from the operator budgets map). Drives D6
@@ -3215,105 +3242,105 @@ async fn stream_response(
         }
     };
 
-    let body = async_stream::stream! {
-        // TD-0014 P2: admission slot rides the body — see the transparent twin above.
-        let _permit = permit;
-        let _open = accounting.state.metrics.stream_open_guard();
-        let mut last_usage: Option<UsageV2> = None;
-        // What the family has reported so far, for families that report before the end
-        // (TD-0013 D3). `None` for a terminal-only family, for the whole stream.
-        let mut running_reported: Option<ParsedUsage> = None;
-        let mut cache_read_observation = None;
-        // A non-final `Usage` event is accounting-only and must not reach the client (TD-0013 D7):
-        // the ingress wire shape is a TD-0010 parity guarantee, and a metering improvement that
-        // adds frames to a caller's stream has broken something more important than it fixed.
-        let mut accounting_only;
-        let mut delta_out_bytes: u64 = 0;
-        while let Some(item) = upstream.next().await {
-            match item {
-                Ok(event) => {
-                    accounting_only = false;
-                    match &event {
-                        sandhi_core::ChatStreamEventV1::Usage { usage }
-                            if usage.completeness != UsageCompleteness::Final =>
-                        {
-                            // Progress, not a verdict: it must not supersede the terminal frame.
-                            sandhi_core::merge_cache_read_observation(&mut cache_read_observation, usage.cache_read_observation);
-                            if usage.completeness != UsageCompleteness::Unavailable || usage.cache_read_observation.and_then(sandhi_core::CacheReadObservation::validated).is_none() {
-                                running_reported = Some(reported_parts(usage));
+    let tail = (dialect == IngressDialect::OpenAi).then(|| Bytes::from_static(b"data: [DONE]\n\n"));
+    let body = streaming::body(accounting, permit, tail, move |accounting| {
+        Box::pin(async_stream::stream! {
+            let mut last_usage: Option<UsageV2> = None;
+            // What the family has reported so far, for families that report before the end
+            // (TD-0013 D3). `None` for a terminal-only family, for the whole stream.
+            let mut running_reported: Option<ParsedUsage> = None;
+            let mut cache_read_observation = None;
+            // A non-final `Usage` event is accounting-only and must not reach the client (TD-0013 D7):
+            // the ingress wire shape is a TD-0010 parity guarantee, and a metering improvement that
+            // adds frames to a caller's stream has broken something more important than it fixed.
+            let mut accounting_only;
+            let mut delta_out_bytes: u64 = 0;
+            while let Some(item) = upstream.next().await {
+                match item {
+                    Ok(event) => {
+                        accounting_only = false;
+                        match &event {
+                            sandhi_core::ChatStreamEventV1::Usage { usage }
+                                if usage.completeness != UsageCompleteness::Final =>
+                            {
+                                // Progress, not a verdict: it must not supersede the terminal frame.
+                                sandhi_core::merge_cache_read_observation(&mut cache_read_observation, usage.cache_read_observation);
+                                if usage.completeness != UsageCompleteness::Unavailable || usage.cache_read_observation.and_then(sandhi_core::CacheReadObservation::validated).is_none() {
+                                    running_reported = Some(reported_parts(usage));
+                                }
+                                accounting_only = true;
                             }
-                            accounting_only = true;
+                            sandhi_core::ChatStreamEventV1::Usage { usage } => {
+                                sandhi_core::merge_cache_read_observation(&mut cache_read_observation, usage.cache_read_observation);
+                                // Terminal, authoritative usage — replaces any running partial estimate.
+                                accounting.observe(usage);
+                                last_usage = Some(usage.clone());
+                            }
+                            sandhi_core::ChatStreamEventV1::TextDelta { delta }
+                            | sandhi_core::ChatStreamEventV1::ReasoningDelta { delta }
+                            | sandhi_core::ChatStreamEventV1::RefusalDelta { delta }
+                            | sandhi_core::ChatStreamEventV1::ToolCallArgumentsDelta { delta, .. } => {
+                                delta_out_bytes = delta_out_bytes.saturating_add(delta.len() as u64);
+                            }
+                            sandhi_core::ChatStreamEventV1::Error { .. } => {
+                                accounting.set_outcome("error");
+                            }
+                            sandhi_core::ChatStreamEventV1::Finish { reason } => {
+                                // Scope 5: capture the finish reason for `gen_ai.response.finish_reasons`.
+                                accounting.finish_reason = Some(*reason);
+                            }
+                            _ => {}
                         }
-                        sandhi_core::ChatStreamEventV1::Usage { usage } => {
-                            sandhi_core::merge_cache_read_observation(&mut cache_read_observation, usage.cache_read_observation);
-                            // Terminal, authoritative usage — replaces any running partial estimate.
-                            accounting.observe(usage);
-                            last_usage = Some(usage.clone());
+                        // ADR-0005 D1: hold a running `Partial` until the terminal usage arrives, so a
+                        // mid-stream disconnect (which fires the Drop finalizer, not the code below)
+                        // settles the accumulated spend instead of releasing to zero — closing the
+                        // open-stream / read-a-lot / disconnect metering-evasion hole. Per-category:
+                        // real numbers where the family has reported them, the byte estimate only for
+                        // output and only as far as it must (TD-0013 D4). The terminal frame overrides.
+                        if last_usage.is_none() {
+                            let mut usage = partial_usage(running_reported, delta_out_bytes);
+                            usage.cache_read_observation = cache_read_observation;
+                            accounting.observe(&usage);
+                        } else if let Some(usage) = accounting.usage.as_mut() {
+                            usage.cache_read_observation = cache_read_observation;
                         }
-                        sandhi_core::ChatStreamEventV1::TextDelta { delta }
-                        | sandhi_core::ChatStreamEventV1::ReasoningDelta { delta }
-                        | sandhi_core::ChatStreamEventV1::RefusalDelta { delta }
-                        | sandhi_core::ChatStreamEventV1::ToolCallArgumentsDelta { delta, .. } => {
-                            delta_out_bytes = delta_out_bytes.saturating_add(delta.len() as u64);
+                        if accounting_only {
+                            continue;
                         }
-                        sandhi_core::ChatStreamEventV1::Error { .. } => {
-                            accounting.set_outcome("error");
+                        for (event_name, value) in
+                            encode_stream_event(dialect, &event, last_usage.as_ref())
+                        {
+                            yield Ok::<Bytes, std::io::Error>(Bytes::from(sse_frame(event_name, &value)));
                         }
-                        sandhi_core::ChatStreamEventV1::Finish { reason } => {
-                            // Scope 5: capture the finish reason for `gen_ai.response.finish_reasons`.
-                            accounting.finish_reason = Some(*reason);
+                    }
+                    Err(error) => {
+                        accounting.set_outcome("error");
+                        let typed = sandhi_core::ChatStreamEventV1::Error {
+                            error: error.as_typed(Some(provider.slug())),
+                        };
+                        for (event_name, value) in
+                            encode_stream_event(dialect, &typed, last_usage.as_ref())
+                        {
+                            yield Ok::<Bytes, std::io::Error>(Bytes::from(sse_frame(event_name, &value)));
                         }
-                        _ => {}
+                        break;
                     }
-                    // ADR-0005 D1: hold a running `Partial` until the terminal usage arrives, so a
-                    // mid-stream disconnect (which fires the Drop finalizer, not the code below)
-                    // settles the accumulated spend instead of releasing to zero — closing the
-                    // open-stream / read-a-lot / disconnect metering-evasion hole. Per-category:
-                    // real numbers where the family has reported them, the byte estimate only for
-                    // output and only as far as it must (TD-0013 D4). The terminal frame overrides.
-                    if last_usage.is_none() {
-                        let mut usage = partial_usage(running_reported, delta_out_bytes);
-                        usage.cache_read_observation = cache_read_observation;
-                        accounting.observe(&usage);
-                    } else if let Some(usage) = accounting.usage.as_mut() {
-                        usage.cache_read_observation = cache_read_observation;
-                    }
-                    if accounting_only {
-                        continue;
-                    }
-                    for (event_name, value) in
-                        encode_stream_event(dialect, &event, last_usage.as_ref())
-                    {
-                        yield Ok::<Bytes, std::io::Error>(Bytes::from(sse_frame(event_name, &value)));
-                    }
-                }
-                Err(error) => {
-                    accounting.set_outcome("error");
-                    let typed = sandhi_core::ChatStreamEventV1::Error {
-                        error: error.as_typed(Some(provider.slug())),
-                    };
-                    for (event_name, value) in
-                        encode_stream_event(dialect, &typed, last_usage.as_ref())
-                    {
-                        yield Ok::<Bytes, std::io::Error>(Bytes::from(sse_frame(event_name, &value)));
-                    }
-                    break;
                 }
             }
-        }
-        if accounting.outcome != "error" {
-            accounting.set_outcome("success");
-        }
-        accounting.finalize();
-        if dialect == IngressDialect::OpenAi {
-            yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data: [DONE]\n\n"));
-        }
-    };
+            if accounting.outcome != "error" {
+                accounting.set_outcome("success");
+            } else if accounting.state.stream_body_lifetime.is_some() {
+                // The owner must distinguish failed upstream EOF before scheduling a tail.
+                // Leave legacy pull-driven wire behavior unchanged when the policy is absent.
+                yield Err(std::io::Error::other("upstream stream failed"));
+            }
+        })
+    });
 
     Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "text/event-stream")
-        .body(Body::from_stream(body))
+        .body(body)
         .expect("valid streaming response")
 }
 
