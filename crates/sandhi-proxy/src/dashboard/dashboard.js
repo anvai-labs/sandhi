@@ -211,13 +211,13 @@ function tbl(title, rows) {
     + `<td>${cacheCoverageLabel(r)}</td>`
     + `<td class="num">${fmt(r.billable_tokens)}</td>`
     + `<td class="num">${lat(r.latency)}</td></tr>`).join("");
-  return `<h3>${title}</h3><table><thead><tr><th>key</th><th class="num">calls</th>`
+  return `<h3>${title}</h3><div class="table-scroll" role="region" aria-label="${esc(title)} attribution" aria-describedby="table-help" tabindex="0"><table><thead><tr><th>key</th><th class="num">calls</th>`
     + `<th class="num">in</th><th class="num">out</th><th class="num">cache write</th>`
     + `<th class="num">cache read</th><th>cache reporting coverage</th><th class="num" title="ADR-0005 D4: the quantity budgets `
     + `are enforced on — fresh input + cache split + output (+ unfolded reasoning)">billable`
     + `</th><th class="num" title="p50 / p95 milliseconds over the sampled calls that reported a `
     + `duration — approximate by design; tokens above are exact">latency</th></tr></thead>`
-    + `<tbody>${body || '<tr><td colspan=10>no data yet</td></tr>'}</tbody></table>`;
+    + `<tbody>${body || '<tr><td colspan=9>no data yet</td></tr>'}</tbody></table></div>`;
 }
 
 function loadUsage() {
@@ -228,8 +228,8 @@ function loadUsage() {
       [["calls", fmt(t.calls)], ["tokens in", fmt(t.tokens_in)], ["tokens out", fmt(t.tokens_out)],
        ["cache read", cacheRead(t)], ["cache reporting coverage", cacheCoverageLabel(t)], ["billable", fmt(t.billable_tokens)],
        ["latency p50/p95", lat(t.latency)]]
-      .map(([l, n]) => `<div class="card"><div class="n">${n}</div><div class="l">${l}</div></div>`).join("")
-      + `</div><p class="muted">Cache read is reported cache-read input (origin or explicit caller observation), not proof of backend reuse; cache write is an explicit accounting category, not proof of new KV state. Counts are neutral tokens, not prices or savings. Reporting coverage counts calls in each displayed aggregate; it is not a cache hit rate. Mixed totals retain legacy numeric accounting.</p><h3>Attribution</h3><div id="tables">`
+      .map(([l, n]) => `<div class="card${l === "cache reporting coverage" || l === "latency p50/p95" ? " card-detail" : ""}"><div class="n">${n}</div><div class="l">${l}</div></div>`).join("")
+      + `</div><p class="muted">Cache read is reported cache-read input (origin or explicit caller observation), not proof of backend reuse; cache write is an explicit accounting category, not proof of new KV state. Counts are neutral tokens, not prices or savings. Reporting coverage counts calls in each displayed aggregate; it is not a cache hit rate. Mixed totals retain legacy numeric accounting.</p><h3>Attribution</h3><p id="table-help" class="muted">On narrow screens, scroll each table horizontally to see every column. Keyboard users can focus a table and use the arrow keys.</p><div id="tables">`
       + tbl("By user (subject)", d.by_subject || [])
       + tbl("By team (group)", d.by_group || [])
       + tbl("By provider", d.by_provider || [])
