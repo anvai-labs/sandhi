@@ -43,7 +43,21 @@ enum Ending {
     NoUsageDrain,
 }
 
-async fn exercise(slug: &str, newline: &str, width: usize, ending: Ending) -> UsageEvent {
+async fn origin() -> (
+    mpsc::Sender<Bytes>,
+    std::net::SocketAddr,
+    tokio::task::JoinHandle<()>,
+) {
+    origin_ending(false).await
+}
+
+async fn origin_ending(
+    fail: bool,
+) -> (
+    mpsc::Sender<Bytes>,
+    std::net::SocketAddr,
+    tokio::task::JoinHandle<()>,
+) {
     let (tx, rx) = mpsc::channel::<Bytes>(1);
     let receiver = Arc::new(Mutex::new(Some(rx)));
     let origin = Router::new().route(
@@ -56,6 +70,7 @@ async fn exercise(slug: &str, newline: &str, width: usize, ending: Ending) -> Us
                     while let Some(bytes) = rx.recv().await {
                         yield Ok::<Bytes, std::io::Error>(bytes);
                     }
+                    if fail { yield Err(std::io::Error::other("injected origin body failure")); }
                 };
                 (
                     [("content-type", "text/event-stream")],
@@ -69,6 +84,21 @@ async fn exercise(slug: &str, newline: &str, width: usize, ending: Ending) -> Us
     let server = tokio::spawn(async move {
         axum::serve(listener, origin).await.unwrap();
     });
+    (tx, address, server)
+}
+
+async fn exercise(slug: &str, newline: &str, width: usize, ending: Ending) -> UsageEvent {
+    exercise_mode(slug, newline, width, ending, false).await
+}
+
+async fn exercise_mode(
+    slug: &str,
+    newline: &str,
+    width: usize,
+    ending: Ending,
+    supervised: bool,
+) -> UsageEvent {
+    let (tx, address, server) = origin().await;
     let capture = Arc::new(Capture {
         memory: InMemorySink::new(),
         store: SqliteStore::in_memory().unwrap(),
@@ -88,13 +118,18 @@ async fn exercise(slug: &str, newline: &str, width: usize, ending: Ending) -> Us
         None,
         None,
     );
-    let state = Arc::new(ProxyState::new(
+    let mut state = ProxyState::new(
         keys,
         ProxyLedger::in_memory(),
         capture.clone(),
         HashMap::from([("origin".into(), provider)]),
         None,
-    ));
+    );
+    if supervised {
+        state.stream_body_lifetime =
+            Some(sandhi_proxy::streaming::StreamBodyLifetime::new(Duration::from_secs(5)).unwrap());
+    }
+    let state = Arc::new(state);
     let request = Request::builder().method("POST").uri("/v1/chat/completions")
         .header("authorization", "Bearer vk_terminal_fixture").header("content-type", "application/json")
         .header("x-sandhi-session", "terminal-session").header("x-sandhi-run-id", "terminal-run")
@@ -158,7 +193,12 @@ async fn exercise(slug: &str, newline: &str, width: usize, ending: Ending) -> Us
             drop(body);
         }
         _ => {
-            drop(body); // accounting must finish here, without another upstream poll
+            drop(body); // default accounting finishes synchronously; opt-in settlement is owned.
+            if supervised {
+                tokio::time::timeout(Duration::from_secs(5), state.lifecycle.wait_idle())
+                    .await
+                    .unwrap();
+            }
             assert_eq!(
                 capture.memory.len(),
                 1,
@@ -166,6 +206,11 @@ async fn exercise(slug: &str, newline: &str, width: usize, ending: Ending) -> Us
             );
             drop(tx);
         }
+    }
+    if supervised {
+        tokio::time::timeout(Duration::from_secs(5), state.lifecycle.wait_idle())
+            .await
+            .unwrap();
     }
     server.abort();
     let _ = server.await;
@@ -290,5 +335,164 @@ async fn done_without_usage_does_not_invent_a_final_zero_measurement() {
             assert_eq!(event.tokens_in, 0);
             assert_eq!(event.cache_read_tokens, 0);
         }
+    }
+}
+
+struct StreamingFixture {
+    tx: mpsc::Sender<Bytes>,
+    state: Arc<ProxyState>,
+    capture: Arc<InMemorySink>,
+    response: axum::response::Response,
+    server: tokio::task::JoinHandle<()>,
+}
+
+async fn streaming_fixture(translated: bool, fail: bool, duration: Duration) -> StreamingFixture {
+    let (tx, address, server) = origin_ending(fail).await;
+    let capture = Arc::new(InMemorySink::new());
+    let keys = KeyStore::new();
+    keys.insert(VirtualKey {
+        id: "vk_body".into(),
+        upstream_ref: "origin".into(),
+        ..Default::default()
+    });
+    let provider = ProviderRuntime::new().openai_compat(
+        "openai",
+        format!("http://{address}/v1"),
+        "fixture-not-a-credential",
+        Default::default(),
+        Some(0),
+        None,
+        None,
+    );
+    let mut state = ProxyState::new(
+        keys,
+        ProxyLedger::in_memory(),
+        capture.clone(),
+        HashMap::from([("origin".into(), provider)]),
+        None,
+    );
+    state.stream_body_lifetime =
+        Some(sandhi_proxy::streaming::StreamBodyLifetime::new(duration).unwrap());
+    if translated {
+        state
+            .ledger
+            .lock()
+            .unwrap()
+            .set_budget(
+                "vk:vk_body",
+                Some(1_000_000),
+                sandhi_core::Window::Total,
+                sandhi_core::Policy::Block,
+            )
+            .unwrap();
+    }
+    let state = Arc::new(state);
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("authorization", "Bearer vk_body")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"model":"fixture","messages":[{"role":"user","content":"hello"}],"stream":true}"#,
+        ))
+        .unwrap();
+    tx.send(Bytes::from_static(b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n")).await.unwrap();
+    let response = build_app(state.clone()).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    StreamingFixture {
+        tx,
+        state,
+        capture,
+        response,
+        server,
+    }
+}
+
+#[tokio::test]
+async fn retained_unpolled_body_closes_origin_and_settles_on_both_planes() {
+    for translated in [false, true] {
+        let StreamingFixture {
+            tx,
+            state,
+            capture,
+            response,
+            server,
+        } = streaming_fixture(translated, false, Duration::from_millis(100)).await;
+        // The response stays alive and is never polled before the origin must close.
+        let closed = tokio::time::timeout(Duration::from_secs(2), tx.closed()).await;
+        if closed.is_err() {
+            server.abort();
+        }
+        assert!(
+            closed.is_ok(),
+            "origin stayed open behind an unpolled body; translated={translated}"
+        );
+        tokio::time::timeout(Duration::from_secs(2), state.lifecycle.wait_idle())
+            .await
+            .unwrap();
+        let mut body = response.into_body().into_data_stream();
+        assert!(
+            body.next().await.unwrap().is_err(),
+            "expiry discards queued bytes"
+        );
+        assert!(body.next().await.is_none());
+        let events = capture.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].usage_completeness, UsageCompleteness::Partial);
+        assert!(events[0].tokens_out > 0);
+        server.abort();
+        let _ = server.await;
+    }
+}
+
+#[tokio::test]
+async fn supervised_terminal_usage_preserves_wire_sqlite_and_ledger_conservation() {
+    for ending in [Ending::CloseAtDone, Ending::DrainEof] {
+        assert_authoritative(&exercise_mode("inferflux", "\n", 7, ending, true).await);
+    }
+}
+
+#[tokio::test]
+async fn origin_body_errors_do_not_become_clean_eof_or_translated_done() {
+    for translated in [false, true] {
+        let StreamingFixture {
+            tx,
+            state,
+            capture,
+            response,
+            server,
+        } = streaming_fixture(translated, true, Duration::from_secs(5)).await;
+        let mut body = response.into_body().into_data_stream();
+        // Ensure headers/content arrived before deliberately aborting the HTTP origin body.
+        assert!(tokio::time::timeout(Duration::from_secs(2), body.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .is_ok());
+        drop(tx);
+        let mut failed = false;
+        while let Some(bytes) = tokio::time::timeout(Duration::from_secs(2), body.next())
+            .await
+            .unwrap()
+        {
+            match bytes {
+                Ok(bytes) => assert!(!String::from_utf8_lossy(&bytes).contains("[DONE]")),
+                Err(_) => {
+                    failed = true;
+                    break;
+                }
+            }
+        }
+        server.abort();
+        let _ = server.await;
+        assert!(
+            failed,
+            "upstream error became clean EOF; translated={translated}"
+        );
+        tokio::time::timeout(Duration::from_secs(2), state.lifecycle.wait_idle())
+            .await
+            .unwrap();
+        assert_eq!(capture.events().len(), 1);
+        assert_eq!(capture.events()[0].outcome.as_deref(), Some("error"));
     }
 }
