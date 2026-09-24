@@ -167,6 +167,12 @@ sessions use Secure, HttpOnly, SameSite=Lax `__Host-` cookies. Writes require bo
 proof and the exact configured Origin. **Sign out** invalidates this Sandhi session; it
 does not sign the user out of Kanidm or other applications.
 
+Dashboard section links jump to usage, configuration, access, budgets, alerts and run
+lookup. Keyboard users can use **Skip to overview** and focus each attribution table
+to scroll it horizontally on narrow screens. Cache reporting details remain visible
+separately from the larger token totals; reporting coverage is not a cache hit rate.
+The dashboard follows the system light/dark preference and reduced-motion setting.
+
 Agent clients supply a short-lived OAuth **access token** in their SDK credential field.
 ID tokens and dashboard cookies cannot authorize inference. With multiple configured
 grants, send `x-sandhi-grant: local` or `cloud`; a single grant needs no selector. The

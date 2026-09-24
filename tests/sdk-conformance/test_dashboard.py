@@ -405,7 +405,10 @@ def test_real_store_read_failure_is_503(dashboard, table, panel):
     assert table not in response.text
 
 
-def test_served_assets_and_csp(page, dashboard):
+@pytest.mark.parametrize("width", [390, 1440])
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_served_assets_and_csp(page, dashboard, width, theme):
+    page.emulate_media(color_scheme=theme)
     response = page.goto(dashboard.base + "/dashboard")
     assert response.headers["cache-control"] == "no-store"
     assert "script-src 'self';" in response.headers["content-security-policy"]
@@ -415,5 +418,23 @@ def test_served_assets_and_csp(page, dashboard):
         assert response.status == 200
         assert response.headers["content-type"].startswith(content_type)
         assert response.headers["x-content-type-options"] == "nosniff"
-    page.set_viewport_size({"width": 390, "height": 844})
+    page.set_viewport_size({"width": width, "height": 844})
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+
+    page.get_by_label("Admin token", exact=True).fill(ADMIN_TOKEN)
+    page.get_by_role("button", name="Use token", exact=True).click()
+    expect(page.locator("#tables")).to_be_visible()
+    primary = page.get_by_role("button", name="Use token", exact=True)
+    primary.hover()
+    colors = primary.evaluate("button => { const s = getComputedStyle(button); "
+                              "return [s.color, s.backgroundColor]; }")
+    assert colors[0] != colors[1], "primary button text disappears on hover"
+    expect(page.get_by_role("navigation", name="Dashboard sections")).to_be_visible()
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    assert page.locator(".card").evaluate_all(
+        "cards => cards.every(card => card.scrollWidth <= card.clientWidth)"
+    )
+    tables = page.get_by_role("region", name="By model attribution")
+    expect(tables).to_have_attribute("tabindex", "0")
+    tables.focus()
+    expect(tables).to_be_focused()
