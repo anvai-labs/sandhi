@@ -18,6 +18,7 @@ pub mod metrics;
 pub mod operator;
 pub mod persistence;
 pub mod ratelimit;
+pub mod settlement;
 pub mod streaming;
 
 /// First-party OTel/OTLP export of `gen_ai.*` spans + metrics (Scope 5, TD-0011 P3). Feature-gated
