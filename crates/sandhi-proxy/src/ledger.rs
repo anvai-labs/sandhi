@@ -22,9 +22,8 @@ use time::{Duration, OffsetDateTime};
 use sandhi_core::{EnforcementLedger, InMemoryLedger, LedgerView, Policy, Reservation, Window};
 use sandhi_store::{ReserveOutcome, ShardedLedger};
 
-/// Lease TTL. Must exceed the longest legitimate call (a slow stream can run minutes) so a lease is
-/// only reclaimed well after the request could still be settling (ADR-0005 D2). The proxy settles
-/// every request — including `Partial`-on-disconnect — via the `Drop` finalizer long before this.
+/// Lease TTL. Admission deadlines leave settlement headroom, but blocking finalizers
+/// can outlive this lease. Drop alone does not guarantee a durable charge before reclaim.
 pub(crate) const RESERVATION_TTL_SECS: i64 = 900; // 15 minutes
 
 /// Outcome of admitting one call against the ledger (ADR-0005 D1/D6).
@@ -255,6 +254,137 @@ pub fn reclaim_sweep_at(ledger: &Mutex<ProxyLedger>, now: OffsetDateTime) -> usi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owned_settlement_refuses_unknown_usage_unleased_and_volatile_success() {
+        use crate::settlement::{Attempt, Failure, PendingSettlement};
+        use sandhi_core::{UsageCompleteness, UsageV2};
+        for mode in ["unknown", "unleased", "volatile", "poisoned"] {
+            let mut inner = if mode == "volatile" {
+                ProxyLedger::in_memory()
+            } else {
+                ProxyLedger::durable(":memory:", 1).unwrap()
+            };
+            let Admission::Leased(lease) = inner.reserve("scope", 100, now(), Policy::Block) else {
+                panic!("lease");
+            };
+            let usage = UsageV2 {
+                tokens_out: 9,
+                completeness: if mode == "unknown" {
+                    UsageCompleteness::Unavailable
+                } else {
+                    UsageCompleteness::Final
+                },
+                ..Default::default()
+            };
+            let reservation = (mode != "unleased").then_some(lease);
+            let pending = PendingSettlement::new(mode.into(), reservation.clone(), &usage);
+            let ledger = Mutex::new(inner);
+            if mode == "poisoned" {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _guard = ledger.lock().unwrap();
+                    panic!("simulated owner failure");
+                }));
+            }
+            let Attempt::Unresolved { pending, failure } = pending.try_commit(&ledger) else {
+                panic!("{mode} must not produce a durable receipt");
+            };
+            assert_eq!(pending.request_id(), mode);
+            assert_eq!(pending.reservation(), reservation.as_ref());
+            assert_eq!(pending.charge(), (mode != "unknown").then_some(9));
+            assert!(matches!(
+                (mode, failure),
+                ("unknown", Failure::UnknownUsage)
+                    | ("unleased", Failure::NoReservation)
+                    | ("volatile", Failure::NonDurableLedger)
+                    | ("poisoned", Failure::LedgerPoisoned)
+            ));
+            let guard = ledger.lock().unwrap_or_else(|poison| poison.into_inner());
+            assert_eq!(guard.spent("scope"), 0);
+            assert_eq!(guard.reserved("scope"), 100);
+        }
+    }
+
+    #[test]
+    fn owned_settlement_retains_frozen_usage_until_retry_commits() {
+        use crate::settlement::{Attempt, Failure, PendingSettlement};
+        use sandhi_core::{UsageCompleteness, UsageV2};
+        use sandhi_store::ledger::evidence::SettlementOutcome;
+        let mut ledger = ProxyLedger::durable(":memory:", 2).unwrap();
+        let Admission::Leased(lease) = ledger.reserve("scope", 100, now(), Policy::Block) else {
+            panic!("lease");
+        };
+        let mut usage = UsageV2 {
+            tokens_in: 11,
+            tokens_out: 7,
+            cache_read_tokens: 3,
+            completeness: UsageCompleteness::Final,
+            ..Default::default()
+        };
+        let pending = PendingSettlement::new("request-frozen".into(), Some(lease.clone()), &usage);
+        usage.tokens_in = 999;
+        let ledger = Mutex::new(ledger);
+        let guard = ledger.lock().unwrap();
+        let Attempt::Unresolved {
+            pending,
+            failure: Failure::LedgerBusy,
+        } = pending.try_commit(&ledger)
+        else {
+            panic!("contended ledger must retain the attempt");
+        };
+        assert_eq!(pending.request_id(), "request-frozen");
+        assert_eq!(pending.reservation(), Some(&lease));
+        assert_eq!(pending.charge(), Some(21));
+        assert_eq!(guard.spent("scope"), 0);
+        drop(guard);
+        assert!(ledger.lock().unwrap().seen("key", "logical").is_none());
+        let Attempt::Committed {
+            request_id,
+            outcome: SettlementOutcome::Committed(receipt),
+        } = pending.try_commit(&ledger)
+        else {
+            panic!("same frozen attempt should commit");
+        };
+        assert_eq!(request_id, "request-frozen");
+        assert_eq!(receipt.reservation_id, lease.id);
+        assert_eq!(receipt.charged_tokens, 21);
+        assert_eq!(ledger.lock().unwrap().spent("scope"), 21);
+        // A ledger receipt is not a logical-event delivery or dedup acknowledgement.
+        assert!(ledger.lock().unwrap().seen("key", "logical").is_none());
+    }
+
+    #[test]
+    fn owned_settlement_propagates_reclaim_failure_without_losing_identity() {
+        use crate::settlement::{Attempt, Failure, PendingSettlement};
+        use sandhi_core::{UsageCompleteness, UsageV2};
+        use sandhi_store::ledger::evidence::EvidenceError;
+        let mut ledger = ProxyLedger::durable(":memory:", 1).unwrap();
+        let Admission::Leased(lease) = ledger.reserve("scope", 100, now(), Policy::Block) else {
+            panic!("lease");
+        };
+        ledger.reclaim_expired(lease.expires_at);
+        let pending = PendingSettlement::new(
+            "request-reclaimed".into(),
+            Some(lease.clone()),
+            &UsageV2 {
+                tokens_out: 9,
+                completeness: UsageCompleteness::Partial,
+                ..Default::default()
+            },
+        );
+        let ledger = Mutex::new(ledger);
+        let Attempt::Unresolved {
+            pending,
+            failure: Failure::Evidence(EvidenceError::MissingReservation),
+        } = pending.try_commit(&ledger)
+        else {
+            panic!("reclaimed is not committed");
+        };
+        assert_eq!(pending.request_id(), "request-reclaimed");
+        assert_eq!(pending.reservation(), Some(&lease));
+        assert_eq!(pending.charge(), Some(9));
+        assert_eq!(ledger.lock().unwrap().spent("scope"), 0);
+    }
 
     fn now() -> OffsetDateTime {
         OffsetDateTime::UNIX_EPOCH

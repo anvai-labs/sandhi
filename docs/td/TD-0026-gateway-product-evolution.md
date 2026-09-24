@@ -3,7 +3,9 @@
 Status: In progress — M1 v0.6.0 published and back-synced; M2/W05b integrated; owner-approved
 v0.6.1 compatibility-exception release fully published, verified and back-synced. TD-0027's
 origin-contract follow-through is published and independently verified as v0.7.0; protected-branch
-evidence is synchronized (2026-09-17). W05c–e and P01–P03 remain open.
+evidence is synchronized (2026-09-17). W05c has an owned settlement library foundation;
+authoritative proxy integration, W05d/e and P01–P03 remain open. See the
+[settlement transition contract](../product/attempt-accounting-and-evidence.md#owned-settlement-transition-w05c-foundation).
 Date: 2026-09-04
 Baseline: `ed1781e` (Sandhi); source review, not a release certification.
 
