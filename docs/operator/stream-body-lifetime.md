@@ -1,8 +1,9 @@
 # Streaming body lifetime ownership
 
 Rust embedders can opt into `ProxyState.stream_body_lifetime` using
-`StreamBodyLifetime::new(Duration)`. This intermediate library surface has no
-standalone environment, CLI, admin, or `SANDHI_CONFIG` setting. The default is
+`StreamBodyLifetime::new(Duration)`. Standalone operators can use the complete
+[streaming route policy](streaming-deadlines.md) in `SANDHI_CONFIG`; it overrides
+the library body-only value for the authorized route. The default is
 `None`: streams remain pull-driven with the same wire bytes and finalization
 ordering. No deployed gateway limit changes through this increment.
 
@@ -43,8 +44,8 @@ OpenAI DONE frame. Finalizer task failures are logged explicitly. Observed final
 usage stays final on a delivery timeout/disconnect, with the transport outcome
 recorded separately from measurement completeness.
 
-Remaining work includes configurable setup/idle/body policy resolution, lease
-renewal or bounded settlement with atomic evidence, and live origin-cancellation
+Remaining work includes lease renewal or bounded settlement with atomic
+evidence, and live origin-cancellation
 acceptance. A Tokio blocking task cannot be cancelled; ledger contention can
 outlast headroom. The proxy still uses its existing settlement path, not the
 store's separately implemented `settle_with_evidence_durable` primitive.

@@ -79,7 +79,7 @@ pub(super) fn body<F>(
 where
     F: for<'a> FnOnce(&'a mut RequestAccounting) -> ByteStream<'a> + Send + 'static,
 {
-    let Some(lifetime) = accounting.state.stream_body_lifetime else {
+    let Some(lifetime) = accounting.stream_body_lifetime else {
         return Body::from_stream(async_stream::stream! {
             let _permit = permit;
             let _open = accounting.state.metrics.stream_open_guard();
