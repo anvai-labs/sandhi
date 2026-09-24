@@ -235,7 +235,12 @@ impl RawForwarder {
     ) -> Result<RawResponse, ProviderError> {
         let url = self.url(path);
         let out_body = normalize_envelope(self.family, &body, false);
-        match tokio::time::timeout(self.complete_timeout, async {
+        let deadline = crate::BufferedDeadline::current()
+            .unwrap_or_else(|| crate::BufferedDeadline::new(self.complete_timeout));
+        if deadline.at <= tokio::time::Instant::now() {
+            return Err(ProviderError::Timeout(deadline.timeout));
+        }
+        match tokio::time::timeout_at(deadline.at, async {
             let resp = self
                 .send_with_session(&url, out_body, session, correlation, call_headers)
                 .await?;
@@ -260,7 +265,7 @@ impl RawForwarder {
         .await
         {
             Ok(result) => result,
-            Err(_) => Err(ProviderError::Timeout(self.complete_timeout)),
+            Err(_) => Err(ProviderError::Timeout(deadline.timeout)),
         }
     }
 
@@ -275,7 +280,14 @@ impl RawForwarder {
     ) -> Result<RawChunkStream, ProviderError> {
         let url = self.url(path);
         let out_body = normalize_envelope(self.family, &body, true);
-        let resp = match tokio::time::timeout(self.stream_setup_timeout, async {
+        let policy = crate::StreamingDeadline::current();
+        let deadline = policy
+            .map(|policy| policy.setup)
+            .unwrap_or_else(|| crate::BufferedDeadline::new(self.stream_setup_timeout));
+        if deadline.at <= tokio::time::Instant::now() {
+            return Err(ProviderError::Timeout(deadline.timeout));
+        }
+        let resp = match tokio::time::timeout_at(deadline.at, async {
             let response = self.send(&url, out_body).await?;
             // Rejection-body collection is still setup: there is no successful
             // stream to which an idle deadline could apply yet.
@@ -287,13 +299,16 @@ impl RawForwarder {
         .await
         {
             Ok(result) => result?,
-            Err(_) => return Err(ProviderError::Timeout(self.stream_setup_timeout)),
+            Err(_) => return Err(ProviderError::Timeout(deadline.timeout)),
         };
         use futures_util::TryStreamExt;
         let stream = resp
             .bytes_stream()
             .map_err(|e| ProviderError::Transport(e.to_string()));
-        Ok(Box::pin(stream))
+        Ok(with_idle_timeout(
+            Box::pin(stream),
+            policy.map(|policy| policy.idle),
+        ))
     }
 
     /// Non-streaming forward **that also meters**: forwards the body verbatim and parses the
@@ -390,10 +405,17 @@ impl RawForwarder {
         let provider = attempt.map_or("transparent", |attempt| attempt.provider.as_str());
         let model = attempt.and_then(|attempt| attempt.model.as_deref());
         let response_request_id_header = self.response_request_id_header;
-        let mut guard = context.and_then(|context| context.begin(provider, model));
         let url = self.url(path);
         let out_body = normalize_envelope(self.family, &body, true);
-        let resp = match tokio::time::timeout(self.stream_setup_timeout, async {
+        let policy = crate::StreamingDeadline::current();
+        let deadline = policy
+            .map(|policy| policy.setup)
+            .unwrap_or_else(|| crate::BufferedDeadline::new(self.stream_setup_timeout));
+        if deadline.at <= tokio::time::Instant::now() {
+            return Err(ProviderError::Timeout(deadline.timeout));
+        }
+        let mut guard = context.and_then(|context| context.begin(provider, model));
+        let resp = match tokio::time::timeout_at(deadline.at, async {
             let response = self
                 .send_with_session(&url, out_body, session, correlation, call_headers)
                 .await?;
@@ -425,7 +447,7 @@ impl RawForwarder {
                 }
             },
             Err(_) => {
-                let error = ProviderError::Timeout(self.stream_setup_timeout);
+                let error = ProviderError::Timeout(deadline.timeout);
                 if let Some(guard) = guard.as_mut() {
                     guard.finish_error(&error);
                 }
@@ -439,7 +461,12 @@ impl RawForwarder {
         } else {
             crate::metered_passthrough(resp.bytes_stream(), sniff_for_family(self.family))
         };
-        let stream = with_idle_timeout(stream, self.stream_idle_timeout);
+        let stream = with_idle_timeout(
+            stream,
+            policy
+                .map(|policy| policy.idle)
+                .or(self.stream_idle_timeout),
+        );
         let stream = match guard {
             Some(guard) => guard.wrap_stream(stream),
             None => stream,
@@ -573,9 +600,11 @@ impl RawForwarder {
 }
 
 /// Bound the gap between metered stream items without imposing a total generation timeout.
-/// Once response headers have arrived, this is the only timeout that is safe for long-running
-/// model streams. A timeout is surfaced in-stream and is never retried.
-fn with_idle_timeout(stream: crate::ByteStream, idle: Option<Duration>) -> crate::ByteStream {
+/// Independent from the proxy body lifetime. A timeout surfaces in-stream and is never retried.
+fn with_idle_timeout<T: Send + 'static>(
+    stream: Pin<Box<dyn Stream<Item = Result<T, ProviderError>> + Send>>,
+    idle: Option<Duration>,
+) -> Pin<Box<dyn Stream<Item = Result<T, ProviderError>> + Send>> {
     let Some(idle) = idle else {
         return stream;
     };
@@ -1331,6 +1360,56 @@ data: [DONE]\n\n";
             .await
             .unwrap_err();
         assert!(matches!(err, ProviderError::Timeout(d) if d == Duration::from_millis(10)));
+        let policy = crate::StreamingDeadline::new(Duration::from_secs(1), Duration::from_secs(1));
+        assert!(policy
+            .scope(forwarder.forward_stream_metered(
+                "/v1/chat/completions",
+                Bytes::from_static(b"{}"),
+                None,
+                None
+            ))
+            .await
+            .is_ok());
+        assert!(policy
+            .scope(forwarder.forward_stream("/v1/chat/completions", Bytes::from_static(b"{}")))
+            .await
+            .is_ok());
+        let expired =
+            crate::StreamingDeadline::new(Duration::from_millis(1), Duration::from_secs(1));
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let before = server.received_requests().await.unwrap().len();
+        assert!(expired
+            .scope(forwarder.forward_stream_metered(
+                "/v1/chat/completions",
+                Bytes::from_static(b"{}"),
+                None,
+                None
+            ))
+            .await
+            .is_err());
+        assert!(expired
+            .scope(forwarder.forward_stream("/v1/chat/completions", Bytes::from_static(b"{}")))
+            .await
+            .is_err());
+        assert_eq!(server.received_requests().await.unwrap().len(), before);
+
+        // The same pooled forwarder can honor a longer call without retaining its
+        // shorter constructor timer or leaking policy into a concurrent/default call.
+        let (long, short) = tokio::join!(
+            crate::BufferedDeadline::new(Duration::from_secs(1))
+                .scope(forwarder.forward("/v1/chat/completions", Bytes::from_static(b"{}"))),
+            forwarder.forward("/v1/chat/completions", Bytes::from_static(b"{}"))
+        );
+        assert_eq!(long.unwrap().body, Bytes::from_static(b"{}"));
+        assert!(matches!(short, Err(ProviderError::Timeout(d)) if d == Duration::from_millis(10)));
+        let before = server.received_requests().await.unwrap().len();
+        let expired = crate::BufferedDeadline::new(Duration::from_millis(1));
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        assert!(expired
+            .scope(forwarder.forward("/v1/chat/completions", Bytes::from_static(b"{}")))
+            .await
+            .is_err());
+        assert_eq!(server.received_requests().await.unwrap().len(), before);
     }
 
     #[tokio::test]

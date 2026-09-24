@@ -32,7 +32,7 @@ TTL reclaim currently deletes abandoned leases; W05a does not change that behavi
 |---|---|---|
 | W05a | Atomic settlement receipt/outbox storage, immutable IDs, bounded claims and acknowledgement, rollback/reopen/concurrency tests | Integrated; 14 focused tests; not wired to proxy or network exporter |
 | W05b | Transport-owned attempt lifecycle and neutral draft contract | Integrated through PR #246 after clean adversarial review and green exact-head/post-merge CI; remains opt-in diagnostics only, while downstream accounting review still gates authoritative use and external release |
-| W05c | Connect admission, settlement and evidence without bypassing correctness | Pending: opt-in authoritative mode, per-shard colocation, failure policy, receipt/attempt linkage, logical dedup separation and all no-lease paths |
+| W05c | Connect admission, settlement and evidence without bypassing correctness | Partial foundation: owned library settlement outcomes; authoritative proxy mode, receipt/attempt linkage, logical dedup separation and no-lease policy remain pending |
 | W05d | Unknown-liability and late-settlement recovery | Pending: durable pre-dispatch intent; crash windows, stale leases, late observations, amendments and idempotent recovery; coordinate TD-0024 retention |
 | W05e | Receiver contract, exporter and operator evidence | Pending: receiver idempotency, authenticated/scoped transport, retry/backoff, backlog/freshness UX, safe retention, multi-shard cursor/migration and real consumer review |
 
@@ -96,6 +96,43 @@ fsync-failure or full gateway pre-dispatch crash drill. Those remain explicit in
 operational acceptance gates, not inferred from SQLite transaction tests.
 
 ## Proposed physical-attempt state machine (W05b–d)
+
+### Owned settlement transition (W05c foundation)
+
+`sandhi_proxy::settlement::PendingSettlement` freezes a caller-provided execution
+request ID, reservation and cache-inclusive `billable(UsageV2)` once. Its consuming
+`try_commit` delegates to W05a's existing scope-routed atomic receipt transaction;
+it introduces no second ledger, charge derivation or receipt identity. `Committed`
+means that transaction returned a new or replayed receipt, not that an event reached
+the dashboard or a consumer. Logical deduplication is a separate operation.
+
+`Unresolved` returns the original owned attempt and a structured reason: busy or
+poisoned proxy mutex, missing reservation, volatile ledger, unavailable usage, or
+the store's evidence error. Unknown usage is not converted to a measured zero.
+Partial measured usage retains its observed charge. A caller can retry the same
+frozen settlement; this API never retries inference. The proxy mutex is acquired
+without waiting, but SQLite's configured busy timeout still applies. There is no
+end-to-end settlement deadline or guaranteed commit.
+
+Retries must use the original admission ledger and unchanged shard topology.
+Reservation IDs are ledger-local; this primitive does not authenticate request IDs
+or bind them to a database identity. A poisoned internal evidence-shard mutex now
+returns `EvidenceError::ShardPoisoned` for settlement, claim and acknowledgement,
+instead of unwinding through the consuming settlement transition.
+
+The primitive is library-only: existing HTTP finalization and defaults are unchanged.
+Unresolved ownership is volatile, not a durable recovery queue; dropping it or
+crashing can still lose the observation. W05d's pre-dispatch intent, reclaim/late
+settlement and recovery contract remains required, as does W05e's retention policy
+before enabling receipt creation on production traffic. No standalone activation
+switch, background retry worker, exporter or automatic pruning is added.
+
+The existing proxy ledger test owner covers frozen-charge retry under contention,
+reclaimed-lease propagation, and explicit unknown/unleased/volatile/poisoned outcomes.
+The store's transaction/replay/rollback suite remains the single owner for W05a's
+database contract; it is not duplicated in proxy tests.
+
+### Remaining durable lifecycle
 
 Persist admission/dispatch intent before a potentially billable send. A crash between intent and
 send is uncertain, not proven execution. Record transport dispatch and terminal observation

@@ -333,8 +333,9 @@ The stock raw buffered upstream deadline covers the request **and response body*
 is 120 seconds (`raw.rs`); typed resilient completion also defaults to 120 seconds per
 attempt. A replay client allowing 900 seconds does not override either gateway limit;
 gateway timeout maps to HTTP 504. `ProviderRuntime` and bindings can configure
-`timeout_secs`, but the stock standalone provider configuration currently exposes no
-upstream-timeout knob. `SANDHI_HEADER_READ_TIMEOUT_SECS` only covers incoming headers.
+`timeout_secs`. The original stock standalone configuration exposed no upstream
+timeout knob; the buffered policy increment below now adds an opt-in operator
+surface. `SANDHI_HEADER_READ_TIMEOUT_SECS` only covers incoming headers.
 No production timeout has been changed here.
 
 Before the mixed-team run, the originating session must choose a bounded configuration
@@ -358,8 +359,12 @@ both entry points, stalled body, cumulative header/body budget, connection relea
 and retained attempt facts. The existing rate-limit test also covers both streaming
 entry points; no duplicate timeout suite was added.
 
-Operator-configurable deadlines remain a separate design requirement, not a
-shipped feature: resolve exact model-within-credential endpoint → endpoint → global
+The buffered-only operator policy increment implements exact
+model-within-credential endpoint → endpoint → global resolution, with startup-only
+activation and unchanged defaults. See [the operator contract](../operator/buffered-deadlines.md).
+Streaming policy and bounded settlement remain open; this is not new live C5
+acceptance evidence. The broader policy requirement is to resolve
+exact model-within-credential endpoint → endpoint → global
 defaults once after authorization; reject invalid or above-ceiling values; expose
 effective limits and their source to authorized operators. Reuse existing pooled
 transports and timeout machinery across transparent and translated forwarding.
@@ -370,6 +375,18 @@ with a longer outer timer. The configured ceiling must leave settlement headroom
 inside the budget-reservation lifetime; longer workloads require an explicit lease
 lifecycle design. Timeout responses do not establish origin cancellation and must
 not silently replay ambiguous inference POSTs.
+
+The next streaming increment adds an opt-in Rust
+[body lifetime owner](../operator/stream-body-lifetime.md) shared by both planes.
+An unread or backpressured response no longer prevents upstream closure under
+that opt-in policy. Cleanup moves off the async worker after dropping the source,
+while admission and lifecycle guards continue to count unfinished settlement.
+This is not a durable receipt, a bounded settlement guarantee, or proof of origin
+GPU cancellation. Default behavior and deployed gateway settings are unchanged;
+standalone [streaming route policy](../operator/streaming-deadlines.md) now adds
+validated setup/idle/body limits. Bounded settlement and full C5 acceptance remain open. The existing
+terminal-accounting fixture and a focused controller suite own the regressions;
+no duplicate lease/parser suite was introduced.
 
 Victor [#1174](https://github.com/anvai-labs/victor/pull/1174) retains two new ZAI/OIDC
 15/15 passes and a separate failed/interrupted Qwen3 attempt. The latter ended with

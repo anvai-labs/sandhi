@@ -3,7 +3,9 @@
 Status: In progress — M1 v0.6.0 published and back-synced; M2/W05b integrated; owner-approved
 v0.6.1 compatibility-exception release fully published, verified and back-synced. TD-0027's
 origin-contract follow-through is published and independently verified as v0.7.0; protected-branch
-evidence is synchronized (2026-09-17). W05c–e and P01–P03 remain open.
+evidence is synchronized (2026-09-17). W05c has an owned settlement library foundation;
+authoritative proxy integration, W05d/e and P01–P03 remain open. See the
+[settlement transition contract](../product/attempt-accounting-and-evidence.md#owned-settlement-transition-w05c-foundation).
 Date: 2026-09-04
 Baseline: `ed1781e` (Sandhi); source review, not a release certification.
 
@@ -688,3 +690,22 @@ unit suite is not a distributed correctness proof. Record evidence and update th
   all four crates and all three npm packages. The independent all-target verifier passed; npm's
   root metadata exposes SLSA provenance. PR #250 then back-synced immutable release evidence as
   `76237c3`; exact-develop push CI `34283659652` passed. C04 is closed without closing P01–P03.
+
+### Streaming route policy increment (2026-09-24)
+
+Standalone `streaming_deadlines` now resolves complete setup/idle/body triples
+through the same exact-route resolver and key validator as buffered policy.
+The existing pooled transports capture request-local limits; the existing body
+owner receives the resolved lifetime. Startup and admin active/desired reporting
+are explicit. Defaults remain absent/unchanged. See
+[operator contract](../operator/streaming-deadlines.md).
+
+Regression ownership was extended in the existing policy, route, raw transport,
+resilience, scope-isolation and terminal-accounting fixtures. The shared route
+fixture covers both buffered and streaming setup, avoiding a copied suite. Body
+fixtures now exercise standalone policy with a different library default to prove
+precedence. No accounting oracle or unrelated tests were removed.
+
+This does not close W05d/e or durable HTTP settlement. Setup-error finalization can
+block HTTP delivery; body cleanup retains admission/lifecycle guards until legacy
+settlement returns. Live origin cancellation and mixed-team C5 remain open.

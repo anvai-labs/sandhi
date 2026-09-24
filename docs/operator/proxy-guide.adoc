@@ -118,7 +118,7 @@ sandhi-proxy listening on http://127.0.0.1:8787  (OpenAI Chat/Responses | Anthro
 
 | `SANDHI_CONFIG`
 | _(unset)_
-| Declarative JSON configuration. In addition to the operator desired state, its optional `tls.cert` and `tls.key` paths enable listener TLS. Invalid or unreadable configured TLS fails startup.
+| Declarative JSON configuration. Optional `tls.cert` / `tls.key` enable listener TLS. Optional `buffered_deadlines` configures global, credential-endpoint and exact-model buffered limits; see link:buffered-deadlines.md[buffered deadlines]. Optional `streaming_deadlines` configures complete setup/idle/body limits per authorized route; see link:streaming-deadlines.md[streaming deadlines]. These sections require restart; invalid startup configuration fails before bind.
 
 | `SANDHI_STORE`
 | _(unset → in-memory)_

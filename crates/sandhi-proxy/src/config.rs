@@ -19,7 +19,7 @@
 //! hash. Applying a vkey entry either mints a new key (if none matching its identity exists yet)
 //! or is a no-op (if one does) — it can never "update" a vkey's secret in place.
 //!
-//! Listener TLS is the one startup-only section: preview/apply reports it as
+//! Listener TLS and buffered deadlines are startup-only sections: preview/apply report them as
 //! `restart required`, while process bootstrap validates and activates it before bind. Live
 //! certificate replacement belongs to TD-0017 P2 and is not smuggled into desired-state apply.
 
@@ -30,6 +30,12 @@ use sandhi_store::{AlertRuleRecord, VirtualKeyRecord};
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 pub struct SandhiFileConfig {
+    /// Buffered upstream limits are validated at startup; apply requires a restart.
+    #[serde(default)]
+    pub buffered_deadlines: Option<crate::deadlines::BufferedDeadlines>,
+    /// Complete streaming limits, activated only at startup.
+    #[serde(default)]
+    pub streaming_deadlines: Option<crate::deadlines::StreamingDeadlines>,
     /// Optional listener TLS configuration. Paths are reviewable configuration,
     /// while the private-key bytes remain outside this file.
     #[serde(default)]
@@ -187,6 +193,134 @@ mod tests {
     fn missing_sections_default_to_empty_not_an_error() {
         let cfg: SandhiFileConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(cfg, SandhiFileConfig::default());
+    }
+
+    #[test]
+    fn streaming_deadlines_reject_partial_unbounded_and_unknown_policy() {
+        for text in [
+            r#"{"setup_ms":1,"idle_ms":1,"body_ms":0}"#,
+            r#"{"setup_ms":18446744073709551615,"idle_ms":1,"body_ms":1}"#,
+        ] {
+            assert!(serde_json::from_str::<crate::deadlines::StreamLimits>(text).is_err());
+        }
+        for policy in [
+            serde_json::json!({"ceiling_ms":900000,"default":{"setup_ms":1,"idle_ms":1,"body_ms":1}}),
+            serde_json::json!({"ceiling_ms":1000,"default":{"setup_ms":1,"idle_ms":1}}),
+            serde_json::json!({"ceiling_ms":1000,"default":{"setup_ms":0,"idle_ms":1,"body_ms":1}}),
+            serde_json::json!({"ceiling_ms":1000,"default":{"setup_ms":1,"idle_ms":0,"body_ms":1}}),
+            serde_json::json!({"ceiling_ms":1000,"default":{"setup_ms":1,"idle_ms":1,"body_ms":0}}),
+            serde_json::json!({"ceiling_ms":1000,"default":{"setup_ms":500,"idle_ms":1,"body_ms":501}}),
+            serde_json::json!({"ceiling_ms":1000,"default":{"setup_ms":1,"idle_ms":1001,"body_ms":1}}),
+            serde_json::json!({"ceiling_ms":1000,"default":{"setup_ms":1,"idle_ms":1,"body_ms":1,"renew":true}}),
+            serde_json::json!({"ceiling_ms":1000,"default":{"setup_ms":1,"idle_ms":1,"body_ms":1},"endpoints":{"zai:a":{"models":{"*":{"setup_ms":1,"idle_ms":1,"body_ms":1}}}}}),
+        ] {
+            assert!(
+                serde_json::from_value::<SandhiFileConfig>(
+                    serde_json::json!({"streaming_deadlines":policy})
+                )
+                .is_err(),
+                "accepted {policy}"
+            );
+        }
+    }
+
+    #[test]
+    fn streaming_deadlines_resolve_complete_routes_and_actual_lease() {
+        use crate::deadlines::{streaming_from_json, Source};
+        let policy = streaming_from_json(
+            r#"{"providers":"operator-owned","streaming_deadlines":{
+            "ceiling_ms":5000,"default":{"setup_ms":100,"idle_ms":200,"body_ms":1000},
+            "endpoints":{"zai:a":{"default":{"setup_ms":200,"idle_ms":300,"body_ms":2000},
+            "models":{"m":{"setup_ms":300,"idle_ms":400,"body_ms":3000}}},"zai:b":{}}}}"#,
+        )
+        .unwrap()
+        .unwrap();
+        for (reference, model, source, total) in [
+            ("zai:a", "m", Source::Model, 3300),
+            ("zai:a", "M", Source::Endpoint, 2200),
+            ("zai:b", "m", Source::Global, 1100),
+            ("other:x", "m", Source::Global, 1100),
+        ] {
+            let (limits, actual) = policy.resolve(reference, model);
+            assert_eq!(actual, source);
+            assert_eq!(limits.dispatch_duration().as_millis(), total);
+        }
+        assert!(policy.validate_endpoints(|id| id == "zai:a").is_err());
+        assert!(policy.validate_endpoints(|_| true).is_ok());
+        assert!(streaming_from_json("{}").unwrap().is_none());
+        for text in [
+            r#"{"streaming_deadlines":{"ceiling_ms":10,"default":{"setup_ms":1,"idle_ms":1,"body_ms":1},"endpoints":{"zai:a":{},"zai:a":{}}}}"#,
+            r#"{"streaming_deadlines":{"ceiling_ms":10,"default":{"setup_ms":1,"idle_ms":1,"body_ms":1},"endpoints":{"zai:a":{"models":{"m":{"setup_ms":1,"idle_ms":1,"body_ms":1},"m":{"setup_ms":1,"idle_ms":1,"body_ms":1}}}}}}"#,
+        ] {
+            assert!(streaming_from_json(text).is_err());
+        }
+    }
+
+    #[test]
+    fn buffered_deadlines_reject_invalid_or_unsupported_policy() {
+        for text in [
+            r#"{"buffered_deadlines":{"ceiling_ms":120000,"endpoints":{"zai:a":{},"zai:a":{}}}}"#,
+            r#"{"buffered_deadlines":{"ceiling_ms":120000,"endpoints":{"zai:a":{"models":{"m":1,"m":2}}}}}"#,
+        ] {
+            assert!(serde_json::from_str::<SandhiFileConfig>(text).is_err());
+        }
+        for policy in [
+            serde_json::json!({"ceiling_ms": 0}),
+            serde_json::json!({"ceiling_ms": 900000}),
+            serde_json::json!({"ceiling_ms": 120000, "default_ms": 120001}),
+            serde_json::json!({"ceiling_ms": 120000, "default_ms": 0}),
+            serde_json::json!({"ceiling_ms": 120000, "default_ms": 1.5}),
+            serde_json::json!({"ceiling_ms": 120000, "stream_idle_ms": 5000}),
+            serde_json::json!({"ceiling_ms": 120000, "endpoints": {"zai:local": {"models": {"glm": 120001}}}}),
+            serde_json::json!({"ceiling_ms": 120000, "endpoints": {"": {"default_ms": 1000}}}),
+        ] {
+            assert!(
+                serde_json::from_value::<SandhiFileConfig>(
+                    serde_json::json!({"buffered_deadlines": policy})
+                )
+                .is_err(),
+                "accepted {policy}"
+            );
+        }
+    }
+
+    #[test]
+    fn buffered_deadlines_resolve_exact_authorized_route_and_preserve_startup_projection() {
+        use crate::deadlines::{from_json, Source};
+        let text = r#"{"providers":"operator-owned", "buffered_deadlines":{
+            "ceiling_ms":600000,"default_ms":150000,
+            "endpoints":{"zai:one":{"default_ms":200000,"models":{"glm":300000}},
+                         "zai:two":{"models":{"glm":400000}}}}}"#;
+        let policy = from_json(text).unwrap().unwrap();
+        for (reference, model, milliseconds, source) in [
+            ("zai:one", "glm", 300000, Source::Model),
+            ("zai:one", "GLM", 200000, Source::Endpoint),
+            ("zai:two", "glm", 400000, Source::Model),
+            ("zai:two", "other", 150000, Source::Global),
+            ("zai:three", "glm", 150000, Source::Global),
+        ] {
+            let resolved = policy.resolve(reference, model);
+            assert_eq!(
+                (resolved.milliseconds, resolved.source),
+                (milliseconds, source)
+            );
+        }
+        assert!(policy.validate_endpoints(|id| id == "zai:one").is_err());
+        assert!(policy.validate_endpoints(|_| true).is_ok());
+        let builtin = from_json(r#"{"buffered_deadlines":{"ceiling_ms":120000}}"#)
+            .unwrap()
+            .unwrap();
+        let resolved = builtin.resolve("", "");
+        assert_eq!(resolved.source, Source::BuiltIn);
+        assert_eq!(resolved.milliseconds, 120000);
+        assert!(from_json(r#"{"buffered_deadlines":{"ceiling_ms":119999}}"#).is_err());
+        let now = time::OffsetDateTime::UNIX_EPOCH + time::Duration::milliseconds(500);
+        assert!(resolved.fits_lease(now + time::Duration::seconds(181), now));
+        assert!(!resolved.fits_lease(now + time::Duration::seconds(180), now));
+        assert!(!resolved.fits_lease(now, now));
+        assert!(from_json(r#"{"providers":"operator-owned"}"#)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

@@ -156,9 +156,10 @@ impl ShardedLedger {
         reservation_id: u64,
         charged_tokens: u64,
     ) -> Result<SettlementOutcome, EvidenceError> {
-        self.with_shard(scope, |ledger| {
-            ledger.settle_with_evidence_durable(scope, reservation_id, charged_tokens)
-        })
+        self.shard_for(scope)
+            .lock()
+            .map_err(|_| EvidenceError::ShardPoisoned)?
+            .settle_with_evidence_durable(scope, reservation_id, charged_tokens)
     }
 
     /// Local shard count for polling. Indices are not stable across topology changes and
@@ -178,7 +179,7 @@ impl ShardedLedger {
             .get(shard_index)
             .ok_or(EvidenceError::InvalidShard)?
             .lock()
-            .expect("ledger shard poisoned")
+            .map_err(|_| EvidenceError::ShardPoisoned)?
             .claim_settlements_durable(limit, now, lease_seconds)
     }
 
@@ -193,7 +194,7 @@ impl ShardedLedger {
             .get(shard_index)
             .ok_or(EvidenceError::InvalidShard)?
             .lock()
-            .expect("ledger shard poisoned")
+            .map_err(|_| EvidenceError::ShardPoisoned)?
             .acknowledge_settlement_durable(receipt_id, claim_token, now)
     }
 
@@ -409,6 +410,32 @@ mod tests {
             ReserveOutcome::Admitted(r) => r,
             ReserveOutcome::Denied(d) => panic!("unexpected denial: {d:?}"),
         }
+    }
+
+    #[test]
+    fn poisoned_shard_returns_evidence_error_instead_of_unwinding() {
+        let ledger = ShardedLedger::open_sharded(":memory:", 1).unwrap();
+        let reservation = admitted(ledger.reserve_durable("scope", 100, now(), ttl()).unwrap());
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = ledger.shard_for("scope").lock().unwrap();
+            panic!("simulated shard owner failure");
+        }));
+        assert!(matches!(
+            ledger.settle_with_evidence_durable("scope", reservation.id, 9),
+            Err(EvidenceError::ShardPoisoned)
+        ));
+        assert!(matches!(
+            ledger.claim_settlements_durable(0, 1, now(), 30),
+            Err(EvidenceError::ShardPoisoned)
+        ));
+        assert!(matches!(
+            ledger.acknowledge_settlement_durable(0, "receipt", "claim", now()),
+            Err(EvidenceError::ShardPoisoned)
+        ));
+        assert_eq!(
+            EvidenceError::ShardPoisoned.to_string(),
+            "settlement evidence shard poisoned"
+        );
     }
 
     #[test]

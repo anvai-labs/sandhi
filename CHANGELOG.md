@@ -19,6 +19,34 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-09-24
+
+### Added
+
+- Optional buffered and streaming deadline policies resolve global, credential-endpoint
+  and exact-model limits after authorization. Startup rejects invalid policy; admin
+  preview/apply distinguishes active and desired settings and requires restart.
+- Streaming policy supplies a complete setup/idle/body triple. The body owner closes
+  unread or backpressured upstream streams at its deadline, on disconnect, or at
+  shutdown grace expiry, while preserving measured usage and cleanup ownership.
+- An owned settlement-attempt API preserves unresolved reservations/charges across
+  ledger failures and exposes explicit outcomes. Poisoned shard locks return errors
+  on the durable evidence path instead of unwinding through the owned transition.
+- OIDC onboarding documentation explains both identity-provider admission and explicit
+  gateway role bindings.
+
+### Compatibility and acceptance limits
+
+- All new deadline surfaces are optional. Omitted configuration keeps existing wire
+  behavior, deadlines, OIDC authorization and zero POST retries unchanged. Both
+  executables, four crates and both bindings share version 0.10.0. Public Rust API additions are included in this minor
+  release; wire/chat contract versions remain unchanged.
+- Transport deadlines do not establish bounded settlement or origin GPU cancellation.
+  HTTP finalization still uses the existing settlement path; the owned library API
+  does not add durable pending-work recovery or an authoritative HTTP receipt.
+- Live InferFlux lifecycle and Victor mixed-team C5 acceptance remain separate gates.
+  Publishing this version does not establish those results.
+
 ## [0.9.1] — 2026-09-23
 
 ### Fixed

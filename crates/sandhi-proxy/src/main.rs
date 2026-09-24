@@ -304,10 +304,14 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
     let config_path = std::env::var("SANDHI_CONFIG")
         .ok()
         .map(std::path::PathBuf::from);
-    let tls = match listener_tls_from_config(config_path.as_deref()) {
-        Ok(tls) => tls,
+    let StartupConfig {
+        tls,
+        buffered_deadlines,
+        streaming_deadlines,
+    } = match startup_config_from_file(config_path.as_deref()) {
+        Ok(config) => config,
         Err(error) => {
-            eprintln!("sandhi-proxy: TLS configuration error: {error}");
+            eprintln!("sandhi-proxy: startup configuration error: {error}");
             std::process::exit(1);
         }
     };
@@ -322,6 +326,24 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
     }
 
     let mut state = ProxyState::new(keys, ledger, sink, providers, store);
+    state.buffered_deadlines = buffered_deadlines;
+    state.streaming_deadlines = streaming_deadlines;
+    if let Some(policy) = &state.buffered_deadlines {
+        let providers = state.providers.lock().expect("providers poisoned");
+        if let Err(error) = policy.validate_endpoints(|reference| providers.contains_key(reference))
+        {
+            eprintln!("sandhi-proxy: {error}");
+            std::process::exit(1);
+        }
+    }
+    if let Some(policy) = &state.streaming_deadlines {
+        let providers = state.providers.lock().expect("providers poisoned");
+        if let Err(error) = policy.validate_endpoints(|reference| providers.contains_key(reference))
+        {
+            eprintln!("sandhi-proxy: {error}");
+            std::process::exit(1);
+        }
+    }
     state.vault = vault;
     state.vkeys = vkeys;
     state.alert_store = alert_store;
@@ -600,17 +622,36 @@ fn request_body_limit_from_env() -> usize {
 /// private-key bytes remain in their separately permissioned file. A configured
 /// but unreadable/invalid pair fails startup rather than silently downgrading to
 /// plaintext.
-fn listener_tls_from_config(path: Option<&std::path::Path>) -> Result<Option<TlsConfig>, String> {
+struct StartupConfig {
+    tls: Option<TlsConfig>,
+    buffered_deadlines: Option<sandhi_proxy::deadlines::BufferedDeadlines>,
+    streaming_deadlines: Option<sandhi_proxy::deadlines::StreamingDeadlines>,
+}
+
+fn startup_config_from_file(path: Option<&std::path::Path>) -> Result<StartupConfig, String> {
     let Some(path) = path else {
-        return Ok(None);
+        return Ok(StartupConfig {
+            tls: None,
+            buffered_deadlines: None,
+            streaming_deadlines: None,
+        });
     };
     let text = std::fs::read_to_string(path)
         .map_err(|error| format!("reading {}: {error}", path.display()))?;
-    listener_tls_entry_from_json(&text, path)?
+    let deadlines = sandhi_proxy::deadlines::from_json(&text)
+        .map_err(|error| format!("buffered deadline configuration: {error}"))?;
+    let streaming = sandhi_proxy::deadlines::streaming_from_json(&text)
+        .map_err(|error| format!("streaming deadline configuration: {error}"))?;
+    let tls = listener_tls_entry_from_json(&text, path)?
         .map(|tls| {
             TlsConfig::from_pem_files(&tls.cert, &tls.key).map_err(|error| error.to_string())
         })
-        .transpose()
+        .transpose()?;
+    Ok(StartupConfig {
+        tls,
+        buffered_deadlines: deadlines,
+        streaming_deadlines: streaming,
+    })
 }
 
 /// Bootstrap needs only the transport projection. Deserializing the complete

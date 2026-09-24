@@ -251,7 +251,7 @@ async fn version_endpoint_is_unauthenticated_and_reports_the_contract() {
 }
 
 #[tokio::test]
-async fn config_preview_and_apply_acknowledge_the_startup_only_tls_section() {
+async fn config_preview_and_apply_acknowledge_startup_only_sections() {
     // Adversarial-review finding on the TLS PR: the config module's doc promised that
     // preview/apply would report the startup-only `tls` section as `restart required`, but the
     // responses never mentioned it — an operator applying a TLS edit got silent ignorance of a
@@ -269,7 +269,8 @@ async fn config_preview_and_apply_acknowledge_the_startup_only_tls_section() {
     let cfg_path = std::env::temp_dir().join(format!("sandhi-tls-ack-{}.json", std::process::id()));
     std::fs::write(
         &cfg_path,
-        r#"{"tls": {"cert": "/nonexistent/cert.pem", "key": "/nonexistent/key.pem"}}"#,
+        r#"{"tls": {"cert": "/nonexistent/cert.pem", "key": "/nonexistent/key.pem"},
+            "buffered_deadlines":{"ceiling_ms":300000,"default_ms":200000},"streaming_deadlines":{"ceiling_ms":5000,"default":{"setup_ms":1000,"idle_ms":1000,"body_ms":2000}}}"#,
     )
     .unwrap();
     state.config_path = Some(cfg_path.clone());
@@ -297,6 +298,19 @@ async fn config_preview_and_apply_acknowledge_the_startup_only_tls_section() {
         preview["tls"], "restart required",
         "preview must acknowledge the startup-only section, not ignore it"
     );
+    assert_eq!(
+        preview["buffered_deadlines"]["activation"],
+        "restart required"
+    );
+    assert!(preview["buffered_deadlines"]["active"].is_null());
+    assert_eq!(
+        preview["buffered_deadlines"]["desired"]["default"]["milliseconds"],
+        200000
+    );
+    assert_eq!(
+        preview["buffered_deadlines"]["desired"]["default"]["source"],
+        "global"
+    );
 
     let response = app
         .clone()
@@ -321,6 +335,17 @@ async fn config_preview_and_apply_acknowledge_the_startup_only_tls_section() {
         apply["tls"], "restart required",
         "apply must acknowledge that it did NOT activate listener TLS"
     );
+    assert_eq!(apply["buffered_deadlines"], preview["buffered_deadlines"]);
+    assert_eq!(
+        preview["streaming_deadlines"]["activation"],
+        "restart required"
+    );
+    assert!(preview["streaming_deadlines"]["active"].is_null());
+    assert_eq!(
+        preview["streaming_deadlines"]["desired"]["default"]["limits"]["body_ms"],
+        2000
+    );
+    assert_eq!(apply["streaming_deadlines"], preview["streaming_deadlines"]);
 
     std::fs::write(&cfg_path, r#"{"providers": []}"#).unwrap();
     let response = app
@@ -340,7 +365,167 @@ async fn config_preview_and_apply_acknowledge_the_startup_only_tls_section() {
     )
     .unwrap();
     assert_eq!(preview["tls"], "not configured");
+    assert!(
+        preview.get("buffered_deadlines").is_none() && preview.get("streaming_deadlines").is_none(),
+        "absent policy leaves default response unchanged"
+    );
     let _ = std::fs::remove_file(&cfg_path);
+}
+
+#[tokio::test]
+async fn route_deadlines_enforce_authorized_model_in_both_planes_without_replay() {
+    for streaming in [false, true] {
+        use serde_json::json;
+        use std::time::Duration;
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST")).respond_with(ResponseTemplate::new(200)
+        .set_delay(Duration::from_millis(100))
+        .set_body_json(json!({"id":"reply","object":"chat.completion","model":"long",
+            "choices":[{"index":0,"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":3,"completion_tokens":2}})))
+        .mount(&upstream).await;
+        let sink = Arc::new(InMemorySink::new());
+        let mut state = Arc::try_unwrap(state_with(
+            upstream.uri(),
+            sink.clone(),
+            ProxyLedger::in_memory(),
+        ))
+        .ok()
+        .unwrap();
+        let handle = state.providers.lock().unwrap().remove("up1").unwrap();
+        state
+            .providers
+            .lock()
+            .unwrap()
+            .insert("openai:default".into(), handle);
+        state.keys.insert(VirtualKey {
+            id: "vk_demo".into(),
+            upstream_ref: "openai:default".into(),
+            models: Some(vec!["short".into(), "long".into()]),
+            ..Default::default()
+        });
+        state.buffered_deadlines = sandhi_proxy::deadlines::from_json(
+            r#"{
+        "buffered_deadlines":{"ceiling_ms":2000,"default_ms":20,
+            "endpoints":{"openai:default":{"models":{"long":2000}}}}}"#,
+        )
+        .unwrap();
+        if streaming {
+            state.streaming_deadlines=sandhi_proxy::deadlines::streaming_from_json(r#"{"streaming_deadlines":{"ceiling_ms":5000,"default":{"setup_ms":20,"idle_ms":1000,"body_ms":1000},"endpoints":{"openai:default":{"models":{"long":{"setup_ms":2000,"idle_ms":1000,"body_ms":1000}}}}}}"#).unwrap();
+        }
+        let app = build_app(Arc::new(state));
+        let call = |model: &str, translated: bool| {
+            let body = json!({"model":model,"stream":streaming,"max_tokens":8,"messages":[{"role":"user","content":"hello"}]});
+            Request::builder()
+                .method("POST")
+                .uri(if translated {
+                    "/v1/messages"
+                } else {
+                    "/v1/chat/completions"
+                })
+                .header("authorization", "Bearer vk_demo")
+                .header("content-type", "application/json")
+                .header("x-sandhi-timeout-ms", "999999") // never an authority
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        for translated in [false, true] {
+            let (short, long) = tokio::join!(
+                app.clone().oneshot(call("short", translated)),
+                app.clone().oneshot(call("long", translated))
+            );
+            assert_eq!(short.unwrap().status(), StatusCode::GATEWAY_TIMEOUT);
+            let long = long.unwrap();
+            assert_eq!(long.status(), StatusCode::OK);
+            // Drain the body so streaming accounting completes, even for the intentionally
+            // non-SSE mock response (this fixture owns setup/route assertions only).
+            let _ = axum::body::to_bytes(long.into_body(), usize::MAX).await;
+        }
+        assert_eq!(
+            upstream.received_requests().await.unwrap().len(),
+            4,
+            "one upstream POST per admitted call"
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while sink.events().len() < 4 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            sink.events().len(),
+            4,
+            "timeouts and successes each settle once"
+        );
+        assert_eq!(
+            app.oneshot(call("forbidden", false))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(upstream.received_requests().await.unwrap().len(), 4);
+        assert_eq!(sink.events().len(), 4);
+        // The nominal TTL minus headroom cannot fit once admission has spent any
+        // time. Refuse before polling upstream, roll back, and emit no fake call.
+        let rejected_sink = Arc::new(InMemorySink::new());
+        let mut state = Arc::try_unwrap(state_with(
+            upstream.uri(),
+            rejected_sink.clone(),
+            ProxyLedger::in_memory(),
+        ))
+        .ok()
+        .unwrap();
+        state.buffered_deadlines = sandhi_proxy::deadlines::from_json(
+            r#"{"buffered_deadlines":{"ceiling_ms":840000,"default_ms":840000}}"#,
+        )
+        .unwrap();
+        if streaming {
+            state.streaming_deadlines=sandhi_proxy::deadlines::streaming_from_json(r#"{"streaming_deadlines":{"ceiling_ms":840000,"default":{"setup_ms":1000,"idle_ms":1000,"body_ms":839000}}}"#).unwrap();
+        }
+        let state = Arc::new(state);
+        assert_eq!(
+            build_app(state.clone())
+                .oneshot(call("long", false))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(upstream.received_requests().await.unwrap().len(), 4);
+        assert!(rejected_sink.events().is_empty());
+        assert_eq!(state.lifecycle.active_operations(), 0);
+
+        let mut custom = Arc::try_unwrap(state_with(
+            upstream.uri(),
+            rejected_sink,
+            ProxyLedger::in_memory(),
+        ))
+        .ok()
+        .unwrap();
+        custom
+            .providers
+            .lock()
+            .unwrap()
+            .insert("up1".into(), ProviderHandle::new(Arc::new(AlwaysTimeout)));
+        custom.buffered_deadlines =
+            sandhi_proxy::deadlines::from_json(r#"{"buffered_deadlines":{"ceiling_ms":120000}}"#)
+                .unwrap();
+        if streaming {
+            custom.streaming_deadlines=sandhi_proxy::deadlines::streaming_from_json(r#"{"streaming_deadlines":{"ceiling_ms":5000,"default":{"setup_ms":1000,"idle_ms":1000,"body_ms":1000}}}"#).unwrap();
+        }
+        // This provider returns 504 if called. A configured override must instead
+        // reject the unsupported extension before invoking it.
+        assert_eq!(
+            build_app(Arc::new(custom))
+                .oneshot(call("long", false))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_GATEWAY
+        );
+    }
 }
 
 #[tokio::test]
