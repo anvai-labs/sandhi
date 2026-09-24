@@ -442,7 +442,27 @@ fn process_exit_helper() {
     };
     let mode = std::env::var("SANDHI_EVIDENCE_CRASH_TEST_MODE").unwrap();
     let mut ledger = SqliteLedger::open(&path).unwrap();
-    if mode == "committed" {
+    if mode == "intent_committed" {
+        ledger
+            .reserve_with_intent_durable(
+                "team",
+                7,
+                OffsetDateTime::now_utc(),
+                Duration::seconds(1),
+                2,
+            )
+            .unwrap();
+    } else if mode == "intent_uncommitted" {
+        ledger
+            .conn
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+            INSERT INTO budget_reservation (scope, ceiling, expires_at) VALUES ('team', 7, 1);
+            INSERT INTO budget_execution_intent (execution_id, reservation_id, created_at)
+                VALUES ('uncommitted', last_insert_rowid(), 1);",
+            )
+            .unwrap();
+    } else if mode == "committed" {
         ledger.settle_with_evidence_durable("team", 1, 42).unwrap();
     } else {
         // Stage the same two storage facts, then exit without COMMIT or rollback.
@@ -463,7 +483,12 @@ fn process_exit_helper() {
 
 #[test]
 fn process_exit_preserves_committed_pair_and_discards_uncommitted_pair() {
-    for mode in ["committed", "uncommitted"] {
+    for mode in [
+        "committed",
+        "uncommitted",
+        "intent_committed",
+        "intent_uncommitted",
+    ] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ledger.db");
         let mut ledger = SqliteLedger::open(path.to_str().unwrap()).unwrap();
@@ -481,7 +506,27 @@ fn process_exit_preserves_committed_pair_and_discards_uncommitted_pair() {
             .unwrap();
         assert_eq!(status.code(), Some(77));
         let mut ledger = SqliteLedger::open(path.to_str().unwrap()).unwrap();
-        if mode == "committed" {
+        if mode.starts_with("intent_") {
+            let expected = i64::from(mode == "intent_committed");
+            let count: i64 = ledger
+                .conn
+                .query_row("SELECT COUNT(*) FROM budget_execution_intent", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, expected);
+            assert_eq!(
+                ledger.reserved_durable("team").unwrap(),
+                100 + 7 * expected as u64
+            );
+            ledger
+                .reclaim_expired_durable(OffsetDateTime::now_utc() + Duration::hours(2))
+                .unwrap();
+            assert_eq!(
+                ledger.reserved_durable("team").unwrap(),
+                7 * expected as u64
+            );
+        } else if mode == "committed" {
             assert_eq!(ledger.spent_durable("team").unwrap(), 42);
             assert_eq!(count(&ledger), 1);
             assert!(matches!(
@@ -498,4 +543,205 @@ fn process_exit_preserves_committed_pair_and_discards_uncommitted_pair() {
             ));
         }
     }
+}
+
+#[test]
+fn durable_intent_survives_both_expiry_paths_and_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("intent.db");
+    let now = OffsetDateTime::now_utc();
+    let intent = {
+        let mut ledger = SqliteLedger::open(path.to_str().unwrap()).unwrap();
+        ledger
+            .set_limit_durable("team", Some(100), Window::Total, Policy::Block)
+            .unwrap();
+        let IntentAdmission::Admitted(intent) = ledger
+            .reserve_with_intent_durable("team", 100, now, Duration::seconds(1), 10)
+            .unwrap()
+        else {
+            panic!("denied")
+        };
+        assert_eq!(intent.execution_id.len(), 64);
+        intent
+    };
+    let mut ledger = SqliteLedger::open(path.to_str().unwrap()).unwrap();
+    let later = now + Duration::seconds(2);
+    assert_eq!(ledger.reclaim_expired_durable(later).unwrap(), 0);
+    assert!(matches!(
+        ledger
+            .reserve_durable("team", 1, later, Duration::seconds(1))
+            .unwrap(),
+        ReserveOutcome::Denied(_)
+    ));
+    assert_eq!(ledger.reserved_durable("team").unwrap(), 100);
+    assert_eq!(
+        ledger
+            .intent_durable(&intent.execution_id)
+            .unwrap()
+            .unwrap()
+            .reservation
+            .id,
+        intent.reservation.id
+    );
+    let receipt = ledger
+        .settle_with_evidence_durable("team", intent.reservation.id, 42)
+        .unwrap();
+    assert!(matches!(receipt, SettlementOutcome::Committed(_)));
+    assert!(matches!(
+        ledger
+            .settle_with_evidence_durable("team", intent.reservation.id, 42)
+            .unwrap(),
+        SettlementOutcome::AlreadyCommitted(_)
+    ));
+    assert_eq!(ledger.spent_durable("team").unwrap(), 42);
+}
+
+#[test]
+fn intent_insert_failure_rolls_back_admission() {
+    for table in ["budget_execution_intent", "budget_reservation"] {
+        for failure in ["RAISE(ABORT, 'injected')", "RAISE(IGNORE)"] {
+            let mut ledger = SqliteLedger::open(":memory:").unwrap();
+            reserve(&mut ledger, "old");
+            ledger.conn.execute_batch(&format!("CREATE TRIGGER reject_intent BEFORE INSERT ON {table} BEGIN SELECT {failure}; END;")).unwrap();
+            assert!(matches!(
+                ledger.reserve_with_intent_durable(
+                    "team",
+                    9,
+                    OffsetDateTime::now_utc(),
+                    Duration::seconds(2),
+                    1
+                ),
+                Err(EvidenceError::Storage(_))
+            ));
+            assert_eq!(ledger.reserved_durable("team").unwrap(), 0);
+            assert_eq!(ledger.reserved_durable("old").unwrap(), 100);
+            let count: i64 = ledger
+                .conn
+                .query_row("SELECT COUNT(*) FROM budget_execution_intent", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0);
+        }
+    }
+}
+
+#[test]
+fn intent_capacity_is_atomic_and_retains_settled_identities() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("capacity.db");
+    SqliteLedger::open(path.to_str().unwrap()).unwrap();
+    let barrier = Arc::new(Barrier::new(2));
+    let workers: Vec<_> = (0..2)
+        .map(|_| {
+            let path = path.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let mut ledger = SqliteLedger::open(path.to_str().unwrap()).unwrap();
+                barrier.wait();
+                ledger.reserve_with_intent_durable(
+                    "team",
+                    1,
+                    OffsetDateTime::now_utc(),
+                    Duration::seconds(1),
+                    1,
+                )
+            })
+        })
+        .collect();
+    let mut admitted = None;
+    let mut exhausted = 0;
+    for worker in workers {
+        match worker.join().unwrap() {
+            Ok(IntentAdmission::Admitted(intent)) => {
+                assert!(admitted.is_none());
+                admitted = Some(intent);
+            }
+            Err(EvidenceError::IntentCapacity) => exhausted += 1,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    assert_eq!(exhausted, 1);
+    let intent = admitted.unwrap();
+    let mut ledger = SqliteLedger::open(path.to_str().unwrap()).unwrap();
+    ledger
+        .settle_with_evidence_durable("team", intent.reservation.id, 1)
+        .unwrap();
+    assert!(matches!(
+        ledger.reserve_with_intent_durable(
+            "team",
+            1,
+            OffsetDateTime::now_utc(),
+            Duration::seconds(1),
+            1
+        ),
+        Err(EvidenceError::IntentCapacity)
+    ));
+    assert!(ledger
+        .intent_durable(&intent.execution_id)
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+fn intent_denial_bounds_and_legacy_migration_are_explicit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("intents.db");
+    let path = path.to_str().unwrap();
+    let mut ledger = SqliteLedger::open(path).unwrap();
+    let now = OffsetDateTime::now_utc();
+    for (ceiling, ttl, limit) in [
+        (1, Duration::seconds(1), 0),
+        (1, Duration::seconds(1), 100001),
+        (u64::MAX, Duration::seconds(1), 1),
+        (1, Duration::ZERO, 1),
+    ] {
+        assert!(matches!(
+            ledger.reserve_with_intent_durable("team", ceiling, now, ttl, limit),
+            Err(EvidenceError::InvalidInput)
+        ));
+    }
+    ledger
+        .set_limit_durable("team", Some(0), Window::Total, Policy::Block)
+        .unwrap();
+    assert!(matches!(
+        ledger
+            .reserve_with_intent_durable("team", 1, now, Duration::seconds(1), 1)
+            .unwrap(),
+        IntentAdmission::Denied(_)
+    ));
+    ledger
+        .set_limit_durable("team", Some(i64::MAX as u64), Window::Total, Policy::Block)
+        .unwrap();
+    let IntentAdmission::Admitted(intent) = ledger
+        .reserve_with_intent_durable("team", i64::MAX as u64, now, Duration::seconds(1), 1)
+        .unwrap()
+    else {
+        panic!("denied")
+    };
+    assert!(
+        matches!(
+            ledger
+                .reserve_durable("team", 1, now, Duration::seconds(1))
+                .unwrap(),
+            ReserveOutcome::Denied(_)
+        ),
+        "admission sum must not wrap"
+    );
+    assert!(ledger.intent_durable(&"0".repeat(64)).unwrap().is_none());
+    assert!(matches!(
+        ledger.intent_durable("invalid"),
+        Err(EvidenceError::InvalidInput)
+    ));
+    drop(ledger);
+    assert!(crate::ShardedLedger::open_sharded(path, 2).is_err());
+    for shard in 0..2 {
+        assert!(!std::path::Path::new(&format!("{path}-ledger-shard-{shard}.db")).exists());
+    }
+    let ledger = SqliteLedger::open(path).unwrap();
+    assert!(ledger
+        .intent_durable(&intent.execution_id)
+        .unwrap()
+        .is_some());
+    assert_eq!(ledger.reserved_durable("team").unwrap(), i64::MAX as u64);
 }

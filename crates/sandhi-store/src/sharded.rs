@@ -299,6 +299,17 @@ impl ShardedLedger {
                 std::io::Error::other("settlement evidence requires explicit shard migration"),
             )));
         }
+        if has_table("budget_execution_intent")?
+            && legacy.query_row(
+                "SELECT EXISTS(SELECT 1 FROM budget_execution_intent)",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?
+        {
+            return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                std::io::Error::other("execution intents require explicit shard migration"),
+            )));
+        }
         if !has_table("budget_reservation")? || !has_table("budget_limit")? {
             return Ok(()); // nothing ever created here
         }

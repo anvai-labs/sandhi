@@ -709,3 +709,11 @@ precedence. No accounting oracle or unrelated tests were removed.
 This does not close W05d/e or durable HTTP settlement. Setup-error finalization can
 block HTTP delivery; body cleanup retains admission/lifecycle guards until legacy
 settlement returns. Live origin cancellation and mixed-team C5 remain open.
+
+### Durable admission intent storage increment (2026-09-24)
+
+W05d's next storage foundation commits an opt-in execution intent with admission,
+protects unresolved capacity through both reclaim paths and bounds retained IDs.
+See [the owning contract](../product/attempt-accounting-and-evidence.md#durable-admission-intent-w05d-storage-foundation).
+It does not activate durable HTTP settlement or close W05c–e. Terminal observation,
+recovery ownership, retention and integration remain open.
