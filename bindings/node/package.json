@@ -1,6 +1,6 @@
 {
   "name": "@anvailabs/sandhi",
-  "version": "0.9.1",
+  "version": "0.10.0",
   "description": "Sandhi \u2014 the metering layer for AI agents (Node binding): in-process virtual keys, budgets, and neutral usage-event metering.",
   "license": "Apache-2.0",
   "repository": "https://github.com/anvai-labs/sandhi",
