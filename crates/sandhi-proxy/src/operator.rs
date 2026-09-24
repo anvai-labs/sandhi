@@ -1553,6 +1553,13 @@ fn add_deadline_status(
     state: &ProxyState,
     cfg: &crate::config::SandhiFileConfig,
 ) {
+    if state.streaming_deadlines.is_some() || cfg.streaming_deadlines.is_some() {
+        payload["streaming_deadlines"] = json!({
+            "activation": "restart required",
+            "active": state.streaming_deadlines.as_ref().map(|policy|policy.report()),
+            "desired": cfg.streaming_deadlines.as_ref().map(|policy|policy.report()),
+        });
+    }
     if state.buffered_deadlines.is_some() || cfg.buffered_deadlines.is_some() {
         payload["buffered_deadlines"] = json!({
             "activation": "restart required",

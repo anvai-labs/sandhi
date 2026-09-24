@@ -30,7 +30,7 @@ mod cache_read;
 pub mod catalog;
 pub mod cohere;
 mod deadline;
-pub use deadline::BufferedDeadline;
+pub use deadline::{BufferedDeadline, StreamingDeadline};
 mod cohere_typed;
 pub mod escape_hatch;
 pub mod gemini;

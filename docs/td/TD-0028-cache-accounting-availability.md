@@ -383,7 +383,8 @@ that opt-in policy. Cleanup moves off the async worker after dropping the source
 while admission and lifecycle guards continue to count unfinished settlement.
 This is not a durable receipt, a bounded settlement guarantee, or proof of origin
 GPU cancellation. Default behavior and deployed gateway settings are unchanged;
-standalone streaming policy and full C5 acceptance remain open. The existing
+standalone [streaming route policy](../operator/streaming-deadlines.md) now adds
+validated setup/idle/body limits. Bounded settlement and full C5 acceptance remain open. The existing
 terminal-accounting fixture and a focused controller suite own the regressions;
 no duplicate lease/parser suite was introduced.
 

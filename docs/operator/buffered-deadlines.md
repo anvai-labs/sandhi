@@ -84,7 +84,8 @@ Headroom is an opportunity for settlement, **not a guarantee**: settlement can
 still wait on ledger/SQLite contention. Longer calls need a separate lease renewal
 and bounded settlement contract. Streaming idle limits do not bound total stream
 lifetime. An opt-in Rust [body lifetime owner](stream-body-lifetime.md) exists;
-standalone streaming policy and live lifecycle acceptance remain open.
+standalone [streaming policy](streaming-deadlines.md) is separately opt-in. Live
+lifecycle acceptance remains open.
 
 ## Regression ownership
 
