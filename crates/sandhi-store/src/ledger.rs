@@ -289,13 +289,25 @@ impl SqliteLedger {
 
     /// Idempotently settle a reservation to its actual billable usage. Guarded by `settled = 0`, so
     /// a retried or replayed settle updates zero rows and changes nothing (ADR-0005 D2/C2).
+    /// Opt-in tracked reservations require `settle_terminal_durable`; this API returns a
+    /// SQLite constraint error without changing their charge or releasing liability.
     pub fn settle_durable(&mut self, reservation_id: u64, actual: u64) -> rusqlite::Result<()> {
-        self.conn.execute(
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if evidence::is_tracked(&tx, reservation_id as i64)? {
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+                Some("tracked reservation requires terminal settlement".into()),
+            ));
+        }
+        tx.execute(
             "UPDATE budget_reservation
              SET actual = ?2, settled = 1, settled_at = CAST(strftime('%s','now') AS INTEGER)
              WHERE id = ?1 AND settled = 0",
             params![reservation_id as i64, actual as i64],
         )?;
+        tx.commit()?;
         Ok(())
     }
 

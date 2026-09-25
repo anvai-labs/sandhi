@@ -1,5 +1,6 @@
 //! Internal settlement receipts, not physical-attempt or public usage events (TD-0026 W05a).
-//! Includes opt-in execution usage snapshots; existing HTTP/settlement callers are unchanged.
+//! Includes opt-in execution usage snapshots and settlement from their frozen charge.
+//! Existing untracked HTTP/settlement callers are unchanged.
 //! Receipt delivery is at least once;
 //! consumers must deduplicate by receipt ID. No network exporter is provided here.
 
@@ -7,7 +8,7 @@
 mod tests;
 
 use super::*;
-use sandhi_core::{UsageCompleteness, UsageV2};
+use sandhi_core::{UsageBasis, UsageCompleteness, UsageV2};
 
 /// Immutable execution-level usage snapshot, not proof of a physical send or settlement.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +56,9 @@ pub enum EvidenceError {
     InvalidInput,
     IntentCapacity,
     MissingIntent,
+    MissingObservation,
+    UnresolvedObservation,
+    TrackedSettlementRequired,
     ConflictingObservation,
     AlreadySettled,
     CorruptObservation,
@@ -74,6 +78,9 @@ impl std::fmt::Display for EvidenceError {
         f.write_str(match self {
             Self::IntentCapacity => "durable execution intent capacity exhausted",
             Self::MissingIntent => "durable execution intent missing",
+            Self::MissingObservation => "terminal observation missing",
+            Self::UnresolvedObservation => "terminal usage is not final provider-reported evidence",
+            Self::TrackedSettlementRequired => "tracked reservation requires terminal settlement",
             Self::ConflictingObservation => "terminal observation conflicts with stored evidence",
             Self::AlreadySettled => "reservation was settled before terminal observation",
             Self::CorruptObservation => "terminal observation cannot be decoded safely",
@@ -270,13 +277,123 @@ fn read_observation(
     .transpose()
 }
 
+fn settle_receipt(
+    tx: &rusqlite::Transaction<'_>,
+    scope: &str,
+    id: i64,
+    charge: i64,
+) -> Result<SettlementOutcome, EvidenceError> {
+    let existing = tx
+        .query_row(
+            "SELECT receipt_id, reservation_id, scope, charged_tokens, settled_at
+         FROM budget_settlement_outbox WHERE reservation_id = ?1",
+            [id],
+            receipt,
+        )
+        .optional()?;
+    if let Some(existing) = existing {
+        if existing.scope != scope {
+            return Err(EvidenceError::WrongScope);
+        }
+        if existing.charged_tokens != charge as u64 {
+            return Err(EvidenceError::ConflictingCharge);
+        }
+        return Ok(SettlementOutcome::AlreadyCommitted(existing));
+    }
+    let lease: Option<(String, bool)> = tx
+        .query_row(
+            "SELECT scope, settled FROM budget_reservation WHERE id = ?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let (stored_scope, settled) = lease.ok_or(EvidenceError::MissingReservation)?;
+    if stored_scope != scope {
+        return Err(EvidenceError::WrongScope);
+    }
+    if settled {
+        return Err(EvidenceError::LegacySettlement);
+    }
+    let receipt = SettlementReceipt {
+        receipt_id: opaque_id()?,
+        reservation_id: id as u64,
+        scope: stored_scope,
+        charged_tokens: charge as u64,
+        settled_at: OffsetDateTime::now_utc().unix_timestamp(),
+    };
+    let updated = tx.execute(
+        "UPDATE budget_reservation SET actual = ?2, settled = 1, settled_at = ?3
+         WHERE id = ?1 AND settled = 0",
+        params![id, charge, receipt.settled_at],
+    )?;
+    if updated != 1 {
+        return Err(EvidenceError::Storage(rusqlite::Error::QueryReturnedNoRows));
+    }
+    let inserted = tx.execute(
+        "INSERT INTO budget_settlement_outbox
+         (receipt_id, reservation_id, scope, charged_tokens, settled_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![receipt.receipt_id, id, scope, charge, receipt.settled_at],
+    )?;
+    if inserted != 1 {
+        return Err(EvidenceError::Storage(rusqlite::Error::QueryReturnedNoRows));
+    }
+    Ok(SettlementOutcome::Committed(receipt))
+}
+
+pub(super) fn is_tracked(conn: &Connection, id: i64) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM budget_execution_intent WHERE reservation_id = ?1)",
+        [id],
+        |row| row.get(0),
+    )
+}
+
 impl SqliteLedger {
+    /// Settle a tracked execution using its immutable stored charge. Only final
+    /// provider-reported usage can release the reservation; partial/estimated/unknown
+    /// usage retains liability until a separately reviewed amendment/recovery policy.
+    /// Replays, including after receipt acknowledgement, return the original receipt.
+    pub fn settle_terminal_durable(
+        &mut self,
+        scope: &str,
+        execution_id: &str,
+    ) -> Result<SettlementOutcome, EvidenceError> {
+        validate_scope(scope)?;
+        validate_execution_id(execution_id)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (reservation_id, stored_scope, _) =
+            intent_binding(&tx, execution_id)?.ok_or(EvidenceError::MissingIntent)?;
+        if stored_scope != scope {
+            return Err(EvidenceError::WrongScope);
+        }
+        let observed = read_observation(&tx, execution_id, reservation_id, &stored_scope)?
+            .ok_or(EvidenceError::MissingObservation)?;
+        if observed.usage.completeness != UsageCompleteness::Final
+            || observed.usage.basis != UsageBasis::ProviderReported
+        {
+            return Err(EvidenceError::UnresolvedObservation);
+        }
+        let id = i64::try_from(reservation_id).map_err(|_| EvidenceError::CorruptObservation)?;
+        let charge = i64::try_from(
+            observed
+                .frozen_charge
+                .ok_or(EvidenceError::CorruptObservation)?,
+        )
+        .map_err(|_| EvidenceError::CorruptObservation)?;
+        let outcome = settle_receipt(&tx, scope, id, charge)?;
+        tx.commit()?;
+        Ok(outcome)
+    }
+
     /// Persist one immutable execution-level terminal usage snapshot. The intent owns
     /// reservation/scope identity; this method never settles, releases or retries inference.
     /// Exact replay returns the stored timestamp/charge. Conflicting later evidence is
     /// rejected, including refinements of unavailable/partial usage. Outcome strings are
-    /// bounded metadata, not physical-send proof. Use one compatible owner and fixed topology:
-    /// legacy settlement APIs are not yet linked to this observation contract.
+    /// bounded metadata, not physical-send proof. Use the canonical terminal settlement API
+    /// for tracked reservations and retain a compatible owner and fixed ledger topology.
     pub fn record_terminal_durable(
         &mut self,
         scope: &str,
@@ -439,6 +556,7 @@ impl SqliteLedger {
     /// Atomically settle one lease and persist its immutable receipt. Replays return the
     /// original receipt, including after acknowledgement. Missing or legacy leases are NOT
     /// successful settlements. Scope is checked in storage, not just used for shard routing.
+    /// Tracked reservations reject caller charges; use `settle_terminal_durable` instead.
     pub fn settle_with_evidence_durable(
         &mut self,
         scope: &str,
@@ -453,64 +571,12 @@ impl SqliteLedger {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let existing = tx
-            .query_row(
-                "SELECT receipt_id, reservation_id, scope, charged_tokens, settled_at
-             FROM budget_settlement_outbox WHERE reservation_id = ?1",
-                [id],
-                receipt,
-            )
-            .optional()?;
-        if let Some(existing) = existing {
-            if existing.scope != scope {
-                return Err(EvidenceError::WrongScope);
-            }
-            if existing.charged_tokens != charged_tokens {
-                return Err(EvidenceError::ConflictingCharge);
-            }
-            tx.commit()?;
-            return Ok(SettlementOutcome::AlreadyCommitted(existing));
+        if is_tracked(&tx, id)? {
+            return Err(EvidenceError::TrackedSettlementRequired);
         }
-        let lease: Option<(String, bool)> = tx
-            .query_row(
-                "SELECT scope, settled FROM budget_reservation WHERE id = ?1",
-                [id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        let (stored_scope, settled) = lease.ok_or(EvidenceError::MissingReservation)?;
-        if stored_scope != scope {
-            return Err(EvidenceError::WrongScope);
-        }
-        if settled {
-            return Err(EvidenceError::LegacySettlement);
-        }
-        let receipt = SettlementReceipt {
-            receipt_id: opaque_id()?,
-            reservation_id,
-            scope: stored_scope,
-            charged_tokens,
-            settled_at: OffsetDateTime::now_utc().unix_timestamp(),
-        };
-        let updated = tx.execute(
-            "UPDATE budget_reservation SET actual = ?2, settled = 1, settled_at = ?3
-             WHERE id = ?1 AND settled = 0",
-            params![id, charge, receipt.settled_at],
-        )?;
-        if updated != 1 {
-            return Err(EvidenceError::Storage(rusqlite::Error::QueryReturnedNoRows));
-        }
-        let inserted = tx.execute(
-            "INSERT INTO budget_settlement_outbox
-             (receipt_id, reservation_id, scope, charged_tokens, settled_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![receipt.receipt_id, id, scope, charge, receipt.settled_at],
-        )?;
-        if inserted != 1 {
-            return Err(EvidenceError::Storage(rusqlite::Error::QueryReturnedNoRows));
-        }
+        let outcome = settle_receipt(&tx, scope, id, charge)?;
         tx.commit()?;
-        Ok(SettlementOutcome::Committed(receipt))
+        Ok(outcome)
     }
 
     /// Claim at most 1..=1000 pending receipts for 1..=3600 seconds. The caller supplies
