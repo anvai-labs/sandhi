@@ -425,3 +425,45 @@ settlement deadline. Before HTTP activation, finish proven-never-dispatched liab
 handling, typed finalization results, bounded blocking-job ownership, shutdown/restart
 recovery, retention/export and lifecycle acceptance. Old writers and incompatible
 rollback remain unsafe for tracked reservations.
+
+## Durable dispatch fence (W05d storage prerequisite)
+
+A new opt-in `SqliteLedger::reserve_prepared_durable` commits a reservation, its
+existing execution identity and a `Prepared` fence in one transaction. It requires
+file-backed storage and shares the existing admission/capacity authority. Existing
+`reserve_with_intent_durable` callers, both historical and newly admitted, remain
+unfenced: their dispatch outcome is unknown, so they cannot prove never-dispatched
+closure. The additive table does not backfill such proof.
+
+`authorize_dispatch_durable` and `close_before_dispatch_durable` take the same
+SQLite write lock and validate binding, phase and evidence before changing state:
+
+- `Prepared` to authorized checks lease expiry after acquiring the lock. Only the
+  first successful commit returns a private, non-Clone `DispatchPermit`. Repeated
+  authorization, lost permits and uncertain commit responses never return another
+  permit. Authorized means **may have dispatched**, not proof of a physical send.
+- `Prepared` to closed releases the reservation atomically with distinct
+  `PreDispatchClosure` evidence. Replays return the original closure. This produces
+  neither provider-reported zero usage nor a settlement-outbox receipt.
+- Authorized executions retain liability until the existing terminal observation
+  and canonical settlement path resolves it. Closure cannot cancel an authorization.
+  Closed/prepared executions reject terminal observation and settlement.
+
+Recovery inventory distinguishes prepared, may-have-dispatched and closed records;
+legacy unfenced records retain their prior states. Corruption fails closed. Closed
+identities still count toward the existing retained-intent bound; there is no pruning
+or TTL-based inference retry. Methods return errors without consuming the caller's
+execution identity, allowing reconciliation against the original ledger.
+
+This is a storage prerequisite, **not HTTP dispatch enforcement or cancellation
+acceptance**. The caller must transfer and consume the permit at its owned dispatch
+boundary; this change adds no network call, proxy admission switch, recovery worker,
+shard migration or shutdown job. Existing HTTP/default behavior remains unchanged.
+Scope checks are binding validation, not caller authorization. Older writers cannot
+safely operate on fenced ledgers; retain the compatible writer/schema for rollback.
+
+Tests extend the existing store evidence suite: reopen/closure without fabricated
+usage, lost-permit/repeated authorization, conservative legacy migration, both winners
+under competing SQLite connections, atomic rollback on injected write failure, expired
+leases and damaged phase/evidence. Existing terminal/settlement and proxy-cancellation
+tests keep their distinct invariants; no duplicate suite was added or removed.

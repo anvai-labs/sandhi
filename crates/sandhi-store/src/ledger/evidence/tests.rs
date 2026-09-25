@@ -1656,3 +1656,406 @@ fn recovery_rejects_damaged_bindings_observations_and_receipts_without_writes() 
         Err(EvidenceError::CorruptObservation)
     ));
 }
+
+// These cases extend the existing evidence suite: legacy/terminal/receipt matrices
+// remain above. This boundary owns only the opt-in dispatch/closure transition.
+#[test]
+fn prepared_closure_is_durable_without_provider_usage_or_receipt() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledger.db");
+    let path = path.to_str().unwrap();
+    let mut ledger = SqliteLedger::open(path).unwrap();
+    for action in ["IGNORE", "ABORT, 'injected failure'"] {
+        ledger.conn.execute_batch(&format!("CREATE TRIGGER fail_fence BEFORE INSERT ON budget_dispatch_fence BEGIN SELECT RAISE({action}); END;")).unwrap();
+        assert!(matches!(
+            ledger.reserve_prepared_durable(
+                "team",
+                100,
+                OffsetDateTime::now_utc(),
+                Duration::seconds(30),
+                10
+            ),
+            Err(EvidenceError::Storage(_))
+        ));
+        for table in [
+            "budget_reservation",
+            "budget_execution_intent",
+            "budget_dispatch_fence",
+        ] {
+            assert_eq!(
+                ledger
+                    .conn
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+        ledger
+            .conn
+            .execute_batch("DROP TRIGGER fail_fence")
+            .unwrap();
+    }
+    let IntentAdmission::Admitted(intent) = ledger
+        .reserve_prepared_durable(
+            "team",
+            100,
+            OffsetDateTime::now_utc(),
+            Duration::seconds(30),
+            10,
+        )
+        .unwrap()
+    else {
+        panic!("denied")
+    };
+    assert!(matches!(
+        ledger
+            .recovery_page_durable("team", None, 10)
+            .unwrap()
+            .entries[0]
+            .state,
+        RecoveryState::Prepared
+    ));
+    assert!(matches!(
+        ledger.record_terminal_durable("team", &intent.execution_id, &observed_usage()),
+        Err(EvidenceError::DispatchNotAuthorized)
+    ));
+    assert!(matches!(
+        ledger.close_before_dispatch_durable("other", &intent.execution_id),
+        Err(EvidenceError::WrongScope)
+    ));
+    ledger.conn.execute_batch("CREATE TRIGGER fail_closure BEFORE UPDATE ON budget_reservation BEGIN SELECT RAISE(ABORT, 'injected failure'); END;").unwrap();
+    assert!(matches!(
+        ledger.close_before_dispatch_durable("team", &intent.execution_id),
+        Err(EvidenceError::Storage(_))
+    ));
+    assert!(matches!(
+        ledger
+            .recovery_page_durable("team", None, 10)
+            .unwrap()
+            .entries[0]
+            .state,
+        RecoveryState::Prepared
+    ));
+    ledger
+        .conn
+        .execute_batch("DROP TRIGGER fail_closure")
+        .unwrap();
+    let ClosureOutcome::Closed(closure) = ledger
+        .close_before_dispatch_durable("team", &intent.execution_id)
+        .unwrap()
+    else {
+        panic!("not closed")
+    };
+    drop(ledger);
+    let mut ledger = SqliteLedger::open(path).unwrap();
+    assert_eq!(
+        ledger
+            .close_before_dispatch_durable("team", &intent.execution_id)
+            .unwrap(),
+        ClosureOutcome::AlreadyClosed(closure.clone())
+    );
+    assert!(
+        matches!(ledger.authorize_dispatch_durable("team", &intent.execution_id).unwrap(), DispatchOutcome::ClosedBeforeDispatch(value) if value == closure)
+    );
+    assert_eq!(
+        ledger
+            .recovery_page_durable("team", None, 10)
+            .unwrap()
+            .entries[0]
+            .state,
+        RecoveryState::ClosedBeforeDispatch(closure)
+    );
+    assert!(matches!(
+        ledger.record_terminal_durable("team", &intent.execution_id, &observed_usage()),
+        Err(EvidenceError::DispatchNotAuthorized)
+    ));
+    assert!(matches!(
+        ledger.settle_terminal_durable("team", &intent.execution_id),
+        Err(EvidenceError::DispatchNotAuthorized)
+    ));
+    assert!(ledger
+        .terminal_durable("team", &intent.execution_id)
+        .unwrap()
+        .is_none());
+    assert!(ledger
+        .claim_settlements_durable(10, OffsetDateTime::now_utc(), 30)
+        .unwrap()
+        .is_empty());
+    assert_eq!(ledger.conn.query_row("SELECT SUM(actual), SUM(CASE WHEN settled=0 THEN ceiling ELSE 0 END) FROM budget_reservation", [], |r| Ok((r.get::<_,u64>(0)?,r.get::<_,u64>(1)?))).unwrap(), (0,0));
+}
+
+#[test]
+fn dispatch_authorization_survives_lost_permit_and_retains_liability() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledger.db");
+    let path = path.to_str().unwrap();
+    let mut ledger = SqliteLedger::open(path).unwrap();
+    let IntentAdmission::Admitted(intent) = ledger
+        .reserve_prepared_durable(
+            "team",
+            100,
+            OffsetDateTime::now_utc(),
+            Duration::seconds(30),
+            10,
+        )
+        .unwrap()
+    else {
+        panic!("denied")
+    };
+    let DispatchOutcome::Authorized(permit) = ledger
+        .authorize_dispatch_durable("team", &intent.execution_id)
+        .unwrap()
+    else {
+        panic!("no permit")
+    };
+    assert_eq!(permit.execution_id(), intent.execution_id);
+    drop(permit);
+    drop(ledger);
+    let mut ledger = SqliteLedger::open(path).unwrap();
+    assert!(matches!(
+        ledger
+            .authorize_dispatch_durable("team", &intent.execution_id)
+            .unwrap(),
+        DispatchOutcome::MayHaveDispatched
+    ));
+    assert_eq!(
+        ledger
+            .close_before_dispatch_durable("team", &intent.execution_id)
+            .unwrap(),
+        ClosureOutcome::MayHaveDispatched
+    );
+    assert_eq!(
+        ledger
+            .recovery_page_durable("team", None, 10)
+            .unwrap()
+            .entries[0]
+            .state,
+        RecoveryState::MayHaveDispatched
+    );
+    assert_eq!(
+        ledger
+            .conn
+            .query_row(
+                "SELECT ceiling FROM budget_reservation WHERE settled=0",
+                [],
+                |r| r.get::<_, u64>(0)
+            )
+            .unwrap(),
+        100
+    );
+    ledger
+        .record_terminal_durable("team", &intent.execution_id, &observed_usage())
+        .unwrap();
+    assert!(matches!(
+        ledger
+            .settle_terminal_durable("team", &intent.execution_id)
+            .unwrap(),
+        SettlementOutcome::Committed(_)
+    ));
+    assert_eq!(
+        ledger
+            .close_before_dispatch_durable("team", &intent.execution_id)
+            .unwrap(),
+        ClosureOutcome::MayHaveDispatched
+    );
+}
+
+#[test]
+fn legacy_intents_never_acquire_never_dispatched_proof() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledger.db");
+    let path = path.to_str().unwrap();
+    let mut ledger = SqliteLedger::open(path).unwrap();
+    let old = tracked(&mut ledger);
+    // Simulate the pre-fence schema, then reopen through the additive migration.
+    ledger
+        .conn
+        .execute_batch("DROP TABLE budget_dispatch_fence")
+        .unwrap();
+    drop(ledger);
+    let mut ledger = SqliteLedger::open(path).unwrap();
+    let new = tracked(&mut ledger);
+    for intent in [old, new] {
+        assert!(matches!(
+            ledger.authorize_dispatch_durable("team", &intent.execution_id),
+            Err(EvidenceError::UnfencedIntent)
+        ));
+        assert!(matches!(
+            ledger.close_before_dispatch_durable("team", &intent.execution_id),
+            Err(EvidenceError::UnfencedIntent)
+        ));
+        ledger
+            .record_terminal_durable("team", &intent.execution_id, &observed_usage())
+            .unwrap();
+        ledger
+            .settle_terminal_durable("team", &intent.execution_id)
+            .unwrap();
+    }
+    let mut memory = SqliteLedger::open(":memory:").unwrap();
+    assert!(matches!(
+        memory.reserve_prepared_durable(
+            "team",
+            100,
+            OffsetDateTime::now_utc(),
+            Duration::seconds(30),
+            10
+        ),
+        Err(EvidenceError::UnsupportedTrackedLedger)
+    ));
+}
+
+#[test]
+fn dispatch_and_closure_serialize_across_connections_for_both_winners() {
+    static BUSY_READY: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>> =
+        std::sync::Mutex::new(None);
+    for dispatch_wins in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.db");
+        let path = path.to_str().unwrap().to_string();
+        let mut first = SqliteLedger::open(&path).unwrap();
+        let mut second = SqliteLedger::open(&path).unwrap();
+        let IntentAdmission::Admitted(intent) = first
+            .reserve_prepared_durable(
+                "team",
+                100,
+                OffsetDateTime::now_utc(),
+                Duration::seconds(30),
+                10,
+            )
+            .unwrap()
+        else {
+            panic!("denied")
+        };
+        // Hold the writer lock before starting the competing connection. The loser
+        // must reread the committed winner, never act on a pre-transaction read.
+        let tx = first
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        *BUSY_READY.lock().unwrap() = Some(ready_tx);
+        second
+            .conn
+            .busy_handler(Some(|_| {
+                if let Some(sender) = BUSY_READY.lock().unwrap().take() {
+                    sender.send(()).unwrap();
+                }
+                std::thread::yield_now();
+                true
+            }))
+            .unwrap();
+        let execution_id = intent.execution_id.clone();
+        let worker = std::thread::spawn(move || {
+            if dispatch_wins {
+                assert_eq!(
+                    second
+                        .close_before_dispatch_durable("team", &execution_id)
+                        .unwrap(),
+                    ClosureOutcome::MayHaveDispatched
+                );
+            } else {
+                assert!(matches!(
+                    second
+                        .authorize_dispatch_durable("team", &execution_id)
+                        .unwrap(),
+                    DispatchOutcome::ClosedBeforeDispatch(_)
+                ));
+            }
+        });
+        // The callback fires only once SQLite actually encounters the held writer lock.
+        ready_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let (_, changed) =
+            dispatch::transition(&tx, "team", &intent.execution_id, dispatch_wins).unwrap();
+        assert!(changed);
+        tx.commit().unwrap();
+        worker.join().unwrap();
+    }
+}
+
+#[test]
+fn dispatch_fence_rejects_expired_and_damaged_evidence() {
+    for damage in [
+        "expiry",
+        "orphan",
+        "timestamp",
+        "phase",
+        "prepared_receipt",
+        "closed_observation",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.db");
+        let mut ledger = SqliteLedger::open(path.to_str().unwrap()).unwrap();
+        let IntentAdmission::Admitted(intent) = ledger
+            .reserve_prepared_durable(
+                "team",
+                100,
+                OffsetDateTime::now_utc(),
+                Duration::seconds(30),
+                10,
+            )
+            .unwrap()
+        else {
+            panic!("denied")
+        };
+        match damage {
+            "expiry" => {
+                ledger
+                    .conn
+                    .execute_batch("UPDATE budget_reservation SET expires_at=0")
+                    .unwrap();
+                assert!(matches!(
+                    ledger.authorize_dispatch_durable("team", &intent.execution_id),
+                    Err(EvidenceError::ExpiredBeforeDispatch)
+                ));
+                assert!(matches!(
+                    ledger
+                        .close_before_dispatch_durable("team", &intent.execution_id)
+                        .unwrap(),
+                    ClosureOutcome::Closed(_)
+                ));
+                continue;
+            }
+            "orphan" => {
+                ledger
+                    .conn
+                    .execute_batch("DELETE FROM budget_reservation")
+                    .unwrap();
+            }
+            "timestamp" => {
+                ledger.conn.execute_batch("UPDATE budget_dispatch_fence SET phase=1, transitioned_at=9223372036854775807").unwrap();
+            }
+            "phase" => {
+                ledger.conn.execute_batch("PRAGMA ignore_check_constraints=ON; UPDATE budget_dispatch_fence SET phase=9").unwrap();
+            }
+            "prepared_receipt" => {
+                ledger.conn.execute_batch("INSERT INTO budget_settlement_outbox(receipt_id,reservation_id,scope,charged_tokens,settled_at) SELECT 'fake',id,scope,0,0 FROM budget_reservation").unwrap();
+            }
+            "closed_observation" => {
+                ledger
+                    .close_before_dispatch_durable("team", &intent.execution_id)
+                    .unwrap();
+                ledger.conn.execute("INSERT INTO budget_terminal_observation(execution_id,version,usage_json,frozen_charge,observed_at) VALUES (?1,1,?2,37,0)",params![intent.execution_id,encode_usage(&observed_usage()).unwrap()]).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            ledger
+                .authorize_dispatch_durable("team", &intent.execution_id)
+                .is_err(),
+            "{damage}"
+        );
+        assert!(
+            ledger
+                .close_before_dispatch_durable("team", &intent.execution_id)
+                .is_err(),
+            "{damage}"
+        );
+        assert!(
+            ledger.recovery_page_durable("team", None, 10).is_err(),
+            "{damage}"
+        );
+    }
+}
