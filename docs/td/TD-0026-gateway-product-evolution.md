@@ -712,8 +712,20 @@ settlement returns. Live origin cancellation and mixed-team C5 remain open.
 
 ### Durable admission intent storage increment (2026-09-24)
 
-W05d's next storage foundation commits an opt-in execution intent with admission,
+W05d's admission storage foundation commits an opt-in execution intent with admission,
 protects unresolved capacity through both reclaim paths and bounds retained IDs.
 See [the owning contract](../product/attempt-accounting-and-evidence.md#durable-admission-intent-w05d-storage-foundation).
-It does not activate durable HTTP settlement or close W05c–e. Terminal observation,
-recovery ownership, retention and integration remain open.
+It does not activate durable HTTP settlement or close W05c–e. Recovery ownership,
+retention and integration remain open; the next storage slice follows.
+
+### Durable terminal usage storage increment (2026-09-24)
+
+The next W05d slice stores one immutable versioned `UsageV2` observation per retained
+execution intent, with reservation/scope binding, exact replay, conflict detection
+and a frozen optional charge. Unknown usage remains unknown, including after expiry.
+See [the owning contract](../product/attempt-accounting-and-evidence.md#durable-terminal-usage-observation-w05d-storage-foundation).
+It reuses the canonical billable function and existing evidence/crash test owners.
+No HTTP activation, physical-attempt proof, observation amendment, receipt linkage,
+recovery worker or retention/export is implied. Existing public settlement APIs
+still require one compatible owner until canonical observation-to-settlement linkage
+is implemented; this storage increment does not close W05c–e.
