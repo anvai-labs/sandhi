@@ -739,3 +739,17 @@ remaining-liability recovery are designed. See [the owning contract](../product/
 The existing evidence/process-exit fixtures own validation. No HTTP activation,
 sharded topology migration, automatic recovery or external delivery is implied.
 Do not roll back to older writers that can bypass tracked-settlement guards.
+
+### Bounded recovery inventory storage increment (2026-09-25)
+
+W05d now has a scoped read-only inventory with bounded pages, a frozen admission
+upper bound and current state per page. It shares the canonical settlement eligibility
+and receipt-consistency checks, rejects corrupt/orphaned bindings explicitly and
+never retries inference or mutates accounting. Existing evidence tests cover cursor,
+concurrent admission/state changes, corruption and read-only conservation; the existing
+usage-basis matrix also checks classification. See [the owning contract](../product/attempt-accounting-and-evidence.md#bounded-terminal-recovery-inventory-w05d-storage-foundation).
+
+This is a library foundation, not an activated recovery worker or HTTP owner.
+Amendments, dispatch ownership, lifecycle acceptance, release/deployment and C5 remain
+open. Cursors stay on the original ledger and fixed topology; a finished sweep is
+not proof of quiescence or whole-ledger integrity.

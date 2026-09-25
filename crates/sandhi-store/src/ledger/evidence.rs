@@ -22,6 +22,36 @@ pub struct TerminalObservation {
     pub observed_at: i64,
 }
 
+/// In-process cursor for one scope on the original ledger and fixed topology.
+/// Not portable across database replacement/restore; not an authorization credential.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryCursor {
+    scope: String,
+    after_id: u64,
+    through_id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecoveryState {
+    MissingObservation,
+    UnresolvedObservation,
+    ReadyToSettle,
+    Settled(SettlementReceipt),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryEntry {
+    pub execution_id: String,
+    pub reservation_id: u64,
+    pub state: RecoveryState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryPage {
+    pub entries: Vec<RecoveryEntry>,
+    pub next: Option<RecoveryCursor>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObservationOutcome {
     Recorded(TerminalObservation),
@@ -62,6 +92,7 @@ pub enum EvidenceError {
     ConflictingObservation,
     AlreadySettled,
     CorruptObservation,
+    InconsistentSettlement,
     MissingReservation,
     WrongScope,
     ConflictingCharge,
@@ -84,6 +115,7 @@ impl std::fmt::Display for EvidenceError {
             Self::ConflictingObservation => "terminal observation conflicts with stored evidence",
             Self::AlreadySettled => "reservation was settled before terminal observation",
             Self::CorruptObservation => "terminal observation cannot be decoded safely",
+            Self::InconsistentSettlement => "terminal settlement evidence is inconsistent",
             Self::InvalidInput => "invalid settlement evidence input",
             Self::MissingReservation => "reservation missing or reclaimed",
             Self::WrongScope => "reservation scope mismatch",
@@ -277,6 +309,63 @@ fn read_observation(
     .transpose()
 }
 
+// The one eligibility rule shared by recovery inventory and canonical settlement.
+fn terminal_charge(observed: &TerminalObservation) -> Result<i64, EvidenceError> {
+    if observed.usage.completeness != UsageCompleteness::Final
+        || observed.usage.basis != UsageBasis::ProviderReported
+    {
+        return Err(EvidenceError::UnresolvedObservation);
+    }
+    i64::try_from(
+        observed
+            .frozen_charge
+            .ok_or(EvidenceError::CorruptObservation)?,
+    )
+    .map_err(|_| EvidenceError::CorruptObservation)
+}
+
+fn checked_terminal_receipt(
+    conn: &Connection,
+    scope: &str,
+    id: u64,
+    charge: Option<i64>,
+) -> Result<Option<SettlementReceipt>, EvidenceError> {
+    let (scope_matches, settled, actual, settled_at): (bool, i64, i64, Option<i64>) = conn
+        .query_row(
+            "SELECT scope = ?2, settled, actual, settled_at FROM budget_reservation WHERE id = ?1",
+            params![id, scope],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+    let stored = conn
+        .query_row(
+            "SELECT CASE WHEN length(CAST(receipt_id AS BLOB)) = 64 THEN receipt_id END,
+                reservation_id, CASE WHEN scope = ?2 THEN ?2 END, charged_tokens, settled_at
+         FROM budget_settlement_outbox WHERE reservation_id = ?1",
+            params![id, scope],
+            receipt,
+        )
+        .optional()?;
+    if !scope_matches {
+        return Err(EvidenceError::WrongScope);
+    }
+    match (settled, stored) {
+        (0, None) if actual == 0 && settled_at.is_none() => Ok(None),
+        (1, None) => Err(EvidenceError::LegacySettlement),
+        (1, Some(receipt))
+            if charge == Some(actual)
+                && actual >= 0
+                && receipt.charged_tokens == actual as u64
+                && receipt.scope == scope
+                && receipt.reservation_id == id
+                && Some(receipt.settled_at) == settled_at
+                && validate_execution_id(&receipt.receipt_id).is_ok() =>
+        {
+            Ok(Some(receipt))
+        }
+        _ => Err(EvidenceError::InconsistentSettlement),
+    }
+}
+
 fn settle_receipt(
     tx: &rusqlite::Transaction<'_>,
     scope: &str,
@@ -350,6 +439,116 @@ pub(super) fn is_tracked(conn: &Connection, id: i64) -> rusqlite::Result<bool> {
 }
 
 impl SqliteLedger {
+    /// Read 1..=100 scoped records, ordered by the existing reservation identity.
+    /// Each page is a short read transaction; the cursor freezes the admission upper
+    /// bound, not state across pages. Start a new sweep for new/late observations.
+    /// No state filtering before LIMIT, claiming, settlement, release or inference retry.
+    /// Scope matching is not caller authorization. Cursors belong to the original
+    /// ledger/fixed topology, not database replacement/restore. Corruption is an error;
+    /// completion is not a global integrity certificate or proof of no pending work.
+    /// Bounded returned records do not guarantee bounded SQLite execution latency.
+    pub fn recovery_page_durable(
+        &mut self,
+        scope: &str,
+        cursor: Option<&RecoveryCursor>,
+        limit: usize,
+    ) -> Result<RecoveryPage, EvidenceError> {
+        validate_scope(scope)?;
+        if !(1..=100).contains(&limit) {
+            return Err(EvidenceError::InvalidInput);
+        }
+        if let Some(cursor) = cursor {
+            if cursor.scope != scope {
+                return Err(EvidenceError::WrongScope);
+            }
+            if cursor.after_id == 0
+                || cursor.after_id > cursor.through_id
+                || cursor.through_id > i64::MAX as u64
+            {
+                return Err(EvidenceError::InvalidInput);
+            }
+        }
+        let tx = self.conn.transaction()?;
+        // Orphan scope is unknowable. Fail closed without returning metadata from any
+        // scope; a scoped inner join alone would silently omit these retained intents.
+        let orphaned: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM budget_execution_intent i
+             LEFT JOIN budget_reservation r ON r.id = i.reservation_id WHERE r.id IS NULL)
+             OR EXISTS(SELECT 1 FROM budget_terminal_observation o
+             LEFT JOIN budget_execution_intent i ON i.execution_id = o.execution_id
+             WHERE i.execution_id IS NULL)",
+            [],
+            |r| r.get(0),
+        )?;
+        if orphaned {
+            return Err(EvidenceError::CorruptObservation);
+        }
+        let (after_id, through_id) = match cursor {
+            Some(cursor) => (cursor.after_id, cursor.through_id),
+            None => (
+                0,
+                tx.query_row(
+                    "SELECT COALESCE(MAX(i.reservation_id), 0) FROM budget_execution_intent i
+                 JOIN budget_reservation r ON r.id = i.reservation_id WHERE r.scope = ?1",
+                    [scope],
+                    |r| r.get::<_, u64>(0),
+                )?,
+            ),
+        };
+        // One lookahead record tells the caller whether another page exists.
+        let mut rows = {
+            let mut statement = tx.prepare(
+                "SELECT CASE WHEN length(CAST(i.execution_id AS BLOB)) = 64 THEN i.execution_id END,
+                 i.reservation_id FROM budget_execution_intent i
+                 JOIN budget_reservation r ON r.id = i.reservation_id
+                 WHERE r.scope = ?1 AND i.reservation_id > ?2 AND i.reservation_id <= ?3
+                 ORDER BY i.reservation_id LIMIT ?4",
+            )?;
+            let mapped = statement
+                .query_map(params![scope, after_id, through_id, limit + 1], |r| {
+                    Ok((r.get::<_, Option<String>>(0)?, r.get::<_, u64>(1)?))
+                })?;
+            mapped.collect::<Result<Vec<_>, _>>()?
+        };
+        let has_more = rows.len() > limit;
+        rows.truncate(limit);
+        let mut entries = Vec::with_capacity(rows.len());
+        for (execution_id, reservation_id) in rows {
+            let execution_id = execution_id.ok_or(EvidenceError::CorruptObservation)?;
+            validate_execution_id(&execution_id).map_err(|_| EvidenceError::CorruptObservation)?;
+            let observed = read_observation(&tx, &execution_id, reservation_id, scope)?;
+            let charge = observed.as_ref().map(terminal_charge).transpose();
+            let charge = match charge {
+                Ok(value) => value,
+                Err(EvidenceError::UnresolvedObservation) => None,
+                Err(error) => return Err(error),
+            };
+            let receipt = checked_terminal_receipt(&tx, scope, reservation_id, charge)?;
+            let state = match (receipt, observed, charge) {
+                (Some(receipt), _, _) => RecoveryState::Settled(receipt),
+                (None, None, _) => RecoveryState::MissingObservation,
+                (None, Some(_), None) => RecoveryState::UnresolvedObservation,
+                (None, Some(_), Some(_)) => RecoveryState::ReadyToSettle,
+            };
+            entries.push(RecoveryEntry {
+                execution_id,
+                reservation_id,
+                state,
+            });
+        }
+        let next = if has_more {
+            entries.last().map(|last| RecoveryCursor {
+                scope: scope.to_string(),
+                after_id: last.reservation_id,
+                through_id,
+            })
+        } else {
+            None
+        };
+        tx.commit()?;
+        Ok(RecoveryPage { entries, next })
+    }
+
     /// Settle a tracked execution using its immutable stored charge. Only final
     /// provider-reported usage can release the reservation; partial/estimated/unknown
     /// usage retains liability until a separately reviewed amendment/recovery policy.
@@ -371,18 +570,9 @@ impl SqliteLedger {
         }
         let observed = read_observation(&tx, execution_id, reservation_id, &stored_scope)?
             .ok_or(EvidenceError::MissingObservation)?;
-        if observed.usage.completeness != UsageCompleteness::Final
-            || observed.usage.basis != UsageBasis::ProviderReported
-        {
-            return Err(EvidenceError::UnresolvedObservation);
-        }
         let id = i64::try_from(reservation_id).map_err(|_| EvidenceError::CorruptObservation)?;
-        let charge = i64::try_from(
-            observed
-                .frozen_charge
-                .ok_or(EvidenceError::CorruptObservation)?,
-        )
-        .map_err(|_| EvidenceError::CorruptObservation)?;
+        let charge = terminal_charge(&observed)?;
+        checked_terminal_receipt(&tx, scope, reservation_id, Some(charge))?;
         let outcome = settle_receipt(&tx, scope, id, charge)?;
         tx.commit()?;
         Ok(outcome)
