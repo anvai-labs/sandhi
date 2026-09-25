@@ -7,7 +7,11 @@
 //! recovery. Do not activate HTTP ownership until W05c–e's integration gates pass.
 use crate::ProxyLedger;
 use sandhi_core::{Reservation, UsageV2};
-use sandhi_store::ledger::evidence::{EvidenceError, ExecutionIntent, SettlementOutcome};
+use sandhi_store::ledger::evidence::{
+    ClosureOutcome, DispatchOutcome, DispatchPermit, EvidenceError, ExecutionIntent,
+    PreDispatchClosure, SettlementOutcome,
+};
+use sandhi_store::ShardedLedger;
 use std::sync::Mutex;
 
 #[derive(Debug)]
@@ -33,6 +37,7 @@ pub enum Failure {
     NoReservation,
     NonDurableLedger,
     UnknownUsage,
+    MayHaveDispatched,
     Evidence(EvidenceError),
 }
 
@@ -117,60 +122,173 @@ impl PendingSettlement {
                 };
             }
         }
-        let guard = match ledger.try_lock() {
-            Ok(guard) => guard,
-            Err(std::sync::TryLockError::WouldBlock) => {
-                return Attempt::Unresolved {
-                    pending: self,
-                    failure: Failure::LedgerBusy,
-                };
-            }
-            Err(std::sync::TryLockError::Poisoned(_)) => {
-                return Attempt::Unresolved {
-                    pending: self,
-                    failure: Failure::LedgerPoisoned,
-                };
-            }
-        };
-        let ProxyLedger::Durable(durable) = &*guard else {
-            return Attempt::Unresolved {
-                pending: self,
-                failure: Failure::NonDurableLedger,
-            };
-        };
-        let result = if let Some(tracked) = self.tracked.as_mut() {
-            // Exact record replay is intentional, even after a previous recorded
-            // attempt: the current ledger must confirm identical retained evidence.
-            match durable.record_terminal_for_intent_durable(&tracked.intent, &tracked.usage) {
-                Ok(_) => {
-                    tracked.recorded = true;
-                    durable.settle_terminal_durable(
-                        &tracked.intent.reservation.scope,
-                        &tracked.intent.execution_id,
-                    )
+        let result = with_durable_ledger(ledger, |durable| {
+            if let Some(tracked) = self.tracked.as_mut() {
+                // Exact record replay is intentional, even after a previous recorded
+                // attempt: the current ledger must confirm identical retained evidence.
+                match durable.record_terminal_for_intent_durable(&tracked.intent, &tracked.usage) {
+                    Ok(_) => {
+                        tracked.recorded = true;
+                        durable.settle_terminal_durable(
+                            &tracked.intent.reservation.scope,
+                            &tracked.intent.execution_id,
+                        )
+                    }
+                    Err(error) => Err(error),
                 }
-                Err(error) => Err(error),
+            } else {
+                let reservation = self
+                    .reservation
+                    .as_ref()
+                    .expect("legacy reservation checked");
+                durable.settle_with_evidence_durable(
+                    &reservation.scope,
+                    reservation.id,
+                    self.charge.expect("legacy charge checked"),
+                )
             }
-        } else {
-            let reservation = self
-                .reservation
-                .as_ref()
-                .expect("legacy reservation checked");
-            durable.settle_with_evidence_durable(
-                &reservation.scope,
-                reservation.id,
-                self.charge.expect("legacy charge checked"),
-            )
-        };
+        });
         match result {
             Ok(outcome) => Attempt::Committed {
                 request_id: self.request_id,
                 outcome,
             },
-            Err(error) => Attempt::Unresolved {
+            Err(failure) => Attempt::Unresolved {
                 pending: self,
-                failure: Failure::Evidence(error),
+                failure,
             },
         }
+    }
+}
+
+// Shared lock/failure policy. The outer mutex is nonblocking; SQLite and inner
+// shard locks can still wait. This does not promise an end-to-end deadline.
+fn with_durable_ledger<T>(
+    ledger: &Mutex<ProxyLedger>,
+    operation: impl FnOnce(&ShardedLedger) -> Result<T, EvidenceError>,
+) -> Result<T, Failure> {
+    let guard = ledger.try_lock().map_err(|error| match error {
+        std::sync::TryLockError::WouldBlock => Failure::LedgerBusy,
+        std::sync::TryLockError::Poisoned(_) => Failure::LedgerPoisoned,
+    })?;
+    let ProxyLedger::Durable(durable) = &*guard else {
+        return Err(Failure::NonDurableLedger);
+    };
+    operation(durable).map_err(Failure::Evidence)
+}
+
+/// Own an admitted execution until explicit dispatch authorization or closure.
+/// No Drop I/O: abandonment retains durable liability for recovery. Constructing
+/// this owner is not proof of Prepared state or permission; storage checks both.
+/// Use the original database and fixed topology with a trusted caller. Binding
+/// validation is not caller authorization. Synchronous try_* methods can wait
+/// inside SQLite/inner shard locks; they provide no end-to-end deadline or cutoff.
+#[derive(Debug)]
+#[must_use]
+pub struct PendingDispatch {
+    request_id: String,
+    intent: ExecutionIntent,
+}
+
+/// Carries the only permit issued by the successful authorization transaction.
+/// Not Clone/Deserialize; HTTP dispatch must consume this owner at its boundary.
+/// Dropping it retains uncertain liability and never manufactures terminal usage.
+#[derive(Debug)]
+#[must_use]
+pub struct AuthorizedExecution {
+    request_id: String,
+    intent: ExecutionIntent,
+    _permit: DispatchPermit,
+}
+
+#[derive(Debug)]
+#[must_use]
+pub enum DispatchAttempt {
+    Authorized(AuthorizedExecution),
+    Closed {
+        request_id: String,
+        closure: PreDispatchClosure,
+    },
+    Unresolved {
+        pending: PendingDispatch,
+        failure: Failure,
+    },
+}
+
+impl PendingDispatch {
+    pub fn new(request_id: String, intent: ExecutionIntent) -> Self {
+        Self { request_id, intent }
+    }
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+    pub fn intent(&self) -> &ExecutionIntent {
+        &self.intent
+    }
+
+    /// Only a first committed authorization returns an AuthorizedExecution.
+    /// Errors retain the unchanged owner. Replays are uncertain, never a send retry.
+    pub fn try_authorize(self, ledger: &Mutex<ProxyLedger>) -> DispatchAttempt {
+        match with_durable_ledger(ledger, |durable| {
+            durable.authorize_dispatch_for_intent_durable(&self.intent)
+        }) {
+            Ok(DispatchOutcome::Authorized(permit)) => {
+                DispatchAttempt::Authorized(AuthorizedExecution {
+                    request_id: self.request_id,
+                    intent: self.intent,
+                    _permit: permit,
+                })
+            }
+            Ok(DispatchOutcome::ClosedBeforeDispatch(closure)) => DispatchAttempt::Closed {
+                request_id: self.request_id,
+                closure,
+            },
+            Ok(DispatchOutcome::MayHaveDispatched) => DispatchAttempt::Unresolved {
+                pending: self,
+                failure: Failure::MayHaveDispatched,
+            },
+            Err(failure) => DispatchAttempt::Unresolved {
+                pending: self,
+                failure,
+            },
+        }
+    }
+
+    /// Close only proven never-authorized admission; never legacy settle(0).
+    pub fn try_close(self, ledger: &Mutex<ProxyLedger>) -> DispatchAttempt {
+        match with_durable_ledger(ledger, |durable| {
+            durable.close_before_dispatch_for_intent_durable(&self.intent)
+        }) {
+            Ok(ClosureOutcome::Closed(closure) | ClosureOutcome::AlreadyClosed(closure)) => {
+                DispatchAttempt::Closed {
+                    request_id: self.request_id,
+                    closure,
+                }
+            }
+            Ok(ClosureOutcome::MayHaveDispatched) => DispatchAttempt::Unresolved {
+                pending: self,
+                failure: Failure::MayHaveDispatched,
+            },
+            Err(failure) => DispatchAttempt::Unresolved {
+                pending: self,
+                failure,
+            },
+        }
+    }
+}
+
+impl AuthorizedExecution {
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+    pub fn intent(&self) -> &ExecutionIntent {
+        &self.intent
+    }
+
+    /// Transfer the original identity and actual terminal observation to the
+    /// existing settlement owner. Caller supplies evidence, not inferred zero.
+    /// Authorization alone is not evidence that a provider completed a request.
+    pub fn into_settlement(self, usage: UsageV2) -> PendingSettlement {
+        PendingSettlement::tracked(self.request_id, self.intent, usage)
     }
 }
