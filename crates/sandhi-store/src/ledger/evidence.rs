@@ -4,8 +4,10 @@
 //! Receipt delivery is at least once;
 //! consumers must deduplicate by receipt ID. No network exporter is provided here.
 
+mod dispatch;
 #[cfg(test)]
 mod tests;
+pub use dispatch::{ClosureOutcome, DispatchOutcome, DispatchPermit, PreDispatchClosure};
 
 use super::*;
 use sandhi_core::{UsageBasis, UsageCompleteness, UsageV2};
@@ -33,6 +35,9 @@ pub struct RecoveryCursor {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecoveryState {
+    Prepared,
+    MayHaveDispatched,
+    ClosedBeforeDispatch(PreDispatchClosure),
     MissingObservation,
     UnresolvedObservation,
     ReadyToSettle,
@@ -83,6 +88,10 @@ pub struct ClaimedSettlement {
 
 #[derive(Debug)]
 pub enum EvidenceError {
+    UnfencedIntent,
+    DispatchNotAuthorized,
+    InconsistentDispatch,
+    ExpiredBeforeDispatch,
     InvalidInput,
     IntentCapacity,
     MissingIntent,
@@ -108,6 +117,10 @@ impl std::fmt::Display for EvidenceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Do not render caller metadata or storage internals into operator-facing errors.
         f.write_str(match self {
+            Self::UnfencedIntent => "execution has no durable dispatch fence",
+            Self::DispatchNotAuthorized => "execution is not authorized for terminal observation",
+            Self::InconsistentDispatch => "dispatch evidence is inconsistent",
+            Self::ExpiredBeforeDispatch => "reservation expired before dispatch authorization",
             Self::IntentCapacity => "durable execution intent capacity exhausted",
             Self::MissingIntent => "durable execution intent missing",
             Self::MissingObservation => "terminal observation missing",
@@ -154,6 +167,13 @@ pub(super) fn init(conn: &Connection) -> rusqlite::Result<()> {
             execution_id TEXT PRIMARY KEY NOT NULL,
             reservation_id INTEGER UNIQUE NOT NULL CHECK(reservation_id > 0),
             created_at INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS budget_dispatch_fence (
+            execution_id TEXT PRIMARY KEY NOT NULL REFERENCES budget_execution_intent(execution_id),
+            phase INTEGER NOT NULL CHECK(phase IN (0, 1, 2)),
+            transitioned_at INTEGER,
+            CHECK((phase = 0 AND transitioned_at IS NULL) OR
+                  (phase IN (1, 2) AND transitioned_at IS NOT NULL))
          );
          CREATE TABLE IF NOT EXISTS budget_settlement_outbox (
             receipt_id TEXT PRIMARY KEY NOT NULL,
@@ -480,6 +500,9 @@ impl SqliteLedger {
              LEFT JOIN budget_reservation r ON r.id = i.reservation_id WHERE r.id IS NULL)
              OR EXISTS(SELECT 1 FROM budget_terminal_observation o
              LEFT JOIN budget_execution_intent i ON i.execution_id = o.execution_id
+             WHERE i.execution_id IS NULL)
+             OR EXISTS(SELECT 1 FROM budget_dispatch_fence f
+             LEFT JOIN budget_execution_intent i ON i.execution_id = f.execution_id
              WHERE i.execution_id IS NULL)",
             [],
             |r| r.get(0),
@@ -520,6 +543,22 @@ impl SqliteLedger {
         for (execution_id, reservation_id) in rows {
             let execution_id = execution_id.ok_or(EvidenceError::CorruptObservation)?;
             validate_execution_id(&execution_id).map_err(|_| EvidenceError::CorruptObservation)?;
+            let fence = dispatch::checked_fence(&tx, scope, &execution_id, reservation_id)?;
+            let immediate_state = match &fence {
+                Some(dispatch::Fence::Prepared) => Some(RecoveryState::Prepared),
+                Some(dispatch::Fence::Closed(closure)) => {
+                    Some(RecoveryState::ClosedBeforeDispatch(closure.clone()))
+                }
+                _ => None,
+            };
+            if let Some(state) = immediate_state {
+                entries.push(RecoveryEntry {
+                    execution_id,
+                    reservation_id,
+                    state,
+                });
+                continue;
+            }
             let observed = read_observation(&tx, &execution_id, reservation_id, scope)?;
             let charge = observed.as_ref().map(terminal_charge).transpose();
             let charge = match charge {
@@ -530,6 +569,7 @@ impl SqliteLedger {
             let receipt = checked_terminal_receipt(&tx, scope, reservation_id, charge)?;
             let state = match (receipt, observed, charge) {
                 (Some(receipt), _, _) => RecoveryState::Settled(receipt),
+                (None, None, _) if fence.is_some() => RecoveryState::MayHaveDispatched,
                 (None, None, _) => RecoveryState::MissingObservation,
                 (None, Some(_), None) => RecoveryState::UnresolvedObservation,
                 (None, Some(_), Some(_)) => RecoveryState::ReadyToSettle,
@@ -572,6 +612,7 @@ impl SqliteLedger {
         if stored_scope != scope {
             return Err(EvidenceError::WrongScope);
         }
+        dispatch::require_observable(&tx, scope, execution_id, reservation_id)?;
         let observed = read_observation(&tx, execution_id, reservation_id, &stored_scope)?
             .ok_or(EvidenceError::MissingObservation)?;
         let id = i64::try_from(reservation_id).map_err(|_| EvidenceError::CorruptObservation)?;
@@ -605,6 +646,7 @@ impl SqliteLedger {
         if stored_scope != scope {
             return Err(EvidenceError::WrongScope);
         }
+        dispatch::require_observable(&tx, scope, execution_id, reservation_id)?;
         if let Some(original) = read_observation(&tx, execution_id, reservation_id, scope)? {
             if original.usage != *usage {
                 return Err(EvidenceError::ConflictingObservation);
@@ -646,7 +688,8 @@ impl SqliteLedger {
     }
 
     /// Read a retained snapshot from the original ledger. Scope matching is not caller
-    /// authorization. Unknown IDs/unobserved intents return None; invalid/corrupt data fails.
+    /// authorization. Unknown IDs/unobserved intents return None; invalid/corrupt usage fails.
+    /// Use recovery_page_durable for dispatch-phase and settlement consistency checks.
     pub fn terminal_durable(
         &self,
         scope: &str,
@@ -678,6 +721,35 @@ impl SqliteLedger {
         ttl: Duration,
         retained_limit: usize,
     ) -> Result<IntentAdmission, EvidenceError> {
+        self.reserve_intent(scope, ceiling, now, ttl, retained_limit, false)
+    }
+
+    /// Opt-in storage prerequisite for dispatch fencing. Only file-backed ledgers.
+    /// Caller must obtain the one-use permit before dispatch; HTTP does not use this yet.
+    /// Existing reserve_with_intent_durable callers remain unfenced/unknown.
+    pub fn reserve_prepared_durable(
+        &mut self,
+        scope: &str,
+        ceiling: u64,
+        now: OffsetDateTime,
+        ttl: Duration,
+        retained_limit: usize,
+    ) -> Result<IntentAdmission, EvidenceError> {
+        if !self.is_file_backed() {
+            return Err(EvidenceError::UnsupportedTrackedLedger);
+        }
+        self.reserve_intent(scope, ceiling, now, ttl, retained_limit, true)
+    }
+
+    fn reserve_intent(
+        &mut self,
+        scope: &str,
+        ceiling: u64,
+        now: OffsetDateTime,
+        ttl: Duration,
+        retained_limit: usize,
+        prepared: bool,
+    ) -> Result<IntentAdmission, EvidenceError> {
         if !(1..=100_000).contains(&retained_limit)
             || scope.is_empty()
             || scope.len() > 4096
@@ -707,6 +779,15 @@ impl SqliteLedger {
         )?;
         if inserted != 1 {
             return Err(EvidenceError::Storage(rusqlite::Error::QueryReturnedNoRows));
+        }
+        if prepared {
+            let inserted = tx.execute(
+                "INSERT INTO budget_dispatch_fence (execution_id, phase) VALUES (?1, 0)",
+                [&execution_id],
+            )?;
+            if inserted != 1 {
+                return Err(EvidenceError::Storage(rusqlite::Error::QueryReturnedNoRows));
+            }
         }
         tx.commit()?;
         Ok(IntentAdmission::Admitted(ExecutionIntent {

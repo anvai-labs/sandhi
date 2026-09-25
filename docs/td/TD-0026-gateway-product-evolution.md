@@ -770,3 +770,12 @@ extended; store eligibility/atomicity matrices remain their single test owner.
 See [the owning contract](../product/attempt-accounting-and-evidence.md#owned-tracked-terminal-settlement-w05c-integration-foundation).
 W05c–e remain open: no live HTTP ownership, recovery worker or lifecycle acceptance
 is claimed by this increment.
+
+### Durable dispatch fence storage prerequisite
+
+The next W05d increment adds an opt-in prepared-admission path and mutually exclusive
+transactional dispatch authorization / never-dispatched closure. Existing admissions
+remain conservatively unknown. Closure has distinct evidence and cannot fabricate
+provider usage or settle an authorized execution. See the [owning contract](../product/attempt-accounting-and-evidence.md#durable-dispatch-fence-w05d-storage-prerequisite).
+This store-only foundation does not activate HTTP ownership, bounded recovery or
+lifecycle acceptance; W05c–e and C5 remain open.
