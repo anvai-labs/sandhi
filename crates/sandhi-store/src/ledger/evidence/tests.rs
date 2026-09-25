@@ -1288,9 +1288,18 @@ fn terminal_settlement_retains_unresolved_usage_and_accepts_measured_zero() {
             ledger
                 .record_terminal_durable("team", &intent.execution_id, &usage)
                 .unwrap();
-            let result = ledger.settle_terminal_durable("team", &intent.execution_id);
             let resolved =
                 completeness == UsageCompleteness::Final && basis == UsageBasis::ProviderReported;
+            let page = ledger.recovery_page_durable("team", None, 100).unwrap();
+            assert_eq!(
+                page.entries[0].state,
+                if resolved {
+                    RecoveryState::ReadyToSettle
+                } else {
+                    RecoveryState::UnresolvedObservation
+                }
+            );
+            let result = ledger.settle_terminal_durable("team", &intent.execution_id);
             if resolved {
                 assert_eq!(unwrap_receipt(result.unwrap()).charged_tokens, 0);
             } else {
@@ -1401,4 +1410,249 @@ fn terminal_settlement_concurrent_replay_returns_one_receipt() {
     assert_eq!(count(&ledger), 1);
     assert_eq!(ledger.spent_durable("team").unwrap(), 42);
     assert_eq!(ledger.reserved_durable("team").unwrap(), 0);
+}
+
+#[test]
+fn recovery_pages_are_scoped_read_only_and_bounded_across_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("recovery.db");
+    let mut ledger = SqliteLedger::open(path.to_str().unwrap()).unwrap();
+    let first = tracked(&mut ledger);
+    // Interleaved untracked/other-scope rows cannot consume or escape the page.
+    reserve(&mut ledger, "team");
+    let foreign = tracked(&mut ledger);
+    ledger
+        .conn
+        .execute(
+            "UPDATE budget_reservation SET scope = 'other' WHERE id = ?1",
+            [foreign.reservation.id],
+        )
+        .unwrap();
+    let second = tracked(&mut ledger);
+    let third = tracked(&mut ledger);
+    ledger
+        .record_terminal_durable("team", &second.execution_id, &observed_usage())
+        .unwrap();
+    ledger
+        .record_terminal_durable("team", &third.execution_id, &observed_usage())
+        .unwrap();
+    let receipt = unwrap_receipt(
+        ledger
+            .settle_terminal_durable("team", &third.execution_id)
+            .unwrap(),
+    );
+    let now = OffsetDateTime::now_utc();
+    let claim = ledger
+        .claim_settlements_durable(1, now, 10)
+        .unwrap()
+        .remove(0);
+    ledger
+        .acknowledge_settlement_durable(&receipt.receipt_id, &claim.claim_token, now)
+        .unwrap();
+    drop(ledger);
+    let mut ledger = SqliteLedger::open(path.to_str().unwrap()).unwrap();
+    let before = ledger.conn.total_changes();
+    let reserved_before = ledger.reserved_durable("team").unwrap();
+    let mut entries = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = ledger
+            .recovery_page_durable("team", cursor.as_ref(), 1)
+            .unwrap();
+        assert_eq!(page.entries.len(), 1);
+        entries.extend(page.entries);
+        cursor = page.next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(
+        entries,
+        vec![
+            RecoveryEntry {
+                execution_id: first.execution_id,
+                reservation_id: first.reservation.id,
+                state: RecoveryState::MissingObservation
+            },
+            RecoveryEntry {
+                execution_id: second.execution_id,
+                reservation_id: second.reservation.id,
+                state: RecoveryState::ReadyToSettle
+            },
+            RecoveryEntry {
+                execution_id: third.execution_id,
+                reservation_id: third.reservation.id,
+                state: RecoveryState::Settled(receipt)
+            },
+        ]
+    );
+    let empty = ledger.recovery_page_durable("empty", None, 100).unwrap();
+    assert!(empty.entries.is_empty() && empty.next.is_none());
+    assert_eq!(
+        ledger
+            .recovery_page_durable("other", None, 100)
+            .unwrap()
+            .entries[0]
+            .execution_id,
+        foreign.execution_id
+    );
+    assert_eq!(ledger.conn.total_changes(), before);
+    assert_eq!(ledger.reserved_durable("team").unwrap(), reserved_before);
+    assert_eq!(ledger.spent_durable("team").unwrap(), 42);
+    assert_eq!(count(&ledger), 1);
+}
+
+#[test]
+fn recovery_cursor_freezes_admission_range_but_rechecks_current_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("recovery.db");
+    let mut ledger = SqliteLedger::open(path.to_str().unwrap()).unwrap();
+    let first = tracked(&mut ledger);
+    let second = tracked(&mut ledger);
+    let page = ledger.recovery_page_durable("team", None, 1).unwrap();
+    let cursor = page.next.unwrap();
+    let mut writer = SqliteLedger::open(path.to_str().unwrap()).unwrap();
+    let later = tracked(&mut writer);
+    for intent in [&first, &second] {
+        writer
+            .record_terminal_durable("team", &intent.execution_id, &observed_usage())
+            .unwrap();
+    }
+    let next = ledger
+        .recovery_page_durable("team", Some(&cursor), 100)
+        .unwrap();
+    assert_eq!(
+        next.entries,
+        vec![RecoveryEntry {
+            execution_id: second.execution_id.clone(),
+            reservation_id: second.reservation.id,
+            state: RecoveryState::ReadyToSettle
+        }]
+    );
+    assert!(next.next.is_none());
+    // Inventory is not a claim: another connection settles before this consumer does.
+    let receipt = unwrap_receipt(
+        writer
+            .settle_terminal_durable("team", &second.execution_id)
+            .unwrap(),
+    );
+    assert_eq!(
+        ledger
+            .settle_terminal_durable("team", &second.execution_id)
+            .unwrap(),
+        SettlementOutcome::AlreadyCommitted(receipt)
+    );
+    let sweep = ledger.recovery_page_durable("team", None, 100).unwrap();
+    assert_eq!(sweep.entries.len(), 3);
+    assert_eq!(sweep.entries[0].state, RecoveryState::ReadyToSettle);
+    assert_eq!(sweep.entries[2].execution_id, later.execution_id);
+    for limit in [0, 101, usize::MAX] {
+        assert!(matches!(
+            ledger.recovery_page_durable("team", None, limit),
+            Err(EvidenceError::InvalidInput)
+        ));
+    }
+    assert!(matches!(
+        ledger.recovery_page_durable("", None, 1),
+        Err(EvidenceError::InvalidInput)
+    ));
+    assert!(matches!(
+        ledger.recovery_page_durable(&"x".repeat(4097), None, 1),
+        Err(EvidenceError::InvalidInput)
+    ));
+    assert!(matches!(
+        ledger.recovery_page_durable("other", Some(&cursor), 1),
+        Err(EvidenceError::WrongScope)
+    ));
+    for (after_id, through_id) in [(0, 2), (3, 2), (1, u64::MAX)] {
+        let bad = RecoveryCursor {
+            scope: "team".into(),
+            after_id,
+            through_id,
+        };
+        assert!(matches!(
+            ledger.recovery_page_durable("team", Some(&bad), 1),
+            Err(EvidenceError::InvalidInput)
+        ));
+    }
+    let exhausted = RecoveryCursor {
+        scope: "team".into(),
+        after_id: second.reservation.id,
+        through_id: second.reservation.id,
+    };
+    let empty = ledger
+        .recovery_page_durable("team", Some(&exhausted), 1)
+        .unwrap();
+    assert!(empty.entries.is_empty() && empty.next.is_none());
+}
+
+#[test]
+fn recovery_rejects_damaged_bindings_observations_and_receipts_without_writes() {
+    for fault in [
+        "DELETE FROM budget_reservation",
+        "PRAGMA foreign_keys = OFF; DELETE FROM budget_execution_intent",
+        "DELETE FROM budget_terminal_observation",
+        "DELETE FROM budget_settlement_outbox",
+        "UPDATE budget_terminal_observation SET usage_json = '{}'",
+        "UPDATE budget_terminal_observation SET frozen_charge = 43",
+        "UPDATE budget_reservation SET settled = 0",
+        "UPDATE budget_reservation SET settled = 2",
+        "UPDATE budget_reservation SET actual = 43",
+        "UPDATE budget_reservation SET settled_at = 0",
+        "UPDATE budget_settlement_outbox SET scope = 'other'",
+        "UPDATE budget_settlement_outbox SET charged_tokens = 43",
+        "UPDATE budget_settlement_outbox SET receipt_id = 'invalid'",
+        "UPDATE budget_settlement_outbox SET receipt_id = printf('%20000s', 'x')",
+        "UPDATE budget_settlement_outbox SET scope = printf('%20000s', 'x')",
+    ] {
+        let mut ledger = SqliteLedger::open(":memory:").unwrap();
+        let intent = tracked(&mut ledger);
+        ledger
+            .record_terminal_durable("team", &intent.execution_id, &observed_usage())
+            .unwrap();
+        ledger
+            .settle_terminal_durable("team", &intent.execution_id)
+            .unwrap();
+        ledger.conn.execute_batch(fault).unwrap();
+        let before = ledger.conn.total_changes();
+        assert!(
+            ledger.recovery_page_durable("team", None, 1).is_err(),
+            "{fault}"
+        );
+        assert_eq!(ledger.conn.total_changes(), before, "{fault}");
+        assert!(
+            ledger
+                .settle_terminal_durable("team", &intent.execution_id)
+                .is_err(),
+            "{fault}"
+        );
+        assert_eq!(ledger.conn.total_changes(), before, "{fault}");
+    }
+    // Malformed identity allocation is bounded before decoding.
+    for invalid in ["g".repeat(64), "x".repeat(20000)] {
+        let mut ledger = SqliteLedger::open(":memory:").unwrap();
+        tracked(&mut ledger);
+        ledger
+            .conn
+            .execute(
+                "UPDATE budget_execution_intent SET execution_id = ?1",
+                [invalid],
+            )
+            .unwrap();
+        assert!(matches!(
+            ledger.recovery_page_durable("team", None, 1),
+            Err(EvidenceError::CorruptObservation)
+        ));
+    }
+    // Even a request for a different scope cannot silently certify an orphaned intent.
+    let mut ledger = SqliteLedger::open(":memory:").unwrap();
+    tracked(&mut ledger);
+    ledger
+        .conn
+        .execute("DELETE FROM budget_reservation", [])
+        .unwrap();
+    assert!(matches!(
+        ledger.recovery_page_durable("other", None, 1),
+        Err(EvidenceError::CorruptObservation)
+    ));
 }

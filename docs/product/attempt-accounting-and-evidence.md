@@ -34,7 +34,7 @@ liability through expiry. HTTP adoption remains separate.
 | W05a | Atomic settlement receipt/outbox storage, immutable IDs, bounded claims and acknowledgement, rollback/reopen/concurrency tests | Integrated; 14 focused tests; not wired to proxy or network exporter |
 | W05b | Transport-owned attempt lifecycle and neutral draft contract | Integrated through PR #246 after clean adversarial review and green exact-head/post-merge CI; remains opt-in diagnostics only, while downstream accounting review still gates authoritative use and external release |
 | W05c | Connect admission, settlement and evidence without bypassing correctness | Partial foundation: owned library settlement outcomes and canonical terminal-observation receipt linkage; authoritative proxy mode, physical-attempt linkage, logical dedup separation and no-lease policy remain pending |
-| W05d | Unknown-liability and late-settlement recovery | Partial storage foundation: atomic admission intent (#308), expiry protection and immutable terminal usage snapshots (#310), followed by canonical stored-charge settlement. Amendments, authoritative HTTP ownership and idempotent recovery remain pending; coordinate TD-0024 retention |
+| W05d | Unknown-liability and late-settlement recovery | Partial storage foundation: atomic admission intent (#308), expiry protection and immutable terminal usage snapshots (#310), followed by canonical stored-charge settlement and read-only bounded recovery inventory. Amendments, authoritative HTTP ownership and idempotent recovery remain pending; coordinate TD-0024 retention |
 | W05e | Receiver contract, exporter and operator evidence | Pending: receiver idempotency, authenticated/scoped transport, retry/backoff, backlog/freshness UX, safe retention, multi-shard cursor/migration and real consumer review |
 
 W05 completes only after all substeps and joint contract gates have evidence. No code in W05a
@@ -229,6 +229,50 @@ physical-attempt correlation, exporter, sharded intent admission or topology mig
 Keep unresolved snapshots and historical receipts; a compatible binary/owner is required
 for rollback. Full lifecycle and mixed-team C5 acceptance remain open.
 
+## Bounded terminal recovery inventory (W05d storage foundation)
+
+`SqliteLedger::recovery_page_durable(scope, cursor, limit)` accepts a page limit
+of 1–100 and returns at most that many records (no matching records yields an empty
+terminal page). The first page
+freezes the highest existing tracked reservation ID in that scope. Subsequent pages
+use that upper bound and the last returned reservation ID; there is no second
+identifier derivation or mutable-state filter before the page limit. Untracked
+reservations and other scopes do not consume the page. New admissions beyond the
+upper bound wait for the next sweep. Each page has one short read transaction;
+state can change between pages, and a fresh sweep is required for late observations
+on previously visited records.
+
+Records distinguish missing terminal observations, unresolved usage, observations
+ready for canonical settlement, and already-settled executions with a consistent
+receipt, including acknowledged receipts. Eligibility uses the canonical settlement
+predicate: final provider-reported usage, including measured zero. Inventory never
+recomputes the stored charge, changes spend/liability, claims work, retries inference
+or releases reservations. A returned candidate is not a lock: a future recovery
+owner must call `settle_terminal_durable`, which revalidates and returns the original
+receipt if another owner already committed it.
+
+Malformed snapshots, orphaned intent/observation bindings and inconsistent receipts
+fail explicitly. An orphan's scope is unknown, so its presence blocks any scoped
+inventory without disclosing record details. Settled state, actual charge, frozen
+charge, receipt scope/identity/charge and timestamp must agree. Canonical terminal
+settlement uses the same receipt-consistency check. Historical settlement without
+a receipt is an error, not a repaired or silently omitted row. No mutation is
+performed when reporting these errors.
+
+The opaque in-process cursor belongs to the original ledger and fixed topology;
+it is not portable across database replacement, restore or sharding changes. Scope
+matching is not caller authorization. Page completion is neither a whole-database
+integrity certificate nor proof of no remaining recovery work. Returned records and
+lookahead allocation are bounded; SQLite execution latency is not thereby bounded.
+There is no HTTP activation, recovery worker, durable scheduler, observation amendment,
+exporter or retention policy in this increment. Older writers still require the
+compatibility restrictions above.
+
+The existing evidence suite owns pagination tests: interleaved scopes, frozen upper
+bounds with concurrent admissions/state updates, reopened/acknowledged receipts,
+invalid cursor/input limits, corrupt bindings/snapshots/receipts, and read-only spend,
+liability and row-change conservation. The existing completeness/basis matrix is
+extended to verify inventory classification rather than duplicated.
 
 ## Proposed physical-attempt state machine (W05b–d)
 
