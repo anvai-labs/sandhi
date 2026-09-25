@@ -779,3 +779,13 @@ remain conservatively unknown. Closure has distinct evidence and cannot fabricat
 provider usage or settle an authorized execution. See the [owning contract](../product/attempt-accounting-and-evidence.md#durable-dispatch-fence-w05d-storage-prerequisite).
 This store-only foundation does not activate HTTP ownership, bounded recovery or
 lifecycle acceptance; W05c–e and C5 remain open.
+
+### Owned admission and dispatch handoff
+
+The W05c integration prerequisite now has an explicit consuming admission owner,
+single-file forwarding with shared original-intent validation, and transfer of the
+one dispatch permit into an owned execution and existing terminal settlement path.
+Errors retain the original owner; Drop retains liability without inventing usage.
+See the [owning contract](../product/attempt-accounting-and-evidence.md#owned-admission-and-dispatch-handoff-w05c-integration-prerequisite).
+Bounded blocking jobs, HTTP activation, recovery workers, lifecycle acceptance and
+release/deployment remain open before full Victor formations/C5 resume.

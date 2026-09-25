@@ -467,3 +467,41 @@ usage, lost-permit/repeated authorization, conservative legacy migration, both w
 under competing SQLite connections, atomic rollback on injected write failure, expired
 leases and damaged phase/evidence. Existing terminal/settlement and proxy-cancellation
 tests keep their distinct invariants; no duplicate suite was added or removed.
+
+## Owned admission and dispatch handoff (W05c integration prerequisite)
+
+`PendingDispatch` consumes an existing admission intent and its logical request ID.
+Its explicit `try_authorize` and `try_close` operations return either an authorized
+execution, durable closure, or the unchanged owner with a typed failure. The
+`ShardedLedger` forwarding methods reuse one full original-intent binding check
+with terminal observation, including persisted whole-second expiry precision.
+Single file-backed storage, unchanged topology and the original database remain
+required. Scope matching is not caller authorization.
+
+Only the first successful dispatch transition returns `AuthorizedExecution`, which
+privately retains the non-Clone permit and original intent. Replayed authorization
+and attempted closure after authorization return `MayHaveDispatched` without a new
+permit. Uncertainty belongs to the new dispatch result; the existing public settlement
+`Failure` enum remains unchanged for Rust callers. `into_settlement(actual_usage)` consumes the authorized owner and hands its
+unchanged identity and usage to the existing canonical terminal-settlement owner;
+it does not derive another charge or create another execution ID.
+
+Neither owner performs I/O on Drop. Abandoning a prepared or authorized owner leaves
+durable liability for reconciliation, without a usage record, zero settlement,
+background task or inference retry. This does not yet guarantee automatic cleanup.
+The shared proxy-ledger access helper preserves the existing typed lock/storage
+failure behavior. Its outer mutex attempt does not wait, but SQLite and inner shard
+locks can wait; `try_*` is not an end-to-end timeout guarantee.
+
+HTTP admission, dispatch and finalization remain unwired. The next gate is bounded
+blocking-job ownership and shutdown/restart handoff, followed by opt-in HTTP
+integration. Recheck cancellation/cutoff after authorization and immediately before
+the existing common dispatch boundary; a lifecycle guard acquired before a SQLite
+wait does not prove authorization before cutoff. A lost caller after authorization
+must not fabricate an immutable unavailable observation merely to end ownership.
+
+Two focused owner tests cover contention/write failures, abandonment, reopening,
+no second permit, closure replay and identity-preserving settlement handoff. The
+existing binding/topology and shard-poison fixtures also cover the new operations;
+store transition matrices and existing proxy cancellation tests remain their sole
+coverage owners. No redundant test cases were identified for removal.

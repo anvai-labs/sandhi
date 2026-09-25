@@ -30,7 +30,8 @@ use std::sync::Mutex;
 use time::OffsetDateTime;
 
 use crate::ledger::evidence::{
-    ClaimedSettlement, EvidenceError, ExecutionIntent, ObservationOutcome, SettlementOutcome,
+    ClaimedSettlement, ClosureOutcome, DispatchOutcome, EvidenceError, ExecutionIntent,
+    IntentAdmission, ObservationOutcome, SettlementOutcome,
 };
 use crate::ledger::{BudgetRow, ReserveOutcome, SqliteLedger};
 use sandhi_core::{Policy, Window};
@@ -187,6 +188,15 @@ impl ShardedLedger {
         usage: &sandhi_core::UsageV2,
     ) -> Result<ObservationOutcome, EvidenceError> {
         let mut ledger = self.tracked_ledger()?;
+        let original = Self::checked_intent(&ledger, intent)?;
+        ledger.record_terminal_durable(&original.reservation.scope, &original.execution_id, usage)
+    }
+
+    // One full binding check shared by terminal evidence and dispatch transitions.
+    fn checked_intent(
+        ledger: &SqliteLedger,
+        intent: &ExecutionIntent,
+    ) -> Result<ExecutionIntent, EvidenceError> {
         let original = ledger
             .intent_durable(&intent.execution_id)?
             .ok_or(EvidenceError::MissingIntent)?;
@@ -202,7 +212,42 @@ impl ShardedLedger {
         {
             return Err(EvidenceError::InvalidInput);
         }
-        ledger.record_terminal_durable(&original.reservation.scope, &original.execution_id, usage)
+        Ok(original)
+    }
+
+    /// Commit opt-in Prepared admission on the original single file-backed ledger.
+    /// This is not HTTP activation; topology and retained intent bounds remain fixed.
+    pub fn reserve_prepared_durable(
+        &self,
+        scope: &str,
+        ceiling: u64,
+        now: OffsetDateTime,
+        ttl: time::Duration,
+        retained_limit: usize,
+    ) -> Result<IntentAdmission, EvidenceError> {
+        self.tracked_ledger()?
+            .reserve_prepared_durable(scope, ceiling, now, ttl, retained_limit)
+    }
+
+    /// Validate the original admission before requesting its one dispatch permit.
+    /// Scope matching is not caller authorization; a replay never gets another permit.
+    pub fn authorize_dispatch_for_intent_durable(
+        &self,
+        intent: &ExecutionIntent,
+    ) -> Result<DispatchOutcome, EvidenceError> {
+        let mut ledger = self.tracked_ledger()?;
+        let original = Self::checked_intent(&ledger, intent)?;
+        ledger.authorize_dispatch_durable(&original.reservation.scope, &original.execution_id)
+    }
+
+    /// Close only proven never-authorized admission, with full original binding checks.
+    pub fn close_before_dispatch_for_intent_durable(
+        &self,
+        intent: &ExecutionIntent,
+    ) -> Result<ClosureOutcome, EvidenceError> {
+        let mut ledger = self.tracked_ledger()?;
+        let original = Self::checked_intent(&ledger, intent)?;
+        ledger.close_before_dispatch_durable(&original.reservation.scope, &original.execution_id)
     }
 
     /// Canonical stored-charge settlement on the original single file-backed ledger.
@@ -507,6 +552,18 @@ mod tests {
         ));
         assert!(matches!(
             ledger.settle_terminal_durable("scope", &intent.execution_id),
+            Err(EvidenceError::ShardPoisoned)
+        ));
+        assert!(matches!(
+            ledger.reserve_prepared_durable("scope", 100, now(), ttl(), 10),
+            Err(EvidenceError::ShardPoisoned)
+        ));
+        assert!(matches!(
+            ledger.authorize_dispatch_for_intent_durable(&intent),
+            Err(EvidenceError::ShardPoisoned)
+        ));
+        assert!(matches!(
+            ledger.close_before_dispatch_for_intent_durable(&intent),
             Err(EvidenceError::ShardPoisoned)
         ));
         assert_eq!(
