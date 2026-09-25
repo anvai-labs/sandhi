@@ -33,8 +33,8 @@ liability through expiry. HTTP adoption remains separate.
 |---|---|---|
 | W05a | Atomic settlement receipt/outbox storage, immutable IDs, bounded claims and acknowledgement, rollback/reopen/concurrency tests | Integrated; 14 focused tests; not wired to proxy or network exporter |
 | W05b | Transport-owned attempt lifecycle and neutral draft contract | Integrated through PR #246 after clean adversarial review and green exact-head/post-merge CI; remains opt-in diagnostics only, while downstream accounting review still gates authoritative use and external release |
-| W05c | Connect admission, settlement and evidence without bypassing correctness | Partial foundation: owned library settlement outcomes; authoritative proxy mode, receipt/attempt linkage, logical dedup separation and no-lease policy remain pending |
-| W05d | Unknown-liability and late-settlement recovery | Partial storage foundation: atomic admission intent (#308), expiry protection and immutable terminal usage snapshots. Amendments, authoritative HTTP ownership and idempotent recovery remain pending; coordinate TD-0024 retention |
+| W05c | Connect admission, settlement and evidence without bypassing correctness | Partial foundation: owned library settlement outcomes and canonical terminal-observation receipt linkage; authoritative proxy mode, physical-attempt linkage, logical dedup separation and no-lease policy remain pending |
+| W05d | Unknown-liability and late-settlement recovery | Partial storage foundation: atomic admission intent (#308), expiry protection and immutable terminal usage snapshots (#310), followed by canonical stored-charge settlement. Amendments, authoritative HTTP ownership and idempotent recovery remain pending; coordinate TD-0024 retention |
 | W05e | Receiver contract, exporter and operator evidence | Pending: receiver idempotency, authenticated/scoped transport, retry/backoff, backlog/freshness UX, safe retention, multi-shard cursor/migration and real consumer review |
 
 W05 completes only after all substeps and joint contract gates have evidence. No code in W05a
@@ -172,18 +172,63 @@ intent inherits admission's bounded record count. There is no automatic pruning.
 **Activation limits:** an unavailable or partial snapshot is immutable too. A later
 refinement requires a separately reviewed amendment contract; do not overwrite or
 infer a zero charge to release capacity. Intent-backed unknown liability remains
-reserved after expiry. Existing public settlement APIs are not yet forced through
-this frozen observation. Use one compatible owner and unchanged ledger topology;
-do not mix legacy writers or claim that arbitrary settlement calls are reconciled
-against these snapshots. Canonical receipt linkage, bounded recovery, authoritative
-HTTP ownership, retention/export and broad lifecycle acceptance remain subsequent
-gates. The lossy W05b diagnostic channel is not an authoritative input.
+reserved after expiry. Current-version caller-charge APIs reject tracked reservations;
+use the canonical settlement API below with one compatible owner and unchanged
+ledger topology. Older binaries can still bypass this guard: do not mix them with
+tracked writers or roll back to them while tracked work exists. Bounded recovery,
+authoritative HTTP ownership, retention/export and broad lifecycle acceptance remain
+subsequent gates. The lossy W05b diagnostic channel is not an authoritative input.
 
 Verification extends the existing evidence suite for full-snapshot reopen, replay
 and conflict, concurrent winners, failed/ignored insert rollback, unavailable versus
 zero, malformed input and corrupt reads. The existing child-process fixture covers
 committed and uncommitted observations; these are process-exit tests, not power-loss
 acceptance. No separate ledger or proxy test suite was introduced.
+
+## Canonical terminal settlement (W05c/d storage foundation)
+
+`SqliteLedger::settle_terminal_durable(scope, execution_id)` reads the retained
+intent and immutable observation inside one immediate transaction, then settles
+using its **stored** charge. It accepts no caller charge and never reruns the
+billable calculation. The same receipt-writing transaction helper serves existing
+untracked receipt callers; no second receipt ledger or charge derivation is added.
+
+Only `Final` + `ProviderReported` snapshots settle, including explicit zero.
+Unavailable, partial and estimated usage return `UnresolvedObservation` and retain
+the entire reservation through expiry. Missing snapshots return `MissingObservation`;
+missing intents, corrupt data and wrong scopes also reject without releasing
+liability. Amendment and remaining-liability rules are still needed before other
+usage states can settle automatically. A provider-reported basis is a stored contract
+fact, not independent proof that the provider's usage or executed cache reuse is accurate.
+
+`Committed` records the settlement and receipt together. Concurrent or later replay,
+including after reopen or receipt acknowledgement, returns `AlreadyCommitted` with
+the original receipt. A historical receipt with a conflicting charge is preserved
+and rejected, never rewritten. Scope matching remains a storage guard rather than
+caller authorization; an eventual HTTP owner must supply authenticated scope.
+
+This deliberately tightens the **opt-in tracked** contract: `settle_with_evidence_durable`
+returns `TrackedSettlementRequired` for a tracked reservation even when the supplied
+charge happens to match; legacy `settle_durable` returns a SQLite constraint error.
+Both guards run within the write transaction. The legacy void `EnforcementLedger::settle`
+cannot report that error but cannot update the tracked reservation; it is unsuitable
+for an authoritative owner. Existing untracked outcomes and receipts stay unchanged.
+Migration helpers and raw database access are trusted maintenance surfaces, not
+alternative runtime settlement APIs.
+
+The evidence owner covers frozen-charge use, bypass attempts before/after observation
+and settlement, unresolved versus measured-zero liability, corrupt/missing observations,
+rollback on ignored/failed receipt insertion, concurrent replay, reopen and acknowledged
+replay. The existing child-process fixture also exits after canonical settlement and
+verifies the committed pair on reopen. These are process-exit tests, not power-loss
+acceptance. Existing receipt tests still own shared transaction failure behavior;
+no duplicate test suite was introduced.
+
+This library increment does not activate HTTP settlement, a recovery worker,
+physical-attempt correlation, exporter, sharded intent admission or topology migration.
+Keep unresolved snapshots and historical receipts; a compatible binary/owner is required
+for rollback. Full lifecycle and mixed-team C5 acceptance remain open.
+
 
 ## Proposed physical-attempt state machine (W05b–d)
 

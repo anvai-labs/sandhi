@@ -725,7 +725,17 @@ execution intent, with reservation/scope binding, exact replay, conflict detecti
 and a frozen optional charge. Unknown usage remains unknown, including after expiry.
 See [the owning contract](../product/attempt-accounting-and-evidence.md#durable-terminal-usage-observation-w05d-storage-foundation).
 It reuses the canonical billable function and existing evidence/crash test owners.
-No HTTP activation, physical-attempt proof, observation amendment, receipt linkage,
-recovery worker or retention/export is implied. Existing public settlement APIs
-still require one compatible owner until canonical observation-to-settlement linkage
-is implemented; this storage increment does not close W05c–e.
+The immutable observation increment landed in #310. It does not imply HTTP activation,
+physical-attempt proof, observation amendment, a recovery worker or retention/export.
+The following increment supplies canonical receipt linkage; W05c–e remain open.
+
+### Canonical terminal settlement storage increment (2026-09-25)
+
+One immediate transaction binds the retained observation's frozen charge to the
+existing receipt writer. Current caller-charge APIs reject tracked reservations;
+untracked defaults are preserved. Only final provider-reported usage settles;
+unknown, partial and estimated observations retain liability until amendment and
+remaining-liability recovery are designed. See [the owning contract](../product/attempt-accounting-and-evidence.md#canonical-terminal-settlement-w05cd-storage-foundation).
+The existing evidence/process-exit fixtures own validation. No HTTP activation,
+sharded topology migration, automatic recovery or external delivery is implied.
+Do not roll back to older writers that can bypass tracked-settlement guards.
