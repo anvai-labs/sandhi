@@ -729,7 +729,7 @@ mod tests {
 
     #[test]
     fn dispatch_owner_handoff_and_replay_never_grant_a_second_permit() {
-        use crate::settlement::{Attempt, DispatchAttempt, Failure, PendingDispatch};
+        use crate::settlement::{Attempt, DispatchAttempt, PendingDispatch};
         use sandhi_core::{UsageBasis, UsageCompleteness, UsageV2};
         use sandhi_store::ledger::{
             evidence::{IntentAdmission, SettlementOutcome},
@@ -765,15 +765,11 @@ mod tests {
         let ledger = Mutex::new(ProxyLedger::durable(path, 1).unwrap());
         for close in [false, true] {
             let replay = PendingDispatch::new("request".into(), intent.clone());
-            let DispatchAttempt::Unresolved {
-                pending,
-                failure: Failure::MayHaveDispatched,
-            } = (if close {
+            let DispatchAttempt::MayHaveDispatched { pending } = (if close {
                 replay.try_close(&ledger)
             } else {
                 replay.try_authorize(&ledger)
-            })
-            else {
+            }) else {
                 panic!("replay cannot authorize or close")
             };
             assert_eq!(pending.intent(), &intent);

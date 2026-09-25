@@ -481,7 +481,8 @@ required. Scope matching is not caller authorization.
 Only the first successful dispatch transition returns `AuthorizedExecution`, which
 privately retains the non-Clone permit and original intent. Replayed authorization
 and attempted closure after authorization return `MayHaveDispatched` without a new
-permit. `into_settlement(actual_usage)` consumes the authorized owner and hands its
+permit. Uncertainty belongs to the new dispatch result; the existing public settlement
+`Failure` enum remains unchanged for Rust callers. `into_settlement(actual_usage)` consumes the authorized owner and hands its
 unchanged identity and usage to the existing canonical terminal-settlement owner;
 it does not derive another charge or create another execution ID.
 

@@ -37,7 +37,6 @@ pub enum Failure {
     NoReservation,
     NonDurableLedger,
     UnknownUsage,
-    MayHaveDispatched,
     Evidence(EvidenceError),
 }
 
@@ -204,6 +203,9 @@ pub struct AuthorizedExecution {
 #[derive(Debug)]
 #[must_use]
 pub enum DispatchAttempt {
+    MayHaveDispatched {
+        pending: PendingDispatch,
+    },
     Authorized(AuthorizedExecution),
     Closed {
         request_id: String,
@@ -243,10 +245,9 @@ impl PendingDispatch {
                 request_id: self.request_id,
                 closure,
             },
-            Ok(DispatchOutcome::MayHaveDispatched) => DispatchAttempt::Unresolved {
-                pending: self,
-                failure: Failure::MayHaveDispatched,
-            },
+            Ok(DispatchOutcome::MayHaveDispatched) => {
+                DispatchAttempt::MayHaveDispatched { pending: self }
+            }
             Err(failure) => DispatchAttempt::Unresolved {
                 pending: self,
                 failure,
@@ -265,10 +266,9 @@ impl PendingDispatch {
                     closure,
                 }
             }
-            Ok(ClosureOutcome::MayHaveDispatched) => DispatchAttempt::Unresolved {
-                pending: self,
-                failure: Failure::MayHaveDispatched,
-            },
+            Ok(ClosureOutcome::MayHaveDispatched) => {
+                DispatchAttempt::MayHaveDispatched { pending: self }
+            }
             Err(failure) => DispatchAttempt::Unresolved {
                 pending: self,
                 failure,
