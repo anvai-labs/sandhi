@@ -29,7 +29,9 @@ use std::sync::Mutex;
 
 use time::OffsetDateTime;
 
-use crate::ledger::evidence::{ClaimedSettlement, EvidenceError, SettlementOutcome};
+use crate::ledger::evidence::{
+    ClaimedSettlement, EvidenceError, ExecutionIntent, ObservationOutcome, SettlementOutcome,
+};
 use crate::ledger::{BudgetRow, ReserveOutcome, SqliteLedger};
 use sandhi_core::{Policy, Window};
 
@@ -160,6 +162,58 @@ impl ShardedLedger {
             .lock()
             .map_err(|_| EvidenceError::ShardPoisoned)?
             .settle_with_evidence_durable(scope, reservation_id, charged_tokens)
+    }
+
+    fn tracked_ledger(&self) -> Result<std::sync::MutexGuard<'_, SqliteLedger>, EvidenceError> {
+        if self.shards.len() != 1 {
+            return Err(EvidenceError::UnsupportedTrackedLedger);
+        }
+        let ledger = self.shards[0]
+            .lock()
+            .map_err(|_| EvidenceError::ShardPoisoned)?;
+        if !ledger.is_file_backed() {
+            return Err(EvidenceError::UnsupportedTrackedLedger);
+        }
+        Ok(ledger)
+    }
+
+    /// Record immutable terminal usage for the exact original admission. This bridge
+    /// supports only a single file-backed ledger; use the original database and fixed
+    /// topology. Caller-supplied reservation metadata must match the persisted intent.
+    /// It confers no caller authorization and does not enable tracked HTTP admission.
+    pub fn record_terminal_for_intent_durable(
+        &self,
+        intent: &ExecutionIntent,
+        usage: &sandhi_core::UsageV2,
+    ) -> Result<ObservationOutcome, EvidenceError> {
+        let mut ledger = self.tracked_ledger()?;
+        let original = ledger
+            .intent_durable(&intent.execution_id)?
+            .ok_or(EvidenceError::MissingIntent)?;
+        if original.reservation.scope != intent.reservation.scope {
+            return Err(EvidenceError::WrongScope);
+        }
+        // Admission returns the caller's timestamp precision; SQLite persists
+        // expiry as whole Unix seconds. Compare the binding at that precision.
+        if original.reservation.id != intent.reservation.id
+            || original.reservation.ceiling != intent.reservation.ceiling
+            || original.reservation.expires_at.unix_timestamp()
+                != intent.reservation.expires_at.unix_timestamp()
+        {
+            return Err(EvidenceError::InvalidInput);
+        }
+        ledger.record_terminal_durable(&original.reservation.scope, &original.execution_id, usage)
+    }
+
+    /// Canonical stored-charge settlement on the original single file-backed ledger.
+    /// Receipt/eligibility checks remain owned by SqliteLedger, including replay.
+    pub fn settle_terminal_durable(
+        &self,
+        scope: &str,
+        execution_id: &str,
+    ) -> Result<SettlementOutcome, EvidenceError> {
+        self.tracked_ledger()?
+            .settle_terminal_durable(scope, execution_id)
     }
 
     /// Local shard count for polling. Indices are not stable across topology changes and
@@ -441,6 +495,18 @@ mod tests {
         ));
         assert!(matches!(
             ledger.acknowledge_settlement_durable(0, "receipt", "claim", now()),
+            Err(EvidenceError::ShardPoisoned)
+        ));
+        let intent = ExecutionIntent {
+            execution_id: "a".repeat(64),
+            reservation,
+        };
+        assert!(matches!(
+            ledger.record_terminal_for_intent_durable(&intent, &sandhi_core::UsageV2::default()),
+            Err(EvidenceError::ShardPoisoned)
+        ));
+        assert!(matches!(
+            ledger.settle_terminal_durable("scope", &intent.execution_id),
             Err(EvidenceError::ShardPoisoned)
         ));
         assert_eq!(

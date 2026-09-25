@@ -388,3 +388,40 @@ credential-generation evidence only after SP2; its lookup is not a model attempt
 supplies browser action evidence only after AB04's correlation/retention contract; a browser
 action is not a token charge. Opaque run IDs correlate facts but never authorize cross-tenant reads.
 No sibling changes, external issue/PR, consumer sign-off or live service test is implied.
+
+
+## Owned tracked terminal settlement (W05c integration foundation)
+
+`PendingSettlement::tracked(request_id, intent, usage)` owns the complete immutable
+`UsageV2` and the existing execution intent. `try_commit` validates the full binding
+against the original ledger (expiry uses its persisted whole-second precision),
+records terminal usage, and calls canonical stored-charge
+settlement. It does not calculate a second charge. `charge()` remains the legacy
+caller-charge accessor and returns `None` for tracked attempts; the committed receipt
+is the authoritative charge result.
+
+An unresolved result returns the owner, including its original usage and identity.
+`observation_recorded()` distinguishes an observation not yet confirmed stored from
+one whose record/replay succeeded but whose settlement remains unresolved. The latter
+is not a settlement acknowledgement. Exact replay revalidates the immutable stored
+observation before attempting settlement again. Unknown usage is recorded and retains
+liability; a caller must not replace it with invented zero usage or retry inference.
+
+This bridge supports one file-backed ledger only. Volatile ledgers (including SQLite
+memory/temporary databases), multiple shards, missing intents, incorrect reservation
+metadata and poisoned locks fail explicitly before recording an observation. Use the
+original database and fixed topology; scope matching is not authentication. The bridge
+is an opt-in library API and does not add tracked admission to the HTTP request path.
+
+The existing settlement-owner tests cover proxy-lock contention, separate injected
+observation and receipt failures, retained ownership, reopen/replay, invalid bindings,
+unsupported ledgers and unknown liability. The existing shard-poison test covers the
+new forwarding methods. Canonical charge eligibility, atomicity and corruption remain
+owned by the store tests, without a duplicated matrix.
+
+The outer mutex attempt does not wait, but SQLite and the inner shard mutex can wait.
+The existing 120-second buffered transport bound is not an established end-to-end
+settlement deadline. Before HTTP activation, finish proven-never-dispatched liability
+handling, typed finalization results, bounded blocking-job ownership, shutdown/restart
+recovery, retention/export and lifecycle acceptance. Old writers and incompatible
+rollback remain unsafe for tracked reservations.
