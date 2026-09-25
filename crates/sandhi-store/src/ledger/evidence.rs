@@ -33,6 +33,7 @@ pub struct ClaimedSettlement {
 #[derive(Debug)]
 pub enum EvidenceError {
     InvalidInput,
+    IntentCapacity,
     MissingReservation,
     WrongScope,
     ConflictingCharge,
@@ -47,6 +48,7 @@ impl std::fmt::Display for EvidenceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Do not render caller metadata or storage internals into operator-facing errors.
         f.write_str(match self {
+            Self::IntentCapacity => "durable execution intent capacity exhausted",
             Self::InvalidInput => "invalid settlement evidence input",
             Self::MissingReservation => "reservation missing or reclaimed",
             Self::WrongScope => "reservation scope mismatch",
@@ -77,7 +79,12 @@ impl From<rusqlite::Error> for EvidenceError {
 
 pub(super) fn init(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS budget_settlement_outbox (
+        "CREATE TABLE IF NOT EXISTS budget_execution_intent (
+            execution_id TEXT PRIMARY KEY NOT NULL,
+            reservation_id INTEGER UNIQUE NOT NULL CHECK(reservation_id > 0),
+            created_at INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS budget_settlement_outbox (
             receipt_id TEXT PRIMARY KEY NOT NULL,
             reservation_id INTEGER UNIQUE NOT NULL CHECK(reservation_id > 0),
             scope TEXT NOT NULL,
@@ -114,7 +121,105 @@ fn receipt(row: &rusqlite::Row<'_>) -> rusqlite::Result<SettlementReceipt> {
     })
 }
 
+/// Ledger-generated execution identity, distinct from logical request/dedup IDs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionIntent {
+    pub execution_id: String,
+    pub reservation: Reservation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IntentAdmission {
+    Admitted(ExecutionIntent),
+    Denied(Denied),
+}
+
 impl SqliteLedger {
+    /// Opt-in library foundation: commit admission and its execution identity together
+    /// before dispatch. No HTTP activation, terminal observation or recovery worker.
+    /// Retained identities (including settled ones) count toward `retained_limit`,
+    /// bounded to 1..=100_000 per ledger. Exhaustion refuses new tracked admission.
+    /// No automatic pruning: unresolved leases retain capacity even after expiry.
+    /// Use the original ledger and fixed topology; never replay inference using this ID.
+    pub fn reserve_with_intent_durable(
+        &mut self,
+        scope: &str,
+        ceiling: u64,
+        now: OffsetDateTime,
+        ttl: Duration,
+        retained_limit: usize,
+    ) -> Result<IntentAdmission, EvidenceError> {
+        if !(1..=100_000).contains(&retained_limit)
+            || scope.is_empty()
+            || scope.len() > 4096
+            || ceiling > i64::MAX as u64
+            || ttl <= Duration::ZERO
+            || now.checked_add(ttl).is_none()
+        {
+            return Err(EvidenceError::InvalidInput);
+        }
+        let execution_id = opaque_id()?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let count: i64 = tx.query_row("SELECT COUNT(*) FROM budget_execution_intent", [], |r| {
+            r.get(0)
+        })?;
+        if count >= retained_limit as i64 {
+            return Err(EvidenceError::IntentCapacity);
+        }
+        let reservation = match Self::reserve_in_transaction(&tx, scope, ceiling, now, ttl)? {
+            ReserveOutcome::Admitted(reservation) => reservation,
+            ReserveOutcome::Denied(denied) => return Ok(IntentAdmission::Denied(denied)),
+        };
+        let inserted = tx.execute(
+            "INSERT INTO budget_execution_intent (execution_id, reservation_id, created_at) VALUES (?1, ?2, ?3)",
+            params![execution_id, reservation.id, now.unix_timestamp()],
+        )?;
+        if inserted != 1 {
+            return Err(EvidenceError::Storage(rusqlite::Error::QueryReturnedNoRows));
+        }
+        tx.commit()?;
+        Ok(IntentAdmission::Admitted(ExecutionIntent {
+            execution_id,
+            reservation,
+        }))
+    }
+
+    /// Read the original admission after reconnecting to the same ledger. This is
+    /// not proof of dispatch, measured usage, settlement or caller authorization.
+    pub fn intent_durable(
+        &self,
+        execution_id: &str,
+    ) -> Result<Option<ExecutionIntent>, EvidenceError> {
+        if execution_id.len() != 64 || !execution_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(EvidenceError::InvalidInput);
+        }
+        let row: Option<(u64, String, u64, i64)> = self
+            .conn
+            .query_row(
+                "SELECT r.id, r.scope, r.ceiling, r.expires_at FROM budget_execution_intent i
+             JOIN budget_reservation r ON r.id = i.reservation_id WHERE i.execution_id = ?1",
+                [execution_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        row.map(|(id, scope, ceiling, expires_at)| {
+            let expires_at = OffsetDateTime::from_unix_timestamp(expires_at)
+                .map_err(|_| EvidenceError::InvalidInput)?;
+            Ok(ExecutionIntent {
+                execution_id: execution_id.to_string(),
+                reservation: Reservation {
+                    id,
+                    scope,
+                    ceiling,
+                    expires_at,
+                },
+            })
+        })
+        .transpose()
+    }
+
     /// Atomically settle one lease and persist its immutable receipt. Replays return the
     /// original receipt, including after acknowledgement. Missing or legacy leases are NOT
     /// successful settlements. Scope is checked in storage, not just used for shard routing.

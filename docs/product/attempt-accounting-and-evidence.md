@@ -95,6 +95,43 @@ API's rollback path. This proves process-exit/reopen behavior, not a power-loss,
 fsync-failure or full gateway pre-dispatch crash drill. Those remain explicit integration and
 operational acceptance gates, not inferred from SQLite transaction tests.
 
+## Durable admission intent (W05d storage foundation)
+
+`SqliteLedger::reserve_with_intent_durable` is an opt-in library primitive, not an
+HTTP activation switch. It uses the same admission calculation as `reserve_durable`
+and atomically commits the reservation plus one ledger-generated execution ID.
+The ID is distinct from logical idempotency and is not authorization to retry
+inference. `IntentAdmission::Denied` preserves the existing budget denial contract;
+capacity exhaustion, invalid input, entropy failure and storage failure are explicit
+errors. A failed intent insertion rolls back admission.
+
+Callers set a finite retained-record ceiling (1–100,000 per ledger); the count and
+insert share the write transaction. The ceiling includes settled identities.
+There is no pruning or automatic capacity recovery. Expired intent-backed leases
+remain reserved through **both** opportunistic admission reclaim and periodic
+reclaim until explicitly settled. Expiry does not establish zero provider usage.
+Legacy reservations without intents retain their previous expiry behavior.
+The common admission calculation now checks SQLite's signed ceiling bound and
+compares aggregate spend in widened arithmetic, avoiding negative/wrapped ceilings.
+
+`intent_durable` reads an original execution/reservation association from the same
+ledger after reopen. Keep topology fixed: legacy-to-sharded migration rejects a
+source containing intents before creating target files. This first increment has
+no sharded admission wrapper, unresolved-intent enumerator, terminal observation,
+worker, receipt/attempt linkage, exporter or retention policy. Existing HTTP
+finalization is unchanged and remains outside durable-settlement acceptance.
+Older writers do not understand protected intents: do not downgrade or share this
+ledger with an older writer once intents exist. Preserve the database and use an
+explicitly reviewed migration/recovery plan.
+Do not enable this on production traffic until the subsequent owner/recovery and
+bounded-failure policies are implemented and reviewed.
+
+Tests extend the existing evidence owner for rollback, concurrent capacity limits,
+reopen, both expiry routes, late settlement, signed bounds and migration refusal.
+The existing child-process crash owner also covers committed and uncommitted
+reservation/intent pairs. These are process-exit tests, not power-loss guarantees.
+No duplicate receipt or proxy-level database suite was introduced.
+
 ## Proposed physical-attempt state machine (W05b–d)
 
 ### Owned settlement transition (W05c foundation)
