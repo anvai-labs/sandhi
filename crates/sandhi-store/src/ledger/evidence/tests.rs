@@ -1,5 +1,363 @@
 use super::*;
+use sandhi_core::{
+    CacheReadObservation, CacheReadSource, CacheReadStatus, UsageBasis, UsageCompleteness,
+};
 use std::sync::{Arc, Barrier};
+
+fn tracked(ledger: &mut SqliteLedger) -> ExecutionIntent {
+    let IntentAdmission::Admitted(intent) = ledger
+        .reserve_with_intent_durable(
+            "team",
+            100,
+            OffsetDateTime::now_utc(),
+            Duration::seconds(1),
+            10,
+        )
+        .unwrap()
+    else {
+        panic!("denied")
+    };
+    intent
+}
+
+fn observed_usage() -> UsageV2 {
+    UsageV2 {
+        tokens_in: 10,
+        tokens_out: 20,
+        cache_creation_tokens: 3,
+        cache_read_tokens: 4,
+        cache_read_observation: Some(CacheReadObservation::origin(CacheReadStatus::Reported)),
+        audio_input_tokens: Some(2),
+        audio_output_tokens: Some(3),
+        reasoning_tokens: Some(5),
+        reasoning_included: Some(false),
+        accepted_prediction_tokens: Some(6),
+        rejected_prediction_tokens: Some(7),
+        completeness: UsageCompleteness::Final,
+        basis: UsageBasis::ProviderReported,
+        attempts: 1,
+        outcome: Some("success".into()),
+        upstream_request_id: Some("upstream-1".into()),
+        duration_ms: Some(123),
+        duration_source: Some(sandhi_core::LatencySource::Origin),
+        time_to_first_token_ms: Some(10),
+        time_to_first_token_source: Some(sandhi_core::LatencySource::Boundary),
+    }
+}
+
+fn unwrap_observation(outcome: ObservationOutcome) -> TerminalObservation {
+    match outcome {
+        ObservationOutcome::Recorded(value) | ObservationOutcome::AlreadyRecorded(value) => value,
+    }
+}
+
+#[test]
+fn terminal_snapshot_is_immutable_and_survives_reopen_and_settlement() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("terminal.db");
+    let mut ledger = SqliteLedger::open(path.to_str().unwrap()).unwrap();
+    let intent = tracked(&mut ledger);
+    assert_eq!(
+        ledger
+            .terminal_durable("team", &intent.execution_id)
+            .unwrap(),
+        None
+    );
+    let usage = observed_usage();
+    let original = unwrap_observation(
+        ledger
+            .record_terminal_durable("team", &intent.execution_id, &usage)
+            .unwrap(),
+    );
+    assert_eq!(original.version, 1);
+    assert_eq!(original.usage, usage);
+    assert_eq!(original.frozen_charge, Some(42));
+    assert_eq!(original.reservation_id, intent.reservation.id);
+    assert_eq!(original.scope, "team");
+    assert_eq!(ledger.spent_durable("team").unwrap(), 0);
+    assert_eq!(ledger.reserved_durable("team").unwrap(), 100);
+    drop(ledger);
+    let mut ledger = SqliteLedger::open(path.to_str().unwrap()).unwrap();
+    assert_eq!(
+        ledger
+            .terminal_durable("team", &intent.execution_id)
+            .unwrap(),
+        Some(original.clone())
+    );
+    for changed in [
+        UsageV2 {
+            outcome: Some("error".into()),
+            ..usage.clone()
+        },
+        UsageV2 {
+            basis: UsageBasis::Estimated,
+            ..usage.clone()
+        },
+        UsageV2 {
+            completeness: UsageCompleteness::Partial,
+            ..usage.clone()
+        },
+        UsageV2 {
+            tokens_in: 11,
+            tokens_out: 19,
+            ..usage.clone()
+        },
+    ] {
+        assert!(matches!(
+            ledger.record_terminal_durable("team", &intent.execution_id, &changed),
+            Err(EvidenceError::ConflictingObservation)
+        ));
+    }
+    assert!(matches!(
+        ledger.record_terminal_durable("other", &intent.execution_id, &usage),
+        Err(EvidenceError::WrongScope)
+    ));
+    assert!(matches!(
+        ledger.terminal_durable("other", &intent.execution_id),
+        Err(EvidenceError::WrongScope)
+    ));
+    ledger
+        .settle_with_evidence_durable("team", intent.reservation.id, 42)
+        .unwrap();
+    assert_eq!(
+        ledger
+            .record_terminal_durable("team", &intent.execution_id, &usage)
+            .unwrap(),
+        ObservationOutcome::AlreadyRecorded(original)
+    );
+}
+
+#[test]
+fn terminal_unknown_zero_partial_and_reasoning_keep_their_meanings() {
+    let mut ledger = SqliteLedger::open(":memory:").unwrap();
+    for (usage, charge) in [
+        (UsageV2::default(), None),
+        (
+            UsageV2 {
+                completeness: UsageCompleteness::Final,
+                ..UsageV2::default()
+            },
+            Some(0),
+        ),
+        (
+            UsageV2 {
+                completeness: UsageCompleteness::Partial,
+                basis: UsageBasis::Estimated,
+                ..observed_usage()
+            },
+            Some(42),
+        ),
+        (
+            UsageV2 {
+                reasoning_included: Some(true),
+                ..observed_usage()
+            },
+            Some(37),
+        ),
+    ] {
+        let intent = tracked(&mut ledger);
+        let value = unwrap_observation(
+            ledger
+                .record_terminal_durable("team", &intent.execution_id, &usage)
+                .unwrap(),
+        );
+        assert_eq!(value.usage, usage);
+        assert_eq!(value.frozen_charge, charge);
+        ledger
+            .reclaim_expired_durable(OffsetDateTime::now_utc() + Duration::hours(2))
+            .unwrap();
+        assert_eq!(
+            ledger
+                .terminal_durable("team", &intent.execution_id)
+                .unwrap(),
+            Some(value)
+        );
+    }
+    assert_eq!(ledger.reserved_durable("team").unwrap(), 400);
+    assert_eq!(ledger.spent_durable("team").unwrap(), 0);
+}
+
+#[test]
+fn terminal_missing_settled_invalid_and_lossy_input_are_rejected() {
+    let mut ledger = SqliteLedger::open(":memory:").unwrap();
+    let intent = tracked(&mut ledger);
+    for usage in [
+        UsageV2 {
+            tokens_in: i64::MAX as u64,
+            ..observed_usage()
+        },
+        UsageV2 {
+            outcome: Some("x".repeat(257)),
+            ..observed_usage()
+        },
+        UsageV2 {
+            upstream_request_id: Some("x".repeat(1025)),
+            ..observed_usage()
+        },
+        UsageV2 {
+            cache_read_observation: Some(CacheReadObservation {
+                status: CacheReadStatus::Unsupported,
+                source: CacheReadSource::OriginUsage,
+            }),
+            ..observed_usage()
+        },
+    ] {
+        assert!(matches!(
+            ledger.record_terminal_durable("team", &intent.execution_id, &usage),
+            Err(EvidenceError::InvalidInput)
+        ));
+    }
+    for id in ["bad".to_string(), "z".repeat(64)] {
+        assert!(matches!(
+            ledger.record_terminal_durable("team", &id, &observed_usage()),
+            Err(EvidenceError::InvalidInput)
+        ));
+        assert!(matches!(
+            ledger.terminal_durable("team", &id),
+            Err(EvidenceError::InvalidInput)
+        ));
+    }
+    assert!(matches!(
+        ledger.record_terminal_durable("team", &"0".repeat(64), &observed_usage()),
+        Err(EvidenceError::MissingIntent)
+    ));
+    assert_eq!(
+        ledger.terminal_durable("team", &"0".repeat(64)).unwrap(),
+        None
+    );
+    assert_eq!(
+        ledger
+            .terminal_durable("team", &intent.execution_id)
+            .unwrap(),
+        None
+    );
+    ledger.settle_durable(intent.reservation.id, 7).unwrap();
+    assert!(matches!(
+        ledger.record_terminal_durable("team", &intent.execution_id, &observed_usage()),
+        Err(EvidenceError::AlreadySettled)
+    ));
+}
+
+#[test]
+fn terminal_failed_or_ignored_insert_leaves_liability_and_can_retry() {
+    for failure in ["RAISE(ABORT, 'injected')", "RAISE(IGNORE)"] {
+        let mut ledger = SqliteLedger::open(":memory:").unwrap();
+        let intent = tracked(&mut ledger);
+        ledger.conn.execute_batch(&format!("CREATE TRIGGER reject_terminal BEFORE INSERT ON budget_terminal_observation BEGIN SELECT {failure}; END;")).unwrap();
+        assert!(matches!(
+            ledger.record_terminal_durable("team", &intent.execution_id, &observed_usage()),
+            Err(EvidenceError::Storage(_))
+        ));
+        assert_eq!(
+            ledger
+                .terminal_durable("team", &intent.execution_id)
+                .unwrap(),
+            None
+        );
+        assert_eq!(ledger.reserved_durable("team").unwrap(), 100);
+        assert_eq!(ledger.spent_durable("team").unwrap(), 0);
+        ledger
+            .conn
+            .execute_batch("DROP TRIGGER reject_terminal")
+            .unwrap();
+        assert!(matches!(
+            ledger.record_terminal_durable("team", &intent.execution_id, &observed_usage()),
+            Ok(ObservationOutcome::Recorded(_))
+        ));
+    }
+}
+
+#[test]
+fn terminal_independent_connections_have_one_immutable_winner() {
+    for conflicting in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("terminal.db");
+        let mut ledger = SqliteLedger::open(path.to_str().unwrap()).unwrap();
+        let intent = tracked(&mut ledger);
+        let barrier = Arc::new(Barrier::new(2));
+        let workers: Vec<_> = (0..2)
+            .map(|i| {
+                let mut connection = SqliteLedger::open(path.to_str().unwrap()).unwrap();
+                let id = intent.execution_id.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let mut usage = observed_usage();
+                    if conflicting {
+                        usage.tokens_in += i;
+                    }
+                    barrier.wait();
+                    connection.record_terminal_durable("team", &id, &usage)
+                })
+            })
+            .collect();
+        let results: Vec<_> = workers.into_iter().map(|w| w.join().unwrap()).collect();
+        assert_eq!(
+            results
+                .iter()
+                .filter(|r| matches!(r, Ok(ObservationOutcome::Recorded(_))))
+                .count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|r| matches!(r, Err(EvidenceError::ConflictingObservation)))
+                .count(),
+            usize::from(conflicting)
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|r| matches!(r, Ok(ObservationOutcome::AlreadyRecorded(_))))
+                .count(),
+            usize::from(!conflicting)
+        );
+        assert_eq!(
+            ledger
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM budget_terminal_observation",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(ledger.reserved_durable("team").unwrap(), 100);
+    }
+}
+
+#[test]
+fn terminal_read_rejects_unsupported_or_corrupt_snapshots_without_rewriting() {
+    for mutation in [
+        "UPDATE budget_terminal_observation SET version = 2",
+        "UPDATE budget_terminal_observation SET usage_json = '{invalid'",
+        "UPDATE budget_terminal_observation SET usage_json = json_set(usage_json, '$.future_field', 1)",
+        "UPDATE budget_terminal_observation SET usage_json = json_set(usage_json, '$.cache_read_observation.status', 'future')",
+        "UPDATE budget_terminal_observation SET usage_json = printf('%20000s', 'x')",
+        "UPDATE budget_terminal_observation SET frozen_charge = NULL",
+        "DELETE FROM budget_reservation",
+        "DELETE FROM budget_execution_intent",
+    ] {
+        let mut ledger = SqliteLedger::open(":memory:").unwrap();
+        let intent = tracked(&mut ledger);
+        ledger
+            .record_terminal_durable("team", &intent.execution_id, &observed_usage())
+            .unwrap();
+        ledger.conn.execute_batch(&format!("PRAGMA foreign_keys = OFF; PRAGMA ignore_check_constraints = ON; {mutation}")).unwrap();
+        let reserved_after_mutation = ledger.reserved_durable("team").unwrap();
+        assert!(matches!(
+            ledger.terminal_durable("team", &intent.execution_id),
+            Err(EvidenceError::CorruptObservation)
+        ));
+        assert!(matches!(
+            ledger.record_terminal_durable("team", &intent.execution_id, &observed_usage()),
+            Err(EvidenceError::CorruptObservation)
+        ));
+        assert_eq!(ledger.reserved_durable("team").unwrap(), reserved_after_mutation);
+        assert_eq!(ledger.spent_durable("team").unwrap(), 0);
+    }
+}
 
 fn reserve(ledger: &mut SqliteLedger, scope: &str) -> u64 {
     match ledger
@@ -442,7 +800,24 @@ fn process_exit_helper() {
     };
     let mode = std::env::var("SANDHI_EVIDENCE_CRASH_TEST_MODE").unwrap();
     let mut ledger = SqliteLedger::open(&path).unwrap();
-    if mode == "intent_committed" {
+    if mode.starts_with("terminal_") {
+        let execution_id: String = ledger
+            .conn
+            .query_row(
+                "SELECT execution_id FROM budget_execution_intent",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        if mode == "terminal_committed" {
+            ledger
+                .record_terminal_durable("team", &execution_id, &observed_usage())
+                .unwrap();
+        } else {
+            ledger.conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            ledger.conn.execute("INSERT INTO budget_terminal_observation (execution_id, version, usage_json, frozen_charge, observed_at) VALUES (?1, 1, ?2, 42, 1)", params![execution_id, serde_json::to_string(&observed_usage()).unwrap()]).unwrap();
+        }
+    } else if mode == "intent_committed" {
         ledger
             .reserve_with_intent_durable(
                 "team",
@@ -488,11 +863,18 @@ fn process_exit_preserves_committed_pair_and_discards_uncommitted_pair() {
         "uncommitted",
         "intent_committed",
         "intent_uncommitted",
+        "terminal_committed",
+        "terminal_uncommitted",
     ] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ledger.db");
         let mut ledger = SqliteLedger::open(path.to_str().unwrap()).unwrap();
-        assert_eq!(reserve(&mut ledger, "team"), 1);
+        let terminal_id = if mode.starts_with("terminal_") {
+            Some(tracked(&mut ledger).execution_id)
+        } else {
+            assert_eq!(reserve(&mut ledger, "team"), 1);
+            None
+        };
         drop(ledger);
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
@@ -506,7 +888,17 @@ fn process_exit_preserves_committed_pair_and_discards_uncommitted_pair() {
             .unwrap();
         assert_eq!(status.code(), Some(77));
         let mut ledger = SqliteLedger::open(path.to_str().unwrap()).unwrap();
-        if mode.starts_with("intent_") {
+        if let Some(execution_id) = terminal_id {
+            let observation = ledger.terminal_durable("team", &execution_id).unwrap();
+            assert_eq!(observation.is_some(), mode == "terminal_committed");
+            if let Some(observation) = observation {
+                assert_eq!(observation.usage, observed_usage());
+                assert_eq!(observation.frozen_charge, Some(42));
+            }
+            assert_eq!(ledger.reserved_durable("team").unwrap(), 100);
+            assert_eq!(ledger.spent_durable("team").unwrap(), 0);
+            assert_eq!(count(&ledger), 0);
+        } else if mode.starts_with("intent_") {
             let expected = i64::from(mode == "intent_committed");
             let count: i64 = ledger
                 .conn

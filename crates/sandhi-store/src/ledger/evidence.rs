@@ -1,11 +1,31 @@
 //! Internal settlement receipts, not physical-attempt or public usage events (TD-0026 W05a).
-//! Existing `settle_durable` callers are deliberately unchanged. Delivery is at least once;
+//! Includes opt-in execution usage snapshots; existing HTTP/settlement callers are unchanged.
+//! Receipt delivery is at least once;
 //! consumers must deduplicate by receipt ID. No network exporter is provided here.
 
 #[cfg(test)]
 mod tests;
 
 use super::*;
+use sandhi_core::{UsageCompleteness, UsageV2};
+
+/// Immutable execution-level usage snapshot, not proof of a physical send or settlement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalObservation {
+    pub version: u32,
+    pub execution_id: String,
+    pub reservation_id: u64,
+    pub scope: String,
+    pub usage: UsageV2,
+    pub frozen_charge: Option<u64>,
+    pub observed_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObservationOutcome {
+    Recorded(TerminalObservation),
+    AlreadyRecorded(TerminalObservation),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettlementReceipt {
@@ -34,6 +54,10 @@ pub struct ClaimedSettlement {
 pub enum EvidenceError {
     InvalidInput,
     IntentCapacity,
+    MissingIntent,
+    ConflictingObservation,
+    AlreadySettled,
+    CorruptObservation,
     MissingReservation,
     WrongScope,
     ConflictingCharge,
@@ -49,6 +73,10 @@ impl std::fmt::Display for EvidenceError {
         // Do not render caller metadata or storage internals into operator-facing errors.
         f.write_str(match self {
             Self::IntentCapacity => "durable execution intent capacity exhausted",
+            Self::MissingIntent => "durable execution intent missing",
+            Self::ConflictingObservation => "terminal observation conflicts with stored evidence",
+            Self::AlreadySettled => "reservation was settled before terminal observation",
+            Self::CorruptObservation => "terminal observation cannot be decoded safely",
             Self::InvalidInput => "invalid settlement evidence input",
             Self::MissingReservation => "reservation missing or reclaimed",
             Self::WrongScope => "reservation scope mismatch",
@@ -92,7 +120,14 @@ pub(super) fn init(conn: &Connection) -> rusqlite::Result<()> {
             settled_at INTEGER NOT NULL,
             claim_token TEXT,
             claim_until INTEGER,
-            acknowledged_at INTEGER
+             acknowledged_at INTEGER
+         );
+         CREATE TABLE IF NOT EXISTS budget_terminal_observation (
+            execution_id TEXT PRIMARY KEY NOT NULL REFERENCES budget_execution_intent(execution_id),
+            version INTEGER NOT NULL CHECK(version = 1),
+            usage_json TEXT NOT NULL CHECK(length(CAST(usage_json AS BLOB)) <= 16384),
+            frozen_charge INTEGER CHECK(frozen_charge >= 0),
+            observed_at INTEGER NOT NULL
          );
          CREATE INDEX IF NOT EXISTS idx_settlement_pending
              ON budget_settlement_outbox(settled_at, receipt_id)
@@ -134,9 +169,192 @@ pub enum IntentAdmission {
     Denied(Denied),
 }
 
+fn validate_execution_id(execution_id: &str) -> Result<(), EvidenceError> {
+    if execution_id.len() != 64 || !execution_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(EvidenceError::InvalidInput);
+    }
+    Ok(())
+}
+
+fn validate_scope(scope: &str) -> Result<(), EvidenceError> {
+    if scope.is_empty() || scope.len() > 4096 {
+        return Err(EvidenceError::InvalidInput);
+    }
+    Ok(())
+}
+
+fn encode_usage(usage: &UsageV2) -> Result<String, EvidenceError> {
+    if usage.outcome.as_ref().is_some_and(|v| v.len() > 256)
+        || usage
+            .upstream_request_id
+            .as_ref()
+            .is_some_and(|v| v.len() > 1024)
+        || usage
+            .cache_read_observation
+            .is_some_and(|v| v.validated().is_none())
+    {
+        return Err(EvidenceError::InvalidInput);
+    }
+    let encoded = serde_json::to_string(usage).map_err(|_| EvidenceError::InvalidInput)?;
+    if encoded.len() > 16384 {
+        return Err(EvidenceError::InvalidInput);
+    }
+    Ok(encoded)
+}
+
+fn intent_binding(
+    conn: &Connection,
+    execution_id: &str,
+) -> Result<Option<(u64, String, bool)>, EvidenceError> {
+    let binding: Option<(Option<u64>, Option<String>, Option<bool>)> = conn
+        .query_row(
+            "SELECT r.id, r.scope, r.settled FROM budget_execution_intent i
+         LEFT JOIN budget_reservation r ON r.id = i.reservation_id WHERE i.execution_id = ?1",
+            [execution_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    match binding {
+        Some((Some(id), Some(scope), Some(settled))) => Ok(Some((id, scope, settled))),
+        Some(_) => Err(EvidenceError::CorruptObservation),
+        None => {
+            let retained: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM budget_terminal_observation WHERE execution_id = ?1)",
+                [execution_id],
+                |r| r.get(0),
+            )?;
+            if retained {
+                Err(EvidenceError::CorruptObservation)
+            } else {
+                Ok(None)
+            }
+        }
+    }
+}
+
+fn read_observation(
+    conn: &Connection,
+    execution_id: &str,
+    reservation_id: u64,
+    scope: &str,
+) -> Result<Option<TerminalObservation>, EvidenceError> {
+    // Bound allocation even if a newer/foreign writer violated this version's contract.
+    let row: Option<(u32, Option<String>, Option<u64>, i64)> = conn.query_row(
+        "SELECT version, CASE WHEN length(CAST(usage_json AS BLOB)) <= 16384 THEN usage_json END,
+                frozen_charge, observed_at FROM budget_terminal_observation WHERE execution_id = ?1",
+        [execution_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    ).optional()?;
+    row.map(|(version, encoded, frozen_charge, observed_at)| {
+        let encoded = encoded.ok_or(EvidenceError::CorruptObservation)?;
+        let usage: UsageV2 =
+            serde_json::from_str(&encoded).map_err(|_| EvidenceError::CorruptObservation)?;
+        // Reject unsupported fields/versions and lossy forgiving deserialization. The
+        // frozen charge is read, never recalculated under a potentially changed formula.
+        if version != 1
+            || encode_usage(&usage).map_err(|_| EvidenceError::CorruptObservation)? != encoded
+            || (usage.completeness == UsageCompleteness::Unavailable) != frozen_charge.is_none()
+        {
+            return Err(EvidenceError::CorruptObservation);
+        }
+        Ok(TerminalObservation {
+            version,
+            execution_id: execution_id.to_string(),
+            reservation_id,
+            scope: scope.to_string(),
+            usage,
+            frozen_charge,
+            observed_at,
+        })
+    })
+    .transpose()
+}
+
 impl SqliteLedger {
+    /// Persist one immutable execution-level terminal usage snapshot. The intent owns
+    /// reservation/scope identity; this method never settles, releases or retries inference.
+    /// Exact replay returns the stored timestamp/charge. Conflicting later evidence is
+    /// rejected, including refinements of unavailable/partial usage. Outcome strings are
+    /// bounded metadata, not physical-send proof. Use one compatible owner and fixed topology:
+    /// legacy settlement APIs are not yet linked to this observation contract.
+    pub fn record_terminal_durable(
+        &mut self,
+        scope: &str,
+        execution_id: &str,
+        usage: &UsageV2,
+    ) -> Result<ObservationOutcome, EvidenceError> {
+        validate_scope(scope)?;
+        validate_execution_id(execution_id)?;
+        let encoded = encode_usage(usage)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (reservation_id, stored_scope, settled) =
+            intent_binding(&tx, execution_id)?.ok_or(EvidenceError::MissingIntent)?;
+        if stored_scope != scope {
+            return Err(EvidenceError::WrongScope);
+        }
+        if let Some(original) = read_observation(&tx, execution_id, reservation_id, scope)? {
+            if original.usage != *usage {
+                return Err(EvidenceError::ConflictingObservation);
+            }
+            return Ok(ObservationOutcome::AlreadyRecorded(original));
+        }
+        if settled {
+            return Err(EvidenceError::AlreadySettled);
+        }
+        let frozen_charge = match usage.completeness {
+            UsageCompleteness::Unavailable => None,
+            UsageCompleteness::Final | UsageCompleteness::Partial => {
+                Some(sandhi_core::billable(usage))
+            }
+        };
+        let charge = frozen_charge
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| EvidenceError::InvalidInput)?;
+        let observed_at = OffsetDateTime::now_utc().unix_timestamp();
+        let inserted = tx.execute(
+            "INSERT INTO budget_terminal_observation (execution_id, version, usage_json, frozen_charge, observed_at)
+             VALUES (?1, 1, ?2, ?3, ?4)",
+            params![execution_id, encoded, charge, observed_at],
+        )?;
+        if inserted != 1 {
+            return Err(EvidenceError::Storage(rusqlite::Error::QueryReturnedNoRows));
+        }
+        tx.commit()?;
+        Ok(ObservationOutcome::Recorded(TerminalObservation {
+            version: 1,
+            execution_id: execution_id.to_string(),
+            reservation_id,
+            scope: stored_scope,
+            usage: usage.clone(),
+            frozen_charge,
+            observed_at,
+        }))
+    }
+
+    /// Read a retained snapshot from the original ledger. Scope matching is not caller
+    /// authorization. Unknown IDs/unobserved intents return None; invalid/corrupt data fails.
+    pub fn terminal_durable(
+        &self,
+        scope: &str,
+        execution_id: &str,
+    ) -> Result<Option<TerminalObservation>, EvidenceError> {
+        validate_scope(scope)?;
+        validate_execution_id(execution_id)?;
+        let Some((reservation_id, stored_scope, _)) = intent_binding(&self.conn, execution_id)?
+        else {
+            return Ok(None);
+        };
+        if stored_scope != scope {
+            return Err(EvidenceError::WrongScope);
+        }
+        read_observation(&self.conn, execution_id, reservation_id, scope)
+    }
+
     /// Opt-in library foundation: commit admission and its execution identity together
-    /// before dispatch. No HTTP activation, terminal observation or recovery worker.
+    /// before dispatch. No HTTP activation or recovery worker.
     /// Retained identities (including settled ones) count toward `retained_limit`,
     /// bounded to 1..=100_000 per ledger. Exhaustion refuses new tracked admission.
     /// No automatic pruning: unresolved leases retain capacity even after expiry.
@@ -192,9 +410,7 @@ impl SqliteLedger {
         &self,
         execution_id: &str,
     ) -> Result<Option<ExecutionIntent>, EvidenceError> {
-        if execution_id.len() != 64 || !execution_id.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err(EvidenceError::InvalidInput);
-        }
+        validate_execution_id(execution_id)?;
         let row: Option<(u64, String, u64, i64)> = self
             .conn
             .query_row(
