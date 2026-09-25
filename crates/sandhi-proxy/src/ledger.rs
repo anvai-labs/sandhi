@@ -386,6 +386,250 @@ mod tests {
         assert_eq!(ledger.lock().unwrap().spent("scope"), 0);
     }
 
+    #[test]
+    fn tracked_owner_retains_evidence_across_contention_storage_failure_and_reopen() {
+        use crate::settlement::{Attempt, Failure, PendingSettlement};
+        use sandhi_core::{UsageBasis, UsageCompleteness, UsageV2};
+        use sandhi_store::ledger::{
+            evidence::{IntentAdmission, SettlementOutcome},
+            SqliteLedger,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.db");
+        let path = path.to_str().unwrap();
+        let mut store = SqliteLedger::open(path).unwrap();
+        let IntentAdmission::Admitted(intent) = store
+            .reserve_with_intent_durable(
+                "scope",
+                100,
+                now() + Duration::nanoseconds(123),
+                Duration::seconds(30),
+                10,
+            )
+            .unwrap()
+        else {
+            panic!("admitted");
+        };
+        let usage = UsageV2 {
+            tokens_in: 11,
+            tokens_out: 7,
+            cache_read_tokens: 3,
+            completeness: UsageCompleteness::Final,
+            basis: UsageBasis::ProviderReported,
+            ..Default::default()
+        };
+        let pending =
+            PendingSettlement::tracked("actual-request".into(), intent.clone(), usage.clone());
+        let ledger = Mutex::new(ProxyLedger::durable(path, 1).unwrap());
+        let held = ledger.lock().unwrap();
+        let Attempt::Unresolved {
+            pending,
+            failure: Failure::LedgerBusy,
+        } = pending.try_commit(&ledger)
+        else {
+            panic!("retain while busy");
+        };
+        assert_eq!(pending.terminal_usage(), Some(&usage));
+        assert_eq!(pending.observation_recorded(), Some(false));
+        drop(held);
+        let injector = rusqlite::Connection::open(path).unwrap();
+        injector.execute_batch("CREATE TRIGGER reject_observation BEFORE INSERT ON budget_terminal_observation BEGIN SELECT RAISE(ABORT, 'injected'); END;").unwrap();
+        let Attempt::Unresolved {
+            pending,
+            failure: Failure::Evidence(_),
+        } = pending.try_commit(&ledger)
+        else {
+            panic!("retain unstored usage");
+        };
+        assert_eq!(pending.observation_recorded(), Some(false));
+        assert!(store
+            .terminal_durable("scope", &intent.execution_id)
+            .unwrap()
+            .is_none());
+        injector.execute_batch("DROP TRIGGER reject_observation; CREATE TRIGGER reject_receipt BEFORE INSERT ON budget_settlement_outbox BEGIN SELECT RAISE(ABORT, 'injected'); END;").unwrap();
+        let Attempt::Unresolved {
+            pending,
+            failure: Failure::Evidence(_),
+        } = pending.try_commit(&ledger)
+        else {
+            panic!("retain stored usage until receipt commits");
+        };
+        assert_eq!(pending.observation_recorded(), Some(true));
+        assert_eq!(pending.terminal_usage(), Some(&usage));
+        assert_eq!(pending.reservation(), Some(&intent.reservation));
+        assert_eq!(pending.request_id(), "actual-request");
+        assert_eq!(pending.charge(), None); // Only storage derives tracked charge.
+        assert_eq!(
+            store
+                .terminal_durable("scope", &intent.execution_id)
+                .unwrap()
+                .unwrap()
+                .usage,
+            usage
+        );
+        assert_eq!(store.spent_durable("scope").unwrap(), 0);
+        assert_eq!(store.reserved_durable("scope").unwrap(), 100);
+        drop(ledger);
+        injector
+            .execute_batch("DROP TRIGGER reject_receipt")
+            .unwrap();
+        let ledger = Mutex::new(ProxyLedger::durable(path, 1).unwrap());
+        let Attempt::Committed {
+            outcome: SettlementOutcome::Committed(receipt),
+            ..
+        } = pending.try_commit(&ledger)
+        else {
+            panic!("reopened owner commits");
+        };
+        assert_eq!(receipt.charged_tokens, 21);
+        let replay = PendingSettlement::tracked("actual-request".into(), intent, usage);
+        let Attempt::Committed {
+            outcome: SettlementOutcome::AlreadyCommitted(original),
+            ..
+        } = replay.try_commit(&ledger)
+        else {
+            panic!("replay same receipt");
+        };
+        assert_eq!(original, receipt);
+        assert_eq!(store.spent_durable("scope").unwrap(), 21);
+        assert!(ledger.lock().unwrap().seen("key", "logical").is_none());
+    }
+
+    #[test]
+    fn tracked_owner_rejects_wrong_binding_and_unsupported_ledgers_before_observation() {
+        use crate::settlement::{Attempt, Failure, PendingSettlement};
+        use sandhi_core::UsageV2;
+        use sandhi_store::ledger::{
+            evidence::{EvidenceError, IntentAdmission},
+            SqliteLedger,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.db");
+        let path = path.to_str().unwrap();
+        let mut store = SqliteLedger::open(path).unwrap();
+        let IntentAdmission::Admitted(intent) = store
+            .reserve_with_intent_durable("scope", 100, now(), Duration::seconds(30), 10)
+            .unwrap()
+        else {
+            panic!("admitted");
+        };
+        for mode in [
+            "wrong-reservation",
+            "wrong-ceiling",
+            "wrong-expiry",
+            "missing-intent",
+            "wrong-scope",
+            "memory",
+            "sqlite-memory",
+            "sqlite-temporary",
+            "multiple",
+            "poisoned",
+        ] {
+            let mut supplied = intent.clone();
+            let inner = match mode {
+                "memory" => ProxyLedger::in_memory(),
+                "sqlite-memory" => ProxyLedger::durable(":memory:", 1).unwrap(),
+                "sqlite-temporary" => ProxyLedger::durable("", 1).unwrap(),
+                "multiple" => {
+                    ProxyLedger::durable(dir.path().join("other.db").to_str().unwrap(), 2).unwrap()
+                }
+                _ => ProxyLedger::durable(path, 1).unwrap(),
+            };
+            if mode == "missing-intent" {
+                supplied.execution_id = "f".repeat(64);
+            }
+            if mode == "wrong-ceiling" {
+                supplied.reservation.ceiling += 1;
+            }
+            if mode == "wrong-expiry" {
+                supplied.reservation.expires_at += Duration::seconds(1);
+            }
+            if mode == "wrong-reservation" {
+                supplied.reservation.id += 1;
+            }
+            if mode == "wrong-scope" {
+                supplied.reservation.scope = "other".into();
+            }
+            let ledger = Mutex::new(inner);
+            if mode == "poisoned" {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _guard = ledger.lock().unwrap();
+                    panic!("injected");
+                }));
+            }
+            let pending = PendingSettlement::tracked(mode.into(), supplied, UsageV2::default());
+            let Attempt::Unresolved { pending, failure } = pending.try_commit(&ledger) else {
+                panic!("{mode} must reject");
+            };
+            assert!(
+                matches!(
+                    (mode, failure),
+                    (
+                        "wrong-reservation" | "wrong-ceiling" | "wrong-expiry",
+                        Failure::Evidence(EvidenceError::InvalidInput)
+                    ) | (
+                        "missing-intent",
+                        Failure::Evidence(EvidenceError::MissingIntent)
+                    ) | ("wrong-scope", Failure::Evidence(EvidenceError::WrongScope))
+                        | ("memory", Failure::NonDurableLedger)
+                        | (
+                            "sqlite-memory" | "sqlite-temporary" | "multiple",
+                            Failure::Evidence(EvidenceError::UnsupportedTrackedLedger)
+                        )
+                        | ("poisoned", Failure::LedgerPoisoned)
+                ),
+                "{mode}"
+            );
+            assert_eq!(pending.observation_recorded(), Some(false), "{mode}");
+            assert!(store
+                .terminal_durable("scope", &intent.execution_id)
+                .unwrap()
+                .is_none());
+        }
+        assert_eq!(store.reserved_durable("scope").unwrap(), 100);
+    }
+
+    #[test]
+    fn tracked_owner_persists_unknown_usage_without_claiming_settlement() {
+        use crate::settlement::{Attempt, Failure, PendingSettlement};
+        use sandhi_core::UsageV2;
+        use sandhi_store::ledger::{
+            evidence::{EvidenceError, IntentAdmission},
+            SqliteLedger,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.db");
+        let path = path.to_str().unwrap();
+        let mut store = SqliteLedger::open(path).unwrap();
+        let IntentAdmission::Admitted(intent) = store
+            .reserve_with_intent_durable("scope", 100, now(), Duration::seconds(30), 10)
+            .unwrap()
+        else {
+            panic!("admitted");
+        };
+        let usage = UsageV2::default();
+        let pending = PendingSettlement::tracked("unknown".into(), intent.clone(), usage.clone());
+        let ledger = Mutex::new(ProxyLedger::durable(path, 1).unwrap());
+        let Attempt::Unresolved {
+            pending,
+            failure: Failure::Evidence(EvidenceError::UnresolvedObservation),
+        } = pending.try_commit(&ledger)
+        else {
+            panic!("unknown remains unresolved");
+        };
+        assert_eq!(pending.observation_recorded(), Some(true));
+        assert_eq!(pending.terminal_usage(), Some(&usage));
+        assert_eq!(
+            store
+                .terminal_durable("scope", &intent.execution_id)
+                .unwrap()
+                .unwrap()
+                .usage,
+            usage
+        );
+        assert_eq!(store.reserved_durable("scope").unwrap(), 100);
+    }
+
     fn now() -> OffsetDateTime {
         OffsetDateTime::UNIX_EPOCH
     }

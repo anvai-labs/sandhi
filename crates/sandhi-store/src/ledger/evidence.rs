@@ -98,6 +98,7 @@ pub enum EvidenceError {
     ConflictingCharge,
     LegacySettlement,
     InvalidShard,
+    UnsupportedTrackedLedger,
     ShardPoisoned,
     EntropyUnavailable,
     Storage(rusqlite::Error),
@@ -121,6 +122,9 @@ impl std::fmt::Display for EvidenceError {
             Self::WrongScope => "reservation scope mismatch",
             Self::ConflictingCharge => "settlement charge conflicts with receipt",
             Self::LegacySettlement => "legacy settlement has no receipt",
+            Self::UnsupportedTrackedLedger => {
+                "tracked settlement requires a single file-backed ledger"
+            }
             Self::InvalidShard => "invalid evidence shard",
             Self::ShardPoisoned => "settlement evidence shard poisoned",
             Self::EntropyUnavailable => "receipt identity unavailable",

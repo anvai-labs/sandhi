@@ -51,6 +51,10 @@ pub struct SqliteLedger {
 }
 
 impl SqliteLedger {
+    pub(crate) fn is_file_backed(&self) -> bool {
+        self.conn.path().is_some_and(|path| !path.is_empty())
+    }
+
     /// Open (creating if needed) a ledger at `path` (`:memory:` for a volatile one).
     pub fn open(path: &str) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;

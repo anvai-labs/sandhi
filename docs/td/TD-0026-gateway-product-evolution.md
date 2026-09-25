@@ -753,3 +753,20 @@ This is a library foundation, not an activated recovery worker or HTTP owner.
 Amendments, dispatch ownership, lifecycle acceptance, release/deployment and C5 remain
 open. Cursors stay on the original ledger and fixed topology; a finished sweep is
 not proof of quiescence or whole-ledger integrity.
+
+
+### Owned tracked terminal settlement bridge (2026-09-25)
+
+The existing `PendingSettlement` now has an opt-in tracked constructor that retains
+full immutable usage, persists the terminal observation and settles through the canonical
+stored-charge transaction. Failures retain ownership and expose whether observation
+storage succeeded. The bridge validates the stored intent binding and rejects volatile
+or multi-shard ledgers. Existing HTTP defaults remain unchanged.
+
+The three added owner tests began red with constructor stubs, then passed with the
+bridge; they cover contention, injected observation/receipt failures, reopen/replay,
+unsupported topology/bindings and unresolved usage. The existing shard-poison test is
+extended; store eligibility/atomicity matrices remain their single test owner.
+See [the owning contract](../product/attempt-accounting-and-evidence.md#owned-tracked-terminal-settlement-w05c-integration-foundation).
+W05c–e remain open: no live HTTP ownership, recovery worker or lifecycle acceptance
+is claimed by this increment.
