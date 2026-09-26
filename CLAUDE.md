@@ -59,7 +59,7 @@ Two proxy-path caveats that contradict older prose — see [ADR-0004](docs/adr/0
 ## Conventions
 
 - **No third-party AI-agent authorship attribution** in commits/PRs — no `Co-Authored-By: Claude/…`, no "Generated with", no robot emoji, no model signature, no bot co-author. Enforced by the `commit-msg` hook **and** server-side CI (not bypassable). (Mentioning `CLAUDE.md` or the Anthropic/OpenAI *APIs* is fine.) **Our own agent is the exception:** `victor` is first-party tooling we credit on purpose — `Generated-by: victor-code-ai` and a `victor-code-ai` co-author trailer are allowed (`ALLOWED_PATTERNS` in `scripts/check_no_agent_attribution.py`). Do **not** add your own attribution.
-- The exact official Dependabot co-author trailer is dependency provenance and is allowed; altered identities, appended text and other bot trailers remain rejected.
+- The exact official Dependabot co-author trailer and the repository-owned `sandhi pin bot <pin-bot@anvai-labs.local>` trailer configured in `update-protocol-pin.yml` are dependency provenance and are allowed. This text exception does not authenticate authorship; altered identities, appended text and other bot trailers remain rejected.
 - PRs target **`develop`** (protected; the aggregate **`CI Success`** check must be green). `main` is the release trunk.
 - New behavior lands with tests; line coverage must stay ≥75%. Decisions go in `docs/adr/NNNN-slug.md`; larger technical designs in `docs/td/TD-NNNN-*.md`. Keep lifecycle state synchronized with the central [documentation map](docs/README.md).
 - CI is path-filtered: docs-only changes skip compile/coverage/bindings but `CI Success` still reports.
