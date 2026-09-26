@@ -727,19 +727,36 @@ mod tests {
         }
     }
 
-    #[test]
-    fn dispatch_owner_handoff_and_replay_never_grant_a_second_permit() {
+    #[tokio::test]
+    async fn dispatch_owner_handoff_and_replay_never_grant_a_second_permit() {
+        use crate::settlement::jobs::{Jobs, Outcome, Work};
         use crate::settlement::{Attempt, DispatchAttempt, PendingDispatch};
         use sandhi_core::{UsageBasis, UsageCompleteness, UsageV2};
         use sandhi_store::ledger::{
             evidence::{IntentAdmission, SettlementOutcome},
             SqliteLedger,
         };
+        use std::sync::Arc;
+        async fn run(ledger: Arc<Mutex<ProxyLedger>>, work: Work) -> Outcome {
+            let jobs = Jobs::new(ledger, Arc::new(crate::lifecycle::Lifecycle::new()), 1);
+            let ticket = jobs.submit(work).unwrap();
+            ticket.wait().await;
+            ticket.take().unwrap()
+        }
+        async fn interrupt(ledger: Arc<Mutex<ProxyLedger>>, work: Work) -> Work {
+            let jobs = Jobs::new(ledger, Arc::new(crate::lifecycle::Lifecycle::new()), 1);
+            let ticket = jobs.interrupt_after_commit(work).unwrap();
+            ticket.wait().await;
+            let Some(Outcome::Interrupted(input)) = ticket.take() else {
+                panic!("uncertain commit")
+            };
+            input
+        }
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("dispatch.db");
         let path = path.to_str().unwrap();
         let mut inspector = SqliteLedger::open(path).unwrap();
-        let ledger = Mutex::new(ProxyLedger::durable(path, 1).unwrap());
+        let ledger = Arc::new(Mutex::new(ProxyLedger::durable(path, 1).unwrap()));
         let IntentAdmission::Admitted(intent) = (match &*ledger.lock().unwrap() {
             ProxyLedger::Durable(store) => store
                 .reserve_prepared_durable(
@@ -754,15 +771,18 @@ mod tests {
         }) else {
             panic!("admitted")
         };
-        let DispatchAttempt::Authorized(authorized) =
-            PendingDispatch::new("request".into(), intent.clone()).try_authorize(&ledger)
+        let Outcome::Dispatch(DispatchAttempt::Authorized(authorized)) = run(
+            ledger.clone(),
+            Work::Authorize(PendingDispatch::new("request".into(), intent.clone())),
+        )
+        .await
         else {
             panic!("first authorization")
         };
         assert_eq!(authorized.intent(), &intent);
         assert_eq!(authorized.request_id(), "request");
         drop(ledger);
-        let ledger = Mutex::new(ProxyLedger::durable(path, 1).unwrap());
+        let ledger = Arc::new(Mutex::new(ProxyLedger::durable(path, 1).unwrap()));
         for close in [false, true] {
             let replay = PendingDispatch::new("request".into(), intent.clone());
             let DispatchAttempt::MayHaveDispatched { pending } = (if close {
@@ -785,14 +805,22 @@ mod tests {
         assert_eq!(pending.request_id(), "request");
         assert_eq!(pending.reservation(), Some(&intent.reservation));
         assert_eq!(pending.terminal_usage(), Some(&usage));
+        let Work::Settle(pending) = interrupt(ledger.clone(), Work::Settle(pending)).await else {
+            panic!("original settlement")
+        };
+        // The snapshot predates the committed observation. Canonical reconciliation
+        // must discover the receipt, not trust the stale in-memory progress bit.
+        assert_eq!(pending.observation_recorded(), Some(false));
+        assert_eq!(pending.terminal_usage(), Some(&usage));
         let Attempt::Committed {
-            outcome: SettlementOutcome::Committed(receipt),
+            outcome: SettlementOutcome::AlreadyCommitted(receipt),
             ..
         } = pending.try_commit(&ledger)
         else {
             panic!("canonical settlement")
         };
         assert_eq!(receipt.charged_tokens, 18);
+        assert_eq!(inspector.spent_durable("scope").unwrap(), 18);
         // A lost authorized owner leaves uncertainty, never invented terminal zero.
         let IntentAdmission::Admitted(lost) = inspector
             .reserve_prepared_durable(
@@ -806,12 +834,18 @@ mod tests {
         else {
             panic!("admitted")
         };
-        let DispatchAttempt::Authorized(owner) =
-            PendingDispatch::new("lost".into(), lost.clone()).try_authorize(&ledger)
+        let Work::Authorize(pending) = interrupt(
+            ledger.clone(),
+            Work::Authorize(PendingDispatch::new("lost".into(), lost.clone())),
+        )
+        .await
         else {
-            panic!("authorized")
+            panic!("original admission")
         };
-        drop(owner);
+        assert!(matches!(
+            pending.try_authorize(&ledger),
+            DispatchAttempt::MayHaveDispatched { .. }
+        ));
         assert_eq!(inspector.reserved_durable("scope").unwrap(), 50);
         assert!(inspector
             .terminal_durable("scope", &lost.execution_id)
@@ -829,10 +863,14 @@ mod tests {
         else {
             panic!("admitted")
         };
-        let DispatchAttempt::Closed {
+        let Outcome::Dispatch(DispatchAttempt::Closed {
             request_id,
             closure,
-        } = PendingDispatch::new("closed".into(), closed.clone()).try_close(&ledger)
+        }) = run(
+            ledger.clone(),
+            Work::Close(PendingDispatch::new("closed".into(), closed.clone())),
+        )
+        .await
         else {
             panic!("closed")
         };
