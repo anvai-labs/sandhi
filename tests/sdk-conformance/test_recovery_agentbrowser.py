@@ -23,16 +23,16 @@ def altered_dashboard(gateway_origin, fault):
     """Fixed loopback target; mutate only disposable served assets, never source files."""
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
-            assert self.path.startswith(("/dashboard", "/admin/"))
+            assert self.path == "/auth/session" or self.path.startswith(("/dashboard", "/admin/"))
             response = httpx.get(gateway_origin + self.path,
                                 headers={"Authorization": self.headers.get("Authorization", "")},
                                 timeout=3, trust_env=False)
             body = response.content
             if fault == "hidden" and self.path == "/dashboard/assets/dashboard.css":
-                body += b"\n#tables table:nth-of-type(2) { display:none !important; }\n"
+                body += b"\n#tables > .table-scroll:nth-of-type(2) { display:none !important; }\n"
             if fault == "heading" and self.path == "/dashboard/assets/dashboard.js":
                 body += b"""\nnew MutationObserver(() => {
-                  const table = document.querySelector('#tables table:nth-of-type(2)');
+                  const table = document.querySelector('#tables > .table-scroll:nth-of-type(2)');
                   if (table && !table.dataset.fixtureMoved) {
                     table.dataset.fixtureMoved = 'true';
                     table.after(table.previousElementSibling);
@@ -95,19 +95,27 @@ def test_agentbrowser_observes_restored_dashboard(recovery_gateway, tmp_path):
         assert "recovery-test-admin" not in result.stdout + result.stderr
         # These values remain present elsewhere on the page. Incorrect card, keyed
         # attribution and budget associations must still fail, not match any text.
-        for fault in ("card", "attribution", "budget"):
+        for fault in ("card", "attribution", "budget", "coverage_card", "coverage_attribution"):
             wrong = copy.deepcopy(expected)
             if fault == "card":
                 wrong["total"]["calls"] = wrong["total"]["billable_tokens"]
             elif fault == "attribution":
                 wrong["by_group"][0]["calls"] = wrong["total"]["calls"]
-            else:
+            elif fault == "budget":
                 wrong["budgets"][0]["spent"] = wrong["total"]["billable_tokens"]
+            else:
+                row = wrong["total"] if fault == "coverage_card" else wrong["by_group"][0]
+                counts = row["cache_read_coverage"]
+                source = next(key for key, count in counts.items() if count > 0)
+                target = next(key for key in counts if key != source)
+                counts[source] -= 1
+                counts[target] += 1
             env["SANDHI_SMOKE_EXPECTED_EVIDENCE"] = json.dumps(wrong)
             negative = subprocess.run(["node", str(Path(__file__).with_name("agentbrowser-smoke.mjs"))],
                                       cwd=tmp_path, env=env, capture_output=True, text=True, timeout=90)
             assert negative.returncode != 0, f"incorrect {fault} evidence was accepted"
-            stage = {"card": "cards", "attribution": "attribution", "budget": "budgets"}[fault]
+            stage = {"card": "cards", "attribution": "attribution", "budget": "budgets",
+                     "coverage_card": "cards", "coverage_attribution": "attribution"}[fault]
             assert f"restored dashboard numeric evidence mismatch: {stage}" in negative.stderr
             assert "AgentBrowser smoke passed" not in negative.stdout
             assert "recovery-test-admin" not in negative.stdout + negative.stderr

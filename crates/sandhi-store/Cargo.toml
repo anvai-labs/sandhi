@@ -25,14 +25,16 @@ keyring = { version = "3", default-features = false, features = [
 # Optional and NON-default: the IPC backend (and its tokio runtime) ships only
 # where the `sentinelpass-ipc` feature is enabled — release binary builds turn
 # it on; crates consumers may enable it themselves. sentinelpass-protocol
-# v0.8.0 is published to crates.io, so the published manifest stays clean.
-sentinelpass-protocol = { version = "0.8.1", optional = true }
+# is published to crates.io; no local path patch is needed.
+sentinelpass-protocol = { version = "0.13.3", optional = true }
 tokio = { version = "1", default-features = false, features = ["rt", "time"], optional = true }
 
 [features]
 sentinelpass-ipc = ["dep:sentinelpass-protocol", "dep:tokio"]
 
 [dev-dependencies]
+# Test-only stdio control channel; protocol framing uses the real optional crate.
+tokio = { version = "1", features = ["io-std", "io-util"] }
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 tempfile = "3"
 
@@ -41,3 +43,7 @@ name = "ledger"
 harness = false
 # `cargo test` must not execute benchmarks in CI; numbers come from `cargo bench`.
 test = false
+
+[[example]]
+name = "sdk_broker_transport"
+required-features = ["sentinelpass-ipc"]
