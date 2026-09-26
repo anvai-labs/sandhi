@@ -33,6 +33,8 @@ tokio = { version = "1", default-features = false, features = ["rt", "time"], op
 sentinelpass-ipc = ["dep:sentinelpass-protocol", "dep:tokio"]
 
 [dev-dependencies]
+# Test-only stdio control channel; protocol framing uses the real optional crate.
+tokio = { version = "1", features = ["io-std", "io-util"] }
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 tempfile = "3"
 
@@ -41,3 +43,7 @@ name = "ledger"
 harness = false
 # `cargo test` must not execute benchmarks in CI; numbers come from `cargo bench`.
 test = false
+
+[[example]]
+name = "sdk_broker_transport"
+required-features = ["sentinelpass-ipc"]

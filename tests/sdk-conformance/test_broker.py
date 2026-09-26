@@ -2,7 +2,7 @@
 
 import json
 import os
-import socket
+import select
 import sqlite3
 import shutil
 import struct
@@ -22,83 +22,132 @@ SECRET = "synthetic-provider-secret-never-log"
 
 
 class FakeBroker:
-    def __init__(self, path):
+    def __init__(self, path, transport_binary):
         self.path = str(path)
-        self.listener = socket.socket(socket.AF_UNIX)
-        self.listener.bind(self.path)
-        self.listener.listen()
-        self.listener.settimeout(0.1)
         self.stop = threading.Event()
         self.received = []
         self.mode = "normal"
-        self.thread = threading.Thread(target=self.run, daemon=True)
-        self.thread.start()
+        self.errors = []
+        # Only the Rust bridge speaks the wire protocol; authorization stays here.
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith(("SANDHI_", "SENTINELPASS_"))}
+        self.process = subprocess.Popen(
+            [str(transport_binary), self.path], stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0, env=env,
+        )
+        try:
+            os.set_blocking(self.process.stdin.fileno(), False)
+            assert self.read_frame() == {"ready": True}
+            self.thread = threading.Thread(target=self.run, daemon=True)
+            self.thread.start()
+        except BaseException:
+            self._terminate()
+            raise
 
     @staticmethod
-    def read_exact(conn, count):
+    def read_exact(pipe, count, deadline):
         data = b""
         while len(data) < count:
-            chunk = conn.recv(count - len(data))
+            ready, _, _ = select.select([pipe], [], [], max(0, deadline - time.monotonic()))
+            if not ready:
+                raise TimeoutError("fixture control read timed out")
+            chunk = os.read(pipe.fileno(), count - len(data))
             if not chunk:
                 raise EOFError()
             data += chunk
         return data
 
+    def read_frame(self):
+        deadline = time.monotonic() + 3
+        size = struct.unpack(">I", self.read_exact(self.process.stdout, 4, deadline))[0]
+        assert 0 < size <= 65536
+        return json.loads(self.read_exact(self.process.stdout, size, deadline))
+
+    def write_frame(self, response):
+        body = json.dumps(response).encode()
+        assert 0 < len(body) <= 65536
+        data = memoryview(struct.pack(">I", len(body)) + body)
+        deadline = time.monotonic() + 3
+        while data:
+            _, ready, _ = select.select([], [self.process.stdin], [],
+                                        max(0, deadline - time.monotonic()))
+            if not ready:
+                raise TimeoutError("fixture control write timed out")
+            written = os.write(self.process.stdin.fileno(), data)
+            if not written:
+                raise EOFError()
+            data = data[written:]
+
     def run(self):
         while not self.stop.is_set():
             try:
-                conn, _ = self.listener.accept()
-            except socket.timeout:
-                continue
-            except OSError:
+                ready, _, _ = select.select([self.process.stdout], [], [], 0.1)
+                if not ready:
+                    continue
+                envelope = self.read_frame()
+                self.received.append(envelope)
+                if self.mode == "hang":
+                    if self.stop.wait(2):
+                        break
+                    self.write_frame(None)
+                    continue
+                kind, request = next(iter(envelope["message"].items()))
+                allowed = (envelope["token"] == "disposable-daemon-token"
+                           and envelope.get("origin") == "cli"
+                           and envelope.get("client_token") in ("read-token", "write-token")
+                           and request["client_id"] == "sandhi"
+                           and request["domain"] == "sandhi:openai:default")
+                locked = self.mode == "locked"
+                if kind == "SaveSecret":
+                    success = allowed and envelope.get("client_token") == "write-token" and not locked
+                    response = {"SaveSecretResponse": {"success": success, "locked": locked,
+                                "error": None if success else SECRET}}
+                elif kind == "GetExternalSecret":
+                    response = {"GetExternalSecretResponse": {
+                        "authorized": allowed, "locked": locked,
+                        "value": SECRET if allowed and not locked and self.mode != "missing" else None,
+                        "error": None if allowed else SECRET}}
+                else:
+                    response = {"DeleteSecretResponse": {"deleted": False, "error": SECRET}}
+                self.write_frame(response)
+            except Exception as exc:
+                if not self.stop.is_set():
+                    self.errors.append(type(exc).__name__)
                 break
-            with conn:
-                conn.settimeout(2)
-                try:
-                    size = struct.unpack(">I", self.read_exact(conn, 4))[0]
-                    assert 0 < size <= 65536
-                    envelope = json.loads(self.read_exact(conn, size))
-                    self.received.append(envelope)
-                    if self.mode == "hang":
-                        self.stop.wait(2)
-                        continue
-                    kind, request = next(iter(envelope["message"].items()))
-                    allowed = (envelope["token"] == "disposable-daemon-token"
-                               and envelope.get("origin") == "cli"
-                               and envelope.get("client_token") in ("read-token", "write-token")
-                               and request["client_id"] == "sandhi"
-                               and request["domain"] == "sandhi:openai:default")
-                    locked = self.mode == "locked"
-                    if kind == "SaveSecret":
-                        success = allowed and envelope.get("client_token") == "write-token" and not locked
-                        response = {"SaveSecretResponse": {"success": success, "locked": locked,
-                                    "error": None if success else SECRET}}
-                    elif kind == "GetExternalSecret":
-                        response = {"GetExternalSecretResponse": {
-                            "authorized": allowed, "locked": locked,
-                            "value": SECRET if allowed and not locked and self.mode != "missing" else None,
-                            "error": None if allowed else SECRET}}
-                    else:
-                        response = {"DeleteSecretResponse": {"deleted": False, "error": SECRET}}
-                    data = json.dumps(response).encode()
-                    conn.sendall(struct.pack(">I", len(data)) + data)
-                except (OSError, EOFError):
-                    pass
+
+    def _terminate(self):
+        if self.process.poll() is None:
+            self.process.terminate()
+        try:
+            self.process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait(timeout=2)
+        for pipe in (self.process.stdin, self.process.stdout, self.process.stderr):
+            pipe.close()
 
     def close(self):
         self.stop.set()
-        self.listener.close()
-        self.thread.join(timeout=3)
+        if self.process.poll() is None:
+            self.process.terminate()
+        self.thread.join(timeout=4)
+        self._terminate()
         assert not self.thread.is_alive()
+        assert not self.errors, f"secured fixture control failure: {self.errors}"
 
 
 @pytest.fixture(scope="module")
 def broker_binary(tmp_path_factory):
     subprocess.run(["cargo", "build", "-p", "sandhi-proxy", "--bins",
-                    "--features", "sentinelpass-ipc"], cwd=REPO_ROOT, check=True)
+                    "--features", "sentinelpass-ipc", "--locked"], cwd=REPO_ROOT, check=True)
+    subprocess.run(["cargo", "build", "-p", "sandhi-store", "--example",
+                    "sdk_broker_transport", "--features", "sentinelpass-ipc", "--locked"],
+                   cwd=REPO_ROOT, check=True)
     # Keep each feature build immutable even when another fixture rebuilds the normal target.
     target = tmp_path_factory.mktemp("native-broker-bin") / "sandhi-proxy"
     shutil.copy2(REPO_ROOT / "target/debug/sandhi-proxy", target)
+    shutil.copy2(REPO_ROOT / "target/debug/examples/sdk_broker_transport",
+                 target.with_name("sdk_broker_transport"))
     return target
 
 
@@ -113,9 +162,11 @@ def broker_plain_binary(tmp_path_factory):
 @pytest.fixture
 def broker(broker_binary, tmp_path, request):
     options = getattr(request, "param", {})
+    transport_binary = broker_binary.with_name("sdk_broker_transport")
     if not options.get("native", True):
         broker_binary = request.getfixturevalue("broker_plain_binary")
-    daemon = FakeBroker(tmp_path / "broker.sock")
+    daemon = FakeBroker(tmp_path / "broker.sock", transport_binary)
+    request.addfinalizer(daemon.close)
     daemon.database = tmp_path / "usage.db"
     token_dir = tmp_path / "config/PasswordManager"
     token_dir.mkdir(parents=True)
@@ -157,7 +208,6 @@ def broker(broker_binary, tmp_path, request):
             except subprocess.TimeoutExpired:
                 proc.kill()
                 _, logs = proc.communicate(timeout=5)
-            daemon.close()
             assert SECRET.encode() not in logs
             assert b"Cannot start a runtime" not in logs
             assert b"Cannot drop a runtime" not in logs
