@@ -33,6 +33,9 @@ pub struct SandhiFileConfig {
     /// Buffered upstream limits are validated at startup; apply requires a restart.
     #[serde(default)]
     pub buffered_deadlines: Option<crate::deadlines::BufferedDeadlines>,
+    /// Complete streaming limits, activated only at startup.
+    #[serde(default)]
+    pub streaming_deadlines: Option<crate::deadlines::StreamingDeadlines>,
     /// Optional listener TLS configuration. Paths are reviewable configuration,
     /// while the private-key bytes remain outside this file.
     #[serde(default)]
@@ -190,6 +193,67 @@ mod tests {
     fn missing_sections_default_to_empty_not_an_error() {
         let cfg: SandhiFileConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(cfg, SandhiFileConfig::default());
+    }
+
+    #[test]
+    fn streaming_deadlines_reject_partial_unbounded_and_unknown_policy() {
+        for text in [
+            r#"{"setup_ms":1,"idle_ms":1,"body_ms":0}"#,
+            r#"{"setup_ms":18446744073709551615,"idle_ms":1,"body_ms":1}"#,
+        ] {
+            assert!(serde_json::from_str::<crate::deadlines::StreamLimits>(text).is_err());
+        }
+        for policy in [
+            serde_json::json!({"ceiling_ms":900000,"default":{"setup_ms":1,"idle_ms":1,"body_ms":1}}),
+            serde_json::json!({"ceiling_ms":1000,"default":{"setup_ms":1,"idle_ms":1}}),
+            serde_json::json!({"ceiling_ms":1000,"default":{"setup_ms":0,"idle_ms":1,"body_ms":1}}),
+            serde_json::json!({"ceiling_ms":1000,"default":{"setup_ms":1,"idle_ms":0,"body_ms":1}}),
+            serde_json::json!({"ceiling_ms":1000,"default":{"setup_ms":1,"idle_ms":1,"body_ms":0}}),
+            serde_json::json!({"ceiling_ms":1000,"default":{"setup_ms":500,"idle_ms":1,"body_ms":501}}),
+            serde_json::json!({"ceiling_ms":1000,"default":{"setup_ms":1,"idle_ms":1001,"body_ms":1}}),
+            serde_json::json!({"ceiling_ms":1000,"default":{"setup_ms":1,"idle_ms":1,"body_ms":1,"renew":true}}),
+            serde_json::json!({"ceiling_ms":1000,"default":{"setup_ms":1,"idle_ms":1,"body_ms":1},"endpoints":{"zai:a":{"models":{"*":{"setup_ms":1,"idle_ms":1,"body_ms":1}}}}}),
+        ] {
+            assert!(
+                serde_json::from_value::<SandhiFileConfig>(
+                    serde_json::json!({"streaming_deadlines":policy})
+                )
+                .is_err(),
+                "accepted {policy}"
+            );
+        }
+    }
+
+    #[test]
+    fn streaming_deadlines_resolve_complete_routes_and_actual_lease() {
+        use crate::deadlines::{streaming_from_json, Source};
+        let policy = streaming_from_json(
+            r#"{"providers":"operator-owned","streaming_deadlines":{
+            "ceiling_ms":5000,"default":{"setup_ms":100,"idle_ms":200,"body_ms":1000},
+            "endpoints":{"zai:a":{"default":{"setup_ms":200,"idle_ms":300,"body_ms":2000},
+            "models":{"m":{"setup_ms":300,"idle_ms":400,"body_ms":3000}}},"zai:b":{}}}}"#,
+        )
+        .unwrap()
+        .unwrap();
+        for (reference, model, source, total) in [
+            ("zai:a", "m", Source::Model, 3300),
+            ("zai:a", "M", Source::Endpoint, 2200),
+            ("zai:b", "m", Source::Global, 1100),
+            ("other:x", "m", Source::Global, 1100),
+        ] {
+            let (limits, actual) = policy.resolve(reference, model);
+            assert_eq!(actual, source);
+            assert_eq!(limits.dispatch_duration().as_millis(), total);
+        }
+        assert!(policy.validate_endpoints(|id| id == "zai:a").is_err());
+        assert!(policy.validate_endpoints(|_| true).is_ok());
+        assert!(streaming_from_json("{}").unwrap().is_none());
+        for text in [
+            r#"{"streaming_deadlines":{"ceiling_ms":10,"default":{"setup_ms":1,"idle_ms":1,"body_ms":1},"endpoints":{"zai:a":{},"zai:a":{}}}}"#,
+            r#"{"streaming_deadlines":{"ceiling_ms":10,"default":{"setup_ms":1,"idle_ms":1,"body_ms":1},"endpoints":{"zai:a":{"models":{"m":{"setup_ms":1,"idle_ms":1,"body_ms":1},"m":{"setup_ms":1,"idle_ms":1,"body_ms":1}}}}}}"#,
+        ] {
+            assert!(streaming_from_json(text).is_err());
+        }
     }
 
     #[test]

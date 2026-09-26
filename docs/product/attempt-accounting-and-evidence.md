@@ -24,7 +24,8 @@ Current evidence: `RequestAccounting::finalize` settles each ingress execution, 
 logical events for repeated idempotency keys. `ResilientProvider` emits a final attempt count;
 failed intermediate attempts have no individual measurement record. Transparent transport does
 not retry. A zero ledger charge after absent usage is not evidence of zero provider consumption.
-TTL reclaim currently deletes abandoned leases; W05a does not change that behavior.
+Legacy TTL reclaim deletes abandoned leases; tracked intents now retain unresolved
+liability through expiry. HTTP adoption remains separate.
 
 ## Delivery substeps
 
@@ -32,8 +33,8 @@ TTL reclaim currently deletes abandoned leases; W05a does not change that behavi
 |---|---|---|
 | W05a | Atomic settlement receipt/outbox storage, immutable IDs, bounded claims and acknowledgement, rollback/reopen/concurrency tests | Integrated; 14 focused tests; not wired to proxy or network exporter |
 | W05b | Transport-owned attempt lifecycle and neutral draft contract | Integrated through PR #246 after clean adversarial review and green exact-head/post-merge CI; remains opt-in diagnostics only, while downstream accounting review still gates authoritative use and external release |
-| W05c | Connect admission, settlement and evidence without bypassing correctness | Pending: opt-in authoritative mode, per-shard colocation, failure policy, receipt/attempt linkage, logical dedup separation and all no-lease paths |
-| W05d | Unknown-liability and late-settlement recovery | Pending: durable pre-dispatch intent; crash windows, stale leases, late observations, amendments and idempotent recovery; coordinate TD-0024 retention |
+| W05c | Connect admission, settlement and evidence without bypassing correctness | Partial foundation: owned library settlement outcomes and canonical terminal-observation receipt linkage; authoritative proxy mode, physical-attempt linkage, logical dedup separation and no-lease policy remain pending |
+| W05d | Unknown-liability and late-settlement recovery | Partial storage foundation: atomic admission intent (#308), expiry protection and immutable terminal usage snapshots (#310), followed by canonical stored-charge settlement and read-only bounded recovery inventory. Amendments, authoritative HTTP ownership and idempotent recovery remain pending; coordinate TD-0024 retention |
 | W05e | Receiver contract, exporter and operator evidence | Pending: receiver idempotency, authenticated/scoped transport, retry/backoff, backlog/freshness UX, safe retention, multi-shard cursor/migration and real consumer review |
 
 W05 completes only after all substeps and joint contract gates have evidence. No code in W05a
@@ -95,7 +96,222 @@ API's rollback path. This proves process-exit/reopen behavior, not a power-loss,
 fsync-failure or full gateway pre-dispatch crash drill. Those remain explicit integration and
 operational acceptance gates, not inferred from SQLite transaction tests.
 
+## Durable admission intent (W05d storage foundation)
+
+`SqliteLedger::reserve_with_intent_durable` is an opt-in library primitive, not an
+HTTP activation switch. It uses the same admission calculation as `reserve_durable`
+and atomically commits the reservation plus one ledger-generated execution ID.
+The ID is distinct from logical idempotency and is not authorization to retry
+inference. `IntentAdmission::Denied` preserves the existing budget denial contract;
+capacity exhaustion, invalid input, entropy failure and storage failure are explicit
+errors. A failed intent insertion rolls back admission.
+
+Callers set a finite retained-record ceiling (1–100,000 per ledger); the count and
+insert share the write transaction. The ceiling includes settled identities.
+There is no pruning or automatic capacity recovery. Expired intent-backed leases
+remain reserved through **both** opportunistic admission reclaim and periodic
+reclaim until explicitly settled. Expiry does not establish zero provider usage.
+Legacy reservations without intents retain their previous expiry behavior.
+The common admission calculation now checks SQLite's signed ceiling bound and
+compares aggregate spend in widened arithmetic, avoiding negative/wrapped ceilings.
+
+`intent_durable` reads an original execution/reservation association from the same
+ledger after reopen. Keep topology fixed: legacy-to-sharded migration rejects a
+source containing intents before creating target files. The initial admission
+increment had no terminal observation; the next storage slice is documented below.
+There is still no sharded admission wrapper, unresolved-intent enumerator, worker,
+receipt/attempt linkage, exporter or retention policy. Existing HTTP
+finalization is unchanged and remains outside durable-settlement acceptance.
+Older writers do not understand protected intents: do not downgrade or share this
+ledger with an older writer once intents exist. Preserve the database and use an
+explicitly reviewed migration/recovery plan.
+Do not enable this on production traffic until the subsequent owner/recovery and
+bounded-failure policies are implemented and reviewed.
+
+Tests extend the existing evidence owner for rollback, concurrent capacity limits,
+reopen, both expiry routes, late settlement, signed bounds and migration refusal.
+The existing child-process crash owner also covers committed and uncommitted
+reservation/intent pairs. These are process-exit tests, not power-loss guarantees.
+No duplicate receipt or proxy-level database suite was introduced.
+
+## Durable terminal usage observation (W05d storage foundation)
+
+`SqliteLedger::record_terminal_durable(scope, execution_id, usage)` persists one
+immutable, versioned `UsageV2` snapshot for an existing execution intent. Reservation
+identity and scope come from that intent within the immediate transaction. A caller
+cannot attach evidence to a different reservation by supplying its numeric ID.
+`terminal_durable` reads the snapshot after reopen; matching scope is not caller
+authorization. These are library APIs, not an HTTP activation or recovery worker.
+
+The first successful write returns `ObservationOutcome::Recorded`; an exact replay
+returns `AlreadyRecorded` with the original timestamp and frozen charge. A changed
+snapshot conflicts, including equal-total changes to categories, completeness,
+measurement basis or outcome. First observation after settlement is rejected; exact
+replay of already stored evidence remains possible after settlement. No observation
+operation updates spend, releases a reservation or retries inference.
+
+Final/partial usage freezes the existing canonical `sandhi_core::billable` result
+once; unavailable usage freezes **None**, never a measured zero. Cache categories,
+reasoning inclusion, audio/prediction counters, completeness, basis and latency
+provenance remain available in the full snapshot. Partial/estimated usage does not
+become complete/provider-reported by being persisted. On read, charge is retrieved
+from storage rather than recalculated using a later formula. `UsageV2.outcome`
+remains opaque execution-level metadata, not proof of a physical adapter send or
+provider receipt; the providers' diagnostic `AttemptOutcome` is not duplicated here.
+
+Outcome and upstream-request-ID metadata are limited to 256 and 1,024 UTF-8 bytes;
+serialized snapshots are capped at 16 KiB. Oversized values, invalid cache metadata
+that serde would otherwise omit, and a charge outside SQLite's signed integer
+range are rejected. Reads reject unsupported versions, oversized/corrupt snapshots
+and unknown fields instead of silently dropping evidence. Future `UsageV2` or
+serialization changes must preserve a versioned reader or provide an explicit
+migration for valid v1 snapshots; do not reinterpret old evidence with a new shape.
+One row per retained
+intent inherits admission's bounded record count. There is no automatic pruning.
+
+**Activation limits:** an unavailable or partial snapshot is immutable too. A later
+refinement requires a separately reviewed amendment contract; do not overwrite or
+infer a zero charge to release capacity. Intent-backed unknown liability remains
+reserved after expiry. Current-version caller-charge APIs reject tracked reservations;
+use the canonical settlement API below with one compatible owner and unchanged
+ledger topology. Older binaries can still bypass this guard: do not mix them with
+tracked writers or roll back to them while tracked work exists. Bounded recovery,
+authoritative HTTP ownership, retention/export and broad lifecycle acceptance remain
+subsequent gates. The lossy W05b diagnostic channel is not an authoritative input.
+
+Verification extends the existing evidence suite for full-snapshot reopen, replay
+and conflict, concurrent winners, failed/ignored insert rollback, unavailable versus
+zero, malformed input and corrupt reads. The existing child-process fixture covers
+committed and uncommitted observations; these are process-exit tests, not power-loss
+acceptance. No separate ledger or proxy test suite was introduced.
+
+## Canonical terminal settlement (W05c/d storage foundation)
+
+`SqliteLedger::settle_terminal_durable(scope, execution_id)` reads the retained
+intent and immutable observation inside one immediate transaction, then settles
+using its **stored** charge. It accepts no caller charge and never reruns the
+billable calculation. The same receipt-writing transaction helper serves existing
+untracked receipt callers; no second receipt ledger or charge derivation is added.
+
+Only `Final` + `ProviderReported` snapshots settle, including explicit zero.
+Unavailable, partial and estimated usage return `UnresolvedObservation` and retain
+the entire reservation through expiry. Missing snapshots return `MissingObservation`;
+missing intents, corrupt data and wrong scopes also reject without releasing
+liability. Amendment and remaining-liability rules are still needed before other
+usage states can settle automatically. A provider-reported basis is a stored contract
+fact, not independent proof that the provider's usage or executed cache reuse is accurate.
+
+`Committed` records the settlement and receipt together. Concurrent or later replay,
+including after reopen or receipt acknowledgement, returns `AlreadyCommitted` with
+the original receipt. A historical receipt with a conflicting charge is preserved
+and rejected, never rewritten. Scope matching remains a storage guard rather than
+caller authorization; an eventual HTTP owner must supply authenticated scope.
+
+This deliberately tightens the **opt-in tracked** contract: `settle_with_evidence_durable`
+returns `TrackedSettlementRequired` for a tracked reservation even when the supplied
+charge happens to match; legacy `settle_durable` returns a SQLite constraint error.
+Both guards run within the write transaction. The legacy void `EnforcementLedger::settle`
+cannot report that error but cannot update the tracked reservation; it is unsuitable
+for an authoritative owner. Existing untracked outcomes and receipts stay unchanged.
+Migration helpers and raw database access are trusted maintenance surfaces, not
+alternative runtime settlement APIs.
+
+The evidence owner covers frozen-charge use, bypass attempts before/after observation
+and settlement, unresolved versus measured-zero liability, corrupt/missing observations,
+rollback on ignored/failed receipt insertion, concurrent replay, reopen and acknowledged
+replay. The existing child-process fixture also exits after canonical settlement and
+verifies the committed pair on reopen. These are process-exit tests, not power-loss
+acceptance. Existing receipt tests still own shared transaction failure behavior;
+no duplicate test suite was introduced.
+
+This library increment does not activate HTTP settlement, a recovery worker,
+physical-attempt correlation, exporter, sharded intent admission or topology migration.
+Keep unresolved snapshots and historical receipts; a compatible binary/owner is required
+for rollback. Full lifecycle and mixed-team C5 acceptance remain open.
+
+## Bounded terminal recovery inventory (W05d storage foundation)
+
+`SqliteLedger::recovery_page_durable(scope, cursor, limit)` accepts a page limit
+of 1–100 and returns at most that many records (no matching records yields an empty
+terminal page). The first page
+freezes the highest existing tracked reservation ID in that scope. Subsequent pages
+use that upper bound and the last returned reservation ID; there is no second
+identifier derivation or mutable-state filter before the page limit. Untracked
+reservations and other scopes do not consume the page. New admissions beyond the
+upper bound wait for the next sweep. Each page has one short read transaction;
+state can change between pages, and a fresh sweep is required for late observations
+on previously visited records.
+
+Records distinguish missing terminal observations, unresolved usage, observations
+ready for canonical settlement, and already-settled executions with a consistent
+receipt, including acknowledged receipts. Eligibility uses the canonical settlement
+predicate: final provider-reported usage, including measured zero. Inventory never
+recomputes the stored charge, changes spend/liability, claims work, retries inference
+or releases reservations. A returned candidate is not a lock: a future recovery
+owner must call `settle_terminal_durable`, which revalidates and returns the original
+receipt if another owner already committed it.
+
+Malformed snapshots, orphaned intent/observation bindings and inconsistent receipts
+fail explicitly. An orphan's scope is unknown, so its presence blocks any scoped
+inventory without disclosing record details. Settled state, actual charge, frozen
+charge, receipt scope/identity/charge and timestamp must agree. Canonical terminal
+settlement uses the same receipt-consistency check. Historical settlement without
+a receipt is an error, not a repaired or silently omitted row. No mutation is
+performed when reporting these errors.
+
+The opaque in-process cursor belongs to the original ledger and fixed topology;
+it is not portable across database replacement, restore or sharding changes. Scope
+matching is not caller authorization. Page completion is neither a whole-database
+integrity certificate nor proof of no remaining recovery work. Returned records and
+lookahead allocation are bounded; SQLite execution latency is not thereby bounded.
+There is no HTTP activation, recovery worker, durable scheduler, observation amendment,
+exporter or retention policy in this increment. Older writers still require the
+compatibility restrictions above.
+
+The existing evidence suite owns pagination tests: interleaved scopes, frozen upper
+bounds with concurrent admissions/state updates, reopened/acknowledged receipts,
+invalid cursor/input limits, corrupt bindings/snapshots/receipts, and read-only spend,
+liability and row-change conservation. The existing completeness/basis matrix is
+extended to verify inventory classification rather than duplicated.
+
 ## Proposed physical-attempt state machine (W05b–d)
+
+### Owned settlement transition (W05c foundation)
+
+`sandhi_proxy::settlement::PendingSettlement` freezes a caller-provided execution
+request ID, reservation and cache-inclusive `billable(UsageV2)` once. Its consuming
+`try_commit` delegates to W05a's existing scope-routed atomic receipt transaction;
+it introduces no second ledger, charge derivation or receipt identity. `Committed`
+means that transaction returned a new or replayed receipt, not that an event reached
+the dashboard or a consumer. Logical deduplication is a separate operation.
+
+`Unresolved` returns the original owned attempt and a structured reason: busy or
+poisoned proxy mutex, missing reservation, volatile ledger, unavailable usage, or
+the store's evidence error. Unknown usage is not converted to a measured zero.
+Partial measured usage retains its observed charge. A caller can retry the same
+frozen settlement; this API never retries inference. The proxy mutex is acquired
+without waiting, but SQLite's configured busy timeout still applies. There is no
+end-to-end settlement deadline or guaranteed commit.
+
+Retries must use the original admission ledger and unchanged shard topology.
+Reservation IDs are ledger-local; this primitive does not authenticate request IDs
+or bind them to a database identity. A poisoned internal evidence-shard mutex now
+returns `EvidenceError::ShardPoisoned` for settlement, claim and acknowledgement,
+instead of unwinding through the consuming settlement transition.
+
+The primitive is library-only: existing HTTP finalization and defaults are unchanged.
+Unresolved ownership is volatile, not a durable recovery queue; dropping it or
+crashing can still lose the observation. W05d's pre-dispatch intent, reclaim/late
+settlement and recovery contract remains required, as does W05e's retention policy
+before enabling receipt creation on production traffic. No standalone activation
+switch, background retry worker, exporter or automatic pruning is added.
+
+The existing proxy ledger test owner covers frozen-charge retry under contention,
+reclaimed-lease propagation, and explicit unknown/unleased/volatile/poisoned outcomes.
+The store's transaction/replay/rollback suite remains the single owner for W05a's
+database contract; it is not duplicated in proxy tests.
+
+### Remaining durable lifecycle
 
 Persist admission/dispatch intent before a potentially billable send. A crash between intent and
 send is uncertain, not proven execution. Record transport dispatch and terminal observation
@@ -172,3 +388,168 @@ credential-generation evidence only after SP2; its lookup is not a model attempt
 supplies browser action evidence only after AB04's correlation/retention contract; a browser
 action is not a token charge. Opaque run IDs correlate facts but never authorize cross-tenant reads.
 No sibling changes, external issue/PR, consumer sign-off or live service test is implied.
+
+
+## Owned tracked terminal settlement (W05c integration foundation)
+
+`PendingSettlement::tracked(request_id, intent, usage)` owns the complete immutable
+`UsageV2` and the existing execution intent. `try_commit` validates the full binding
+against the original ledger (expiry uses its persisted whole-second precision),
+records terminal usage, and calls canonical stored-charge
+settlement. It does not calculate a second charge. `charge()` remains the legacy
+caller-charge accessor and returns `None` for tracked attempts; the committed receipt
+is the authoritative charge result.
+
+An unresolved result returns the owner, including its original usage and identity.
+`observation_recorded()` distinguishes an observation not yet confirmed stored from
+one whose record/replay succeeded but whose settlement remains unresolved. The latter
+is not a settlement acknowledgement. Exact replay revalidates the immutable stored
+observation before attempting settlement again. Unknown usage is recorded and retains
+liability; a caller must not replace it with invented zero usage or retry inference.
+
+This bridge supports one file-backed ledger only. Volatile ledgers (including SQLite
+memory/temporary databases), multiple shards, missing intents, incorrect reservation
+metadata and poisoned locks fail explicitly before recording an observation. Use the
+original database and fixed topology; scope matching is not authentication. The bridge
+is an opt-in library API and does not add tracked admission to the HTTP request path.
+
+The existing settlement-owner tests cover proxy-lock contention, separate injected
+observation and receipt failures, retained ownership, reopen/replay, invalid bindings,
+unsupported ledgers and unknown liability. The existing shard-poison test covers the
+new forwarding methods. Canonical charge eligibility, atomicity and corruption remain
+owned by the store tests, without a duplicated matrix.
+
+The outer mutex attempt does not wait, but SQLite and the inner shard mutex can wait.
+The existing 120-second buffered transport bound is not an established end-to-end
+settlement deadline. Before HTTP activation, finish proven-never-dispatched liability
+handling, typed finalization results, bounded blocking-job ownership, shutdown/restart
+recovery, retention/export and lifecycle acceptance. Old writers and incompatible
+rollback remain unsafe for tracked reservations.
+
+## Durable dispatch fence (W05d storage prerequisite)
+
+A new opt-in `SqliteLedger::reserve_prepared_durable` commits a reservation, its
+existing execution identity and a `Prepared` fence in one transaction. It requires
+file-backed storage and shares the existing admission/capacity authority. Existing
+`reserve_with_intent_durable` callers, both historical and newly admitted, remain
+unfenced: their dispatch outcome is unknown, so they cannot prove never-dispatched
+closure. The additive table does not backfill such proof.
+
+`authorize_dispatch_durable` and `close_before_dispatch_durable` take the same
+SQLite write lock and validate binding, phase and evidence before changing state:
+
+- `Prepared` to authorized checks lease expiry after acquiring the lock. Only the
+  first successful commit returns a private, non-Clone `DispatchPermit`. Repeated
+  authorization, lost permits and uncertain commit responses never return another
+  permit. Authorized means **may have dispatched**, not proof of a physical send.
+- `Prepared` to closed releases the reservation atomically with distinct
+  `PreDispatchClosure` evidence. Replays return the original closure. This produces
+  neither provider-reported zero usage nor a settlement-outbox receipt.
+- Authorized executions retain liability until the existing terminal observation
+  and canonical settlement path resolves it. Closure cannot cancel an authorization.
+  Closed/prepared executions reject terminal observation and settlement.
+
+Recovery inventory distinguishes prepared, may-have-dispatched and closed records;
+legacy unfenced records retain their prior states. Corruption fails closed. Closed
+identities still count toward the existing retained-intent bound; there is no pruning
+or TTL-based inference retry. Methods return errors without consuming the caller's
+execution identity, allowing reconciliation against the original ledger.
+
+This is a storage prerequisite, **not HTTP dispatch enforcement or cancellation
+acceptance**. The caller must transfer and consume the permit at its owned dispatch
+boundary; this change adds no network call, proxy admission switch, recovery worker,
+shard migration or shutdown job. Existing HTTP/default behavior remains unchanged.
+Scope checks are binding validation, not caller authorization. Older writers cannot
+safely operate on fenced ledgers; retain the compatible writer/schema for rollback.
+
+Tests extend the existing store evidence suite: reopen/closure without fabricated
+usage, lost-permit/repeated authorization, conservative legacy migration, both winners
+under competing SQLite connections, atomic rollback on injected write failure, expired
+leases and damaged phase/evidence. Existing terminal/settlement and proxy-cancellation
+tests keep their distinct invariants; no duplicate suite was added or removed.
+
+## Owned admission and dispatch handoff (W05c integration prerequisite)
+
+`PendingDispatch` consumes an existing admission intent and its logical request ID.
+Its explicit `try_authorize` and `try_close` operations return either an authorized
+execution, durable closure, or the unchanged owner with a typed failure. The
+`ShardedLedger` forwarding methods reuse one full original-intent binding check
+with terminal observation, including persisted whole-second expiry precision.
+Single file-backed storage, unchanged topology and the original database remain
+required. Scope matching is not caller authorization.
+
+Only the first successful dispatch transition returns `AuthorizedExecution`, which
+privately retains the non-Clone permit and original intent. Replayed authorization
+and attempted closure after authorization return `MayHaveDispatched` without a new
+permit. Uncertainty belongs to the new dispatch result; the existing public settlement
+`Failure` enum remains unchanged for Rust callers. `into_settlement(actual_usage)` consumes the authorized owner and hands its
+unchanged identity and usage to the existing canonical terminal-settlement owner;
+it does not derive another charge or create another execution ID.
+
+Neither owner performs I/O on Drop. Abandoning a prepared or authorized owner leaves
+durable liability for reconciliation, without a usage record, zero settlement,
+background task or inference retry. This does not yet guarantee automatic cleanup.
+The shared proxy-ledger access helper preserves the existing typed lock/storage
+failure behavior. Its outer mutex attempt does not wait, but SQLite and inner shard
+locks can wait; `try_*` is not an end-to-end timeout guarantee.
+
+HTTP admission, dispatch and finalization remain unwired. The next gate is bounded
+blocking-job ownership and shutdown/restart handoff, followed by opt-in HTTP
+integration. Recheck cancellation/cutoff after authorization and immediately before
+the existing common dispatch boundary; a lifecycle guard acquired before a SQLite
+wait does not prove authorization before cutoff. A lost caller after authorization
+must not fabricate an immutable unavailable observation merely to end ownership.
+
+Two focused owner tests cover contention/write failures, abandonment, reopening,
+no second permit, closure replay and identity-preserving settlement handoff. The
+existing binding/topology and shard-poison fixtures also cover the new operations;
+store transition matrices and existing proxy cancellation tests remain their sole
+coverage owners. No redundant test cases were identified for removal.
+
+## Bounded blocking ownership (W05c integration prerequisite)
+
+The opt-in `settlement::jobs::Jobs` supervisor runs only the existing authorize,
+never-dispatched closure and canonical settlement transitions. It is not an
+inference executor, retry scheduler or new receipt writer. HTTP remains unwired.
+Its fixed slot limit includes queued work, running work and completed/unclaimed
+results. Full, closed and missing-runtime admissions return the unchanged input;
+there is no unbounded fallback. This is a count bound, not a total byte bound:
+trusted callers must also limit input sizes.
+
+A worker owns lifecycle admission independently of its waiter. Its private inert
+input snapshot remains in the registry while the consuming transition runs.
+Cancellation before the blocking closure starts or an unwind publishes an explicit
+`Interrupted` outcome before releasing lifecycle admission, and closes further
+submissions. An interrupted authorization never recreates a dispatch permit.
+An interrupted settlement's in-memory `observation_recorded` flag may be stale:
+the database can have committed before publication failed. Reconcile against the
+original ledger; never infer rollback, repeat inference or fabricate zero usage.
+Runtime shutdown alone does not cancel queued/running blocking work.
+
+`Ticket::wait` only observes level-triggered readiness. Dropping a ticket or its
+waiter cannot remove a result or free capacity. Explicit synchronous `take` or the
+supervisor's `take_ready` transfers a completed result exactly once under the
+registry lock. No pending snapshot is externally claimable while work can run.
+Capacity is released only at that transfer; the receiving owner then bears the
+reconciliation responsibility. The manager must remain alive through draining and
+result collection. Dropping all manager/ticket/worker references or losing the
+process loses unpersisted RAM evidence; retained results are **not durable**.
+
+Drain uses the lifecycle's original absolute deadline, without extending it or
+pretending a dropped task handle stops SQLite. Its report distinguishes shared
+active operations from this supervisor's retained slots. Zero active operations
+with retained results means workers have drained, not that accounting is resolved.
+No drain report activates HTTP settlement or establishes restart acceptance.
+
+Focused worker tests cover cancellation, full/completed capacity, unwind after
+consuming input, actual queued-job cancellation, competing result consumers and
+blocked work crossing cutoff. The existing ledger handoff/reopen/receipt fixture
+now uses the worker, including injected interruption after real authorization and
+settlement commits. It verifies no second permit and no second charge. Existing
+SQL failure, scope and corruption matrices remain their single coverage owners;
+no redundant tests were identified for removal.
+
+Next: explicit HTTP admission/finalization ownership, bounded recovery of retained
+and persisted uncertainty, lifecycle acceptance, promotion/release/deployment,
+then the actual six-Qwen/one-ZAI C5 run. A process-local supervisor alone does not
+close W05c–e, G62 or C5.

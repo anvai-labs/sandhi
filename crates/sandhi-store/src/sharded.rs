@@ -29,7 +29,10 @@ use std::sync::Mutex;
 
 use time::OffsetDateTime;
 
-use crate::ledger::evidence::{ClaimedSettlement, EvidenceError, SettlementOutcome};
+use crate::ledger::evidence::{
+    ClaimedSettlement, ClosureOutcome, DispatchOutcome, EvidenceError, ExecutionIntent,
+    IntentAdmission, ObservationOutcome, SettlementOutcome,
+};
 use crate::ledger::{BudgetRow, ReserveOutcome, SqliteLedger};
 use sandhi_core::{Policy, Window};
 
@@ -156,9 +159,106 @@ impl ShardedLedger {
         reservation_id: u64,
         charged_tokens: u64,
     ) -> Result<SettlementOutcome, EvidenceError> {
-        self.with_shard(scope, |ledger| {
-            ledger.settle_with_evidence_durable(scope, reservation_id, charged_tokens)
-        })
+        self.shard_for(scope)
+            .lock()
+            .map_err(|_| EvidenceError::ShardPoisoned)?
+            .settle_with_evidence_durable(scope, reservation_id, charged_tokens)
+    }
+
+    fn tracked_ledger(&self) -> Result<std::sync::MutexGuard<'_, SqliteLedger>, EvidenceError> {
+        if self.shards.len() != 1 {
+            return Err(EvidenceError::UnsupportedTrackedLedger);
+        }
+        let ledger = self.shards[0]
+            .lock()
+            .map_err(|_| EvidenceError::ShardPoisoned)?;
+        if !ledger.is_file_backed() {
+            return Err(EvidenceError::UnsupportedTrackedLedger);
+        }
+        Ok(ledger)
+    }
+
+    /// Record immutable terminal usage for the exact original admission. This bridge
+    /// supports only a single file-backed ledger; use the original database and fixed
+    /// topology. Caller-supplied reservation metadata must match the persisted intent.
+    /// It confers no caller authorization and does not enable tracked HTTP admission.
+    pub fn record_terminal_for_intent_durable(
+        &self,
+        intent: &ExecutionIntent,
+        usage: &sandhi_core::UsageV2,
+    ) -> Result<ObservationOutcome, EvidenceError> {
+        let mut ledger = self.tracked_ledger()?;
+        let original = Self::checked_intent(&ledger, intent)?;
+        ledger.record_terminal_durable(&original.reservation.scope, &original.execution_id, usage)
+    }
+
+    // One full binding check shared by terminal evidence and dispatch transitions.
+    fn checked_intent(
+        ledger: &SqliteLedger,
+        intent: &ExecutionIntent,
+    ) -> Result<ExecutionIntent, EvidenceError> {
+        let original = ledger
+            .intent_durable(&intent.execution_id)?
+            .ok_or(EvidenceError::MissingIntent)?;
+        if original.reservation.scope != intent.reservation.scope {
+            return Err(EvidenceError::WrongScope);
+        }
+        // Admission returns the caller's timestamp precision; SQLite persists
+        // expiry as whole Unix seconds. Compare the binding at that precision.
+        if original.reservation.id != intent.reservation.id
+            || original.reservation.ceiling != intent.reservation.ceiling
+            || original.reservation.expires_at.unix_timestamp()
+                != intent.reservation.expires_at.unix_timestamp()
+        {
+            return Err(EvidenceError::InvalidInput);
+        }
+        Ok(original)
+    }
+
+    /// Commit opt-in Prepared admission on the original single file-backed ledger.
+    /// This is not HTTP activation; topology and retained intent bounds remain fixed.
+    pub fn reserve_prepared_durable(
+        &self,
+        scope: &str,
+        ceiling: u64,
+        now: OffsetDateTime,
+        ttl: time::Duration,
+        retained_limit: usize,
+    ) -> Result<IntentAdmission, EvidenceError> {
+        self.tracked_ledger()?
+            .reserve_prepared_durable(scope, ceiling, now, ttl, retained_limit)
+    }
+
+    /// Validate the original admission before requesting its one dispatch permit.
+    /// Scope matching is not caller authorization; a replay never gets another permit.
+    pub fn authorize_dispatch_for_intent_durable(
+        &self,
+        intent: &ExecutionIntent,
+    ) -> Result<DispatchOutcome, EvidenceError> {
+        let mut ledger = self.tracked_ledger()?;
+        let original = Self::checked_intent(&ledger, intent)?;
+        ledger.authorize_dispatch_durable(&original.reservation.scope, &original.execution_id)
+    }
+
+    /// Close only proven never-authorized admission, with full original binding checks.
+    pub fn close_before_dispatch_for_intent_durable(
+        &self,
+        intent: &ExecutionIntent,
+    ) -> Result<ClosureOutcome, EvidenceError> {
+        let mut ledger = self.tracked_ledger()?;
+        let original = Self::checked_intent(&ledger, intent)?;
+        ledger.close_before_dispatch_durable(&original.reservation.scope, &original.execution_id)
+    }
+
+    /// Canonical stored-charge settlement on the original single file-backed ledger.
+    /// Receipt/eligibility checks remain owned by SqliteLedger, including replay.
+    pub fn settle_terminal_durable(
+        &self,
+        scope: &str,
+        execution_id: &str,
+    ) -> Result<SettlementOutcome, EvidenceError> {
+        self.tracked_ledger()?
+            .settle_terminal_durable(scope, execution_id)
     }
 
     /// Local shard count for polling. Indices are not stable across topology changes and
@@ -178,7 +278,7 @@ impl ShardedLedger {
             .get(shard_index)
             .ok_or(EvidenceError::InvalidShard)?
             .lock()
-            .expect("ledger shard poisoned")
+            .map_err(|_| EvidenceError::ShardPoisoned)?
             .claim_settlements_durable(limit, now, lease_seconds)
     }
 
@@ -193,7 +293,7 @@ impl ShardedLedger {
             .get(shard_index)
             .ok_or(EvidenceError::InvalidShard)?
             .lock()
-            .expect("ledger shard poisoned")
+            .map_err(|_| EvidenceError::ShardPoisoned)?
             .acknowledge_settlement_durable(receipt_id, claim_token, now)
     }
 
@@ -296,6 +396,17 @@ impl ShardedLedger {
         {
             return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
                 std::io::Error::other("settlement evidence requires explicit shard migration"),
+            )));
+        }
+        if has_table("budget_execution_intent")?
+            && legacy.query_row(
+                "SELECT EXISTS(SELECT 1 FROM budget_execution_intent)",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?
+        {
+            return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                std::io::Error::other("execution intents require explicit shard migration"),
             )));
         }
         if !has_table("budget_reservation")? || !has_table("budget_limit")? {
@@ -409,6 +520,56 @@ mod tests {
             ReserveOutcome::Admitted(r) => r,
             ReserveOutcome::Denied(d) => panic!("unexpected denial: {d:?}"),
         }
+    }
+
+    #[test]
+    fn poisoned_shard_returns_evidence_error_instead_of_unwinding() {
+        let ledger = ShardedLedger::open_sharded(":memory:", 1).unwrap();
+        let reservation = admitted(ledger.reserve_durable("scope", 100, now(), ttl()).unwrap());
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = ledger.shard_for("scope").lock().unwrap();
+            panic!("simulated shard owner failure");
+        }));
+        assert!(matches!(
+            ledger.settle_with_evidence_durable("scope", reservation.id, 9),
+            Err(EvidenceError::ShardPoisoned)
+        ));
+        assert!(matches!(
+            ledger.claim_settlements_durable(0, 1, now(), 30),
+            Err(EvidenceError::ShardPoisoned)
+        ));
+        assert!(matches!(
+            ledger.acknowledge_settlement_durable(0, "receipt", "claim", now()),
+            Err(EvidenceError::ShardPoisoned)
+        ));
+        let intent = ExecutionIntent {
+            execution_id: "a".repeat(64),
+            reservation,
+        };
+        assert!(matches!(
+            ledger.record_terminal_for_intent_durable(&intent, &sandhi_core::UsageV2::default()),
+            Err(EvidenceError::ShardPoisoned)
+        ));
+        assert!(matches!(
+            ledger.settle_terminal_durable("scope", &intent.execution_id),
+            Err(EvidenceError::ShardPoisoned)
+        ));
+        assert!(matches!(
+            ledger.reserve_prepared_durable("scope", 100, now(), ttl(), 10),
+            Err(EvidenceError::ShardPoisoned)
+        ));
+        assert!(matches!(
+            ledger.authorize_dispatch_for_intent_durable(&intent),
+            Err(EvidenceError::ShardPoisoned)
+        ));
+        assert!(matches!(
+            ledger.close_before_dispatch_for_intent_durable(&intent),
+            Err(EvidenceError::ShardPoisoned)
+        ));
+        assert_eq!(
+            EvidenceError::ShardPoisoned.to_string(),
+            "settlement evidence shard poisoned"
+        );
     }
 
     #[test]

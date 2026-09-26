@@ -22,9 +22,8 @@ use time::{Duration, OffsetDateTime};
 use sandhi_core::{EnforcementLedger, InMemoryLedger, LedgerView, Policy, Reservation, Window};
 use sandhi_store::{ReserveOutcome, ShardedLedger};
 
-/// Lease TTL. Must exceed the longest legitimate call (a slow stream can run minutes) so a lease is
-/// only reclaimed well after the request could still be settling (ADR-0005 D2). The proxy settles
-/// every request — including `Partial`-on-disconnect — via the `Drop` finalizer long before this.
+/// Lease TTL. Admission deadlines leave settlement headroom, but blocking finalizers
+/// can outlive this lease. Drop alone does not guarantee a durable charge before reclaim.
 pub(crate) const RESERVATION_TTL_SECS: i64 = 900; // 15 minutes
 
 /// Outcome of admitting one call against the ledger (ADR-0005 D1/D6).
@@ -255,6 +254,642 @@ pub fn reclaim_sweep_at(ledger: &Mutex<ProxyLedger>, now: OffsetDateTime) -> usi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owned_settlement_refuses_unknown_usage_unleased_and_volatile_success() {
+        use crate::settlement::{Attempt, Failure, PendingSettlement};
+        use sandhi_core::{UsageCompleteness, UsageV2};
+        for mode in ["unknown", "unleased", "volatile", "poisoned"] {
+            let mut inner = if mode == "volatile" {
+                ProxyLedger::in_memory()
+            } else {
+                ProxyLedger::durable(":memory:", 1).unwrap()
+            };
+            let Admission::Leased(lease) = inner.reserve("scope", 100, now(), Policy::Block) else {
+                panic!("lease");
+            };
+            let usage = UsageV2 {
+                tokens_out: 9,
+                completeness: if mode == "unknown" {
+                    UsageCompleteness::Unavailable
+                } else {
+                    UsageCompleteness::Final
+                },
+                ..Default::default()
+            };
+            let reservation = (mode != "unleased").then_some(lease);
+            let pending = PendingSettlement::new(mode.into(), reservation.clone(), &usage);
+            let ledger = Mutex::new(inner);
+            if mode == "poisoned" {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _guard = ledger.lock().unwrap();
+                    panic!("simulated owner failure");
+                }));
+            }
+            let Attempt::Unresolved { pending, failure } = pending.try_commit(&ledger) else {
+                panic!("{mode} must not produce a durable receipt");
+            };
+            assert_eq!(pending.request_id(), mode);
+            assert_eq!(pending.reservation(), reservation.as_ref());
+            assert_eq!(pending.charge(), (mode != "unknown").then_some(9));
+            assert!(matches!(
+                (mode, failure),
+                ("unknown", Failure::UnknownUsage)
+                    | ("unleased", Failure::NoReservation)
+                    | ("volatile", Failure::NonDurableLedger)
+                    | ("poisoned", Failure::LedgerPoisoned)
+            ));
+            let guard = ledger.lock().unwrap_or_else(|poison| poison.into_inner());
+            assert_eq!(guard.spent("scope"), 0);
+            assert_eq!(guard.reserved("scope"), 100);
+        }
+    }
+
+    #[test]
+    fn owned_settlement_retains_frozen_usage_until_retry_commits() {
+        use crate::settlement::{Attempt, Failure, PendingSettlement};
+        use sandhi_core::{UsageCompleteness, UsageV2};
+        use sandhi_store::ledger::evidence::SettlementOutcome;
+        let mut ledger = ProxyLedger::durable(":memory:", 2).unwrap();
+        let Admission::Leased(lease) = ledger.reserve("scope", 100, now(), Policy::Block) else {
+            panic!("lease");
+        };
+        let mut usage = UsageV2 {
+            tokens_in: 11,
+            tokens_out: 7,
+            cache_read_tokens: 3,
+            completeness: UsageCompleteness::Final,
+            ..Default::default()
+        };
+        let pending = PendingSettlement::new("request-frozen".into(), Some(lease.clone()), &usage);
+        usage.tokens_in = 999;
+        let ledger = Mutex::new(ledger);
+        let guard = ledger.lock().unwrap();
+        let Attempt::Unresolved {
+            pending,
+            failure: Failure::LedgerBusy,
+        } = pending.try_commit(&ledger)
+        else {
+            panic!("contended ledger must retain the attempt");
+        };
+        assert_eq!(pending.request_id(), "request-frozen");
+        assert_eq!(pending.reservation(), Some(&lease));
+        assert_eq!(pending.charge(), Some(21));
+        assert_eq!(guard.spent("scope"), 0);
+        drop(guard);
+        assert!(ledger.lock().unwrap().seen("key", "logical").is_none());
+        let Attempt::Committed {
+            request_id,
+            outcome: SettlementOutcome::Committed(receipt),
+        } = pending.try_commit(&ledger)
+        else {
+            panic!("same frozen attempt should commit");
+        };
+        assert_eq!(request_id, "request-frozen");
+        assert_eq!(receipt.reservation_id, lease.id);
+        assert_eq!(receipt.charged_tokens, 21);
+        assert_eq!(ledger.lock().unwrap().spent("scope"), 21);
+        // A ledger receipt is not a logical-event delivery or dedup acknowledgement.
+        assert!(ledger.lock().unwrap().seen("key", "logical").is_none());
+    }
+
+    #[test]
+    fn owned_settlement_propagates_reclaim_failure_without_losing_identity() {
+        use crate::settlement::{Attempt, Failure, PendingSettlement};
+        use sandhi_core::{UsageCompleteness, UsageV2};
+        use sandhi_store::ledger::evidence::EvidenceError;
+        let mut ledger = ProxyLedger::durable(":memory:", 1).unwrap();
+        let Admission::Leased(lease) = ledger.reserve("scope", 100, now(), Policy::Block) else {
+            panic!("lease");
+        };
+        ledger.reclaim_expired(lease.expires_at);
+        let pending = PendingSettlement::new(
+            "request-reclaimed".into(),
+            Some(lease.clone()),
+            &UsageV2 {
+                tokens_out: 9,
+                completeness: UsageCompleteness::Partial,
+                ..Default::default()
+            },
+        );
+        let ledger = Mutex::new(ledger);
+        let Attempt::Unresolved {
+            pending,
+            failure: Failure::Evidence(EvidenceError::MissingReservation),
+        } = pending.try_commit(&ledger)
+        else {
+            panic!("reclaimed is not committed");
+        };
+        assert_eq!(pending.request_id(), "request-reclaimed");
+        assert_eq!(pending.reservation(), Some(&lease));
+        assert_eq!(pending.charge(), Some(9));
+        assert_eq!(ledger.lock().unwrap().spent("scope"), 0);
+    }
+
+    #[test]
+    fn tracked_owner_retains_evidence_across_contention_storage_failure_and_reopen() {
+        use crate::settlement::{Attempt, Failure, PendingSettlement};
+        use sandhi_core::{UsageBasis, UsageCompleteness, UsageV2};
+        use sandhi_store::ledger::{
+            evidence::{IntentAdmission, SettlementOutcome},
+            SqliteLedger,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.db");
+        let path = path.to_str().unwrap();
+        let mut store = SqliteLedger::open(path).unwrap();
+        let IntentAdmission::Admitted(intent) = store
+            .reserve_with_intent_durable(
+                "scope",
+                100,
+                now() + Duration::nanoseconds(123),
+                Duration::seconds(30),
+                10,
+            )
+            .unwrap()
+        else {
+            panic!("admitted");
+        };
+        let usage = UsageV2 {
+            tokens_in: 11,
+            tokens_out: 7,
+            cache_read_tokens: 3,
+            completeness: UsageCompleteness::Final,
+            basis: UsageBasis::ProviderReported,
+            ..Default::default()
+        };
+        let pending =
+            PendingSettlement::tracked("actual-request".into(), intent.clone(), usage.clone());
+        let ledger = Mutex::new(ProxyLedger::durable(path, 1).unwrap());
+        let held = ledger.lock().unwrap();
+        let Attempt::Unresolved {
+            pending,
+            failure: Failure::LedgerBusy,
+        } = pending.try_commit(&ledger)
+        else {
+            panic!("retain while busy");
+        };
+        assert_eq!(pending.terminal_usage(), Some(&usage));
+        assert_eq!(pending.observation_recorded(), Some(false));
+        drop(held);
+        let injector = rusqlite::Connection::open(path).unwrap();
+        injector.execute_batch("CREATE TRIGGER reject_observation BEFORE INSERT ON budget_terminal_observation BEGIN SELECT RAISE(ABORT, 'injected'); END;").unwrap();
+        let Attempt::Unresolved {
+            pending,
+            failure: Failure::Evidence(_),
+        } = pending.try_commit(&ledger)
+        else {
+            panic!("retain unstored usage");
+        };
+        assert_eq!(pending.observation_recorded(), Some(false));
+        assert!(store
+            .terminal_durable("scope", &intent.execution_id)
+            .unwrap()
+            .is_none());
+        injector.execute_batch("DROP TRIGGER reject_observation; CREATE TRIGGER reject_receipt BEFORE INSERT ON budget_settlement_outbox BEGIN SELECT RAISE(ABORT, 'injected'); END;").unwrap();
+        let Attempt::Unresolved {
+            pending,
+            failure: Failure::Evidence(_),
+        } = pending.try_commit(&ledger)
+        else {
+            panic!("retain stored usage until receipt commits");
+        };
+        assert_eq!(pending.observation_recorded(), Some(true));
+        assert_eq!(pending.terminal_usage(), Some(&usage));
+        assert_eq!(pending.reservation(), Some(&intent.reservation));
+        assert_eq!(pending.request_id(), "actual-request");
+        assert_eq!(pending.charge(), None); // Only storage derives tracked charge.
+        assert_eq!(
+            store
+                .terminal_durable("scope", &intent.execution_id)
+                .unwrap()
+                .unwrap()
+                .usage,
+            usage
+        );
+        assert_eq!(store.spent_durable("scope").unwrap(), 0);
+        assert_eq!(store.reserved_durable("scope").unwrap(), 100);
+        drop(ledger);
+        injector
+            .execute_batch("DROP TRIGGER reject_receipt")
+            .unwrap();
+        let ledger = Mutex::new(ProxyLedger::durable(path, 1).unwrap());
+        let Attempt::Committed {
+            outcome: SettlementOutcome::Committed(receipt),
+            ..
+        } = pending.try_commit(&ledger)
+        else {
+            panic!("reopened owner commits");
+        };
+        assert_eq!(receipt.charged_tokens, 21);
+        let replay = PendingSettlement::tracked("actual-request".into(), intent, usage);
+        let Attempt::Committed {
+            outcome: SettlementOutcome::AlreadyCommitted(original),
+            ..
+        } = replay.try_commit(&ledger)
+        else {
+            panic!("replay same receipt");
+        };
+        assert_eq!(original, receipt);
+        assert_eq!(store.spent_durable("scope").unwrap(), 21);
+        assert!(ledger.lock().unwrap().seen("key", "logical").is_none());
+    }
+
+    #[test]
+    fn tracked_owner_rejects_wrong_binding_and_unsupported_ledgers_before_observation() {
+        use crate::settlement::{
+            Attempt, DispatchAttempt, Failure, PendingDispatch, PendingSettlement,
+        };
+        use sandhi_core::UsageV2;
+        use sandhi_store::ledger::{
+            evidence::{EvidenceError, IntentAdmission},
+            SqliteLedger,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.db");
+        let path = path.to_str().unwrap();
+        let mut store = SqliteLedger::open(path).unwrap();
+        let IntentAdmission::Admitted(intent) = store
+            .reserve_with_intent_durable("scope", 100, now(), Duration::seconds(30), 10)
+            .unwrap()
+        else {
+            panic!("admitted");
+        };
+        let assert_failure = |mode: &str, failure: Failure| {
+            assert!(
+                matches!(
+                    (mode, failure),
+                    (
+                        "wrong-reservation" | "wrong-ceiling" | "wrong-expiry",
+                        Failure::Evidence(EvidenceError::InvalidInput)
+                    ) | (
+                        "missing-intent",
+                        Failure::Evidence(EvidenceError::MissingIntent)
+                    ) | ("wrong-scope", Failure::Evidence(EvidenceError::WrongScope))
+                        | ("memory", Failure::NonDurableLedger)
+                        | (
+                            "sqlite-memory" | "sqlite-temporary" | "multiple",
+                            Failure::Evidence(EvidenceError::UnsupportedTrackedLedger)
+                        )
+                        | ("poisoned", Failure::LedgerPoisoned)
+                ),
+                "{mode}"
+            );
+        };
+        for mode in [
+            "wrong-reservation",
+            "wrong-ceiling",
+            "wrong-expiry",
+            "missing-intent",
+            "wrong-scope",
+            "memory",
+            "sqlite-memory",
+            "sqlite-temporary",
+            "multiple",
+            "poisoned",
+        ] {
+            let mut supplied = intent.clone();
+            let inner = match mode {
+                "memory" => ProxyLedger::in_memory(),
+                "sqlite-memory" => ProxyLedger::durable(":memory:", 1).unwrap(),
+                "sqlite-temporary" => ProxyLedger::durable("", 1).unwrap(),
+                "multiple" => {
+                    ProxyLedger::durable(dir.path().join("other.db").to_str().unwrap(), 2).unwrap()
+                }
+                _ => ProxyLedger::durable(path, 1).unwrap(),
+            };
+            if mode == "missing-intent" {
+                supplied.execution_id = "f".repeat(64);
+            }
+            if mode == "wrong-ceiling" {
+                supplied.reservation.ceiling += 1;
+            }
+            if mode == "wrong-expiry" {
+                supplied.reservation.expires_at += Duration::seconds(1);
+            }
+            if mode == "wrong-reservation" {
+                supplied.reservation.id += 1;
+            }
+            if mode == "wrong-scope" {
+                supplied.reservation.scope = "other".into();
+            }
+            let ledger = Mutex::new(inner);
+            if mode == "poisoned" {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _guard = ledger.lock().unwrap();
+                    panic!("injected");
+                }));
+            }
+            for authorize in [false, true] {
+                let owner = PendingDispatch::new(mode.into(), supplied.clone());
+                let DispatchAttempt::Unresolved { pending, failure } = (if authorize {
+                    owner.try_authorize(&ledger)
+                } else {
+                    owner.try_close(&ledger)
+                }) else {
+                    panic!("{mode} admission must reject")
+                };
+                assert_eq!(pending.intent(), &supplied);
+                assert_eq!(pending.request_id(), mode);
+                assert_failure(mode, failure);
+            }
+            let pending = PendingSettlement::tracked(mode.into(), supplied, UsageV2::default());
+            let Attempt::Unresolved { pending, failure } = pending.try_commit(&ledger) else {
+                panic!("{mode} must reject");
+            };
+            assert_failure(mode, failure);
+            assert_eq!(pending.observation_recorded(), Some(false), "{mode}");
+            assert!(store
+                .terminal_durable("scope", &intent.execution_id)
+                .unwrap()
+                .is_none());
+        }
+        assert_eq!(store.reserved_durable("scope").unwrap(), 100);
+    }
+
+    #[test]
+    fn tracked_owner_persists_unknown_usage_without_claiming_settlement() {
+        use crate::settlement::{Attempt, Failure, PendingSettlement};
+        use sandhi_core::UsageV2;
+        use sandhi_store::ledger::{
+            evidence::{EvidenceError, IntentAdmission},
+            SqliteLedger,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.db");
+        let path = path.to_str().unwrap();
+        let mut store = SqliteLedger::open(path).unwrap();
+        let IntentAdmission::Admitted(intent) = store
+            .reserve_with_intent_durable("scope", 100, now(), Duration::seconds(30), 10)
+            .unwrap()
+        else {
+            panic!("admitted");
+        };
+        let usage = UsageV2::default();
+        let pending = PendingSettlement::tracked("unknown".into(), intent.clone(), usage.clone());
+        let ledger = Mutex::new(ProxyLedger::durable(path, 1).unwrap());
+        let Attempt::Unresolved {
+            pending,
+            failure: Failure::Evidence(EvidenceError::UnresolvedObservation),
+        } = pending.try_commit(&ledger)
+        else {
+            panic!("unknown remains unresolved");
+        };
+        assert_eq!(pending.observation_recorded(), Some(true));
+        assert_eq!(pending.terminal_usage(), Some(&usage));
+        assert_eq!(
+            store
+                .terminal_durable("scope", &intent.execution_id)
+                .unwrap()
+                .unwrap()
+                .usage,
+            usage
+        );
+        assert_eq!(store.reserved_durable("scope").unwrap(), 100);
+    }
+
+    #[test]
+    fn dispatch_owner_retains_admission_across_lock_and_storage_failures() {
+        use crate::settlement::{DispatchAttempt, Failure, PendingDispatch};
+        use sandhi_store::ledger::{evidence::IntentAdmission, SqliteLedger};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dispatch.db");
+        let path = path.to_str().unwrap();
+        let ledger = Mutex::new(ProxyLedger::durable(path, 1).unwrap());
+        let inspector = SqliteLedger::open(path).unwrap();
+        for authorize in [false, true] {
+            let IntentAdmission::Admitted(intent) = (match &*ledger.lock().unwrap() {
+                ProxyLedger::Durable(store) => store
+                    .reserve_prepared_durable(
+                        "scope",
+                        100,
+                        OffsetDateTime::now_utc(),
+                        Duration::seconds(30),
+                        10,
+                    )
+                    .unwrap(),
+                _ => unreachable!(),
+            }) else {
+                panic!("admitted")
+            };
+            let pending = PendingDispatch::new("owned-request".into(), intent.clone());
+            let held = ledger.lock().unwrap();
+            let DispatchAttempt::Unresolved {
+                pending,
+                failure: Failure::LedgerBusy,
+            } = (if authorize {
+                pending.try_authorize(&ledger)
+            } else {
+                pending.try_close(&ledger)
+            })
+            else {
+                panic!("retain admission while busy")
+            };
+            assert_eq!(pending.intent(), &intent);
+            assert_eq!(pending.request_id(), "owned-request");
+            drop(held);
+            let injector = rusqlite::Connection::open(path).unwrap();
+            injector.execute_batch("CREATE TRIGGER reject_transition BEFORE UPDATE ON budget_dispatch_fence BEGIN SELECT RAISE(ABORT, 'injected'); END;").unwrap();
+            let DispatchAttempt::Unresolved {
+                pending,
+                failure: Failure::Evidence(_),
+            } = (if authorize {
+                pending.try_authorize(&ledger)
+            } else {
+                pending.try_close(&ledger)
+            })
+            else {
+                panic!("retain original admission on write failure")
+            };
+            assert_eq!(pending.intent(), &intent);
+            assert!(inspector
+                .terminal_durable("scope", &intent.execution_id)
+                .unwrap()
+                .is_none());
+            injector
+                .execute_batch("DROP TRIGGER reject_transition")
+                .unwrap();
+            // Abandoning the owner does not claim cleanup or create provider usage.
+            drop(pending);
+            assert!(inspector.reserved_durable("scope").unwrap() >= 100);
+            let recovered = PendingDispatch::new("owned-request".into(), intent.clone());
+            if authorize {
+                assert!(matches!(
+                    recovered.try_authorize(&ledger),
+                    DispatchAttempt::Authorized(_)
+                ));
+            } else {
+                assert!(matches!(
+                    recovered.try_close(&ledger),
+                    DispatchAttempt::Closed { .. }
+                ));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_owner_handoff_and_replay_never_grant_a_second_permit() {
+        use crate::settlement::jobs::{Jobs, Outcome, Work};
+        use crate::settlement::{Attempt, DispatchAttempt, PendingDispatch};
+        use sandhi_core::{UsageBasis, UsageCompleteness, UsageV2};
+        use sandhi_store::ledger::{
+            evidence::{IntentAdmission, SettlementOutcome},
+            SqliteLedger,
+        };
+        use std::sync::Arc;
+        async fn run(ledger: Arc<Mutex<ProxyLedger>>, work: Work) -> Outcome {
+            let jobs = Jobs::new(ledger, Arc::new(crate::lifecycle::Lifecycle::new()), 1);
+            let ticket = jobs.submit(work).unwrap();
+            ticket.wait().await;
+            ticket.take().unwrap()
+        }
+        async fn interrupt(ledger: Arc<Mutex<ProxyLedger>>, work: Work) -> Work {
+            let jobs = Jobs::new(ledger, Arc::new(crate::lifecycle::Lifecycle::new()), 1);
+            let ticket = jobs.interrupt_after_commit(work).unwrap();
+            ticket.wait().await;
+            let Some(Outcome::Interrupted(input)) = ticket.take() else {
+                panic!("uncertain commit")
+            };
+            input
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dispatch.db");
+        let path = path.to_str().unwrap();
+        let mut inspector = SqliteLedger::open(path).unwrap();
+        let ledger = Arc::new(Mutex::new(ProxyLedger::durable(path, 1).unwrap()));
+        let IntentAdmission::Admitted(intent) = (match &*ledger.lock().unwrap() {
+            ProxyLedger::Durable(store) => store
+                .reserve_prepared_durable(
+                    "scope",
+                    100,
+                    OffsetDateTime::now_utc() + Duration::nanoseconds(123),
+                    Duration::seconds(30),
+                    10,
+                )
+                .unwrap(),
+            _ => unreachable!(),
+        }) else {
+            panic!("admitted")
+        };
+        let Outcome::Dispatch(DispatchAttempt::Authorized(authorized)) = run(
+            ledger.clone(),
+            Work::Authorize(PendingDispatch::new("request".into(), intent.clone())),
+        )
+        .await
+        else {
+            panic!("first authorization")
+        };
+        assert_eq!(authorized.intent(), &intent);
+        assert_eq!(authorized.request_id(), "request");
+        drop(ledger);
+        let ledger = Arc::new(Mutex::new(ProxyLedger::durable(path, 1).unwrap()));
+        for close in [false, true] {
+            let replay = PendingDispatch::new("request".into(), intent.clone());
+            let DispatchAttempt::MayHaveDispatched { pending } = (if close {
+                replay.try_close(&ledger)
+            } else {
+                replay.try_authorize(&ledger)
+            }) else {
+                panic!("replay cannot authorize or close")
+            };
+            assert_eq!(pending.intent(), &intent);
+        }
+        let usage = UsageV2 {
+            tokens_in: 11,
+            tokens_out: 7,
+            completeness: UsageCompleteness::Final,
+            basis: UsageBasis::ProviderReported,
+            ..Default::default()
+        };
+        let pending = authorized.into_settlement(usage.clone());
+        assert_eq!(pending.request_id(), "request");
+        assert_eq!(pending.reservation(), Some(&intent.reservation));
+        assert_eq!(pending.terminal_usage(), Some(&usage));
+        let Work::Settle(pending) = interrupt(ledger.clone(), Work::Settle(pending)).await else {
+            panic!("original settlement")
+        };
+        // The snapshot predates the committed observation. Canonical reconciliation
+        // must discover the receipt, not trust the stale in-memory progress bit.
+        assert_eq!(pending.observation_recorded(), Some(false));
+        assert_eq!(pending.terminal_usage(), Some(&usage));
+        let Attempt::Committed {
+            outcome: SettlementOutcome::AlreadyCommitted(receipt),
+            ..
+        } = pending.try_commit(&ledger)
+        else {
+            panic!("canonical settlement")
+        };
+        assert_eq!(receipt.charged_tokens, 18);
+        assert_eq!(inspector.spent_durable("scope").unwrap(), 18);
+        // A lost authorized owner leaves uncertainty, never invented terminal zero.
+        let IntentAdmission::Admitted(lost) = inspector
+            .reserve_prepared_durable(
+                "scope",
+                50,
+                OffsetDateTime::now_utc(),
+                Duration::seconds(30),
+                10,
+            )
+            .unwrap()
+        else {
+            panic!("admitted")
+        };
+        let Work::Authorize(pending) = interrupt(
+            ledger.clone(),
+            Work::Authorize(PendingDispatch::new("lost".into(), lost.clone())),
+        )
+        .await
+        else {
+            panic!("original admission")
+        };
+        assert!(matches!(
+            pending.try_authorize(&ledger),
+            DispatchAttempt::MayHaveDispatched { .. }
+        ));
+        assert_eq!(inspector.reserved_durable("scope").unwrap(), 50);
+        assert!(inspector
+            .terminal_durable("scope", &lost.execution_id)
+            .unwrap()
+            .is_none());
+        let IntentAdmission::Admitted(closed) = inspector
+            .reserve_prepared_durable(
+                "scope",
+                10,
+                OffsetDateTime::now_utc(),
+                Duration::seconds(30),
+                10,
+            )
+            .unwrap()
+        else {
+            panic!("admitted")
+        };
+        let Outcome::Dispatch(DispatchAttempt::Closed {
+            request_id,
+            closure,
+        }) = run(
+            ledger.clone(),
+            Work::Close(PendingDispatch::new("closed".into(), closed.clone())),
+        )
+        .await
+        else {
+            panic!("closed")
+        };
+        assert_eq!(request_id, "closed");
+        for authorize in [false, true] {
+            let replay = PendingDispatch::new("closed".into(), closed.clone());
+            let DispatchAttempt::Closed {
+                closure: original, ..
+            } = (if authorize {
+                replay.try_authorize(&ledger)
+            } else {
+                replay.try_close(&ledger)
+            })
+            else {
+                panic!("closed replay")
+            };
+            assert_eq!(original, closure);
+        }
+    }
 
     fn now() -> OffsetDateTime {
         OffsetDateTime::UNIX_EPOCH

@@ -3,7 +3,9 @@
 Status: In progress — M1 v0.6.0 published and back-synced; M2/W05b integrated; owner-approved
 v0.6.1 compatibility-exception release fully published, verified and back-synced. TD-0027's
 origin-contract follow-through is published and independently verified as v0.7.0; protected-branch
-evidence is synchronized (2026-09-17). W05c–e and P01–P03 remain open.
+evidence is synchronized (2026-09-17). W05c has an owned settlement library foundation;
+authoritative proxy integration, W05d/e and P01–P03 remain open. See the
+[settlement transition contract](../product/attempt-accounting-and-evidence.md#owned-settlement-transition-w05c-foundation).
 Date: 2026-09-04
 Baseline: `ed1781e` (Sandhi); source review, not a release certification.
 
@@ -688,3 +690,116 @@ unit suite is not a distributed correctness proof. Record evidence and update th
   all four crates and all three npm packages. The independent all-target verifier passed; npm's
   root metadata exposes SLSA provenance. PR #250 then back-synced immutable release evidence as
   `76237c3`; exact-develop push CI `34283659652` passed. C04 is closed without closing P01–P03.
+
+### Streaming route policy increment (2026-09-24)
+
+Standalone `streaming_deadlines` now resolves complete setup/idle/body triples
+through the same exact-route resolver and key validator as buffered policy.
+The existing pooled transports capture request-local limits; the existing body
+owner receives the resolved lifetime. Startup and admin active/desired reporting
+are explicit. Defaults remain absent/unchanged. See
+[operator contract](../operator/streaming-deadlines.md).
+
+Regression ownership was extended in the existing policy, route, raw transport,
+resilience, scope-isolation and terminal-accounting fixtures. The shared route
+fixture covers both buffered and streaming setup, avoiding a copied suite. Body
+fixtures now exercise standalone policy with a different library default to prove
+precedence. No accounting oracle or unrelated tests were removed.
+
+This does not close W05d/e or durable HTTP settlement. Setup-error finalization can
+block HTTP delivery; body cleanup retains admission/lifecycle guards until legacy
+settlement returns. Live origin cancellation and mixed-team C5 remain open.
+
+### Durable admission intent storage increment (2026-09-24)
+
+W05d's admission storage foundation commits an opt-in execution intent with admission,
+protects unresolved capacity through both reclaim paths and bounds retained IDs.
+See [the owning contract](../product/attempt-accounting-and-evidence.md#durable-admission-intent-w05d-storage-foundation).
+It does not activate durable HTTP settlement or close W05c–e. Recovery ownership,
+retention and integration remain open; the next storage slice follows.
+
+### Durable terminal usage storage increment (2026-09-24)
+
+The next W05d slice stores one immutable versioned `UsageV2` observation per retained
+execution intent, with reservation/scope binding, exact replay, conflict detection
+and a frozen optional charge. Unknown usage remains unknown, including after expiry.
+See [the owning contract](../product/attempt-accounting-and-evidence.md#durable-terminal-usage-observation-w05d-storage-foundation).
+It reuses the canonical billable function and existing evidence/crash test owners.
+The immutable observation increment landed in #310. It does not imply HTTP activation,
+physical-attempt proof, observation amendment, a recovery worker or retention/export.
+The following increment supplies canonical receipt linkage; W05c–e remain open.
+
+### Canonical terminal settlement storage increment (2026-09-25)
+
+One immediate transaction binds the retained observation's frozen charge to the
+existing receipt writer. Current caller-charge APIs reject tracked reservations;
+untracked defaults are preserved. Only final provider-reported usage settles;
+unknown, partial and estimated observations retain liability until amendment and
+remaining-liability recovery are designed. See [the owning contract](../product/attempt-accounting-and-evidence.md#canonical-terminal-settlement-w05cd-storage-foundation).
+The existing evidence/process-exit fixtures own validation. No HTTP activation,
+sharded topology migration, automatic recovery or external delivery is implied.
+Do not roll back to older writers that can bypass tracked-settlement guards.
+
+### Bounded recovery inventory storage increment (2026-09-25)
+
+W05d now has a scoped read-only inventory with bounded pages, a frozen admission
+upper bound and current state per page. It shares the canonical settlement eligibility
+and receipt-consistency checks, rejects corrupt/orphaned bindings explicitly and
+never retries inference or mutates accounting. Existing evidence tests cover cursor,
+concurrent admission/state changes, corruption and read-only conservation; the existing
+usage-basis matrix also checks classification. See [the owning contract](../product/attempt-accounting-and-evidence.md#bounded-terminal-recovery-inventory-w05d-storage-foundation).
+
+This is a library foundation, not an activated recovery worker or HTTP owner.
+Amendments, dispatch ownership, lifecycle acceptance, release/deployment and C5 remain
+open. Cursors stay on the original ledger and fixed topology; a finished sweep is
+not proof of quiescence or whole-ledger integrity.
+
+
+### Owned tracked terminal settlement bridge (2026-09-25)
+
+The existing `PendingSettlement` now has an opt-in tracked constructor that retains
+full immutable usage, persists the terminal observation and settles through the canonical
+stored-charge transaction. Failures retain ownership and expose whether observation
+storage succeeded. The bridge validates the stored intent binding and rejects volatile
+or multi-shard ledgers. Existing HTTP defaults remain unchanged.
+
+The three added owner tests began red with constructor stubs, then passed with the
+bridge; they cover contention, injected observation/receipt failures, reopen/replay,
+unsupported topology/bindings and unresolved usage. The existing shard-poison test is
+extended; store eligibility/atomicity matrices remain their single test owner.
+See [the owning contract](../product/attempt-accounting-and-evidence.md#owned-tracked-terminal-settlement-w05c-integration-foundation).
+W05c–e remain open: no live HTTP ownership, recovery worker or lifecycle acceptance
+is claimed by this increment.
+
+### Durable dispatch fence storage prerequisite
+
+The next W05d increment adds an opt-in prepared-admission path and mutually exclusive
+transactional dispatch authorization / never-dispatched closure. Existing admissions
+remain conservatively unknown. Closure has distinct evidence and cannot fabricate
+provider usage or settle an authorized execution. See the [owning contract](../product/attempt-accounting-and-evidence.md#durable-dispatch-fence-w05d-storage-prerequisite).
+This store-only foundation does not activate HTTP ownership, bounded recovery or
+lifecycle acceptance; W05c–e and C5 remain open.
+
+### Owned admission and dispatch handoff
+
+The W05c integration prerequisite now has an explicit consuming admission owner,
+single-file forwarding with shared original-intent validation, and transfer of the
+one dispatch permit into an owned execution and existing terminal settlement path.
+Errors retain the original owner; Drop retains liability without inventing usage.
+See the [owning contract](../product/attempt-accounting-and-evidence.md#owned-admission-and-dispatch-handoff-w05c-integration-prerequisite).
+The following bounded-job increment supplies process-local ownership. HTTP
+activation, recovery workers, lifecycle acceptance and release/deployment remain
+open before full Victor formations/C5 resume.
+
+### Bounded blocking ownership
+
+The opt-in W05c worker supervisor retains queued, running and unclaimed results
+under one fixed slot bound. Waiter cancellation cannot release ownership; interrupted
+work retains original evidence and closes admission, and explicit result handoff is
+single-use. Drain observes the existing absolute lifecycle deadline. The existing
+ledger fixture now covers lost publication after real commits without duplicating
+its storage matrices. See the [owning contract](../product/attempt-accounting-and-evidence.md#bounded-blocking-ownership-w05c-integration-prerequisite).
+
+This is process-local ownership, not durable observation or activated HTTP recovery.
+Keep the supervisor alive through collection; HTTP integration, bounded recovery,
+lifecycle acceptance, release/deployment and mixed-team C5 remain open.

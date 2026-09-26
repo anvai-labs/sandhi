@@ -18,6 +18,7 @@ pub mod metrics;
 pub mod operator;
 pub mod persistence;
 pub mod ratelimit;
+pub mod settlement;
 pub mod streaming;
 
 /// First-party OTel/OTLP export of `gen_ai.*` spans + metrics (Scope 5, TD-0011 P3). Feature-gated
@@ -222,6 +223,8 @@ pub fn plaintext_bind_warning(addr: SocketAddr, tls_enabled: bool) -> Option<&'s
 pub struct ProxyState {
     /// Validated startup-only buffered transport policy; absent preserves transport defaults.
     pub buffered_deadlines: Option<deadlines::BufferedDeadlines>,
+    /// Startup-only, per-authorized-route streaming setup/idle/body limits.
+    pub streaming_deadlines: Option<deadlines::StreamingDeadlines>,
     /// Opt-in body lifetime owner for built-in streaming transports (no standalone configuration yet).
     pub stream_body_lifetime: Option<streaming::StreamBodyLifetime>,
     /// One-shot lifecycle; dispatch authorization stops atomically at shutdown cutoff.
@@ -336,6 +339,7 @@ impl ProxyState {
         Self {
             lifecycle: Arc::new(lifecycle::Lifecycle::new()),
             buffered_deadlines: None,
+            streaming_deadlines: None,
             stream_body_lifetime: None,
             shutdown_quiesce: Duration::from_secs(1),
             keys,
@@ -2281,7 +2285,18 @@ async fn handle(
         );
     }
 
-    if wants_stream && state.stream_body_lifetime.is_some() && provider.raw_forwarder().is_none() {
+    let streaming_deadline = if wants_stream {
+        state
+            .streaming_deadlines
+            .as_ref()
+            .map(|policy| policy.resolve(&vk.upstream_ref, &request.model).0)
+    } else {
+        None
+    };
+    let body_lifetime = streaming_deadline
+        .map(|policy| policy.body_lifetime())
+        .or(state.stream_body_lifetime);
+    if wants_stream && body_lifetime.is_some() && provider.raw_forwarder().is_none() {
         return ingress_error(
             dialect,
             StatusCode::BAD_GATEWAY,
@@ -2354,6 +2369,7 @@ async fn handle(
     };
     // Refusal still belongs to pending admission: drop rolls back the lease without
     // fabricating usage for an upstream call that never happened.
+    let stream_dispatch_deadline = streaming_deadline.map(|policy| policy.transport());
     let dispatch_deadline = buffered_deadline
         .map(|effective| sandhi_providers::BufferedDeadline::new(effective.duration()));
     if let (Some(deadline), Some(Admission::Leased(lease))) =
@@ -2367,13 +2383,11 @@ async fn handle(
             );
         }
     }
-    if let (true, Some(lifetime), Some(Admission::Leased(lease))) = (
-        wants_stream,
-        state.stream_body_lifetime,
-        pending.admission.as_ref(),
-    ) {
+    if let (true, Some(lifetime), Some(Admission::Leased(lease))) =
+        (wants_stream, body_lifetime, pending.admission.as_ref())
+    {
         if !deadlines::fits_lease(
-            lifetime.duration(),
+            streaming_deadline.map_or(lifetime.duration(), |policy| policy.dispatch_duration()),
             lease.expires_at,
             time::OffsetDateTime::now_utc(),
         ) {
@@ -2445,6 +2459,7 @@ async fn handle(
         dialect_label(dialect),
         plane,
     );
+    accounting.stream_body_lifetime = body_lifetime;
     accounting.input_len = input_len;
     accounting.operation = Some(operation);
     // TD-0021 P4 (D1): the METER records the LOGICAL call once — a repeat of a settled
@@ -2522,9 +2537,10 @@ async fn handle(
             }
         }
     };
-    match dispatch_deadline {
-        Some(deadline) => deadline.scope(dispatch).await,
-        None => dispatch.await,
+    match (dispatch_deadline, stream_dispatch_deadline) {
+        (Some(deadline), _) => deadline.scope(dispatch).await,
+        (_, Some(deadline)) => deadline.scope(dispatch).await,
+        _ => dispatch.await,
     }
 }
 
@@ -2773,7 +2789,7 @@ async fn transparent_stream_response(
             }
             if accounting.outcome != "error" {
                 accounting.set_outcome("success");
-            } else if accounting.state.stream_body_lifetime.is_some() {
+            } else if accounting.stream_body_lifetime.is_some() {
                 // The owner must distinguish failed upstream EOF before scheduling a tail.
                 // Leave legacy pull-driven wire behavior unchanged when the policy is absent.
                 yield Err(std::io::Error::other("upstream stream failed"));
@@ -2901,6 +2917,7 @@ struct RequestAccounting {
     dialect: &'static str,
     plane: metrics::Plane,
     state: Arc<ProxyState>,
+    stream_body_lifetime: Option<streaming::StreamBodyLifetime>,
     scope: String,
     /// The held lease to settle by id (ADR-0005 D2). `None` when the scope admitted fail-open with
     /// no durable lease (D6) — nothing to settle.
@@ -2957,6 +2974,7 @@ impl RequestAccounting {
         };
         Self {
             operation: None,
+            stream_body_lifetime: state.stream_body_lifetime,
             state,
             scope,
             reservation,
@@ -3329,7 +3347,7 @@ async fn stream_response(
             }
             if accounting.outcome != "error" {
                 accounting.set_outcome("success");
-            } else if accounting.state.stream_body_lifetime.is_some() {
+            } else if accounting.stream_body_lifetime.is_some() {
                 // The owner must distinguish failed upstream EOF before scheduling a tail.
                 // Leave legacy pull-driven wire behavior unchanged when the policy is absent.
                 yield Err(std::io::Error::other("upstream stream failed"));

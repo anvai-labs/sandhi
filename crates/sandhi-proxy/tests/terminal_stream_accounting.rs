@@ -346,13 +346,18 @@ struct StreamingFixture {
     server: tokio::task::JoinHandle<()>,
 }
 
-async fn streaming_fixture(translated: bool, fail: bool, duration: Duration) -> StreamingFixture {
+async fn streaming_fixture(
+    translated: bool,
+    fail: bool,
+    duration: Duration,
+    idle: Duration,
+) -> StreamingFixture {
     let (tx, address, server) = origin_ending(fail).await;
     let capture = Arc::new(InMemorySink::new());
     let keys = KeyStore::new();
     keys.insert(VirtualKey {
         id: "vk_body".into(),
-        upstream_ref: "origin".into(),
+        upstream_ref: "openai:origin".into(),
         ..Default::default()
     });
     let provider = ProviderRuntime::new().openai_compat(
@@ -368,11 +373,16 @@ async fn streaming_fixture(translated: bool, fail: bool, duration: Duration) -> 
         keys,
         ProxyLedger::in_memory(),
         capture.clone(),
-        HashMap::from([("origin".into(), provider)]),
+        HashMap::from([("openai:origin".into(), provider)]),
         None,
     );
+    // Exercise standalone policy through the same body/settlement fixtures. The legacy
+    // library lifetime is deliberately different, so route precedence is observable.
     state.stream_body_lifetime =
-        Some(sandhi_proxy::streaming::StreamBodyLifetime::new(duration).unwrap());
+        Some(sandhi_proxy::streaming::StreamBodyLifetime::new(Duration::from_secs(60)).unwrap());
+    state.streaming_deadlines = sandhi_proxy::deadlines::streaming_from_json(&serde_json::json!({
+        "streaming_deadlines":{"ceiling_ms":120000,"default":{"setup_ms":1000,"idle_ms":90000,"body_ms":60000},"endpoints":{"openai:origin":{"models":{"fixture":{"setup_ms":1000,"idle_ms":idle.as_millis(),"body_ms":duration.as_millis()}}}}}
+    }).to_string()).unwrap();
     if translated {
         state
             .ledger
@@ -410,38 +420,43 @@ async fn streaming_fixture(translated: bool, fail: bool, duration: Duration) -> 
 
 #[tokio::test]
 async fn retained_unpolled_body_closes_origin_and_settles_on_both_planes() {
-    for translated in [false, true] {
-        let StreamingFixture {
-            tx,
-            state,
-            capture,
-            response,
-            server,
-        } = streaming_fixture(translated, false, Duration::from_millis(100)).await;
-        // The response stays alive and is never polled before the origin must close.
-        let closed = tokio::time::timeout(Duration::from_secs(2), tx.closed()).await;
-        if closed.is_err() {
+    for (duration, idle) in [
+        (Duration::from_millis(100), Duration::from_secs(90)),
+        (Duration::from_secs(5), Duration::from_millis(100)),
+    ] {
+        for translated in [false, true] {
+            let StreamingFixture {
+                tx,
+                state,
+                capture,
+                response,
+                server,
+            } = streaming_fixture(translated, false, duration, idle).await;
+            // The response stays alive and is never polled before the origin must close.
+            let closed = tokio::time::timeout(Duration::from_secs(2), tx.closed()).await;
+            if closed.is_err() {
+                server.abort();
+            }
+            assert!(
+                closed.is_ok(),
+                "origin stayed open behind an unpolled body; translated={translated}"
+            );
+            tokio::time::timeout(Duration::from_secs(2), state.lifecycle.wait_idle())
+                .await
+                .unwrap();
+            let mut body = response.into_body().into_data_stream();
+            assert!(
+                body.next().await.unwrap().is_err(),
+                "expiry discards queued bytes"
+            );
+            assert!(body.next().await.is_none());
+            let events = capture.events();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].usage_completeness, UsageCompleteness::Partial);
+            assert!(events[0].tokens_out > 0);
             server.abort();
+            let _ = server.await;
         }
-        assert!(
-            closed.is_ok(),
-            "origin stayed open behind an unpolled body; translated={translated}"
-        );
-        tokio::time::timeout(Duration::from_secs(2), state.lifecycle.wait_idle())
-            .await
-            .unwrap();
-        let mut body = response.into_body().into_data_stream();
-        assert!(
-            body.next().await.unwrap().is_err(),
-            "expiry discards queued bytes"
-        );
-        assert!(body.next().await.is_none());
-        let events = capture.events();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].usage_completeness, UsageCompleteness::Partial);
-        assert!(events[0].tokens_out > 0);
-        server.abort();
-        let _ = server.await;
     }
 }
 
@@ -461,7 +476,13 @@ async fn origin_body_errors_do_not_become_clean_eof_or_translated_done() {
             capture,
             response,
             server,
-        } = streaming_fixture(translated, true, Duration::from_secs(5)).await;
+        } = streaming_fixture(
+            translated,
+            true,
+            Duration::from_secs(5),
+            Duration::from_secs(90),
+        )
+        .await;
         let mut body = response.into_body().into_data_stream();
         // Ensure headers/content arrived before deliberately aborting the HTTP origin body.
         assert!(tokio::time::timeout(Duration::from_secs(2), body.next())
