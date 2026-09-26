@@ -74,7 +74,7 @@ jobs:
           # feature (post-#188) — a plain check compiles none of the pin, so the
           # feature must be on. The check also re-resolves the tracked workspace
           # Cargo.lock — stage it with the manifest or the branch ships a stale lock.
-          cargo check -p sandhi-store --features sentinelpass-ipc
+          cargo test -p sandhi-store --features sentinelpass-ipc
           git add crates/sandhi-store/Cargo.toml Cargo.lock
           git commit -m "chore(store): bump sentinelpass-protocol pin to ${LATEST}"
           # checkout runs with persist-credentials: false, so git has no token;
@@ -92,5 +92,5 @@ jobs:
           branch="chore/sentinelpass-protocol-${LATEST}"
           gh pr create --base develop --head "$branch" \
             --title "chore(store): bump sentinelpass-protocol to ${LATEST}" \
-            --body "Automated pin bump: sentinelpass-protocol ${CURRENT} → ${LATEST} (crates.io latest). Build verified with cargo check -p sandhi-store --features sentinelpass-ipc before the push; Cargo.lock refreshed with the pin. Review for breaking protocol changes before merging." \
+            --body "Automated pin bump: sentinelpass-protocol ${CURRENT} → ${LATEST} (crates.io latest). Build verified with cargo test -p sandhi-store --features sentinelpass-ipc before the push; Cargo.lock refreshed with the pin. Review for breaking protocol changes before merging." \
             || echo "::warning::PR create failed (may already exist)"
