@@ -787,5 +787,19 @@ single-file forwarding with shared original-intent validation, and transfer of t
 one dispatch permit into an owned execution and existing terminal settlement path.
 Errors retain the original owner; Drop retains liability without inventing usage.
 See the [owning contract](../product/attempt-accounting-and-evidence.md#owned-admission-and-dispatch-handoff-w05c-integration-prerequisite).
-Bounded blocking jobs, HTTP activation, recovery workers, lifecycle acceptance and
-release/deployment remain open before full Victor formations/C5 resume.
+The following bounded-job increment supplies process-local ownership. HTTP
+activation, recovery workers, lifecycle acceptance and release/deployment remain
+open before full Victor formations/C5 resume.
+
+### Bounded blocking ownership
+
+The opt-in W05c worker supervisor retains queued, running and unclaimed results
+under one fixed slot bound. Waiter cancellation cannot release ownership; interrupted
+work retains original evidence and closes admission, and explicit result handoff is
+single-use. Drain observes the existing absolute lifecycle deadline. The existing
+ledger fixture now covers lost publication after real commits without duplicating
+its storage matrices. See the [owning contract](../product/attempt-accounting-and-evidence.md#bounded-blocking-ownership-w05c-integration-prerequisite).
+
+This is process-local ownership, not durable observation or activated HTTP recovery.
+Keep the supervisor alive through collection; HTTP integration, bounded recovery,
+lifecycle acceptance, release/deployment and mixed-team C5 remain open.

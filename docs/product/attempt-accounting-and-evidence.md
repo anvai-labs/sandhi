@@ -505,3 +505,51 @@ no second permit, closure replay and identity-preserving settlement handoff. The
 existing binding/topology and shard-poison fixtures also cover the new operations;
 store transition matrices and existing proxy cancellation tests remain their sole
 coverage owners. No redundant test cases were identified for removal.
+
+## Bounded blocking ownership (W05c integration prerequisite)
+
+The opt-in `settlement::jobs::Jobs` supervisor runs only the existing authorize,
+never-dispatched closure and canonical settlement transitions. It is not an
+inference executor, retry scheduler or new receipt writer. HTTP remains unwired.
+Its fixed slot limit includes queued work, running work and completed/unclaimed
+results. Full, closed and missing-runtime admissions return the unchanged input;
+there is no unbounded fallback. This is a count bound, not a total byte bound:
+trusted callers must also limit input sizes.
+
+A worker owns lifecycle admission independently of its waiter. Its private inert
+input snapshot remains in the registry while the consuming transition runs.
+Cancellation before the blocking closure starts or an unwind publishes an explicit
+`Interrupted` outcome before releasing lifecycle admission, and closes further
+submissions. An interrupted authorization never recreates a dispatch permit.
+An interrupted settlement's in-memory `observation_recorded` flag may be stale:
+the database can have committed before publication failed. Reconcile against the
+original ledger; never infer rollback, repeat inference or fabricate zero usage.
+Runtime shutdown alone does not cancel queued/running blocking work.
+
+`Ticket::wait` only observes level-triggered readiness. Dropping a ticket or its
+waiter cannot remove a result or free capacity. Explicit synchronous `take` or the
+supervisor's `take_ready` transfers a completed result exactly once under the
+registry lock. No pending snapshot is externally claimable while work can run.
+Capacity is released only at that transfer; the receiving owner then bears the
+reconciliation responsibility. The manager must remain alive through draining and
+result collection. Dropping all manager/ticket/worker references or losing the
+process loses unpersisted RAM evidence; retained results are **not durable**.
+
+Drain uses the lifecycle's original absolute deadline, without extending it or
+pretending a dropped task handle stops SQLite. Its report distinguishes shared
+active operations from this supervisor's retained slots. Zero active operations
+with retained results means workers have drained, not that accounting is resolved.
+No drain report activates HTTP settlement or establishes restart acceptance.
+
+Focused worker tests cover cancellation, full/completed capacity, unwind after
+consuming input, actual queued-job cancellation, competing result consumers and
+blocked work crossing cutoff. The existing ledger handoff/reopen/receipt fixture
+now uses the worker, including injected interruption after real authorization and
+settlement commits. It verifies no second permit and no second charge. Existing
+SQL failure, scope and corruption matrices remain their single coverage owners;
+no redundant tests were identified for removal.
+
+Next: explicit HTTP admission/finalization ownership, bounded recovery of retained
+and persisted uncertainty, lifecycle acceptance, promotion/release/deployment,
+then the actual six-Qwen/one-ZAI C5 run. A process-local supervisor alone does not
+close W05c–e, G62 or C5.
