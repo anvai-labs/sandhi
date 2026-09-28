@@ -24,6 +24,7 @@ pub mod policy_workers;
 pub mod ratelimit;
 pub mod settlement;
 pub mod streaming;
+mod text_endpoints;
 
 /// First-party OTel/OTLP export of `gen_ai.*` spans + metrics (Scope 5, TD-0011 P3). Feature-gated
 /// (`otel-otlp`, default off); provides no-op stubs when the feature is off so call sites compile
@@ -633,6 +634,8 @@ pub(crate) async fn resolve_client_ip(
 fn ingress_routes(state: &Arc<ProxyState>) -> axum::Router<Arc<ProxyState>> {
     let ai_routes = Router::new()
         .route("/v1/chat/completions", post(handle_openai))
+        .route("/v1/embeddings", post(handle_embeddings))
+        .route("/v1/completions", post(handle_completions))
         .route("/v1/messages", post(handle_anthropic))
         .route("/v1/responses", post(handle_responses))
         // Gemini's path carries the model AND the method, colon-separated
@@ -1811,6 +1814,48 @@ async fn dashboard_style() -> Response {
 
 const DASHBOARD_HTML: &str = include_str!("dashboard/index.html");
 
+async fn handle_completions(
+    State(state): State<Arc<ProxyState>>,
+    permit: Extension<Arc<AdmissionPermit>>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let body = match request_body(body, IngressDialect::Completions) {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
+    handle(
+        state,
+        permit.0,
+        headers,
+        body,
+        IngressDialect::Completions,
+        None,
+    )
+    .await
+}
+
+async fn handle_embeddings(
+    State(state): State<Arc<ProxyState>>,
+    permit: Extension<Arc<AdmissionPermit>>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let body = match request_body(body, IngressDialect::Embeddings) {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
+    handle(
+        state,
+        permit.0,
+        headers,
+        body,
+        IngressDialect::Embeddings,
+        None,
+    )
+    .await
+}
+
 async fn handle_openai(
     State(state): State<Arc<ProxyState>>,
     permit: Extension<Arc<AdmissionPermit>>,
@@ -2156,7 +2201,7 @@ async fn handle_with_policy_receipt(
     state: Arc<ProxyState>,
     permit: Arc<AdmissionPermit>,
     headers: HeaderMap,
-    body: Bytes,
+    mut body: Bytes,
     dialect: IngressDialect,
     gemini_route: Option<GeminiRoute>,
     policy_receipt: Arc<Mutex<Option<String>>>,
@@ -2216,9 +2261,33 @@ async fn handle_with_policy_receipt(
     };
 
     // 3. Decode the public ingress dialect into the one canonical runtime request.
-    let Ok(body_json) = serde_json::from_slice::<Value>(&body) else {
+    let raw_text_route = matches!(
+        dialect,
+        IngressDialect::Embeddings | IngressDialect::Completions
+    );
+    if raw_text_route
+        && (provider.family() != ProviderFamily::OpenAiCompat || provider.raw_forwarder().is_none())
+    {
+        return ingress_error(
+            dialect,
+            StatusCode::BAD_REQUEST,
+            "text endpoints require a compatible raw upstream",
+        );
+    }
+    let parsed = if raw_text_route {
+        sandhi_core::policy::strict_json(&body).map_err(|_| ())
+    } else {
+        serde_json::from_slice::<Value>(&body).map_err(|_| ())
+    };
+    let Ok(mut body_json) = parsed else {
         return ingress_error(dialect, StatusCode::BAD_REQUEST, "body is not valid JSON");
     };
+    if dialect == IngressDialect::Completions && body_json.get("max_tokens").is_none() {
+        if let Some(object) = body_json.as_object_mut() {
+            object.insert("max_tokens".into(), serde_json::json!(16));
+            body = Bytes::from(serde_json::to_vec(&body_json).expect("parsed JSON"));
+        }
+    }
     // ADR-0005 D7 + ADR-0008 D3: session identity is single-sourced in core. An explicit
     // `x-sandhi-session` header wins; otherwise derive from the wire body's standard signals
     // (OpenAI `user`, Anthropic `metadata.user_id`, then a stable hash of the cacheable
@@ -2234,6 +2303,8 @@ async fn handle_with_policy_receipt(
     );
     let route = match dialect {
         IngressDialect::OpenAi => "/v1/chat/completions",
+        IngressDialect::Embeddings => "/v1/embeddings",
+        IngressDialect::Completions => "/v1/completions",
         IngressDialect::Anthropic => "/v1/messages",
         IngressDialect::Responses => "/v1/responses",
         IngressDialect::Gemini => "/v1beta/models/:generateContent",
@@ -2392,13 +2463,22 @@ async fn handle_with_policy_receipt(
 
     if let Some(gate) = &state.policy {
         let admission = gate
-            .check(
+            .check_input(
                 body.clone(),
                 policy_identity,
                 vk.id.clone(),
                 vk.upstream_ref.clone(),
                 request.model.clone(),
-                matches!(dialect, IngressDialect::OpenAi),
+                match dialect {
+                    IngressDialect::OpenAi => Some(sandhi_core::policy::InputFormat::Chat),
+                    IngressDialect::Embeddings => {
+                        Some(sandhi_core::policy::InputFormat::Embeddings)
+                    }
+                    IngressDialect::Completions => {
+                        Some(sandhi_core::policy::InputFormat::Completions)
+                    }
+                    _ => None,
+                },
             )
             .await;
         if let Ok(ref admitted) = admission {
@@ -2448,7 +2528,11 @@ async fn handle_with_policy_receipt(
     // A scope is "capped" (for output-bounding) only under a `Block` policy: `Warn` never rejects,
     // so we do not shrink the client's request. An output maximum reduces exposure when the
     // client omitted it; it does not make the estimated total a strict cap (TD-0026 W03).
-    let input_len = body.len();
+    let input_len = if raw_text_route {
+        text_endpoints::input_bytes(&request, body.len())
+    } else {
+        body.len()
+    };
     let estimated_input = state
         .token_estimator
         .lock()
@@ -2641,6 +2725,8 @@ async fn handle_with_policy_receipt(
 fn dialect_label(dialect: IngressDialect) -> &'static str {
     match dialect {
         IngressDialect::OpenAi => "openai",
+        IngressDialect::Embeddings => "openai_embeddings",
+        IngressDialect::Completions => "openai_completions",
         IngressDialect::Anthropic => "anthropic",
         IngressDialect::Responses => "responses",
         IngressDialect::Gemini => "gemini",
@@ -2650,7 +2736,9 @@ fn dialect_label(dialect: IngressDialect) -> &'static str {
 /// Ingress dialect → the upstream family it maps to, for plane selection (TD-0006 Step 2).
 fn ingress_family(dialect: IngressDialect) -> ProviderFamily {
     match dialect {
-        IngressDialect::OpenAi => ProviderFamily::OpenAiCompat,
+        IngressDialect::OpenAi | IngressDialect::Embeddings | IngressDialect::Completions => {
+            ProviderFamily::OpenAiCompat
+        }
         IngressDialect::Anthropic => ProviderFamily::Anthropic,
         IngressDialect::Responses => ProviderFamily::OpenAiResponses,
         IngressDialect::Gemini => ProviderFamily::Gemini,
@@ -2659,7 +2747,16 @@ fn ingress_family(dialect: IngressDialect) -> ProviderFamily {
 
 /// The upstream path suffix for a same-family transparent forward — mirrors each typed adapter's
 /// endpoint. Only the three ingress families above ever reach the transparent plane.
-fn upstream_path(family: ProviderFamily, gemini: Option<&GeminiRoute>) -> String {
+fn upstream_path(
+    family: ProviderFamily,
+    gemini: Option<&GeminiRoute>,
+    dialect: IngressDialect,
+) -> String {
+    match dialect {
+        IngressDialect::Embeddings => return "/embeddings".into(),
+        IngressDialect::Completions => return "/completions".into(),
+        _ => (),
+    }
     match family {
         ProviderFamily::OpenAiCompat => "/chat/completions".to_string(),
         ProviderFamily::OpenAiResponses => "/responses".to_string(),
@@ -2752,7 +2849,7 @@ async fn transparent_complete_response(
     let call_headers = accounting.per_call_wire_headers();
     match forwarder
         .forward_metered_with_headers(
-            &upstream_path(provider.family(), gemini.as_ref()),
+            &upstream_path(provider.family(), gemini.as_ref(), dialect),
             body,
             session.as_deref(),
             Some(accounting.request_id.as_str()),
@@ -2808,7 +2905,7 @@ async fn transparent_stream_response(
     let call_headers = accounting.per_call_wire_headers();
     let raw = match forwarder
         .forward_stream_metered_with_headers(
-            &upstream_path(provider.family(), gemini.as_ref()),
+            &upstream_path(provider.family(), gemini.as_ref(), dialect),
             body,
             session.as_deref(),
             Some(accounting.request_id.as_str()),

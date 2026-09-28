@@ -37,6 +37,11 @@ and forward. These are opinionated demo rules: a quoted private-key header in te
 documentation will also be blocked. Review/tune a copied policy and advance its revision.
 The model's registered name does not confer authorization to a user or group.
 
+The policy also inspects text on `/v1/embeddings` and `/v1/completions`, including
+all batch items and string-bearing options. Token-ID inputs and unsupported fields
+are rejected rather than forwarded uninspected. See [text endpoints](text-endpoints.md).
+Other wire dialects still fail closed when this policy is enabled.
+
 ## Model evidence and limits
 
 `scripts/sensitive_policy.py build` reproduces a small logistic-regression ONNX graph
