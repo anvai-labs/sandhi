@@ -40,7 +40,7 @@ fn bundled_model_parity_unicode_and_default_policy_actions() {
     let synthetic_token = format!("ghp_{}", "a".repeat(36));
     for (text, disposition, audit) in [
         ("-----BEGIN PRIVATE KEY-----", Disposition::Block, false),
-        (synthetic_token.as_str(), Disposition::Block, false),
+        (synthetic_token.as_str(), Disposition::Block, true),
         (
             "Dana Park social security number: 987-65-4321",
             Disposition::Forward,
@@ -64,13 +64,15 @@ fn bundled_model_parity_unicode_and_default_policy_actions() {
             "test",
             Instant::now() + Duration::from_secs(1),
         );
-        assert_eq!(decision.disposition, disposition);
+        assert_eq!(decision.reason, "evaluated", "fixture: {text}");
+        assert_eq!(decision.disposition, disposition, "fixture: {text}");
         assert_eq!(
             decision
                 .matched_rules
                 .iter()
                 .any(|r| r == "audit-sensitive-text"),
-            audit
+            audit,
+            "fixture: {text}; decision: {decision:?}"
         );
     }
 }
