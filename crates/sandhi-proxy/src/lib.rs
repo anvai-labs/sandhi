@@ -704,6 +704,7 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         // TD-0021 P2 (D5/R2): capability detail — which optional features are on —
         // is operator information, gated like the rest of /admin.
         .route("/admin/version", get(operator::version_capabilities))
+        .route("/admin/policy", get(operator::policy_status))
         .route("/admin/keys/reference", post(operator::register_reference))
         .route(
             "/admin/keys",

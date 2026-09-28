@@ -138,12 +138,14 @@ mod embedded {
     struct Backend {
         session: Mutex<Session>,
         vocabulary: HashMap<String, usize>,
+        trigrams: bool,
     }
     impl Backend {
         fn load(d: &Deployment) -> Result<Self, EvaluationError> {
             let data = bytes(&d.preprocessing, &d.preprocessing_sha256, 262144)?;
             let pre: Preprocessing =
                 serde_json::from_value(strict_json(&data)?).map_err(|_| EvaluationError)?;
+            let trigrams = pre.profile == "utf8_byte_trigrams_v1";
             let vocabulary = validate_preprocessing(pre)?;
             let model = bytes(&d.model, &d.model_sha256, 8388608)?;
             let session = Session::builder()
@@ -177,6 +179,7 @@ mod embedded {
             let backend = Self {
                 session: Mutex::new(session),
                 vocabulary,
+                trigrams,
             };
             // Readiness runs actual inference. It is not a model-quality assertion.
             backend.score(
@@ -197,6 +200,17 @@ mod embedded {
     fn validate_preprocessing(
         pre: Preprocessing,
     ) -> Result<HashMap<String, usize>, EvaluationError> {
+        if pre.version == 1 && pre.profile == "utf8_byte_trigrams_v1" {
+            if pre.vocabulary != (0..512).map(|i| format!("bin{i:03}")).collect::<Vec<_>>() {
+                return Err(EvaluationError);
+            }
+            return Ok(pre
+                .vocabulary
+                .into_iter()
+                .enumerate()
+                .map(|(i, word)| (word, i))
+                .collect());
+        }
         if pre.version != 1
             || pre.profile != "ascii_word_counts_v1"
             || pre.vocabulary.is_empty()
@@ -247,11 +261,36 @@ mod embedded {
         remaining(deadline)?;
         Ok(values)
     }
+    fn trigram_counts(input: &Inspection, deadline: Instant) -> Result<Vec<f32>, EvaluationError> {
+        remaining(deadline)?;
+        let mut values = vec![0.; 1024];
+        for (row, text) in [&input.text, &input.joined].iter().enumerate() {
+            if text.len() > 262144 {
+                return Err(EvaluationError);
+            }
+            for (i, gram) in text.as_bytes().windows(3).enumerate() {
+                if i % 1024 == 0 {
+                    remaining(deadline)?;
+                }
+                let mut hash = 2166136261u32;
+                for byte in gram {
+                    hash = (hash ^ u32::from(byte.to_ascii_lowercase())).wrapping_mul(16777619);
+                }
+                values[row * 512 + (hash as usize % 512)] += 1.;
+            }
+        }
+        remaining(deadline)?;
+        Ok(values)
+    }
     impl ScoreBackend for Backend {
         fn score(&self, input: &Inspection, deadline: Instant) -> Result<f64, EvaluationError> {
             remaining(deadline)?;
             let mut session = self.session.try_lock().map_err(|_| EvaluationError)?;
-            let values = counts(input, &self.vocabulary, deadline)?;
+            let values = if self.trigrams {
+                trigram_counts(input, deadline)?
+            } else {
+                counts(input, &self.vocabulary, deadline)?
+            };
             let tensor = Tensor::from_array(([2, self.vocabulary.len()], values))
                 .map_err(|_| EvaluationError)?;
             run(&mut session, tensor, deadline)
@@ -302,6 +341,51 @@ mod embedded {
     #[cfg(test)]
     mod tests {
         use super::*;
+        #[test]
+        fn utf8_trigram_profile_is_deterministic_bounded_and_unicode_safe() {
+            let input = Inspection {
+                text: "ABC".into(),
+                joined: "é界".into(),
+                body_bytes: 8,
+                max_output_tokens: None,
+            };
+            let deadline = Instant::now() + Duration::from_secs(1);
+            let actual = trigram_counts(&input, deadline).unwrap();
+            assert_eq!(actual.len(), 1024);
+            assert_eq!(actual[..512].iter().sum::<f32>(), 1.0);
+            assert_eq!(actual[512..].iter().sum::<f32>(), 3.0);
+            assert_eq!(
+                actual,
+                trigram_counts(
+                    &Inspection {
+                        text: "abc".into(),
+                        ..input
+                    },
+                    deadline
+                )
+                .unwrap()
+            );
+            assert!(trigram_counts(
+                &Inspection {
+                    text: "x".repeat(262145),
+                    joined: String::new(),
+                    body_bytes: 0,
+                    max_output_tokens: None
+                },
+                deadline
+            )
+            .is_err());
+            assert!(trigram_counts(
+                &Inspection {
+                    text: String::new(),
+                    joined: String::new(),
+                    body_bytes: 0,
+                    max_output_tokens: None
+                },
+                Instant::now()
+            )
+            .is_err());
+        }
         #[test]
         fn onnx_ascii_preprocessing_is_bounded_and_has_exact_word_semantics() {
             let vocabulary = validate_preprocessing(Preprocessing {

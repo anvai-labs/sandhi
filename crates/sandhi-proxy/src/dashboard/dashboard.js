@@ -73,7 +73,7 @@ function resetAuth(token) {
   for (const controller of pending) controller.abort();
   pending.clear();
   panels.clear();
-  for (const id of ["usage", "keys", "budgets", "alerts", "config", "run-tree"]) {
+  for (const id of ["usage", "keys", "budgets", "alerts", "config", "policy", "run-tree"]) {
     const el = document.getElementById(id);
     el.replaceChildren();
     el.dataset.state = "locked";
@@ -387,6 +387,28 @@ function configPlanTable(title, rows, cols) {
   return `<h3>${title}</h3><table><thead><tr>${cols.map(c => `<th>${c}</th>`).join("")}<th>plan</th></tr></thead>`
     + `<tbody>${body || `<tr><td colspan=${cols.length + 1}>none declared</td></tr>`}</tbody></table>`;
 }
+function loadPolicy() {
+  return loadPanel("policy", "/admin/policy", data => {
+    if (data.enabled === false) return '<p class="callout">Content inspection is not configured.</p>';
+    requireFields(data, ["rules"], ["receipts"]);
+    if (data.enabled !== true || !Number.isSafeInteger(data.revision)
+        || !Number.isSafeInteger(data.receipts.used) || !Number.isSafeInteger(data.receipts.capacity)
+        || data.receipts.used < 0 || data.receipts.capacity < 1
+        || data.rules.some(r => typeof r.id !== "string" || typeof r.evaluator !== "string"
+          || !["audit", "block", "quarantine"].includes(r.effect))) {
+      throw new ApiError(502, "Incomplete policy status");
+    }
+    return `<p>Active revision <strong>${fmt(data.revision)}</strong>. Evaluation budget: ${fmt(data.deadline_ms)} ms.</p>
+      <p>Audit records: <strong>${fmt(data.receipts.used)} / ${fmt(data.receipts.capacity)}</strong>.
+      ${data.receipts.full ? '<strong>Storage full — requests are denied.</strong>' : 'Requests are denied if evaluation or audit storage is unavailable.'}</p>
+      <p class="hint">Audit rules record a finding and allow forwarding. Block and quarantine rules deny forwarding.
+      Classifier findings are signals for review; they do not guarantee that all sensitive data is detected.
+      Prompt text and matched values are not stored in these receipts.</p>
+      <div class="table-scroll"><table><thead><tr><th>Rule</th><th>Action</th><th>Evaluator</th></tr></thead>
+      <tbody>${data.rules.map(r => `<tr><td>${esc(r.id)}</td><td>${esc(r.effect)}</td><td>${esc(r.evaluator)}</td></tr>`).join("")}</tbody></table></div>`;
+  }, "read");
+}
+
 function loadConfig() {
   return loadPanel("config", "/admin/config", data => {
     requireFields(data, ["providers", "budgets", "alerts", "vkeys"]);
@@ -477,7 +499,7 @@ async function refreshAll() {
     document.getElementById("auth-status").textContent = "Access verification unavailable. Retry with Refresh.";
     return;
   }
-  return Promise.all([loadUsage(), loadKeys(), loadBudgets(), loadAlerts(), loadConfig()]);
+  return Promise.all([loadUsage(), loadKeys(), loadBudgets(), loadAlerts(), loadConfig(), loadPolicy()]);
 }
 
 // Attribute values are inert data, never JavaScript source. Only this fixed action table

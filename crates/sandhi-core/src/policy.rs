@@ -334,6 +334,9 @@ impl Engine {
             evaluators,
         })
     }
+    pub fn configuration(&self) -> &PolicyDocumentV1 {
+        &self.document
+    }
     pub fn revision(&self) -> u64 {
         self.document.revision
     }

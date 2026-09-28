@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "files": {
+    "model.onnx": "e38c06661d741a17990ec51d88671da5978a25ab0c5aa4857b64734a646689a8",
+    "preprocessing.json": "4dbd658f9f3a4b76440b6ce2ce570073e17fb136ee4cc3c2de894bdd8be21d61",
+    "policy.json": "a711a42af3955f99d31fda7bc95c97e158558a799887ec7781dc81e6e811956a",
+    "golden.json": "ce398b61fa0e35ed1fb9eb1c3ccfda86f62b81e1d5d08d9b81ec41aff4b140f8",
+    "model-card.json": "357fe0516b059b5a390e01d3809c829724d8431fb79502942a654df611fc8297"
+  }
+}

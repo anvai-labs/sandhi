@@ -25,6 +25,17 @@ impl PolicyAuditStore {
             max_rows,
         })
     }
+    /// Bounded metadata-only inventory; failures must not look like an empty audit log.
+    pub fn summary(&self) -> rusqlite::Result<serde_json::Value> {
+        let connection = self
+            .connection
+            .try_lock()
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let used: u64 =
+            connection.query_row("SELECT count(*) FROM policy_receipts", [], |row| row.get(0))?;
+        Ok(serde_json::json!({"used": used, "capacity": self.max_rows,
+            "remaining": self.max_rows.saturating_sub(used), "full": used >= self.max_rows}))
+    }
     pub fn record(
         &self,
         identity: &Identity,
@@ -61,6 +72,17 @@ impl PolicyAuditStore {
 mod tests {
     use super::*;
     use sandhi_core::policy::Disposition;
+    #[test]
+    fn summary_failure_is_not_reported_as_empty_capacity() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = PolicyAuditStore::open(&temp.path().join("audit.db"), 10).unwrap();
+        assert_eq!(store.summary().unwrap()["used"], 0);
+        let guard = store.connection.lock().unwrap();
+        assert!(store.summary().is_err());
+        guard.execute("DROP TABLE policy_receipts", []).unwrap();
+        drop(guard);
+        assert!(store.summary().is_err());
+    }
     #[test]
     fn receipts_survive_restart_and_capacity_is_mandatory() {
         let temp = tempfile::tempdir().unwrap();
