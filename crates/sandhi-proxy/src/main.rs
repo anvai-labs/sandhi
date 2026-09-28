@@ -351,6 +351,60 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
     state.alerts = alerts;
     state.admin_token = admin_token;
     state.oidc = oidc;
+    if (std::env::var_os("SANDHI_POLICY_WORKERS").is_some()
+        || std::env::var_os("SANDHI_POLICY_ONNX").is_some()
+        || std::env::var_os("SANDHI_POLICY_REMOTE").is_some())
+        && std::env::var_os("SANDHI_POLICY_CONFIG").is_none()
+    {
+        eprintln!("sandhi-proxy: policy evaluators require a policy configuration");
+        return 1;
+    }
+    if let Some(path) = std::env::var_os("SANDHI_POLICY_CONFIG") {
+        let loaded = (|| -> Result<_, ()> {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            std::fs::File::open(path)
+                .map_err(|_| ())?
+                .take(131073)
+                .read_to_end(&mut bytes)
+                .map_err(|_| ())?;
+            let worker_path = std::env::var_os("SANDHI_POLICY_WORKERS");
+            let mut registry = sandhi_proxy::policy_workers::load_registry(
+                worker_path.as_deref().map(std::path::Path::new),
+            )
+            .map_err(|_| ())?;
+            let onnx_path = std::env::var_os("SANDHI_POLICY_ONNX");
+            sandhi_proxy::policy_onnx::load_models(
+                &mut registry,
+                onnx_path.as_deref().map(std::path::Path::new),
+            )
+            .map_err(|_| ())?;
+            let remote_path = std::env::var_os("SANDHI_POLICY_REMOTE");
+            sandhi_proxy::policy_remote::load_remotes(
+                &mut registry,
+                remote_path.as_deref().map(std::path::Path::new),
+            )
+            .map_err(|_| ())?;
+            let engine = sandhi_core::policy::Engine::from_slice_with_registry(&bytes, &registry)
+                .map_err(|_| ())?;
+            let store = std::env::var_os("SANDHI_STORE").ok_or(())?;
+            let audit =
+                sandhi_store::policy::PolicyAuditStore::open(std::path::Path::new(&store), 100_000)
+                    .map_err(|_| ())?;
+            Ok(sandhi_proxy::policy::PolicyGate::new(
+                engine,
+                Arc::new(audit),
+            ))
+        })();
+        match loaded {
+            Ok(policy) => state.policy = Some(Arc::new(policy)),
+            Err(()) => {
+                eprintln!("sandhi-proxy: invalid policy or unavailable mandatory policy store");
+                return 1;
+            }
+        }
+    }
+
     state.public_url = public_url;
     // ADR-0004 D4: dashboard read endpoints follow the admin token unless explicitly re-opened.
     state.dashboard_public = std::env::var("SANDHI_DASHBOARD_PUBLIC").as_deref() == Ok("1");

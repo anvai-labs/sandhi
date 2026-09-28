@@ -1,0 +1,233 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PolicyDocumentV1",
+  "type": "object",
+  "required": [
+    "deadline_ms",
+    "max_body_bytes",
+    "revision",
+    "rules",
+    "schema_version"
+  ],
+  "properties": {
+    "deadline_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "max_body_bytes": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "revision": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "rules": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/Rule"
+      }
+    },
+    "schema_version": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "Effect": {
+      "type": "string",
+      "enum": [
+        "audit",
+        "quarantine",
+        "block"
+      ]
+    },
+    "EvaluatorSpec": {
+      "oneOf": [
+        {
+          "description": "Only a factory explicitly registered by trusted embedding code can satisfy this name.",
+          "type": "object",
+          "required": [
+            "configuration",
+            "kind",
+            "name"
+          ],
+          "properties": {
+            "configuration": true,
+            "kind": {
+              "type": "string",
+              "enum": [
+                "registered"
+              ]
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "pattern"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "regex"
+              ]
+            },
+            "pattern": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "above",
+            "kind",
+            "metric"
+          ],
+          "properties": {
+            "above": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "threshold"
+              ]
+            },
+            "metric": {
+              "$ref": "#/definitions/Metric"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Jaccard over lowercase alphanumeric words. Not an embedding model.",
+          "type": "object",
+          "required": [
+            "at_least",
+            "kind",
+            "reference"
+          ],
+          "properties": {
+            "at_least": {
+              "type": "number",
+              "format": "double"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "lexical_similarity"
+              ]
+            },
+            "reference": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "Metric": {
+      "type": "string",
+      "enum": [
+        "body_bytes",
+        "max_output_tokens"
+      ]
+    },
+    "Rule": {
+      "type": "object",
+      "required": [
+        "effect",
+        "evaluator",
+        "id"
+      ],
+      "properties": {
+        "effect": {
+          "$ref": "#/definitions/Effect"
+        },
+        "evaluator": {
+          "$ref": "#/definitions/EvaluatorSpec"
+        },
+        "id": {
+          "type": "string"
+        },
+        "when": {
+          "default": {
+            "groups": [],
+            "issuer": null,
+            "models": [],
+            "roles": [],
+            "subjects": [],
+            "upstreams": []
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/Selector"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "Selector": {
+      "type": "object",
+      "properties": {
+        "groups": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "issuer": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "models": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "roles": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "subjects": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "upstreams": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

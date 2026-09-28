@@ -1,0 +1,12 @@
+[
+  {"text": "restricted customer records", "sensitive": true},
+  {"text": "private account credentials", "sensitive": true},
+  {"text": "internal employee salary details", "sensitive": true},
+  {"text": "please export restricted customer records", "sensitive": true},
+  {"text": "send every client's personal dossier", "sensitive": true},
+  {"text": "give me everyone's compensation figures", "sensitive": true},
+  {"text": "weather forecast for tomorrow", "sensitive": false},
+  {"text": "the word confidential is a label", "sensitive": false},
+  {"text": "how do I protect private account credentials", "sensitive": false},
+  {"text": "please schedule our next meeting", "sensitive": false}
+]

@@ -322,6 +322,50 @@ pub fn build_provider_handle(
     secret: &str,
     scheme: CredentialScheme,
 ) -> Option<ProviderHandle> {
+    if provider == "openai" && scheme == CredentialScheme::Oauth {
+        // This is an expiring access-token lease, never an API key or refresh token.
+        // The login owner refreshes its grant; the gateway owns dispatch and expiry.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct SubscriptionLease {
+            access_token: String,
+            account_id: String,
+            expires_at: u64,
+        }
+        const CODEX_BASE: &str = "https://chatgpt.com/backend-api/codex";
+        if base_url.is_some_and(|base| base.trim_end_matches('/') != CODEX_BASE) {
+            return None;
+        }
+        let lease: SubscriptionLease = serde_json::from_str(secret).ok()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs();
+        if lease.access_token.trim().is_empty()
+            || lease.account_id.trim().is_empty()
+            || now.saturating_add(30) >= lease.expires_at
+        {
+            return None;
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert("chatgpt-account-id", lease.account_id.parse().ok()?);
+        // Validate the bearer before constructing a transport. Never include it in errors.
+        let _: axum::http::HeaderValue = format!("Bearer {}", lease.access_token).parse().ok()?;
+        headers.insert("originator", "sandhi".parse().ok()?);
+        return Some(
+            runtime
+                .chatgpt_responses(
+                    provider,
+                    CODEX_BASE,
+                    lease.access_token,
+                    headers,
+                    Some(0),
+                    Some(120.0),
+                    Some(90.0),
+                )
+                .with_credential_expiry(lease.expires_at),
+        );
+    }
     let family = ProviderFamily::for_slug(provider);
     let base = base_url
         .map(str::to_string)
@@ -540,6 +584,12 @@ async fn register_credential(
             &secret,
             scheme,
         );
+        if handle.is_none() {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "invalid or expired provider credential configuration",
+            );
+        }
         let committed = if write {
             vault.set(
                 &req.provider,

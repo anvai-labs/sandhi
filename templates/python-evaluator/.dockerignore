@@ -1,0 +1,6 @@
+*
+!Dockerfile
+!requirements-container.lock
+!__main__.py
+!evaluator_app/
+!evaluator_app/*.py
