@@ -129,3 +129,17 @@ delegated virtual keys are implemented on this feature branch; no live migration
 claimed. Legacy token-mode subscription provisioning is superseded for this deployment.
 See [identity and group ownership](operator/identity-groups.md) for the tested mapping, shared
 budget/rate semantics, membership freshness limits and pending live acceptance.
+
+### Private gateway certificate authorities
+
+The provider transport loads native trust roots in addition to WebPKI roots. Set
+`SSL_CERT_FILE` to a PEM CA bundle in the client process when using a private
+HTTPS gateway. This also works in the Python binding used by Victor; setting
+Python/httpx trust alone did not configure its Rust transport. Keep hostname
+verification enabled and include the actual gateway hostname in the certificate.
+Public WebPKI roots remain available. This is process-wide transport trust, not
+an operating-system trust-store installation or a per-provider CA pin.
+
+Real TLS regression tests cover a trusted private CA, an untrusted CA and a
+hostname mismatch. Already installed wheels must be rebuilt/replaced to pick up
+this feature; a configuration variable cannot change an older wheel's feature set.
