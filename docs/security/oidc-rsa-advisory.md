@@ -1,6 +1,6 @@
 # OIDC RSA advisory applicability
 
-Assessment date: 2026-09-22. Reassessment required before 2026-10-22, on dependency
+Assessment date: 2026-09-28. Reassessment required before 2026-10-22, on dependency
 or adapter drift, or before introducing another RSA/OIDC consumer. This is an
 explicit non-applicability assessment, not a fix for the dependency vulnerability.
 
@@ -46,3 +46,12 @@ cargo deny --locked --all-features --config deny.toml check advisories
 cargo deny --locked --all-features --manifest-path bindings/python/Cargo.toml --config deny.toml check advisories
 cargo deny --locked --all-features --manifest-path bindings/node/Cargo.toml --config deny.toml check advisories
 ```
+
+The subscription-gateway amendment was independently reassessed on 2026-09-28.
+Group authorization, authenticated UserInfo, delegated keys, policy identity
+projection, and the scoped large-error lint annotation introduce no production
+private RSA operations. Review traced both PKCS#1 and PSS verification through
+`openidconnect` to `RsaPublicKey` and public exponentiation. Locked, offline,
+all-feature dependency graphs retain the sole production route
+`sandhi-proxy -> openidconnect -> rsa`; neither binding graph includes RSA.
+The adapter fingerprint now binds this amendment. The expiry remains 2026-10-22.

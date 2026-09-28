@@ -754,6 +754,7 @@ impl Oidc {
             .await
             .map(|(key, _)| key)
     }
+    #[allow(clippy::result_large_err)] // Ready-to-return axum denial; consistent with inference().
     pub(crate) async fn inference_with_identity(
         &self,
         token: &str,
