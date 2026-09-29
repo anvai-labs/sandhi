@@ -152,6 +152,23 @@ pub struct BudgetSpec {
 /// Admin auth. Returns `Ok(())` when the presented bearer matches the configured admin token.
 /// `403` when no admin token is configured; `401` when missing/wrong.
 #[allow(clippy::result_large_err)] // axum::Response is intentionally large; this is the idiomatic shape.
+/// Protected policy metadata, never prompt text, patterns, selectors or matched values.
+pub(crate) async fn policy_status(
+    State(state): State<Arc<ProxyState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Read, false).await {
+        return r;
+    }
+    let Some(policy) = state.policy.clone() else {
+        return Json(json!({"enabled":false})).into_response();
+    };
+    match tokio::task::spawn_blocking(move || policy.status()).await {
+        Ok(Ok(status)) => Json(status).into_response(),
+        _ => err(StatusCode::SERVICE_UNAVAILABLE, "policy status unavailable"),
+    }
+}
+
 /// `GET /admin/version` — capability detail beyond the versions (TD-0021 P2, D5/R2).
 ///
 /// The ungated `/version` answers "which contract am I talking to"; this answers

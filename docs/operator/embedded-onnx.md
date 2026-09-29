@@ -1,7 +1,9 @@
 # Embedded ONNX policy evaluator
 
 Status: implemented opt-in feature candidate, September 27, 2026. CPU-only,
-fixed-shape ASCII TF-IDF profile; not a general transformer/tokenizer adapter.
+fixed-shape ASCII TF-IDF and UTF-8 trigram profiles; not a general transformer/tokenizer adapter.
+The optional [sensitive-text bundle](sensitive-policy.md) provides audit-only classifier defaults
+alongside narrow credential-pattern blocks.
 Remote HTTP services now have a separate [template and adapter](../../templates/python-evaluator/README.md); gRPC remains unimplemented.
 
 ## Deployment

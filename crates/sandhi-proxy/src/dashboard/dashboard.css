@@ -140,3 +140,12 @@
     .card { padding: .75rem; }
     .card-detail { grid-column: 1 / -1; }
   }
+
+/* Policy actions must remain visible alongside rule names on narrow screens. */
+#policy .table-scroll table { width: 100%; min-width: 0; table-layout: fixed; }
+#policy .table-scroll th, #policy .table-scroll td {
+  white-space: normal; overflow-wrap: anywhere; min-width: 0; max-width: none;
+}
+#policy .table-scroll th:nth-child(1) { width: 38%; }
+#policy .table-scroll th:nth-child(2) { width: 22%; }
+#policy .table-scroll th:nth-child(3) { width: 40%; }

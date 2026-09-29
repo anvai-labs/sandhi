@@ -1,0 +1,43 @@
+{
+  "schema_version": "1",
+  "revision": 1,
+  "deadline_ms": 200,
+  "max_body_bytes": 262144,
+  "rules": [
+    {
+      "id": "block-private-key",
+      "effect": "block",
+      "evaluator": {
+        "kind": "regex",
+        "pattern": "-----BEGIN (?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----"
+      }
+    },
+    {
+      "id": "block-provider-token",
+      "effect": "block",
+      "evaluator": {
+        "kind": "regex",
+        "pattern": "\\b(?:sk-(?:proj-|svcacct-)[A-Za-z0-9_-]{32,}|gh[pousr]_[A-Za-z0-9]{36,})\\b"
+      }
+    },
+    {
+      "id": "audit-email",
+      "effect": "audit",
+      "evaluator": {
+        "kind": "regex",
+        "pattern": "(?i)\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b"
+      }
+    },
+    {
+      "id": "audit-sensitive-text",
+      "effect": "audit",
+      "evaluator": {
+        "kind": "registered",
+        "name": "onnx.sensitive_text.v1",
+        "configuration": {
+          "at_least": 0.75
+        }
+      }
+    }
+  ]
+}

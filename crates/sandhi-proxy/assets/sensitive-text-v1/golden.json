@@ -1,0 +1,80 @@
+[
+  {
+    "text": "Dana Park social security number: 987-65-4321",
+    "joined": "Dana Park social security number: 987-65-4321",
+    "label": 1,
+    "score": 0.8150071501731873
+  },
+  {
+    "text": "Patient Dana Park has diabetes. Medical record number 445566.",
+    "joined": "Patient Dana Park has diabetes. Medical record number 445566.",
+    "label": 1,
+    "score": 0.883787214756012
+  },
+  {
+    "text": "Dana Park bank account 098765432100 and routing number 021000021",
+    "joined": "Dana Park bank account 098765432100 and routing number 021000021",
+    "label": 1,
+    "score": 0.8515841364860535
+  },
+  {
+    "text": "Private credentials: password ZebraExample777! for Dana Park",
+    "joined": "Private credentials: password ZebraExample777! for Dana Park",
+    "label": 1,
+    "score": 0.7968423962593079
+  },
+  {
+    "text": "Explain OAuth without using real tokens",
+    "joined": "Explain OAuth without using real tokens",
+    "label": 0,
+    "score": 0.08587069064378738
+  },
+  {
+    "text": "How can I redact a social security number safely?",
+    "joined": "How can I redact a social security number safely?",
+    "label": 0,
+    "score": 0.539513349533081
+  },
+  {
+    "text": "Write a sorting algorithm in Rust",
+    "joined": "Write a sorting algorithm in Rust",
+    "label": 0,
+    "score": 0.17859764397144318
+  },
+  {
+    "text": "你好，今天的天气如何？",
+    "joined": "你好，今天的天气如何？",
+    "label": 0,
+    "score": 0.21145009994506836
+  },
+  {
+    "text": "Bonjour, quelle heure est-il?",
+    "joined": "Bonjour, quelle heure est-il?",
+    "label": 0,
+    "score": 0.6060332655906677
+  },
+  {
+    "text": "What does confidential mean in a document?",
+    "joined": "What does confidential mean in a document?",
+    "label": 0,
+    "score": 0.35861679911613464
+  },
+  {
+    "text": "",
+    "joined": "",
+    "label": 0,
+    "score": 0.5963143706321716
+  },
+  {
+    "text": "ABC",
+    "joined": "ABC",
+    "label": 0,
+    "score": 0.46787628531455994
+  },
+  {
+    "text": "é界",
+    "joined": "é界",
+    "label": 0,
+    "score": 0.8957011699676514
+  }
+]

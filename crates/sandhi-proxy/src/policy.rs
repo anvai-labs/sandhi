@@ -23,6 +23,29 @@ impl PolicyGate {
             slots: Arc::new(Semaphore::new(4)),
         }
     }
+    pub fn status(&self) -> Result<serde_json::Value, Unavailable> {
+        use sandhi_core::policy::EvaluatorSpec;
+        let document = self.engine.configuration();
+        let rules: Vec<_> = document
+            .rules
+            .iter()
+            .map(|rule| {
+                let evaluator = match &rule.evaluator {
+                    EvaluatorSpec::Registered { name, .. } => name.as_str(),
+                    EvaluatorSpec::Regex { .. } => "regex",
+                    EvaluatorSpec::Threshold { .. } => "threshold",
+                    EvaluatorSpec::LexicalSimilarity { .. } => "lexical_similarity",
+                };
+                serde_json::json!({"id": rule.id, "effect": rule.effect, "evaluator": evaluator})
+            })
+            .collect();
+        Ok(
+            serde_json::json!({"enabled":true, "revision":document.revision,
+            "deadline_ms":document.deadline_ms, "max_body_bytes":document.max_body_bytes,
+            "rules":rules, "receipts":self.audit.summary().map_err(|_| Unavailable)?,
+            "supported_input":"OpenAI Chat Completions text", "on_unavailable":"deny"}),
+        )
+    }
     pub async fn check(
         &self,
         body: bytes::Bytes,

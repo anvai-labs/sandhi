@@ -419,3 +419,10 @@ def test_oidc_advisory_rejects_additional_production_consumer(oidc_advisory_guar
         oidc_advisory_guard.check_graph(changed, True)
     with pytest.raises(ValueError, match="binding production graph"):
         oidc_advisory_guard.check_graph(metadata, False)
+
+
+def test_binary_release_ships_optional_sensitive_policy():
+    run = commands(workflow("release.yml")["jobs"]["binaries"])
+    assert "--features sentinelpass-ipc,policy-onnx" in run
+    for artifact in ["scripts/sensitive_policy.py", "crates/sandhi-proxy/assets/sensitive-text-v1", "docs/operator/sensitive-policy.md"]:
+        assert artifact in run

@@ -183,3 +183,5 @@ The longer-term implementation roadmap, which TD-0026 proposes reprioritizing, i
   evidence snapshots and drift as implementation files move.
 
 Consolidation candidate: [gateway security review and reviewer path](operator/GATEWAY-SECURITY-REVIEW-2026-09-27.md).
+
+- [Optional sensitive-text policy bundle](operator/sensitive-policy.md): reproducible CPU ONNX demo, audited defaults, protected operator status, and measured limits.

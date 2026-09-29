@@ -143,6 +143,9 @@ jobs:
               - 'scripts/test_policy_*.py'
               - 'scripts/test_subscription_lease.py'
               - 'scripts/generate_onnx_test_fixtures.py'
+              - 'scripts/sensitive_policy.py'
+              - 'scripts/test_sensitive_policy.py'
+              - 'scripts/smoke_sensitive_policy.py'
               - 'scripts/smoke_policy_evaluator.py'
               - 'scripts/smoke_policy_container.py'
               - 'scripts/check-oidc-advisory.py'
@@ -218,7 +221,8 @@ jobs:
       - name: Subscription lease and Python ML export contracts
         run: |
           python -m pip install scikit-learn==1.8.0 onnx==1.21.0 onnxruntime==1.26.0
-          python -m pytest scripts/test_subscription_lease.py scripts/test_policy_text.py scripts/test_policy_onnx_export.py -q
+          python -m pytest scripts/test_subscription_lease.py scripts/test_policy_text.py scripts/test_policy_onnx_export.py scripts/test_sensitive_policy.py -q
+          python scripts/smoke_sensitive_policy.py
       - name: Container resource enforcement on hosted Linux
         if: ${{ runner.environment == 'github-hosted' }}
         run: |
