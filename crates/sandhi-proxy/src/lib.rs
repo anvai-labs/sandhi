@@ -17,6 +17,10 @@ pub mod lifecycle;
 pub mod metrics;
 pub mod operator;
 pub mod persistence;
+pub mod policy;
+pub mod policy_onnx;
+pub mod policy_remote;
+pub mod policy_workers;
 pub mod ratelimit;
 pub mod settlement;
 pub mod streaming;
@@ -221,6 +225,7 @@ pub fn plaintext_bind_warning(addr: SocketAddr, tls_enabled: bool) -> Option<&'s
 /// Shared server state: the virtual-key store, the budget ledger, the usage sink, and the
 /// registry of configured upstream providers (each already holding its real credential).
 pub struct ProxyState {
+    pub policy: Option<Arc<policy::PolicyGate>>,
     /// Validated startup-only buffered transport policy; absent preserves transport defaults.
     pub buffered_deadlines: Option<deadlines::BufferedDeadlines>,
     /// Startup-only, per-authorized-route streaming setup/idle/body limits.
@@ -337,6 +342,7 @@ impl ProxyState {
         store: Option<Arc<SqliteStore>>,
     ) -> Self {
         Self {
+            policy: None,
             lifecycle: Arc::new(lifecycle::Lifecycle::new()),
             buffered_deadlines: None,
             streaming_deadlines: None,
@@ -676,6 +682,7 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         .route("/auth/callback", get(auth::callback))
         .route("/auth/session", get(auth::session_status))
         .route("/auth/logout", post(auth::logout))
+        .route("/auth/keys", post(auth::delegate_key))
         .route("/dashboard", get(dashboard_html))
         .route("/dashboard/assets/dashboard.js", get(dashboard_script))
         .route("/dashboard/assets/dashboard.css", get(dashboard_style))
@@ -1983,7 +1990,7 @@ async fn resolve_for_discovery(
                 "OIDC inference authorization failed",
             ))
         }
-        VirtualKeyResolution::Found(vk) => vk,
+        VirtualKeyResolution::Found(vk, _, _) => *vk,
         VirtualKeyResolution::Expired => {
             return Err(ingress_error(
                 dialect,
@@ -2124,6 +2131,35 @@ async fn handle(
     dialect: IngressDialect,
     gemini_route: Option<GeminiRoute>,
 ) -> Response {
+    let receipt = Arc::new(Mutex::new(None));
+    let mut response = handle_with_policy_receipt(
+        state,
+        permit,
+        headers,
+        body,
+        dialect,
+        gemini_route,
+        receipt.clone(),
+    )
+    .await;
+    if let Some(id) = receipt.lock().expect("policy receipt poisoned").as_ref() {
+        response.headers_mut().insert(
+            "x-sandhi-policy-receipt",
+            axum::http::HeaderValue::from_str(id).expect("generated receipt"),
+        );
+    }
+    response
+}
+
+async fn handle_with_policy_receipt(
+    state: Arc<ProxyState>,
+    permit: Arc<AdmissionPermit>,
+    headers: HeaderMap,
+    body: Bytes,
+    dialect: IngressDialect,
+    gemini_route: Option<GeminiRoute>,
+    policy_receipt: Arc<Mutex<Option<String>>>,
+) -> Response {
     // Body extraction may have spanned shutdown even after semaphore admission succeeded.
     if !state.lifecycle.is_running() {
         return draining_error(dialect);
@@ -2148,11 +2184,13 @@ async fn handle(
             ),
         );
     };
-    let vk = match resolve_virtual_key(&state, vk_token, &headers).await {
+    let (vk, rate_identity, policy_identity) = match resolve_virtual_key(&state, vk_token, &headers)
+        .await
+    {
         VirtualKeyResolution::Denied(status) => {
             return ingress_error(dialect, status, "OIDC inference authorization failed")
         }
-        VirtualKeyResolution::Found(vk) => vk,
+        VirtualKeyResolution::Found(vk, rate_identity, identity) => (*vk, rate_identity, identity),
         VirtualKeyResolution::Expired => {
             return ingress_error(dialect, StatusCode::UNAUTHORIZED, "virtual key expired");
         }
@@ -2331,8 +2369,9 @@ async fn handle(
     // cheap check (an in-memory bucket) and the reservation is the expensive one (a durable
     // write), and — more importantly — a throttled request must consume no lease, record no
     // spend, and emit no usage event. It never reached a provider.
-    if let ratelimit::Decision::Limited { retry_after_secs } =
-        state.rate_limiter.check(&vk.id, vk.rate_limit_per_min)
+    if let ratelimit::Decision::Limited { retry_after_secs } = state
+        .rate_limiter
+        .check(&rate_identity, vk.rate_limit_per_min)
     {
         tracing::warn!(
             provider = provider.slug(),
@@ -2348,6 +2387,59 @@ async fn handle(
             outcome: "rate_limited",
         });
         return rate_limited_error(dialect, retry_after_secs);
+    }
+
+    if let Some(gate) = &state.policy {
+        let admission = gate
+            .check(
+                body.clone(),
+                policy_identity,
+                vk.id.clone(),
+                vk.upstream_ref.clone(),
+                request.model.clone(),
+                matches!(dialect, IngressDialect::OpenAi),
+            )
+            .await;
+        if let Ok(ref admitted) = admission {
+            *policy_receipt.lock().expect("policy receipt poisoned") =
+                Some(admitted.receipt.clone());
+        }
+        match admission {
+            Ok(admission)
+                if admission.decision.disposition == sandhi_core::policy::Disposition::Forward => {}
+            result => {
+                let (code, status, receipt) = match result {
+                    Ok(a) => {
+                        let (code, status) = match a.decision.disposition {
+                            sandhi_core::policy::Disposition::Block => {
+                                ("policy_blocked", StatusCode::FORBIDDEN)
+                            }
+                            sandhi_core::policy::Disposition::Quarantine => {
+                                ("policy_quarantined", StatusCode::FORBIDDEN)
+                            }
+                            _ => ("policy_unavailable", StatusCode::SERVICE_UNAVAILABLE),
+                        };
+                        (code, status, Some(a.receipt))
+                    }
+                    Err(_) => ("policy_unavailable", StatusCode::SERVICE_UNAVAILABLE, None),
+                };
+                let mut response =
+                    codec::IngressError::policy(status, code, receipt.as_deref()).render(dialect);
+                response
+                    .headers_mut()
+                    .insert("x-sandhi-policy-code", code.parse().expect("static code"));
+                response
+                    .headers_mut()
+                    .insert("cache-control", "no-store".parse().unwrap());
+                if let Some(receipt) = receipt {
+                    response.headers_mut().insert(
+                        "x-sandhi-policy-receipt",
+                        receipt.parse().expect("generated receipt"),
+                    );
+                }
+                return response;
+            }
+        }
     }
 
     let scope = budget_scope(&vk);
@@ -3651,7 +3743,7 @@ fn budget_scope(vk: &VirtualKey) -> String {
 }
 
 enum VirtualKeyResolution {
-    Found(VirtualKey),
+    Found(Box<VirtualKey>, String, sandhi_core::policy::Identity),
     NotFound,
     Expired,
     Denied(StatusCode),
@@ -3665,8 +3757,21 @@ async fn resolve_virtual_key(
     headers: &HeaderMap,
 ) -> VirtualKeyResolution {
     if let Some(oidc) = &state.oidc {
-        return match oidc.inference(token, headers).await {
-            Ok(grant) => VirtualKeyResolution::Found(grant),
+        if token.starts_with("vk_") {
+            return match oidc
+                .delegated_key_with_identity(state, token, headers)
+                .await
+            {
+                Ok((grant, rate_identity, identity)) => {
+                    VirtualKeyResolution::Found(Box::new(grant), rate_identity, identity)
+                }
+                Err(status) => VirtualKeyResolution::Denied(status),
+            };
+        }
+        return match oidc.inference_with_identity(token, headers).await {
+            Ok((grant, identity)) => {
+                VirtualKeyResolution::Found(Box::new(grant.clone()), grant.id, identity)
+            }
             Err(r) => VirtualKeyResolution::Denied(r.status()),
         };
     }
@@ -3679,7 +3784,14 @@ async fn resolve_virtual_key(
             if vk.is_expired(&now_rfc3339()) {
                 VirtualKeyResolution::Expired
             } else {
-                VirtualKeyResolution::Found(vk)
+                VirtualKeyResolution::Found(
+                    Box::new(vk.clone()),
+                    vk.id.clone(),
+                    sandhi_core::policy::Identity {
+                        subject: vk.subject_id.clone(),
+                        ..Default::default()
+                    },
+                )
             }
         }
         None => VirtualKeyResolution::NotFound,

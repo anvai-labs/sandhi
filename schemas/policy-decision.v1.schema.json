@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Decision",
+  "type": "object",
+  "required": [
+    "disposition",
+    "elapsed_us",
+    "matched_rules",
+    "reason",
+    "revision"
+  ],
+  "properties": {
+    "disposition": {
+      "$ref": "#/definitions/Disposition"
+    },
+    "elapsed_us": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "matched_rules": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "reason": {
+      "type": "string"
+    },
+    "revision": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "Disposition": {
+      "type": "string",
+      "enum": [
+        "forward",
+        "quarantine",
+        "block",
+        "unavailable"
+      ]
+    }
+  }
+}

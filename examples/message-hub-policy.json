@@ -1,0 +1,58 @@
+{
+  "schema_version": "1",
+  "revision": 1,
+  "deadline_ms": 200,
+  "max_body_bytes": 65536,
+  "rules": [
+    {
+      "id": "audit-admission",
+      "effect": "audit",
+      "evaluator": {
+        "kind": "threshold",
+        "metric": "body_bytes",
+        "above": 0
+      }
+    },
+    {
+      "id": "block-credential-patterns",
+      "effect": "block",
+      "evaluator": {
+        "kind": "regex",
+        "pattern": "-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|sk-[A-Za-z0-9_-]{20,}|SANDHI_TEST_SECRET_[0-9]+"
+      }
+    },
+    {
+      "id": "bound-prompt-size",
+      "effect": "block",
+      "evaluator": {
+        "kind": "threshold",
+        "metric": "body_bytes",
+        "above": 60000
+      }
+    },
+    {
+      "id": "review-reference-overlap",
+      "effect": "quarantine",
+      "evaluator": {
+        "kind": "lexical_similarity",
+        "reference": "restricted customer records",
+        "at_least": 0.75
+      }
+    },
+    {
+      "id": "audit-victor-workload",
+      "when": {
+        "issuer": "https://id.anvaiops.com/oauth2/openid/sandhi",
+        "subjects": [
+          "0eb94a9e-f1a7-4e04-ae08-7abdb6ef46e4"
+        ]
+      },
+      "effect": "audit",
+      "evaluator": {
+        "kind": "threshold",
+        "metric": "body_bytes",
+        "above": 0
+      }
+    }
+  ]
+}

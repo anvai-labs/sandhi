@@ -199,13 +199,15 @@ pub fn strip_transport_owned(mut headers: http::HeaderMap) -> http::HeaderMap {
 ///
 /// Transport-owned names (see [`TRANSPORT_OWNED_HEADERS`]) are stripped from the **per-call**
 /// set so a library consumer can never override the vaulted credential or framing. Per-call
-/// wins over static for every other name (single-valued: the FFI's string-map form cannot
+/// Subscription account identity is also static-only: it belongs to the vaulted grant.
+/// Per-call wins over static for every other name (single-valued: the FFI's string-map form cannot
 /// express multi-value headers).
 #[must_use]
 pub fn merge_call_headers(base: &http::HeaderMap, call: &http::HeaderMap) -> http::HeaderMap {
     let mut out = base.clone();
     for (name, value) in call.iter() {
-        if TRANSPORT_OWNED_HEADERS.contains(&name.as_str()) {
+        if TRANSPORT_OWNED_HEADERS.contains(&name.as_str()) || name.as_str() == "chatgpt-account-id"
+        {
             continue; // transport-owned: the credential and framing are not caller-overridable
         }
         out.insert(name.clone(), value.clone());
@@ -364,6 +366,26 @@ pub(crate) fn error_for_status_with_body(
     body: Option<String>,
     request_id: Option<String>,
 ) -> ProviderError {
+    // Preserve the gateway's structured refusal through the typed transport. Ordinary
+    // credential failures keep their existing redacted Auth classification.
+    if status == 403
+        && body
+            .as_ref()
+            .and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok())
+            .and_then(|v| v.get("error")?.get("code")?.as_str().map(str::to_owned))
+            .is_some_and(|c| {
+                matches!(
+                    c.as_str(),
+                    "policy_blocked" | "policy_quarantined" | "policy_unavailable"
+                )
+            })
+    {
+        return ProviderError::Upstream {
+            status,
+            body,
+            request_id,
+        };
+    }
     match status {
         401 | 403 => ProviderError::Auth,
         429 => ProviderError::RateLimited,
@@ -1424,5 +1446,22 @@ mod usage_cadence_conformance {
         ] {
             let _ = family.usage_cadence();
         }
+    }
+}
+
+#[cfg(test)]
+mod policy_error_tests {
+    use super::*;
+    #[test]
+    fn policy_refusal_retains_structured_reason_instead_of_becoming_auth_failure() {
+        let body=Some(r#"{"error":{"code":"policy_quarantined","request_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}"#.into());
+        assert!(matches!(
+            error_for_status_with_body(403, body, None),
+            ProviderError::Upstream { status: 403, .. }
+        ));
+        assert!(matches!(
+            error_for_status_with_body(403, Some("ordinary forbidden".into()), None),
+            ProviderError::Auth
+        ));
     }
 }

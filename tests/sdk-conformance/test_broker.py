@@ -27,6 +27,7 @@ class FakeBroker:
         self.stop = threading.Event()
         self.received = []
         self.mode = "normal"
+        self.secret = SECRET
         self.errors = []
         # Only the Rust bridge speaks the wire protocol; authorization stays here.
         env = {k: v for k, v in os.environ.items()
@@ -105,7 +106,7 @@ class FakeBroker:
                 elif kind == "GetExternalSecret":
                     response = {"GetExternalSecretResponse": {
                         "authorized": allowed, "locked": locked,
-                        "value": SECRET if allowed and not locked and self.mode != "missing" else None,
+                        "value": self.secret if allowed and not locked and self.mode != "missing" else None,
                         "error": None if allowed else SECRET}}
                 else:
                     response = {"DeleteSecretResponse": {"deleted": False, "error": SECRET}}
@@ -337,12 +338,42 @@ def test_cli_reference_does_not_consume_or_forward_stdin(broker):
 def test_credential_scheme_aliases_reach_the_broker_and_persist(broker, scheme, canonical, reference):
     client, daemon = broker
     body = {"provider": "openai", "scheme": scheme}
+    secret = SECRET
+    if canonical == "oauth":
+        secret = json.dumps({"access_token": SECRET, "account_id": "synthetic-account",
+                             "expires_at": int(time.time()) + 120})
+    daemon.secret = secret
     if not reference:
-        body["secret"] = SECRET
+        body["secret"] = secret
     result = client.post("/admin/keys/reference" if reference else "/admin/keys", json=body)
     assert result.status_code == 201, result.text
     assert len(daemon.received) == 1
     assert client.get("/admin/keys").json()["keys"][0]["scheme"] == canonical
+
+
+@pytest.mark.parametrize("invalid", ["raw", "expired", "missing_expiry", "refresh_token"])
+@pytest.mark.parametrize("reference", [False, True])
+def test_invalid_oauth_lease_never_publishes_metadata_or_writes_broker(broker, invalid, reference):
+    client, daemon = broker
+    lease = {"access_token": SECRET, "account_id": "synthetic-account",
+             "expires_at": int(time.time()) + 120}
+    if invalid == "expired":
+        lease["expires_at"] = int(time.time()) - 1
+    elif invalid == "missing_expiry":
+        del lease["expires_at"]
+    elif invalid == "refresh_token":
+        lease["refresh_token"] = "synthetic-refresh-secret"
+    secret = SECRET if invalid == "raw" else json.dumps(lease)
+    daemon.secret = secret
+    body = {"provider": "openai", "scheme": "OAuth"}
+    if not reference:
+        body["secret"] = secret
+    result = client.post("/admin/keys/reference" if reference else "/admin/keys", json=body)
+    assert result.status_code == 400
+    assert SECRET not in result.text and "synthetic-refresh-secret" not in result.text
+    assert client.get("/admin/keys").json()["keys"] == []
+    assert len(daemon.received) == int(reference)
+    assert all(list(envelope["message"]) == ["GetExternalSecret"] for envelope in daemon.received)
 
 
 def test_unknown_credential_scheme_is_rejected_before_broker_access(broker):

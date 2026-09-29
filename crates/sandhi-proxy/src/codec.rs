@@ -84,6 +84,27 @@ pub(crate) struct IngressError {
 }
 
 impl IngressError {
+    pub(crate) fn policy(
+        status: axum::http::StatusCode,
+        code: &str,
+        receipt: Option<&str>,
+    ) -> Self {
+        let typed = sandhi_core::ProviderErrorV1 {
+            code: code.into(),
+            message: "Request stopped by gateway policy".into(),
+            retryable: false,
+            http_status: Some(status.as_u16()),
+            provider: None,
+            request_id: receipt.map(str::to_owned),
+            details: Default::default(),
+        };
+        Self {
+            status,
+            code: code.into(),
+            message: typed.message.clone(),
+            typed: Some(typed),
+        }
+    }
     pub(crate) fn draining() -> Self {
         Self {
             status: axum::http::StatusCode::SERVICE_UNAVAILABLE,

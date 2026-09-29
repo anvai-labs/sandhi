@@ -252,6 +252,7 @@ pub struct ProviderHandle {
     /// [`new`](Self::new) escape hatch (host-owned typed providers), which carry no transport
     /// config to forward with — those fall back to the typed translation path.
     raw: Option<crate::raw::RawForwarder>,
+    credential_expires_at: Option<u64>,
 }
 
 impl ProviderHandle {
@@ -269,7 +270,30 @@ impl ProviderHandle {
             inner,
             family: ProviderFamily::OpenAiCompat,
             raw: None,
+            credential_expires_at: None,
         }
+    }
+
+    /// Fence every dispatch to an expiring gateway credential. Raw forwarding is disabled
+    /// because it would bypass both this check and the subscription request constraints.
+    #[must_use]
+    pub fn with_credential_expiry(mut self, expires_at: u64) -> Self {
+        self.credential_expires_at = Some(expires_at);
+        self.raw = None;
+        self
+    }
+
+    fn check_credential(&self) -> Result<(), ProviderError> {
+        if let Some(expires_at) = self.credential_expires_at {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| ProviderError::Auth)?
+                .as_secs();
+            if now.saturating_add(30) >= expires_at {
+                return Err(ProviderError::Auth);
+            }
+        }
+        Ok(())
     }
 
     /// The raw byte-forwarder for the same-family transparent plane, or `None` for escape-hatch
@@ -321,6 +345,7 @@ impl ProviderHandle {
     ) -> Result<ChatResponseV1, ProviderError> {
         // Wire-truth latency, stamped once at the family-neutral typed
         // boundary (W3b) — the one seam every binding and the proxy call.
+        self.check_credential()?;
         let started = std::time::Instant::now();
         let mut response = self.inner.complete(request, call_headers).await?;
         reconcile_duration(&mut response.usage, elapsed_ms(started));
@@ -333,6 +358,7 @@ impl ProviderHandle {
         request: ChatRequestV1,
         call_headers: http::HeaderMap,
     ) -> Result<ChatEventStream, ProviderError> {
+        self.check_credential()?;
         let started = std::time::Instant::now();
         let inner = self.inner.stream(request, call_headers).await?;
         Ok(stamp_stream_latency(inner, started))
@@ -347,6 +373,7 @@ impl ProviderHandle {
         call_headers: http::HeaderMap,
         attempt_context: crate::AttemptContext,
     ) -> Result<ChatResponseV1, ProviderError> {
+        self.check_credential()?;
         let started = std::time::Instant::now();
         let mut response = self
             .inner
@@ -363,6 +390,7 @@ impl ProviderHandle {
         call_headers: http::HeaderMap,
         attempt_context: crate::AttemptContext,
     ) -> Result<ChatEventStream, ProviderError> {
+        self.check_credential()?;
         let started = std::time::Instant::now();
         let inner = self
             .inner
@@ -533,6 +561,7 @@ impl ProviderRuntime {
             inner: Arc::new(TypedOpenAiCompat { slug, raw }),
             family: ProviderFamily::OpenAiCompat,
             raw: raw_forwarder,
+            credential_expires_at: None,
         }
     }
 
@@ -570,6 +599,7 @@ impl ProviderRuntime {
             )),
             family: ProviderFamily::OpenAiResponses,
             raw: raw_forwarder,
+            credential_expires_at: None,
         }
     }
 
@@ -598,7 +628,8 @@ impl ProviderRuntime {
         config.timeout_secs = timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
         config.openai_responses_profile = OpenAiResponsesProfile::ChatGptCodex;
-        let raw_forwarder = Some(build_raw_forwarder(&config));
+        // Subscription payloads must always pass through the constrained codec.
+        let raw_forwarder = None;
         let raw = self.transport(config);
         ProviderHandle {
             inner: Arc::new(crate::openai_responses_typed::TypedOpenAiResponses::new(
@@ -608,6 +639,7 @@ impl ProviderRuntime {
             )),
             family: ProviderFamily::OpenAiResponses,
             raw: raw_forwarder,
+            credential_expires_at: None,
         }
     }
 
@@ -635,6 +667,7 @@ impl ProviderRuntime {
             inner: Arc::new(crate::anthropic_typed::TypedAnthropic::new(raw)),
             family: ProviderFamily::Anthropic,
             raw: raw_forwarder,
+            credential_expires_at: None,
         }
     }
 
@@ -660,6 +693,7 @@ impl ProviderRuntime {
             inner: Arc::new(crate::ollama_typed::TypedOllama::new(raw)),
             family: ProviderFamily::Ollama,
             raw: raw_forwarder,
+            credential_expires_at: None,
         }
     }
 
@@ -687,6 +721,7 @@ impl ProviderRuntime {
             inner: Arc::new(crate::gemini_typed::TypedGemini::new(raw)),
             family: ProviderFamily::Gemini,
             raw: raw_forwarder,
+            credential_expires_at: None,
         }
     }
 
@@ -712,6 +747,7 @@ impl ProviderRuntime {
             inner: Arc::new(crate::cohere_typed::TypedCohere::new(raw)),
             family: ProviderFamily::Cohere,
             raw: raw_forwarder,
+            credential_expires_at: None,
         }
     }
 

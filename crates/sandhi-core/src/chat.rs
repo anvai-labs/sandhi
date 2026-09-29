@@ -19,7 +19,7 @@ pub const CHAT_SCHEMA_VERSION_V1: &str = "1";
 /// (TD-0027 S4); 9 = cache-read observation and same-population coverage (TD-0028 C2).
 /// Consumers feature-detect the binding export and treat an absent fn as
 /// minor 0.
-pub const CHAT_CONTRACT_MINOR: u32 = 9;
+pub const CHAT_CONTRACT_MINOR: u32 = 10;
 
 fn schema_v1() -> String {
     CHAT_SCHEMA_VERSION_V1.to_owned()
@@ -675,6 +675,14 @@ pub fn contract_schema_documents() -> BTreeMap<&'static str, String> {
     }
 
     BTreeMap::from([
+        (
+            "policy-document.v1.schema.json",
+            render(&schemars::schema_for!(crate::policy::PolicyDocumentV1)),
+        ),
+        (
+            "policy-decision.v1.schema.json",
+            render(&schemars::schema_for!(crate::policy::Decision)),
+        ),
         ("usage-event.v1.schema.json", render(&usage_event_schema())),
         (
             "chat-request.v1.schema.json",
@@ -846,7 +854,7 @@ mod tests {
         let digest = fnv1a(concatenated.as_bytes());
         assert_eq!(
             (CHAT_CONTRACT_MINOR, digest),
-            (9, 0x3d36fa7158767a6e_u64),
+            (10, 0xbfac4906491040d9_u64),
             "contract schemas changed: bump CHAT_CONTRACT_MINOR and update this digest \
              (new digest = {digest:#x})"
         );

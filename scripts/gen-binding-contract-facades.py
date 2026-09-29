@@ -13,6 +13,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMAS = (
+    "policy-document.v1.schema.json",
+    "policy-decision.v1.schema.json",
     "chat-request.v1.schema.json",
     "chat-response.v1.schema.json",
     "chat-stream-event.v1.schema.json",
@@ -56,6 +58,47 @@ class CacheReadCoverage(TypedDict):
     malformed: int
     unsupported: int
     unknown: int
+
+class PolicySelectorV1(TypedDict, total=False):
+    issuer: Optional[str]
+    subjects: list[str]
+    groups: list[str]
+    roles: list[str]
+    upstreams: list[str]
+    models: list[str]
+class RegexEvaluatorV1(TypedDict):
+    kind: Literal["regex"]
+    pattern: str
+class ThresholdEvaluatorV1(TypedDict):
+    kind: Literal["threshold"]
+    metric: Literal["body_bytes", "max_output_tokens"]
+    above: int
+class LexicalEvaluatorV1(TypedDict):
+    kind: Literal["lexical_similarity"]
+    reference: str
+    at_least: float
+class RegisteredEvaluatorV1(TypedDict):
+    kind: Literal["registered"]
+    name: str
+    configuration: JsonValue
+PolicyEvaluatorV1 = RegexEvaluatorV1 | ThresholdEvaluatorV1 | LexicalEvaluatorV1 | RegisteredEvaluatorV1
+class PolicyRuleV1(TypedDict):
+    id: str
+    when: NotRequired[PolicySelectorV1]
+    evaluator: PolicyEvaluatorV1
+    effect: Literal["audit", "quarantine", "block"]
+class PolicyDocumentV1(TypedDict):
+    schema_version: Literal["1"]
+    revision: int
+    deadline_ms: int
+    max_body_bytes: int
+    rules: list[PolicyRuleV1]
+class PolicyDecisionV1(TypedDict):
+    revision: int
+    disposition: Literal["forward", "quarantine", "block", "unavailable"]
+    matched_rules: list[str]
+    reason: str
+    elapsed_us: int
 
 class TextPart(TypedDict):
     type: Literal["text"]
@@ -297,6 +340,15 @@ export interface UsageV2 {{
   reasoning_included?: boolean
   accepted_prediction_tokens?: number; rejected_prediction_tokens?: number
 }}
+export interface PolicySelectorV1 {{ issuer?: string | null; subjects?: string[]; groups?: string[]; roles?: string[]; upstreams?: string[]; models?: string[] }}
+export type PolicyEvaluatorV1 =
+  | {{ kind: "regex"; pattern: string }}
+  | {{ kind: "threshold"; metric: "body_bytes" | "max_output_tokens"; above: number }}
+  | {{ kind: "lexical_similarity"; reference: string; at_least: number }}
+  | {{ kind: "registered"; name: string; configuration: JsonValue }}
+export interface PolicyRuleV1 {{ id: string; when?: PolicySelectorV1; evaluator: PolicyEvaluatorV1; effect: "audit" | "quarantine" | "block" }}
+export interface PolicyDocumentV1 {{ schema_version: "1"; revision: number; deadline_ms: number; max_body_bytes: number; rules: PolicyRuleV1[] }}
+export interface PolicyDecisionV1 {{ revision: number; disposition: "forward" | "quarantine" | "block" | "unavailable"; matched_rules: string[]; reason: string; elapsed_us: number }}
 export interface LatencySummary {{ samples: number; p50_ms: number; p95_ms: number; ttft_p50_ms?: number }}
 export interface UsageAggregateV1 {{
   key: string; calls: number; tokens_in: number; tokens_out: number;

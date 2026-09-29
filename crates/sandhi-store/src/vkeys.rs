@@ -114,13 +114,41 @@ impl VirtualKeyStore {
             -- already maintains an implicit unique index on the same column, so a second index
             -- was pure write amplification (design audit A7). The DROP keeps existing stores
             -- from carrying it forever.
-            DROP INDEX IF EXISTS idx_vkeys_hash;",
+            DROP INDEX IF EXISTS idx_vkeys_hash;
+            CREATE TABLE IF NOT EXISTS oidc_key_delegations (
+                key_id TEXT PRIMARY KEY REFERENCES virtual_keys(id),
+                identity_json TEXT NOT NULL
+            );",
         )
     }
 
     /// Mint a new virtual key. The plaintext secret is generated, returned once, and only its
     /// SHA-256 hash is persisted.
     pub fn mint(&self, req: MintRequest) -> rusqlite::Result<MintedKey> {
+        self.mint_inner(req, None)
+    }
+
+    /// Atomically bind a new credential to authenticated OIDC delegation metadata.
+    pub fn mint_delegated(
+        &self,
+        req: MintRequest,
+        identity_json: &str,
+    ) -> rusqlite::Result<MintedKey> {
+        self.mint_inner(req, Some(identity_json))
+    }
+
+    pub fn delegation(&self, id: &str) -> rusqlite::Result<Option<String>> {
+        self.conn.lock().expect("vkey conn poisoned").query_row(
+            "SELECT d.identity_json FROM oidc_key_delegations d JOIN virtual_keys k ON k.id=d.key_id WHERE d.key_id=?1 AND k.revoked_at IS NULL",
+            params![id], |row| row.get(0),
+        ).optional()
+    }
+
+    fn mint_inner(
+        &self,
+        req: MintRequest,
+        delegation: Option<&str>,
+    ) -> rusqlite::Result<MintedKey> {
         let secret = generate_secret();
         let hash = hash_secret(&secret);
         let id = generate_id();
@@ -143,8 +171,9 @@ impl VirtualKeyStore {
             created_at,
             revoked_at: None,
         };
-        let conn = self.conn.lock().expect("vkey conn poisoned");
-        conn.execute(
+        let mut conn = self.conn.lock().expect("vkey conn poisoned");
+        let tx = conn.transaction()?;
+        tx.execute(
             "INSERT INTO virtual_keys \
              (id, subject_id, group_id, upstream_ref, models, budget_scope, expires_at, \
               rate_limit_per_min, secret_hash, created_at, revoked_at) \
@@ -162,6 +191,13 @@ impl VirtualKeyStore {
                 record.created_at,
             ],
         )?;
+        if let Some(identity) = delegation {
+            tx.execute(
+                "INSERT INTO oidc_key_delegations(key_id,identity_json) VALUES(?1,?2)",
+                params![record.id, identity],
+            )?;
+        }
+        tx.commit()?;
         Ok(MintedKey { record, secret })
     }
 

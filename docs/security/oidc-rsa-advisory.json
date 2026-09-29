@@ -1,10 +1,10 @@
 {
   "advisory": "RUSTSEC-2023-0071",
   "status": "not_affected_under_reviewed_usage",
-  "reviewed_on": "2026-09-22",
+  "reviewed_on": "2026-09-28",
   "expires_on": "2026-10-22",
   "adapter": "crates/sandhi-proxy/src/auth.rs",
-  "adapter_sha256": "a2470fac63d156414a76421da8d4a6a5fe0f0eab70e556feb2e638a68070abe7",
+  "adapter_sha256": "b31100404cae0eb2b79515dd665249523ac61478eb1f1d85afbbd069cd80f94e",
   "packages": {
     "openidconnect": {
       "version": "4.0.1",
