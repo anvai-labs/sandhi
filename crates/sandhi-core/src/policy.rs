@@ -231,6 +231,14 @@ impl Registry {
     }
 }
 
+/// Explicit wire shape for bounded plaintext inspection; never inferred from caller fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputFormat {
+    Chat,
+    Embeddings,
+    Completions,
+}
+
 pub struct Engine {
     document: PolicyDocumentV1,
     evaluators: Vec<Box<dyn Evaluator>>,
@@ -351,6 +359,18 @@ impl Engine {
         model: &str,
         deadline: Instant,
     ) -> Decision {
+        self.evaluate_with_format(body, who, upstream, model, InputFormat::Chat, deadline)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_with_format(
+        &self,
+        body: &[u8],
+        who: &Identity,
+        upstream: &str,
+        model: &str,
+        format: InputFormat,
+        deadline: Instant,
+    ) -> Decision {
         let start = Instant::now();
         let mut decision = Decision {
             revision: self.document.revision,
@@ -364,7 +384,7 @@ impl Engine {
             if body.len() > self.document.max_body_bytes {
                 return Err(EvaluationError);
             }
-            let input = inspect(body)?;
+            let input = inspect_format(body, format)?;
             // Local checks run first regardless of document ordering. A known denial
             // or incomplete local check must never disclose text to a remote evaluator.
             for remote_phase in [false, true] {
@@ -498,7 +518,7 @@ pub fn strict_json(bytes: &[u8]) -> Result<Value, EvaluationError> {
         .map_err(|_| EvaluationError)
 }
 
-fn inspect(body: &[u8]) -> Result<Inspection, EvaluationError> {
+fn inspect_format(body: &[u8], format: InputFormat) -> Result<Inspection, EvaluationError> {
     let value = strict_json(body)?;
     let object = value.as_object().ok_or(EvaluationError)?;
     const FIELDS: &[&str] = &[
@@ -524,14 +544,57 @@ fn inspect(body: &[u8]) -> Result<Inspection, EvaluationError> {
         "service_tier",
         "reasoning_effort",
     ];
-    if object.keys().any(|k| !FIELDS.contains(&k.as_str())) {
+    let fields = match format {
+        InputFormat::Chat => FIELDS,
+        InputFormat::Embeddings => &["model", "input", "encoding_format", "dimensions", "user"],
+        InputFormat::Completions => &[
+            "model",
+            "prompt",
+            "suffix",
+            "max_tokens",
+            "temperature",
+            "top_p",
+            "n",
+            "stream",
+            "stream_options",
+            "logprobs",
+            "echo",
+            "stop",
+            "presence_penalty",
+            "frequency_penalty",
+            "best_of",
+            "logit_bias",
+            "user",
+            "seed",
+        ],
+    };
+    if object.keys().any(|k| !fields.contains(&k.as_str())) {
         return Err(EvaluationError);
     }
-    let messages = value
-        .get("messages")
-        .and_then(Value::as_array)
-        .ok_or(EvaluationError)?;
     let mut parts = Vec::new();
+    let empty = Vec::new();
+    let text_field = match format {
+        InputFormat::Chat => "messages",
+        InputFormat::Embeddings => "input",
+        InputFormat::Completions => "prompt",
+    };
+    let messages = if format == InputFormat::Chat {
+        value
+            .get("messages")
+            .and_then(Value::as_array)
+            .ok_or(EvaluationError)?
+    } else {
+        match value.get(text_field) {
+            Some(Value::String(text)) => parts.push(text.clone()),
+            Some(Value::Array(texts)) if !texts.is_empty() && texts.len() <= 2048 => {
+                for text in texts {
+                    parts.push(text.as_str().ok_or(EvaluationError)?.to_owned());
+                }
+            }
+            _ => return Err(EvaluationError),
+        }
+        &empty
+    };
     for message in messages {
         let m = message.as_object().ok_or(EvaluationError)?;
         if m.keys().any(|k| {
@@ -592,7 +655,7 @@ fn inspect(body: &[u8]) -> Result<Inspection, EvaluationError> {
     }
     // Include string-bearing extras and tool schemas; no hidden uninspected text fields.
     for (key, value) in object {
-        if key != "messages" && key != "model" {
+        if key != text_field && key != "model" {
             collect(value, &mut parts, 0)?;
         }
     }

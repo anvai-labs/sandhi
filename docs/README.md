@@ -33,12 +33,13 @@ disagree, code plus its tests win until the record is reconciled.
 
 Sandhi is an L7 AI usage gateway and provider-transport library, not a general L4 proxy:
 
-- The proxy accepts four HTTP ingress dialects: OpenAI Chat, OpenAI Responses, Anthropic Messages,
+- The proxy accepts four HTTP protocol families: OpenAI (chat, plaintext completions and embeddings), OpenAI Responses, Anthropic Messages,
   and Gemini. Cohere and Ollama are available as upstream codecs but do not have proxy ingress
   dialects.
 - Eligible same-family proxy calls use the transparent metering plane; cross-family calls use the
-  neutral chat contract and may lose explicitly provider-specific extensions. A hard-capped call
-  with no explicit output limit also uses translation so Sandhi can inject an enforceable ceiling.
+  neutral chat contract and may lose explicitly provider-specific extensions. A hard-capped chat call
+  with no explicit output limit uses translation to inject a bound. Plaintext completions
+  instead receive an explicit max_tokens=16 default and remain on their native route.
 - The listener is deliberately HTTP/1.1-only. It supports plain HTTP for loopback/trusted hops and
   opt-in TLS termination. HTTP/2, HTTP/3, raw TCP forwarding, and WebSocket sessions are not shipped.
 - Budget and rate-limit enforcement is proxy-only and single-node. The in-process bindings meter
@@ -135,6 +136,8 @@ perpetually open.
 | [0028](td/TD-0028-cache-accounting-availability.md) | In progress | C1–C4 and C5 terminal-stream repair merged; buffered-only [operator deadlines](operator/buffered-deadlines.md) implemented with unchanged defaults; opt-in Rust [stream body ownership](operator/stream-body-lifetime.md) implemented; standalone [streaming route policy](operator/streaming-deadlines.md) implemented; bounded settlement and originating Mac six-Qwen/one-ZAI acceptance remain open |
 | [0029](td/TD-0029-oidc-sso-authorization.md) | In progress | OIDC sessions and roles; feature candidate adds verified groups, renewable clients and durable user keys; existing browser acceptance recorded; new live group/broker acceptance and release pending |
 
+| [0030](td/TD-0030-governed-text-endpoints.md) | In progress | Plaintext embeddings/completions implemented and tested; live acceptance and LAN cutover pending |
+
 TD-0026 slice completion means implementation/local verification. Its separate C01/C02 checkpoint
 table tracks remote CI, merge and release; C01 [PR #230](https://github.com/anvai-labs/sandhi/pull/230)
 merged into `develop` as `8f56b91` after clean review and green hosted CI, with an explicit
@@ -185,3 +188,5 @@ The longer-term implementation roadmap, which TD-0026 proposes reprioritizing, i
 Consolidation candidate: [gateway security review and reviewer path](operator/GATEWAY-SECURITY-REVIEW-2026-09-27.md).
 
 - [Optional sensitive-text policy bundle](operator/sensitive-policy.md): reproducible CPU ONNX demo, audited defaults, protected operator status, and measured limits.
+
+- [Governed text endpoints](operator/text-endpoints.md): plaintext embeddings/completions support and reservation limits.

@@ -129,3 +129,52 @@ delegated virtual keys are implemented on this feature branch; no live migration
 claimed. Legacy token-mode subscription provisioning is superseded for this deployment.
 See [identity and group ownership](operator/identity-groups.md) for the tested mapping, shared
 budget/rate semantics, membership freshness limits and pending live acceptance.
+
+### Private gateway certificate authorities
+
+The provider transport loads native trust roots in addition to WebPKI roots. Set
+`SSL_CERT_FILE` to a PEM CA bundle in the client process when using a private
+HTTPS gateway. This also works in the Python binding used by Victor; setting
+Python/httpx trust alone did not configure its Rust transport. Keep hostname
+verification enabled and include the actual gateway hostname in the certificate.
+Public WebPKI roots remain available. This is process-wide transport trust, not
+an operating-system trust-store installation or a per-provider CA pin.
+
+Real TLS regression tests cover a trusted private CA, an untrusted CA and a
+hostname mismatch. Already installed wheels must be rebuilt/replaced to pick up
+this feature; a configuration variable cannot change an older wheel's feature set.
+
+
+## Model plus reasoning effort
+
+The foundational request already represents these independently:
+`ChatRequestV1.model` and optional `ChatRequestV1.reasoning_effort`. Clients
+should supply both explicitly when they need a stable reasoning default:
+
+```json
+{"model":"gpt-6-luna","reasoning_effort":"medium","messages":[{"role":"system","content":"Classify the input."},{"role":"user","content":"hello"}]}
+```
+
+Both standard and subscription Responses codecs preserve the exact model and
+map effort to `reasoning.effort`; typed effort wins over extension duplicates.
+No model-name suffix, gateway-global default, or inference from temperature is
+introduced. Absent/null delegates to the model default; `"none"` is an explicit
+supported effort value. Effort does not select a credential or loosen policy,
+model allowlists, rate limits or token budgets.
+
+[GPT-6 Luna](https://developers.openai.com/api/docs/models/gpt-6-luna) and
+[GPT-6 Sol](https://developers.openai.com/api/docs/models/gpt-6-sol) document
+none, low, medium, high, xhigh and max. This is model-specific metadata, not a
+universal scale. The neutral string also accommodates other provider labels.
+Compatible chat codecs forward a top-level field; existing native-family
+codecs have separate thinking controls and do not all map named effort. Do not
+advertise unsupported mappings as working merely because the neutral contract
+accepts the field. Gateway consumers should select a verified adapter/model.
+
+Victor now shares a typed effort vocabulary between profile configuration,
+immutable session overrides and FEP-0037 classification. Message-hub uses a
+Luna-only key with a separate budget for WhatsApp/Facebook and retains the
+existing local route for other channels. Authentication, contract discovery
+and schema pinning precede classification; policy denials remain terminal.
+A codec matrix tests both models and all six documented levels under both
+Responses profiles. No gateway binary change is needed for this forwarding.

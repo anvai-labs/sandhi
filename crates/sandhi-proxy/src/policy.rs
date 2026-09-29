@@ -1,5 +1,5 @@
 //! Bounded trusted built-in policy evaluation + mandatory durable admission receipt.
-use sandhi_core::policy::{Decision, Disposition, Engine, Identity};
+use sandhi_core::policy::{Decision, Disposition, Engine, Identity, InputFormat};
 use sandhi_store::policy::PolicyAuditStore;
 use std::{sync::Arc, time::Instant};
 use tokio::sync::Semaphore;
@@ -43,7 +43,7 @@ impl PolicyGate {
             serde_json::json!({"enabled":true, "revision":document.revision,
             "deadline_ms":document.deadline_ms, "max_body_bytes":document.max_body_bytes,
             "rules":rules, "receipts":self.audit.summary().map_err(|_| Unavailable)?,
-            "supported_input":"OpenAI Chat Completions text", "on_unavailable":"deny"}),
+            "supported_input":"OpenAI chat, completions and embeddings text", "on_unavailable":"deny"}),
         )
     }
     pub async fn check(
@@ -54,6 +54,25 @@ impl PolicyGate {
         upstream: String,
         model: String,
         supported_dialect: bool,
+    ) -> Result<Admission, Unavailable> {
+        self.check_input(
+            body,
+            identity,
+            key,
+            upstream,
+            model,
+            supported_dialect.then_some(InputFormat::Chat),
+        )
+        .await
+    }
+    pub async fn check_input(
+        &self,
+        body: bytes::Bytes,
+        identity: Identity,
+        key: String,
+        upstream: String,
+        model: String,
+        format: Option<InputFormat>,
     ) -> Result<Admission, Unavailable> {
         let start = Instant::now();
         let deadline = start + self.engine.timeout();
@@ -68,8 +87,8 @@ impl PolicyGate {
         // work; the slot stays owned by the worker until cleanup, even after cancellation.
         let work = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            let decision = if supported_dialect {
-                engine.evaluate(&body, &identity, &upstream, &model, deadline)
+            let decision = if let Some(format) = format {
+                engine.evaluate_with_format(&body, &identity, &upstream, &model, format, deadline)
             } else {
                 Decision {
                     revision: engine.revision(),
