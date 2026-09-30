@@ -255,7 +255,7 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.ct_eq(b).into()
 }
 
-fn err(status: StatusCode, msg: &str) -> Response {
+pub(crate) fn err(status: StatusCode, msg: &str) -> Response {
     (status, Json(json!({ "error": msg }))).into_response()
 }
 
@@ -269,7 +269,9 @@ fn draining_response() -> Response {
 }
 
 #[allow(clippy::result_large_err)]
-fn admit_mutation(state: &ProxyState) -> Result<crate::lifecycle::OperationGuard, Response> {
+pub(crate) fn admit_mutation(
+    state: &ProxyState,
+) -> Result<crate::lifecycle::OperationGuard, Response> {
     state
         .lifecycle
         .try_operation()
