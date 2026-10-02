@@ -4,7 +4,7 @@
 //! then — when `SANDHI_STORE` is set — opens the TD-0003 operator surface (provider-credential
 //! vault, durable virtual-key store) and rehydrates the live key store + upstream handles from
 //! it. The admin API is enabled by `SANDHI_ADMIN_TOKEN`; the vault backend by
-//! `SANDHI_VAULT_BACKEND=keyring|sentinelpass` (default `keyring`). Request handling lives in the
+//! `SANDHI_VAULT_BACKEND=keyring|sentinelpass|credstore` (default `keyring`). Request handling lives in the
 //! `sandhi_proxy` library and is exercised by the integration tests.
 
 use axum::http::HeaderMap;
@@ -214,6 +214,16 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
     });
 
     // TD-0003 P1 operator surface: vault + virtual-key store (same path as the usage store).
+    if std::env::var("SANDHI_VAULT_BACKEND")
+        .map(|backend| !backend.trim().is_empty())
+        .unwrap_or(false)
+        && store_path.is_none()
+    {
+        // A non-default secret backend with no durable store would leave the
+        // gateway serving with no credential source and zero diagnostics.
+        eprintln!("sandhi-proxy: SANDHI_VAULT_BACKEND is set but SANDHI_STORE is not configured");
+        std::process::exit(1);
+    }
     let vault = store_path.as_deref().map(|p| {
         let vault = VaultStore::with_backend(p, VaultStore::backend_from_env())
             .unwrap_or_else(|_| startup_store_fatal("vault"));
