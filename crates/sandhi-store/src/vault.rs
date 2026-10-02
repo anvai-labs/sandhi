@@ -12,11 +12,12 @@
 //!   `sentinelpass-ipc` feature is enabled, with [`SentinelPassVault`] retained as an explicit CLI
 //!   fallback. [`InMemoryVault`] backs tests.
 //!
-//! Selection is via `SANDHI_VAULT_BACKEND=keyring|sentinelpass` (default `keyring`). The
+//! Selection is via `SANDHI_VAULT_BACKEND=keyring|sentinelpass|credstore` (default `keyring`). The
 //! measure-vs-price boundary is held: no dollars, no SKU/tier — only credentials + neutral token
 //! attribution.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -229,6 +230,132 @@ pub use ipc::SentinelPassIpcVault;
 /// Kept as an opt-in fallback (`SANDHI_SENTINELPASS_FALLBACK_CLI=1`); the default
 /// `SANDHI_VAULT_BACKEND=sentinelpass` now uses [`SentinelPassIpcVault`] (native daemon IPC,
 /// TD-0003 follow-up shipped via the `sentinelpass-protocol` contract crate).
+/// Directory-backed read-only vault for restart-safe deployments
+/// (ADR-011 in the sentinelpass repo)
+/// (`SANDHI_VAULT_BACKEND=credstore` + `SANDHI_CREDENTIALS_DIR`). Secrets are
+/// systemd **encrypted credentials** decrypted by PID 1 into
+/// `$CREDENTIALS_DIRECTORY/<cred-name>` at unit start — no SentinelPass
+/// daemon, vault, or master password is involved at runtime. Provision with
+/// `sentinelpass service-credential install` (sentinelpass ≥ 0.14.0;
+/// runbook: docs/SERVICE_CREDENTIALS.md in the sentinelpass repo); rotate
+/// by re-running it.
+pub struct CredentialStoreVault {
+    dir: PathBuf,
+}
+
+/// Upstream credentials are API keys / short tokens (< 4 KiB in practice); a
+/// file larger than this is a provisioning mistake, not a credential.
+const CREDSTORE_MAX_SECRET_BYTES: u64 = 64 * 1024;
+
+impl CredentialStoreVault {
+    pub fn new(dir: PathBuf) -> Self {
+        Self { dir }
+    }
+
+    /// Filename candidates for `provider:label`, covering both the
+    /// double-underscore scheme and the `service-credential install`
+    /// cred-name convention (`<topic>.<provider>.<label>`). Rejects
+    /// separators and traversal before anything touches the filesystem.
+    fn candidates(&self, provider: &str, label: &str) -> Option<Vec<PathBuf>> {
+        fn filename_safe(s: &str) -> bool {
+            !s.is_empty()
+                && Path::new(s)
+                    .file_name()
+                    .is_some_and(|f| f.to_str() == Some(s))
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        }
+        if !filename_safe(provider) || !filename_safe(label) {
+            return None;
+        }
+        Some(vec![
+            self.dir.join(format!("{provider}__{label}")),
+            self.dir.join(format!("{provider}.{label}")),
+            // The service-credential install convention:
+            // `<topic>.<provider>.<label>` (TD-0031 deployments use `sandhi.`).
+            self.dir.join(format!("sandhi.{provider}.{label}")),
+        ])
+    }
+}
+
+impl Vault for CredentialStoreVault {
+    fn name(&self) -> &'static str {
+        "credstore"
+    }
+
+    fn capabilities(&self) -> VaultCapabilities {
+        VaultCapabilities {
+            read: true,
+            write: false,
+            delete: false,
+            bounded_io: false,
+        }
+    }
+
+    fn get_secret(&self, provider: &str, label: &str) -> Result<Option<String>, VaultError> {
+        let Some(candidates) = self.candidates(provider, label) else {
+            return Ok(None);
+        };
+        // Credential-lifecycle integrity: when more than one candidate exists,
+        // or an earlier candidate fails to read before a later one succeeds,
+        // say so — a stale shadow file must not silently defeat rotation.
+        let existing: Vec<&PathBuf> = candidates.iter().filter(|p| p.exists()).collect();
+        if existing.len() > 1 {
+            tracing::warn!(
+                "credstore: multiple candidate credential files for {provider}:{label};                  using the first — remove stale schemes to avoid shadowing"
+            );
+        }
+        for path in candidates {
+            match std::fs::read(&path) {
+                // systemd-creds output may carry a trailing newline; trim
+                // surrounding Unicode whitespace — the secret itself is
+                // never logged.
+                Ok(bytes) => {
+                    if bytes.len() as u64 > CREDSTORE_MAX_SECRET_BYTES {
+                        return Err(VaultError::Backend(format!(
+                            "credstore read {}: {} bytes exceeds the {}-byte credential cap",
+                            path.display(),
+                            bytes.len(),
+                            CREDSTORE_MAX_SECRET_BYTES
+                        )));
+                    }
+                    let secret = String::from_utf8(bytes)
+                        .map_err(|e| VaultError::Backend(format!("credstore utf8: {e}")))?;
+                    let trimmed = secret.trim();
+                    if trimmed.is_empty() {
+                        // A whitespace-only credential file is a provisioning
+                        // accident, not a credential: report absent so the
+                        // provider fails LOUD instead of 401ing on "".
+                        return Ok(None);
+                    }
+                    return Ok(Some(trimmed.to_string()));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    return Err(VaultError::Backend(format!(
+                        "credstore read {}: {e}",
+                        path.display()
+                    )))
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn set_secret(&self, _provider: &str, _label: &str, _secret: &str) -> Result<(), VaultError> {
+        Err(VaultError::NotSupported(
+            "credstore is provisioned by `sentinelpass service-credential install`; rotate by re-running it"
+                .into(),
+        ))
+    }
+
+    fn delete_secret(&self, _provider: &str, _label: &str) -> Result<bool, VaultError> {
+        Err(VaultError::NotSupported(
+            "credstore is provisioned by `sentinelpass service-credential install`".into(),
+        ))
+    }
+}
+
 pub struct SentinelPassVault {
     client_id: String,
     /// Path/executable override; defaults to `sentinelpass`.
@@ -453,10 +580,16 @@ impl VaultStore {
         })
     }
 
-    /// Pick the backend named by `SANDHI_VAULT_BACKEND` (`keyring` default; `sentinelpass`).
+    /// Pick the backend named by `SANDHI_VAULT_BACKEND`
+    /// (`keyring` default; `sentinelpass`; `credstore`).
     ///
     /// `sentinelpass` selects the native daemon-IPC backend; setting
     /// `SANDHI_SENTINELPASS_FALLBACK_CLI=1` keeps the legacy CLI shell-out.
+    /// `credstore` selects the sentinelpass-ADR-011 directory-backed read-only backend and
+    /// requires `SANDHI_CREDENTIALS_DIR` (typically
+    /// `$CREDENTIALS_DIRECTORY` inside a system unit); refusing to start
+    /// without it is deliberate — an empty directory would silently drop
+    /// every provider credential.
     pub fn backend_from_env() -> Box<dyn Vault> {
         match std::env::var("SANDHI_VAULT_BACKEND")
             .unwrap_or_else(|_| "keyring".into())
@@ -464,6 +597,27 @@ impl VaultStore {
             .to_ascii_lowercase()
             .as_str()
         {
+            "credstore" => {
+                let dir = std::env::var("SANDHI_CREDENTIALS_DIR")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                if dir.is_empty() {
+                    eprintln!(
+                        "sandhi-proxy: SANDHI_VAULT_BACKEND=credstore requires SANDHI_CREDENTIALS_DIR"
+                    );
+                    std::process::exit(1);
+                }
+                let dir = std::path::PathBuf::from(&dir);
+                if !dir.is_dir() {
+                    eprintln!(
+                        "sandhi-proxy: SANDHI_CREDENTIALS_DIR '{}' is not a directory",
+                        dir.display()
+                    );
+                    std::process::exit(1);
+                }
+                Box::new(CredentialStoreVault::new(dir))
+            }
             "sentinelpass" => {
                 if std::env::var("SANDHI_SENTINELPASS_FALLBACK_CLI").as_deref() == Ok("1") {
                     Box::new(SentinelPassVault::new())
@@ -852,5 +1006,139 @@ mod tests {
             vault.set_secret("p", "l", "s").unwrap_err(),
             VaultError::NotSupported(_)
         ));
+    }
+}
+
+#[cfg(test)]
+mod credstore_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "sandhi-credstore-{tag}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn credstore_reads_trimmed_secret_from_double_underscore_name() {
+        let dir = temp_dir("read");
+        std::fs::write(dir.join("inferflux__default"), "sk-live-key\n").unwrap();
+        let vault = CredentialStoreVault::new(dir.clone());
+        assert_eq!(
+            vault.get_secret("inferflux", "default").unwrap().as_deref(),
+            Some("sk-live-key")
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn credstore_falls_back_to_dotted_cred_name() {
+        let dir = temp_dir("dotted");
+        std::fs::write(dir.join("sandhi.inferflux.default"), "sk-live").unwrap();
+        let vault = CredentialStoreVault::new(dir.clone());
+        assert_eq!(
+            vault.get_secret("inferflux", "default").unwrap().as_deref(),
+            Some("sk-live")
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn credstore_first_existing_candidate_wins_and_dotted_scheme_is_second() {
+        let dir = temp_dir("precedence");
+        // Both the double-underscore and dotted schemes present: the first
+        // candidate must win, pinning the rotation-shadowing semantics.
+        std::fs::write(dir.join("inferflux__default"), "sk-old").unwrap();
+        std::fs::write(dir.join("inferflux.default"), "sk-new").unwrap();
+        std::fs::write(dir.join("sandhi.inferflux.default"), "sk-newest").unwrap();
+        let vault = CredentialStoreVault::new(dir.clone());
+        assert_eq!(
+            vault.get_secret("inferflux", "default").unwrap().as_deref(),
+            Some("sk-old")
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn credstore_whitespace_only_file_is_absent_not_a_live_empty_credential() {
+        let dir = temp_dir("whitespace");
+        std::fs::write(dir.join("inferflux__default"), "\n  \n").unwrap();
+        let vault = CredentialStoreVault::new(dir.clone());
+        assert_eq!(vault.get_secret("inferflux", "default").unwrap(), None);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn credstore_invalid_utf8_is_a_backend_error() {
+        let dir = temp_dir("utf8");
+        std::fs::write(dir.join("inferflux__default"), [0xff, 0xfe, 0x41]).unwrap();
+        let vault = CredentialStoreVault::new(dir.clone());
+        assert!(matches!(
+            vault.get_secret("inferflux", "default"),
+            Err(VaultError::Backend(_))
+        ));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn credstore_missing_file_is_none() {
+        let vault = CredentialStoreVault::new(temp_dir("missing"));
+        assert_eq!(vault.get_secret("inferflux", "default").unwrap(), None);
+    }
+
+    #[test]
+    fn credstore_write_and_delete_are_not_supported() {
+        let vault = CredentialStoreVault::new(temp_dir("write"));
+        assert!(matches!(
+            vault.set_secret("inferflux", "default", "x"),
+            Err(VaultError::NotSupported(_))
+        ));
+        assert!(matches!(
+            vault.delete_secret("inferflux", "default"),
+            Err(VaultError::NotSupported(_))
+        ));
+    }
+
+    #[test]
+    fn credstore_rejects_unsafe_names_without_touching_the_filesystem() {
+        let vault = CredentialStoreVault::new(temp_dir("unsafe"));
+        for (provider, label) in [
+            ("../escape", "default"),
+            ("inferflux", "../../etc/passwd"),
+            ("inferflux", "a/b"),
+            ("", "default"),
+            ("inferflux", ""),
+        ] {
+            assert_eq!(
+                vault.get_secret(provider, label).unwrap(),
+                None,
+                "({provider}, {label}) must resolve to None"
+            );
+        }
+    }
+
+    #[test]
+    fn credstore_unreadable_file_is_a_backend_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("unreadable");
+        let path = dir.join("inferflux__default");
+        std::fs::write(&path, "sk").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let vault = CredentialStoreVault::new(dir.clone());
+        assert!(matches!(
+            vault.get_secret("inferflux", "default"),
+            Err(VaultError::Backend(_))
+        ));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::remove_dir_all(dir).ok();
     }
 }
