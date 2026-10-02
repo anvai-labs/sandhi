@@ -9,6 +9,7 @@
 pub const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod auth;
+pub mod client_credentials;
 mod codec;
 pub mod config;
 pub mod deadlines;
@@ -329,10 +330,13 @@ pub struct ProxyState {
     /// `/admin/config/apply` — providers/budgets/alerts/vkeys as committable JSON, secrets
     /// referenced by env-var name rather than inlined. `None` disables both routes (404).
     pub config_path: Option<std::path::PathBuf>,
+    /// TD-0031: optional non-interactive client-credentials registry.
+    pub client_credentials: Option<Arc<client_credentials::ClientCredentialRegistry>>,
 }
 
 impl ProxyState {
-    /// Build a state with the operator surface defaulted off (no vault, no admin token). The
+    /// Build a state with the operator surface defaulted off (no vault, no admin token, no
+    /// client-credentials registry). The
     /// existing demo + request-handling path is unchanged.
     #[must_use]
     pub fn new(
@@ -379,6 +383,7 @@ impl ProxyState {
             token_estimator: Mutex::new(TokenEstimateCalibrator::default()),
             otel: None,
             config_path: None,
+            client_credentials: None,
         }
     }
 }
@@ -682,6 +687,7 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         .route("/version", get(version))
         .route("/catalog/models", get(catalog_models))
         .route("/auth/login", get(auth::login))
+        .route("/auth/token", post(crate::client_credentials::client_token))
         .route("/auth/callback", get(auth::callback))
         .route("/auth/session", get(auth::session_status))
         .route("/auth/logout", post(auth::logout))

@@ -214,16 +214,6 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
     });
 
     // TD-0003 P1 operator surface: vault + virtual-key store (same path as the usage store).
-    if std::env::var("SANDHI_VAULT_BACKEND")
-        .map(|backend| !backend.trim().is_empty())
-        .unwrap_or(false)
-        && store_path.is_none()
-    {
-        // A non-default secret backend with no durable store would leave the
-        // gateway serving with no credential source and zero diagnostics.
-        eprintln!("sandhi-proxy: SANDHI_VAULT_BACKEND is set but SANDHI_STORE is not configured");
-        std::process::exit(1);
-    }
     let vault = store_path.as_deref().map(|p| {
         let vault = VaultStore::with_backend(p, VaultStore::backend_from_env())
             .unwrap_or_else(|_| startup_store_fatal("vault"));
@@ -335,7 +325,37 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
         eprintln!("sandhi-proxy: admin API enabled on /admin/*");
     }
 
+    // TD-0031: optional non-interactive client-credentials registry. A malformed
+    // file is fatal (fail-closed): a partially-trusted client list must never run.
+    let client_credentials = match std::env::var("SANDHI_CLIENT_CREDENTIALS_FILE") {
+        Ok(path) if !path.trim().is_empty() => {
+            match sandhi_proxy::client_credentials::ClientCredentialRegistry::load(
+                std::path::Path::new(&path),
+            ) {
+                Ok(registry) => {
+                    eprintln!("sandhi-proxy: client-credentials grant enabled");
+                    Some(Arc::new(registry))
+                }
+                Err(error) => {
+                    eprintln!("sandhi-proxy: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        _ => None,
+    };
     let mut state = ProxyState::new(keys, ledger, sink, providers, store);
+    if oidc.is_some() && client_credentials.is_some() {
+        // In OIDC mode every vk_ token is routed through delegation metadata
+        // that a plain mint never writes — a client-credentials token would be
+        // minted successfully and then 401 at inference. Fail the startup.
+        eprintln!(
+            "sandhi-proxy: SANDHI_CLIENT_CREDENTIALS_FILE is not supported in OIDC auth mode; \
+             use POST /auth/keys (IdP-authenticated delegation) instead"
+        );
+        std::process::exit(1);
+    }
+    state.client_credentials = client_credentials;
     state.buffered_deadlines = buffered_deadlines;
     state.streaming_deadlines = streaming_deadlines;
     if let Some(policy) = &state.buffered_deadlines {
