@@ -214,6 +214,20 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
     });
 
     // TD-0003 P1 operator surface: vault + virtual-key store (same path as the usage store).
+    if std::env::var("SANDHI_VAULT_BACKEND")
+        .map(|backend| !backend.trim().is_empty())
+        .unwrap_or(false)
+        && store_path.is_none()
+    {
+        // Non-fatal by design: backend selection without a durable store is a
+        // deliberate, contract-pinned configuration (the env-demo providers,
+        // the sdk-conformance suite). Warn — a non-default backend here has
+        // no credential source until one is registered.
+        tracing::warn!(
+            "SANDHI_VAULT_BACKEND is set but SANDHI_STORE is not; vault \
+             backend selection is inert — no credential source is active"
+        );
+    }
     let vault = store_path.as_deref().map(|p| {
         let vault = VaultStore::with_backend(p, VaultStore::backend_from_env())
             .unwrap_or_else(|_| startup_store_fatal("vault"));
