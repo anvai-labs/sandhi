@@ -302,7 +302,7 @@ impl Vault for CredentialStoreVault {
         let existing: Vec<&PathBuf> = candidates.iter().filter(|p| p.exists()).collect();
         if existing.len() > 1 {
             tracing::warn!(
-                "credstore: multiple candidate credential files for {provider}:{label};                  using the first — remove stale schemes to avoid shadowing"
+                "credstore: multiple candidate credential files for {provider}:{label}; using the first — remove stale schemes to avoid shadowing"
             );
         }
         for path in candidates {
