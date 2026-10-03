@@ -192,6 +192,10 @@ impl AttemptContext {
     }
 
     pub(crate) fn begin(&self, provider: &str, model: Option<&str>) -> Option<AttemptGuard> {
+        // fetch_update is deprecated on Rust 1.99+ (renamed to try_update,
+        // stable since 1.95) while the workspace MSRV is 1.75; switch to
+        // try_update when the MSRV is raised.
+        #[allow(deprecated)]
         let ordinal = self
             .shared
             .next_ordinal
@@ -294,6 +298,8 @@ impl AttemptGuard {
             self.context.shared.sender.try_send(observation),
             Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_))
         ) {
+            // Same MSRV constraint as the next_ordinal fetch_update above.
+            #[allow(deprecated)]
             let _ = self.context.shared.dropped.fetch_update(
                 Ordering::Relaxed,
                 Ordering::Relaxed,
