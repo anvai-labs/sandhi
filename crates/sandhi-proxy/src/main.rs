@@ -4,7 +4,7 @@
 //! then — when `SANDHI_STORE` is set — opens the TD-0003 operator surface (provider-credential
 //! vault, durable virtual-key store) and rehydrates the live key store + upstream handles from
 //! it. The admin API is enabled by `SANDHI_ADMIN_TOKEN`; the vault backend by
-//! `SANDHI_VAULT_BACKEND=keyring|sentinelpass` (default `keyring`). Request handling lives in the
+//! `SANDHI_VAULT_BACKEND=keyring|sentinelpass|credstore` (default `keyring`). Request handling lives in the
 //! `sandhi_proxy` library and is exercised by the integration tests.
 
 use axum::http::HeaderMap;
@@ -214,6 +214,20 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
     });
 
     // TD-0003 P1 operator surface: vault + virtual-key store (same path as the usage store).
+    if std::env::var("SANDHI_VAULT_BACKEND")
+        .map(|backend| !backend.trim().is_empty())
+        .unwrap_or(false)
+        && store_path.is_none()
+    {
+        // Non-fatal by design: backend selection without a durable store is a
+        // deliberate, contract-pinned configuration (the env-demo providers,
+        // the sdk-conformance suite). Warn — a non-default backend here has
+        // no credential source until one is registered.
+        tracing::warn!(
+            "SANDHI_VAULT_BACKEND is set but SANDHI_STORE is not; vault \
+             backend selection is inert — no credential source is active"
+        );
+    }
     let vault = store_path.as_deref().map(|p| {
         let vault = VaultStore::with_backend(p, VaultStore::backend_from_env())
             .unwrap_or_else(|_| startup_store_fatal("vault"));
@@ -325,7 +339,37 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
         eprintln!("sandhi-proxy: admin API enabled on /admin/*");
     }
 
+    // TD-0031: optional non-interactive client-credentials registry. A malformed
+    // file is fatal (fail-closed): a partially-trusted client list must never run.
+    let client_credentials = match std::env::var("SANDHI_CLIENT_CREDENTIALS_FILE") {
+        Ok(path) if !path.trim().is_empty() => {
+            match sandhi_proxy::client_credentials::ClientCredentialRegistry::load(
+                std::path::Path::new(&path),
+            ) {
+                Ok(registry) => {
+                    eprintln!("sandhi-proxy: client-credentials grant enabled");
+                    Some(Arc::new(registry))
+                }
+                Err(error) => {
+                    eprintln!("sandhi-proxy: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        _ => None,
+    };
     let mut state = ProxyState::new(keys, ledger, sink, providers, store);
+    if oidc.is_some() && client_credentials.is_some() {
+        // In OIDC mode every vk_ token is routed through delegation metadata
+        // that a plain mint never writes — a client-credentials token would be
+        // minted successfully and then 401 at inference. Fail the startup.
+        eprintln!(
+            "sandhi-proxy: SANDHI_CLIENT_CREDENTIALS_FILE is not supported in OIDC auth mode; \
+             use POST /auth/keys (IdP-authenticated delegation) instead"
+        );
+        std::process::exit(1);
+    }
+    state.client_credentials = client_credentials;
     state.buffered_deadlines = buffered_deadlines;
     state.streaming_deadlines = streaming_deadlines;
     if let Some(policy) = &state.buffered_deadlines {
@@ -351,6 +395,60 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
     state.alerts = alerts;
     state.admin_token = admin_token;
     state.oidc = oidc;
+    if (std::env::var_os("SANDHI_POLICY_WORKERS").is_some()
+        || std::env::var_os("SANDHI_POLICY_ONNX").is_some()
+        || std::env::var_os("SANDHI_POLICY_REMOTE").is_some())
+        && std::env::var_os("SANDHI_POLICY_CONFIG").is_none()
+    {
+        eprintln!("sandhi-proxy: policy evaluators require a policy configuration");
+        return 1;
+    }
+    if let Some(path) = std::env::var_os("SANDHI_POLICY_CONFIG") {
+        let loaded = (|| -> Result<_, ()> {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            std::fs::File::open(path)
+                .map_err(|_| ())?
+                .take(131073)
+                .read_to_end(&mut bytes)
+                .map_err(|_| ())?;
+            let worker_path = std::env::var_os("SANDHI_POLICY_WORKERS");
+            let mut registry = sandhi_proxy::policy_workers::load_registry(
+                worker_path.as_deref().map(std::path::Path::new),
+            )
+            .map_err(|_| ())?;
+            let onnx_path = std::env::var_os("SANDHI_POLICY_ONNX");
+            sandhi_proxy::policy_onnx::load_models(
+                &mut registry,
+                onnx_path.as_deref().map(std::path::Path::new),
+            )
+            .map_err(|_| ())?;
+            let remote_path = std::env::var_os("SANDHI_POLICY_REMOTE");
+            sandhi_proxy::policy_remote::load_remotes(
+                &mut registry,
+                remote_path.as_deref().map(std::path::Path::new),
+            )
+            .map_err(|_| ())?;
+            let engine = sandhi_core::policy::Engine::from_slice_with_registry(&bytes, &registry)
+                .map_err(|_| ())?;
+            let store = std::env::var_os("SANDHI_STORE").ok_or(())?;
+            let audit =
+                sandhi_store::policy::PolicyAuditStore::open(std::path::Path::new(&store), 100_000)
+                    .map_err(|_| ())?;
+            Ok(sandhi_proxy::policy::PolicyGate::new(
+                engine,
+                Arc::new(audit),
+            ))
+        })();
+        match loaded {
+            Ok(policy) => state.policy = Some(Arc::new(policy)),
+            Err(()) => {
+                eprintln!("sandhi-proxy: invalid policy or unavailable mandatory policy store");
+                return 1;
+            }
+        }
+    }
+
     state.public_url = public_url;
     // ADR-0004 D4: dashboard read endpoints follow the admin token unless explicitly re-opened.
     state.dashboard_public = std::env::var("SANDHI_DASHBOARD_PUBLIC").as_deref() == Ok("1");

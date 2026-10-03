@@ -21,6 +21,9 @@ path = "src/cli.rs"
 
 [features]
 default = []
+# Opt-in embedded CPU inference. Requires Rust >=1.88 and an operator-pinned
+# ONNX Runtime >=1.26 shared library; never downloads a runtime at build/request time.
+policy-onnx = ["dep:ort"]
 # Release binaries opt into native SentinelPass daemon IPC. Keep the feature on
 # the binary crate because release.yml builds `sandhi-proxy --features
 # sentinelpass-ipc`; without this forwarding edge that documented release path
@@ -37,12 +40,13 @@ otel-otlp = [
 ]
 
 [dependencies]
+ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, features = ["std", "load-dynamic", "api-26"] }
 openidconnect = { version = "4.0.1", default-features = false, features = ["reqwest", "rustls-tls"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-sandhi-core = { path = "../sandhi-core", version = "0.10.1" }
-sandhi-providers = { path = "../sandhi-providers", version = "0.10.1" }
-sandhi-store = { path = "../sandhi-store", version = "0.10.1" }
+sandhi-core = { path = "../sandhi-core", version = "0.11.0" }
+sandhi-providers = { path = "../sandhi-providers", version = "0.11.0" }
+sandhi-store = { path = "../sandhi-store", version = "0.11.0" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 axum = "0.7"
 futures-util = "0.3"
@@ -70,6 +74,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Constant-time admin-token compare (ADR-0004 D4). Already in the lockfile via rustls, so this
 # adds no new crate — it swaps the hand-rolled loop for one with optimizer barriers.
+sha2 = "0.10"
 subtle = { version = "2.6", default-features = false }
 time = { version = "0.3", features = ["formatting"] }
 # TD-0003 P1 operator CLI (thin HTTP client to the admin API).
@@ -103,6 +108,8 @@ opentelemetry-otlp = { version = "0.32", optional = true, default-features = fal
 ] }
 
 [dev-dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+tempfile = "3"
 p256 = { version = "0.13", features = ["ecdsa"] }
 base64 = "0.22"
 rsa = { version = "0.9", features = ["pem"] }

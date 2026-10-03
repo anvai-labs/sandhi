@@ -51,6 +51,10 @@ pub struct SqliteLedger {
 }
 
 impl SqliteLedger {
+    pub(crate) fn is_file_backed(&self) -> bool {
+        self.conn.path().is_some_and(|path| !path.is_empty())
+    }
+
     /// Open (creating if needed) a ledger at `path` (`:memory:` for a volatile one).
     pub fn open(path: &str) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
@@ -190,7 +194,8 @@ impl SqliteLedger {
 
     /// Atomically admit a call by holding `ceiling` tokens as a lease expiring at `now + ttl`, or
     /// deny it if the ceiling would breach a set cap. Reclaims this scope's expired leases first so
-    /// a crashed reservation never blocks admission (opportunistic, ADR-0005 D2).
+    /// a legacy crashed reservation never blocks admission (ADR-0005 D2). Opt-in
+    /// execution intents retain unresolved capacity until explicit settlement.
     pub fn reserve_durable(
         &mut self,
         scope: &str,
@@ -198,16 +203,34 @@ impl SqliteLedger {
         now: OffsetDateTime,
         ttl: Duration,
     ) -> rusqlite::Result<ReserveOutcome> {
-        let now_ts = now.unix_timestamp();
-        let expires_at = (now + ttl).unix_timestamp();
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let outcome = Self::reserve_in_transaction(&tx, scope, ceiling, now, ttl)?;
+        if matches!(outcome, ReserveOutcome::Admitted(_)) {
+            tx.commit()?;
+        }
+        Ok(outcome)
+    }
 
+    // Single admission calculation shared by legacy and opt-in intent callers.
+    fn reserve_in_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        scope: &str,
+        ceiling: u64,
+        now: OffsetDateTime,
+        ttl: Duration,
+    ) -> rusqlite::Result<ReserveOutcome> {
+        let checked_ceiling = i64::try_from(ceiling)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        let now_ts = now.unix_timestamp();
+        let expires_at = (now + ttl).unix_timestamp();
         // Opportunistic reclaim: drop this scope's unsettled, expired leases before measuring.
         tx.execute(
             "DELETE FROM budget_reservation
-             WHERE scope = ?1 AND settled = 0 AND expires_at <= ?2",
+             WHERE scope = ?1 AND settled = 0 AND expires_at <= ?2
+               AND NOT EXISTS (SELECT 1 FROM budget_execution_intent
+                               WHERE reservation_id = budget_reservation.id)",
             params![scope, now_ts],
         )?;
 
@@ -230,14 +253,16 @@ impl SqliteLedger {
                 |row| row.get(0),
             )?;
             let reserved = sum_i64(
-                &tx,
+                tx,
                 "SELECT COALESCE(SUM(ceiling), 0) FROM budget_reservation WHERE scope = ?1 AND settled = 0",
                 scope,
             )?;
             // `Warn` is a **soft cap** (ADR-0005 D6): it never denies admission — the lease is still
             // created below so spend keeps accruing for threshold alerts and the dashboard. Only
             // `Block` hard-refuses a ceiling that would breach the cap.
-            if Policy::parse(&policy) == Policy::Block && spent + reserved + ceiling as i64 > limit
+            if Policy::parse(&policy) == Policy::Block
+                && i128::from(spent) + i128::from(reserved) + i128::from(ceiling)
+                    > i128::from(limit)
             {
                 // Transaction rolls back on drop — nothing reserved.
                 return Ok(ReserveOutcome::Denied(Denied {
@@ -250,12 +275,14 @@ impl SqliteLedger {
             }
         }
 
-        tx.execute(
+        let inserted = tx.execute(
             "INSERT INTO budget_reservation (scope, ceiling, expires_at) VALUES (?1, ?2, ?3)",
-            params![scope, ceiling as i64, expires_at],
+            params![scope, checked_ceiling, expires_at],
         )?;
+        if inserted != 1 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
         let id = tx.last_insert_rowid() as u64;
-        tx.commit()?;
         Ok(ReserveOutcome::Admitted(Reservation {
             id,
             scope: scope.to_string(),
@@ -266,13 +293,25 @@ impl SqliteLedger {
 
     /// Idempotently settle a reservation to its actual billable usage. Guarded by `settled = 0`, so
     /// a retried or replayed settle updates zero rows and changes nothing (ADR-0005 D2/C2).
+    /// Opt-in tracked reservations require `settle_terminal_durable`; this API returns a
+    /// SQLite constraint error without changing their charge or releasing liability.
     pub fn settle_durable(&mut self, reservation_id: u64, actual: u64) -> rusqlite::Result<()> {
-        self.conn.execute(
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if evidence::is_tracked(&tx, reservation_id as i64)? {
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+                Some("tracked reservation requires terminal settlement".into()),
+            ));
+        }
+        tx.execute(
             "UPDATE budget_reservation
              SET actual = ?2, settled = 1, settled_at = CAST(strftime('%s','now') AS INTEGER)
              WHERE id = ?1 AND settled = 0",
             params![reservation_id as i64, actual as i64],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -389,7 +428,9 @@ impl SqliteLedger {
     pub fn reclaim_expired_durable(&mut self, now: OffsetDateTime) -> rusqlite::Result<usize> {
         let now_ts = now.unix_timestamp();
         let n = self.conn.execute(
-            "DELETE FROM budget_reservation WHERE settled = 0 AND expires_at <= ?1",
+            "DELETE FROM budget_reservation WHERE settled = 0 AND expires_at <= ?1
+               AND NOT EXISTS (SELECT 1 FROM budget_execution_intent
+                               WHERE reservation_id = budget_reservation.id)",
             params![now_ts],
         )?;
         // TD-0021 P4 review finding: the dedup table is not prune-on-sight only —

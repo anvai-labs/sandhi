@@ -61,9 +61,13 @@ try {
   }
   async function assertRestoredNumbers() {
     if (expectedEvidence === null) return;
-    const observation = await service.observe(sessionId, pageId, { mode: 'content' });
+    const observation = await service.observe(sessionId, pageId, {
+      mode: 'content', maxElements: 1000, maxBytes: 256 * 1024,
+    });
     const extracted = await service.extract(sessionId, pageId, { format: 'tables' });
-    const accessible = await service.observe(sessionId, pageId, { mode: 'accessibility', maxElements: 1000 });
+    const accessible = await service.observe(sessionId, pageId, {
+      mode: 'accessibility', maxElements: 1000, maxBytes: 256 * 1024,
+    });
     assert.ok(!JSON.stringify([observation, extracted, accessible]).includes(secret),
       'registered secret leaked into numeric evidence');
     assert.equal(observation.untrustedContent, true);
@@ -85,11 +89,35 @@ try {
         assert.ok(Number.isSafeInteger(value) && value >= 0);
         return value.toLocaleString('en-US');
       };
-      const labels = [['calls', 'calls'], ['tokens in', 'tokens_in'],
-        ['tokens out', 'tokens_out'], ['cache read', 'cache_read_tokens'],
-        ['billable', 'billable_tokens']];
-      assert.deepEqual(cards.slice(0, 10), labels.flatMap(([label, key]) =>
-        [number(expectedEvidence.total[key]), label]));
+      const coverageFields = ['reported', 'absent', 'malformed', 'unsupported', 'unknown'];
+      const coverage = (row) => {
+        const value = row.cache_read_coverage;
+        assert.ok(value && coverageFields.every((key) =>
+          Number.isSafeInteger(value[key]) && value[key] >= 0));
+        assert.equal(coverageFields.reduce((sum, key) => sum + value[key], 0), row.calls);
+        return value;
+      };
+      const coverageText = (row) => {
+        const c = coverage(row);
+        return `${number(c.reported)} / ${number(row.calls)} reported`
+          + ` (not reported ${number(c.absent)}; malformed ${number(c.malformed)};`
+          + ` unsupported ${number(c.unsupported)}; unknown ${number(c.unknown)})`;
+      };
+      const cacheReadText = (row) => {
+        const c = coverage(row);
+        if (row.calls === 0) return '—';
+        if (c.reported === row.calls) return number(row.cache_read_tokens);
+        for (const [key, label] of [['absent', 'not reported'], ['malformed', 'malformed'],
+          ['unsupported', 'unsupported'], ['unknown', 'unknown']]) {
+          if (c[key] === row.calls) return label;
+        }
+        return `${number(row.cache_read_tokens)} (mixed reporting)`;
+      };
+      const total = expectedEvidence.total;
+      assert.deepEqual(cards.slice(0, 12), [number(total.calls), 'calls',
+        number(total.tokens_in), 'tokens in', number(total.tokens_out), 'tokens out',
+        cacheReadText(total), 'cache read', coverageText(total), 'cache reporting coverage',
+        number(total.billable_tokens), 'billable']);
       // Card association is DOM-text evidence only: the supported accessibility
       // observation omits their static text. Visibility is independently proved
       // below for the numeric attribution/budget rows, not these cards.
@@ -101,16 +129,17 @@ try {
       assert.deepEqual(text.filter((line) => headings.includes(line)), headings);
       const tables = extracted.data;
       assert.ok(Array.isArray(tables));
-      const usageHeaders = ['key', 'calls', 'in', 'out', 'cache write', 'cache read', 'billable', 'latency'];
+      const usageHeaders = ['key', 'calls', 'in', 'out', 'cache write', 'cache read', 'cache reporting coverage', 'billable', 'latency'];
       const usage = tables.filter((table) => JSON.stringify(table.headers) === JSON.stringify(usageHeaders));
       assert.equal(usage.length, 4);
       const dimensions = ['by_subject', 'by_group', 'by_provider', 'by_model'];
-      const fields = ['calls', 'tokens_in', 'tokens_out', 'cache_creation_tokens', 'cache_read_tokens', 'billable_tokens'];
+      const fields = ['calls', 'tokens_in', 'tokens_out', 'cache_creation_tokens'];
       for (const [index, dimension] of dimensions.entries()) {
         const wanted = expectedEvidence[dimension].map((row) =>
-          [row.key, ...fields.map((field) => number(row[field]))]);
+          [row.key, ...fields.map((field) => number(row[field])), cacheReadText(row),
+            coverageText(row), number(row.billable_tokens)]);
         assert.ok(wanted.length > 0 && wanted.length <= 64);
-        assert.ok(usage[index].rows.every((row) => row.length === 8));
+        assert.ok(usage[index].rows.every((row) => row.length === 9));
         const headingStart = text.indexOf(headings[index]);
         const headingEnd = index < 3 ? text.indexOf(headings[index + 1])
           : text.findIndex((line) => line.startsWith('Declarative config '));
@@ -118,7 +147,7 @@ try {
         assert.deepEqual(text.slice(headingStart + 1, headingEnd),
           [usageHeaders.join(' '), ...usage[index].rows.map((row) => row.join(' '))]);
         const byKey = (a, b) => a[0].localeCompare(b[0]);
-        assert.deepEqual(usage[index].rows.map((row) => row.slice(0, 7)).sort(byKey), wanted.sort(byKey));
+        assert.deepEqual(usage[index].rows.map((row) => row.slice(0, 8)).sort(byKey), wanted.sort(byKey));
       }
       stage = 'budgets';
       const budgets = tables.filter((table) => JSON.stringify(table.headers) === JSON.stringify(

@@ -88,6 +88,7 @@ fn offline_oidc() -> Oidc {
         http: reqwest::Client::new(),
         secret: None,
         introspection_url: "https://sso.example.test/introspect".into(),
+        userinfo_url: None,
         introspection_client_auth: false,
         sessions: Mutex::new(Sessions {
             pending: HashMap::new(),
@@ -148,6 +149,7 @@ async fn dashboard_roles_and_csrf_are_enforced_at_real_handlers() {
             digest("session"),
             Session {
                 subject: subject.into(),
+                groups: Vec::new(),
                 csrf: "proof".into(),
                 expires: unix_now() + 60,
             },
@@ -257,6 +259,7 @@ struct IdpState {
     token_failure: Option<(StatusCode, String)>,
     token_delay: Duration,
     introspection_methods: Value,
+    required_user_agent: Option<String>,
 }
 impl Authority {
     async fn start() -> Self {
@@ -296,6 +299,7 @@ impl Authority {
             token_failure: None,
             token_delay: Duration::ZERO,
             introspection_methods: json!(["none"]),
+            required_user_agent: None,
         }));
         let app = axum::Router::new()
             .route(
@@ -305,6 +309,11 @@ impl Authority {
             .route("/jwks", axum::routing::get(idp_jwks))
             .route("/token", axum::routing::post(idp_token))
             .route("/introspect", axum::routing::post(idp_introspect))
+            .route("/userinfo", axum::routing::get(idp_userinfo))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                idp_agent_gate,
+            ))
             .with_state(state.clone());
         let tls = crate::TlsConfig::from_pem_files(
             fixture.join("localhost-cert.pem"),
@@ -420,7 +429,7 @@ async fn idp_metadata(State(state): State<Arc<Mutex<IdpState>>>) -> Json<Value> 
     let state = state.lock().unwrap();
     let root = state.issuer.trim_end_matches("/oidc");
     let mut metadata = json!({"issuer":state.issuer,"authorization_endpoint":format!("{root}/authorize"),"token_endpoint":format!("{root}/token?diagnostic=fixture-secret"),
-        "jwks_uri":format!("{root}/jwks"),"introspection_endpoint":format!("{root}/introspect"),"introspection_endpoint_auth_methods_supported":state.introspection_methods,"response_types_supported":["code"],
+        "jwks_uri":format!("{root}/jwks"),"userinfo_endpoint":format!("{root}/userinfo"),"introspection_endpoint":format!("{root}/introspect"),"introspection_endpoint_auth_methods_supported":state.introspection_methods,"response_types_supported":["code"],
         "subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256","ES256"],"code_challenge_methods_supported":["S256"]});
     if state.introspection_methods.is_null() {
         metadata
@@ -500,7 +509,7 @@ async fn confidential_introspection_encodes_oauth_client_credentials() {
         "aud":"client:name","sub":"agent-id","exp":unix_now()+60,"token_type":"Bearer"}),
         );
     }
-    let (_, url, client_auth) = oidc.discover().await.unwrap();
+    let (_, url, client_auth, _) = oidc.discover().await.unwrap();
     oidc.introspection_url = url;
     oidc.introspection_client_auth = client_auth;
     assert!(client_auth);
@@ -515,7 +524,7 @@ async fn confidential_introspection_encodes_oauth_client_credentials() {
     );
     // A confidential login client can still advertise public introspection.
     authority.state.lock().unwrap().introspection_methods = json!(["none"]);
-    let (_, _, client_auth) = oidc.discover().await.unwrap();
+    let (_, _, client_auth, _) = oidc.discover().await.unwrap();
     assert!(!client_auth);
     oidc.introspection_client_auth = client_auth;
     assert_eq!(
@@ -1081,4 +1090,637 @@ async fn multi_provider_grants_use_existing_accounting_and_correlation_path() {
         events[0].request_id
     );
     assert_eq!(sent[0].headers["x-inferflux-session-id"], "member-local");
+}
+
+#[tokio::test]
+async fn group_grants_and_delegated_keys_share_budget_alerts_and_authority() {
+    use tower::ServiceExt;
+    use wiremock::{
+        matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+    let authority = Authority::start().await;
+    for (token, sub, groups) in [
+        ("member-access", "member-group-only", json!(["engineering"])),
+        ("admin-access", "admin-id", json!([])),
+    ] {
+        authority.state.lock().unwrap().tokens.insert(token.into(),json!({"active":true,"iss":authority.config.issuer,"aud":"sandhi","sub":sub,"groups":groups,"exp":unix_now()+300,"token_type":"Bearer"}));
+    }
+    let mut document = serde_json::to_value(&authority.config).unwrap();
+    document["group_claim"] = json!("groups");
+    document["allow_delegated_keys"] = json!(true);
+    document["groups"] = json!({"engineering":{"grants":{"cloud":{"upstream":"openai:subscription","models":["allowed"],"group":"engineering","budget_scope":"group:engineering","rate_limit_per_min":20}}}});
+    let config: Config = serde_json::from_value(document).expect("group-based configuration");
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST")).and(path("/chat/completions")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"choices":[{"message":{"content":"done"}}],"usage":{"prompt_tokens":50,"completion_tokens":35}}))).expect(2).mount(&upstream).await;
+    let mut state = ProxyState::new(
+        sandhi_core::KeyStore::new(),
+        crate::ProxyLedger::in_memory(),
+        Arc::new(sandhi_core::InMemorySink::new()),
+        HashMap::from([(
+            "openai:subscription".into(),
+            sandhi_providers::ProviderRuntime::new().openai_compat(
+                "openai",
+                upstream.uri(),
+                "upstream-only",
+                HeaderMap::new(),
+                Some(0),
+                None,
+                None,
+            ),
+        )]),
+        None,
+    );
+    state.oidc = Some(Arc::new(Oidc::new(config).await.unwrap()));
+    state.vkeys = Some(Arc::new(
+        sandhi_store::VirtualKeyStore::in_memory().unwrap(),
+    ));
+    let alert_store = Arc::new(sandhi_store::AlertStore::in_memory().unwrap());
+    state.alerts = Some(Arc::new(Mutex::new(crate::rehydrate_alerts(&alert_store))));
+    state.alert_store = Some(alert_store);
+    let state = Arc::new(state);
+    let app = crate::build_app(state.clone());
+    let req = |route: &str, token: &str, body: Value| {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri(route)
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap()
+    };
+    let budget = json!({"scope":"group:engineering","limit_tokens":100,"window":"total","policy":"warn","alert_thresholds":[80]});
+    assert_eq!(
+        app.clone()
+            .oneshot(req("/admin/budget", "member-access", budget.clone()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(req("/admin/budget", "admin-access", budget))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let minted = app
+        .clone()
+        .oneshot(req(
+            "/auth/keys",
+            "member-access",
+            json!({"grant":"cloud","models":["allowed"]}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(minted.status(), StatusCode::CREATED);
+    let minted: Value = serde_json::from_slice(
+        &axum::body::to_bytes(minted.into_body(), 8192)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let key = minted["virtual_key"].as_str().unwrap();
+    let body = json!({"model":"allowed","messages":[{"role":"user","content":"hello"}]});
+    for token in ["member-access", key] {
+        let response = app
+            .clone()
+            .oneshot(req("/v1/chat/completions", token, body.clone()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+    }
+    assert_eq!(state.ledger.lock().unwrap().spent("group:engineering"), 170);
+    {
+        let registry = state.alerts.as_ref().unwrap().lock().unwrap();
+        let rule = registry
+            .rules()
+            .iter()
+            .find(|r| r.scope == "group:engineering")
+            .unwrap();
+        assert!(registry
+            .last_fired_at("group:engineering", &rule.id)
+            .is_some());
+    }
+    // Both credentials consume the same group cap; a new key is not a fresh budget.
+    assert_eq!(
+        app.clone()
+            .oneshot(req(
+                "/admin/budget",
+                "admin-access",
+                json!({"scope":"group:engineering","limit_tokens":100,"policy":"block"})
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    for token in ["member-access", key] {
+        assert_eq!(
+            app.clone()
+                .oneshot(req("/v1/chat/completions", token, body.clone()))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+    assert_eq!(
+        app.clone()
+            .oneshot(req("/auth/keys", key, json!({"grant":"cloud"})))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(req(
+                "/admin/budget",
+                key,
+                json!({"scope":"x","limit_tokens":1})
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let overbroad = app
+        .clone()
+        .oneshot(req(
+            "/auth/keys",
+            "member-access",
+            json!({"grant":"cloud","models":["forbidden"]}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(overbroad.status(), StatusCode::FORBIDDEN);
+    authority
+        .state
+        .lock()
+        .unwrap()
+        .tokens
+        .get_mut("member-access")
+        .unwrap()["groups"] = json!([]);
+    assert_eq!(
+        app.clone()
+            .oneshot(req("/auth/keys", "member-access", json!({"grant":"cloud"})))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    // Explicit local revocation immediately denies the delegated credential.
+    state
+        .vkeys
+        .as_ref()
+        .unwrap()
+        .revoke(minted["id"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(
+        app.oneshot(req("/v1/chat/completions", key, body))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[test]
+fn group_claims_are_strict_and_conflicting_policy_does_not_escalate() {
+    let mut oidc = offline_oidc();
+    oidc.config.group_claim = Some("groups".into());
+    let mut claims = json!({"active":true,"iss":oidc.config.issuer,"aud":"sandhi","sub":"user","exp":unix_now()+600,"token_type":"Bearer"});
+    for invalid in [
+        json!("admins"),
+        json!([true]),
+        json!([""]),
+        json!(vec!["g"; 129]),
+    ] {
+        claims["groups"] = invalid;
+        assert!(oidc.introspection_identity(&claims).is_none());
+    }
+    let grant = oidc.config.subjects["agent-id"].grants["local"].clone();
+    let mut other = grant.clone();
+    other.upstream = "other:provider".into();
+    oidc.config.groups.insert(
+        "one".into(),
+        Binding {
+            grants: HashMap::from([("same".into(), grant)]),
+            ..Default::default()
+        },
+    );
+    oidc.config.groups.insert(
+        "two".into(),
+        Binding {
+            grants: HashMap::from([("same".into(), other)]),
+            role: Some(Role::Admin),
+            ..Default::default()
+        },
+    );
+    assert!(oidc
+        .config
+        .grant_groups("user", &["one".into(), "two".into()], Some("same"))
+        .is_none());
+    assert!(!oidc
+        .config
+        .permits_groups("user", &["one".into(), "two".into()], Permission::Admin));
+}
+
+#[tokio::test]
+async fn delegated_keys_bind_issuer_subject_expiry_policy_and_rate_identity() {
+    let mut oidc = offline_oidc();
+    oidc.config.allow_delegated_keys = true;
+    let store = Arc::new(sandhi_store::VirtualKeyStore::in_memory().unwrap());
+    let mut state = ProxyState::new(
+        sandhi_core::KeyStore::new(),
+        crate::ProxyLedger::in_memory(),
+        Arc::new(sandhi_core::InMemorySink::new()),
+        HashMap::new(),
+        None,
+    );
+    state.vkeys = Some(store.clone());
+    let mint = |issuer: &str, subject: &str, expires: i64| {
+        let record = sandhi_store::MintRequest {
+            subject_id: Some("agent-id".into()),
+            group_id: Some("team-a".into()),
+            upstream_ref: "inferflux:local".into(),
+            models: vec!["qwen3-coder-30b".into()],
+            budget_scope: None,
+            expires_at: Some("2090-01-01T00:00:00Z".into()),
+            rate_limit_per_min: Some(1),
+        };
+        store
+            .mint_delegated(
+                record,
+                &serde_json::to_string(&Delegation {
+                    issuer: issuer.into(),
+                    identity: Identity {
+                        groups_known: false,
+                        subject: subject.into(),
+                        groups: vec![],
+                        expires_at: expires,
+                    },
+                    grant: "local".into(),
+                    subject_key: false,
+                })
+                .unwrap(),
+            )
+            .unwrap()
+    };
+    let headers = |token: &str| {
+        let mut h = HeaderMap::new();
+        h.insert("authorization", format!("Bearer {token}").parse().unwrap());
+        h
+    };
+    for (issuer, subject, expires) in [
+        ("https://wrong-issuer", "agent-id", unix_now() + 60),
+        (
+            oidc.config.issuer.as_str(),
+            "other-subject",
+            unix_now() + 60,
+        ),
+        (oidc.config.issuer.as_str(), "agent-id", unix_now() - 1),
+    ] {
+        let minted = mint(issuer, subject, expires);
+        assert!(oidc
+            .delegated_key(&state, &minted.secret, &headers(&minted.secret))
+            .await
+            .is_err());
+    }
+    let first = mint(&oidc.config.issuer, "agent-id", unix_now() + 60);
+    let second = mint(&oidc.config.issuer, "agent-id", unix_now() + 60);
+    let (one, rate_one) = oidc
+        .delegated_key(&state, &first.secret, &headers(&first.secret))
+        .await
+        .unwrap();
+    let (two, rate_two) = oidc
+        .delegated_key(&state, &second.secret, &headers(&second.secret))
+        .await
+        .unwrap();
+    assert_eq!(one.id, first.record.id);
+    assert_eq!(two.id, second.record.id);
+    assert_ne!(one.id, two.id);
+    assert_eq!(rate_one, rate_two);
+    assert_eq!(crate::budget_scope(&one), crate::budget_scope(&two));
+    assert_eq!(
+        state.rate_limiter.check(&rate_one, Some(1)),
+        crate::ratelimit::Decision::Allowed
+    );
+    assert!(matches!(
+        state.rate_limiter.check(&rate_two, Some(1)),
+        crate::ratelimit::Decision::Limited { .. }
+    ));
+    oidc.config.subjects.remove("agent-id");
+    assert!(oidc
+        .delegated_key(&state, &first.secret, &headers(&first.secret))
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn group_userinfo_is_bound_to_introspected_subject() {
+    let authority = Authority::start().await;
+    authority.state.lock().unwrap().tokens.insert("access".into(),json!({"active":true,"iss":authority.config.issuer,"aud":"sandhi","sub":"person","exp":unix_now()+60,"token_type":"Bearer","userinfo_groups":["engineering"]}));
+    let mut config = serde_json::to_value(&authority.config).unwrap();
+    config["group_claim"] = json!("sandhi_groups");
+    config["group_source"] = json!("userinfo");
+    let oidc = Oidc::new(serde_json::from_value(config).expect("userinfo group source"))
+        .await
+        .unwrap();
+    let identity = oidc.bearer_identity("access").await.ok().unwrap();
+    assert_eq!(identity.subject, "person");
+    assert_eq!(identity.groups, vec!["engineering"]);
+    authority
+        .state
+        .lock()
+        .unwrap()
+        .tokens
+        .get_mut("access")
+        .unwrap()["userinfo_sub"] = json!("different-person");
+    assert!(oidc.bearer_identity("access").await.is_err());
+}
+
+async fn idp_userinfo(State(state): State<Arc<Mutex<IdpState>>>, headers: HeaderMap) -> Response {
+    let token = headers
+        .get("authorization")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .strip_prefix("Bearer ")
+        .unwrap();
+    let state = state.lock().unwrap();
+    let data = &state.tokens[token];
+    Json(json!({"sub":data.get("userinfo_sub").unwrap_or(&data["sub"]),"sandhi_groups":data["userinfo_groups"]})).into_response()
+}
+
+#[tokio::test]
+async fn long_lived_keys_require_subject_policy_and_survive_restart_revocation() {
+    use tower::ServiceExt;
+    let authority = Authority::start().await;
+    for (token, subject) in [("user-access", "agent-id"), ("group-access", "group-only")] {
+        authority.state.lock().unwrap().tokens.insert(
+            token.into(),
+            json!({
+                "active":true,"iss":authority.config.issuer,"aud":"sandhi","sub":subject,
+                "groups":["engineering"],"exp":unix_now()+60,"token_type":"Bearer"
+            }),
+        );
+    }
+    let mut document = serde_json::to_value(&authority.config).unwrap();
+    document["allow_delegated_keys"] = json!(true);
+    document["max_subject_key_ttl_seconds"] = json!(86400);
+    document["group_claim"] = json!("groups");
+    document["groups"] = json!({"engineering":{"grants":{"cloud":{
+        "upstream":"openai:subscription","models":["allowed"]
+    }}}});
+    let config: Config = serde_json::from_value(document).expect("long-lived key configuration");
+    assert!(config.validate().is_ok());
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("keys.db");
+    let store = Arc::new(sandhi_store::VirtualKeyStore::open(database.to_str().unwrap()).unwrap());
+    let mut state = ProxyState::new(
+        sandhi_core::KeyStore::new(),
+        crate::ProxyLedger::in_memory(),
+        Arc::new(sandhi_core::InMemorySink::new()),
+        HashMap::new(),
+        None,
+    );
+    state.vkeys = Some(store.clone());
+    state.oidc = Some(Arc::new(Oidc::new(config.clone()).await.unwrap()));
+    let state = Arc::new(state);
+    let app = crate::build_app(state.clone());
+    let request = |token: &str, body: Value| {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri("/auth/keys")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap()
+    };
+    for (token, body, expected) in [
+        (
+            "group-access",
+            json!({"grant":"cloud","ttl_seconds":3600}),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "user-access",
+            json!({"grant":"local","ttl_seconds":86401}),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "user-access",
+            json!({"grant":"local","ttl_seconds":0}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "user-access",
+            json!({"grant":"local","ttl_seconds":true}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            "user-access",
+            json!({"grant":"local","ttl_seconds":3600,"models":["forbidden"]}),
+            StatusCode::FORBIDDEN,
+        ),
+    ] {
+        assert_eq!(
+            app.clone()
+                .oneshot(request(token, body))
+                .await
+                .unwrap()
+                .status(),
+            expected
+        );
+    }
+    let response = app
+        .clone()
+        .oneshot(request(
+            "user-access",
+            json!({"grant":"local","ttl_seconds":3600}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert!(response.headers()["cache-control"]
+        .to_str()
+        .unwrap()
+        .contains("no-store"));
+    let minted: Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let key = minted["virtual_key"].as_str().unwrap();
+    let expires = time::OffsetDateTime::parse(
+        minted["expires_at"].as_str().unwrap(),
+        &time::format_description::well_known::Rfc3339,
+    )
+    .unwrap()
+    .unix_timestamp();
+    assert!(expires > unix_now() + 3500); // intentionally outlives the login token
+    let mut headers = HeaderMap::new();
+    headers.insert("authorization", format!("Bearer {key}").parse().unwrap());
+    assert_eq!(
+        app.oneshot(request(key, json!({"grant":"local"})))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    drop(state);
+    drop(store);
+    // Reopen persisted hashes and identity bindings; no access token is needed.
+    let store = Arc::new(sandhi_store::VirtualKeyStore::open(database.to_str().unwrap()).unwrap());
+    let mut state = ProxyState::new(
+        sandhi_core::KeyStore::new(),
+        crate::ProxyLedger::in_memory(),
+        Arc::new(sandhi_core::InMemorySink::new()),
+        HashMap::new(),
+        None,
+    );
+    state.vkeys = Some(store.clone());
+    let mut oidc = Oidc::new(config.clone()).await.unwrap();
+    let (resolved, rate) = oidc.delegated_key(&state, key, &headers).await.unwrap();
+    let direct = config.grant("agent-id", Some("local")).unwrap();
+    assert_eq!(resolved.subject_id.as_deref(), Some("agent-id"));
+    assert_eq!(rate, direct.id);
+    assert_eq!(crate::budget_scope(&resolved), crate::budget_scope(&direct));
+    oidc.config.subjects.remove("agent-id");
+    assert_eq!(
+        oidc.delegated_key(&state, key, &headers).await.unwrap_err(),
+        StatusCode::FORBIDDEN
+    );
+    oidc.config = config.clone();
+    let mut disabled = serde_json::to_value(&config).unwrap();
+    disabled["max_subject_key_ttl_seconds"] = json!(0);
+    oidc.config = serde_json::from_value(disabled).unwrap();
+    assert_eq!(
+        oidc.delegated_key(&state, key, &headers).await.unwrap_err(),
+        StatusCode::FORBIDDEN
+    );
+    oidc.config = config;
+    store.revoke(minted["id"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        oidc.delegated_key(&state, key, &headers).await.unwrap_err(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[test]
+fn subject_key_lifetimes_are_explicit_and_bounded() {
+    for ttl in [0, 120, 86400, 31536000, 31536001] {
+        let mut document = serde_json::to_value(config()).unwrap();
+        document["max_subject_key_ttl_seconds"] = json!(ttl);
+        let config: Config =
+            serde_json::from_value(document).expect("subject key lifetime setting");
+        assert_eq!(config.validate().is_ok(), ttl <= 31536000);
+    }
+}
+
+async fn idp_agent_gate(
+    State(state): State<Arc<Mutex<IdpState>>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let required = state.lock().unwrap().required_user_agent.clone();
+    if required.as_deref().is_some_and(|expected| {
+        request
+            .headers()
+            .get("user-agent")
+            .and_then(|v| v.to_str().ok())
+            != Some(expected)
+    }) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    next.run(request).await
+}
+
+#[tokio::test]
+async fn oidc_identifies_itself_on_every_authority_request() {
+    let authority = Authority::start().await;
+    {
+        let mut state = authority.state.lock().unwrap();
+        state.required_user_agent = Some(format!("sandhi-oidc/{}", env!("CARGO_PKG_VERSION")));
+        state.tokens.insert(
+            "access".into(),
+            json!({"active":true,"iss":authority.config.issuer,
+            "aud":"sandhi","sub":"person","exp":unix_now()+300,"token_type":"Bearer",
+            "userinfo_groups":["engineering"]}),
+        );
+    }
+    let mut config = authority.config.clone();
+    config.group_claim = Some("sandhi_groups".into());
+    config.group_source = GroupSource::Userinfo;
+    let oidc = Oidc::new(config)
+        .await
+        .expect("discovery and JWKS identify the client");
+    let identity = oidc
+        .bearer_identity("access")
+        .await
+        .expect("introspection and UserInfo identify the client");
+    assert_eq!(identity.subject, "person");
+    assert_eq!(identity.groups, vec!["engineering"]);
+}
+
+#[tokio::test]
+async fn policy_receives_only_verified_directory_context() {
+    let authority = Authority::start().await;
+    authority.state.lock().unwrap().tokens.insert(
+        "access".into(),
+        json!({
+            "active":true,"iss":authority.config.issuer,"aud":"sandhi","sub":"person",
+            "exp":unix_now()+300,"token_type":"Bearer","userinfo_groups":["engineering"]
+        }),
+    );
+    let mut config = authority.config.clone();
+    config.group_claim = Some("sandhi_groups".into());
+    config.group_source = GroupSource::Userinfo;
+    config.groups.insert(
+        "engineering".into(),
+        Binding {
+            role: Some(Role::Viewer),
+            ..Default::default()
+        },
+    );
+    config.subjects.insert(
+        "person".into(),
+        Binding {
+            role: Some(Role::Operator),
+            ..Default::default()
+        },
+    );
+    let oidc = Oidc::new(config).await.unwrap();
+    let identity = oidc
+        .bearer_identity("access")
+        .await
+        .expect("verified access");
+    let context = oidc.policy_identity(&identity, true);
+    assert_eq!(context.groups, vec!["engineering"]);
+    assert_eq!(context.roles, vec!["operator", "viewer"]);
+    assert!(context.directory_known);
+    let durable = oidc.policy_identity(&identity, false);
+    assert!(durable.groups.is_empty() && durable.roles.is_empty() && !durable.directory_known);
+    assert_eq!(durable.subject, context.subject);
+}
+
+#[test]
+fn policy_missing_group_claim_is_unknown_not_empty_membership() {
+    let mut oidc = offline_oidc();
+    oidc.config.group_claim = Some("groups".into());
+    let mut value = json!({"active":true,"iss":oidc.config.issuer,"aud":"sandhi",
+        "sub":"agent-id","exp":unix_now()+300,"token_type":"Bearer","groups":[]});
+    let explicit = oidc.introspection_identity(&value).unwrap();
+    assert!(oidc.policy_identity(&explicit, true).directory_known);
+    value.as_object_mut().unwrap().remove("groups");
+    let missing = oidc.introspection_identity(&value).unwrap();
+    assert!(!oidc.policy_identity(&missing, true).directory_known);
 }

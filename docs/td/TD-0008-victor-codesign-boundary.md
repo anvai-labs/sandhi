@@ -134,3 +134,31 @@ handle). "Sandhi owns transport" is unconditional for both families.
    re-encoded sandhi's private rule heuristically in victor). Corollary: a request whose
    semantics are already satisfied is a NO-OP, not an error — reject contradictions,
    accept redundancy.
+
+
+## Subscription gateway credential ownership (2026-09-26)
+
+The proxy path owns upstream subscription leases; Victor clients own only their
+virtual keys. Direct in-process OAuth still owns its own login separately. See
+[the subscription co-design](../subscription-gateway.md) for the expiry fence,
+refresh-writer boundary, model/rate/budget scopes and acceptance tests.
+
+
+## Identity-first follow-up (2026-09-26)
+
+The configured local OIDC issuer remains authoritative. Group policy and short-lived
+delegated virtual keys are implemented on this feature branch; no live migration is
+claimed. Legacy token-mode subscription provisioning is superseded for this deployment.
+See [identity and group ownership](../operator/identity-groups.md) for the tested mapping, shared
+budget/rate semantics, membership freshness limits and pending live acceptance.
+
+
+### Long-running identity credentials (2026-09-26 candidate)
+
+Victor's OpenAI gateway path accepts renewable `TokenCredential` sources and
+identity-pinned, broker-rotated private token files. Sandhi additionally offers
+explicitly enabled, expiring durable keys under current subject grants. Durable
+keys never retain group-derived authority and are not automatically revoked by
+directory account changes. Both paths retain issuer/subject ownership and the
+same grant budget/rate/alert pipeline. See the [operator contract](../operator/identity-groups.md)
+for issuance, rotation, revocation, lifetime limits and live acceptance gates.

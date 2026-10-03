@@ -136,6 +136,18 @@ jobs:
           ref: ${{ github.event_name == 'push' && github.sha || '' }}
           filters: |
             rust:
+              - 'templates/python-evaluator/**'
+              - 'scripts/new_policy_evaluator.py'
+              - 'scripts/subscription_*.py'
+              - 'scripts/policy_*.py'
+              - 'scripts/test_policy_*.py'
+              - 'scripts/test_subscription_lease.py'
+              - 'scripts/generate_onnx_test_fixtures.py'
+              - 'scripts/sensitive_policy.py'
+              - 'scripts/test_sensitive_policy.py'
+              - 'scripts/smoke_sensitive_policy.py'
+              - 'scripts/smoke_policy_evaluator.py'
+              - 'scripts/smoke_policy_container.py'
               - 'scripts/check-oidc-advisory.py'
               - 'docs/security/**'
               - 'crates/**'
@@ -194,6 +206,28 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo build --workspace --all-targets
       - run: cargo test --workspace
+      - name: Optional embedded evaluator feature compiles and passes portable tests
+        run: |
+          cargo clippy --workspace --all-targets --features policy-onnx -- -D warnings
+          cargo test --workspace --features policy-onnx
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Python evaluator template and real TLS replica conformance
+        run: |
+          python -m pip install -r templates/python-evaluator/requirements-dev.txt
+          python -m pytest templates/python-evaluator/tests -q
+          python scripts/smoke_policy_evaluator.py --sandhi "$GITHUB_WORKSPACE"
+      - name: Subscription lease and Python ML export contracts
+        run: |
+          python -m pip install scikit-learn==1.8.0 onnx==1.21.0 onnxruntime==1.26.0
+          python -m pytest scripts/test_subscription_lease.py scripts/test_policy_text.py scripts/test_policy_onnx_export.py scripts/test_sensitive_policy.py -q
+          python scripts/smoke_sensitive_policy.py
+      - name: Container resource enforcement on hosted Linux
+        if: ${{ runner.environment == 'github-hosted' }}
+        run: |
+          docker build --iidfile "$RUNNER_TEMP/evaluator-image.id" templates/python-evaluator
+          python scripts/smoke_policy_container.py --sandhi "$GITHUB_WORKSPACE" --image "$(cat "$RUNNER_TEMP/evaluator-image.id")"
       # Scope 5 (TD-0011 P3): the `otel-otlp` feature is default-off. Verify it builds, clippy-
       # cleans, and tests when opted in — and that the default build stays free of the
       # OpenTelemetry dependency tree (TD-0011 D1/D4: the feature must not move the default graph).
@@ -203,7 +237,7 @@ jobs:
       # proxy feature. Compile the exact public feature seam release.yml uses;
       # otherwise a typo or missing forwarding edge survives normal workspace CI.
       - run: cargo clippy -p sandhi-proxy --features sentinelpass-ipc --all-targets -- -D warnings
-      - run: cargo test -p sandhi-proxy --features sentinelpass-ipc
+      - run: cargo test -p sandhi-proxy -p sandhi-store --features sentinelpass-ipc --locked
       - name: default build excludes the OTel dependency tree
         run: |
           cargo build -p sandhi-proxy

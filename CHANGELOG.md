@@ -19,6 +19,42 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-10-02
+
+### Added
+
+- Credstore vault backend: `SANDHI_VAULT_BACKEND=credstore` reads provider credentials
+  from a systemd encrypted-credential directory (`SANDHI_CREDENTIALS_DIR`), so the
+  gateway restarts and serves without the SentinelPass daemon, vault, or master
+  password available. Provision and rotate with `sentinelpass service-credential
+  install` (sentinelpass >= 0.14.0).
+- Non-interactive client-credentials token grant (TD-0031): `POST /auth/token` issues
+  gateway tokens for registered clients without an interactive OIDC round trip.
+  Tokens auth mode only — startup refuses `SANDHI_CLIENT_CREDENTIALS_FILE` together
+  with OIDC SSO mode.
+- Governed plaintext embeddings and completions pass through the shared admission path.
+- Optional sensitive-text ONNX audit bundle, with audit and policy status surfaced
+  through gateway policy endpoints.
+- Identity-bound gateway policy with bounded evaluators for admission decisions.
+  Scope: with policy evaluation enabled, only OpenAI-dialect ingress is served —
+  Anthropic, Responses and Gemini dialect requests fail closed with 503 — and rules
+  carrying `groups`/`roles` selectors refuse subjects without a known directory
+  membership.
+- Chat wire contract minor 10 (additive policy schema documents; bindings regenerated).
+- Durable settlement and admission records: immutable terminal usage observations,
+  atomic admission intents, fenced dispatch authorization, owned settlement evidence,
+  retained settlement job ownership, and a bounded terminal recovery inventory.
+
+### Fixed
+
+- Provider clients load private CA roots for private-cluster TLS.
+- The SentinelPass IPC backend now speaks the secured 0.13.x protocol and requires a
+  daemon of sentinelpass >= 0.14; against an older daemon it fails closed (no
+  plaintext retry) and the gateway continues without those credentials. Validate the
+  protocol at startup instead of assuming it.
+- The Rust 1.99 `fetch_update` deprecation is silenced at its four call sites while the
+  workspace MSRV remains 1.75.
+
 ## [0.10.1] — 2026-09-24
 
 ### Fixed

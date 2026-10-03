@@ -48,6 +48,9 @@ fn lift_gemini_thinking(object: &Map<String, Value>) -> Option<ThinkingV1> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IngressDialect {
     OpenAi,
+    /// Same-family raw transport only; canonical request is used for admission/accounting.
+    Embeddings,
+    Completions,
     Anthropic,
     /// OpenAI Responses item/event protocol (`/v1/responses`). Normalized through the same
     /// `ChatRequestV1` as the other dialects; the field mapping mirrors the typed Responses
@@ -84,6 +87,27 @@ pub(crate) struct IngressError {
 }
 
 impl IngressError {
+    pub(crate) fn policy(
+        status: axum::http::StatusCode,
+        code: &str,
+        receipt: Option<&str>,
+    ) -> Self {
+        let typed = sandhi_core::ProviderErrorV1 {
+            code: code.into(),
+            message: "Request stopped by gateway policy".into(),
+            retryable: false,
+            http_status: Some(status.as_u16()),
+            provider: None,
+            request_id: receipt.map(str::to_owned),
+            details: Default::default(),
+        };
+        Self {
+            status,
+            code: code.into(),
+            message: typed.message.clone(),
+            typed: Some(typed),
+        }
+    }
     pub(crate) fn draining() -> Self {
         Self {
             status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -177,7 +201,10 @@ impl IngressError {
     /// construction path — a future dialect is added here once, not per call site.
     pub(crate) fn render(&self, dialect: IngressDialect) -> axum::response::Response {
         let body = match dialect {
-            IngressDialect::OpenAi | IngressDialect::Responses => {
+            IngressDialect::OpenAi
+            | IngressDialect::Embeddings
+            | IngressDialect::Completions
+            | IngressDialect::Responses => {
                 json!({"error": self.payload()})
             }
             IngressDialect::Anthropic => json!({"type":"error","error": self.payload()}),
@@ -271,9 +298,10 @@ impl IngressDialect {
         match self {
             // No `x-api-key` here on purpose: the OpenAI SDKs never send it, so accepting it
             // would invent a cross-vendor auth scheme no client asked for.
-            IngressDialect::OpenAi | IngressDialect::Responses => {
-                &[CredentialScheme::AuthorizationBearer]
-            }
+            IngressDialect::OpenAi
+            | IngressDialect::Embeddings
+            | IngressDialect::Completions
+            | IngressDialect::Responses => &[CredentialScheme::AuthorizationBearer],
             IngressDialect::Anthropic => &[
                 CredentialScheme::RawHeader("x-api-key"),
                 CredentialScheme::AuthorizationBearer,
@@ -293,7 +321,10 @@ impl IngressDialect {
     /// message tells a client what its vendor actually sends, not what another vendor sends.
     pub(crate) fn credential_hint(self) -> &'static str {
         match self {
-            IngressDialect::OpenAi | IngressDialect::Responses => "'Authorization: Bearer <key>'",
+            IngressDialect::OpenAi
+            | IngressDialect::Embeddings
+            | IngressDialect::Completions
+            | IngressDialect::Responses => "'Authorization: Bearer <key>'",
             IngressDialect::Anthropic => "'x-api-key: <key>' (or 'Authorization: Bearer <key>')",
             IngressDialect::Gemini => "'x-goog-api-key: <key>' (or 'Authorization: Bearer <key>')",
         }
@@ -315,6 +346,9 @@ pub(crate) fn decode_request(
 ) -> Result<(ChatRequestV1, bool), String> {
     match dialect {
         IngressDialect::OpenAi => decode_openai_request(body, metadata),
+        IngressDialect::Embeddings | IngressDialect::Completions => {
+            crate::text_endpoints::decode(dialect, body, metadata)
+        }
         IngressDialect::Anthropic => decode_anthropic_request(body, metadata),
         IngressDialect::Responses => decode_responses_request(body, metadata),
         IngressDialect::Gemini => decode_gemini_request(body, metadata),
@@ -722,7 +756,7 @@ fn encode_gemini_stream_event(
     }
 }
 
-fn decode_openai_request(
+pub(crate) fn decode_openai_request(
     body: Value,
     metadata: RequestMetadataV1,
 ) -> Result<(ChatRequestV1, bool), String> {
@@ -1451,7 +1485,9 @@ fn responses_response_format(format: &Value) -> Result<Value, String> {
 
 pub(crate) fn encode_response(dialect: IngressDialect, response: &ChatResponseV1) -> Value {
     match dialect {
-        IngressDialect::OpenAi => encode_openai_response(response),
+        IngressDialect::OpenAi | IngressDialect::Embeddings | IngressDialect::Completions => {
+            encode_openai_response(response)
+        }
         IngressDialect::Anthropic => encode_anthropic_response(response),
         IngressDialect::Responses => encode_responses_response(response),
         IngressDialect::Gemini => encode_gemini_response(response),
@@ -1602,7 +1638,9 @@ pub(crate) fn encode_stream_event(
     last_usage: Option<&UsageV2>,
 ) -> Vec<(Option<&'static str>, Value)> {
     match dialect {
-        IngressDialect::OpenAi => encode_openai_stream_event(event, last_usage),
+        IngressDialect::OpenAi | IngressDialect::Embeddings | IngressDialect::Completions => {
+            encode_openai_stream_event(event, last_usage)
+        }
         IngressDialect::Anthropic => encode_anthropic_stream_event(event, last_usage),
         IngressDialect::Responses => encode_responses_stream_event(event, last_usage),
         IngressDialect::Gemini => encode_gemini_stream_event(event, last_usage),

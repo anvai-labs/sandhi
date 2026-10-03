@@ -370,7 +370,7 @@ def test_oidc_advisory_gate_precedes_scoped_ignore(oidc_advisory_guard):
     import json
     import tomllib
     record = json.loads((ROOT / oidc_advisory_guard.RECORD).read_text())
-    oidc_advisory_guard.check_record(ROOT, record, datetime.date(2026, 9, 22))
+    oidc_advisory_guard.check_record(ROOT, record, datetime.date.fromisoformat(record["reviewed_on"]))
     job = commands(workflow("ci.yml")["jobs"]["security"])
     assert job.index("python3 scripts/check-oidc-advisory.py") < job.index("cargo deny")
     assert job.count("cargo deny --locked --all-features") == 3
@@ -380,7 +380,7 @@ def test_oidc_advisory_gate_precedes_scoped_ignore(oidc_advisory_guard):
     assert "docs/security/**" in filters
 
 
-@pytest.mark.parametrize("drift", ["expiry", "version", "checksum", "adapter", "use_site"])
+@pytest.mark.parametrize("drift", ["expiry", "future_review", "version", "checksum", "adapter", "use_site"])
 def test_oidc_advisory_rejects_review_drift(tmp_path, oidc_advisory_guard, drift):
     import datetime
     import json
@@ -390,9 +390,11 @@ def test_oidc_advisory_rejects_review_drift(tmp_path, oidc_advisory_guard, drift
         path = tmp_path / name
         path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / name, path)
-    today = datetime.date(2026, 9, 22)
+    today = datetime.date.fromisoformat(record["reviewed_on"])
     if drift == "expiry":
         today = datetime.date.fromisoformat(record["expires_on"])
+    elif drift == "future_review":
+        today -= datetime.timedelta(days=1)
     elif drift in {"version", "checksum"}:
         record["packages"]["rsa"][drift] = "changed"
     elif drift == "adapter":
@@ -417,3 +419,10 @@ def test_oidc_advisory_rejects_additional_production_consumer(oidc_advisory_guar
         oidc_advisory_guard.check_graph(changed, True)
     with pytest.raises(ValueError, match="binding production graph"):
         oidc_advisory_guard.check_graph(metadata, False)
+
+
+def test_binary_release_ships_optional_sensitive_policy():
+    run = commands(workflow("release.yml")["jobs"]["binaries"])
+    assert "--features sentinelpass-ipc,policy-onnx" in run
+    for artifact in ["scripts/sensitive_policy.py", "crates/sandhi-proxy/assets/sensitive-text-v1", "docs/operator/sensitive-policy.md"]:
+        assert artifact in run

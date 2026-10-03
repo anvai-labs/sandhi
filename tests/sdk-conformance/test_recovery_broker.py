@@ -73,12 +73,12 @@ def recovered_broker_process(binary, database, runtime_dir, daemon, *, token="re
 def test_restored_metadata_is_not_broker_authority(
     broker_binary, broker_plain_binary, upstream, tmp_path, failure,
 ):
-    daemon = FakeBroker(tmp_path / "broker.sock")
     source_dir = tmp_path / "source"
     source_dir.mkdir()
     source = source_dir / "usage.db"
     reference = {"provider": "openai", "label": "default", "base_url": upstream.base_url}
     body = {"model": "gpt-mock", "messages": [{"role": "user", "content": "synthetic recovery"}]}
+    daemon = FakeBroker(tmp_path / "broker.sock", broker_binary.with_name("sdk_broker_transport"))
     try:
         with recovered_broker_process(broker_binary, source, tmp_path / "initial", daemon) as client:
             registered = client.post("/admin/keys/reference", json=reference)

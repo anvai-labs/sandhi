@@ -901,6 +901,30 @@ mod tests {
     }
 
     #[test]
+    fn model_effort_pair_survives_standard_and_subscription_responses() {
+        for model in ["gpt-6-sol", "gpt-6-luna"] {
+            for effort in ["none", "low", "medium", "high", "xhigh", "max"] {
+                for profile in [
+                    OpenAiResponsesProfile::Standard,
+                    OpenAiResponsesProfile::ChatGptCodex,
+                ] {
+                    let request: ChatRequestV1 = serde_json::from_value(json!({
+                        "model": model,
+                        "messages": [{"role": "system", "content": "Classify the input."}, {"role": "user", "content": "hello"}],
+                        "reasoning_effort": effort,
+                        "extensions": {"openai_responses": {"reasoning": {"effort": "low", "summary": "auto"}}}
+                    })).unwrap();
+                    let body = encode_responses_request_for_profile(&request, profile).unwrap();
+                    assert_eq!(body["model"], model);
+                    assert_eq!(body["reasoning"]["effort"], effort);
+                    assert_eq!(body["reasoning"]["summary"], "auto");
+                    assert!(body.get("reasoning_effort").is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn w3d_reasoning_effort_merges_into_existing_reasoning_object() {
         let request: ChatRequestV1 = serde_json::from_value(json!({
             "model": "gpt-5",

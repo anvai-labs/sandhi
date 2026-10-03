@@ -1,0 +1,15 @@
+{
+  "name": "onnx.sensitive_text.v1",
+  "profile": "utf8_byte_trigrams_v1",
+  "training_examples": 256,
+  "source": "repository-owned synthetic templates; no private data",
+  "seed": 0,
+  "action": "audit",
+  "threshold": 0.75,
+  "model_bytes": 2476,
+  "limits": [
+    "Unvalidated on real user traffic; audit-only classifier",
+    "No guarantee for paraphrases, obfuscation, long mixed text or non-English content",
+    "A score is not a calibrated probability; synthetic holdout is a smoke test"
+  ]
+}

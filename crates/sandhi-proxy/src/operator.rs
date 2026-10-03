@@ -152,6 +152,23 @@ pub struct BudgetSpec {
 /// Admin auth. Returns `Ok(())` when the presented bearer matches the configured admin token.
 /// `403` when no admin token is configured; `401` when missing/wrong.
 #[allow(clippy::result_large_err)] // axum::Response is intentionally large; this is the idiomatic shape.
+/// Protected policy metadata, never prompt text, patterns, selectors or matched values.
+pub(crate) async fn policy_status(
+    State(state): State<Arc<ProxyState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Read, false).await {
+        return r;
+    }
+    let Some(policy) = state.policy.clone() else {
+        return Json(json!({"enabled":false})).into_response();
+    };
+    match tokio::task::spawn_blocking(move || policy.status()).await {
+        Ok(Ok(status)) => Json(status).into_response(),
+        _ => err(StatusCode::SERVICE_UNAVAILABLE, "policy status unavailable"),
+    }
+}
+
 /// `GET /admin/version` — capability detail beyond the versions (TD-0021 P2, D5/R2).
 ///
 /// The ungated `/version` answers "which contract am I talking to"; this answers
@@ -238,7 +255,7 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.ct_eq(b).into()
 }
 
-fn err(status: StatusCode, msg: &str) -> Response {
+pub(crate) fn err(status: StatusCode, msg: &str) -> Response {
     (status, Json(json!({ "error": msg }))).into_response()
 }
 
@@ -252,7 +269,9 @@ fn draining_response() -> Response {
 }
 
 #[allow(clippy::result_large_err)]
-fn admit_mutation(state: &ProxyState) -> Result<crate::lifecycle::OperationGuard, Response> {
+pub(crate) fn admit_mutation(
+    state: &ProxyState,
+) -> Result<crate::lifecycle::OperationGuard, Response> {
     state
         .lifecycle
         .try_operation()
@@ -322,6 +341,50 @@ pub fn build_provider_handle(
     secret: &str,
     scheme: CredentialScheme,
 ) -> Option<ProviderHandle> {
+    if provider == "openai" && scheme == CredentialScheme::Oauth {
+        // This is an expiring access-token lease, never an API key or refresh token.
+        // The login owner refreshes its grant; the gateway owns dispatch and expiry.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct SubscriptionLease {
+            access_token: String,
+            account_id: String,
+            expires_at: u64,
+        }
+        const CODEX_BASE: &str = "https://chatgpt.com/backend-api/codex";
+        if base_url.is_some_and(|base| base.trim_end_matches('/') != CODEX_BASE) {
+            return None;
+        }
+        let lease: SubscriptionLease = serde_json::from_str(secret).ok()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs();
+        if lease.access_token.trim().is_empty()
+            || lease.account_id.trim().is_empty()
+            || now.saturating_add(30) >= lease.expires_at
+        {
+            return None;
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert("chatgpt-account-id", lease.account_id.parse().ok()?);
+        // Validate the bearer before constructing a transport. Never include it in errors.
+        let _: axum::http::HeaderValue = format!("Bearer {}", lease.access_token).parse().ok()?;
+        headers.insert("originator", "sandhi".parse().ok()?);
+        return Some(
+            runtime
+                .chatgpt_responses(
+                    provider,
+                    CODEX_BASE,
+                    lease.access_token,
+                    headers,
+                    Some(0),
+                    Some(120.0),
+                    Some(90.0),
+                )
+                .with_credential_expiry(lease.expires_at),
+        );
+    }
     let family = ProviderFamily::for_slug(provider);
     let base = base_url
         .map(str::to_string)
@@ -540,6 +603,12 @@ async fn register_credential(
             &secret,
             scheme,
         );
+        if handle.is_none() {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "invalid or expired provider credential configuration",
+            );
+        }
         let committed = if write {
             vault.set(
                 &req.provider,

@@ -31,7 +31,11 @@ synthetic cases compare response conventions, stored event categories, run total
 leases. They validate accounting, not real-provider token bounds or strict-cap eligibility.
 
 `test_broker.py` builds with `sentinelpass-ipc` and drives a real proxy against a disposable Unix
-socket daemon. It tests synthetic read/write grants, locked/denied/missing states, timeout and
+socket daemon. Its test-only `sdk_broker_transport` Rust example uses the pinned
+protocol crate's real secured session; plaintext is refused. Bounded private pipe
+frames connect it to the existing Python grant decisions, without copying crypto
+or authorization logic. Each fixture stops and reaps its bridge. It tests synthetic
+read/write grants, locked/denied/missing states, timeout and
 overlapping mutations, redaction, reference registration (API/CLI/browser), unsupported deletion,
 namespace rejection, scheme aliases and metadata faults. Config-apply cases retain canonical
 reconciliation facts for storage failure and ambiguous write timeout. Its daemon token lives only in a disposable private fixture file selected explicitly

@@ -9,6 +9,7 @@
 pub const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod auth;
+pub mod client_credentials;
 mod codec;
 pub mod config;
 pub mod deadlines;
@@ -17,9 +18,14 @@ pub mod lifecycle;
 pub mod metrics;
 pub mod operator;
 pub mod persistence;
+pub mod policy;
+pub mod policy_onnx;
+pub mod policy_remote;
+pub mod policy_workers;
 pub mod ratelimit;
 pub mod settlement;
 pub mod streaming;
+mod text_endpoints;
 
 /// First-party OTel/OTLP export of `gen_ai.*` spans + metrics (Scope 5, TD-0011 P3). Feature-gated
 /// (`otel-otlp`, default off); provides no-op stubs when the feature is off so call sites compile
@@ -221,6 +227,7 @@ pub fn plaintext_bind_warning(addr: SocketAddr, tls_enabled: bool) -> Option<&'s
 /// Shared server state: the virtual-key store, the budget ledger, the usage sink, and the
 /// registry of configured upstream providers (each already holding its real credential).
 pub struct ProxyState {
+    pub policy: Option<Arc<policy::PolicyGate>>,
     /// Validated startup-only buffered transport policy; absent preserves transport defaults.
     pub buffered_deadlines: Option<deadlines::BufferedDeadlines>,
     /// Startup-only, per-authorized-route streaming setup/idle/body limits.
@@ -323,10 +330,13 @@ pub struct ProxyState {
     /// `/admin/config/apply` — providers/budgets/alerts/vkeys as committable JSON, secrets
     /// referenced by env-var name rather than inlined. `None` disables both routes (404).
     pub config_path: Option<std::path::PathBuf>,
+    /// TD-0031: optional non-interactive client-credentials registry.
+    pub client_credentials: Option<Arc<client_credentials::ClientCredentialRegistry>>,
 }
 
 impl ProxyState {
-    /// Build a state with the operator surface defaulted off (no vault, no admin token). The
+    /// Build a state with the operator surface defaulted off (no vault, no admin token, no
+    /// client-credentials registry). The
     /// existing demo + request-handling path is unchanged.
     #[must_use]
     pub fn new(
@@ -337,6 +347,7 @@ impl ProxyState {
         store: Option<Arc<SqliteStore>>,
     ) -> Self {
         Self {
+            policy: None,
             lifecycle: Arc::new(lifecycle::Lifecycle::new()),
             buffered_deadlines: None,
             streaming_deadlines: None,
@@ -372,6 +383,7 @@ impl ProxyState {
             token_estimator: Mutex::new(TokenEstimateCalibrator::default()),
             otel: None,
             config_path: None,
+            client_credentials: None,
         }
     }
 }
@@ -627,6 +639,8 @@ pub(crate) async fn resolve_client_ip(
 fn ingress_routes(state: &Arc<ProxyState>) -> axum::Router<Arc<ProxyState>> {
     let ai_routes = Router::new()
         .route("/v1/chat/completions", post(handle_openai))
+        .route("/v1/embeddings", post(handle_embeddings))
+        .route("/v1/completions", post(handle_completions))
         .route("/v1/messages", post(handle_anthropic))
         .route("/v1/responses", post(handle_responses))
         // Gemini's path carries the model AND the method, colon-separated
@@ -673,9 +687,11 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         .route("/version", get(version))
         .route("/catalog/models", get(catalog_models))
         .route("/auth/login", get(auth::login))
+        .route("/auth/token", post(crate::client_credentials::client_token))
         .route("/auth/callback", get(auth::callback))
         .route("/auth/session", get(auth::session_status))
         .route("/auth/logout", post(auth::logout))
+        .route("/auth/keys", post(auth::delegate_key))
         .route("/dashboard", get(dashboard_html))
         .route("/dashboard/assets/dashboard.js", get(dashboard_script))
         .route("/dashboard/assets/dashboard.css", get(dashboard_style))
@@ -697,6 +713,7 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         // TD-0021 P2 (D5/R2): capability detail — which optional features are on —
         // is operator information, gated like the rest of /admin.
         .route("/admin/version", get(operator::version_capabilities))
+        .route("/admin/policy", get(operator::policy_status))
         .route("/admin/keys/reference", post(operator::register_reference))
         .route(
             "/admin/keys",
@@ -1803,6 +1820,48 @@ async fn dashboard_style() -> Response {
 
 const DASHBOARD_HTML: &str = include_str!("dashboard/index.html");
 
+async fn handle_completions(
+    State(state): State<Arc<ProxyState>>,
+    permit: Extension<Arc<AdmissionPermit>>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let body = match request_body(body, IngressDialect::Completions) {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
+    handle(
+        state,
+        permit.0,
+        headers,
+        body,
+        IngressDialect::Completions,
+        None,
+    )
+    .await
+}
+
+async fn handle_embeddings(
+    State(state): State<Arc<ProxyState>>,
+    permit: Extension<Arc<AdmissionPermit>>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let body = match request_body(body, IngressDialect::Embeddings) {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
+    handle(
+        state,
+        permit.0,
+        headers,
+        body,
+        IngressDialect::Embeddings,
+        None,
+    )
+    .await
+}
+
 async fn handle_openai(
     State(state): State<Arc<ProxyState>>,
     permit: Extension<Arc<AdmissionPermit>>,
@@ -1983,7 +2042,7 @@ async fn resolve_for_discovery(
                 "OIDC inference authorization failed",
             ))
         }
-        VirtualKeyResolution::Found(vk) => vk,
+        VirtualKeyResolution::Found(vk, _, _) => *vk,
         VirtualKeyResolution::Expired => {
             return Err(ingress_error(
                 dialect,
@@ -2124,6 +2183,35 @@ async fn handle(
     dialect: IngressDialect,
     gemini_route: Option<GeminiRoute>,
 ) -> Response {
+    let receipt = Arc::new(Mutex::new(None));
+    let mut response = handle_with_policy_receipt(
+        state,
+        permit,
+        headers,
+        body,
+        dialect,
+        gemini_route,
+        receipt.clone(),
+    )
+    .await;
+    if let Some(id) = receipt.lock().expect("policy receipt poisoned").as_ref() {
+        response.headers_mut().insert(
+            "x-sandhi-policy-receipt",
+            axum::http::HeaderValue::from_str(id).expect("generated receipt"),
+        );
+    }
+    response
+}
+
+async fn handle_with_policy_receipt(
+    state: Arc<ProxyState>,
+    permit: Arc<AdmissionPermit>,
+    headers: HeaderMap,
+    mut body: Bytes,
+    dialect: IngressDialect,
+    gemini_route: Option<GeminiRoute>,
+    policy_receipt: Arc<Mutex<Option<String>>>,
+) -> Response {
     // Body extraction may have spanned shutdown even after semaphore admission succeeded.
     if !state.lifecycle.is_running() {
         return draining_error(dialect);
@@ -2148,11 +2236,13 @@ async fn handle(
             ),
         );
     };
-    let vk = match resolve_virtual_key(&state, vk_token, &headers).await {
+    let (vk, rate_identity, policy_identity) = match resolve_virtual_key(&state, vk_token, &headers)
+        .await
+    {
         VirtualKeyResolution::Denied(status) => {
             return ingress_error(dialect, status, "OIDC inference authorization failed")
         }
-        VirtualKeyResolution::Found(vk) => vk,
+        VirtualKeyResolution::Found(vk, rate_identity, identity) => (*vk, rate_identity, identity),
         VirtualKeyResolution::Expired => {
             return ingress_error(dialect, StatusCode::UNAUTHORIZED, "virtual key expired");
         }
@@ -2177,9 +2267,33 @@ async fn handle(
     };
 
     // 3. Decode the public ingress dialect into the one canonical runtime request.
-    let Ok(body_json) = serde_json::from_slice::<Value>(&body) else {
+    let raw_text_route = matches!(
+        dialect,
+        IngressDialect::Embeddings | IngressDialect::Completions
+    );
+    if raw_text_route
+        && (provider.family() != ProviderFamily::OpenAiCompat || provider.raw_forwarder().is_none())
+    {
+        return ingress_error(
+            dialect,
+            StatusCode::BAD_REQUEST,
+            "text endpoints require a compatible raw upstream",
+        );
+    }
+    let parsed = if raw_text_route {
+        sandhi_core::policy::strict_json(&body).map_err(|_| ())
+    } else {
+        serde_json::from_slice::<Value>(&body).map_err(|_| ())
+    };
+    let Ok(mut body_json) = parsed else {
         return ingress_error(dialect, StatusCode::BAD_REQUEST, "body is not valid JSON");
     };
+    if dialect == IngressDialect::Completions && body_json.get("max_tokens").is_none() {
+        if let Some(object) = body_json.as_object_mut() {
+            object.insert("max_tokens".into(), serde_json::json!(16));
+            body = Bytes::from(serde_json::to_vec(&body_json).expect("parsed JSON"));
+        }
+    }
     // ADR-0005 D7 + ADR-0008 D3: session identity is single-sourced in core. An explicit
     // `x-sandhi-session` header wins; otherwise derive from the wire body's standard signals
     // (OpenAI `user`, Anthropic `metadata.user_id`, then a stable hash of the cacheable
@@ -2195,6 +2309,8 @@ async fn handle(
     );
     let route = match dialect {
         IngressDialect::OpenAi => "/v1/chat/completions",
+        IngressDialect::Embeddings => "/v1/embeddings",
+        IngressDialect::Completions => "/v1/completions",
         IngressDialect::Anthropic => "/v1/messages",
         IngressDialect::Responses => "/v1/responses",
         IngressDialect::Gemini => "/v1beta/models/:generateContent",
@@ -2331,8 +2447,9 @@ async fn handle(
     // cheap check (an in-memory bucket) and the reservation is the expensive one (a durable
     // write), and — more importantly — a throttled request must consume no lease, record no
     // spend, and emit no usage event. It never reached a provider.
-    if let ratelimit::Decision::Limited { retry_after_secs } =
-        state.rate_limiter.check(&vk.id, vk.rate_limit_per_min)
+    if let ratelimit::Decision::Limited { retry_after_secs } = state
+        .rate_limiter
+        .check(&rate_identity, vk.rate_limit_per_min)
     {
         tracing::warn!(
             provider = provider.slug(),
@@ -2350,12 +2467,78 @@ async fn handle(
         return rate_limited_error(dialect, retry_after_secs);
     }
 
+    if let Some(gate) = &state.policy {
+        let admission = gate
+            .check_input(
+                body.clone(),
+                policy_identity,
+                vk.id.clone(),
+                vk.upstream_ref.clone(),
+                request.model.clone(),
+                match dialect {
+                    IngressDialect::OpenAi => Some(sandhi_core::policy::InputFormat::Chat),
+                    IngressDialect::Embeddings => {
+                        Some(sandhi_core::policy::InputFormat::Embeddings)
+                    }
+                    IngressDialect::Completions => {
+                        Some(sandhi_core::policy::InputFormat::Completions)
+                    }
+                    _ => None,
+                },
+            )
+            .await;
+        if let Ok(ref admitted) = admission {
+            *policy_receipt.lock().expect("policy receipt poisoned") =
+                Some(admitted.receipt.clone());
+        }
+        match admission {
+            Ok(admission)
+                if admission.decision.disposition == sandhi_core::policy::Disposition::Forward => {}
+            result => {
+                let (code, status, receipt) = match result {
+                    Ok(a) => {
+                        let (code, status) = match a.decision.disposition {
+                            sandhi_core::policy::Disposition::Block => {
+                                ("policy_blocked", StatusCode::FORBIDDEN)
+                            }
+                            sandhi_core::policy::Disposition::Quarantine => {
+                                ("policy_quarantined", StatusCode::FORBIDDEN)
+                            }
+                            _ => ("policy_unavailable", StatusCode::SERVICE_UNAVAILABLE),
+                        };
+                        (code, status, Some(a.receipt))
+                    }
+                    Err(_) => ("policy_unavailable", StatusCode::SERVICE_UNAVAILABLE, None),
+                };
+                let mut response =
+                    codec::IngressError::policy(status, code, receipt.as_deref()).render(dialect);
+                response
+                    .headers_mut()
+                    .insert("x-sandhi-policy-code", code.parse().expect("static code"));
+                response
+                    .headers_mut()
+                    .insert("cache-control", "no-store".parse().unwrap());
+                if let Some(receipt) = receipt {
+                    response.headers_mut().insert(
+                        "x-sandhi-policy-receipt",
+                        receipt.parse().expect("generated receipt"),
+                    );
+                }
+                return response;
+            }
+        }
+    }
+
     let scope = budget_scope(&vk);
     let policy = scope_policy(&state, &scope);
     // A scope is "capped" (for output-bounding) only under a `Block` policy: `Warn` never rejects,
     // so we do not shrink the client's request. An output maximum reduces exposure when the
     // client omitted it; it does not make the estimated total a strict cap (TD-0026 W03).
-    let input_len = body.len();
+    let input_len = if raw_text_route {
+        text_endpoints::input_bytes(&request, body.len())
+    } else {
+        body.len()
+    };
     let estimated_input = state
         .token_estimator
         .lock()
@@ -2548,6 +2731,8 @@ async fn handle(
 fn dialect_label(dialect: IngressDialect) -> &'static str {
     match dialect {
         IngressDialect::OpenAi => "openai",
+        IngressDialect::Embeddings => "openai_embeddings",
+        IngressDialect::Completions => "openai_completions",
         IngressDialect::Anthropic => "anthropic",
         IngressDialect::Responses => "responses",
         IngressDialect::Gemini => "gemini",
@@ -2557,7 +2742,9 @@ fn dialect_label(dialect: IngressDialect) -> &'static str {
 /// Ingress dialect → the upstream family it maps to, for plane selection (TD-0006 Step 2).
 fn ingress_family(dialect: IngressDialect) -> ProviderFamily {
     match dialect {
-        IngressDialect::OpenAi => ProviderFamily::OpenAiCompat,
+        IngressDialect::OpenAi | IngressDialect::Embeddings | IngressDialect::Completions => {
+            ProviderFamily::OpenAiCompat
+        }
         IngressDialect::Anthropic => ProviderFamily::Anthropic,
         IngressDialect::Responses => ProviderFamily::OpenAiResponses,
         IngressDialect::Gemini => ProviderFamily::Gemini,
@@ -2566,7 +2753,16 @@ fn ingress_family(dialect: IngressDialect) -> ProviderFamily {
 
 /// The upstream path suffix for a same-family transparent forward — mirrors each typed adapter's
 /// endpoint. Only the three ingress families above ever reach the transparent plane.
-fn upstream_path(family: ProviderFamily, gemini: Option<&GeminiRoute>) -> String {
+fn upstream_path(
+    family: ProviderFamily,
+    gemini: Option<&GeminiRoute>,
+    dialect: IngressDialect,
+) -> String {
+    match dialect {
+        IngressDialect::Embeddings => return "/embeddings".into(),
+        IngressDialect::Completions => return "/completions".into(),
+        _ => (),
+    }
     match family {
         ProviderFamily::OpenAiCompat => "/chat/completions".to_string(),
         ProviderFamily::OpenAiResponses => "/responses".to_string(),
@@ -2659,7 +2855,7 @@ async fn transparent_complete_response(
     let call_headers = accounting.per_call_wire_headers();
     match forwarder
         .forward_metered_with_headers(
-            &upstream_path(provider.family(), gemini.as_ref()),
+            &upstream_path(provider.family(), gemini.as_ref(), dialect),
             body,
             session.as_deref(),
             Some(accounting.request_id.as_str()),
@@ -2715,7 +2911,7 @@ async fn transparent_stream_response(
     let call_headers = accounting.per_call_wire_headers();
     let raw = match forwarder
         .forward_stream_metered_with_headers(
-            &upstream_path(provider.family(), gemini.as_ref()),
+            &upstream_path(provider.family(), gemini.as_ref(), dialect),
             body,
             session.as_deref(),
             Some(accounting.request_id.as_str()),
@@ -3651,7 +3847,7 @@ fn budget_scope(vk: &VirtualKey) -> String {
 }
 
 enum VirtualKeyResolution {
-    Found(VirtualKey),
+    Found(Box<VirtualKey>, String, sandhi_core::policy::Identity),
     NotFound,
     Expired,
     Denied(StatusCode),
@@ -3665,8 +3861,21 @@ async fn resolve_virtual_key(
     headers: &HeaderMap,
 ) -> VirtualKeyResolution {
     if let Some(oidc) = &state.oidc {
-        return match oidc.inference(token, headers).await {
-            Ok(grant) => VirtualKeyResolution::Found(grant),
+        if token.starts_with("vk_") {
+            return match oidc
+                .delegated_key_with_identity(state, token, headers)
+                .await
+            {
+                Ok((grant, rate_identity, identity)) => {
+                    VirtualKeyResolution::Found(Box::new(grant), rate_identity, identity)
+                }
+                Err(status) => VirtualKeyResolution::Denied(status),
+            };
+        }
+        return match oidc.inference_with_identity(token, headers).await {
+            Ok((grant, identity)) => {
+                VirtualKeyResolution::Found(Box::new(grant.clone()), grant.id, identity)
+            }
             Err(r) => VirtualKeyResolution::Denied(r.status()),
         };
     }
@@ -3679,7 +3888,14 @@ async fn resolve_virtual_key(
             if vk.is_expired(&now_rfc3339()) {
                 VirtualKeyResolution::Expired
             } else {
-                VirtualKeyResolution::Found(vk)
+                VirtualKeyResolution::Found(
+                    Box::new(vk.clone()),
+                    vk.id.clone(),
+                    sandhi_core::policy::Identity {
+                        subject: vk.subject_id.clone(),
+                        ..Default::default()
+                    },
+                )
             }
         }
         None => VirtualKeyResolution::NotFound,

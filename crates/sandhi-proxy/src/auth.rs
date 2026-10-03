@@ -80,6 +80,14 @@ pub struct Binding {
     #[serde(default)]
     pub grants: HashMap<String, Grant>,
 }
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupSource {
+    #[default]
+    Introspection,
+    Userinfo,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -90,10 +98,24 @@ pub struct Config {
     pub client_secret_env: Option<String>,
     #[serde(default)]
     pub scopes: Vec<String>,
+    #[serde(default)]
     pub subjects: HashMap<String, Binding>,
+    #[serde(default)]
+    pub groups: HashMap<String, Binding>,
+    pub group_claim: Option<String>,
+    #[serde(default)]
+    pub group_source: GroupSource,
+    #[serde(default)]
+    pub allow_delegated_keys: bool,
+    /// Zero disables durable subject keys. Group-derived delegation stays short-lived.
+    #[serde(default)]
+    pub max_subject_key_ttl_seconds: u32,
 }
 impl Config {
     pub fn validate(&self) -> Result<(), String> {
+        if self.max_subject_key_ttl_seconds > 31_536_000 {
+            return Err("subject key lifetime must not exceed one year".into());
+        }
         let issuer = secure_url(&self.issuer)?;
         let redirect = secure_url(&self.redirect_url)?;
         if issuer.query().is_some()
@@ -105,7 +127,14 @@ impl Config {
         {
             return Err("invalid OIDC issuer, client ID or exact /auth/callback URL".into());
         }
-        for (subject, binding) in &self.subjects {
+        if !self.groups.is_empty()
+            && self.group_claim.as_deref().map_or(true, |v| {
+                v.is_empty() || v.len() > 128 || ["sub", "iss", "aud", "exp", "active"].contains(&v)
+            })
+        {
+            return Err("group policies require an explicit non-reserved group claim".into());
+        }
+        for (subject, binding) in self.subjects.iter().chain(self.groups.iter()) {
             if subject.is_empty()
                 || (binding.role.is_none()
                     && binding.grants.is_empty()
@@ -129,14 +158,57 @@ impl Config {
         }
         Ok(())
     }
-    pub fn permits(&self, subject: &str, p: Permission) -> bool {
-        self.subjects.get(subject).is_some_and(|b| {
-            b.role.is_some_and(|r| r.permits(p))
-                || (p == Permission::Diagnostics && b.allow_diagnostics)
+    pub fn permits(&self, subject: &str, permission: Permission) -> bool {
+        self.permits_groups(subject, &[], permission)
+    }
+
+    fn binding(&self, subject: &str, groups: &[String]) -> Option<Binding> {
+        let mut result = self.subjects.get(subject).cloned().unwrap_or_default();
+        for name in groups {
+            if let Some(binding) = self.groups.get(name) {
+                if let Some(role) = binding.role {
+                    if result
+                        .role
+                        .map_or(true, |old| role_rank(role) > role_rank(old))
+                    {
+                        result.role = Some(role);
+                    }
+                }
+                result.allow_diagnostics |= binding.allow_diagnostics;
+                for (name, grant) in &binding.grants {
+                    if let Some(old) = result.grants.get(name) {
+                        // Ambiguous policy is denied, never resolved by group order.
+                        if serde_json::to_value(old).ok()? != serde_json::to_value(grant).ok()? {
+                            return None;
+                        }
+                    }
+                    result.grants.insert(name.clone(), grant.clone());
+                }
+            }
+        }
+        Some(result)
+    }
+
+    fn permits_groups(&self, subject: &str, groups: &[String], permission: Permission) -> bool {
+        self.binding(subject, groups).is_some_and(|b| {
+            b.role.is_some_and(|r| r.permits(permission))
+                || (permission == Permission::Diagnostics && b.allow_diagnostics)
         })
     }
+
+    #[cfg(test)]
     fn grant(&self, subject: &str, selector: Option<&str>) -> Option<sandhi_core::VirtualKey> {
-        let grants = &self.subjects.get(subject)?.grants;
+        self.grant_groups(subject, &[], selector)
+    }
+
+    fn grant_groups(
+        &self,
+        subject: &str,
+        groups: &[String],
+        selector: Option<&str>,
+    ) -> Option<sandhi_core::VirtualKey> {
+        let binding = self.binding(subject, groups)?;
+        let grants = &binding.grants;
         let (name, g) = match selector {
             Some(name) => (name, grants.get(name)?),
             None if grants.len() == 1 => {
@@ -159,6 +231,34 @@ impl Config {
         })
     }
 }
+fn role_rank(role: Role) -> u8 {
+    match role {
+        Role::Viewer => 1,
+        Role::Operator => 2,
+        Role::Admin => 3,
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Identity {
+    #[serde(default)]
+    groups_known: bool,
+    subject: String,
+    groups: Vec<String>,
+    expires_at: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Delegation {
+    issuer: String,
+    identity: Identity,
+    grant: String,
+    #[serde(default)]
+    subject_key: bool,
+}
+
 fn secure_url(raw: &str) -> Result<reqwest::Url, String> {
     let u = reqwest::Url::parse(raw).map_err(|_| "invalid OIDC URL")?;
     if u.scheme() != "https"
@@ -204,6 +304,7 @@ struct Pending {
 #[derive(Clone)]
 struct Session {
     subject: String,
+    groups: Vec<String>,
     csrf: String,
     expires: i64,
 }
@@ -222,6 +323,7 @@ pub struct Oidc {
     http: reqwest::Client,
     secret: Option<ClientSecret>,
     introspection_url: String,
+    userinfo_url: Option<String>,
     introspection_client_auth: bool,
     sessions: Mutex<Sessions>,
     permits: tokio::sync::Semaphore,
@@ -249,6 +351,7 @@ impl Oidc {
     pub async fn new(config: Config) -> Result<Self, String> {
         config.validate()?;
         let mut builder = reqwest::Client::builder()
+            .user_agent(concat!("sandhi-oidc/", env!("CARGO_PKG_VERSION")))
             .redirect(reqwest::redirect::Policy::none())
             // One total deadline includes DNS, connection, TLS and response reads.
             // A shorter connection cap rejected valid macOS .local DNS resolution.
@@ -272,6 +375,7 @@ impl Oidc {
             .transpose()?;
         let mut result = Self {
             introspection_url: String::new(),
+            userinfo_url: None,
             introspection_client_auth: false,
             config,
             http: builder
@@ -284,7 +388,8 @@ impl Oidc {
             }),
             permits: tokio::sync::Semaphore::new(16),
         };
-        let (_, url, client_auth) = result.discover().await?;
+        let (_, url, client_auth, userinfo) = result.discover().await?;
+        result.userinfo_url = userinfo;
         result.introspection_url = url;
         result.introspection_client_auth = client_auth;
         Ok(result)
@@ -343,7 +448,7 @@ impl Oidc {
             .body(bytes)
             .map_err(|_| Error::other("invalid OIDC response"))
     }
-    async fn discover(&self) -> Result<(Client, String, bool), String> {
+    async fn discover(&self) -> Result<(Client, String, bool, Option<String>), String> {
         let issuer = IssuerUrl::new(self.config.issuer.clone()).map_err(|_| "invalid issuer")?;
         // Fetch once as JSON to validate extensions and same-origin endpoints before the library fetches JWKS.
         let endpoint = format!(
@@ -375,6 +480,20 @@ impl Oidc {
                 return Err("OIDC endpoints must use issuer origin".into());
             }
         }
+        let userinfo = if self.config.group_source == GroupSource::Userinfo {
+            if self.config.group_claim.is_none() {
+                return Err("userinfo groups require group_claim".into());
+            }
+            let endpoint = metadata["userinfo_endpoint"]
+                .as_str()
+                .ok_or("missing userinfo endpoint")?;
+            if secure_url(endpoint)?.origin() != origin {
+                return Err("userinfo endpoint must use issuer origin".into());
+            }
+            Some(endpoint.to_owned())
+        } else {
+            None
+        };
         if !metadata["code_challenge_methods_supported"]
             .as_array()
             .is_some_and(|v| v.iter().any(|v| v == "S256"))
@@ -427,7 +546,7 @@ impl Oidc {
             RedirectUrl::new(self.config.redirect_url.clone())
                 .map_err(|_| "invalid redirect URL")?,
         );
-        Ok((client, introspection, client_auth))
+        Ok((client, introspection, client_auth, userinfo))
     }
     #[allow(clippy::result_large_err)] // Ready-to-return axum denial, same as other authorization gates.
     fn session(&self, headers: &HeaderMap) -> Result<Option<Session>, Response> {
@@ -439,7 +558,7 @@ impl Oidc {
         Ok(sessions.active.get(&digest(&cookie)).cloned())
     }
     #[allow(clippy::result_large_err)] // Ready-to-return axum denial; consistent with session().
-    async fn bearer_subject(&self, token: &str) -> Result<String, Response> {
+    async fn bearer_identity(&self, token: &str) -> Result<Identity, Response> {
         if token.is_empty() || token.len() > MAX_TOKEN_BYTES {
             return Err(unauthorized());
         }
@@ -491,8 +610,69 @@ impl Oidc {
             }
             return Err(unavailable());
         }
-        let value: Value = serde_json::from_slice(response.body()).map_err(|_| unavailable())?;
-        self.introspection_subject(&value).ok_or_else(unauthorized)
+        let mut value: Value =
+            serde_json::from_slice(response.body()).map_err(|_| unavailable())?;
+        let subject = self
+            .introspection_subject(&value)
+            .ok_or_else(unauthorized)?;
+        if self.config.group_source == GroupSource::Userinfo {
+            let endpoint = self.userinfo_url.as_ref().ok_or_else(unavailable)?;
+            let request = axum::http::Request::builder()
+                .uri(endpoint)
+                .header("authorization", format!("Bearer {token}"))
+                .body(Vec::new())
+                .map_err(|_| unauthorized())?;
+            let response = self.fetch(request).await.map_err(|_| unavailable())?;
+            if !response.status().is_success() {
+                return Err(unavailable());
+            }
+            let info: Value = serde_json::from_slice(response.body()).map_err(|_| unavailable())?;
+            if info["sub"].as_str() != Some(subject.as_str()) {
+                return Err(unauthorized());
+            }
+            let claim = self.config.group_claim.as_ref().ok_or_else(unavailable)?;
+            // Only the explicitly configured group claim crosses this boundary; the
+            // validated issuer, subject, audience and expiry stay introspection-owned.
+            value
+                .as_object_mut()
+                .ok_or_else(unauthorized)?
+                .remove(claim);
+            if let Some(groups) = info.get(claim) {
+                value[claim] = groups.clone();
+            }
+        }
+        self.introspection_identity(&value).ok_or_else(unauthorized)
+    }
+    fn introspection_identity(&self, value: &Value) -> Option<Identity> {
+        let subject = self.introspection_subject(value)?;
+        let mut groups = Vec::new();
+        if let Some(claim) = &self.config.group_claim {
+            if let Some(values) = value.get(claim) {
+                let values = values.as_array()?;
+                if values.len() > 128 {
+                    return None;
+                }
+                for value in values {
+                    let group = value.as_str()?;
+                    if group.is_empty() || group.len() > 256 {
+                        return None;
+                    }
+                    if !groups.iter().any(|g| g == group) {
+                        groups.push(group.to_owned());
+                    }
+                }
+            }
+        }
+        Some(Identity {
+            groups_known: self
+                .config
+                .group_claim
+                .as_ref()
+                .is_some_and(|claim| value.get(claim).is_some()),
+            subject,
+            groups,
+            expires_at: value["exp"].as_i64()?,
+        })
     }
     fn introspection_subject(&self, v: &Value) -> Option<String> {
         let aud = &v["aud"];
@@ -514,7 +694,7 @@ impl Oidc {
         Some(sub.into())
     }
     #[allow(clippy::result_large_err)] // Ready-to-return axum denial; consistent with session().
-    async fn identity(&self, headers: &HeaderMap, mutation: bool) -> Result<String, Response> {
+    async fn identity(&self, headers: &HeaderMap, mutation: bool) -> Result<Identity, Response> {
         let bearer = unique_header(headers, "authorization")?;
         let session = self.session(headers)?;
         if bearer.is_some() && cookie(headers, SESSION_COOKIE)?.is_some() {
@@ -522,7 +702,7 @@ impl Oidc {
         }
         if let Some(value) = bearer {
             let token = value.strip_prefix("Bearer ").ok_or_else(unauthorized)?;
-            return self.bearer_subject(token).await;
+            return self.bearer_identity(token).await;
         }
         let session = session.ok_or_else(unauthorized)?;
         if mutation {
@@ -537,7 +717,12 @@ impl Oidc {
                 return Err(failure(StatusCode::FORBIDDEN, "invalid session CSRF proof"));
             }
         }
-        Ok(session.subject)
+        Ok(Identity {
+            groups_known: false,
+            subject: session.subject,
+            groups: session.groups,
+            expires_at: session.expires,
+        })
     }
     #[allow(clippy::result_large_err)] // Ready-to-return axum denial; consistent with session().
     pub async fn authorize(
@@ -547,7 +732,10 @@ impl Oidc {
         mutation: bool,
     ) -> Result<(), Response> {
         let subject = self.identity(headers, mutation).await?;
-        if self.config.permits(&subject, permission) {
+        if self
+            .config
+            .permits_groups(&subject.subject, &subject.groups, permission)
+        {
             Ok(())
         } else {
             Err(failure(
@@ -562,6 +750,16 @@ impl Oidc {
         token: &str,
         headers: &HeaderMap,
     ) -> Result<sandhi_core::VirtualKey, Response> {
+        self.inference_with_identity(token, headers)
+            .await
+            .map(|(key, _)| key)
+    }
+    #[allow(clippy::result_large_err)] // Ready-to-return axum denial; consistent with inference().
+    pub(crate) async fn inference_with_identity(
+        &self,
+        token: &str,
+        headers: &HeaderMap,
+    ) -> Result<(sandhi_core::VirtualKey, sandhi_core::policy::Identity), Response> {
         // A caller cannot select a different principal by sending competing dialect headers.
         let mut credentials = 0;
         for name in ["authorization", "x-api-key", "x-goog-api-key"] {
@@ -575,10 +773,60 @@ impl Oidc {
         if cookie(headers, SESSION_COOKIE)?.is_some() {
             return Err(unauthorized());
         }
-        let subject = self.bearer_subject(token).await?;
-        self.config
-            .grant(&subject, unique_header(headers, "x-sandhi-grant")?)
-            .ok_or_else(|| failure(StatusCode::FORBIDDEN, "no matching inference grant"))
+        let subject = self.bearer_identity(token).await?;
+        let grant = self
+            .config
+            .grant_groups(
+                &subject.subject,
+                &subject.groups,
+                unique_header(headers, "x-sandhi-grant")?,
+            )
+            .ok_or_else(|| failure(StatusCode::FORBIDDEN, "no matching inference grant"))?;
+        let identity = self.policy_identity(&subject, true);
+        Ok((grant, identity))
+    }
+    fn policy_identity(
+        &self,
+        identity: &Identity,
+        directory: bool,
+    ) -> sandhi_core::policy::Identity {
+        let roles = if directory {
+            self.config
+                .subjects
+                .get(&identity.subject)
+                .into_iter()
+                .chain(
+                    identity
+                        .groups
+                        .iter()
+                        .filter_map(|g| self.config.groups.get(g)),
+                )
+                .filter_map(|binding| binding.role)
+                .map(|r| {
+                    match r {
+                        Role::Viewer => "viewer",
+                        Role::Operator => "operator",
+                        Role::Admin => "admin",
+                    }
+                    .to_owned()
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        sandhi_core::policy::Identity {
+            issuer: Some(self.config.issuer.clone()),
+            subject: Some(identity.subject.clone()),
+            groups: if directory {
+                identity.groups.clone()
+            } else {
+                vec![]
+            },
+            roles,
+            directory_known: directory && identity.groups_known,
+        }
     }
 }
 #[allow(clippy::result_large_err)]
@@ -626,7 +874,7 @@ pub(crate) async fn login(State(state): State<Arc<ProxyState>>) -> Response {
     let Ok(_permit) = oidc.permits.try_acquire() else {
         return unavailable();
     };
-    let (client, _, _) = match oidc.discover().await {
+    let (client, _, _, _) = match oidc.discover().await {
         Ok(v) => v,
         Err(_) => return unavailable(),
     };
@@ -701,7 +949,7 @@ pub(crate) async fn callback(
     let Ok(_permit) = oidc.permits.try_acquire() else {
         return unavailable();
     };
-    let (client, _, _) = match oidc.discover().await {
+    let (client, _, _, _) = match oidc.discover().await {
         Ok(v) => v,
         Err(_) => return unavailable(),
     };
@@ -740,13 +988,28 @@ pub(crate) async fn callback(
         }
     }
     let subject = claims.subject().as_str().to_owned();
-    if !oidc.config.permits(&subject, Permission::Read) {
+    let (groups, groups_expire) = if oidc.config.groups.is_empty() {
+        (Vec::new(), i64::MAX)
+    } else {
+        match oidc.bearer_identity(token.access_token().secret()).await {
+            Ok(identity) if identity.subject == subject => (identity.groups, identity.expires_at),
+            _ => return unauthorized(),
+        }
+    };
+    if !oidc
+        .config
+        .permits_groups(&subject, &groups, Permission::Read)
+    {
         return failure(StatusCode::FORBIDDEN, "no dashboard role assigned");
     }
-    let expires = claims
-        .expiration()
-        .timestamp()
-        .min(unix_now() + SESSION_TTL);
+    let expires = claims.expiration().timestamp().min(groups_expire).min(
+        unix_now()
+            + if oidc.config.groups.is_empty() {
+                SESSION_TTL
+            } else {
+                120
+            },
+    );
     if expires <= unix_now() {
         return unauthorized();
     }
@@ -763,6 +1026,7 @@ pub(crate) async fn callback(
         digest(&value),
         Session {
             subject,
+            groups,
             csrf: random(),
             expires,
         },
@@ -781,18 +1045,18 @@ pub(crate) async fn session_status(
     };
     match oidc.session(&headers) {
         Ok(Some(s)) => {
-            let binding = oidc.config.subjects.get(&s.subject);
+            let binding = oidc.config.binding(&s.subject, &s.groups);
             let mut permissions = [Permission::Read, Permission::Operate, Permission::Admin]
                 .into_iter()
-                .filter(|p| oidc.config.permits(&s.subject, *p))
+                .filter(|p| oidc.config.permits_groups(&s.subject, &s.groups, *p))
                 .collect::<Vec<_>>();
             // Preserve existing session responses unless the capability is explicitly enabled.
             // Admin already implies diagnostics, as it did before this opt-in extension.
-            if binding.is_some_and(|b| b.allow_diagnostics) {
+            if binding.as_ref().is_some_and(|b| b.allow_diagnostics) {
                 permissions.push(Permission::Diagnostics);
             }
             Json(
-                json!({"mode":"oidc","subject":s.subject,"role":binding.and_then(|b| b.role),
+                json!({"mode":"oidc","subject":s.subject,"role":binding.as_ref().and_then(|b| b.role),
                 "permissions":permissions,"csrf":s.csrf,"expires_at":s.expires}),
             )
             .into_response()
@@ -829,3 +1093,256 @@ pub(crate) async fn logout(State(state): State<Arc<ProxyState>>, headers: Header
 
 #[cfg(test)]
 mod tests;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DelegateRequest {
+    grant: String,
+    #[serde(default)]
+    models: Vec<String>,
+    #[serde(default = "default_delegation_ttl")]
+    ttl_seconds: u32,
+}
+
+fn default_delegation_ttl() -> u32 {
+    120
+}
+
+/// Exchange a verified access token for an attenuated agent key.
+/// Lifetimes above 120 seconds require an explicitly configured durable subject grant.
+/// Delegated keys cannot mint more keys or access administration endpoints.
+pub(crate) async fn delegate_key(
+    State(state): State<Arc<ProxyState>>,
+    headers: HeaderMap,
+    Json(body): Json<DelegateRequest>,
+) -> Response {
+    let Some(oidc) = &state.oidc else {
+        return unauthorized();
+    };
+    if !oidc.config.allow_delegated_keys {
+        return failure(StatusCode::FORBIDDEN, "delegation disabled");
+    }
+    if !matches!(cookie(&headers, SESSION_COOKIE), Ok(None)) {
+        return unauthorized();
+    }
+    for name in ["x-api-key", "x-goog-api-key"] {
+        if !matches!(unique_header(&headers, name), Ok(None)) {
+            return unauthorized();
+        }
+    }
+    let Ok(Some(bearer)) = unique_header(&headers, "authorization") else {
+        return unauthorized();
+    };
+    let Some(token) = bearer.strip_prefix("Bearer ") else {
+        return unauthorized();
+    };
+    if token.starts_with("vk_") {
+        return unauthorized();
+    }
+    let Some(operation) = state.lifecycle.try_operation() else {
+        return unavailable();
+    };
+    let mut identity = match oidc.bearer_identity(token).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    if body.ttl_seconds == 0 {
+        return failure(StatusCode::BAD_REQUEST, "key lifetime must be positive");
+    }
+    let subject_key = body.ttl_seconds > 120;
+    if subject_key {
+        if body.ttl_seconds > oidc.config.max_subject_key_ttl_seconds {
+            return failure(StatusCode::FORBIDDEN, "subject key lifetime exceeds policy");
+        }
+        // A directory membership snapshot must never become durable authority.
+        // A long-lived key requires a current, explicit subject grant instead.
+        identity.groups.clear();
+    }
+    let Some(grant) =
+        oidc.config
+            .grant_groups(&identity.subject, &identity.groups, Some(&body.grant))
+    else {
+        return failure(StatusCode::FORBIDDEN, "no matching inference grant");
+    };
+    if body.models.len() > 128
+        || body
+            .models
+            .iter()
+            .any(|m| m.is_empty() || m.len() > 256 || m.contains(',') || !grant.permits_model(m))
+    {
+        return failure(StatusCode::FORBIDDEN, "delegation exceeds model grant");
+    }
+    let Some(vkeys) = state.vkeys.clone() else {
+        return unavailable();
+    };
+    let requested_expiry = unix_now() + i64::from(body.ttl_seconds);
+    identity.expires_at = if subject_key {
+        requested_expiry
+    } else {
+        identity.expires_at.min(requested_expiry)
+    };
+    if identity.expires_at <= unix_now() {
+        return unauthorized();
+    }
+    let expires = match time::OffsetDateTime::from_unix_timestamp(identity.expires_at) {
+        Ok(v) => match v.format(&time::format_description::well_known::Rfc3339) {
+            Ok(v) => v,
+            Err(_) => return unavailable(),
+        },
+        Err(_) => return unavailable(),
+    };
+    let delegation = Delegation {
+        issuer: oidc.config.issuer.clone(),
+        identity,
+        grant: body.grant,
+        subject_key,
+    };
+    let metadata = match serde_json::to_string(&delegation) {
+        Ok(v) => v,
+        Err(_) => return unavailable(),
+    };
+    let req = sandhi_store::MintRequest {
+        subject_id: grant.subject_id,
+        group_id: grant.group_id,
+        upstream_ref: grant.upstream_ref,
+        models: if body.models.is_empty() {
+            grant.models.unwrap_or_default()
+        } else {
+            body.models
+        },
+        budget_scope: grant.budget_scope,
+        expires_at: Some(expires),
+        rate_limit_per_min: grant.rate_limit_per_min,
+    };
+    let Ok(permit) = state.vault_writer.clone().try_acquire_owned() else {
+        return unavailable();
+    };
+    match tokio::task::spawn_blocking(move || {
+        let _operation = operation;
+        let _permit = permit;
+        vkeys.mint_delegated(req, &metadata)
+    })
+    .await
+    {
+        Ok(Ok(minted)) => (
+            StatusCode::CREATED,
+            Json(json!({"id": minted.record.id, "virtual_key": minted.secret,
+            "subject": minted.record.subject_id, "expires_at": minted.record.expires_at})),
+        )
+            .into_response(),
+        _ => unavailable(),
+    }
+}
+
+impl Oidc {
+    /// This is explicit authenticated delegation, never a legacy-key fallback.
+    #[cfg(test)]
+    pub(crate) async fn delegated_key(
+        &self,
+        state: &ProxyState,
+        token: &str,
+        headers: &HeaderMap,
+    ) -> Result<(sandhi_core::VirtualKey, String), StatusCode> {
+        self.delegated_key_with_identity(state, token, headers)
+            .await
+            .map(|(key, rate, _)| (key, rate))
+    }
+    pub(crate) async fn delegated_key_with_identity(
+        &self,
+        state: &ProxyState,
+        token: &str,
+        headers: &HeaderMap,
+    ) -> Result<
+        (
+            sandhi_core::VirtualKey,
+            String,
+            sandhi_core::policy::Identity,
+        ),
+        StatusCode,
+    > {
+        if !self.config.allow_delegated_keys
+            || cookie(headers, SESSION_COOKIE)
+                .map_err(|_| StatusCode::UNAUTHORIZED)?
+                .is_some()
+        {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        let mut count = 0;
+        for name in ["authorization", "x-api-key", "x-goog-api-key"] {
+            if unique_header(headers, name)
+                .map_err(|_| StatusCode::UNAUTHORIZED)?
+                .is_some()
+            {
+                count += 1;
+            }
+        }
+        if count != 1 {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        let store = state.vkeys.clone().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+        let token = token.to_owned();
+        let found = tokio::task::spawn_blocking(move || {
+            store.find_by_secret(&token).and_then(|record| {
+                let Some(record) = record else {
+                    return Ok(None);
+                };
+                store
+                    .delegation(&record.id)
+                    .map(|metadata| metadata.map(|metadata| (record, metadata)))
+            })
+        })
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        let (record, metadata) = found.ok_or(StatusCode::UNAUTHORIZED)?;
+        let delegation: Delegation =
+            serde_json::from_str(&metadata).map_err(|_| StatusCode::UNAUTHORIZED)?;
+        if delegation.issuer != self.config.issuer
+            || delegation.identity.expires_at <= unix_now()
+            || record.subject_id.as_deref() != Some(&delegation.identity.subject)
+        {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        if delegation.subject_key
+            && (self.config.max_subject_key_ttl_seconds == 0
+                || !delegation.identity.groups.is_empty())
+        {
+            return Err(StatusCode::FORBIDDEN);
+        }
+        let mut grant = self
+            .config
+            .grant_groups(
+                &delegation.identity.subject,
+                &delegation.identity.groups,
+                Some(&delegation.grant),
+            )
+            .ok_or(StatusCode::FORBIDDEN)?;
+        if grant.upstream_ref != record.upstream_ref
+            || grant.group_id != record.group_id
+            || grant.budget_scope != record.budget_scope
+        {
+            return Err(StatusCode::FORBIDDEN);
+        }
+        let models: Vec<_> = record
+            .model_list()
+            .into_iter()
+            .filter(|m| grant.permits_model(m))
+            .collect();
+        if models.is_empty() {
+            return Err(StatusCode::FORBIDDEN);
+        }
+        // The client key remains independently auditable, while all credentials for
+        // this owner/grant share rate and budget scope. Minting never resets either.
+        let rate_identity = grant.id.clone();
+        grant.budget_scope = Some(crate::budget_scope(&grant));
+        grant.id = record.id;
+        grant.models = Some(models);
+        grant.expires_at = record.expires_at;
+        grant.rate_limit_per_min = match (grant.rate_limit_per_min, record.rate_limit_per_min) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let identity = self.policy_identity(&delegation.identity, !delegation.subject_key);
+        Ok((grant, rate_identity, identity))
+    }
+}

@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "kind": "tfidf_reference",
+  "references": [
+    "restricted customer records",
+    "private account credentials",
+    "internal employee salary details"
+  ],
+  "max_features": 256
+}

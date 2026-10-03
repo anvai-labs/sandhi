@@ -150,3 +150,23 @@ routes and the reviewed adapter. The security job runs the drift/expiry guard
 before cargo-deny; every other advisory remains fatal. See the [assessment and
 limitations](../security/oidc-rsa-advisory.md). Reassessment is required before
 private-key operations or additional OIDC/RSA consumers are introduced.
+
+
+## Identity-first follow-up (2026-09-26)
+
+The configured local OIDC issuer remains authoritative. Group policy and short-lived
+delegated virtual keys are implemented on this feature branch; no live migration is
+claimed. Legacy token-mode subscription provisioning is superseded for this deployment.
+See [identity and group ownership](../operator/identity-groups.md) for the tested mapping, shared
+budget/rate semantics, membership freshness limits and pending live acceptance.
+
+
+### Long-running identity credentials (2026-09-26 candidate)
+
+Victor's OpenAI gateway path accepts renewable `TokenCredential` sources and
+identity-pinned, broker-rotated private token files. Sandhi additionally offers
+explicitly enabled, expiring durable keys under current subject grants. Durable
+keys never retain group-derived authority and are not automatically revoked by
+directory account changes. Both paths retain issuer/subject ownership and the
+same grant budget/rate/alert pipeline. See the [operator contract](../operator/identity-groups.md)
+for issuance, rotation, revocation, lifetime limits and live acceptance gates.

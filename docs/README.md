@@ -9,6 +9,8 @@ mistaken for shipped behavior.
 | Question | Source of truth |
 |---|---|
 | What can I run today? | The root [README](../README.md) and [proxy operator guide](operator/proxy-guide.adoc) |
+| How do users, groups and long-running clients authenticate? | [Identity and agent credentials](operator/identity-groups.md) (feature candidate; live migration pending) |
+| How is prompt egress inspected? | [Policy MVP](operator/policy-evaluation.md) (candidate); [evaluator backends and Python/MLflow](operator/python-ml-evaluators.md) (Python, optional ONNX and remote-service candidates); [resource-limited container profile](../templates/python-evaluator/DEPLOYMENT.md) |
 | How do I rehearse recovery safely? | [Isolated single-node recovery drill](operator/recovery-drill.md); no automatic production restore guarantee |
 | What is the supported architecture and scope? | Accepted records in [`adr/`](adr/) |
 | What is complete or still open? | This index and the status line at the top of each record in [`td/`](td/) |
@@ -31,12 +33,13 @@ disagree, code plus its tests win until the record is reconciled.
 
 Sandhi is an L7 AI usage gateway and provider-transport library, not a general L4 proxy:
 
-- The proxy accepts four HTTP ingress dialects: OpenAI Chat, OpenAI Responses, Anthropic Messages,
+- The proxy accepts four HTTP protocol families: OpenAI (chat, plaintext completions and embeddings), OpenAI Responses, Anthropic Messages,
   and Gemini. Cohere and Ollama are available as upstream codecs but do not have proxy ingress
   dialects.
 - Eligible same-family proxy calls use the transparent metering plane; cross-family calls use the
-  neutral chat contract and may lose explicitly provider-specific extensions. A hard-capped call
-  with no explicit output limit also uses translation so Sandhi can inject an enforceable ceiling.
+  neutral chat contract and may lose explicitly provider-specific extensions. A hard-capped chat call
+  with no explicit output limit uses translation to inject a bound. Plaintext completions
+  instead receive an explicit max_tokens=16 default and remain on their native route.
 - The listener is deliberately HTTP/1.1-only. It supports plain HTTP for loopback/trusted hops and
   opt-in TLS termination. HTTP/2, HTTP/3, raw TCP forwarding, and WebSocket sessions are not shipped.
 - Budget and rate-limit enforcement is proxy-only and single-node. The in-process bindings meter
@@ -107,7 +110,7 @@ perpetually open.
 | [0002](td/TD-0002-typed-provider-runtime.md) | Complete | Consumer-repository cleanup is outside Sandhi's completion gate |
 | [0003](td/TD-0003-operator-surface-keys-budgets-attribution.md) | Complete | — |
 | [0004](td/TD-0004-catalog-governance-dual-mode.md) | In progress | Shared-governance core and optional in-process durable surface; policy engine is TD-0005 |
-| [0005](td/TD-0005-declarative-policy-engine.md) | Proposed | Policy document, engine, and distribution |
+| [0005](td/TD-0005-declarative-policy-engine.md) | In progress | Opt-in [policy MVP](operator/policy-evaluation.md): regex/threshold/lexical checks, verified identity selection, durable metadata receipts and dispatch denial; [Python workers/offline MLflow](operator/python-ml-evaluators.md) implemented as candidates; [embedded ONNX](operator/embedded-onnx.md) profile and multi-model remote service/replica adapter implemented; semantic models, payload quarantine and signed distribution remain proposed |
 | [0006](td/TD-0006-two-plane-proxy-transparent-metering.md) | Complete | — |
 | [0007](td/TD-0007-enforcement-ledger-backends.md) | In progress | Shared/HA backend selection and implementation |
 | [0008](td/TD-0008-victor-codesign-boundary.md) | Complete | — |
@@ -128,10 +131,12 @@ perpetually open.
 | [0023](td/TD-0023-release-automation.md) | Complete | Publish mechanics implemented; safeguarded all-target v0.6.0 execution tracked separately in TD-0026 |
 | [0024](td/TD-0024-reservation-retention-and-rollup.md) | Proposed | Bounded reservation history and rollups |
 | [0025](td/TD-0025-ingress-funnel-and-family-registry.md) | Proposed | Family registry and funnel decomposition |
-| [0026](td/TD-0026-gateway-product-evolution.md) | In progress | v0.6.0/v0.6.1 fully verified and back-synced; W05b opt-in diagnostics shipped; W05c owned settlement library foundation implemented, authoritative proxy integration/recovery/export and P01–P03 remain open |
+| [0026](td/TD-0026-gateway-product-evolution.md) | In progress | W05b opt-in diagnostics shipped; W05c owned/frozen-observation settlement plus single-file tracked terminal bridge plus owned admission/dispatch handoff and bounded blocking-result ownership and W05d admission-intent/immutable-terminal-usage/bounded-recovery-inventory/opt-in dispatch-fence storage foundations implemented; authoritative proxy integration, observation amendment, recovery/export and P01–P03 remain open |
 | [0027](td/TD-0027-three-way-origin-codesign.md) | In progress | Sandhi v0.7.0 published/verified and evidence synchronized; InferFlux v0.3.0 packaging correction awaits approval/native verification; focused Victor v0.9.5 awaits approval/CI/promotion; sibling publication remains open |
 | [0028](td/TD-0028-cache-accounting-availability.md) | In progress | C1–C4 and C5 terminal-stream repair merged; buffered-only [operator deadlines](operator/buffered-deadlines.md) implemented with unchanged defaults; opt-in Rust [stream body ownership](operator/stream-body-lifetime.md) implemented; standalone [streaming route policy](operator/streaming-deadlines.md) implemented; bounded settlement and originating Mac six-Qwen/one-ZAI acceptance remain open |
-| [0029](td/TD-0029-oidc-sso-authorization.md) | In progress | OIDC browser sessions, explicit roles and inference grants; dedicated Kanidm registration and live browser acceptance passed; machine/upstream acceptance and release pending |
+| [0029](td/TD-0029-oidc-sso-authorization.md) | In progress | OIDC sessions and roles; feature candidate adds verified groups, renewable clients and durable user keys; existing browser acceptance recorded; new live group/broker acceptance and release pending |
+
+| [0030](td/TD-0030-governed-text-endpoints.md) | In progress | Plaintext embeddings/completions implemented and tested; live acceptance and LAN cutover pending |
 
 TD-0026 slice completion means implementation/local verification. Its separate C01/C02 checkpoint
 table tracks remote CI, merge and release; C01 [PR #230](https://github.com/anvai-labs/sandhi/pull/230)
@@ -179,3 +184,9 @@ The longer-term implementation roadmap, which TD-0026 proposes reprioritizing, i
   historical instructions as if they were a current runbook.
 - Prefer links to types, tests, and stable symbols over source line numbers; line references are
   evidence snapshots and drift as implementation files move.
+
+Consolidation candidate: [gateway security review and reviewer path](operator/GATEWAY-SECURITY-REVIEW-2026-09-27.md).
+
+- [Optional sensitive-text policy bundle](operator/sensitive-policy.md): reproducible CPU ONNX demo, audited defaults, protected operator status, and measured limits.
+
+- [Governed text endpoints](operator/text-endpoints.md): plaintext embeddings/completions support and reservation limits.

@@ -242,6 +242,13 @@ token location is unchanged. Set
 `SANDHI_SENTINELPASS_BIN` (default `sentinelpass`). Native IPC is enabled in release binaries and in
 source builds made with `--features sentinelpass-ipc`.
 
+Native IPC now requires a SentinelPass daemon compatible with protocol 0.13.3 secured sessions.
+On Windows the transport uses named pipes; the former `tcp://` loopback transport is unsupported.
+On Unix the socket parent must be owned by the current user, owner-only (0700), and not a symlink.
+Upgrade the daemon before the client; preserve the prior binaries/configuration for rollback.
+A handshake, authentication or permission failure is explicit: there is no automatic plaintext
+or CLI retry. The daemon token and per-client grant remain separate credentials.
+
 Native IPC uses a dedicated runtime thread and a bounded queue. Its default deadline is 5000 ms,
 including queue time; `SANDHI_SENTINELPASS_TIMEOUT_MS` accepts 50–30000 ms. A timed-out write may
 have applied in the broker: reconcile before retrying. The explicit legacy CLI backend has no

@@ -56,6 +56,15 @@ ALLOWED_PATTERNS = [
 # Names that mark a machine author regardless of vendor: an `-ai`/`ai-` segment,
 # or a `-bot`/`[bot]` marker. Deliberately NOT keyed on `users.noreply.github.com`
 # — that is the normal privacy address for human co-authors.
+# Accept only the complete official dependency-update identities, including the
+# repository-owned identity configured in update-protocol-pin.yml. This is
+# package provenance, not an AI-agent authorship or identity-authentication rule.
+_DEPENDENCY_TRAILER = re.compile(
+    r"^[ \t]*co-authored-by:[ \t]+(?:dependabot\[bot\][ \t]+"
+    r"<49699333\+dependabot\[bot\]@users\.noreply\.github\.com>"
+    r"|sandhi pin bot[ \t]+<pin-bot@anvai-labs\.local>)[ \t]*\r?$",
+    re.I | re.M | re.ASCII,
+)
 _BOT_NAME = r"(?:[-_.]ai\b|\bai[-_.]|\[bot\]|[-_.]bot\b|\bbot\b)"
 FORBIDDEN_PATTERNS = [
     (re.compile(rf"^\s*co-authored-by:.*(?:{_AGENTS})", re.I | re.M),
@@ -94,6 +103,7 @@ def scan(text: str, source: str) -> list[str]:
     a violation — we credit our own tooling; the rules exist to keep third-party
     agent attribution out.
     """
+    text = _DEPENDENCY_TRAILER.sub("", text)
     violations: list[str] = []
     for rx, label in FORBIDDEN_PATTERNS:
         for m in rx.finditer(text):

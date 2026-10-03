@@ -225,7 +225,6 @@ impl Vault for SentinelPassIpcVault {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
     use std::os::unix::net::UnixListener;
 
     fn client(path: std::path::PathBuf) -> IpcClient {
@@ -233,60 +232,178 @@ mod tests {
             .with_context(Some("synthetic-read-token".into()), Some(Origin::Cli))
     }
 
+    fn secure_exchange(
+        listener: UnixListener,
+        token: &'static str,
+        write: bool,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            listener.set_nonblocking(true).unwrap();
+            runtime.block_on(async {
+                use sentinelpass_protocol::connection::IpcConnection;
+                use sentinelpass_protocol::transport::unix::UnixSocketConnection;
+                let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let (mut connection, first) = IpcConnection::accept_server(
+                        UnixSocketConnection::from_stream(stream).into(),
+                        token,
+                    )
+                    .await
+                    .unwrap();
+                    assert!(matches!(connection, IpcConnection::Secured { .. }));
+                    assert!(first.is_none());
+                    let body = connection.recv_frame().await;
+                    if token != "synthetic-daemon-token" {
+                        // A mismatched daemon token must never deliver an application request.
+                        assert!(body.is_err());
+                        return;
+                    }
+                    let envelope: sentinelpass_protocol::IpcEnvelope =
+                        serde_json::from_slice(&body.unwrap()).unwrap();
+                    assert_eq!(
+                        envelope.client_token.as_deref(),
+                        Some("synthetic-read-token")
+                    );
+                    assert_eq!(envelope.origin, Some(Origin::Cli));
+                    let response = if write {
+                        assert!(matches!(envelope.message, IpcMessage::SaveSecret {
+                            client_id, domain, value, ..
+                        } if client_id == "sandhi" && domain == "sandhi:openai:default"
+                            && value == "synthetic-key"));
+                        IpcMessage::SaveSecretResponse {
+                            success: true,
+                            error: None,
+                            locked: None,
+                        }
+                    } else {
+                        assert!(matches!(envelope.message, IpcMessage::GetExternalSecret {
+                            client_id, domain, ..
+                        } if client_id == "sandhi" && domain == "sandhi:openai:default"));
+                        IpcMessage::GetExternalSecretResponse {
+                            value: Some("synthetic-key".into()),
+                            authorized: true,
+                            error: None,
+                            locked: None,
+                        }
+                    };
+                    connection
+                        .send_frame(&serde_json::to_vec(&response).unwrap())
+                        .await
+                        .unwrap();
+                })
+                .await
+                .unwrap();
+            });
+        })
+    }
+
     #[test]
     fn construction_lookup_and_drop_are_safe_inside_an_async_runtime() {
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("broker.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
-            let mut prefix = [0; 4];
-            stream.read_exact(&mut prefix).unwrap();
-            let mut body = vec![0; u32::from_be_bytes(prefix) as usize];
-            stream.read_exact(&mut body).unwrap();
-            let envelope: sentinelpass_protocol::IpcEnvelope =
-                serde_json::from_slice(&body).unwrap();
-            assert_eq!(
-                envelope.client_token.as_deref(),
-                Some("synthetic-read-token")
-            );
-            assert!(
-                matches!(envelope.message, IpcMessage::GetExternalSecret { domain, .. }
-                if domain == "sandhi:openai:default")
-            );
-            let response = serde_json::to_vec(&IpcMessage::GetExternalSecretResponse {
-                value: Some("synthetic-key".into()),
-                authorized: true,
-                error: None,
-                locked: None,
-            })
-            .unwrap();
-            stream
-                .write_all(&(response.len() as u32).to_be_bytes())
-                .unwrap();
-            stream.write_all(&response).unwrap();
-        });
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-        runtime.block_on(async {
-            let vault = SentinelPassIpcVault::from_client(
-                "sandhi".into(),
-                client(socket),
-                Duration::from_secs(1),
-            )
-            .unwrap();
-            assert_eq!(
-                vault.get_secret("openai", "default").unwrap().as_deref(),
-                Some("synthetic-key")
+        for write in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            // Protocol 0.13 requires an owner-only socket directory.
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let socket = dir.path().join("broker.sock");
+            let server = secure_exchange(
+                UnixListener::bind(&socket).unwrap(),
+                "synthetic-daemon-token",
+                write,
             );
-            drop(vault);
-        });
+            runtime.block_on(async {
+                let vault = SentinelPassIpcVault::from_client(
+                    "sandhi".into(),
+                    client(socket),
+                    Duration::from_secs(1),
+                )
+                .unwrap();
+                if write {
+                    vault
+                        .set_secret("openai", "default", "synthetic-key")
+                        .unwrap();
+                } else {
+                    assert_eq!(
+                        vault.get_secret("openai", "default").unwrap().as_deref(),
+                        Some("synthetic-key")
+                    );
+                }
+                drop(vault);
+            });
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn wrong_daemon_token_fails_closed_without_plaintext_retry() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = dir.path().join("broker.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let pending = listener.try_clone().unwrap();
+        pending.set_nonblocking(true).unwrap();
+        let server = secure_exchange(listener, "different-synthetic-token", false);
+        let vault = SentinelPassIpcVault::from_client(
+            "sandhi".into(),
+            client(socket),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(
+            matches!(vault.get_secret("openai", "default"), Err(VaultError::Backend(ref message)) if message == "broker transport or protocol failure")
+        );
         server.join().unwrap();
+        assert!(matches!(pending.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+    }
+
+    #[test]
+    fn handshake_obeys_the_vault_deadline() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = dir.path().join("broker.sock");
+        // Leave the connection queued without acknowledging the session hello.
+        let _listener = UnixListener::bind(&socket).unwrap();
+        let vault = SentinelPassIpcVault::from_client(
+            "sandhi".into(),
+            client(socket),
+            Duration::from_millis(50),
+        )
+        .unwrap();
+        assert!(matches!(
+            vault.get_secret("openai", "default"),
+            Err(VaultError::Timeout)
+        ));
+    }
+
+    #[test]
+    fn public_socket_directory_is_rejected_before_connect() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let socket = dir.path().join("broker.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let vault = SentinelPassIpcVault::from_client(
+            "sandhi".into(),
+            client(socket),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(matches!(
+            vault.get_secret("openai", "default"),
+            Err(VaultError::Backend(_))
+        ));
+        assert!(matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
     }
 
     #[test]
