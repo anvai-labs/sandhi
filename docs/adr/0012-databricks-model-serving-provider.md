@@ -1,4 +1,4 @@
-# ADR-0011: Databricks Model Serving provider — OpenAI-compatible upstream with per-workspace routing
+# ADR-0012: Databricks Model Serving provider — OpenAI-compatible upstream with per-workspace routing
 
 Date: 2026-10-01
 
