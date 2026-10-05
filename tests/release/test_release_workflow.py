@@ -239,6 +239,58 @@ def test_ci_always_checks_release_safeguards():
     check_ci(workflow("ci.yml"))
 
 
+def check_aarch64_wheel(release, ci):
+    build = release["jobs"]["pypi-build"]
+    matrix = build["strategy"]["matrix"]["include"]
+    arm = [entry for entry in matrix if entry["target"] == "aarch64-unknown-linux-gnu"]
+    assert arm == [{"os": "ubuntu-24.04-arm", "target": "aarch64-unknown-linux-gnu", "manylinux": "2014"}]
+    action = uses(build, "PyO3/maturin-action")[0]
+    assert action["with"]["target"] == "${{ matrix.target }}"
+    assert action["with"]["manylinux"] == "${{ matrix.manylinux }}"
+    assert "pypi-build" in needs(release["jobs"]["create-release"])
+    assert "pypi-build" in needs(release["jobs"]["pypi-publish"])
+    smoke = ci["jobs"]["python-wheel-arm64"]
+    assert smoke["runs-on"] == arm[0]["os"]
+    assert "python-wheel-arm64" in needs(ci["jobs"]["ci-success"])
+    assert "continue-on-error" not in smoke
+    smoke_action = uses(smoke, "PyO3/maturin-action")[0]
+    assert smoke_action["uses"] == action["uses"]
+    assert smoke_action["with"]["args"] == action["with"]["args"]
+    for key in ("target", "manylinux"):
+        assert smoke_action["with"][key] == arm[0][key]
+    assert "--release --locked" in action["with"]["args"]
+    assert "target-cpu=native" not in str(build) + str(smoke)
+    assert "--no-index --no-deps --only-binary=:all:" in commands(smoke)
+    assert "cp311-abi3-manylinux*aarch64.whl" in commands(smoke)
+    assert "for version in 3.11 3.12 3.13; do" in commands(smoke)
+    assert "-m pytest bindings/python/tests/ -q" in commands(smoke)
+    filters = next(step for step in ci["jobs"]["changes"]["steps"] if step.get("id") == "filter")
+    assert ".github/workflows/release.yml" in yaml.safe_load(filters["with"]["filters"])["python"]
+
+
+def test_aarch64_release_wheel_is_exercised_before_publication():
+    check_aarch64_wheel(workflow("release.yml"), workflow("ci.yml"))
+
+
+@pytest.mark.parametrize("fault", ["missing_arm", "wrong_runner", "host_wheel", "unlocked", "ungated"])
+def test_aarch64_wheel_rejects_packaging_regressions(fault):
+    release, ci = workflow("release.yml"), workflow("ci.yml")
+    build = release["jobs"]["pypi-build"]
+    arm = build["strategy"]["matrix"]["include"][1]
+    if fault == "missing_arm":
+        build["strategy"]["matrix"]["include"].remove(arm)
+    elif fault == "wrong_runner":
+        arm["os"] = "ubuntu-24.04"
+    elif fault == "host_wheel":
+        arm["manylinux"] = "off"
+    elif fault == "unlocked":
+        uses(build, "PyO3/maturin-action")[0]["with"]["args"] = "--release"
+    else:
+        ci["jobs"]["ci-success"]["needs"].remove("python-wheel-arm64")
+    with pytest.raises(AssertionError):
+        check_aarch64_wheel(release, ci)
+
+
 @pytest.mark.parametrize("fault", ["extra_oidc", "wrong_token", "install_before_publish", "unchecked_publish",
     "token_in_other_job", "oidc_action", "job_token", "empty_token", "upload_skipped", "upload_failure_ignored"])
 def test_crates_token_rejects_privilege_and_auth_regressions(fault):

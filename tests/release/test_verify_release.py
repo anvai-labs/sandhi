@@ -52,7 +52,8 @@ def fixtures():
     routes = {PYPI_URL: {"info": {"name": verify.PYPI_PACKAGE, "version": VERSION}, "urls": [
         {"filename": f"sandhi_gateway-{VERSION}-cp311-abi3-{platform}.whl", "yanked": False,
          "size": 100, "packagetype": "bdist_wheel"} for platform in (
-             "manylinux_2_17_x86_64.manylinux2014_x86_64", "macosx_11_0_arm64", "win_amd64")
+             "manylinux_2_17_x86_64.manylinux2014_x86_64",
+             "manylinux_2_17_aarch64.manylinux2014_aarch64", "macosx_11_0_arm64", "win_amd64")
     ]}}
     for crate in verify.CRATES:
         routes[f"https://crates.io/api/v1/crates/{crate}/{VERSION}"] = {
@@ -317,6 +318,28 @@ class VerifyReleaseTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 self.routes[PYPI_URL] = record
                 self.assertEqual(verify.check_pypi(self.client, VERSION).status, status)
+
+    def test_pypi_requires_portable_aarch64_wheel(self):
+        original = copy.deepcopy(self.routes[PYPI_URL])
+        arm = next(file for file in original["urls"] if "aarch64" in file["filename"])
+        for platform in ("manylinux2014_aarch64", "manylinux_2_17_aarch64",
+                         "manylinux_2_17_aarch64.manylinux2014_aarch64"):
+            self.routes[PYPI_URL] = copy.deepcopy(original)
+            current = next(file for file in self.routes[PYPI_URL]["urls"] if "aarch64" in file["filename"])
+            current["filename"] = f"sandhi_gateway-{VERSION}-cp311-abi3-{platform}.whl"
+            self.assertEqual(verify.check_pypi(self.client, VERSION).status, verify.Status.OK)
+        for filename in (None, f"sandhi_gateway-{VERSION}-cp311-abi3-linux_aarch64.whl",
+                         f"sandhi_gateway-{VERSION}-cp311-abi3-musllinux_1_2_aarch64.whl",
+                         f"other-{VERSION}-cp311-abi3-manylinux2014_aarch64.whl",
+                         "sandhi_gateway-0.0.0-cp311-abi3-manylinux2014_aarch64.whl"):
+            with self.subTest(filename=filename):
+                self.routes[PYPI_URL] = copy.deepcopy(original)
+                self.routes[PYPI_URL]["urls"].remove(arm)
+                if filename:
+                    self.routes[PYPI_URL]["urls"].append({**arm, "filename": filename})
+                result = verify.check_pypi(self.client, VERSION)
+                self.assertEqual(result.status, verify.Status.MISSING)
+                self.assertIn("linux-aarch64", result.reason)
 
     def test_wheel_platform_matching_is_package_and_version_scoped(self):
         self.assertEqual(verify.wheel_platforms(f"sandhi_gateway-{VERSION}-cp311-abi3-macosx_11_0_universal2.whl", VERSION), {"macos-arm64"})

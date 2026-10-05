@@ -42,7 +42,7 @@ CRATES = ("sandhi-core", "sandhi-providers", "sandhi-store", "sandhi-proxy")
 PYPI_PACKAGE = "sandhi-gateway"
 NPM_PACKAGE = "@anvailabs/sandhi"
 TARGETS = ("pypi", "crates", "npm", "github")
-PYPI_PLATFORMS = ("linux-x86_64", "macos-arm64", "windows-amd64")
+PYPI_PLATFORMS = ("linux-x86_64", "linux-aarch64", "macos-arm64", "windows-amd64")
 NPM_PLATFORMS = ("linux-x64-gnu", "darwin-arm64")
 BINARY_TARGETS = ("x86_64-unknown-linux-gnu", "aarch64-apple-darwin")
 MAX_JSON_BYTES = 8 * 1024 * 1024
@@ -239,6 +239,8 @@ def wheel_platforms(filename, version):
     for tag in parts[-1].split("."):
         if re.fullmatch(r"(?:manylinux[0-9_]+|linux)_x86_64", tag):
             found.add("linux-x86_64")
+        if re.fullmatch(r"manylinux[0-9_]+_aarch64", tag):
+            found.add("linux-aarch64")
         if re.fullmatch(r"macosx_[0-9]+_[0-9]+_(?:arm64|universal2)", tag):
             found.add("macos-arm64")
         if tag == "win_amd64":

@@ -19,6 +19,12 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+### Added
+
+- Linux aarch64 Python wheels using manylinux2014 and the existing CPython 3.11+
+  stable ABI. Native arm64 CI tests the release wheel on Python 3.11–3.13, and
+  release verification now requires this platform alongside the existing wheels.
+
 ### Changed
 - Raise the declared MSRV to 1.95 and migrate the atomic `fetch_update`
   call sites to `try_update` (renamed upstream; the alias is deprecated

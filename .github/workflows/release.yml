@@ -110,7 +110,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-latest, windows-latest]
+        include:
+          - {os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, manylinux: '2014'}
+          - {os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, manylinux: '2014'}
+          - {os: macos-latest, target: aarch64-apple-darwin, manylinux: auto}
+          - {os: windows-latest, target: x86_64-pc-windows-msvc, manylinux: auto}
     env:
       RELEASE_VERSION: ${{ needs.authorize.outputs.version }}
       RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
@@ -131,8 +135,9 @@ jobs:
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b
         with:
           command: build
-          args: --release -m bindings/python/Cargo.toml --out dist
-          manylinux: auto
+          args: --release --locked -m bindings/python/Cargo.toml --out dist
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
       - name: Install and import the built wheel
         shell: bash
         run: |
