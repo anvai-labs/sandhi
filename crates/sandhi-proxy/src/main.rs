@@ -229,8 +229,14 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
         );
     }
     let vault = store_path.as_deref().map(|p| {
-        let vault = VaultStore::with_backend(p, VaultStore::backend_from_env())
-            .unwrap_or_else(|_| startup_store_fatal("vault"));
+        // The library reports backend misconfiguration as Err; the binary owns
+        // the exit — a bad SANDHI_CREDENTIALS_DIR is fatal at startup.
+        let backend = VaultStore::backend_from_env().unwrap_or_else(|error| {
+            eprintln!("sandhi-proxy: {error}");
+            std::process::exit(1);
+        });
+        let vault =
+            VaultStore::with_backend(p, backend).unwrap_or_else(|_| startup_store_fatal("vault"));
         eprintln!(
             "sandhi-proxy: credential vault (backend: {}) at {p}",
             vault.backend_name()

@@ -315,7 +315,7 @@ impl Ticket {
                 if state
                     .slots
                     .get(&self.id)
-                    .map_or(true, |slot| slot.outcome.is_some())
+                    .is_none_or(|slot| slot.outcome.is_some())
                 {
                     return;
                 }
