@@ -714,7 +714,7 @@ mod tests {
         );
         let lines: Vec<_> = rendered.lines().collect();
         assert_eq!(lines.len(), 20);
-        for (group, family) in lines.chunks_exact(4).zip([
+        for (group, family) in lines.as_chunks::<4>().0.iter().zip([
             "configured",
             "capacity",
             "queued",
