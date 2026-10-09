@@ -803,3 +803,15 @@ its storage matrices. See the [owning contract](../product/attempt-accounting-an
 This is process-local ownership, not durable observation or activated HTTP recovery.
 Keep the supervisor alive through collection; HTTP integration, bounded recovery,
 lifecycle acceptance, release/deployment and mixed-team C5 remain open.
+
+### Owned prepared admission
+
+Prepared admission now uses that same bounded registry through additive typed
+submission/collection. It preserves existing public Work/Outcome APIs, canonical
+single-file reservation/intent/fence storage and byte-identical HTTP defaults.
+Cancelled waiters cannot discard a late committed intent; interrupted publication
+retains uncertainty and never authorizes another reservation or provider send.
+See the [owning contract](../product/attempt-accounting-and-evidence.md#owned-prepared-admission-w05c-integration-prerequisite).
+The existing job and ledger fixtures cover the new boundary; storage transaction
+matrices are not duplicated. HTTP integration, durable request correlation,
+bounded recovery, lifecycle acceptance and released C5 qualification remain open.

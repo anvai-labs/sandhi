@@ -19,6 +19,12 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+### Added
+- Opt-in prepared admission in the existing bounded settlement worker registry,
+  with typed result ownership across waiter cancellation and late commit. Existing
+  Rust Work/Outcome APIs and HTTP defaults are unchanged; HTTP recovery activation
+  and full lifecycle acceptance remain separate gates.
+
 ### Changed
 - Raise the declared MSRV to 1.95 and migrate the atomic `fetch_update`
   call sites to `try_update` (renamed upstream; the alias is deprecated
