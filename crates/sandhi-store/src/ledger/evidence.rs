@@ -168,6 +168,10 @@ pub(super) fn init(conn: &Connection) -> rusqlite::Result<()> {
             reservation_id INTEGER UNIQUE NOT NULL CHECK(reservation_id > 0),
             created_at INTEGER NOT NULL
          );
+         CREATE TABLE IF NOT EXISTS budget_request_correlation (
+            execution_id TEXT PRIMARY KEY NOT NULL REFERENCES budget_execution_intent(execution_id),
+            request_id TEXT NOT NULL CHECK(length(CAST(request_id AS BLOB)) BETWEEN 1 AND 4096)
+         );
          CREATE TABLE IF NOT EXISTS budget_dispatch_fence (
             execution_id TEXT PRIMARY KEY NOT NULL REFERENCES budget_execution_intent(execution_id),
             phase INTEGER NOT NULL CHECK(phase IN (0, 1, 2)),
@@ -462,7 +466,115 @@ pub(super) fn is_tracked(conn: &Connection, id: i64) -> rusqlite::Result<bool> {
     )
 }
 
+/// Opaque scope inventory cursor on the original ledger; not an authorization token.
+#[derive(Debug, Clone)]
+pub struct ScopeCursor {
+    after: String,
+    through_id: u64,
+}
+#[derive(Debug)]
+pub struct ScopePage {
+    pub scopes: Vec<String>,
+    pub next: Option<ScopeCursor>,
+}
+
 impl SqliteLedger {
+    /// Bounded scope inventory includes unbudgeted and removed-key scopes. New admissions
+    /// beyond the frozen upper bound are visited by the next sweep.
+    pub fn recovery_scopes_durable(
+        &mut self,
+        cursor: Option<&ScopeCursor>,
+        limit: usize,
+    ) -> Result<ScopePage, EvidenceError> {
+        if !(1..=100).contains(&limit) {
+            return Err(EvidenceError::InvalidInput);
+        }
+        let tx = self.conn.transaction()?;
+        let through_id = match cursor {
+            Some(c) => c.through_id,
+            None => tx.query_row(
+                "SELECT COALESCE(MAX(reservation_id),0) FROM budget_execution_intent",
+                [],
+                |r| r.get(0),
+            )?,
+        };
+        let after = cursor.map_or("", |c| c.after.as_str());
+        let mut stmt = tx.prepare("SELECT DISTINCT r.scope FROM budget_execution_intent i LEFT JOIN budget_reservation r ON r.id=i.reservation_id WHERE i.reservation_id<=?1 AND (r.scope>?2 OR r.scope IS NULL) ORDER BY r.scope LIMIT ?3")?;
+        let scopes = stmt
+            .query_map(params![through_id, after, limit as i64], |r| {
+                r.get::<_, Option<String>>(0)
+            })?
+            .map(|r| {
+                r.map_err(EvidenceError::Storage)
+                    .and_then(|s| s.ok_or(EvidenceError::MissingReservation))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for scope in &scopes {
+            validate_scope(scope)?;
+        }
+        let next = (scopes.len() == limit).then(|| ScopeCursor {
+            after: scopes.last().unwrap().clone(),
+            through_id,
+        });
+        drop(stmt);
+        tx.commit()?;
+        Ok(ScopePage { scopes, next })
+    }
+    /// Prepared admission with immutable gateway correlation, never a replay key.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reserve_correlated_durable(
+        &mut self,
+        scope: &str,
+        ceiling: u64,
+        now: OffsetDateTime,
+        ttl: Duration,
+        retained_limit: usize,
+        request_id: &str,
+    ) -> Result<IntentAdmission, EvidenceError> {
+        if !self.is_file_backed() {
+            return Err(EvidenceError::UnsupportedTrackedLedger);
+        }
+        if request_id.is_empty() || request_id.len() > 4096 {
+            return Err(EvidenceError::InvalidInput);
+        }
+        self.reserve_intent(
+            scope,
+            ceiling,
+            now,
+            ttl,
+            retained_limit,
+            true,
+            Some(request_id),
+        )
+    }
+    pub fn request_id_durable(
+        &self,
+        scope: &str,
+        execution_id: &str,
+    ) -> Result<Option<String>, EvidenceError> {
+        validate_scope(scope)?;
+        let intent = self
+            .intent_durable(execution_id)?
+            .ok_or(EvidenceError::MissingIntent)?;
+        if intent.reservation.scope != scope {
+            return Err(EvidenceError::WrongScope);
+        }
+        let value: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT request_id FROM budget_request_correlation WHERE execution_id = ?1",
+                [execution_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if value
+            .as_ref()
+            .is_some_and(|v| v.is_empty() || v.len() > 4096)
+        {
+            return Err(EvidenceError::CorruptObservation);
+        }
+        Ok(value)
+    }
     /// Read 1..=100 scoped records, ordered by the existing reservation identity.
     /// Each page is a short read transaction; the cursor freezes the admission upper
     /// bound, not state across pages. Start a new sweep for new/late observations.
@@ -721,7 +833,7 @@ impl SqliteLedger {
         ttl: Duration,
         retained_limit: usize,
     ) -> Result<IntentAdmission, EvidenceError> {
-        self.reserve_intent(scope, ceiling, now, ttl, retained_limit, false)
+        self.reserve_intent(scope, ceiling, now, ttl, retained_limit, false, None)
     }
 
     /// Opt-in storage prerequisite for dispatch fencing. Only file-backed ledgers.
@@ -738,9 +850,10 @@ impl SqliteLedger {
         if !self.is_file_backed() {
             return Err(EvidenceError::UnsupportedTrackedLedger);
         }
-        self.reserve_intent(scope, ceiling, now, ttl, retained_limit, true)
+        self.reserve_intent(scope, ceiling, now, ttl, retained_limit, true, None)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn reserve_intent(
         &mut self,
         scope: &str,
@@ -749,6 +862,7 @@ impl SqliteLedger {
         ttl: Duration,
         retained_limit: usize,
         prepared: bool,
+        request_id: Option<&str>,
     ) -> Result<IntentAdmission, EvidenceError> {
         if !(1..=100_000).contains(&retained_limit)
             || scope.is_empty()
@@ -788,6 +902,12 @@ impl SqliteLedger {
             if inserted != 1 {
                 return Err(EvidenceError::Storage(rusqlite::Error::QueryReturnedNoRows));
             }
+        }
+        if let Some(request_id) = request_id {
+            tx.execute(
+                "INSERT INTO budget_request_correlation(execution_id, request_id) VALUES (?1, ?2)",
+                params![execution_id, request_id],
+            )?;
         }
         tx.commit()?;
         Ok(IntentAdmission::Admitted(ExecutionIntent {

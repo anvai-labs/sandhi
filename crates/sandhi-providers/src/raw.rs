@@ -417,7 +417,14 @@ impl RawForwarder {
             } else {
                 Ok(())
             };
-            let usage = qualification.map(|_| usage.into());
+            let usage = qualification.map(|_| {
+                let mut usage: sandhi_core::UsageV2 = usage.into();
+                if qualify {
+                    usage.upstream_request_id =
+                        crate::provider_request_id(&raw.headers, response_request_id_header);
+                }
+                usage
+            });
             Ok((
                 crate::QualifiedCompletion {
                     response: raw,

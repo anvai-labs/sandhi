@@ -11,7 +11,7 @@ use crate::{
 };
 use std::collections::BTreeMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use tokio::sync::watch;
 
 /// Only accounting transitions. No inference callback or network dispatch authority.
@@ -32,18 +32,7 @@ impl Work {
             Self::Close(p) => {
                 Self::Close(PendingDispatch::new(p.request_id.clone(), p.intent.clone()))
             }
-            Self::Settle(p) => Self::Settle(PendingSettlement {
-                request_id: p.request_id.clone(),
-                reservation: p.reservation.clone(),
-                charge: p.charge,
-                tracked: p.tracked.as_ref().map(|t| {
-                    Box::new(super::TrackedObservation {
-                        intent: t.intent.clone(),
-                        usage: t.usage.clone(),
-                        recorded: t.recorded,
-                    })
-                }),
-            }),
+            Self::Settle(p) => Self::Settle(p.snapshot()),
         }
     }
     fn run(self, ledger: &Mutex<ProxyLedger>) -> Outcome {
@@ -92,6 +81,7 @@ impl Input {
             Self::Work(work) => Self::Work(work.snapshot()),
             Self::Admission(input) => Self::Admission(PreparedAdmission {
                 evidence: input.evidence.clone(),
+                correlated: input.correlated,
             }),
         }
     }
@@ -127,9 +117,28 @@ struct InputRejected {
     reason: Refusal,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Empty,
+    Admitting,
+    Prepared,
+    Authorizing,
+    Authorized,
+    Closing,
+    Terminal,
+    Resolved,
+    Uncertain,
+}
+
 struct Slot {
     snapshot: Option<Input>,
     outcome: Option<ResultValue>,
+    held: bool,
+    running: bool,
+    epoch: u64,
+    releasable: bool,
+    consumed: bool,
+    phase: Phase,
 }
 struct State {
     slots: BTreeMap<u64, Slot>,
@@ -153,33 +162,95 @@ impl Inner {
             }
         }
     }
-    fn finish(&self, id: u64, outcome: Option<ResultValue>) {
+    fn finish(&self, id: u64, epoch: u64, outcome: Option<ResultValue>) {
         let mut state = self.lock();
         let interrupted = outcome.as_ref().is_none_or(ResultValue::interrupted);
         if interrupted {
             state.closed = true;
         }
-        if let Some(slot) = state.slots.get_mut(&id) {
+        if let Some(slot) = state
+            .slots
+            .get_mut(&id)
+            .filter(|slot| slot.epoch == epoch && slot.running)
+        {
+            slot.running = false;
+            if slot.held {
+                slot.phase = match &outcome {
+                    Some(ResultValue::Admission(AdmissionOutcome::Prepared(_))) => Phase::Prepared,
+                    Some(ResultValue::Admission(
+                        AdmissionOutcome::Denied { .. } | AdmissionOutcome::Cutoff(_),
+                    )) => Phase::Resolved,
+                    Some(ResultValue::Work(Outcome::Dispatch(DispatchAttempt::Authorized(_)))) => {
+                        Phase::Authorized
+                    }
+                    Some(ResultValue::Work(Outcome::Dispatch(DispatchAttempt::Closed {
+                        ..
+                    })))
+                    | Some(ResultValue::Work(Outcome::Settlement(Attempt::Committed { .. }))) => {
+                        Phase::Resolved
+                    }
+                    _ if slot.phase == Phase::Terminal => Phase::Terminal,
+                    _ => Phase::Uncertain,
+                };
+            }
+            slot.releasable = matches!(
+                &outcome,
+                Some(ResultValue::Admission(
+                    AdmissionOutcome::Denied { .. } | AdmissionOutcome::Cutoff(_)
+                )) | Some(ResultValue::Work(Outcome::Settlement(
+                    Attempt::Committed { .. }
+                ))) | Some(ResultValue::Work(Outcome::Dispatch(
+                    DispatchAttempt::Closed { .. }
+                )))
+            );
+            if slot.held {
+                if let Some(ResultValue::Admission(AdmissionOutcome::Prepared(pending))) = &outcome
+                {
+                    slot.snapshot = Some(Input::Work(Work::Close(PendingDispatch::new(
+                        pending.request_id.clone(),
+                        pending.intent.clone(),
+                    ))));
+                }
+            }
             // Only the worker guard can finish; consumers cannot take a pending slot.
-            slot.outcome = outcome.or_else(|| slot.snapshot.take().map(Input::interrupted));
-            slot.snapshot = None;
+            slot.outcome = outcome.or_else(|| {
+                slot.snapshot
+                    .as_ref()
+                    .map(Input::snapshot)
+                    .map(Input::interrupted)
+            });
+            if !slot.held {
+                slot.snapshot = None;
+            }
         } else {
             state.closed = true;
         }
         self.changed.send_replace(());
     }
-    fn take(&self, id: u64, kind: Kind) -> Option<ResultValue> {
+    fn take(&self, id: u64, epoch: u64, kind: Kind) -> Option<ResultValue> {
         let mut state = self.lock();
-        if state.slots.get(&id)?.outcome.as_ref()?.kind() != kind {
+        if state.slots.get(&id)?.epoch != epoch
+            || state.slots.get(&id)?.consumed
+            || state.slots.get(&id)?.outcome.as_ref()?.kind() != kind
+        {
             return None;
         }
-        let outcome = state.slots.remove(&id)?.outcome;
+        let outcome = if state.slots.get(&id)?.held {
+            let slot = state.slots.get_mut(&id)?;
+            slot.consumed = true;
+            slot.outcome.take()
+        } else {
+            state.slots.remove(&id)?.outcome
+        };
         self.changed.send_replace(());
         outcome
     }
     fn take_ready(&self, kind: Kind) -> Option<ResultValue> {
         let mut state = self.lock();
         let id = state.slots.iter().find_map(|(id, slot)| {
+            if slot.held {
+                return None;
+            }
             slot.outcome
                 .as_ref()
                 .filter(|result| result.kind() == kind)
@@ -197,18 +268,35 @@ struct Worker {
     inner: Arc<Inner>,
     id: u64,
     finished: bool,
-    _operation: OperationGuard,
+    epoch: u64,
+    _operation: Arc<OperationGuard>,
 }
 impl Worker {
     fn finish(mut self, outcome: ResultValue) {
-        self.inner.finish(self.id, Some(outcome));
+        self.inner.finish(self.id, self.epoch, Some(outcome));
         self.finished = true;
     }
 }
 impl Drop for Worker {
     fn drop(&mut self) {
         if !self.finished {
-            self.inner.finish(self.id, None);
+            self.inner.finish(self.id, self.epoch, None);
+        }
+    }
+}
+
+// Access the same authoritative mutex. The HTTP bridge is weak because its
+// owner belongs to ProxyState; admitted async tasks hold the strong state.
+#[derive(Clone)]
+enum LedgerAccess {
+    Shared(Arc<Mutex<ProxyLedger>>),
+    Proxy(Weak<crate::ProxyState>),
+}
+impl LedgerAccess {
+    fn with<T>(&self, run: impl FnOnce(&Mutex<ProxyLedger>) -> T) -> Option<T> {
+        match self {
+            Self::Shared(ledger) => Some(run(ledger)),
+            Self::Proxy(state) => state.upgrade().map(|state| run(&state.ledger)),
         }
     }
 }
@@ -217,12 +305,13 @@ impl Drop for Worker {
 /// Dropping the last manager/ticket/worker loses RAM evidence, never durable liability.
 pub struct Jobs {
     inner: Arc<Inner>,
-    ledger: Arc<Mutex<ProxyLedger>>,
+    ledger: LedgerAccess,
 }
 /// A notification/explicit transfer handle. Dropping it does not remove the registry slot.
 pub struct Ticket {
     inner: Arc<Inner>,
     id: u64,
+    epoch: u64,
     #[cfg(test)]
     abort: tokio::task::AbortHandle,
 }
@@ -235,12 +324,210 @@ pub struct AdmissionRejected {
     pub input: PreparedAdmission,
     pub reason: Refusal,
 }
+
+/// One private HTTP obligation reserves capacity through provider execution.
+/// Drop retains unresolved evidence; it performs no I/O and grants no retry authority.
+pub(crate) struct Obligation {
+    inner: Arc<Inner>,
+    ledger: LedgerAccess,
+    id: u64,
+    operation: Arc<OperationGuard>,
+}
+impl Obligation {
+    pub(crate) fn submit(&mut self, work: Work) -> Result<Ticket, Rejected> {
+        self.submit_input(Input::Work(work)).map_err(|error| {
+            let Input::Work(work) = error.input else {
+                unreachable!("work refusal")
+            };
+            Rejected {
+                work,
+                reason: error.reason,
+            }
+        })
+    }
+    pub(crate) fn admit(
+        &mut self,
+        input: PreparedAdmission,
+    ) -> Result<AdmissionTicket, AdmissionRejected> {
+        self.submit_input(Input::Admission(input))
+            .map(|ticket| AdmissionTicket { ticket })
+            .map_err(|error| {
+                let Input::Admission(input) = error.input else {
+                    unreachable!("admission refusal")
+                };
+                AdmissionRejected {
+                    input,
+                    reason: error.reason,
+                }
+            })
+    }
+    fn submit_input(&mut self, input: Input) -> Result<Ticket, InputRejected> {
+        let authorization = matches!(input, Input::Admission(_) | Input::Work(Work::Authorize(_)));
+        let mut state = self.inner.lock();
+        let closed = state.closed;
+        let Some(slot) = state.slots.get_mut(&self.id) else {
+            return Err(InputRejected {
+                input,
+                reason: Refusal::Closed,
+            });
+        };
+        if slot.running || slot.outcome.is_some() {
+            return Err(InputRejected {
+                input,
+                reason: Refusal::Full,
+            });
+        }
+        // Validate the one admission, original binding and monotonic phase before
+        // allowing a caller to replace retained evidence. No second intent or permit.
+        let binding_matches =
+            |request: &str, intent: &sandhi_store::ledger::evidence::ExecutionIntent| match slot
+                .snapshot
+                .as_ref()
+            {
+                Some(Input::Work(Work::Authorize(p) | Work::Close(p))) => {
+                    p.request_id == request && &p.intent == intent
+                }
+                Some(Input::Work(Work::Settle(p))) => {
+                    p.request_id == request
+                        && p.tracked.as_ref().is_some_and(|t| &t.intent == intent)
+                }
+                _ => false,
+            };
+        let next_phase = match &input {
+            Input::Admission(_) if slot.phase == Phase::Empty => Some(Phase::Admitting),
+            Input::Work(Work::Authorize(p))
+                if slot.phase == Phase::Prepared && binding_matches(&p.request_id, &p.intent) =>
+            {
+                Some(Phase::Authorizing)
+            }
+            Input::Work(Work::Close(p))
+                if slot.phase == Phase::Prepared && binding_matches(&p.request_id, &p.intent) =>
+            {
+                Some(Phase::Closing)
+            }
+            Input::Work(Work::Settle(p))
+                if matches!(slot.phase, Phase::Authorized | Phase::Terminal) =>
+            {
+                p.tracked
+                    .as_ref()
+                    .filter(|t| {
+                        binding_matches(&p.request_id, &t.intent)
+                            && match slot.snapshot.as_ref() {
+                                Some(Input::Work(Work::Settle(previous))) => {
+                                    previous.terminal_usage() == p.terminal_usage()
+                                }
+                                _ => slot.phase == Phase::Authorized,
+                            }
+                    })
+                    .map(|_| Phase::Terminal)
+            }
+            _ => None,
+        };
+        let Some(next_phase) = next_phase else {
+            return Err(InputRejected {
+                input,
+                reason: Refusal::Closed,
+            });
+        };
+        // Capture terminal metadata BEFORE scheduling can fail (including absent
+        // runtime or elapsed drain deadline). This is inert evidence, never a permit.
+        if next_phase == Phase::Terminal {
+            slot.phase = next_phase;
+            slot.snapshot = Some(input.snapshot());
+            slot.releasable = false;
+        }
+        if (authorization && (closed || !self.inner.lifecycle.is_running()))
+            || self
+                .inner
+                .lifecycle
+                .remaining()
+                .is_some_and(|left| left.is_zero())
+        {
+            return Err(InputRejected {
+                input,
+                reason: Refusal::Closed,
+            });
+        }
+        let runtime = match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => runtime,
+            Err(_) => {
+                return Err(InputRejected {
+                    input,
+                    reason: Refusal::NoRuntime,
+                })
+            }
+        };
+        let Some(epoch) = slot.epoch.checked_add(1) else {
+            return Err(InputRejected {
+                input,
+                reason: Refusal::Closed,
+            });
+        };
+        slot.phase = next_phase;
+        slot.snapshot = Some(input.snapshot());
+        slot.releasable = false;
+        slot.epoch = epoch;
+        slot.consumed = false;
+        slot.running = true;
+        let worker = Worker {
+            inner: self.inner.clone(),
+            id: self.id,
+            finished: false,
+            epoch,
+            _operation: self.operation.clone(),
+        };
+        drop(state);
+        let ledger = self.ledger.clone();
+        let lifecycle = self.inner.lifecycle.clone();
+        let _task = runtime.spawn_blocking(move || {
+            if let Ok(outcome) = catch_unwind(AssertUnwindSafe(|| {
+                ledger
+                    .with(|ledger| match input {
+                        Input::Work(work) => ResultValue::Work(work.run(ledger)),
+                        Input::Admission(input) => {
+                            ResultValue::Admission(input.run(ledger, &lifecycle))
+                        }
+                    })
+                    .expect("owned proxy state")
+            })) {
+                worker.finish(outcome);
+            }
+        });
+        Ok(Ticket {
+            inner: self.inner.clone(),
+            id: self.id,
+            epoch,
+            #[cfg(test)]
+            abort: _task.abort_handle(),
+        })
+    }
+}
+impl Drop for Obligation {
+    fn drop(&mut self) {
+        let mut state = self.inner.lock();
+        if let Some(slot) = state.slots.get_mut(&self.id) {
+            slot.held = false;
+            if !slot.running && slot.outcome.is_none() {
+                if slot.releasable || slot.snapshot.is_none() {
+                    state.slots.remove(&self.id);
+                } else {
+                    slot.outcome = slot.snapshot.take().map(Input::interrupted);
+                }
+            }
+        }
+        self.inner.changed.send_replace(());
+    }
+}
 impl AdmissionTicket {
     pub async fn wait(&self) {
         self.ticket.wait().await;
     }
     pub fn take(&self) -> Option<AdmissionOutcome> {
-        match self.ticket.inner.take(self.ticket.id, Kind::Admission)? {
+        match self
+            .ticket
+            .inner
+            .take(self.ticket.id, self.ticket.epoch, Kind::Admission)?
+        {
             ResultValue::Admission(result) => Some(result),
             ResultValue::Work(_) => unreachable!("typed registry transfer"),
         }
@@ -255,13 +542,125 @@ pub struct DrainReport {
     pub timed_out: bool,
 }
 impl Jobs {
+    /// Reconcile one abandoned terminal snapshot on the original ledger. The
+    /// registry slot remains owned until canonical settlement confirms completion.
+    /// Cursor advances past uncertainty; no authorization or inference is repeated.
+    pub(crate) fn retry_terminal(&self, after: &mut Option<u64>) {
+        let candidate = {
+            let mut state = self.inner.lock();
+            let candidate = state
+                .slots
+                .range((
+                    after.map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded),
+                    std::ops::Bound::Unbounded,
+                ))
+                .find(|(_, slot)| !slot.held && !slot.running)
+                .map(|(id, _)| *id);
+            let Some(id) = candidate else {
+                *after = None;
+                return;
+            };
+            *after = Some(id);
+            let slot = state.slots.get_mut(&id).expect("existing slot");
+            if slot.releasable {
+                state.slots.remove(&id);
+                return;
+            }
+            let work = match slot.snapshot.as_ref() {
+                Some(Input::Work(Work::Settle(p))) => Some(Work::Settle(p.snapshot())),
+                _ => match slot.outcome.as_ref() {
+                    Some(ResultValue::Work(Outcome::Settlement(Attempt::Unresolved {
+                        pending,
+                        ..
+                    }))) => Some(Work::Settle(pending.snapshot())),
+                    Some(ResultValue::Work(Outcome::Interrupted(Work::Settle(p)))) => {
+                        Some(Work::Settle(p.snapshot()))
+                    }
+                    _ => None,
+                },
+            };
+            let Some(work) = work else {
+                return;
+            };
+            let Some(epoch) = slot.epoch.checked_add(1) else {
+                return;
+            };
+            slot.epoch = epoch;
+            slot.running = true;
+            slot.snapshot = Some(Input::Work(work.snapshot()));
+            slot.outcome = None;
+            (id, epoch, work)
+        };
+        let (id, epoch, work) = candidate;
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            self.ledger
+                .with(|ledger| ResultValue::Work(work.run(ledger)))
+        }))
+        .ok()
+        .flatten();
+        self.inner.finish(id, epoch, outcome);
+        let mut state = self.inner.lock();
+        if state
+            .slots
+            .get(&id)
+            .is_some_and(|s| !s.held && !s.running && s.releasable)
+        {
+            state.slots.remove(&id);
+        }
+    }
+
+    pub(crate) fn retained(&self) -> usize {
+        self.inner.lock().slots.len()
+    }
+    pub(crate) fn obligation(&self) -> Result<Obligation, Refusal> {
+        let mut state = self.inner.lock();
+        if state.closed || !self.inner.lifecycle.is_running() {
+            return Err(Refusal::Closed);
+        }
+        if state.slots.len() >= self.inner.capacity {
+            return Err(Refusal::Full);
+        }
+        let Some(next) = state.next.checked_add(1) else {
+            return Err(Refusal::Closed);
+        };
+        let operation = self
+            .inner
+            .lifecycle
+            .try_operation()
+            .ok_or(Refusal::Closed)?;
+        let id = state.next;
+        state.next = next;
+        state.slots.insert(
+            id,
+            Slot {
+                snapshot: None,
+                outcome: None,
+                held: true,
+                running: false,
+                epoch: 0,
+                releasable: false,
+                consumed: false,
+                phase: Phase::Empty,
+            },
+        );
+        Ok(Obligation {
+            inner: self.inner.clone(),
+            ledger: self.ledger.clone(),
+            id,
+            operation: Arc::new(operation),
+        })
+    }
     pub fn submit_admission(
         &self,
         input: PreparedAdmission,
     ) -> Result<AdmissionTicket, AdmissionRejected> {
         let ledger = self.ledger.clone();
         let lifecycle = self.inner.lifecycle.clone();
-        self.submit_admission_with(input, move |input| input.run(&ledger, &lifecycle))
+        self.submit_admission_with(input, move |input| {
+            ledger
+                .with(|ledger| input.run(ledger, &lifecycle))
+                .expect("owned proxy state")
+        })
     }
     fn submit_admission_with(
         &self,
@@ -299,6 +698,16 @@ impl Jobs {
         lifecycle: Arc<Lifecycle>,
         capacity: usize,
     ) -> Self {
+        Self::with_access(LedgerAccess::Shared(ledger), lifecycle, capacity)
+    }
+    pub(crate) fn for_proxy(state: &Arc<crate::ProxyState>, capacity: usize) -> Self {
+        Self::with_access(
+            LedgerAccess::Proxy(Arc::downgrade(state)),
+            state.lifecycle.clone(),
+            capacity,
+        )
+    }
+    fn with_access(ledger: LedgerAccess, lifecycle: Arc<Lifecycle>, capacity: usize) -> Self {
         Self {
             inner: Arc::new(Inner {
                 state: Mutex::new(State {
@@ -315,7 +724,11 @@ impl Jobs {
     }
     pub fn submit(&self, work: Work) -> Result<Ticket, Rejected> {
         let ledger = self.ledger.clone();
-        self.submit_with(work, move |work| work.run(&ledger))
+        self.submit_with(work, move |work| {
+            ledger
+                .with(|ledger| work.run(ledger))
+                .expect("owned proxy state")
+        })
     }
     fn submit_with(
         &self,
@@ -386,13 +799,20 @@ impl Jobs {
             Slot {
                 snapshot: Some(input.snapshot()),
                 outcome: None,
+                held: false,
+                running: true,
+                epoch: 0,
+                releasable: false,
+                consumed: false,
+                phase: Phase::Empty,
             },
         );
         let worker = Worker {
             inner: self.inner.clone(),
             id,
             finished: false,
-            _operation: operation,
+            epoch: 0,
+            _operation: Arc::new(operation),
         };
         drop(state);
         // The closure owns both completion publication and lifecycle progress. Its
@@ -405,6 +825,7 @@ impl Jobs {
         Ok(Ticket {
             inner: self.inner.clone(),
             id,
+            epoch: 0,
             #[cfg(test)]
             abort: _task.abort_handle(),
         })
@@ -413,7 +834,9 @@ impl Jobs {
     pub(crate) fn interrupt_after_commit(&self, work: Work) -> Result<Ticket, Rejected> {
         let ledger = self.ledger.clone();
         self.submit_with(work, move |work| {
-            let outcome = work.run(&ledger);
+            let outcome = ledger
+                .with(|ledger| work.run(ledger))
+                .expect("owned proxy state");
             assert!(matches!(
                 outcome,
                 Outcome::Dispatch(DispatchAttempt::Authorized(_))
@@ -432,7 +855,9 @@ impl Jobs {
         let ledger = self.ledger.clone();
         let lifecycle = self.inner.lifecycle.clone();
         self.submit_admission_with(input, move |input| {
-            let outcome = input.run(&ledger, &lifecycle);
+            let outcome = ledger
+                .with(|ledger| input.run(ledger, &lifecycle))
+                .expect("owned proxy state");
             assert!(matches!(outcome, AdmissionOutcome::Prepared(_)));
             after();
             outcome
@@ -467,11 +892,9 @@ impl Ticket {
         loop {
             {
                 let state = self.inner.lock();
-                if state
-                    .slots
-                    .get(&self.id)
-                    .is_none_or(|slot| slot.outcome.is_some())
-                {
+                if state.slots.get(&self.id).is_none_or(|slot| {
+                    slot.epoch != self.epoch || slot.consumed || slot.outcome.is_some()
+                }) {
                     return;
                 }
             }
@@ -482,7 +905,7 @@ impl Ticket {
     }
     /// Synchronously transfer a completed result once. Pending work is never exposed.
     pub fn take(&self) -> Option<Outcome> {
-        match self.inner.take(self.id, Kind::Work)? {
+        match self.inner.take(self.id, self.epoch, Kind::Work)? {
             ResultValue::Work(result) => Some(result),
             ResultValue::Admission(_) => unreachable!("typed registry transfer"),
         }
@@ -496,6 +919,177 @@ mod tests {
     use sandhi_store::ledger::evidence::ExecutionIntent;
     use std::time::Duration;
     use time::OffsetDateTime;
+
+    #[tokio::test]
+    async fn http_obligation_keeps_cleanup_capacity_across_cutoff() {
+        let (_dir, jobs, mut obligation, pending) = prepared_obligation().await;
+        let lifecycle = jobs.inner.lifecycle.clone();
+        assert!(matches!(jobs.obligation(), Err(Refusal::Full)));
+        let first = obligation.submit(Work::Authorize(pending)).unwrap();
+        first.wait().await;
+        let Some(Outcome::Dispatch(DispatchAttempt::Authorized(authorized))) = first.take() else {
+            panic!("authorized")
+        };
+        let cleanup_work = Work::Settle(authorized.into_settlement(UsageV2::default()));
+        assert!(
+            matches!(jobs.obligation(), Err(Refusal::Full)),
+            "taking a transition must not release finalization capacity"
+        );
+        lifecycle.begin_quiesce(Duration::from_secs(1));
+        assert!(matches!(jobs.obligation(), Err(Refusal::Closed)));
+        let cleanup = obligation
+            .submit(cleanup_work)
+            .expect("owned cleanup after cutoff");
+        cleanup.wait().await;
+        assert!(
+            first.take().is_none(),
+            "a stale transition ticket cannot consume later cleanup"
+        );
+        assert!(matches!(
+            cleanup.take(),
+            Some(Outcome::Settlement(Attempt::Unresolved { .. }))
+        ));
+        drop(obligation);
+        assert!(
+            cleanup.take().is_none(),
+            "taken ticket must not regain abandonment evidence"
+        );
+        lifecycle.wait_idle().await;
+
+        let (_dir, jobs, mut obligation, pending) = prepared_obligation().await;
+        jobs.inner.lifecycle.begin_quiesce(Duration::from_secs(1));
+        let rejected = obligation.submit(Work::Authorize(pending)).err().unwrap();
+        assert_eq!(rejected.reason, Refusal::Closed);
+        let Work::Authorize(pending) = rejected.work else {
+            panic!("unchanged owner")
+        };
+        let cleanup = obligation
+            .submit(Work::Close(pending))
+            .expect("refused authorization must still allow safe closure");
+        cleanup.wait().await;
+        assert!(matches!(
+            cleanup.take(),
+            Some(Outcome::Dispatch(DispatchAttempt::Closed { .. }))
+        ));
+        tokio::time::timeout(Duration::from_millis(100), cleanup.wait())
+            .await
+            .expect("consumed ticket is ready without another transition");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // Deliberately inject a busy ledger in the blocking worker.
+    async fn recovery_retries_the_first_retained_terminal_slot() {
+        let (_dir, jobs, mut obligation, pending) = prepared_obligation().await;
+        let ticket = obligation.submit(Work::Authorize(pending)).unwrap();
+        ticket.wait().await;
+        let Some(Outcome::Dispatch(DispatchAttempt::Authorized(execution))) = ticket.take() else {
+            panic!("authorization");
+        };
+        let LedgerAccess::Shared(ledger) = &jobs.ledger else {
+            panic!("fixture");
+        };
+        let guard = ledger.lock().unwrap();
+        let ticket = obligation
+            .submit(Work::Settle(execution.into_settlement(UsageV2 {
+                tokens_in: 3,
+                completeness: UsageCompleteness::Final,
+                ..Default::default()
+            })))
+            .unwrap();
+        ticket.wait().await;
+        assert!(matches!(
+            ticket.take(),
+            Some(Outcome::Settlement(Attempt::Unresolved { .. }))
+        ));
+        drop(guard);
+        drop(obligation);
+        assert_eq!(jobs.retained(), 1);
+        let mut cursor = None;
+        jobs.retry_terminal(&mut cursor);
+        assert_eq!(jobs.retained(), 0);
+    }
+
+    async fn prepared_obligation() -> (tempfile::TempDir, Jobs, Obligation, PendingDispatch) {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger =
+            ProxyLedger::durable(dir.path().join("owned.db").to_str().unwrap(), 1).unwrap();
+        let jobs = Jobs::new(Arc::new(Mutex::new(ledger)), Arc::new(Lifecycle::new()), 1);
+        let mut obligation = jobs.obligation().unwrap();
+        let ticket = obligation.admit(admission()).unwrap();
+        ticket.wait().await;
+        let Some(AdmissionOutcome::Prepared(pending)) = ticket.take() else {
+            panic!("durable admission")
+        };
+        (dir, jobs, obligation, pending)
+    }
+
+    #[tokio::test]
+    async fn http_obligation_rejects_second_admission_and_wrong_binding() {
+        let (_dir, jobs, mut obligation, pending) = prepared_obligation().await;
+        assert_eq!(
+            obligation
+                .admit(admission())
+                .err()
+                .expect("one admission only")
+                .reason,
+            Refusal::Closed
+        );
+        let mut wrong = pending.intent.clone();
+        wrong.reservation.scope = "other".into();
+        assert!(obligation
+            .submit(Work::Authorize(PendingDispatch::new(
+                pending.request_id.clone(),
+                wrong
+            )))
+            .is_err());
+        let ticket = obligation.submit(Work::Close(pending)).unwrap();
+        ticket.wait().await;
+        assert!(matches!(
+            ticket.take(),
+            Some(Outcome::Dispatch(DispatchAttempt::Closed { .. }))
+        ));
+        drop(obligation);
+        assert!(jobs.take_ready().is_none());
+    }
+
+    #[tokio::test]
+    async fn http_terminal_without_runtime_survives_refusal_and_downgrade() {
+        let (_dir, jobs, mut obligation, pending) = prepared_obligation().await;
+        let ticket = obligation.submit(Work::Authorize(pending)).unwrap();
+        ticket.wait().await;
+        let Some(Outcome::Dispatch(DispatchAttempt::Authorized(authorized))) = ticket.take() else {
+            panic!("owned authorization")
+        };
+        let downgrade = Work::Close(PendingDispatch::new(
+            authorized.request_id.clone(),
+            authorized.intent.clone(),
+        ));
+        let usage = UsageV2 {
+            tokens_in: 11,
+            tokens_out: 7,
+            completeness: UsageCompleteness::Final,
+            basis: UsageBasis::ProviderReported,
+            ..Default::default()
+        };
+        let pending = authorized.into_settlement(usage.clone());
+        let mut obligation = std::thread::spawn(move || {
+            let rejected = obligation.submit(Work::Settle(pending)).err().unwrap();
+            assert_eq!(rejected.reason, Refusal::NoRuntime);
+            drop(rejected);
+            obligation
+        })
+        .join()
+        .unwrap();
+        assert!(
+            obligation.submit(downgrade).is_err(),
+            "terminal evidence cannot be replaced by Close"
+        );
+        drop(obligation);
+        let Some(Outcome::Interrupted(Work::Settle(retained))) = jobs.take_ready() else {
+            panic!("terminal usage must remain owned without a runtime")
+        };
+        assert_eq!(retained.terminal_usage(), Some(&usage));
+    }
 
     fn work() -> Work {
         Work::Settle(PendingSettlement::tracked(
@@ -608,7 +1202,9 @@ mod tests {
             .submit_admission_with(admission(), move |input| {
                 started_tx.send(()).unwrap();
                 release_rx.recv().unwrap();
-                input.run(&ledger, &worker_lifecycle)
+                ledger
+                    .with(|ledger| input.run(ledger, &worker_lifecycle))
+                    .expect("owned proxy state")
             })
             .unwrap();
         started_rx.await.unwrap();
@@ -821,7 +1417,7 @@ mod tests {
                 } else {
                     Kind::Work
                 };
-                match ticket.inner.take(ticket.id, kind) {
+                match ticket.inner.take(ticket.id, ticket.epoch, kind) {
                     Some(ResultValue::Work(Outcome::Interrupted(input))) => assert_input(&input),
                     Some(ResultValue::Admission(AdmissionOutcome::Interrupted(evidence))) => {
                         assert_eq!(evidence.request_id, "admission");

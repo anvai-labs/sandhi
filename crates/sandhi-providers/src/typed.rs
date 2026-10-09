@@ -265,6 +265,7 @@ pub struct ProviderHandle {
     /// config to forward with — those fall back to the typed translation path.
     raw: Option<crate::raw::RawForwarder>,
     credential_expires_at: Option<u64>,
+    qualified_single_attempt: bool,
 }
 
 impl ProviderHandle {
@@ -283,6 +284,7 @@ impl ProviderHandle {
             family: ProviderFamily::OpenAiCompat,
             raw: None,
             credential_expires_at: None,
+            qualified_single_attempt: false,
         }
     }
 
@@ -312,6 +314,12 @@ impl ProviderHandle {
     /// handles. Proxy plane-selection (TD-0006 Step 2) uses this: same-family → forward via this;
     /// cross-family or `None` → the typed `ChatRequestV1` translation path.
     #[must_use]
+    pub fn supports_owned_buffered(&self) -> bool {
+        self.qualified_single_attempt
+            && self.raw.is_some()
+            && self.family == ProviderFamily::OpenAiCompat
+    }
+
     pub fn raw_forwarder(&self) -> Option<&crate::raw::RawForwarder> {
         self.raw.as_ref()
     }
@@ -592,6 +600,7 @@ impl ProviderRuntime {
             family: ProviderFamily::OpenAiCompat,
             raw: raw_forwarder,
             credential_expires_at: None,
+            qualified_single_attempt: max_retries.unwrap_or(0) == 0,
         }
     }
 
@@ -630,6 +639,7 @@ impl ProviderRuntime {
             family: ProviderFamily::OpenAiResponses,
             raw: raw_forwarder,
             credential_expires_at: None,
+            qualified_single_attempt: false,
         }
     }
 
@@ -670,6 +680,7 @@ impl ProviderRuntime {
             family: ProviderFamily::OpenAiResponses,
             raw: raw_forwarder,
             credential_expires_at: None,
+            qualified_single_attempt: false,
         }
     }
 
@@ -698,6 +709,7 @@ impl ProviderRuntime {
             family: ProviderFamily::Anthropic,
             raw: raw_forwarder,
             credential_expires_at: None,
+            qualified_single_attempt: false,
         }
     }
 
@@ -724,6 +736,7 @@ impl ProviderRuntime {
             family: ProviderFamily::Ollama,
             raw: raw_forwarder,
             credential_expires_at: None,
+            qualified_single_attempt: false,
         }
     }
 
@@ -752,6 +765,7 @@ impl ProviderRuntime {
             family: ProviderFamily::Gemini,
             raw: raw_forwarder,
             credential_expires_at: None,
+            qualified_single_attempt: false,
         }
     }
 
@@ -778,6 +792,7 @@ impl ProviderRuntime {
             family: ProviderFamily::Cohere,
             raw: raw_forwarder,
             credential_expires_at: None,
+            qualified_single_attempt: false,
         }
     }
 
