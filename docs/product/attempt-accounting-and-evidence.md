@@ -34,7 +34,7 @@ liability through expiry. The opt-in buffered mode below uses that admission and
 | W05a | Atomic settlement receipt/outbox storage, immutable IDs, bounded claims and acknowledgement, rollback/reopen/concurrency tests | Integrated; receipt storage is used by opt-in tracked buffered HTTP; network exporter remains pending |
 | W05b | Transport-owned attempt lifecycle and neutral draft contract | Integrated through PR #246 after clean adversarial review and green exact-head/post-merge CI; remains opt-in diagnostics only, while downstream accounting review still gates authoritative use and external release |
 | W05c | Connect admission, settlement and evidence without bypassing correctness | Limited buffered HTTP integration implemented: correlated prepared admission, detached owner and qualified terminal settlement; broader physical-attempt linkage, logical dedup and no-lease policy remain pending |
-| W05d | Unknown-liability and late-settlement recovery | Limited buffered recovery implemented over the original ledger: bounded advancing scope/execution inventory and retained terminal retry, including unbudgeted/removed keys. Amendments, broad lifecycle acceptance and TD-0024 retention remain pending |
+| W05d | Unknown-liability and late-settlement recovery | Limited buffered recovery implemented over the original ledger: bounded advancing scope/execution inventory and retained terminal retry, including unbudgeted/removed keys; two actual-process tracked crash/restart drills cover unknown liability and receipt recovery without replay. Amendments, broad lifecycle acceptance and TD-0024 retention remain pending |
 | W05e | Receiver contract, exporter and operator evidence | Pending: receiver idempotency, authenticated/scoped transport, retry/backoff, backlog/freshness UX, safe retention, multi-shard cursor/migration and real consumer review |
 
 W05 completes only after all substeps and joint contract gates have evidence. No code in W05a
@@ -671,3 +671,34 @@ unknown outcomes, no tracked threshold-alert publication, fixed single-file
 topology, bounded but not hard-time-limited SQLite operations, and no released
 or actual-member acceptance claim. W05c/d's broader lifecycle gates, W05e and C5
 remain open.
+
+
+## Tracked buffered crash/restart acceptance
+
+The existing SDK `test_recovery.py` fixture copies and hashes one immutable gateway
+binary across each drill. Two new cases cross actual SIGKILL/restart boundaries:
+
+- After a synthetic origin accepts one buffered request, gate its response and kill
+  the gateway. Restart against the same file: authorization and correlation remain,
+  no terminal usage or receipt is fabricated, held liability denies a capped request,
+  and shutdown reports incomplete accounting. Exactly one origin request is observed.
+- Reject receipt insertion with a disposable SQLite trigger after a real tracked
+  HTTP call. The final usage snapshot persists while settlement rolls back. Kill,
+  remove the trigger with the writer stopped, then restart: recovery commits the
+  original 14-token charge and one receipt without another origin call or usage
+  event. A second restart preserves receipt identity, settlement time and spend.
+
+This extends the existing provider, shutdown and recovery fixtures. It does not
+repeat field-parser or storage transaction matrices. Test-only negative controls
+leave the first execution tracked and disable tracked mode only on restart: the
+unknown case incorrectly exits cleanly and the ready case never gets a receipt.
+Both controls fail their assertions; the committed tests retain tracked mode.
+
+The trigger is explicit synthetic fault injection, not a naturally occurring disk
+failure or proof of a crash at an individual instruction. The unknown drill proves
+retained liability and shutdown reconciliation, not an independently witnessed
+background sweep. These checks use local HTTP, synthetic provider responses and
+virtual-key compatibility auth. Terminal publication under storage contention,
+process death before publication, tracked TLS/OIDC parity, streaming ownership,
+release/deployment and actual-member C5 remain separate gates. No production hook,
+provider retry or automatic closure of unknown liability is added.

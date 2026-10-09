@@ -37,6 +37,7 @@ class GatedProvider:
     release: threading.Event = field(default_factory=threading.Event)
     base: str = ""
     omit_usage: bool = False
+    gate_buffered: bool = False
 
 
 @pytest.fixture
@@ -56,11 +57,15 @@ def gated_provider():
                 completed = json.loads(payload)
                 completed.pop("usage")
                 payload = json.dumps(completed).encode()
-            self.send_response(200)
-            self.send_header("content-type", "text/event-stream" if streaming else "application/json")
-            self.send_header("content-length", str(len(payload)))
-            self.end_headers()
             try:
+                if not streaming and provider.gate_buffered:
+                    provider.entered.set()
+                    if not provider.release.wait(20):
+                        return
+                self.send_response(200)
+                self.send_header("content-type", "text/event-stream" if streaming else "application/json")
+                self.send_header("content-length", str(len(payload)))
+                self.end_headers()
                 if streaming:
                     # Send one complete event before blocking: the downstream owns an
                     # active response body/admission slot, not just a pending header read.
