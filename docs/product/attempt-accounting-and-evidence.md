@@ -553,3 +553,43 @@ Next: explicit HTTP admission/finalization ownership, bounded recovery of retain
 and persisted uncertainty, lifecycle acceptance, promotion/release/deployment,
 then the actual six-Qwen/one-ZAI C5 run. A process-local supervisor alone does not
 close W05c–e, G62 or C5.
+
+## Owned prepared admission (W05c integration prerequisite)
+
+The same bounded `Jobs` registry now accepts `PreparedAdmission` through additive
+`submit_admission`, `AdmissionTicket` and `take_admission_ready` surfaces. Existing
+`Work`, `Outcome` and `Ticket` contracts are unchanged. Both kinds share the one
+capacity bound, lifecycle guard and worker publication owner; typed collection
+skips the other kind without consuming it. Completed unclaimed results still
+occupy capacity, including after a waiter is cancelled.
+
+Admission calls the canonical `reserve_prepared_durable` on the original single
+file-backed ledger. It returns the original Prepared intent, a budget denial,
+explicit storage failure, observed cutoff or interruption evidence. There is no
+unmetered fallback, additional execution-ID derivation, authorization or provider
+dispatch. Request/scope strings are bounded before registry snapshots; durable
+numeric, capacity and topology validation remain owned by storage.
+
+The lifecycle check follows acquisition of the outer ledger lock. The inner shard
+or SQLite operation may still cross cutoff; a late committed Prepared result is
+retained without dispatch or zero settlement. This is not an atomic cutoff across
+SQLite, a database interrupt, or a bounded database execution-time guarantee.
+
+On interrupted publication, the retained metadata is inert evidence, **not retry
+authority**. Storage generates an opaque execution ID before its transaction, and
+an interrupted caller may never learn it. Never reserve again automatically,
+match an intent by logical request ID, or infer rollback from a missing response.
+Reconciliation must use the original ledger's bounded inventory and canonical
+state transitions. Losing the process still loses unpersisted metadata; this
+increment adds no durable request-correlation index or recovery scheduler.
+
+The existing queued-cancellation fixture covers both job kinds. Mixed capacity
+and typed collection, cutoff before storage, and the existing real-ledger owner
+cover denial/refusal and a committed admission held across cancellation/cutoff,
+including a panic before publication. These prove retained ownership and one
+Prepared row, not cutoff during SQLite contention. The storage contention,
+rollback and corruption matrices retain their existing sole owners.
+
+HTTP admission/finalization, bounded recovery and broader lifecycle acceptance
+remain open. This opt-in library increment changes no HTTP defaults or deployed
+service and does not close W05c–e or C5.

@@ -3,6 +3,7 @@
 //! Keep this manager alive through drain and explicit result collection. Slots include
 //! queued, running and unclaimed results; this is a count bound, not a byte bound.
 //! Retained RAM evidence is not durable. HTTP wiring/recovery scheduling remain gated.
+use super::admission::{AdmissionOutcome, PreparedAdmission};
 use super::{Attempt, DispatchAttempt, PendingDispatch, PendingSettlement};
 use crate::{
     lifecycle::{Lifecycle, OperationGuard},
@@ -76,9 +77,59 @@ pub struct Rejected {
     pub reason: Refusal,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Work,
+    Admission,
+}
+enum Input {
+    Work(Work),
+    Admission(PreparedAdmission),
+}
+impl Input {
+    fn snapshot(&self) -> Self {
+        match self {
+            Self::Work(work) => Self::Work(work.snapshot()),
+            Self::Admission(input) => Self::Admission(PreparedAdmission {
+                evidence: input.evidence.clone(),
+            }),
+        }
+    }
+    fn interrupted(self) -> ResultValue {
+        match self {
+            Self::Work(work) => ResultValue::Work(Outcome::Interrupted(work)),
+            Self::Admission(input) => {
+                ResultValue::Admission(AdmissionOutcome::Interrupted(input.evidence))
+            }
+        }
+    }
+}
+enum ResultValue {
+    Work(Outcome),
+    Admission(AdmissionOutcome),
+}
+impl ResultValue {
+    fn kind(&self) -> Kind {
+        match self {
+            Self::Work(_) => Kind::Work,
+            Self::Admission(_) => Kind::Admission,
+        }
+    }
+    fn interrupted(&self) -> bool {
+        matches!(
+            self,
+            Self::Work(Outcome::Interrupted(_)) | Self::Admission(AdmissionOutcome::Interrupted(_))
+        )
+    }
+}
+struct InputRejected {
+    input: Input,
+    reason: Refusal,
+}
+
 struct Slot {
-    snapshot: Option<Work>,
-    outcome: Option<Outcome>,
+    snapshot: Option<Input>,
+    outcome: Option<ResultValue>,
 }
 struct State {
     slots: BTreeMap<u64, Slot>,
@@ -102,24 +153,38 @@ impl Inner {
             }
         }
     }
-    fn finish(&self, id: u64, outcome: Option<Outcome>) {
+    fn finish(&self, id: u64, outcome: Option<ResultValue>) {
         let mut state = self.lock();
-        let interrupted = outcome.is_none() || matches!(outcome, Some(Outcome::Interrupted(_)));
+        let interrupted = outcome.as_ref().is_none_or(ResultValue::interrupted);
         if interrupted {
             state.closed = true;
         }
         if let Some(slot) = state.slots.get_mut(&id) {
             // Only the worker guard can finish; consumers cannot take a pending slot.
-            slot.outcome = outcome.or_else(|| slot.snapshot.take().map(Outcome::Interrupted));
+            slot.outcome = outcome.or_else(|| slot.snapshot.take().map(Input::interrupted));
             slot.snapshot = None;
         } else {
             state.closed = true;
         }
         self.changed.send_replace(());
     }
-    fn take(&self, id: u64) -> Option<Outcome> {
+    fn take(&self, id: u64, kind: Kind) -> Option<ResultValue> {
         let mut state = self.lock();
-        state.slots.get(&id)?.outcome.as_ref()?;
+        if state.slots.get(&id)?.outcome.as_ref()?.kind() != kind {
+            return None;
+        }
+        let outcome = state.slots.remove(&id)?.outcome;
+        self.changed.send_replace(());
+        outcome
+    }
+    fn take_ready(&self, kind: Kind) -> Option<ResultValue> {
+        let mut state = self.lock();
+        let id = state.slots.iter().find_map(|(id, slot)| {
+            slot.outcome
+                .as_ref()
+                .filter(|result| result.kind() == kind)
+                .map(|_| *id)
+        })?;
         let outcome = state.slots.remove(&id)?.outcome;
         self.changed.send_replace(());
         outcome
@@ -135,7 +200,7 @@ struct Worker {
     _operation: OperationGuard,
 }
 impl Worker {
-    fn finish(mut self, outcome: Outcome) {
+    fn finish(mut self, outcome: ResultValue) {
         self.inner.finish(self.id, Some(outcome));
         self.finished = true;
     }
@@ -161,6 +226,26 @@ pub struct Ticket {
     #[cfg(test)]
     abort: tokio::task::AbortHandle,
 }
+/// Same bounded registry and notification semantics as Ticket, with typed transfer.
+pub struct AdmissionTicket {
+    ticket: Ticket,
+}
+#[derive(Debug)]
+pub struct AdmissionRejected {
+    pub input: PreparedAdmission,
+    pub reason: Refusal,
+}
+impl AdmissionTicket {
+    pub async fn wait(&self) {
+        self.ticket.wait().await;
+    }
+    pub fn take(&self) -> Option<AdmissionOutcome> {
+        match self.ticket.inner.take(self.ticket.id, Kind::Admission)? {
+            ResultValue::Admission(result) => Some(result),
+            ResultValue::Work(_) => unreachable!("typed registry transfer"),
+        }
+    }
+}
 #[derive(Debug)]
 pub struct DrainReport {
     /// All admitted operations in the shared lifecycle, not just this manager's jobs.
@@ -170,6 +255,44 @@ pub struct DrainReport {
     pub timed_out: bool,
 }
 impl Jobs {
+    pub fn submit_admission(
+        &self,
+        input: PreparedAdmission,
+    ) -> Result<AdmissionTicket, AdmissionRejected> {
+        let ledger = self.ledger.clone();
+        let lifecycle = self.inner.lifecycle.clone();
+        self.submit_admission_with(input, move |input| input.run(&ledger, &lifecycle))
+    }
+    fn submit_admission_with(
+        &self,
+        input: PreparedAdmission,
+        run: impl FnOnce(PreparedAdmission) -> AdmissionOutcome + Send + 'static,
+    ) -> Result<AdmissionTicket, AdmissionRejected> {
+        self.submit_input(Input::Admission(input), move |input| {
+            let Input::Admission(input) = input else {
+                unreachable!("admission input")
+            };
+            ResultValue::Admission(run(input))
+        })
+        .map(|ticket| AdmissionTicket { ticket })
+        .map_err(|error| {
+            let Input::Admission(input) = error.input else {
+                unreachable!("admission refusal")
+            };
+            AdmissionRejected {
+                input,
+                reason: error.reason,
+            }
+        })
+    }
+    /// Transfer one ready admission without consuming existing Work outcomes.
+    /// Uncertainty is inert evidence, never permission to reserve again.
+    pub fn take_admission_ready(&self) -> Option<AdmissionOutcome> {
+        match self.inner.take_ready(Kind::Admission)? {
+            ResultValue::Admission(result) => Some(result),
+            ResultValue::Work(_) => unreachable!("typed registry transfer"),
+        }
+    }
     /// Zero capacity intentionally refuses all submissions. Inputs must be size-limited upstream.
     pub fn new(
         ledger: Arc<Mutex<ProxyLedger>>,
@@ -199,38 +322,59 @@ impl Jobs {
         work: Work,
         run: impl FnOnce(Work) -> Outcome + Send + 'static,
     ) -> Result<Ticket, Rejected> {
+        self.submit_input(Input::Work(work), move |input| {
+            let Input::Work(work) = input else {
+                unreachable!("work input")
+            };
+            ResultValue::Work(run(work))
+        })
+        .map_err(|error| {
+            let Input::Work(work) = error.input else {
+                unreachable!("work refusal")
+            };
+            Rejected {
+                work,
+                reason: error.reason,
+            }
+        })
+    }
+    fn submit_input(
+        &self,
+        input: Input,
+        run: impl FnOnce(Input) -> ResultValue + Send + 'static,
+    ) -> Result<Ticket, InputRejected> {
         let runtime = match tokio::runtime::Handle::try_current() {
             Ok(runtime) => runtime,
             Err(_) => {
-                return Err(Rejected {
-                    work,
+                return Err(InputRejected {
+                    input,
                     reason: Refusal::NoRuntime,
                 })
             }
         };
         let mut state = self.inner.lock();
         if state.closed || !self.inner.lifecycle.is_running() {
-            return Err(Rejected {
-                work,
+            return Err(InputRejected {
+                input,
                 reason: Refusal::Closed,
             });
         }
         if state.slots.len() >= self.inner.capacity {
-            return Err(Rejected {
-                work,
+            return Err(InputRejected {
+                input,
                 reason: Refusal::Full,
             });
         }
         let Some(next) = state.next.checked_add(1) else {
             state.closed = true;
-            return Err(Rejected {
-                work,
+            return Err(InputRejected {
+                input,
                 reason: Refusal::Closed,
             });
         };
         let Some(operation) = self.inner.lifecycle.try_operation() else {
-            return Err(Rejected {
-                work,
+            return Err(InputRejected {
+                input,
                 reason: Refusal::Closed,
             });
         };
@@ -240,7 +384,7 @@ impl Jobs {
         state.slots.insert(
             id,
             Slot {
-                snapshot: Some(work.snapshot()),
+                snapshot: Some(input.snapshot()),
                 outcome: None,
             },
         );
@@ -254,7 +398,7 @@ impl Jobs {
         // The closure owns both completion publication and lifecycle progress. Its
         // JoinHandle is not the result owner and dropping it cannot discard a result.
         let _task = runtime.spawn_blocking(move || {
-            if let Ok(outcome) = catch_unwind(AssertUnwindSafe(|| run(work))) {
+            if let Ok(outcome) = catch_unwind(AssertUnwindSafe(|| run(input))) {
                 worker.finish(outcome);
             }
         });
@@ -279,16 +423,27 @@ impl Jobs {
             panic!("injected interruption after commit, before publication");
         })
     }
+    #[cfg(test)]
+    pub(crate) fn after_admission_commit(
+        &self,
+        input: PreparedAdmission,
+        after: impl FnOnce() + Send + 'static,
+    ) -> Result<AdmissionTicket, AdmissionRejected> {
+        let ledger = self.ledger.clone();
+        let lifecycle = self.inner.lifecycle.clone();
+        self.submit_admission_with(input, move |input| {
+            let outcome = input.run(&ledger, &lifecycle);
+            assert!(matches!(outcome, AdmissionOutcome::Prepared(_)));
+            after();
+            outcome
+        })
+    }
     /// Recover an abandoned ticket's result; exactly one consumer wins under the lock.
     pub fn take_ready(&self) -> Option<Outcome> {
-        let mut state = self.inner.lock();
-        let id = state
-            .slots
-            .iter()
-            .find_map(|(id, slot)| slot.outcome.as_ref().map(|_| *id))?;
-        let outcome = state.slots.remove(&id)?.outcome;
-        self.inner.changed.send_replace(());
-        outcome
+        match self.inner.take_ready(Kind::Work)? {
+            ResultValue::Work(result) => Some(result),
+            ResultValue::Admission(_) => unreachable!("typed registry transfer"),
+        }
     }
     /// None until the shared lifecycle establishes cutoff. Does not extend its deadline
     /// or claim accounting is resolved merely because all workers have finished.
@@ -327,7 +482,10 @@ impl Ticket {
     }
     /// Synchronously transfer a completed result once. Pending work is never exposed.
     pub fn take(&self) -> Option<Outcome> {
-        self.inner.take(self.id)
+        match self.inner.take(self.id, Kind::Work)? {
+            ResultValue::Work(result) => Some(result),
+            ResultValue::Admission(_) => unreachable!("typed registry transfer"),
+        }
     }
 }
 
@@ -360,6 +518,112 @@ mod tests {
                 ..Default::default()
             },
         ))
+    }
+    fn admission() -> PreparedAdmission {
+        PreparedAdmission::new(
+            "admission".into(),
+            "scope".into(),
+            100,
+            time::Duration::seconds(30),
+            10,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn admission_and_work_share_capacity_without_cross_kind_consumption() {
+        let (jobs, lifecycle) = jobs(2);
+        let admitted = jobs.submit_admission(admission()).unwrap();
+        admitted.wait().await;
+        // A completed unclaimed result still occupies its slot. Serialize the
+        // transitions so an unrelated legitimate LedgerBusy cannot race this assertion.
+        let existing = jobs.submit(work()).unwrap();
+        existing.wait().await;
+        assert_eq!(jobs.submit(work()).err().unwrap().reason, Refusal::Full);
+        assert_eq!(
+            jobs.submit_admission(admission()).err().unwrap().reason,
+            Refusal::Full
+        );
+        assert!(jobs.take_ready().is_some());
+        assert!(jobs.take_ready().is_none());
+        assert!(existing.take().is_none());
+        let Some(AdmissionOutcome::Failed {
+            evidence,
+            failure: super::super::Failure::NonDurableLedger,
+        }) = admitted.take()
+        else {
+            panic!("admission result must stay owned by its own consumer")
+        };
+        assert_eq!(evidence.request_id, "admission");
+        assert!(admitted.take().is_none());
+        // Reverse ordering: the admission collector cannot take an existing Work.
+        let existing = jobs.submit(work()).unwrap();
+        existing.wait().await;
+        let admitted = jobs.submit_admission(admission()).unwrap();
+        admitted.wait().await;
+        let winners = std::thread::scope(|s| {
+            let a = s.spawn(|| usize::from(admitted.take().is_some()));
+            let b = s.spawn(|| usize::from(jobs.take_admission_ready().is_some()));
+            a.join().unwrap() + b.join().unwrap()
+        });
+        assert_eq!(winners, 1);
+        assert!(jobs.take_admission_ready().is_none());
+        assert!(existing.take().is_some());
+        lifecycle.wait_idle().await;
+    }
+
+    #[test]
+    fn admission_without_runtime_and_oversized_metadata_fail_explicitly() {
+        let (jobs, _) = jobs(1);
+        let rejected = jobs.submit_admission(admission()).err().unwrap();
+        assert_eq!(rejected.reason, Refusal::NoRuntime);
+        assert_eq!(rejected.input.evidence().request_id, "admission");
+        for (request, scope) in [
+            ("x".repeat(4097), "scope".into()),
+            ("request".into(), "s".repeat(4097)),
+        ] {
+            assert!(
+                PreparedAdmission::new(request, scope, 100, time::Duration::seconds(30), 10)
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_admission_observes_cutoff_before_calling_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queued.db");
+        let path = path.to_str().unwrap();
+        let lifecycle = Arc::new(Lifecycle::new());
+        let jobs = Jobs::new(
+            Arc::new(Mutex::new(ProxyLedger::durable(path, 1).unwrap())),
+            lifecycle.clone(),
+            1,
+        );
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let ledger = jobs.ledger.clone();
+        let worker_lifecycle = lifecycle.clone();
+        let ticket = jobs
+            .submit_admission_with(admission(), move |input| {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                input.run(&ledger, &worker_lifecycle)
+            })
+            .unwrap();
+        started_rx.await.unwrap();
+        lifecycle.begin_quiesce(Duration::ZERO);
+        assert!(jobs.drain().await.unwrap().timed_out);
+        release_tx.send(()).unwrap();
+        ticket.wait().await;
+        assert!(matches!(ticket.take(), Some(AdmissionOutcome::Cutoff(_))));
+        let mut inspector = sandhi_store::ledger::SqliteLedger::open(path).unwrap();
+        assert_eq!(inspector.reserved_durable("scope").unwrap(), 0);
+        assert!(inspector
+            .recovery_page_durable("scope", None, 10)
+            .unwrap()
+            .entries
+            .is_empty());
     }
     fn jobs(capacity: usize) -> (Jobs, Arc<Lifecycle>) {
         let lifecycle = Arc::new(Lifecycle::new());
@@ -505,51 +769,69 @@ mod tests {
 
     #[test]
     fn queued_job_cancellation_retains_input_before_idle() {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .max_blocking_threads(1)
-            .enable_all()
-            .build()
-            .unwrap();
-        let (started_tx, started_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        runtime.spawn_blocking(move || {
-            started_tx.send(()).unwrap();
-            release_rx.recv().unwrap();
-        });
-        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        let (jobs, lifecycle) = jobs(1);
-        let executed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let ticket = {
-            let _entered = runtime.enter();
-            let executed = executed.clone();
-            jobs.submit_with(work(), move |work| {
-                executed.store(true, std::sync::atomic::Ordering::SeqCst);
-                Outcome::Interrupted(work)
-            })
-            .unwrap()
-        };
-        assert_eq!(lifecycle.active_operations(), 1);
-        // Runtime shutdown alone drains queued blocking work; explicitly cancel a
-        // job before it starts to exercise the closure-owned completion guard.
-        ticket.abort.abort();
-        runtime.shutdown_background();
-        release_tx.send(()).unwrap();
-        // A separate runtime observes cleanup after the submission runtime is gone.
-        let observer = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        observer.block_on(async {
-            tokio::time::timeout(Duration::from_secs(2), lifecycle.wait_idle())
-                .await
+        for admission_kind in [false, true] {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .max_blocking_threads(1)
+                .enable_all()
+                .build()
                 .unwrap();
-            let Some(Outcome::Interrupted(input)) = ticket.take() else {
-                panic!("retained queued input")
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            runtime.spawn_blocking(move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+            started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            let (jobs, lifecycle) = jobs(1);
+            let executed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let ticket = {
+                let _entered = runtime.enter();
+                let executed = executed.clone();
+                jobs.submit_input(
+                    if admission_kind {
+                        Input::Admission(admission())
+                    } else {
+                        Input::Work(work())
+                    },
+                    move |input| {
+                        executed.store(true, std::sync::atomic::Ordering::SeqCst);
+                        input.interrupted()
+                    },
+                )
+                .unwrap_or_else(|_| panic!("queued input admitted"))
             };
-            assert_input(&input);
-            assert!(!executed.load(std::sync::atomic::Ordering::SeqCst));
-            assert_eq!(jobs.submit(work()).err().unwrap().reason, Refusal::Closed);
-        });
+            assert_eq!(lifecycle.active_operations(), 1);
+            // Runtime shutdown alone drains queued blocking work; explicitly cancel a
+            // job before it starts to exercise the closure-owned completion guard.
+            ticket.abort.abort();
+            runtime.shutdown_background();
+            release_tx.send(()).unwrap();
+            // A separate runtime observes cleanup after the submission runtime is gone.
+            let observer = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            observer.block_on(async {
+                tokio::time::timeout(Duration::from_secs(2), lifecycle.wait_idle())
+                    .await
+                    .unwrap();
+                let kind = if admission_kind {
+                    Kind::Admission
+                } else {
+                    Kind::Work
+                };
+                match ticket.inner.take(ticket.id, kind) {
+                    Some(ResultValue::Work(Outcome::Interrupted(input))) => assert_input(&input),
+                    Some(ResultValue::Admission(AdmissionOutcome::Interrupted(evidence))) => {
+                        assert_eq!(evidence.request_id, "admission");
+                        assert_eq!(evidence.scope, "scope");
+                    }
+                    _ => panic!("retained queued input"),
+                }
+                assert!(!executed.load(std::sync::atomic::Ordering::SeqCst));
+                assert_eq!(jobs.submit(work()).err().unwrap().reason, Refusal::Closed);
+            });
+        }
     }
 }

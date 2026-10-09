@@ -11,6 +11,19 @@ python -m playwright install chromium
 python -m pytest tests/sdk-conformance/ -q
 ```
 
+The binary fixtures expect the worktree's default `target/` directory; omit a
+`CARGO_TARGET_DIR` override for these tests. On macOS, use a fresh short temporary
+directory for broker cases because the default pytest path can exceed the Unix
+socket path limit:
+
+```sh
+python -m pytest tests/sdk-conformance/ -q --basetemp "$(mktemp -d /tmp/sandhi-sdk.XXXXXX)"
+```
+
+Pytest clears its base directory, so never point `--basetemp` at retained evidence
+or an existing service directory. These fixtures build source binaries; their
+results are not installed-release or live-provider acceptance.
+
 `test_dashboard.py` covers authentication, keyboard usage, public/disabled modes, mutation
 feedback, one-time key visibility, token clearing and stale replies, hostile metadata, failed
 database reads, served CSP/assets and mobile overflow. A synthetic-data screenshot is written

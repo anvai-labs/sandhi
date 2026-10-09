@@ -14,6 +14,7 @@ use sandhi_store::ledger::evidence::{
 use sandhi_store::ShardedLedger;
 use std::sync::Mutex;
 
+pub mod admission;
 pub mod jobs;
 
 #[derive(Debug)]
