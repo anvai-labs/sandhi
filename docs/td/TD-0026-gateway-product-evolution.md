@@ -828,3 +828,19 @@ an explicit accounting error without retrying inference. Default methods and HTT
 serialization remain unchanged. Existing test owners cover the new boundary;
 this is not HTTP ownership, release/deployment or C5 acceptance. See the
 [contract and next integration gates](../product/attempt-accounting-and-evidence.md#buffered-usage-qualification-w05c-http-prerequisite).
+
+
+### Limited tracked buffered HTTP activation (2026-10-09)
+
+W05c/d now connect correlated prepared admission, one retained HTTP owner,
+qualified buffered completion, canonical settlement and bounded recovery. The
+standalone switch is opt-in; default behavior is unchanged. Both existing
+forwarding planes are covered, while unsupported combinations fail before
+admission. Unknown liability survives disconnects, storage failures and restart;
+shutdown checks durable uncertainty rather than equating idle workers with
+settled accounting. See the [operator bounds and limitations](../operator/buffered-accounting.md)
+and [owning contract](../product/attempt-accounting-and-evidence.md#owned-buffered-http-and-recovery-w05cd-limited-activation).
+
+Broad streaming lifecycle, amendments, alert/receipt export, release/deployment
+and actual-member C5 acceptance remain open. No provider or event replay is
+introduced, and best-effort observations are not atomic settlement delivery.

@@ -10,6 +10,7 @@ use std::sync::Mutex;
 #[derive(Debug)]
 pub struct PreparedAdmission {
     pub(super) evidence: AdmissionEvidence,
+    pub(super) correlated: bool,
 }
 
 /// Metadata for reconciliation against the supervisor's ORIGINAL ledger. It does
@@ -41,6 +42,7 @@ impl PreparedAdmission {
             return Err(EvidenceError::InvalidInput);
         }
         Ok(Self {
+            correlated: false,
             evidence: AdmissionEvidence {
                 request_id,
                 scope,
@@ -49,6 +51,11 @@ impl PreparedAdmission {
                 retained_limit,
             },
         })
+    }
+
+    pub(crate) fn correlated(mut self) -> Self {
+        self.correlated = true;
+        self
     }
 
     pub fn evidence(&self) -> &AdmissionEvidence {
@@ -68,15 +75,25 @@ impl PreparedAdmission {
             if !lifecycle.is_running() {
                 return Ok(None);
             }
-            store
-                .reserve_prepared_durable(
+            let admission = if self.correlated {
+                store.reserve_correlated_durable(
+                    &evidence.scope,
+                    evidence.ceiling,
+                    time::OffsetDateTime::now_utc(),
+                    evidence.ttl,
+                    evidence.retained_limit,
+                    &evidence.request_id,
+                )
+            } else {
+                store.reserve_prepared_durable(
                     &evidence.scope,
                     evidence.ceiling,
                     time::OffsetDateTime::now_utc(),
                     evidence.ttl,
                     evidence.retained_limit,
                 )
-                .map(Some)
+            };
+            admission.map(Some)
         });
         match result {
             Ok(Some(IntentAdmission::Admitted(intent))) => {

@@ -1,7 +1,7 @@
 # Attempt accounting and durable evidence
 
 Status: W05 in progress. W05a and W05b are integrated. W05b remains
-opt-in/non-authoritative; W05c–e are pending.
+opt-in diagnostics; W05c/d now include a limited tracked buffered HTTP mode, while broader W05c–e gates remain pending.
 Date: 2026-09-08. Tracker: [TD-0026](../td/TD-0026-gateway-product-evolution.md).
 
 ## Work backward from reconciliation
@@ -25,16 +25,16 @@ logical events for repeated idempotency keys. `ResilientProvider` emits a final 
 failed intermediate attempts have no individual measurement record. Transparent transport does
 not retry. A zero ledger charge after absent usage is not evidence of zero provider consumption.
 Legacy TTL reclaim deletes abandoned leases; tracked intents now retain unresolved
-liability through expiry. HTTP adoption remains separate.
+liability through expiry. The opt-in buffered mode below uses that admission and settlement path; defaults remain legacy.
 
 ## Delivery substeps
 
 | ID | Deliverable | Gate / state |
 |---|---|---|
-| W05a | Atomic settlement receipt/outbox storage, immutable IDs, bounded claims and acknowledgement, rollback/reopen/concurrency tests | Integrated; 14 focused tests; not wired to proxy or network exporter |
+| W05a | Atomic settlement receipt/outbox storage, immutable IDs, bounded claims and acknowledgement, rollback/reopen/concurrency tests | Integrated; receipt storage is used by opt-in tracked buffered HTTP; network exporter remains pending |
 | W05b | Transport-owned attempt lifecycle and neutral draft contract | Integrated through PR #246 after clean adversarial review and green exact-head/post-merge CI; remains opt-in diagnostics only, while downstream accounting review still gates authoritative use and external release |
-| W05c | Connect admission, settlement and evidence without bypassing correctness | Partial foundation: owned library settlement outcomes and canonical terminal-observation receipt linkage; authoritative proxy mode, physical-attempt linkage, logical dedup separation and no-lease policy remain pending |
-| W05d | Unknown-liability and late-settlement recovery | Partial storage foundation: atomic admission intent (#308), expiry protection and immutable terminal usage snapshots (#310), followed by canonical stored-charge settlement and read-only bounded recovery inventory. Amendments, authoritative HTTP ownership and idempotent recovery remain pending; coordinate TD-0024 retention |
+| W05c | Connect admission, settlement and evidence without bypassing correctness | Limited buffered HTTP integration implemented: correlated prepared admission, detached owner and qualified terminal settlement; broader physical-attempt linkage, logical dedup and no-lease policy remain pending |
+| W05d | Unknown-liability and late-settlement recovery | Limited buffered recovery implemented over the original ledger: bounded advancing scope/execution inventory and retained terminal retry, including unbudgeted/removed keys. Amendments, broad lifecycle acceptance and TD-0024 retention remain pending |
 | W05e | Receiver contract, exporter and operator evidence | Pending: receiver idempotency, authenticated/scoped transport, retry/backoff, backlog/freshness UX, safe retention, multi-shard cursor/migration and real consumer review |
 
 W05 completes only after all substeps and joint contract gates have evidence. No code in W05a
@@ -637,3 +637,37 @@ wait/recovery separately, and include retained unresolved obligations in shutdow
 reporting. Recovery must advance the original ledger's opaque cursor with scoped
 page/time bounds, including unbudgeted key scopes; a repeated page-one scan can
 starve later ready records. W05c–e and actual-member C5 remain open.
+
+
+## Owned buffered HTTP and recovery (W05c/d limited activation)
+
+The [operator mode](../operator/buffered-accounting.md) connects the previously
+separate admission, dispatch, qualified usage and canonical settlement owners.
+One held registry slot spans the detached HTTP operation. Its generated request
+ID is persisted atomically with prepared admission, without becoming an execution
+ID, idempotency key or replay authority. Old admissions retain absent correlation.
+The opt-in event uses the canonical gateway ID and preserves any available origin
+ID separately. Default APIs and HTTP behavior are unchanged.
+
+Terminal usage enters the retained owner before any best-effort telemetry callback.
+Recovery retries retained terminal observations and settles ready durable records;
+it never authorizes another send, invents zero, or re-emits usage. Its scope
+inventory includes retained unbudgeted and removed-key scopes. Opaque cursors
+advance past settled rows and freeze admission bounds for each inventory. A later
+sweep observes later admissions and changed state. Shutdown checks a fresh bounded
+inventory plus retained slots after workers drain; idle alone cannot mean success.
+
+Tests extend the existing storage, jobs and proxy owners. Storage covers atomic
+correlation rollback/reopen/scoping and bounded scope inventory. Proxy fixtures
+cover both planes, actual header correlation, disconnection, task-local deadlines,
+pre-admission refusal and restart settlement past settled pages without new sends
+or events. Independent review exposed terminal loss on a panicking sink and a
+cursor that skipped slot zero; dedicated negative regressions precede both fixes.
+Existing legacy proxy and provider matrices remain the default/parsing owners;
+no redundant storage or provider field matrices were added or removed.
+
+Limits are explicit: no atomic telemetry delivery, no automatic amendment of
+unknown outcomes, no tracked threshold-alert publication, fixed single-file
+topology, bounded but not hard-time-limited SQLite operations, and no released
+or actual-member acceptance claim. W05c/d's broader lifecycle gates, W05e and C5
+remain open.
