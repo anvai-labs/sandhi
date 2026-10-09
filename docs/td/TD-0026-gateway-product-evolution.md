@@ -815,3 +815,16 @@ See the [owning contract](../product/attempt-accounting-and-evidence.md#owned-pr
 The existing job and ledger fixtures cover the new boundary; storage transaction
 matrices are not duplicated. HTTP integration, durable request correlation,
 bounded recovery, lifecycle acceptance and released C5 qualification remain open.
+
+
+### Buffered usage qualification prerequisite (2026-10-09)
+
+Source review found that buffered missing/null/malformed usage could be normalized
+to `ProviderReported` final zero; passing that result into tracked settlement
+would release unknown liability. A core-owned additive qualification and raw/typed
+OpenAI-compatible completion surfaces now separate response delivery from usable
+final accounting. Explicit zero passes; malformed or inconsistent counters retain
+an explicit accounting error without retrying inference. Default methods and HTTP
+serialization remain unchanged. Existing test owners cover the new boundary;
+this is not HTTP ownership, release/deployment or C5 acceptance. See the
+[contract and next integration gates](../product/attempt-accounting-and-evidence.md#buffered-usage-qualification-w05c-http-prerequisite).
