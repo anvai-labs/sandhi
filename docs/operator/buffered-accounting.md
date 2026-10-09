@@ -67,3 +67,12 @@ work. Do not restore older writers over a database containing tracked evidence.
 This mode does not establish complete streaming lifecycle, executed-cache reuse,
 tokenizer correctness, actual-member C5 acceptance, or a released deployment.
 See [the owning contract](../product/attempt-accounting-and-evidence.md).
+
+
+The local SDK recovery drills now exercise actual SIGKILL and restart with the same
+hashed binary: unknown dispatch keeps liability and incomplete shutdown; persisted
+final usage recovers one receipt after a synthetic receipt-write failure. A second
+restart preserves spend and receipt identity. See the
+[acceptance scope and remaining gates](../product/attempt-accounting-and-evidence.md#tracked-buffered-crashrestart-acceptance).
+These synthetic HTTP/token-mode checks do not establish tracked TLS/OIDC, streaming
+or deployed-provider acceptance.
