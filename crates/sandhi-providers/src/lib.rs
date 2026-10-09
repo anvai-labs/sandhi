@@ -225,6 +225,17 @@ pub struct ProviderResponse {
     pub attempts: u32,
 }
 
+/// A completed response and separately qualified usage from that same call.
+/// `Err` usage means the response arrived but cannot authorize final settlement.
+/// Retain liability/reconcile; never retry inference to repair accounting. On the
+/// typed path, `response.usage` retains legacy semantics; only `usage` is qualified.
+#[derive(Debug)]
+#[must_use]
+pub struct QualifiedCompletion<T> {
+    pub response: T,
+    pub usage: Result<sandhi_core::UsageV2, sandhi_core::usage::BufferedUsageError>,
+}
+
 fn buffered_usage(
     family: sandhi_core::CacheReadFamily,
     body: &serde_json::Value,

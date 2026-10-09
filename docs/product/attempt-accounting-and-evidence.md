@@ -593,3 +593,47 @@ rollback and corruption matrices retain their existing sole owners.
 HTTP admission/finalization, bounded recovery and broader lifecycle acceptance
 remain open. This opt-in library increment changes no HTTP defaults or deployed
 service and does not close W05c–e or C5.
+
+
+## Buffered usage qualification (W05c HTTP prerequisite)
+
+The additive Rust APIs `ProviderHandle::complete_with_qualified_usage` and
+`RawForwarder::forward_qualified_with_headers` return a `QualifiedCompletion`:
+the completed response plus a separate `Result<UsageV2, BufferedUsageError>`.
+A usage error means a response arrived but no qualified final usage is available.
+It is not a transport failure, proof of zero spend, or authority to send the
+request again. Keep unresolved liability for reconciliation. The typed response's
+ordinary `usage` field retains legacy semantics; accounting consumers must use
+the separately qualified result. Explicitly configured transport retries retain
+their existing semantics; qualification never adds a retry.
+
+Qualification initially covers buffered OpenAI-compatible chat (InferFlux/ZAI).
+Unsupported raw routes, streaming flags and provider families are rejected before
+dispatch. Custom typed providers refuse by default unless they implement the
+additive capability. Existing methods, response serialization and HTTP defaults
+are unchanged; no proxy mode, binding facade or deployment is enabled here.
+
+Core owns qualification alongside the existing parser: required prompt/output
+counts must be plausible unsigned integers, while present optional cache/reasoning
+counts must be valid and consistent with their totals. Explicit zero is accepted;
+missing, null, empty, malformed or contradictory usage is not converted to a
+qualified zero. Optional absent/null detail containers remain absent information;
+cache reporting coverage is still separate from numeric usage qualification.
+Unknown extra fields do not grant qualification or change extraction. This does
+not prove tokenizer units, executed cache reuse, truthful provider reporting or
+physical-attempt correspondence.
+
+The existing core usage tests own the field/consistency matrix. Existing provider
+raw/typed test modules own actual HTTP fixtures proving response preservation,
+unchanged typed request/response semantics (apart from elapsed time), no
+qualification-driven replay, explicit-zero acceptance, unsupported pre-dispatch
+refusal and non-JSON raw response retention. Legacy proxy/cache-availability tests
+remain the default-path regression owner; storage eligibility tests are not copied.
+
+Before HTTP activation, carry this result through owned admission/dispatch and
+terminal observation. Install the captured transport deadline inside any spawned
+task (Tokio task-local state does not propagate automatically), bound accounting
+wait/recovery separately, and include retained unresolved obligations in shutdown
+reporting. Recovery must advance the original ledger's opaque cursor with scoped
+page/time bounds, including unbudgeted key scopes; a repeated page-one scan can
+starve later ready records. W05c–e and actual-member C5 remain open.
