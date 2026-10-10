@@ -34,7 +34,7 @@ liability through expiry. The opt-in buffered mode below uses that admission and
 | W05a | Atomic settlement receipt/outbox storage, immutable IDs, bounded claims and acknowledgement, rollback/reopen/concurrency tests | Integrated; receipt storage is used by opt-in tracked buffered HTTP; network exporter remains pending |
 | W05b | Transport-owned attempt lifecycle and neutral draft contract | Integrated through PR #246 after clean adversarial review and green exact-head/post-merge CI; remains opt-in diagnostics only, while downstream accounting review still gates authoritative use and external release |
 | W05c | Connect admission, settlement and evidence without bypassing correctness | Limited buffered HTTP integration implemented: correlated prepared admission, detached owner and qualified terminal settlement; broader physical-attempt linkage, logical dedup and no-lease policy remain pending |
-| W05d | Unknown-liability and late-settlement recovery | Limited buffered recovery implemented over the original ledger: bounded advancing scope/execution inventory and retained terminal retry, including unbudgeted/removed keys; two actual-process tracked crash/restart drills cover unknown liability and receipt recovery without replay. Amendments, broad lifecycle acceptance and TD-0024 retention remain pending |
+| W05d | Unknown-liability and late-settlement recovery | Limited buffered recovery implemented over the original ledger: bounded advancing scope/execution inventory and retained terminal retry, including unbudgeted/removed keys; actual-process drills cover unknown liability, receipt recovery and terminal publication under SQLite contention/process death without replay. Amendments, broad lifecycle acceptance and TD-0024 retention remain pending |
 | W05e | Receiver contract, exporter and operator evidence | Pending: receiver idempotency, authenticated/scoped transport, retry/backoff, backlog/freshness UX, safe retention, multi-shard cursor/migration and real consumer review |
 
 W05 completes only after all substeps and joint contract gates have evidence. No code in W05a
@@ -698,7 +698,29 @@ The trigger is explicit synthetic fault injection, not a naturally occurring dis
 failure or proof of a crash at an individual instruction. The unknown drill proves
 retained liability and shutdown reconciliation, not an independently witnessed
 background sweep. These checks use local HTTP, synthetic provider responses and
-virtual-key compatibility auth. Terminal publication under storage contention,
-process death before publication, tracked TLS/OIDC parity, streaming ownership,
+virtual-key compatibility auth. Tracked TLS/OIDC parity, streaming ownership,
 release/deployment and actual-member C5 remain separate gates. No production hook,
 provider retry or automatic closure of unknown liability is added.
+
+The same fixture now covers the earlier terminal-publication boundary. After one
+origin accepts a request, an external SQLite `BEGIN IMMEDIATE` blocks all writes.
+Authenticated gateway metrics must observe exactly 7 fresh-input, 4 cache-read and
+3 output tokens (14 billable) from a zero baseline. The correlated HTTP response is
+502, and the active-operation gauge must reach zero with the lock still held;
+the original accounting operation has ended without persisting terminal usage.
+
+- If the process survives, releasing the lock permits retained recovery to commit
+  the original terminal observation and one 14-token receipt. Restart preserves
+  receipt identity, timestamp and spend; the origin still saw exactly one request.
+- If SIGKILL occurs before unlocking, restart retains unknown liability, refuses
+  a request capped by that liability and exits with incomplete accounting. It does
+  not fabricate a terminal record, receipt or event from the lost RAM observation.
+
+The positive metric witness is valid only for this isolated single-request process;
+aggregate counters cannot correlate arbitrary production traffic. Metrics describe
+observed usage, not committed spend. The usage-event sink shares the lock and may
+lose its event; the surviving case accepts absence but rejects duplicate or
+mis-correlated events. This is not atomic telemetry delivery. Negative controls
+omit provider usage or disable retained retry and must fail the corresponding
+observation or receipt assertion. Existing in-process/storage tests remain the
+owners of field and transaction matrices; no duplicate matrix was added.
