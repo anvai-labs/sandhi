@@ -10,6 +10,19 @@
 # `ignore`/`groups` only affect future runs; already-open PRs are closed/triaged separately.
 version: 2
 updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    target-branch: "develop"
+    open-pull-requests-limit: 5
+    labels: ["dependencies"]
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    groups:
+      documentation:
+        patterns: ["mkdocs", "mkdocs-material", "pymdown-extensions"]
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
