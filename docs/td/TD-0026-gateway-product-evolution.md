@@ -871,7 +871,13 @@ canonical parser. Null/absent usage stays unavailable; malformed/nonfinal report
 return structured errors. Existing numeric tests cover both qualification paths;
 one new envelope test and two negative controls pin the distinction.
 
-Transport framing and immutable observation retention/conflict detection are next.
-The raw path currently splits lines, so complete SSE-event reconstruction must
-precede integration with streaming ownership and durable settlement. Legacy defaults
+The additive provider observer now supplies bounded complete-event framing and
+immutable first-usage retention with explicit conflict/failure states. It reuses
+an opt-in mode of the existing splitter and the core qualifier. Five observer tests
+plus the extended splitter matrices and four guard-bypass negative controls cover
+fragmentation, truncation, unknown usage, conflicting reports and bounded input.
+
+Next: bind one observer to the existing upstream response/request owner and prove
+cancellation, shutdown, terminal publication and settlement/recovery. The legacy
+raw path is still line-based and is not rewired by this prerequisite. Legacy defaults
 are unchanged; tracked streaming, release/deployment and full C5 remain open.

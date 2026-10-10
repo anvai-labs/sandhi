@@ -63,6 +63,7 @@ pub use openai_responses::{OpenAiResponses, OpenAiResponsesProfile};
 pub use openai_roles::{validate_openai_chat_messages, OpenAiChatRole};
 mod linesplit;
 pub mod metering;
+pub mod stream_usage;
 pub use metering::MeteredProvider;
 pub use resilience::{CircuitBreaker, ResilientProvider, RetryConfig, TimeoutConfig};
 pub use token_estimate::TokenEstimateCalibrator;

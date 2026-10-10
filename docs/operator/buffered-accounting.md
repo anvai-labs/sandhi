@@ -112,7 +112,7 @@ Do not restore older writers over a database containing tracked evidence.
 | OIDC crash/restart | Unknown liability retains its bound scope; final usage settles once after inference-grant revocation; new dispatch is denied without accounting changes | Same two recovery cases parameterized over token and TLS/OIDC modes |
 | Released binary with deployed OIDC policy | 0.12.0 isolated TLS candidate: both Qwen routes and ZAI reconcile three receipts / 51 tokens | [Qualification and limits](../product/attempt-accounting-and-evidence.md#isolated-released-binary-oidc-qualification-2026-10-10); managed gateway unchanged |
 | Managed tracked OIDC and streaming lifecycle | Pending | Separate acceptance gates |
-| Strict streamed usage qualification | Core event qualifier shares buffered counter validation; normal null usage remains unavailable | [Source prerequisite](../product/attempt-accounting-and-evidence.md#openai-chat-stream-usage-qualification-w05c-prerequisite); no transport wiring or tracked streaming activation |
+| Strict streamed usage qualification | Core qualifier plus bounded complete-event observer; first usage retained independently of completion/error; no automatic replay | [Source prerequisite](../product/attempt-accounting-and-evidence.md#openai-chat-stream-usage-qualification-w05c-prerequisite); no transport wiring or tracked streaming activation |
 | Executed cache reuse, tokenizer correctness and actual-member C5 | Pending | Source drills cannot establish these |
 | Released tracked-mode deployment | Pending | Existing 0.12.0 default-mode deployment does not qualify tracked lifecycle |
 
