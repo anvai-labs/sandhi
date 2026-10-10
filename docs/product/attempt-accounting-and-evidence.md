@@ -724,3 +724,33 @@ mis-correlated events. This is not atomic telemetry delivery. Negative controls
 omit provider usage or disable retained retry and must fail the corresponding
 observation or receipt assertion. Existing in-process/storage tests remain the
 owners of field and transaction matrices; no duplicate matrix was added.
+
+## Tracked buffered TLS/OIDC source acceptance
+
+The existing SDK shutdown and SSO owners cover tracked buffered accounting with
+synthetic providers and a disposable HTTPS authority. No production behavior or
+fixture default changes; tracked configuration remains opt-in.
+
+| Boundary | Evidence | Limit |
+|---|---|---|
+| HTTP/TLS shutdown | Same tracked buffered test verifies one origin call, request correlation, receipt or retained uncertainty, and exit 0/124 over both transports | TLS client verifies the fixture CA and hostname; no external trust-store deployment |
+| OIDC bearer accounting | One successful call joins returned request ID, execution intent, attributed usage event and receipt; session/run/step IDs persist | Fixture introspection maps its access token to admin only |
+| Budget settlement | Grant binds to `group:dashboard`; Block policy charges exactly 14 tokens (7 fresh input + 4 cache read + 3 output) | Synthetic usage; not tokenizer or executed-cache-reuse evidence |
+| Pre-admission denial | Invalid bearer, disallowed model and subject spoof leave origin count, intent/correlation/receipt/event counts and budget spend unchanged | Focused composition checks; protocol/authorization matrices remain with their existing owners |
+| Browser roles | Existing viewer/operator/admin login, mutation, secure cookie and logout matrix runs with legacy and tracked configurations | Browser ignores its disposable fixture certificate; HTTP client and gateway-to-IdP paths verify CA trust |
+
+The initial regression fails against the old fixture: one usage event exists but
+no tracked intent, correlation or receipt. Enabling the tracked option requires
+an explicit output bound and a bound Block budget. The shared mock origin retains
+requests across cases, so each gateway records its starting count instead of
+assuming an empty shared history. No requests or cache are cleared.
+
+The duplicate-test audit retained the existing shutdown, SSO role, protocol,
+parser and recovery owners; it adds only the missing cross-boundary accounting
+assertions. The fixture-consumer regression suite includes management, metrics,
+reasoning, run rendering, acceptance decisions, recovery, store startup and the
+existing AgentBrowser smoke. No second browser harness is introduced.
+
+This is source-level synthetic buffered acceptance. Deployed tracked OIDC,
+OIDC crash/restart composition, streaming ownership, broader lifecycle,
+release/deployment qualification and full actual-member C5 remain separate gates.

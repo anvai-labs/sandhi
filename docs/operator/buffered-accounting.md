@@ -108,12 +108,14 @@ Do not restore older writers over a database containing tracked evidence.
 | Unknown dispatch after SIGKILL | Liability and incomplete shutdown survive restart | [#339](https://github.com/anvai-labs/sandhi/pull/339) |
 | Persisted final usage | One receipt recovered; another restart preserves spend and identity | #339, synthetic receipt-write failure |
 | Terminal publication contention | Retained retry commits once if process survives; death preserves unknown liability | [#340](https://github.com/anvai-labs/sandhi/pull/340) |
-| Tracked TLS/OIDC, streaming lifecycle | Pending | Separate acceptance gates |
+| Tracked buffered TLS/OIDC | CA-verified shutdown and OIDC accounting/denial joins; existing browser role matrix | [Synthetic source acceptance](../product/attempt-accounting-and-evidence.md#tracked-buffered-tlsoidc-source-acceptance) |
+| Deployed tracked OIDC and streaming lifecycle | Pending | Separate acceptance gates |
 | Executed cache reuse, tokenizer correctness and actual-member C5 | Pending | Source drills cannot establish these |
-| Released deployment | Pending | Verify artifacts and installed state separately |
+| Released tracked-mode deployment | Pending | Existing 0.12.0 default-mode deployment does not qualify tracked lifecycle |
 
-The drills use the same copied/hashed binary across restart, local synthetic HTTP
-responses and token compatibility mode. Exactly one origin request is observed.
+The restart drills use the same copied/hashed binary, local synthetic HTTP
+responses and token compatibility mode. TLS/OIDC composition uses the separately
+described disposable authority. Each successful drill observes one origin request.
 See the [full acceptance record](../product/attempt-accounting-and-evidence.md#tracked-buffered-crashrestart-acceptance).
 
 !!! note "Telemetry is not a settlement outbox"

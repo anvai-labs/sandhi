@@ -33,6 +33,8 @@ class Dashboard:
     database: Path
     process: subprocess.Popen
     admin_token: str = ADMIN_TOKEN
+    seed_request_id: str | None = None
+    origin_requests_before: int = 0
 
     @property
     def headers(self):
@@ -59,6 +61,8 @@ def dashboard(proxy_binary, upstream, tmp_path, request):
         env["SANDHI_ADMIN_TOKEN"] = ADMIN_TOKEN
     if options.get("store", True):
         env["SANDHI_STORE"] = str(database)
+    if options.get("tracked"):
+        env["SANDHI_BUFFERED_ACCOUNTING"] = "tracked"
     if options.get("public"):
         env["SANDHI_DASHBOARD_PUBLIC"] = "1"
     authority = request.getfixturevalue("oidc_authority") if options.get("oidc") else None
@@ -69,7 +73,8 @@ def dashboard(proxy_binary, upstream, tmp_path, request):
             "issuer": authority.issuer, "client_id": "sandhi-browser",
             "redirect_url": authority.redirect, "ca_file": str(authority.certificate),
             "subjects": {role: {"role": role, "grants": {
-                "fixture": {"upstream": "openai", "models": ["gpt-mock"]}
+                "fixture": {"upstream": "openai", "models": ["gpt-mock"],
+                            **({"group": "dashboard"} if options.get("tracked") else {})}
             } if role == "admin" else {}} for role in ("viewer", "operator", "admin")},
         }))
         config.write_text(json.dumps({"tls": {
@@ -84,6 +89,7 @@ def dashboard(proxy_binary, upstream, tmp_path, request):
     proc = subprocess.Popen([str(proxy_binary)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     server = Dashboard(f"https://localhost:{port}" if authority else f"http://127.0.0.1:{port}",
                        database, proc, "fixture-access" if authority else ADMIN_TOKEN)
+    server.origin_requests_before = len(upstream.requests)
     try:
         deadline = time.monotonic() + 15
         verify = ssl.create_default_context(cafile=authority.certificate) if authority else True
@@ -103,13 +109,19 @@ def dashboard(proxy_binary, upstream, tmp_path, request):
                 if options.get("admin", True):
                     response = client.post("/admin/budget", headers=server.headers, json={
                         "scope": "group:dashboard", "limit_tokens": 10000,
-                        "policy": "warn", "window": "total",
+                        "policy": "block" if options.get("tracked") else "warn", "window": "total",
                     })
                     assert response.status_code == 200, response.text
-                response = client.post("/v1/chat/completions", headers=server.headers if authority else {"Authorization": f"Bearer {VK_OPENAI}"}, json={
+                response = client.post("/v1/chat/completions", headers={
+                    **(server.headers if authority else {"Authorization": f"Bearer {VK_OPENAI}"}),
+                    **({"x-sandhi-session": "sso-session", "x-sandhi-run-id": "sso-run",
+                        "x-sandhi-step-id": "seed"} if options.get("tracked") else {}),
+                }, json={
                     "model": "gpt-mock", "messages": [{"role": "user", "content": "ping"}],
+                    **({"max_tokens": 10} if options.get("tracked") else {}),
                 })
                 assert response.status_code == 200, response.text
+                server.seed_request_id = response.headers.get("x-sandhi-request-id")
                 # The production observer is buffered; wait for the seeded call to be queryable.
                 while client.get("/dashboard/api/usage", headers=server.headers).json()["total"]["calls"] != 1:
                     assert time.monotonic() < deadline, "usage never persisted"
@@ -166,7 +178,61 @@ def hold_authenticated_request(page, dashboard, path):
     return held
 
 
-@pytest.mark.parametrize("dashboard", [{"oidc": True}], indirect=True)
+@pytest.mark.parametrize("dashboard", [{"oidc": True, "tracked": True}], indirect=True)
+@pytest.mark.parametrize("denial", ["bearer", "model", "attribution"])
+def test_tracked_oidc_accounting_and_pre_admission_denials(
+    dashboard, oidc_authority, upstream, denial,
+):
+    """A real bearer call settles; rejected proposals never own an execution."""
+    tables = ("budget_execution_intent", "budget_request_correlation",
+              "budget_settlement_outbox", "usage_events")
+
+    def counts():
+        with sqlite3.connect(dashboard.database) as connection:
+            return tuple(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                         for table in tables)
+
+    assert counts() == (1, 1, 1, 1)
+    with sqlite3.connect(dashboard.database) as connection:
+        rows = connection.execute(
+            "SELECT c.request_id, e.subject_id, e.group_id, e.session_id, e.run_id, e.step_id, "
+            "e.tokens_in, e.tokens_out, e.cache_read_tokens, r.scope, r.charged_tokens "
+            "FROM budget_execution_intent i "
+            "JOIN budget_request_correlation c USING (execution_id) "
+            "JOIN usage_events e ON e.request_id = c.request_id "
+            "JOIN budget_settlement_outbox r ON r.reservation_id = i.reservation_id"
+        ).fetchall()
+    assert rows == [(dashboard.seed_request_id, "admin", "dashboard", "sso-session",
+                     "sso-run", "seed", 7, 3, 4, "group:dashboard", 14)]
+    assert len(upstream.requests) == dashboard.origin_requests_before + 1
+    headers = dashboard.headers
+    body = {"model": "gpt-mock", "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 10}
+    if denial == "bearer":
+        headers["Authorization"] = "Bearer invalid-access"
+    elif denial == "model":
+        body["model"] = "not-permitted"
+    else:
+        headers["x-sandhi-subject-id"] = "another-user"
+    with httpx.Client(base_url=dashboard.base, timeout=5,
+                      verify=ssl.create_default_context(cafile=oidc_authority.certificate)) as client:
+        budgets = client.get("/dashboard/api/budgets", headers=dashboard.headers)
+        assert budgets.status_code == 200, budgets.text
+        assert budgets.json()["budgets"] == [{
+            "scope": "group:dashboard", "limit_tokens": 10000, "spent": 14,
+            "remaining": 9986, "window": "total", "policy": "block",
+        }]
+        response = client.post("/v1/chat/completions", headers=headers, json=body)
+        assert response.status_code == (401 if denial == "bearer" else 403), response.text
+        after = client.get("/dashboard/api/budgets", headers=dashboard.headers)
+        assert after.status_code == 200, after.text
+        assert after.json() == budgets.json()
+    assert counts() == (1, 1, 1, 1)
+    assert len(upstream.requests) == dashboard.origin_requests_before + 1
+
+
+@pytest.mark.parametrize("dashboard", [{"oidc": True}, {"oidc": True, "tracked": True}],
+                         ids=["legacy", "tracked"], indirect=True)
 @pytest.mark.parametrize("page", [{"tls": True}], indirect=True)
 @pytest.mark.parametrize("role", ["viewer", "operator", "admin"])
 def test_sso_browser_roles_cookie_mutations_and_logout(page, dashboard, oidc_authority, role):
