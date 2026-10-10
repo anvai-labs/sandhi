@@ -83,6 +83,7 @@ nav:
       - Accounting and evidence: product/attempt-accounting-and-evidence.md
       - Cache reporting: adr/0010-cache-read-reporting-availability.md
   - Project:
+      - Version 0.12.0: releases/v0.12.0.md
       - Documentation map: map.md
       - Release safeguards: product/release-safeguards.md
       - Contributing to these docs: contributing-docs.md
