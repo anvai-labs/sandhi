@@ -36,6 +36,8 @@ A partly published release remains incomplete even when some artifacts are avail
   since 1.99).
 
 ### Fixed
+- Update the documentation toolchain past the Material search-suggestion XSS
+  and PyMdown path-traversal/ReDoS advisories.
 - `VaultStore::backend_from_env` reports backend misconfiguration as an
   error instead of terminating the process; the proxy binary owns the
   exit, so library consumers no longer die at startup.
