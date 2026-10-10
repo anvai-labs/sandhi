@@ -14,6 +14,8 @@ use sandhi_store::ledger::evidence::{
 use sandhi_store::ShardedLedger;
 use std::sync::Mutex;
 
+pub mod admission;
+pub mod buffered;
 pub mod jobs;
 
 #[derive(Debug)]
@@ -56,6 +58,21 @@ pub enum Attempt {
 }
 
 impl PendingSettlement {
+    fn snapshot(&self) -> Self {
+        Self {
+            request_id: self.request_id.clone(),
+            reservation: self.reservation.clone(),
+            charge: self.charge,
+            tracked: self.tracked.as_ref().map(|t| {
+                Box::new(TrackedObservation {
+                    intent: t.intent.clone(),
+                    usage: t.usage.clone(),
+                    recorded: t.recorded,
+                })
+            }),
+        }
+    }
+
     pub fn new(request_id: String, reservation: Option<Reservation>, usage: &UsageV2) -> Self {
         Self {
             request_id,

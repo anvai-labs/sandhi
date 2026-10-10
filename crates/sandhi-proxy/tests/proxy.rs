@@ -3994,3 +3994,433 @@ async fn per_ip_connection_cap_sheds_and_recovers() {
     let _ = shutdown_tx.send(());
     let _ = tokio::time::timeout(std::time::Duration::from_secs(3), server).await;
 }
+
+#[tokio::test]
+async fn owned_buffered_rejects_unqualified_usage_without_zero_settlement() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"origin-id","choices":[{"message":{"content":"done"},"finish_reason":"stop"}]}))).expect(1).mount(&upstream).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("owned.db");
+    let sink = Arc::new(InMemorySink::new());
+    let state = state_with(
+        upstream.uri(),
+        sink.clone(),
+        ProxyLedger::Durable(
+            sandhi_store::ShardedLedger::open_sharded(path.to_str().unwrap(), 1).unwrap(),
+        ),
+    );
+    sandhi_proxy::settlement::buffered::enable(
+        &state,
+        sandhi_proxy::settlement::buffered::Config::new(
+            4,
+            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(2),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let response = build_app(state).oneshot(Request::post("/v1/chat/completions").header("authorization","Bearer vk_demo").header("content-type","application/json").body(Body::from(r#"{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"max_tokens":10}"#)).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert!(response.headers().contains_key("x-sandhi-request-id"));
+    let events = sink.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].usage_completeness,
+        sandhi_core::UsageCompleteness::Unavailable
+    );
+    let mut ledger = sandhi_store::SqliteLedger::open(path.to_str().unwrap()).unwrap();
+    let page = ledger
+        .recovery_page_durable("group:platform", None, 10)
+        .unwrap();
+    assert_eq!(page.entries.len(), 1);
+    assert!(matches!(
+        page.entries[0].state,
+        sandhi_store::ledger::evidence::RecoveryState::UnresolvedObservation
+    ));
+    assert_eq!(
+        ledger
+            .request_id_durable("group:platform", &page.entries[0].execution_id)
+            .unwrap()
+            .as_deref(),
+        Some(events[0].request_id.as_str())
+    );
+}
+
+fn owned_request(route: &str, body: serde_json::Value) -> Request<Body> {
+    Request::post(route)
+        .header("authorization", "Bearer vk_demo")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+fn owned_body() -> serde_json::Value {
+    serde_json::json!({"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"max_tokens":10})
+}
+fn owned_state(
+    uri: String,
+    path: &std::path::Path,
+    sink: Arc<InMemorySink>,
+    timeout: std::time::Duration,
+) -> Arc<ProxyState> {
+    let state = state_with(
+        uri,
+        sink,
+        ProxyLedger::Durable(
+            sandhi_store::ShardedLedger::open_sharded(path.to_str().unwrap(), 1).unwrap(),
+        ),
+    );
+    sandhi_proxy::settlement::buffered::enable(
+        &state,
+        sandhi_proxy::settlement::buffered::Config::new(
+            4,
+            std::time::Duration::from_secs(2),
+            timeout,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    state
+}
+
+#[tokio::test]
+async fn owned_buffered_both_planes_correlate_and_settle_once() {
+    for (route, origin_id) in [
+        ("/v1/chat/completions", Some("origin-once")),
+        ("/v1/messages", None),
+    ] {
+        let upstream = MockServer::start().await;
+        let mut body = serde_json::json!({"choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}});
+        if let Some(id) = origin_id {
+            body["id"] = id.into();
+        }
+        let mut template = ResponseTemplate::new(200).set_body_json(body);
+        if let Some(id) = origin_id {
+            template = template.insert_header("x-request-id", id);
+        }
+        Mock::given(method("POST"))
+            .respond_with(template)
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owned.db");
+        let sink = Arc::new(InMemorySink::new());
+        let state = owned_state(
+            upstream.uri(),
+            &path,
+            sink.clone(),
+            std::time::Duration::from_secs(2),
+        );
+        let response = build_app(state.clone())
+            .oneshot(owned_request(route, owned_body()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{route}");
+        let request_id = response.headers()["x-sandhi-request-id"].to_str().unwrap();
+        let events = sink.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].request_id, request_id);
+        assert_eq!(events[0].upstream_request_id.as_deref(), origin_id);
+        assert_eq!(sandhi_proxy::settlement::buffered::retained(&state), 0);
+        let mut ledger = sandhi_store::SqliteLedger::open(path.to_str().unwrap()).unwrap();
+        let page = ledger
+            .recovery_page_durable("group:platform", None, 10)
+            .unwrap();
+        assert_eq!(page.entries.len(), 1);
+        assert!(
+            matches!(&page.entries[0].state, sandhi_store::ledger::evidence::RecoveryState::Settled(receipt) if receipt.charged_tokens == 12)
+        );
+        assert_eq!(
+            ledger
+                .request_id_durable("group:platform", &page.entries[0].execution_id)
+                .unwrap()
+                .as_deref(),
+            Some(request_id)
+        );
+        assert_eq!(
+            sandhi_proxy::settlement::buffered::recover(state.clone())
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(sink.events().len(), 1);
+        state
+            .lifecycle
+            .begin_quiesce(std::time::Duration::from_secs(2));
+        assert!(sandhi_proxy::settlement::buffered::finish_shutdown(state)
+            .await
+            .unwrap());
+    }
+}
+
+#[tokio::test]
+async fn owned_buffered_disconnect_retains_execution_and_accounting() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_millis(150)).set_body_json(serde_json::json!({"id":"origin-disconnect","choices":[{"message":{"content":"done"}}],"usage":{"prompt_tokens":3,"completion_tokens":2}}))).expect(1).mount(&upstream).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("owned.db");
+    let sink = Arc::new(InMemorySink::new());
+    let state = owned_state(
+        upstream.uri(),
+        &path,
+        sink.clone(),
+        std::time::Duration::from_secs(2),
+    );
+    let task = tokio::spawn(
+        build_app(state.clone()).oneshot(owned_request("/v1/chat/completions", owned_body())),
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while upstream.received_requests().await.unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    task.abort();
+    let _ = task.await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while sandhi_proxy::settlement::buffered::retained(&state) != 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let events = sink.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].tokens_out, 2);
+    assert_eq!(state.ledger.lock().unwrap().spent("group:platform"), 5);
+}
+
+#[tokio::test]
+async fn owned_buffered_deadline_is_installed_inside_spawn_for_both_planes() {
+    for route in ["/v1/chat/completions", "/v1/messages"] {
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_millis(300)).set_body_json(serde_json::json!({"choices":[{"message":{"content":"late"}}],"usage":{"prompt_tokens":3,"completion_tokens":2}}))).expect(1).mount(&upstream).await;
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Arc::new(InMemorySink::new());
+        let state = owned_state(
+            upstream.uri(),
+            &dir.path().join("owned.db"),
+            sink.clone(),
+            std::time::Duration::from_millis(30),
+        );
+        let response = build_app(state.clone())
+            .oneshot(owned_request(route, owned_body()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            sink.events()[0].usage_completeness,
+            sandhi_core::UsageCompleteness::Unavailable
+        );
+        assert_eq!(sandhi_proxy::settlement::buffered::retained(&state), 1);
+    }
+}
+
+#[tokio::test]
+async fn owned_buffered_unsupported_shapes_refuse_before_admission() {
+    for case in ["stream", "unbounded", "dedup", "retry"] {
+        let upstream = MockServer::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owned.db");
+        let state = owned_state(
+            upstream.uri(),
+            &path,
+            Arc::new(InMemorySink::new()),
+            std::time::Duration::from_secs(2),
+        );
+        let mut body = owned_body();
+        if case == "stream" {
+            body["stream"] = true.into();
+        }
+        if case == "unbounded" {
+            body.as_object_mut().unwrap().remove("max_tokens");
+        }
+        if case == "retry" {
+            state.providers.lock().unwrap().insert(
+                "up1".into(),
+                ProviderRuntime::new().openai_compat(
+                    "openai",
+                    upstream.uri(),
+                    "key",
+                    Default::default(),
+                    Some(1),
+                    None,
+                    None,
+                ),
+            );
+        }
+        let mut request = owned_request("/v1/chat/completions", body);
+        if case == "dedup" {
+            request
+                .headers_mut()
+                .insert("idempotency-key", "duplicate".parse().unwrap());
+        }
+        let response = build_app(state).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{case}");
+        assert!(upstream.received_requests().await.unwrap().is_empty());
+        let mut ledger = sandhi_store::SqliteLedger::open(path.to_str().unwrap()).unwrap();
+        assert!(ledger
+            .recovery_scopes_durable(None, 10)
+            .unwrap()
+            .scopes
+            .is_empty());
+    }
+}
+
+#[tokio::test]
+async fn owned_buffered_restart_recovers_later_ready_rows_and_unbudgeted_removed_scopes() {
+    use sandhi_store::ledger::evidence::{IntentAdmission, RecoveryState};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("owned.db");
+    let mut ledger = sandhi_store::SqliteLedger::open(path.to_str().unwrap()).unwrap();
+    let mut ready_id = String::new();
+    for i in 0..35 {
+        let IntentAdmission::Admitted(intent) = ledger
+            .reserve_correlated_durable(
+                "vk:removed",
+                10,
+                time::OffsetDateTime::now_utc(),
+                time::Duration::minutes(5),
+                100,
+                &format!("req-{i}"),
+            )
+            .unwrap()
+        else {
+            panic!("denied")
+        };
+        ledger
+            .authorize_dispatch_durable("vk:removed", &intent.execution_id)
+            .unwrap();
+        ledger
+            .record_terminal_durable(
+                "vk:removed",
+                &intent.execution_id,
+                &sandhi_core::UsageV2 {
+                    tokens_in: 2,
+                    tokens_out: 1,
+                    completeness: sandhi_core::UsageCompleteness::Final,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        if i < 34 {
+            ledger
+                .settle_terminal_durable("vk:removed", &intent.execution_id)
+                .unwrap();
+        }
+        ready_id = intent.execution_id;
+    }
+    let IntentAdmission::Admitted(unknown) = ledger
+        .reserve_correlated_durable(
+            "vk:unknown",
+            10,
+            time::OffsetDateTime::now_utc(),
+            time::Duration::minutes(5),
+            100,
+            "req-unknown",
+        )
+        .unwrap()
+    else {
+        panic!("denied")
+    };
+    ledger
+        .authorize_dispatch_durable("vk:unknown", &unknown.execution_id)
+        .unwrap();
+    drop(ledger);
+    let upstream = MockServer::start().await;
+    let sink = Arc::new(InMemorySink::new());
+    let state = owned_state(
+        upstream.uri(),
+        &path,
+        sink.clone(),
+        std::time::Duration::from_secs(2),
+    );
+    assert_eq!(
+        sandhi_proxy::settlement::buffered::recover(state.clone())
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sandhi_proxy::settlement::buffered::recover(state.clone())
+            .await
+            .unwrap(),
+        0
+    );
+    let mut ledger = sandhi_store::SqliteLedger::open(path.to_str().unwrap()).unwrap();
+    assert_eq!(
+        ledger
+            .request_id_durable("vk:removed", &ready_id)
+            .unwrap()
+            .as_deref(),
+        Some("req-34")
+    );
+    assert_eq!(ledger.spent_durable("vk:removed").unwrap(), 105);
+    assert!(matches!(
+        ledger
+            .recovery_page_durable("vk:unknown", None, 10)
+            .unwrap()
+            .entries[0]
+            .state,
+        RecoveryState::MayHaveDispatched
+    ));
+    assert_eq!(sandhi_proxy::settlement::buffered::retained(&state), 0);
+    state
+        .lifecycle
+        .begin_quiesce(std::time::Duration::from_secs(2));
+    assert!(
+        !sandhi_proxy::settlement::buffered::finish_shutdown(state)
+            .await
+            .unwrap(),
+        "durable uncertainty is not an idle-worker success"
+    );
+    assert!(sink.events().is_empty());
+    assert!(upstream.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn owned_buffered_sink_panic_cannot_erase_terminal_evidence() {
+    struct PanicSink(std::sync::atomic::AtomicUsize);
+    impl sandhi_core::Sink for PanicSink {
+        fn emit(&self, _: &sandhi_core::UsageEvent) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            panic!("injected telemetry panic");
+        }
+    }
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"choices":[{"message":{"content":"done"}}],"usage":{"prompt_tokens":3,"completion_tokens":2}}))).expect(1).mount(&upstream).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("owned.db");
+    let sink = Arc::new(PanicSink(std::sync::atomic::AtomicUsize::new(0)));
+    let mut state = Arc::try_unwrap(state_with(
+        upstream.uri(),
+        Arc::new(InMemorySink::new()),
+        ProxyLedger::durable(path.to_str().unwrap(), 1).unwrap(),
+    ))
+    .ok()
+    .unwrap();
+    state.sink = sink.clone();
+    let state = Arc::new(state);
+    sandhi_proxy::settlement::buffered::enable(
+        &state,
+        sandhi_proxy::settlement::buffered::Config::new(
+            4,
+            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(2),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let response = build_app(state.clone())
+        .oneshot(owned_request("/v1/chat/completions", owned_body()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    state.lifecycle.wait_idle().await;
+    sandhi_proxy::settlement::buffered::recover(state.clone())
+        .await
+        .unwrap();
+    assert_eq!(state.ledger.lock().unwrap().spent("group:platform"), 5);
+    assert_eq!(sink.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+}

@@ -339,6 +339,54 @@ impl RawForwarder {
         correlation: Option<&str>,
         call_headers: &HeaderMap,
     ) -> Result<(RawResponse, sandhi_core::UsageV2), ProviderError> {
+        let result = self
+            .forward_buffered_inner(path, body, session, correlation, call_headers, false)
+            .await?;
+        Ok((
+            result.response,
+            result.usage.expect("legacy usage is unqualified"),
+        ))
+    }
+
+    /// Opt-in qualified OpenAI-compatible chat usage with unchanged wire response.
+    /// Unsupported family/path/streaming combinations fail before dispatch.
+    /// Missing or malformed response usage is returned separately, never as a
+    /// transport error that might cause inference replay.
+    pub async fn forward_qualified_with_headers(
+        &self,
+        path: &str,
+        body: Bytes,
+        session: Option<&str>,
+        correlation: Option<&str>,
+        call_headers: &HeaderMap,
+    ) -> Result<crate::QualifiedCompletion<RawResponse>, ProviderError> {
+        let request: Value = serde_json::from_slice(&body).map_err(|_| {
+            ProviderError::InvalidRequest("qualified buffered request must be JSON".into())
+        })?;
+        if self.family != ProviderFamily::OpenAiCompat
+            || !matches!(path, "/v1/chat/completions" | "/chat/completions")
+            || !request.is_object()
+            || request
+                .get("stream")
+                .is_some_and(|value| value != &Value::Bool(false))
+        {
+            return Err(ProviderError::InvalidRequest(
+                "qualified usage supports buffered OpenAI-compatible chat only".into(),
+            ));
+        }
+        self.forward_buffered_inner(path, body, session, correlation, call_headers, true)
+            .await
+    }
+
+    async fn forward_buffered_inner(
+        &self,
+        path: &str,
+        body: Bytes,
+        session: Option<&str>,
+        correlation: Option<&str>,
+        call_headers: &HeaderMap,
+        qualify: bool,
+    ) -> Result<crate::QualifiedCompletion<RawResponse>, ProviderError> {
         let attempt = self.attempt.as_ref();
         let context = attempt.map(|attempt| attempt.context.fresh_call());
         let provider = attempt.map_or("transparent", |attempt| attempt.provider.as_str());
@@ -356,12 +404,34 @@ impl RawForwarder {
                     response_request_id_header,
                 )
                 .await?;
-            let (usage, observed_usage) = serde_json::from_slice::<Value>(&raw.body)
-                .ok()
-                .map(|value| crate::buffered_usage(cache_read_family(self.family), &value))
+            let value = serde_json::from_slice::<Value>(&raw.body).ok();
+            let (usage, observed_usage) = value
+                .as_ref()
+                .map(|value| crate::buffered_usage(cache_read_family(self.family), value))
                 .unwrap_or_default();
-            let usage = usage.into();
-            Ok(((raw, usage), observed_usage))
+            let qualification = if qualify {
+                value
+                    .as_ref()
+                    .ok_or(sandhi_core::usage::BufferedUsageError::InvalidResponse)
+                    .and_then(sandhi_core::usage::validate_openai_buffered_usage)
+            } else {
+                Ok(())
+            };
+            let usage = qualification.map(|_| {
+                let mut usage: sandhi_core::UsageV2 = usage.into();
+                if qualify {
+                    usage.upstream_request_id =
+                        crate::provider_request_id(&raw.headers, response_request_id_header);
+                }
+                usage
+            });
+            Ok((
+                crate::QualifiedCompletion {
+                    response: raw,
+                    usage,
+                },
+                observed_usage,
+            ))
         })
         .await
     }
@@ -1282,6 +1352,31 @@ mod tests {
         assert_eq!(usage.tokens_in, 10);
         assert_eq!(usage.cache_read_tokens, 2);
         assert_eq!(usage.tokens_out, 1);
+    }
+
+    #[tokio::test]
+    async fn qualified_buffered_retains_non_json_response_without_zero_usage() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not-json"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let response = RawForwarder::new(ProviderFamily::OpenAiCompat, server.uri(), "k")
+            .forward_qualified_with_headers(
+                "/v1/chat/completions",
+                Bytes::from_static(b"{}"),
+                None,
+                None,
+                &HeaderMap::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.response.body, "not-json");
+        assert_eq!(
+            response.usage,
+            Err(sandhi_core::usage::BufferedUsageError::InvalidResponse)
+        );
     }
 
     #[tokio::test]

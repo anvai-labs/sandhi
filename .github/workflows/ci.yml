@@ -227,7 +227,10 @@ jobs:
       - name: Container resource enforcement on hosted Linux
         if: ${{ runner.environment == 'github-hosted' }}
         run: |
-          docker build --iidfile "$RUNNER_TEMP/evaluator-image.id" templates/python-evaluator
+          # Use the official mirror with the Dockerfile's single immutable pin;
+          # hosted runners otherwise share Docker Hub's anonymous pull quota.
+          image="mirror.gcr.io/library/$(sed -n 's/^ARG PYTHON_IMAGE=//p' templates/python-evaluator/Dockerfile)"
+          docker build --build-arg PYTHON_IMAGE="$image" --iidfile "$RUNNER_TEMP/evaluator-image.id" templates/python-evaluator
           python scripts/smoke_policy_container.py --sandhi "$GITHUB_WORKSPACE" --image "$(cat "$RUNNER_TEMP/evaluator-image.id")"
       # Scope 5 (TD-0011 P3): the `otel-otlp` feature is default-off. Verify it builds, clippy-
       # cleans, and tests when opted in — and that the default build stays free of the

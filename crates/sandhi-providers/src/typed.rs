@@ -179,6 +179,18 @@ pub trait ChatProvider: Send + Sync {
         call_headers: http::HeaderMap,
     ) -> Result<ChatEventStream, ProviderError>;
 
+    /// Additive qualified buffered usage. Custom/unsupported providers must opt in
+    /// explicitly; the default refuses without executing a request.
+    async fn complete_qualified(
+        &self,
+        _request: ChatRequestV1,
+        _call_headers: http::HeaderMap,
+    ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
+        Err(ProviderError::InvalidRequest(
+            "qualified buffered usage is unsupported by this typed provider".into(),
+        ))
+    }
+
     /// Opt-in physical-attempt observation. Implementations that do not own a Sandhi transport
     /// reject this explicitly rather than pretending a logical call is a physical attempt.
     async fn complete_observed(
@@ -253,6 +265,7 @@ pub struct ProviderHandle {
     /// config to forward with — those fall back to the typed translation path.
     raw: Option<crate::raw::RawForwarder>,
     credential_expires_at: Option<u64>,
+    qualified_single_attempt: bool,
 }
 
 impl ProviderHandle {
@@ -271,6 +284,7 @@ impl ProviderHandle {
             family: ProviderFamily::OpenAiCompat,
             raw: None,
             credential_expires_at: None,
+            qualified_single_attempt: false,
         }
     }
 
@@ -300,6 +314,12 @@ impl ProviderHandle {
     /// handles. Proxy plane-selection (TD-0006 Step 2) uses this: same-family → forward via this;
     /// cross-family or `None` → the typed `ChatRequestV1` translation path.
     #[must_use]
+    pub fn supports_owned_buffered(&self) -> bool {
+        self.qualified_single_attempt
+            && self.raw.is_some()
+            && self.family == ProviderFamily::OpenAiCompat
+    }
+
     pub fn raw_forwarder(&self) -> Option<&crate::raw::RawForwarder> {
         self.raw.as_ref()
     }
@@ -350,6 +370,24 @@ impl ProviderHandle {
         let mut response = self.inner.complete(request, call_headers).await?;
         reconcile_duration(&mut response.usage, elapsed_ms(started));
         Ok(response)
+    }
+
+    /// Return qualified usage separately from the legacy response using the same transport.
+    /// Accounting failure does not imply the model failed or authorize another call.
+    pub async fn complete_with_qualified_usage(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+    ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
+        self.check_credential()?;
+        let started = std::time::Instant::now();
+        let mut result = self.inner.complete_qualified(request, call_headers).await?;
+        let elapsed = elapsed_ms(started);
+        reconcile_duration(&mut result.response.usage, elapsed);
+        if let Ok(usage) = &mut result.usage {
+            reconcile_duration(usage, elapsed);
+        }
+        Ok(result)
     }
 
     /// [`Self::stream`] with per-call wire headers (TD-0022 D1).
@@ -562,6 +600,7 @@ impl ProviderRuntime {
             family: ProviderFamily::OpenAiCompat,
             raw: raw_forwarder,
             credential_expires_at: None,
+            qualified_single_attempt: max_retries.unwrap_or(0) == 0,
         }
     }
 
@@ -600,6 +639,7 @@ impl ProviderRuntime {
             family: ProviderFamily::OpenAiResponses,
             raw: raw_forwarder,
             credential_expires_at: None,
+            qualified_single_attempt: false,
         }
     }
 
@@ -640,6 +680,7 @@ impl ProviderRuntime {
             family: ProviderFamily::OpenAiResponses,
             raw: raw_forwarder,
             credential_expires_at: None,
+            qualified_single_attempt: false,
         }
     }
 
@@ -668,6 +709,7 @@ impl ProviderRuntime {
             family: ProviderFamily::Anthropic,
             raw: raw_forwarder,
             credential_expires_at: None,
+            qualified_single_attempt: false,
         }
     }
 
@@ -694,6 +736,7 @@ impl ProviderRuntime {
             family: ProviderFamily::Ollama,
             raw: raw_forwarder,
             credential_expires_at: None,
+            qualified_single_attempt: false,
         }
     }
 
@@ -722,6 +765,7 @@ impl ProviderRuntime {
             family: ProviderFamily::Gemini,
             raw: raw_forwarder,
             credential_expires_at: None,
+            qualified_single_attempt: false,
         }
     }
 
@@ -748,6 +792,7 @@ impl ProviderRuntime {
             family: ProviderFamily::Cohere,
             raw: raw_forwarder,
             credential_expires_at: None,
+            qualified_single_attempt: false,
         }
     }
 
@@ -795,7 +840,17 @@ impl ChatProvider for TypedOpenAiCompat {
         request: ChatRequestV1,
         call_headers: http::HeaderMap,
     ) -> Result<ChatResponseV1, ProviderError> {
-        self.complete_inner(request, call_headers, None).await
+        self.complete_inner(request, call_headers, None, false)
+            .await
+            .map(|r| r.response)
+    }
+
+    async fn complete_qualified(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+    ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
+        self.complete_inner(request, call_headers, None, true).await
     }
 
     async fn stream(
@@ -812,8 +867,9 @@ impl ChatProvider for TypedOpenAiCompat {
         call_headers: http::HeaderMap,
         attempt_context: crate::AttemptContext,
     ) -> Result<ChatResponseV1, ProviderError> {
-        self.complete_inner(request, call_headers, Some(attempt_context))
+        self.complete_inner(request, call_headers, Some(attempt_context), false)
             .await
+            .map(|r| r.response)
     }
 
     async fn stream_observed(
@@ -833,7 +889,8 @@ impl TypedOpenAiCompat {
         mut request: ChatRequestV1,
         call_headers: http::HeaderMap,
         attempt_context: Option<crate::AttemptContext>,
-    ) -> Result<ChatResponseV1, ProviderError> {
+        qualify: bool,
+    ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
         self.apply_constraints(&mut request)?;
         request.validate().map_err(ProviderError::InvalidRequest)?;
         let req = provider_request_observed(
@@ -843,13 +900,22 @@ impl TypedOpenAiCompat {
             attempt_context,
         );
         let response = self.raw.complete(req).await?;
+        let qualification = if qualify {
+            sandhi_core::usage::validate_openai_buffered_usage(&response.body)
+        } else {
+            Ok(())
+        };
         let mut decoded = decode_openai_response(response.body, response.usage, &request.model)?;
         if !request.include_native_response {
             decoded.extensions.remove("openai");
         }
         decoded.usage.attempts = response.attempts;
         decoded.usage.outcome = Some("success".into());
-        Ok(decoded)
+        let usage = qualification.map(|_| decoded.usage.clone());
+        Ok(crate::QualifiedCompletion {
+            response: decoded,
+            usage,
+        })
     }
 
     async fn stream_inner(
@@ -2012,6 +2078,188 @@ mod tests {
             .complete_with(request, http::HeaderMap::new())
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn qualified_buffered_usage_survives_both_planes_without_replaying() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        for (usage, counts) in [
+            (None, None),
+            (Some(json!(null)), None),
+            (
+                Some(json!({"prompt_tokens":0,"completion_tokens":"bad"})),
+                None,
+            ),
+            (
+                Some(json!({"prompt_tokens":0,"completion_tokens":0})),
+                Some((0, 0, 0)),
+            ),
+            (
+                Some(
+                    json!({"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":3}}),
+                ),
+                Some((7, 2, 3)),
+            ),
+        ] {
+            let server = MockServer::start().await;
+            let mut body = json!({"id":"once","choices":[{"message":{"content":"completed"},"finish_reason":"stop"}]});
+            if let Some(usage) = usage {
+                body["usage"] = usage;
+            }
+            let wire = format!("\n{body}\n");
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(wire.clone()))
+                .mount(&server)
+                .await;
+            let handle = ProviderRuntime::new().openai_compat(
+                "inferflux",
+                server.uri(),
+                "key",
+                Default::default(),
+                Some(0),
+                None,
+                None,
+            );
+            let request: ChatRequestV1 = serde_json::from_value(json!({"schema_version":"1","model":"fixture","messages":[{"role":"user","content":"hi"}],"include_native_response":false})).unwrap();
+            let typed = handle
+                .complete_with_qualified_usage(request.clone(), Default::default())
+                .await
+                .unwrap();
+            assert_eq!(typed.usage.is_ok(), counts.is_some(), "typed: {body}");
+            assert_eq!(
+                typed.response.output.content,
+                Some(MessageContent::Text("completed".into()))
+            );
+            assert!(typed.response.extensions.is_empty());
+            let raw_body = bytes::Bytes::from_static(br#"{ "model":"fixture", "messages":[] }"#);
+            let raw = handle
+                .raw_forwarder()
+                .unwrap()
+                .forward_qualified_with_headers(
+                    "/v1/chat/completions",
+                    raw_body.clone(),
+                    Some("member-1"),
+                    Some("request-1"),
+                    &http::HeaderMap::new(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(raw.usage.is_ok(), counts.is_some(), "raw: {body}");
+            assert_eq!(raw.response.body, wire);
+            if let Some(expected_counts) = counts {
+                let typed_usage = typed.usage.unwrap();
+                let raw_usage = raw.usage.unwrap();
+                assert_eq!(
+                    (
+                        typed_usage.tokens_in,
+                        typed_usage.tokens_out,
+                        typed_usage.cache_read_tokens
+                    ),
+                    (
+                        raw_usage.tokens_in,
+                        raw_usage.tokens_out,
+                        raw_usage.cache_read_tokens
+                    )
+                );
+                assert_eq!(
+                    (
+                        typed_usage.tokens_in,
+                        typed_usage.tokens_out,
+                        typed_usage.cache_read_tokens
+                    ),
+                    expected_counts
+                );
+                assert_eq!(typed_usage.completeness, UsageCompleteness::Final);
+            }
+            let legacy = handle
+                .complete_with(request, Default::default())
+                .await
+                .unwrap();
+            let mut expected = serde_json::to_value(legacy).unwrap();
+            let mut actual = serde_json::to_value(&typed.response).unwrap();
+            for value in [&mut expected, &mut actual] {
+                value["usage"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("duration_ms");
+                value["usage"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("duration_source");
+            }
+            assert_eq!(
+                actual, expected,
+                "qualified API preserves the legacy response"
+            );
+            let requests = server.received_requests().await.unwrap();
+            assert_eq!(
+                requests[0].body, requests[2].body,
+                "same typed request codec"
+            );
+            assert_eq!(
+                requests.len(),
+                3,
+                "one physical request per API call, even when usage is invalid"
+            );
+            assert_eq!(requests[1].body, raw_body);
+        }
+    }
+
+    #[tokio::test]
+    async fn qualified_buffered_rejects_unsupported_before_dispatch() {
+        use wiremock::MockServer;
+        let server = MockServer::start().await;
+        let request: ChatRequestV1 = serde_json::from_value(json!({"schema_version":"1","model":"fixture","messages":[{"role":"user","content":"hi"}]})).unwrap();
+        let handle = ProviderRuntime::new().anthropic(
+            server.uri(),
+            "key",
+            crate::AnthropicAuthScheme::ApiKey,
+            Default::default(),
+            None,
+            None,
+            None,
+        );
+        assert!(matches!(
+            handle
+                .complete_with_qualified_usage(request, Default::default())
+                .await,
+            Err(ProviderError::InvalidRequest(_))
+        ));
+        for (family, path, body) in [
+            (ProviderFamily::Anthropic, "/v1/chat/completions", "{}"),
+            (ProviderFamily::OpenAiCompat, "/v1/embeddings", "{}"),
+            (
+                ProviderFamily::OpenAiCompat,
+                "/v1/chat/completions",
+                r#"{"stream":true}"#,
+            ),
+            (
+                ProviderFamily::OpenAiCompat,
+                "/v1/chat/completions",
+                r#"{"stream":"false"}"#,
+            ),
+            (
+                ProviderFamily::OpenAiCompat,
+                "/v1/chat/completions",
+                "not-json",
+            ),
+        ] {
+            let forwarder = crate::raw::RawForwarder::new(family, server.uri(), "key");
+            assert!(matches!(
+                forwarder
+                    .forward_qualified_with_headers(
+                        path,
+                        bytes::Bytes::from_static(body.as_bytes()),
+                        None,
+                        None,
+                        &http::HeaderMap::new()
+                    )
+                    .await,
+                Err(ProviderError::InvalidRequest(_))
+            ));
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     /// TD-0022 D1 end to end: per-call wire headers entered at the handle cross the typed

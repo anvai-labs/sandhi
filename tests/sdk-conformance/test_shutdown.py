@@ -36,6 +36,8 @@ class GatedProvider:
     entered: threading.Event = field(default_factory=threading.Event)
     release: threading.Event = field(default_factory=threading.Event)
     base: str = ""
+    omit_usage: bool = False
+    gate_buffered: bool = False
 
 
 @pytest.fixture
@@ -51,11 +53,19 @@ def gated_provider():
             provider.requests.append(body)
             streaming = body.get("stream", False)
             payload = _openai_chat_body(streaming).encode()
-            self.send_response(200)
-            self.send_header("content-type", "text/event-stream" if streaming else "application/json")
-            self.send_header("content-length", str(len(payload)))
-            self.end_headers()
+            if not streaming and provider.omit_usage:
+                completed = json.loads(payload)
+                completed.pop("usage")
+                payload = json.dumps(completed).encode()
             try:
+                if not streaming and provider.gate_buffered:
+                    provider.entered.set()
+                    if not provider.release.wait(20):
+                        return
+                self.send_response(200)
+                self.send_header("content-type", "text/event-stream" if streaming else "application/json")
+                self.send_header("content-length", str(len(payload)))
+                self.end_headers()
                 if streaming:
                     # Send one complete event before blocking: the downstream owns an
                     # active response body/admission slot, not just a pending header read.
@@ -87,7 +97,7 @@ def gated_provider():
 @pytest.fixture
 def shutdown_gateway(proxy_binary, gated_provider, tmp_path):
     @contextmanager
-    def launch(*, tls=False, grace=5, quiesce=1800, max_connections=64):
+    def launch(*, tls=False, grace=5, quiesce=1800, max_connections=64, tracked=False):
         port = _free_port()
         database = tmp_path / "shutdown.db"
         config = {"providers": [], "vkeys": [], "budgets": [], "alerts": []}
@@ -113,6 +123,8 @@ def shutdown_gateway(proxy_binary, gated_provider, tmp_path):
             "SANDHI_SHUTDOWN_GRACE_SECS": str(grace),
             "SANDHI_SHUTDOWN_QUIESCE_MS": str(quiesce),
         })
+        if tracked:
+            env["SANDHI_BUFFERED_ACCOUNTING"] = "tracked"
         base = f"{'https' if tls else 'http'}://127.0.0.1:{port}"
         # A file avoids stderr pipe backpressure contaminating the deadline test.
         with (tmp_path / "shutdown.stderr").open("wb") as log:
@@ -337,3 +349,32 @@ def test_locked_settlement_cannot_extend_shutdown_past_watchdog(
                     assert elapsed < 2.5, f"locked settlement extended shutdown: {elapsed:.3f}s"
                     assert status == 124, f"stuck SQLite cleanup must be an explicit forced exit, got {status}"
                 assert len(gated_provider.requests) == 1
+
+
+@pytest.mark.parametrize("missing_usage", [False, True], ids=["settled", "unresolved"])
+def test_tracked_buffered_binary_correlation_and_shutdown(
+    shutdown_gateway, gated_provider, missing_usage,
+):
+    """Exercise the shipped switch, real HTTP and SIGTERM against disposable state."""
+    gated_provider.omit_usage = missing_usage
+    with shutdown_gateway(tracked=True) as (process, base, database, _port):
+        with httpx.Client(base_url=base, timeout=5) as client:
+            response = client.post("/v1/chat/completions", headers=CLIENT,
+                                   json={**BODY, "max_tokens": 10})
+            assert response.status_code == (502 if missing_usage else 200), response.text
+            request_id = response.headers["x-sandhi-request-id"]
+        assert len(gated_provider.requests) == 1
+        process.terminate()
+        assert process.wait(timeout=6) == (124 if missing_usage else 0)
+        with sqlite3.connect(database, timeout=1) as connection:
+            assert connection.execute(
+                "SELECT request_id FROM budget_request_correlation"
+            ).fetchall() == [(request_id,)]
+            assert connection.execute(
+                "SELECT request_id FROM usage_events"
+            ).fetchall() == [(request_id,)]
+            receipts = connection.execute(
+                "SELECT charged_tokens FROM budget_settlement_outbox"
+            ).fetchall()
+            assert receipts == ([] if missing_usage else [(14,)])
+        assert len(gated_provider.requests) == 1
