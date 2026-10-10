@@ -20,6 +20,10 @@ A partly published release remains incomplete even when some artifacts are avail
 ## [Unreleased]
 
 ### Added
+
+- Linux aarch64 Python wheels using manylinux2014 and the existing CPython 3.11+
+  stable ABI. Native arm64 CI tests the release wheel on Python 3.11–3.13, and
+  release verification now requires this platform alongside the existing wheels.
 - Opt-in tracked buffered HTTP accounting: atomically correlated admission,
   qualified terminal usage, retained ownership and bounded recovery through the
   original ledger. Actual-process tests cover crash/restart and terminal publication
