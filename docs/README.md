@@ -4,6 +4,8 @@ This page is the index for Sandhi's architecture, contracts, and delivery status
 current product truth from historical rationale so that a proposal's original context is not
 mistaken for shipped behavior.
 
+[Start with the visual operator overview](index.md) or use the reference map below.
+
 ## Which document is authoritative?
 
 | Question | Source of truth |
@@ -20,7 +22,7 @@ mistaken for shipped behavior.
 | What product evolution is proposed and how is it tracked? | [TD-0026 delivery plan](td/TD-0026-gateway-product-evolution.md), [product specification](product/gateway-vision-and-requirements.md), and [2026-09-04 review](reviews/gateway-review-2026-09-04.md); proposals, not shipped claims |
 | What evidence gates the M1 checkpoint? | [Workload and acceptance](product/m1-acceptance.md); UA01 accepts engineering evidence for this release and defers hands-on usability until before production |
 | Which acceptance decisions remain, and why? | [M1 decision packet](product/m1-acceptance-decisions.md); automated evidence, operating-limit choices and a focused user-review script |
-| What is the milestone release state? | [Release safeguards](product/release-safeguards.md); v0.7.0 is promoted, published and independently verified; protected-branch evidence synchronization is complete |
+| What is the release state? | [Published releases](https://github.com/anvai-labs/sandhi/releases) and [CHANGELOG](../CHANGELOG.md); [release safeguards](product/release-safeguards.md) records the historical v0.7.0 milestone, not the current installed version |
 | What is the three-way co-design state? | [TD-0027](td/TD-0027-three-way-origin-codesign.md) and [delivery review](reviews/three-way-release-review-2026-09-16.md); original lanes integrated, cross-repository release follow-through in progress |
 | What adversarial checks cover the first checkpoint? | [2026-09-05 checkpoint review](reviews/checkpoint-adversarial-review-2026-09-05.md); findings, corrections and remaining integration gates |
 
@@ -64,7 +66,7 @@ facades from the same set.
 
 | Contract | Purpose |
 |---|---|
-| [`usage-event.v1`](../schemas/usage-event.v1.schema.json) | One attributed, settled model-call measurement |
+| [`usage-event.v1`](../schemas/usage-event.v1.schema.json) | One attributed model-call observation; tracked-mode events do not prove committed settlement |
 | [`usage.v2`](../schemas/usage.v2.schema.json) | Neutral token/cache/reasoning measurement embedded in chat contracts |
 | [`usage-aggregate.v1`](../schemas/usage-aggregate.v1.schema.json) | Shared aggregate shape used by core, store, proxy, and bindings |
 | [`run-cost-tree.v1`](../schemas/run-cost-tree.v1.schema.json) | Per-run/per-step usage rollup |

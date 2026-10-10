@@ -1,83 +1,123 @@
 # Owned buffered accounting
 
-`SANDHI_BUFFERED_ACCOUNTING=tracked` enables the first durable HTTP accounting
-mode. Unset or `off` preserves the existing path. Other values fail startup.
-Keep existing authentication, TLS, credential and `SANDHI_STORE` configuration;
-this switch does not grant permissions or change provider credentials.
+!!! warning "Opt-in development feature"
+    `SANDHI_BUFFERED_ACCOUNTING=tracked` enables durable buffered HTTP accounting.
+    It is merged after the 0.11.0 release; source acceptance is not a released or
+    deployed acceptance claim. Unset or `off` preserves the existing path. Any
+    other value fails startup.
 
-The first activation is intentionally limited:
+Keep the existing authentication, TLS, credential and `SANDHI_STORE` configuration.
+This switch grants no permissions and changes no provider credentials.
 
-- One file-backed ledger with fixed topology. Volatile or sharded ledgers fail startup.
-- Buffered OpenAI Chat or Anthropic Messages ingress, through a built-in,
-  retry-free OpenAI-compatible upstream. Both transparent and translated paths use
-  the existing transport. Other dialects, streaming, custom transports and expiring
-  credential handles without a raw transport are refused before admission.
-- An explicit output limit, Block policy, and no logical idempotency key. Warn,
-  fail-open and retry combinations are refused, not silently downgraded.
+## Follow the evidence
 
-Standalone bounds are 64 retained owners, two seconds per accounting wait and a
-120-second default transport deadline. Existing global/route/model buffered
-policies override the transport deadline, up to 600 seconds in tracked mode. A
-longer HTTP client timeout does not extend it. Embedders can call
-`settlement::buffered::enable(&Arc<ProxyState>, Config::new(...))` before serving;
-configuration is immutable after enable. The library validates capacity 1–1024,
-accounting waits up to 30 seconds and transport deadlines up to 600 seconds.
-The HTTP wait is bounded by transport plus three accounting waits. A timeout
-never cancels or repeats a possibly committed accounting transition.
+```mermaid
+flowchart TD
+    A[Authorized request] --> B[Persist intent and request ID]
+    B --> C[Authorize one provider dispatch]
+    C --> D[Observe qualified usage]
+    D --> E[Retain usage in process memory]
+    E --> F[Persist terminal observation]
+    F --> G[Commit accounting receipt]
+    E -. storage failure .-> H[Retry retained accounting work]
+    H --> F
+    E -. process dies before persistence .-> I[Unknown liability remains held]
+    E -. best effort .-> J[Metrics and usage event]
+```
 
-Each admitted tracked request gets one generated Sandhi ID, committed with its prepared intent
-in the same SQLite transaction. Responses carry `x-sandhi-request-id`; tracked
-usage events use that same ID, keeping an available upstream request ID separate.
-Response-body completion IDs are not substituted for HTTP request IDs. Origin
-header availability remains transport-dependent; the typed provider response
-currently does not preserve success response headers. An absent origin ID does
-not invalidate the gateway/intent/receipt correlation.
+| Evidence | What it proves | What it does not prove |
+|---|---|---|
+| Request ID and prepared intent | One correlated admission is durable | The provider executed or charged |
+| Usage in memory or metrics | The gateway observed reported usage | Persistence or committed spend |
+| Durable terminal observation | The original usage snapshot survived storage | Settlement has committed |
+| Accounting receipt | The original ledger committed accounting | Atomic telemetry delivery or external billing |
 
-A disconnected HTTP client does not cancel the owned admission, provider call or
-settlement. Once usage is available it is retained before telemetry callbacks.
-Missing or malformed usage, transport failure, accounting timeout and failed
-settlement return a correlated 502 stating that accounting is unresolved and the
-upstream may have completed. **Do not automatically retry that response.** Explicit
-reported zero can settle; absence cannot. A 502 is not proof the model failed.
-The client may not receive the completed model output if accounting is unresolved.
+A disconnected client does not cancel owned admission, the provider call or
+settlement. Recovery never repeats inference or re-emits usage events.
+Usage is retained before telemetry callbacks; a failing sink cannot discard the
+snapshot needed for accounting recovery.
 
-Recovery runs once per second on the original ledger. A slice visits at most eight
-batches, each with at most 32 execution records and one retained terminal retry;
-the one-second elapsed check occurs between batches. These are record/iteration
-bounds, not a hard SQLite latency bound. Recovery advances scope and execution
-cursors, including unbudgeted and removed-key scopes. Only authoritative final
-usage can settle; uncertain dispatches and unavailable observations remain held.
-No model calls or usage events are replayed. In-process terminal snapshots can be
-retried after storage failure; a process crash before their persistence still
-requires reconciliation, because RAM is not durable evidence.
+## Supported activation
 
-Shutdown uses the original grace deadline and process watchdog. After admitted
-workers drain, a fresh bounded inventory checks durable uncertainty as well as
-retained owners. Unresolved rows, an incomplete inventory or timeout produce an
-incomplete shutdown (exit 124), even with zero active workers. A large backlog may
-require more recovery before shutdown; the final check does not extend grace.
+| Surface | Required in tracked mode | Refused before admission |
+|---|---|---|
+| Ledger | One file-backed ledger, fixed topology | Volatile or sharded ledgers fail startup |
+| Ingress | Buffered OpenAI Chat or Anthropic Messages | Other dialects and streaming |
+| Upstream | Built-in, retry-free OpenAI-compatible transport | Custom transports; expiring credential handles without raw transport |
+| Policy | Explicit output limit and Block policy | Warn, fail-open, retry and logical-idempotency combinations |
+| Processing plane | Existing transparent or translated transport | No silent downgrade to legacy accounting |
 
-Receipts establish committed accounting. Usage events, metrics and tracing are
-best-effort observations and may be absent after a telemetry failure; they are
-not an atomic receipt-delivery outbox. Tracked token counters can increase before
-terminal usage or settlement persists; a success-labelled observation does not
-prove a successful client response or committed spend. Threshold alerts are not fired by this
-tracked path. Retained intent capacity remains bounded at 100,000; retention,
-observation amendments, network export and multi-shard migration are separate
-work. Do not restore older writers over a database containing tracked evidence.
+## Bounds and configuration
 
-This mode does not establish complete streaming lifecycle, executed-cache reuse,
-tokenizer correctness, actual-member C5 acceptance, or a released deployment.
-See [the owning contract](../product/attempt-accounting-and-evidence.md).
+| Bound | Standalone value | Configuration / meaning |
+|---|---|---|
+| Retained owners | 64 | One slot spans the detached HTTP operation |
+| Each accounting wait | 2 seconds | A timed-out wait does not cancel or repeat a possibly committed transition |
+| Transport deadline | 120 seconds | Existing global/endpoint/model buffered policy may override, up to 600 seconds |
+| HTTP wait | Transport + three accounting waits | A longer client timeout cannot extend it |
+| Retained intent capacity | 100,000 | Retention and migration are separate work |
 
+Embedders can call `settlement::buffered::enable(&Arc<ProxyState>, Config::new(...))`
+before serving. Configuration is immutable after enable. The library validates
+capacity 1–1024, accounting waits up to 30 seconds and transport deadlines up to
+600 seconds. See [buffered deadline policy](buffered-deadlines.md).
 
-The local SDK recovery drills now exercise actual SIGKILL and restart with the same
-hashed binary: unknown dispatch keeps liability and incomplete shutdown; persisted
-final usage recovers one receipt after a synthetic receipt-write failure. A second
-restart preserves spend and receipt identity. See the
-[acceptance scope and remaining gates](../product/attempt-accounting-and-evidence.md#tracked-buffered-crashrestart-acceptance).
-Additional contention drills witness gateway usage before terminal persistence:
-survival retries retained usage into one receipt, while death before persistence
-retains unknown liability. Neither branch repeats the provider request.
-These synthetic HTTP/token-mode checks do not establish tracked TLS/OIDC, streaming
-or deployed-provider acceptance.
+## Interpret a response
+
+| Outcome | Client result | Required interpretation |
+|---|---|---|
+| Final qualified usage and committed settlement | Normal provider result | Consult the receipt for committed accounting |
+| Missing/malformed usage, transport failure, accounting timeout or failed settlement | Correlated 502 | Upstream may have completed; **do not automatically retry** |
+| Explicit reported zero | May settle zero | Absence of usage is not reported zero |
+| Client disconnect | Client has no confirmed result | Gateway ownership continues; inspect evidence |
+
+The client may not receive completed model output when accounting is unresolved.
+A 502 is not proof the model failed.
+
+Each admitted request gets one generated Sandhi ID, committed atomically with its
+prepared intent. Responses carry `x-sandhi-request-id`; tracked usage events use
+that same ID and preserve an available origin ID separately. The ID is not an
+execution ID, idempotency key or replay authority. Old admissions retain absent
+correlation. Response-body completion IDs are not substituted for HTTP request IDs.
+The typed provider response currently does not preserve success response headers;
+an absent origin ID does not invalidate the gateway/intent/receipt join.
+
+## Recover and shut down
+
+| Situation | Behavior |
+|---|---|
+| Process survives a storage failure | Retry the retained, immutable terminal snapshot |
+| Durable final usage survives a restart | Recover settlement through the original ledger |
+| Process dies before terminal persistence | Keep liability unresolved; RAM cannot establish durable evidence |
+| Recovery sweep | Once per second; at most eight batches, 32 execution records and one retained terminal retry per batch |
+| Sweep progress | Advance scope/execution cursors, including unbudgeted and removed-key scopes |
+| Shutdown | Drain workers, then check fresh bounded durable inventory plus retained owners |
+| Unknown rows, incomplete inventory or timeout | Incomplete shutdown, exit 124 |
+
+The one-second recovery check happens between batches. These are iteration/record
+bounds, **not a hard SQLite latency bound**. Recovery settles only authoritative
+final usage; unavailable observations stay held. Shutdown keeps the original grace
+deadline and watchdog; a large backlog may need more recovery before shutdown.
+Do not restore older writers over a database containing tracked evidence.
+
+## Accepted source evidence and remaining gates
+
+| Gate | Source evidence | Scope |
+|---|---|---|
+| Unknown dispatch after SIGKILL | Liability and incomplete shutdown survive restart | [#339](https://github.com/anvai-labs/sandhi/pull/339) |
+| Persisted final usage | One receipt recovered; another restart preserves spend and identity | #339, synthetic receipt-write failure |
+| Terminal publication contention | Retained retry commits once if process survives; death preserves unknown liability | [#340](https://github.com/anvai-labs/sandhi/pull/340) |
+| Tracked TLS/OIDC, streaming lifecycle | Pending | Separate acceptance gates |
+| Executed cache reuse, tokenizer correctness and actual-member C5 | Pending | Source drills cannot establish these |
+| Released deployment | Pending | Verify artifacts and installed state separately |
+
+The drills use the same copied/hashed binary across restart, local synthetic HTTP
+responses and token compatibility mode. Exactly one origin request is observed.
+See the [full acceptance record](../product/attempt-accounting-and-evidence.md#tracked-buffered-crashrestart-acceptance).
+
+!!! note "Telemetry is not a settlement outbox"
+    Events, metrics and traces are best effort. Counters can increase before
+    persistence, and a success-labelled observation does not prove a successful
+    client response. The event may be absent after a sink failure. Tracked threshold
+    alerts, atomic telemetry export, observation amendments and multi-shard migration
+    remain separate work.

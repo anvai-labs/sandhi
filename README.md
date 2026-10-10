@@ -13,6 +13,9 @@ key, and set per-user budgets — without hand-rolling provider APIs.
 > concern. See [ADR-0001](docs/adr/0001-sandhi-architecture-and-wire-contract.md).
 
 - **License:** Apache-2.0
+- **Documentation:** [Operator site](https://anvai-labs.github.io/sandhi/) ·
+  [source documentation map](docs/README.md). The site follows `develop` and labels
+  unreleased features explicitly.
 - **Status:** early and released. The metering core, typed provider runtime, four proxy ingress
   dialects, operator surface, durable single-node lease ledger, rate limiting, observability/OTLP,
   transparent metering, idempotent usage recording, and opt-in listener TLS are shipped. The

@@ -20,10 +20,15 @@ A partly published release remains incomplete even when some artifacts are avail
 ## [Unreleased]
 
 ### Added
+- Opt-in tracked buffered HTTP accounting: atomically correlated admission,
+  qualified terminal usage, retained ownership and bounded recovery through the
+  original ledger. Actual-process tests cover crash/restart and terminal publication
+  under SQLite contention. Tracked TLS/OIDC, streaming lifecycle, release/deployment
+  and full mixed-team acceptance remain separate gates (#337–#340).
 - Opt-in prepared admission in the existing bounded settlement worker registry,
   with typed result ownership across waiter cancellation and late commit. Existing
-  Rust Work/Outcome APIs and HTTP defaults are unchanged; HTTP recovery activation
-  and full lifecycle acceptance remain separate gates.
+  Rust Work/Outcome APIs and HTTP defaults are unchanged; tracked HTTP activation
+  is opt-in, with full lifecycle acceptance still a separate gate.
 
 ### Changed
 - Raise the declared MSRV to 1.95 and migrate the atomic `fetch_update`
@@ -38,6 +43,8 @@ A partly published release remains incomplete even when some artifacts are avail
   read inside the provisioned directory.
 
 ### Docs
+- Add the MkDocs operator site with visual accounting guidance, a canonical-source
+  documentation map and AnvaiOps-aligned light/dark/system styling.
 - Restore per-version compare links in the changelog footer (0.8.0
   through 0.11.0 were resolving to plain text).
 

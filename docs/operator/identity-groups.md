@@ -1,9 +1,15 @@
 # Identity, groups and delegated agent credentials
 
-The verified current Kanidm domain and origin are `id.anvaiops.com` and
+!!! note "Historical migration snapshot"
+    The deployment details below describe the original Kanidm migration investigation,
+    not a live check of today's identity service or gateway. Verify current discovery,
+    registration and installed configuration before applying them. Sandhi's trust
+    boundary is verified OIDC issuer and subject, not a particular identity product.
+
+The migration investigation verified the Kanidm domain and origin as `id.anvaiops.com` and
 `https://id.anvaiops.com`. Its existing Sandhi discovery document advertises
 `https://id.anvaiops.com/oauth2/openid/sandhi`, client `sandhi`. This is the intended
-authority for the migration. The running gateway still has the older
+authority for that migration. At the time, the gateway had the older
 `https://sso.singh.local:8443/oauth2/openid/sandhi` configuration; it has not been
 silently switched. A realm reset invalidated old signing-key provenance.
 

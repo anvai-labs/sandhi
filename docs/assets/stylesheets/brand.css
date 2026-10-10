@@ -1,0 +1,51 @@
+/* Neutral family palette aligned with AnvaiOps site/assets/brand.css at
+   46b8afcc3030a5a83ed70f4f8e1e5acd7d8ddc39. No commercial runtime dependency. */
+:root, [data-md-color-scheme="default"] {
+  --md-text-font: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --md-code-font: ui-monospace, SFMono-Regular, Consolas, monospace;
+  --md-primary-fg-color: #0f766e;
+  --md-primary-fg-color--light: #ccfbf1;
+  --md-primary-fg-color--dark: #115e59;
+  --md-primary-bg-color: #ffffff;
+  --md-accent-fg-color: #0f766e;
+  --md-default-bg-color: #eef2f7;
+  --md-default-fg-color: #0f172a;
+  --md-default-fg-color--light: #475569;
+  --md-default-fg-color--lighter: #64748b;
+  --md-typeset-a-color: #0f766e;
+  --md-code-bg-color: #f1f5f9;
+  --md-code-fg-color: #0f172a;
+  --sandhi-surface: #ffffff;
+  --sandhi-border: #e2e8f0;
+  --sandhi-soft: #ccfbf1;
+}
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #2dd4bf;
+  --md-primary-fg-color--light: #99f6e4;
+  --md-primary-fg-color--dark: #5eead4;
+  --md-primary-bg-color: #0f172a;
+  --md-accent-fg-color: #2dd4bf;
+  --md-default-bg-color: #0c0c14;
+  --md-default-fg-color: #f1f5f9;
+  --md-default-fg-color--light: #94a3b8;
+  --md-default-fg-color--lighter: #94a3b8;
+  --md-typeset-a-color: #2dd4bf;
+  --md-code-bg-color: #161620;
+  --md-code-fg-color: #f1f5f9;
+  --sandhi-surface: #10101a;
+  --sandhi-border: #293349;
+  --sandhi-soft: #134e4a;
+}
+.md-header { box-shadow: none; }
+.md-banner { background: var(--sandhi-surface); color: var(--md-default-fg-color); border-bottom: 1px solid var(--sandhi-border); }
+.md-banner a { text-decoration: underline; }
+.md-typeset h1 { font-weight: 750; letter-spacing: -.035em; color: var(--md-default-fg-color); }
+.md-typeset h2 { font-weight: 650; letter-spacing: -.02em; }
+.md-typeset .grid.cards > ul > li { background: var(--sandhi-surface); border: 1px solid var(--sandhi-border); border-radius: 12px; }
+.md-typeset table:not([class]) { background: var(--sandhi-surface); border: 1px solid var(--sandhi-border); border-radius: 8px; font-size: .72rem; }
+.md-typeset table:not([class]) th { background: var(--sandhi-soft); color: var(--md-default-fg-color); }
+.md-typeset .mermaid { padding: 1rem; background: var(--sandhi-surface); border: 1px solid var(--sandhi-border); border-radius: 12px; overflow-x: auto; }
+:where(a, button, input, select, summary, [tabindex]):focus-visible { outline: 2px solid var(--md-accent-fg-color); outline-offset: 4px; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}
