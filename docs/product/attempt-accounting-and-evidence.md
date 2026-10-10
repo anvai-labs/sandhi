@@ -703,14 +703,37 @@ retention, invalid events and memory bounds. Four temporary guard-bypass control
 reject last-write-wins, whole-chunk copying and missing line/event bounds. Numeric
 counter validation remains owned by the core tests; no copied parser/storage suite.
 
-**Next gate:** wire one observer into each owned upstream response, retaining the
-existing request/attempt context and canonical admission/terminal/settlement owner.
-The legacy raw callback still receives lines and does not use this observer. Prove
-retention across cancellation, owner shutdown and durable settlement/recovery before
-activating tracked streaming. This prerequisite does not prove transport ownership,
-HTTP completion, durable publication or arbitrary vendor compatibility. Legacy
-parsing, wire bytes and HTTP defaults are unchanged; tracked mode still rejects
-streaming before admission. No deployed runtime or C5 gate is activated.
+### Response-owned stream binding (source prerequisite)
+
+`RawForwarder::forward_stream_qualified_with_headers` binds one observer to one
+OpenAI-compatible Chat response. Unsupported operations and conflicting stream
+modes fail before dispatch. It shares the existing physical send, setup/idle
+deadlines and session/request header policy; there is no second retry path.
+
+| Fact | Contract |
+| --- | --- |
+| Wire delivery | Every received chunk is returned unchanged, including malformed SSE; qualification errors are separate facts |
+| Measurement | First qualified request-total usage is published before yielding its bytes and survives cancellation, errors and drop |
+| Completion | `[DONE]` publishes protocol completion, not delivery success; the single attempt terminal waits for EOF, error or drop so later invalid data remains observable |
+| Correlation | Existing attempt/request context and response headers remain authoritative; SSE `id` is never attribution |
+| Observation handle | Cloneable read-only copied latest snapshot, bounded in memory and surviving stream drop; no public lock borrow, task or queue |
+| Diagnostic loss | Full/disconnected attempt channels cannot erase the response snapshot; diagnostics still expose their dropped-observation counter |
+| Failure | Qualified usage stays Final even when delivery is Cancelled/Timeout/IncompleteStream; a qualification error must remain visible to reconciliation |
+
+The handle does not poll an abandoned stream, prove origin cancellation or persist
+anything. A diagnostic terminal alone cannot authorize settlement, particularly
+when the first measurement conflicts with later data. Existing lifecycle tests
+cover drop before polling, usage/DONE before drop, timeout, missing DONE, malformed
+or conflicting reports, post-DONE data, transport errors and channel loss. Raw HTTP
+tests cover exact response bytes, canonical correlation, one POST and pre-dispatch
+rejection; the existing stalled-error deadline fixture now covers this path too.
+Numeric counters and SSE framing stay in their existing test owners.
+
+**Next gate:** connect the existing proxy body owner to canonical durable terminal
+publication and settlement/recovery. Prove retention through producer shutdown and
+publication/settlement failure without replaying inference. Legacy metered callers
+are unchanged; tracked mode still rejects streaming before admission. No deployed
+runtime, binding facade or C5 gate is activated by this Rust source increment.
 
 ## Owned buffered HTTP and recovery (W05c/d limited activation)
 

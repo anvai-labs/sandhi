@@ -23,6 +23,9 @@ use serde_json::Value;
 use std::pin::Pin;
 use std::time::Duration;
 
+mod qualified_stream;
+pub use qualified_stream::{QualifiedStreamObservation, QualifiedStreamSnapshot};
+
 /// Anthropic API version header value (mirrors the typed adapter).
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
@@ -48,6 +51,16 @@ pub struct RawMeteredStreamResponse {
     pub status: u16,
     pub headers: HeaderMap,
     pub stream: crate::ByteStream,
+}
+
+/// Successful response with byte-preserving delivery and a separate, surviving
+/// usage observation. The caller must poll the stream; the handle does no work.
+/// Attribution remains in the existing request/attempt context, never SSE `id`.
+pub struct RawQualifiedStreamResponse {
+    pub status: u16,
+    pub headers: HeaderMap,
+    pub stream: RawChunkStream,
+    pub observation: QualifiedStreamObservation,
 }
 
 /// A content-faithful, envelope-normalized raw forwarder. One HTTP client (connection pool)
@@ -470,6 +483,91 @@ impl RawForwarder {
         correlation: Option<&str>,
         call_headers: &HeaderMap,
     ) -> Result<RawMeteredStreamResponse, ProviderError> {
+        let (resp, guard, idle) = self
+            .setup_stream(path, body, session, correlation, call_headers)
+            .await?;
+        let status = resp.status().as_u16();
+        let headers = filter_response_headers(resp.headers());
+        let stream = if self.family == ProviderFamily::OpenAiCompat {
+            crate::metered_openai_passthrough(resp.bytes_stream(), sniff_for_family(self.family))
+        } else {
+            crate::metered_passthrough(resp.bytes_stream(), sniff_for_family(self.family))
+        };
+        let stream = with_idle_timeout(stream, idle);
+        let stream = match guard {
+            Some(guard) => guard.wrap_stream(stream),
+            None => stream,
+        };
+        Ok(RawMeteredStreamResponse {
+            status,
+            headers,
+            stream,
+        })
+    }
+
+    /// Opt-in complete-event qualification for OpenAI-compatible Chat streams.
+    /// Missing/true `stream` is accepted and normalized; conflicting modes and
+    /// unsupported operations fail before dispatch. Response bytes (including
+    /// malformed SSE) pass unchanged. Inspect the observation's qualification
+    /// error independently of transport completion; this API does not settle.
+    pub async fn forward_stream_qualified_with_headers(
+        &self,
+        path: &str,
+        body: Bytes,
+        session: Option<&str>,
+        correlation: Option<&str>,
+        call_headers: &HeaderMap,
+    ) -> Result<RawQualifiedStreamResponse, ProviderError> {
+        let request: Value = serde_json::from_slice(&body).map_err(|_| {
+            ProviderError::InvalidRequest("qualified stream request must be JSON".into())
+        })?;
+        if self.family != ProviderFamily::OpenAiCompat
+            || !matches!(path, "/v1/chat/completions" | "/chat/completions")
+            || !request.is_object()
+            || request
+                .get("stream")
+                .is_some_and(|value| value != &Value::Bool(true))
+        {
+            return Err(ProviderError::InvalidRequest(
+                "qualified streaming usage supports OpenAI-compatible chat only".into(),
+            ));
+        }
+        let (response, guard, idle) = self
+            .setup_stream(path, body, session, correlation, call_headers)
+            .await?;
+        let status = response.status().as_u16();
+        let headers = filter_response_headers(response.headers());
+        use futures_util::StreamExt;
+        let raw = Box::pin(
+            response
+                .bytes_stream()
+                .map(|chunk| chunk.map_err(|error| ProviderError::Transport(error.to_string()))),
+        );
+        let (stream, observation) = qualified_stream::observe(with_idle_timeout(raw, idle), guard);
+        Ok(RawQualifiedStreamResponse {
+            status,
+            headers,
+            stream,
+            observation,
+        })
+    }
+
+    /// Shared physical dispatch and setup deadline for legacy/qualified streams.
+    async fn setup_stream(
+        &self,
+        path: &str,
+        body: Bytes,
+        session: Option<&str>,
+        correlation: Option<&str>,
+        call_headers: &HeaderMap,
+    ) -> Result<
+        (
+            reqwest::Response,
+            Option<crate::attempt::AttemptGuard>,
+            Option<Duration>,
+        ),
+        ProviderError,
+    > {
         let attempt = self.attempt.as_ref();
         let context = attempt.map(|attempt| attempt.context.fresh_call());
         let provider = attempt.map_or("transparent", |attempt| attempt.provider.as_str());
@@ -524,28 +622,13 @@ impl RawForwarder {
                 return Err(error);
             }
         };
-        let status = resp.status().as_u16();
-        let headers = filter_response_headers(resp.headers());
-        let stream = if self.family == ProviderFamily::OpenAiCompat {
-            crate::metered_openai_passthrough(resp.bytes_stream(), sniff_for_family(self.family))
-        } else {
-            crate::metered_passthrough(resp.bytes_stream(), sniff_for_family(self.family))
-        };
-        let stream = with_idle_timeout(
-            stream,
+        Ok((
+            resp,
+            guard,
             policy
                 .map(|policy| policy.idle)
                 .or(self.stream_idle_timeout),
-        );
-        let stream = match guard {
-            Some(guard) => guard.wrap_stream(stream),
-            None => stream,
-        };
-        Ok(RawMeteredStreamResponse {
-            status,
-            headers,
-            stream,
-        })
+        ))
     }
 
     fn url(&self, path: &str) -> String {
@@ -1433,6 +1516,115 @@ data: [DONE]\n\n";
     }
 
     #[tokio::test]
+    async fn qualified_stream_binds_one_response_without_changing_wire_or_correlation() {
+        use futures_util::StreamExt;
+        let server = MockServer::start().await;
+        let sse = "id: not-attribution\ndata: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":6,\"completion_tokens\":5}}\n\ndata: [DONE]\n\n";
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(sse, "text/event-stream")
+                    .insert_header("x-request-id", "provider-canonical")
+                    .insert_header("set-cookie", "private"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (context, receiver) = crate::AttemptContext::channel("caller-execution", 4).unwrap();
+        let forwarder = RawForwarder::new(ProviderFamily::OpenAiCompat, server.uri(), "test")
+            .with_session_header(Some("x-session-id"))
+            .with_client_request_id_header(Some("x-client-request-id"))
+            .with_provider_request_id_header(Some("x-request-id"))
+            .with_metered_attempt_context("inferflux", Some("model".into()), context);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-session-id", HeaderValue::from_static("stale"));
+        let response = forwarder
+            .forward_stream_qualified_with_headers(
+                "/v1/chat/completions",
+                Bytes::from_static(b"{\"model\":\"model\",\"stream\":true}"),
+                Some("member-session"),
+                Some("caller-request"),
+                &headers,
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.headers["x-request-id"], "provider-canonical");
+        assert!(!response.headers.contains_key("set-cookie"));
+        let mut stream = response.stream;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            bytes.extend_from_slice(&chunk.unwrap());
+        }
+        assert_eq!(bytes, sse.as_bytes());
+        assert_eq!(
+            response.observation.snapshot().outcome,
+            Some(crate::AttemptOutcome::Success)
+        );
+        assert_eq!(response.observation.snapshot().usage.unwrap().tokens_out, 5);
+        let observations = receiver.drain();
+        assert_eq!(observations.len(), 2);
+        assert_eq!(observations[1].execution_id, "caller-execution");
+        assert_eq!(observations[0].attempt_id, observations[1].attempt_id);
+        assert!(
+            matches!(&observations[1].phase, crate::AttemptPhase::Terminal {
+            provider_status: Some(200), provider_request_id: Some(id), ..
+        } if id == "provider-canonical")
+        );
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].headers["x-session-id"], "member-session");
+        assert_eq!(requests[0].headers["x-client-request-id"], "caller-request");
+        let body: Value = requests[0].body_json().unwrap();
+        assert_eq!(body["stream_options"]["include_usage"], true);
+    }
+
+    #[tokio::test]
+    async fn qualified_stream_rejects_unsupported_requests_before_dispatch() {
+        let server = MockServer::start().await;
+        let (context, receiver) = crate::AttemptContext::channel("not-dispatched", 4).unwrap();
+        for (family, path, body) in [
+            (ProviderFamily::Anthropic, "/v1/chat/completions", "{}"),
+            (ProviderFamily::OpenAiCompat, "/v1/responses", "{}"),
+            (
+                ProviderFamily::OpenAiCompat,
+                "/v1/chat/completions?other=1",
+                "{}",
+            ),
+            (ProviderFamily::OpenAiCompat, "/v1/chat/completions", "[]"),
+            (ProviderFamily::OpenAiCompat, "/v1/chat/completions", "nope"),
+            (
+                ProviderFamily::OpenAiCompat,
+                "/v1/chat/completions",
+                "{\"stream\":false}",
+            ),
+            (
+                ProviderFamily::OpenAiCompat,
+                "/v1/chat/completions",
+                "{\"stream\":null}",
+            ),
+        ] {
+            let forwarder = RawForwarder::new(family, server.uri(), "test")
+                .with_metered_attempt_context("test", None, context.clone());
+            assert!(matches!(
+                forwarder
+                    .forward_stream_qualified_with_headers(
+                        path,
+                        Bytes::from_static(body.as_bytes()),
+                        None,
+                        None,
+                        &HeaderMap::new(),
+                    )
+                    .await,
+                Err(ProviderError::InvalidRequest(_))
+            ));
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
+        assert!(receiver.drain().is_empty());
+    }
+
+    #[tokio::test]
     async fn complete_timeout_applies_to_the_raw_plane() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -1539,7 +1731,7 @@ data: [DONE]\n\n";
     }
 
     #[tokio::test]
-    async fn stream_setup_deadline_includes_stalled_error_body_in_both_raw_paths() {
+    async fn stream_setup_deadline_includes_stalled_error_body_in_all_raw_paths() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
@@ -1548,7 +1740,7 @@ data: [DONE]\n\n";
             (Duration::ZERO, None),
             (Duration::from_millis(250), Some(Duration::from_millis(250))),
         ] {
-            for metered in [false, true] {
+            for mode in ["bare", "metered", "qualified"] {
                 // Wiremock delays headers and body together. This peer sends error headers
                 // promptly, then stalls only the body: the previously unbounded phase.
                 let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1608,7 +1800,18 @@ data: [DONE]\n\n";
                     context,
                 );
                 let result = tokio::time::timeout(Duration::from_secs(1), async {
-                    if metered {
+                    if mode == "qualified" {
+                        forwarder
+                            .forward_stream_qualified_with_headers(
+                                "/v1/chat/completions",
+                                Bytes::from_static(b"{}"),
+                                None,
+                                None,
+                                &HeaderMap::new(),
+                            )
+                            .await
+                            .err()
+                    } else if mode == "metered" {
                         forwarder
                             .forward_stream_metered(
                                 "/v1/chat/completions",
@@ -1636,7 +1839,7 @@ data: [DONE]\n\n";
                     .expect("upstream must close while the client is still alive")
                     .unwrap();
                 drop(forwarder);
-                if metered && timed_out.last() == Some(&true) {
+                if mode != "bare" && timed_out.last() == Some(&true) {
                     let observations = receiver.drain();
                     assert_eq!(observations.len(), 2);
                     assert!(matches!(
@@ -1652,7 +1855,7 @@ data: [DONE]\n\n";
             }
         }
         assert_eq!(
-            timed_out, [true; 4],
+            timed_out, [true; 6],
             "plain and metered paths must enforce their own bound"
         );
     }

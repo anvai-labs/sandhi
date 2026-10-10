@@ -306,6 +306,36 @@ impl AttemptGuard {
         self.response_facts = facts.clone();
     }
 
+    pub(crate) fn cancellation_outcome(&self) -> AttemptOutcome {
+        if self.context.timed_out() {
+            AttemptOutcome::Timeout
+        } else {
+            AttemptOutcome::Cancelled
+        }
+    }
+
+    /// Complete the opt-in qualified stream without downgrading an observed
+    /// request-total measurement when delivery fails. Qualification errors remain
+    /// on the stream snapshot; diagnostic events alone cannot authorize settlement.
+    pub(crate) fn finish_qualified_stream(
+        &mut self,
+        outcome: AttemptOutcome,
+        usage: Option<ParsedUsage>,
+    ) {
+        let (status, request_id) = self.response_values();
+        self.finish(
+            outcome,
+            status,
+            request_id,
+            usage,
+            if usage.is_some() {
+                UsageCompleteness::Final
+            } else {
+                UsageCompleteness::Unavailable
+            },
+        );
+    }
+
     fn response_values(&self) -> (Option<u16>, Option<String>) {
         let facts = self.response_facts.values();
         let request_id = facts
