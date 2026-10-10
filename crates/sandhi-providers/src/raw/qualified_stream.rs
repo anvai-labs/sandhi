@@ -139,7 +139,26 @@ mod tests {
     use crate::{AttemptContext, AttemptPhase};
     use futures_util::{stream, StreamExt};
     use sandhi_core::UsageCompleteness;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
     use std::time::Duration;
+
+    struct DropObservedStream(RawChunkStream, Arc<AtomicUsize>);
+
+    impl Stream for DropObservedStream {
+        type Item = Result<Bytes, ProviderError>;
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            self.0.as_mut().poll_next(cx)
+        }
+    }
+
+    impl Drop for DropObservedStream {
+        fn drop(&mut self) {
+            self.1.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 
     const USAGE: &[u8] = b"id: untrusted\ndata: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":6,\"completion_tokens\":5}}\n\n";
     const DONE: &[u8] = b"data: [DONE]\n\n";
@@ -189,7 +208,11 @@ mod tests {
             } else {
                 Box::pin(stream::iter(chunks))
             };
-            let (mut stream, observation) = observe(inner, Some(guard));
+            let drops = Arc::new(AtomicUsize::new(0));
+            let (mut stream, observation) = observe(
+                Box::pin(DropObservedStream(inner, drops.clone())),
+                Some(guard),
+            );
             let mut forwarded = Vec::new();
             if mode != "unpolled" {
                 let chunk = stream.next().await.unwrap().unwrap();
@@ -209,12 +232,22 @@ mod tests {
                     }
                     assert_eq!(forwarded, expected_bytes, "including malformed bytes");
                     assert!(stream.next().await.is_none(), "terminal stream is fused");
+                    assert_eq!(
+                        drops.load(Ordering::SeqCst),
+                        1,
+                        "release inner while retaining wrapper: {mode}"
+                    );
                 }
             }
             if mode == "timeout_drop" {
                 context.mark_timeout();
             }
             drop(stream);
+            assert_eq!(
+                drops.load(Ordering::SeqCst),
+                1,
+                "exactly one release: {mode}"
+            );
             let snapshot = observation.clone().snapshot();
             let expected = match mode {
                 "unpolled" | "usage_drop" | "done_drop" => AttemptOutcome::Cancelled,
