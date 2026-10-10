@@ -227,6 +227,7 @@ pub fn plaintext_bind_warning(addr: SocketAddr, tls_enabled: bool) -> Option<&'s
 /// Shared server state: the virtual-key store, the budget ledger, the usage sink, and the
 /// registry of configured upstream providers (each already holding its real credential).
 pub struct ProxyState {
+    buffered_accounting: std::sync::OnceLock<Arc<settlement::buffered::Buffered>>,
     pub policy: Option<Arc<policy::PolicyGate>>,
     /// Validated startup-only buffered transport policy; absent preserves transport defaults.
     pub buffered_deadlines: Option<deadlines::BufferedDeadlines>,
@@ -347,6 +348,7 @@ impl ProxyState {
         store: Option<Arc<SqliteStore>>,
     ) -> Self {
         Self {
+            buffered_accounting: std::sync::OnceLock::new(),
             policy: None,
             lifecycle: Arc::new(lifecycle::Lifecycle::new()),
             buffered_deadlines: None,
@@ -2545,6 +2547,26 @@ async fn handle_with_policy_receipt(
         .map(|estimator| estimator.estimate(provider.slug(), &request.model, input_len))
         .unwrap_or_else(|_| baseline_estimate(input_len));
     let (ceiling, effective_max) = reservation_ceiling(&request, estimated_input);
+    if let Some(owned) = state.buffered_accounting.get() {
+        return settlement::buffered::handle(
+            Arc::clone(&state),
+            Arc::clone(owned),
+            provider,
+            request,
+            body,
+            dialect,
+            permit,
+            wants_stream,
+            transparent_eligible,
+            scope,
+            policy,
+            ceiling,
+            effective_max,
+            input_len,
+            buffered_deadline.map(|d| d.duration()),
+        )
+        .await;
+    }
     // SQLite's transaction remains a synchronous correctness boundary, but it runs on Tokio's
     // blocking pool so its busy timeout never parks an async scheduler worker.
     let Some(mut pending) = reserve_budget(&state, &scope, ceiling, policy).await else {
@@ -2853,28 +2875,50 @@ async fn transparent_complete_response(
     // virtual key) is key-authoritative metering input consumed by `usage_event`, never
     // forwarded (ADR-0001 §4).
     let call_headers = accounting.per_call_wire_headers();
-    match forwarder
-        .forward_metered_with_headers(
-            &upstream_path(provider.family(), gemini.as_ref(), dialect),
-            body,
-            session.as_deref(),
-            Some(accounting.request_id.as_str()),
-            &call_headers,
-        )
-        .await
-    {
-        Ok((raw, mut usage)) => {
+    let response = if accounting.owned.is_some() {
+        forwarder
+            .forward_qualified_with_headers(
+                &upstream_path(provider.family(), gemini.as_ref(), dialect),
+                body,
+                session.as_deref(),
+                Some(accounting.request_id.as_str()),
+                &call_headers,
+            )
+            .await
+            .map(|r| (r.response, r.usage.ok()))
+    } else {
+        forwarder
+            .forward_metered_with_headers(
+                &upstream_path(provider.family(), gemini.as_ref(), dialect),
+                body,
+                session.as_deref(),
+                Some(accounting.request_id.as_str()),
+                &call_headers,
+            )
+            .await
+            .map(|(raw, usage)| (raw, Some(usage)))
+    };
+    match response {
+        Ok((raw, usage)) => {
+            let qualified = usage.is_some();
+            let mut usage = usage.unwrap_or_default();
             reconcile_boundary_duration(&mut usage, elapsed_ms(started));
-            usage.completeness = UsageCompleteness::Final;
+            if qualified {
+                usage.completeness = UsageCompleteness::Final;
+            }
             usage.outcome.get_or_insert_with(|| "success".into());
             accounting.observe(&usage);
             accounting.set_outcome("success");
-            accounting.finalize();
+            if !accounting.finalize_buffered().await {
+                return settlement::buffered::accounting_error(dialect, &accounting.request_id);
+            }
             raw_response_to_axum(raw, dialect)
         }
         Err(err) => {
             accounting.set_outcome("error");
-            accounting.finalize();
+            if !accounting.finalize_buffered().await {
+                return settlement::buffered::accounting_error(dialect, &accounting.request_id);
+            }
             provider_error(&err, dialect, provider.slug(), full_error_detail)
         }
     }
@@ -3109,6 +3153,7 @@ fn blocking_section<T>(operation: impl FnOnce() -> T) -> T {
 /// Owns the reservation and guarantees one terminal usage observation even when an HTTP body is
 /// abandoned. Counts are always measured; an unavailable observation releases the reservation.
 struct RequestAccounting {
+    owned: Option<settlement::buffered::Accounting>,
     /// Bounded metric dimensions for this call (TD-0011 D2) — set once at dispatch.
     dialect: &'static str,
     plane: metrics::Plane,
@@ -3169,6 +3214,7 @@ impl RequestAccounting {
             None => (None, None),
         };
         Self {
+            owned: None,
             operation: None,
             stream_body_lifetime: state.stream_body_lifetime,
             state,
@@ -3275,6 +3321,11 @@ impl RequestAccounting {
             return;
         }
         self.finalized = true;
+        // An abandoned owned operation retains its intent/terminal evidence. Drop is
+        // never authority for legacy zero settlement or another inference attempt.
+        if self.owned.is_some() {
+            return;
+        }
         let mut usage = self.usage.take().unwrap_or_default();
         if usage.outcome.is_none() {
             usage.outcome = Some(self.outcome.into());
@@ -3359,8 +3410,13 @@ impl RequestAccounting {
                 .and_then(|budgets| budgets.get(&self.scope).map(|spec| spec.limit_tokens));
             self.fire_alerts(spent, limit);
         }
-        // TD-0011 D3: `actual` is exactly what the ledger settled, so the metric cannot disagree
-        // with the charge. Recording here (not at observe) means one sample per logical call.
+        self.emit_usage(&usage, actual, false);
+    }
+
+    fn emit_usage(&mut self, usage: &UsageV2, actual: u64, canonical: bool) {
+        // Legacy quantities follow settlement. In tracked mode these are measured
+        // observations, independent of confirmed spend; the receipt is authoritative.
+        // Recovery never re-emits observations.
         self.state.metrics.observe_call(
             &self.metric_labels(),
             metrics::CallMeasurements {
@@ -3379,25 +3435,55 @@ impl RequestAccounting {
         // OTel sample per logical call — the same single-emission discipline as `observe_call`.
         // Best-effort like the metric path: OTel must never fail the request.
         if let (Some(recorder), Some(span)) = (self.otel.as_ref(), self.otel_span.as_mut()) {
-            recorder.record_usage(
-                span,
-                &self.provider,
-                &self.model,
-                &usage,
-                self.finish_reason,
-            );
+            recorder.record_usage(span, &self.provider, &self.model, usage, self.finish_reason);
         }
-        let event = usage_event(
+        let mut event = usage_event(
             &self.provider,
             &self.model,
             &self.metadata,
-            &usage,
+            usage,
             Some(self.request_id.as_str()),
         );
+        if canonical {
+            event.request_id.clone_from(&self.request_id);
+        }
         if let Ok(mut estimator) = self.state.token_estimator.lock() {
             estimator.observe(self.input_len, &event);
         }
         self.state.sink.emit(&event);
+    }
+
+    async fn finalize_buffered(&mut self) -> bool {
+        let Some(mut owned) = self.owned.take() else {
+            self.finalize();
+            return true;
+        };
+        self.finalized = true;
+        let mut usage = self.usage.take().unwrap_or_default();
+        usage.outcome.get_or_insert_with(|| self.outcome.into());
+        let measured = usage.completeness == UsageCompleteness::Final;
+        // Retain immutable terminal evidence BEFORE invoking arbitrary best-effort
+        // telemetry. A panicking sink must not erase a completed model's usage.
+        let pending = owned.execution.into_settlement(usage.clone());
+        let submitted = owned
+            .obligation
+            .submit(settlement::jobs::Work::Settle(pending));
+        self.emit_usage(&usage, if measured { billable(&usage) } else { 0 }, true);
+        let Ok(ticket) = submitted else {
+            return false;
+        };
+        if tokio::time::timeout(owned.wait, ticket.wait())
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        matches!(
+            ticket.take(),
+            Some(settlement::jobs::Outcome::Settlement(
+                settlement::Attempt::Committed { .. }
+            ))
+        )
     }
 }
 
@@ -3417,9 +3503,26 @@ async fn complete_response(
 ) -> Response {
     let _permit = permit; // unary: held by the handler future, which is the whole call
     let correlation = accounting.per_call_wire_headers();
-    match provider.complete_with(request, correlation).await {
-        Ok(mut response) => {
-            response.usage.completeness = UsageCompleteness::Final;
+    let result = if accounting.owned.is_some() {
+        provider
+            .complete_with_qualified_usage(request, correlation)
+            .await
+            .map(|r| (r.response, r.usage.ok()))
+    } else {
+        provider.complete_with(request, correlation).await.map(|r| {
+            let usage = r.usage.clone();
+            (r, Some(usage))
+        })
+    };
+    match result {
+        Ok((mut response, usage)) => {
+            let qualified = usage.is_some();
+            if accounting.owned.is_some() {
+                response.usage = usage.unwrap_or_default();
+            }
+            if qualified {
+                response.usage.completeness = UsageCompleteness::Final;
+            }
             response
                 .usage
                 .outcome
@@ -3427,12 +3530,16 @@ async fn complete_response(
             accounting.observe(&response.usage);
             accounting.finish_reason = response.finish_reason;
             accounting.set_outcome("success");
-            accounting.finalize();
+            if !accounting.finalize_buffered().await {
+                return settlement::buffered::accounting_error(dialect, &accounting.request_id);
+            }
             Json(encode_response(dialect, &response)).into_response()
         }
         Err(error) => {
             accounting.set_outcome("error");
-            accounting.finalize();
+            if !accounting.finalize_buffered().await {
+                return settlement::buffered::accounting_error(dialect, &accounting.request_id);
+            }
             provider_error(&error, dialect, provider.slug(), full_error_detail)
         }
     }

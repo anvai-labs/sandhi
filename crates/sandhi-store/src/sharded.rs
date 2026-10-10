@@ -165,6 +165,56 @@ impl ShardedLedger {
             .settle_with_evidence_durable(scope, reservation_id, charged_tokens)
     }
 
+    /// Validate tracked operation topology without reopening or replacing the ledger.
+    pub fn validate_tracked_durable(&self) -> Result<(), EvidenceError> {
+        drop(self.tracked_ledger()?);
+        Ok(())
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn reserve_correlated_durable(
+        &self,
+        scope: &str,
+        ceiling: u64,
+        now: OffsetDateTime,
+        ttl: time::Duration,
+        retained_limit: usize,
+        request_id: &str,
+    ) -> Result<IntentAdmission, EvidenceError> {
+        self.tracked_ledger()?.reserve_correlated_durable(
+            scope,
+            ceiling,
+            now,
+            ttl,
+            retained_limit,
+            request_id,
+        )
+    }
+    pub fn request_id_durable(
+        &self,
+        scope: &str,
+        execution_id: &str,
+    ) -> Result<Option<String>, EvidenceError> {
+        self.tracked_ledger()?
+            .request_id_durable(scope, execution_id)
+    }
+    pub fn recovery_scopes_durable(
+        &self,
+        cursor: Option<&crate::ledger::evidence::ScopeCursor>,
+        limit: usize,
+    ) -> Result<crate::ledger::evidence::ScopePage, EvidenceError> {
+        self.tracked_ledger()?
+            .recovery_scopes_durable(cursor, limit)
+    }
+    pub fn recovery_page_durable(
+        &self,
+        scope: &str,
+        cursor: Option<&crate::ledger::evidence::RecoveryCursor>,
+        limit: usize,
+    ) -> Result<crate::ledger::evidence::RecoveryPage, EvidenceError> {
+        self.tracked_ledger()?
+            .recovery_page_durable(scope, cursor, limit)
+    }
+
     fn tracked_ledger(&self) -> Result<std::sync::MutexGuard<'_, SqliteLedger>, EvidenceError> {
         if self.shards.len() != 1 {
             return Err(EvidenceError::UnsupportedTrackedLedger);

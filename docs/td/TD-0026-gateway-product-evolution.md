@@ -803,3 +803,44 @@ its storage matrices. See the [owning contract](../product/attempt-accounting-an
 This is process-local ownership, not durable observation or activated HTTP recovery.
 Keep the supervisor alive through collection; HTTP integration, bounded recovery,
 lifecycle acceptance, release/deployment and mixed-team C5 remain open.
+
+### Owned prepared admission
+
+Prepared admission now uses that same bounded registry through additive typed
+submission/collection. It preserves existing public Work/Outcome APIs, canonical
+single-file reservation/intent/fence storage and byte-identical HTTP defaults.
+Cancelled waiters cannot discard a late committed intent; interrupted publication
+retains uncertainty and never authorizes another reservation or provider send.
+See the [owning contract](../product/attempt-accounting-and-evidence.md#owned-prepared-admission-w05c-integration-prerequisite).
+The existing job and ledger fixtures cover the new boundary; storage transaction
+matrices are not duplicated. HTTP integration, durable request correlation,
+bounded recovery, lifecycle acceptance and released C5 qualification remain open.
+
+
+### Buffered usage qualification prerequisite (2026-10-09)
+
+Source review found that buffered missing/null/malformed usage could be normalized
+to `ProviderReported` final zero; passing that result into tracked settlement
+would release unknown liability. A core-owned additive qualification and raw/typed
+OpenAI-compatible completion surfaces now separate response delivery from usable
+final accounting. Explicit zero passes; malformed or inconsistent counters retain
+an explicit accounting error without retrying inference. Default methods and HTTP
+serialization remain unchanged. Existing test owners cover the new boundary;
+this is not HTTP ownership, release/deployment or C5 acceptance. See the
+[contract and next integration gates](../product/attempt-accounting-and-evidence.md#buffered-usage-qualification-w05c-http-prerequisite).
+
+
+### Limited tracked buffered HTTP activation (2026-10-09)
+
+W05c/d now connect correlated prepared admission, one retained HTTP owner,
+qualified buffered completion, canonical settlement and bounded recovery. The
+standalone switch is opt-in; default behavior is unchanged. Both existing
+forwarding planes are covered, while unsupported combinations fail before
+admission. Unknown liability survives disconnects, storage failures and restart;
+shutdown checks durable uncertainty rather than equating idle workers with
+settled accounting. See the [operator bounds and limitations](../operator/buffered-accounting.md)
+and [owning contract](../product/attempt-accounting-and-evidence.md#owned-buffered-http-and-recovery-w05cd-limited-activation).
+
+Broad streaming lifecycle, amendments, alert/receipt export, release/deployment
+and actual-member C5 acceptance remain open. No provider or event replay is
+introduced, and best-effort observations are not atomic settlement delivery.

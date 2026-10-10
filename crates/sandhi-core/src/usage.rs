@@ -150,6 +150,84 @@ fn split_prompt(prompt: u64, cached: u64) -> (u64, bool) {
     }
 }
 
+/// Why a buffered OpenAI chat usage object cannot authorize final settlement.
+/// Field names are static contract paths; errors never contain response content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BufferedUsageError {
+    InvalidResponse,
+    MissingUsage,
+    InvalidField(&'static str),
+    InconsistentUsage,
+}
+
+/// Opt-in qualification; legacy extraction and serialization stay unchanged.
+/// Qualification is not independent proof of tokenizer units or physical reuse.
+pub fn validate_openai_buffered_usage(response: &Value) -> Result<(), BufferedUsageError> {
+    use BufferedUsageError::*;
+    if !response.is_object() {
+        return Err(InvalidResponse);
+    }
+    let usage = response.get("usage").ok_or(MissingUsage)?;
+    if !usage.is_object() {
+        return Err(InvalidField("usage"));
+    }
+    let required = |object: &Value, key: &str, field| {
+        object
+            .get(key)
+            .and_then(Value::as_u64)
+            .filter(|n| *n <= MAX_PLAUSIBLE_TOKENS)
+            .ok_or(InvalidField(field))
+    };
+    let optional = |object: &Value, key: &str, field| {
+        object
+            .get(key)
+            .map(|_| required(object, key, field))
+            .transpose()
+    };
+    let details = |key, counter, field| -> Result<Option<u64>, BufferedUsageError> {
+        match usage.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(object) if object.is_object() => optional(object, counter, field),
+            _ => Err(InvalidField(key)),
+        }
+    };
+    let prompt = required(usage, "prompt_tokens", "prompt_tokens")?;
+    let completion = required(usage, "completion_tokens", "completion_tokens")?;
+    let cached = details(
+        "prompt_tokens_details",
+        "cached_tokens",
+        "prompt_tokens_details.cached_tokens",
+    )?;
+    let reasoning = details(
+        "completion_tokens_details",
+        "reasoning_tokens",
+        "completion_tokens_details.reasoning_tokens",
+    )?;
+    let hit = optional(usage, "prompt_cache_hit_tokens", "prompt_cache_hit_tokens")?;
+    let miss = optional(
+        usage,
+        "prompt_cache_miss_tokens",
+        "prompt_cache_miss_tokens",
+    )?;
+    // Validate the numeric inputs, then leave extraction/cache subtraction to the
+    // existing parser. No alternate count derivation or clamping on this path.
+    if cached.is_some_and(|n| n > prompt)
+        || reasoning.is_some_and(|n| n > completion)
+        || hit.is_some_and(|n| n > prompt)
+        || miss.is_some_and(|n| hit.is_none_or(|hit| hit.checked_add(n) != Some(prompt)))
+        || hit.zip(cached).is_some_and(|(a, b)| a != b)
+    {
+        return Err(InconsistentUsage);
+    }
+    if let Some(total) = usage.get("total_tokens") {
+        let total = total.as_u64().ok_or(InvalidField("total_tokens"))?;
+        if prompt.checked_add(completion) != Some(total) {
+            return Err(InconsistentUsage);
+        }
+    }
+    Ok(())
+}
+
 /// Parse an OpenAI (or OpenAI-compatible) Chat Completions response `usage` object.
 ///
 /// `prompt_tokens` is the *total* prompt including cache; `prompt_tokens_details.cached_tokens`
@@ -426,6 +504,110 @@ pub fn parse_bedrock_usage(response: &Value) -> Option<ParsedUsage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn buffered_qualification_rejects_missing_malformed_and_inconsistent_usage() {
+        use BufferedUsageError::*;
+        let good = json!({"prompt_tokens": 10, "completion_tokens": 4});
+        let mut cases = vec![
+            (json!({}), MissingUsage),
+            (json!({"usage":null}), InvalidField("usage")),
+            (json!([]), InvalidResponse),
+            (json!({"usage":{}}), InvalidField("prompt_tokens")),
+            (
+                json!({"usage":{"prompt_tokens":0}}),
+                InvalidField("completion_tokens"),
+            ),
+        ];
+        for field in ["prompt_tokens", "completion_tokens"] {
+            for value in [
+                json!(null),
+                json!(-1),
+                json!(1.5),
+                json!("2"),
+                json!(MAX_PLAUSIBLE_TOKENS + 1),
+            ] {
+                let mut usage = good.clone();
+                usage[field] = value;
+                cases.push((json!({"usage":usage}), InvalidField(field)));
+            }
+        }
+        for (extra, error) in [
+            (
+                json!({"prompt_tokens_details": {"cached_tokens": "bad"}}),
+                InvalidField("prompt_tokens_details.cached_tokens"),
+            ),
+            (
+                json!({"prompt_tokens_details": []}),
+                InvalidField("prompt_tokens_details"),
+            ),
+            (
+                json!({"prompt_tokens_details": {"cached_tokens": 11}}),
+                InconsistentUsage,
+            ),
+            (
+                json!({"completion_tokens_details": {"reasoning_tokens": 5}}),
+                InconsistentUsage,
+            ),
+            (
+                json!({"prompt_cache_hit_tokens": 8, "prompt_cache_miss_tokens": 3}),
+                InconsistentUsage,
+            ),
+            (json!({"prompt_cache_miss_tokens": 10}), InconsistentUsage),
+            (
+                json!({"prompt_cache_hit_tokens": 8, "prompt_tokens_details": {"cached_tokens": 7}}),
+                InconsistentUsage,
+            ),
+            (
+                json!({"prompt_cache_hit_tokens": null}),
+                InvalidField("prompt_cache_hit_tokens"),
+            ),
+            (
+                json!({"prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": "10"}),
+                InvalidField("prompt_cache_miss_tokens"),
+            ),
+            (
+                json!({"completion_tokens_details": []}),
+                InvalidField("completion_tokens_details"),
+            ),
+            (
+                json!({"completion_tokens_details": {"reasoning_tokens": null}}),
+                InvalidField("completion_tokens_details.reasoning_tokens"),
+            ),
+            (json!({"total_tokens": "14"}), InvalidField("total_tokens")),
+            (json!({"total_tokens": 13}), InconsistentUsage),
+        ] {
+            let mut usage = good.clone();
+            usage
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            cases.push((json!({"usage":usage}), error));
+        }
+        for (body, error) in cases {
+            assert_eq!(validate_openai_buffered_usage(&body), Err(error), "{body}");
+        }
+    }
+
+    #[test]
+    fn buffered_qualification_accepts_explicit_zero_and_consistent_cache_shapes() {
+        for usage in [
+            json!({"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}),
+            json!({"prompt_tokens":10,"completion_tokens":4}),
+            json!({"prompt_tokens":10,"completion_tokens":4,"prompt_tokens_details":null}),
+            json!({"prompt_tokens":10,"completion_tokens":4,"prompt_tokens_details":{"cached_tokens":0}}),
+            json!({"prompt_tokens":10,"completion_tokens":4,"prompt_cache_hit_tokens":8}),
+            json!({"prompt_tokens":10,"completion_tokens":4,"prompt_cache_hit_tokens":8,"prompt_cache_miss_tokens":2,"prompt_tokens_details":{"cached_tokens":8},"completion_tokens_details":{"reasoning_tokens":4},"total_tokens":14}),
+        ] {
+            let body = json!({"usage":usage});
+            assert_eq!(validate_openai_buffered_usage(&body), Ok(()), "{body}");
+            let parsed = parse_openai_usage(&body).unwrap();
+            assert_eq!(
+                parsed.tokens_in + parsed.cache_read_tokens,
+                body["usage"]["prompt_tokens"].as_u64().unwrap()
+            );
+        }
+    }
 
     #[test]
     fn origin_latency_rejects_values_that_cannot_be_persisted() {

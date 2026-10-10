@@ -311,8 +311,7 @@ mod tests {
     #[test]
     fn many_lines_in_one_chunk_stay_linear_in_total_work() {
         let mut splitter = LineSplitter::new(usize::MAX);
-        let wire: Vec<u8> = std::iter::repeat(b"line\n".as_slice())
-            .take(5_000)
+        let wire: Vec<u8> = std::iter::repeat_n(b"line\n".as_slice(), 5_000)
             .flatten()
             .copied()
             .collect();

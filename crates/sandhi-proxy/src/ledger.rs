@@ -757,20 +757,37 @@ mod tests {
         let path = path.to_str().unwrap();
         let mut inspector = SqliteLedger::open(path).unwrap();
         let ledger = Arc::new(Mutex::new(ProxyLedger::durable(path, 1).unwrap()));
-        let IntentAdmission::Admitted(intent) = (match &*ledger.lock().unwrap() {
-            ProxyLedger::Durable(store) => store
-                .reserve_prepared_durable(
-                    "scope",
+        use crate::settlement::admission::{AdmissionOutcome, PreparedAdmission};
+        let jobs = Jobs::new(
+            ledger.clone(),
+            Arc::new(crate::lifecycle::Lifecycle::new()),
+            1,
+        );
+        let ticket = jobs
+            .submit_admission(
+                PreparedAdmission::new(
+                    "request".into(),
+                    "scope".into(),
                     100,
-                    OffsetDateTime::now_utc() + Duration::nanoseconds(123),
                     Duration::seconds(30),
                     10,
                 )
                 .unwrap(),
-            _ => unreachable!(),
-        }) else {
-            panic!("admitted")
+            )
+            .unwrap();
+        ticket.wait().await;
+        // The manager must recover this result even when the caller goes away.
+        drop(ticket);
+        let Some(AdmissionOutcome::Prepared(pending)) = jobs.take_admission_ready() else {
+            panic!("owned prepared admission")
         };
+        let intent = pending.intent().clone();
+        assert_eq!(pending.request_id(), "request");
+        assert_eq!(inspector.reserved_durable("scope").unwrap(), 100);
+        assert!(inspector
+            .terminal_durable("scope", &intent.execution_id)
+            .unwrap()
+            .is_none());
         let Outcome::Dispatch(DispatchAttempt::Authorized(authorized)) = run(
             ledger.clone(),
             Work::Authorize(PendingDispatch::new("request".into(), intent.clone())),
@@ -888,6 +905,141 @@ mod tests {
                 panic!("closed replay")
             };
             assert_eq!(original, closure);
+        }
+        // Actual admission commit, then loss of publication. Reuse this ledger
+        // owner instead of duplicating storage transaction/corruption matrices.
+        for interrupt in [false, true] {
+            let scope = if interrupt {
+                "admission-interrupted"
+            } else {
+                "admission-retained"
+            };
+            let lifecycle = Arc::new(crate::lifecycle::Lifecycle::new());
+            let jobs = Jobs::new(ledger.clone(), lifecycle.clone(), 1);
+            let (committed_tx, committed_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let ticket = jobs
+                .after_admission_commit(
+                    PreparedAdmission::new(
+                        "lost-caller".into(),
+                        scope.into(),
+                        55,
+                        Duration::seconds(30),
+                        10,
+                    )
+                    .unwrap(),
+                    move || {
+                        committed_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        assert!(
+                            !interrupt,
+                            "injected lost admission publication after commit"
+                        );
+                    },
+                )
+                .unwrap();
+            committed_rx.await.unwrap();
+            let waiter = tokio::spawn(async move { ticket.wait().await });
+            waiter.abort();
+            assert!(waiter.await.unwrap_err().is_cancelled());
+            assert_eq!(
+                jobs.submit_admission(
+                    PreparedAdmission::new(
+                        "other".into(),
+                        scope.into(),
+                        1,
+                        Duration::seconds(30),
+                        10,
+                    )
+                    .unwrap()
+                )
+                .err()
+                .unwrap()
+                .reason,
+                crate::settlement::jobs::Refusal::Full
+            );
+            lifecycle.begin_quiesce(std::time::Duration::ZERO);
+            let report = jobs.drain().await.unwrap();
+            assert!(report.timed_out);
+            assert_eq!((report.active, report.retained), (1, 1));
+            release_tx.send(()).unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(2), lifecycle.wait_idle())
+                .await
+                .unwrap();
+            let result = jobs.take_admission_ready().unwrap();
+            if interrupt {
+                let AdmissionOutcome::Interrupted(evidence) = result else {
+                    panic!("uncertain admission")
+                };
+                assert_eq!(evidence.request_id, "lost-caller");
+                assert_eq!(evidence.scope, scope);
+            } else {
+                let AdmissionOutcome::Prepared(owner) = result else {
+                    panic!("retained admission")
+                };
+                assert_eq!(owner.request_id(), "lost-caller");
+                drop(owner); // Drop must neither dispatch nor release at zero.
+            }
+            assert!(jobs.take_admission_ready().is_none());
+            let mut reopened = SqliteLedger::open(path).unwrap();
+            let page = reopened.recovery_page_durable(scope, None, 10).unwrap();
+            assert_eq!(page.entries.len(), 1);
+            assert_eq!(
+                page.entries[0].state,
+                sandhi_store::ledger::evidence::RecoveryState::Prepared
+            );
+            assert_eq!(reopened.reserved_durable(scope).unwrap(), 55);
+            assert_eq!(reopened.spent_durable(scope).unwrap(), 0);
+            assert!(reopened
+                .terminal_durable(scope, &page.entries[0].execution_id)
+                .unwrap()
+                .is_none());
+        }
+        // New adapter outcomes preserve canonical denial vs storage refusal.
+        inspector
+            .set_limit_durable("denied", Some(0), Window::Total, Policy::Block)
+            .unwrap();
+        let jobs = Jobs::new(
+            ledger.clone(),
+            Arc::new(crate::lifecycle::Lifecycle::new()),
+            1,
+        );
+        for (scope, bound) in [("denied", 10), ("capacity", 1)] {
+            let ticket = jobs
+                .submit_admission(
+                    PreparedAdmission::new(
+                        "denial-owner".into(),
+                        scope.into(),
+                        1,
+                        Duration::seconds(30),
+                        bound,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            ticket.wait().await;
+            match ticket.take().unwrap() {
+                AdmissionOutcome::Denied { evidence, .. } if scope == "denied" => {
+                    assert_eq!(evidence.request_id, "denial-owner");
+                    assert_eq!(evidence.scope, scope);
+                }
+                AdmissionOutcome::Failed {
+                    evidence,
+                    failure:
+                        crate::settlement::Failure::Evidence(
+                            sandhi_store::ledger::evidence::EvidenceError::IntentCapacity,
+                        ),
+                } if scope == "capacity" => {
+                    assert_eq!(evidence.scope, scope);
+                }
+                result => panic!("unexpected adapter outcome: {result:?}"),
+            }
+            assert!(inspector
+                .recovery_page_durable(scope, None, 10)
+                .unwrap()
+                .entries
+                .is_empty());
+            assert_eq!(inspector.reserved_durable(scope).unwrap(), 0);
         }
     }
 

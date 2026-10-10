@@ -271,10 +271,10 @@ impl StreamLimits {
             || self.idle_ms == 0
             || self.body_ms == 0
             || self.idle_ms > ceiling_ms
-            || !self
+            || self
                 .setup_ms
                 .checked_add(self.body_ms)
-                .is_some_and(|total| total <= ceiling_ms)
+                .is_none_or(|total| total > ceiling_ms)
         {
             Err("streaming limits must be positive; idle and setup+body must fit ceiling_ms".into())
         } else {

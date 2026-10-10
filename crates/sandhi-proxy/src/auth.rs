@@ -128,7 +128,7 @@ impl Config {
             return Err("invalid OIDC issuer, client ID or exact /auth/callback URL".into());
         }
         if !self.groups.is_empty()
-            && self.group_claim.as_deref().map_or(true, |v| {
+            && self.group_claim.as_deref().is_none_or(|v| {
                 v.is_empty() || v.len() > 128 || ["sub", "iss", "aud", "exp", "active"].contains(&v)
             })
         {
@@ -169,7 +169,7 @@ impl Config {
                 if let Some(role) = binding.role {
                     if result
                         .role
-                        .map_or(true, |old| role_rank(role) > role_rank(old))
+                        .is_none_or(|old| role_rank(role) > role_rank(old))
                     {
                         result.role = Some(role);
                     }
@@ -687,7 +687,7 @@ impl Oidc {
             || sub.is_empty()
             || v["exp"].as_i64()? <= unix_now()
             || !v["token_type"].as_str()?.eq_ignore_ascii_case("bearer")
-            || (v.get("nbf").is_some() && v["nbf"].as_i64().map_or(true, |n| n > unix_now()))
+            || (v.get("nbf").is_some() && v["nbf"].as_i64().is_none_or(|n| n > unix_now()))
         {
             return None;
         }
