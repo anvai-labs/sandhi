@@ -4,7 +4,7 @@
   "reviewed_on": "2026-09-28",
   "expires_on": "2026-10-22",
   "adapter": "crates/sandhi-proxy/src/auth.rs",
-  "adapter_sha256": "b31100404cae0eb2b79515dd665249523ac61478eb1f1d85afbbd069cd80f94e",
+  "adapter_sha256": "6505588365cd31ccc76ba6778effc2c7be331bd643149894c1f7a6f2b855c2ae",
   "packages": {
     "openidconnect": {
       "version": "4.0.1",
@@ -16,5 +16,6 @@
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "checksum": "b8573f03f5883dcaebdfcf4725caa1ecb9c15b2ef50c43a07b816e06799bb12d"
     }
-  }
+  },
+  "note": "2026-10-04 reassessment: adapter changed only by clippy 1.95 MSRV lints \u2014 three Option::map_or(true, f) rewritten to the equivalent is_none_or(f) (lines ~131, ~172, ~690); no change to private-key operation reachability. Prior checksum b31100404cae0eb2b79515dd665249523ac61478eb1f1d85afbbd069cd80f94e."
 }

@@ -310,7 +310,7 @@ mod embedded {
             .spawn(move || {
                 if deadline
                     .checked_duration_since(Instant::now())
-                    .map_or(true, |timeout| {
+                    .is_none_or(|timeout| {
                         matches!(
                             rx.recv_timeout(timeout),
                             Err(mpsc::RecvTimeoutError::Timeout)

@@ -1,7 +1,7 @@
 # Attempt accounting and durable evidence
 
 Status: W05 in progress. W05a and W05b are integrated. W05b remains
-opt-in/non-authoritative; W05c–e are pending.
+opt-in diagnostics; W05c/d now include a limited tracked buffered HTTP mode, while broader W05c–e gates remain pending.
 Date: 2026-09-08. Tracker: [TD-0026](../td/TD-0026-gateway-product-evolution.md).
 
 ## Work backward from reconciliation
@@ -25,16 +25,16 @@ logical events for repeated idempotency keys. `ResilientProvider` emits a final 
 failed intermediate attempts have no individual measurement record. Transparent transport does
 not retry. A zero ledger charge after absent usage is not evidence of zero provider consumption.
 Legacy TTL reclaim deletes abandoned leases; tracked intents now retain unresolved
-liability through expiry. HTTP adoption remains separate.
+liability through expiry. The opt-in buffered mode below uses that admission and settlement path; defaults remain legacy.
 
 ## Delivery substeps
 
 | ID | Deliverable | Gate / state |
 |---|---|---|
-| W05a | Atomic settlement receipt/outbox storage, immutable IDs, bounded claims and acknowledgement, rollback/reopen/concurrency tests | Integrated; 14 focused tests; not wired to proxy or network exporter |
+| W05a | Atomic settlement receipt/outbox storage, immutable IDs, bounded claims and acknowledgement, rollback/reopen/concurrency tests | Integrated; receipt storage is used by opt-in tracked buffered HTTP; network exporter remains pending |
 | W05b | Transport-owned attempt lifecycle and neutral draft contract | Integrated through PR #246 after clean adversarial review and green exact-head/post-merge CI; remains opt-in diagnostics only, while downstream accounting review still gates authoritative use and external release |
-| W05c | Connect admission, settlement and evidence without bypassing correctness | Partial foundation: owned library settlement outcomes and canonical terminal-observation receipt linkage; authoritative proxy mode, physical-attempt linkage, logical dedup separation and no-lease policy remain pending |
-| W05d | Unknown-liability and late-settlement recovery | Partial storage foundation: atomic admission intent (#308), expiry protection and immutable terminal usage snapshots (#310), followed by canonical stored-charge settlement and read-only bounded recovery inventory. Amendments, authoritative HTTP ownership and idempotent recovery remain pending; coordinate TD-0024 retention |
+| W05c | Connect admission, settlement and evidence without bypassing correctness | Limited buffered HTTP integration implemented: correlated prepared admission, detached owner and qualified terminal settlement; broader physical-attempt linkage, logical dedup and no-lease policy remain pending |
+| W05d | Unknown-liability and late-settlement recovery | Limited buffered recovery implemented over the original ledger: bounded advancing scope/execution inventory and retained terminal retry, including unbudgeted/removed keys; actual-process drills cover unknown liability, receipt recovery and terminal publication under SQLite contention/process death without replay. Amendments, broad lifecycle acceptance and TD-0024 retention remain pending |
 | W05e | Receiver contract, exporter and operator evidence | Pending: receiver idempotency, authenticated/scoped transport, retry/backoff, backlog/freshness UX, safe retention, multi-shard cursor/migration and real consumer review |
 
 W05 completes only after all substeps and joint contract gates have evidence. No code in W05a
@@ -553,3 +553,174 @@ Next: explicit HTTP admission/finalization ownership, bounded recovery of retain
 and persisted uncertainty, lifecycle acceptance, promotion/release/deployment,
 then the actual six-Qwen/one-ZAI C5 run. A process-local supervisor alone does not
 close W05c–e, G62 or C5.
+
+## Owned prepared admission (W05c integration prerequisite)
+
+The same bounded `Jobs` registry now accepts `PreparedAdmission` through additive
+`submit_admission`, `AdmissionTicket` and `take_admission_ready` surfaces. Existing
+`Work`, `Outcome` and `Ticket` contracts are unchanged. Both kinds share the one
+capacity bound, lifecycle guard and worker publication owner; typed collection
+skips the other kind without consuming it. Completed unclaimed results still
+occupy capacity, including after a waiter is cancelled.
+
+Admission calls the canonical `reserve_prepared_durable` on the original single
+file-backed ledger. It returns the original Prepared intent, a budget denial,
+explicit storage failure, observed cutoff or interruption evidence. There is no
+unmetered fallback, additional execution-ID derivation, authorization or provider
+dispatch. Request/scope strings are bounded before registry snapshots; durable
+numeric, capacity and topology validation remain owned by storage.
+
+The lifecycle check follows acquisition of the outer ledger lock. The inner shard
+or SQLite operation may still cross cutoff; a late committed Prepared result is
+retained without dispatch or zero settlement. This is not an atomic cutoff across
+SQLite, a database interrupt, or a bounded database execution-time guarantee.
+
+On interrupted publication, the retained metadata is inert evidence, **not retry
+authority**. Storage generates an opaque execution ID before its transaction, and
+an interrupted caller may never learn it. Never reserve again automatically,
+match an intent by logical request ID, or infer rollback from a missing response.
+Reconciliation must use the original ledger's bounded inventory and canonical
+state transitions. Losing the process still loses unpersisted metadata; this
+increment adds no durable request-correlation index or recovery scheduler.
+
+The existing queued-cancellation fixture covers both job kinds. Mixed capacity
+and typed collection, cutoff before storage, and the existing real-ledger owner
+cover denial/refusal and a committed admission held across cancellation/cutoff,
+including a panic before publication. These prove retained ownership and one
+Prepared row, not cutoff during SQLite contention. The storage contention,
+rollback and corruption matrices retain their existing sole owners.
+
+HTTP admission/finalization, bounded recovery and broader lifecycle acceptance
+remain open. This opt-in library increment changes no HTTP defaults or deployed
+service and does not close W05c–e or C5.
+
+
+## Buffered usage qualification (W05c HTTP prerequisite)
+
+The additive Rust APIs `ProviderHandle::complete_with_qualified_usage` and
+`RawForwarder::forward_qualified_with_headers` return a `QualifiedCompletion`:
+the completed response plus a separate `Result<UsageV2, BufferedUsageError>`.
+A usage error means a response arrived but no qualified final usage is available.
+It is not a transport failure, proof of zero spend, or authority to send the
+request again. Keep unresolved liability for reconciliation. The typed response's
+ordinary `usage` field retains legacy semantics; accounting consumers must use
+the separately qualified result. Explicitly configured transport retries retain
+their existing semantics; qualification never adds a retry.
+
+Qualification initially covers buffered OpenAI-compatible chat (InferFlux/ZAI).
+Unsupported raw routes, streaming flags and provider families are rejected before
+dispatch. Custom typed providers refuse by default unless they implement the
+additive capability. Existing methods, response serialization and HTTP defaults
+are unchanged; no proxy mode, binding facade or deployment is enabled here.
+
+Core owns qualification alongside the existing parser: required prompt/output
+counts must be plausible unsigned integers, while present optional cache/reasoning
+counts must be valid and consistent with their totals. Explicit zero is accepted;
+missing, null, empty, malformed or contradictory usage is not converted to a
+qualified zero. Optional absent/null detail containers remain absent information;
+cache reporting coverage is still separate from numeric usage qualification.
+Unknown extra fields do not grant qualification or change extraction. This does
+not prove tokenizer units, executed cache reuse, truthful provider reporting or
+physical-attempt correspondence.
+
+The existing core usage tests own the field/consistency matrix. Existing provider
+raw/typed test modules own actual HTTP fixtures proving response preservation,
+unchanged typed request/response semantics (apart from elapsed time), no
+qualification-driven replay, explicit-zero acceptance, unsupported pre-dispatch
+refusal and non-JSON raw response retention. Legacy proxy/cache-availability tests
+remain the default-path regression owner; storage eligibility tests are not copied.
+
+Before HTTP activation, carry this result through owned admission/dispatch and
+terminal observation. Install the captured transport deadline inside any spawned
+task (Tokio task-local state does not propagate automatically), bound accounting
+wait/recovery separately, and include retained unresolved obligations in shutdown
+reporting. Recovery must advance the original ledger's opaque cursor with scoped
+page/time bounds, including unbudgeted key scopes; a repeated page-one scan can
+starve later ready records. W05c–e and actual-member C5 remain open.
+
+
+## Owned buffered HTTP and recovery (W05c/d limited activation)
+
+The [operator mode](../operator/buffered-accounting.md) connects the previously
+separate admission, dispatch, qualified usage and canonical settlement owners.
+One held registry slot spans the detached HTTP operation. Its generated request
+ID is persisted atomically with prepared admission, without becoming an execution
+ID, idempotency key or replay authority. Old admissions retain absent correlation.
+The opt-in event uses the canonical gateway ID and preserves any available origin
+ID separately. Default APIs and HTTP behavior are unchanged.
+
+Terminal usage enters the retained owner before any best-effort telemetry callback.
+Recovery retries retained terminal observations and settles ready durable records;
+it never authorizes another send, invents zero, or re-emits usage. Its scope
+inventory includes retained unbudgeted and removed-key scopes. Opaque cursors
+advance past settled rows and freeze admission bounds for each inventory. A later
+sweep observes later admissions and changed state. Shutdown checks a fresh bounded
+inventory plus retained slots after workers drain; idle alone cannot mean success.
+
+Tests extend the existing storage, jobs and proxy owners. Storage covers atomic
+correlation rollback/reopen/scoping and bounded scope inventory. Proxy fixtures
+cover both planes, actual header correlation, disconnection, task-local deadlines,
+pre-admission refusal and restart settlement past settled pages without new sends
+or events. Independent review exposed terminal loss on a panicking sink and a
+cursor that skipped slot zero; dedicated negative regressions precede both fixes.
+Existing legacy proxy and provider matrices remain the default/parsing owners;
+no redundant storage or provider field matrices were added or removed.
+
+Limits are explicit: no atomic telemetry delivery, no automatic amendment of
+unknown outcomes, no tracked threshold-alert publication, fixed single-file
+topology, bounded but not hard-time-limited SQLite operations, and no released
+or actual-member acceptance claim. W05c/d's broader lifecycle gates, W05e and C5
+remain open.
+
+
+## Tracked buffered crash/restart acceptance
+
+The existing SDK `test_recovery.py` fixture copies and hashes one immutable gateway
+binary across each drill. Two new cases cross actual SIGKILL/restart boundaries:
+
+- After a synthetic origin accepts one buffered request, gate its response and kill
+  the gateway. Restart against the same file: authorization and correlation remain,
+  no terminal usage or receipt is fabricated, held liability denies a capped request,
+  and shutdown reports incomplete accounting. Exactly one origin request is observed.
+- Reject receipt insertion with a disposable SQLite trigger after a real tracked
+  HTTP call. The final usage snapshot persists while settlement rolls back. Kill,
+  remove the trigger with the writer stopped, then restart: recovery commits the
+  original 14-token charge and one receipt without another origin call or usage
+  event. A second restart preserves receipt identity, settlement time and spend.
+
+This extends the existing provider, shutdown and recovery fixtures. It does not
+repeat field-parser or storage transaction matrices. Test-only negative controls
+leave the first execution tracked and disable tracked mode only on restart: the
+unknown case incorrectly exits cleanly and the ready case never gets a receipt.
+Both controls fail their assertions; the committed tests retain tracked mode.
+
+The trigger is explicit synthetic fault injection, not a naturally occurring disk
+failure or proof of a crash at an individual instruction. The unknown drill proves
+retained liability and shutdown reconciliation, not an independently witnessed
+background sweep. These checks use local HTTP, synthetic provider responses and
+virtual-key compatibility auth. Tracked TLS/OIDC parity, streaming ownership,
+release/deployment and actual-member C5 remain separate gates. No production hook,
+provider retry or automatic closure of unknown liability is added.
+
+The same fixture now covers the earlier terminal-publication boundary. After one
+origin accepts a request, an external SQLite `BEGIN IMMEDIATE` blocks all writes.
+Authenticated gateway metrics must observe exactly 7 fresh-input, 4 cache-read and
+3 output tokens (14 billable) from a zero baseline. The correlated HTTP response is
+502, and the active-operation gauge must reach zero with the lock still held;
+the original accounting operation has ended without persisting terminal usage.
+
+- If the process survives, releasing the lock permits retained recovery to commit
+  the original terminal observation and one 14-token receipt. Restart preserves
+  receipt identity, timestamp and spend; the origin still saw exactly one request.
+- If SIGKILL occurs before unlocking, restart retains unknown liability, refuses
+  a request capped by that liability and exits with incomplete accounting. It does
+  not fabricate a terminal record, receipt or event from the lost RAM observation.
+
+The positive metric witness is valid only for this isolated single-request process;
+aggregate counters cannot correlate arbitrary production traffic. Metrics describe
+observed usage, not committed spend. The usage-event sink shares the lock and may
+lose its event; the surviving case accepts absence but rejects duplicate or
+mis-correlated events. This is not atomic telemetry delivery. Negative controls
+omit provider usage or disable retained retry and must fail the corresponding
+observation or receipt assertion. Existing in-process/storage tests remain the
+owners of field and transaction matrices; no duplicate matrix was added.

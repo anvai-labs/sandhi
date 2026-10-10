@@ -12,9 +12,10 @@
 //! proxy for what amounts to a few atomics and a text formatter. The repo already keeps SQLite out
 //! of the bindings for the same reason (TD-0009 D1).
 //!
-//! Counters are unsampled (D6): anything derived from a settled call must reconcile with the meter.
-//! Nothing here recounts tokens — [`Metrics::observe_call`] is handed the same `billable` quantity
-//! the ledger settled (D3), so a metric can never disagree with what was charged.
+//! Counters are unsampled (D6); nothing here recounts tokens. [`Metrics::observe_call`]
+//! records the accounting path's quantity (D3). Legacy calls report after settlement;
+//! opt-in tracked calls report observed usage before settlement is confirmed. Metrics
+//! are process-local telemetry, not durable receipts or proof of committed spend.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -131,7 +132,7 @@ pub enum TokenKind {
     CacheRead,
     Output,
     Reasoning,
-    /// The ADR-0005 D4 quantity the ledger settled — the one a budget is enforced on.
+    /// The ADR-0005 D4 charge quantity; tracked observations may precede settlement.
     Billable,
 }
 
@@ -148,7 +149,7 @@ impl TokenKind {
     }
 }
 
-/// One settled call's measurements, as the accounting path already computed them.
+/// One call's measurements, as the accounting path already computed them.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CallMeasurements {
     pub fresh_input: u64,
@@ -344,8 +345,8 @@ impl Metrics {
         self.connections_shed.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Record one settled call. Called from the accounting path, which already holds the settled
-    /// `billable` — so this cannot drift from what the ledger charged.
+    /// Record the accounting path's measurements without re-deriving `billable`.
+    /// Tracked usage can be observed before persistence; consult the receipt for committed spend.
     pub fn observe_call(&self, labels: &Labels, m: CallMeasurements) {
         let Ok(mut inner) = self.inner.lock() else {
             return; // never let telemetry fail a request
@@ -714,7 +715,7 @@ mod tests {
         );
         let lines: Vec<_> = rendered.lines().collect();
         assert_eq!(lines.len(), 20);
-        for (group, family) in lines.chunks_exact(4).zip([
+        for (group, family) in lines.as_chunks::<4>().0.iter().zip([
             "configured",
             "capacity",
             "queued",

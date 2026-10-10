@@ -358,13 +358,9 @@ impl ScoreBackend for Pool {
             return Err(EvaluationError);
         }
         let (reply, rx) = mpsc::sync_channel(1);
-        // fetch_update is deprecated on Rust 1.99+ (renamed to try_update,
-        // stable since 1.95) while the workspace MSRV is 1.75; switch to
-        // try_update when the MSRV is raised.
-        #[allow(deprecated)]
         let seq = self
             .sequence
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_add(1))
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_add(1))
             .map_err(|_| EvaluationError)?;
         let mut job = Job {
             id: seq.to_string(),

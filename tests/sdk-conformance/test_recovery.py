@@ -12,6 +12,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import threading
 import time
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
@@ -42,9 +43,9 @@ class Gateway:
     executable_sha256: str
     contract_version: dict
 
-    def stop(self):
+    def stop(self, *, expected_status=0):
         self.process.terminate()
-        assert self.process.wait(timeout=6) == 0
+        assert self.process.wait(timeout=6) == expected_status
 
 
 @pytest.fixture
@@ -58,7 +59,7 @@ def recovery_gateway(proxy_binary, gated_provider, tmp_path):
     launches = 0
 
     @contextmanager
-    def launch(database, *, shards=1, provider_enabled=True):
+    def launch(database, *, shards=1, provider_enabled=True, tracked=False):
         nonlocal launches
         launches += 1
         database = Path(database)
@@ -76,6 +77,8 @@ def recovery_gateway(proxy_binary, gated_provider, tmp_path):
             # No OS keyring or real broker reads, even if restored metadata is malformed.
             "SANDHI_VAULT_BACKEND": "recovery-fixture-unavailable",
         })
+        if tracked:
+            env["SANDHI_BUFFERED_ACCOUNTING"] = "tracked"
         if provider_enabled:
             env.update(SANDHI_OPENAI_KEY=REAL_OPENAI_KEY, SANDHI_OPENAI_BASE=gated_provider.base)
         with (tmp_path / f"launch-{launches}.stderr").open("wb") as logs:
@@ -368,3 +371,278 @@ def test_old_snapshot_revocation_is_reconciled_without_provider_credentials_befo
         assert call(reconciled.client, key["virtual_key"]).status_code == 401
         assert gated_provider.requests == []
         reconciled.stop()
+
+
+def tracked_rows(database):
+    """One read transaction observes durable state, never the lost process's RAM."""
+    with closing(sqlite3.connect(database, timeout=1)) as connection:
+        connection.execute("BEGIN")
+        return {table: connection.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+                for table in ("budget_execution_intent", "budget_request_correlation",
+                              "budget_dispatch_fence", "budget_terminal_observation",
+                              "budget_settlement_outbox", "budget_reservation", "usage_events")}
+
+
+def await_terminal(database):
+    deadline = time.monotonic() + 5
+    while True:
+        rows = tracked_rows(database)
+        if len(rows["budget_terminal_observation"]) == 1:
+            return rows
+        assert time.monotonic() < deadline, rows
+        time.sleep(0.02)
+
+
+def await_receipt(database):
+    deadline = time.monotonic() + 8
+    while True:
+        rows = tracked_rows(database)
+        if len(rows["budget_settlement_outbox"]) == 1:
+            return rows
+        assert time.monotonic() < deadline, rows
+        time.sleep(0.02)
+
+
+def observed_tokens(client):
+    """Exact series for this isolated, single-request synthetic drill only."""
+    response = client.get("/metrics", headers=ADMIN)
+    assert response.status_code == 200, response.text
+    prefix = ('sandhi_tokens_total{provider="openai",model="gpt-mock",'
+              'dialect="openai",plane="transparent",outcome="success",kind="')
+    return {line[len(prefix):].split('"}', 1)[0]: int(line.rsplit(" ", 1)[1])
+            for line in response.text.splitlines() if line.startswith(prefix)}
+
+
+@pytest.mark.parametrize("crash", [False, True], ids=["retained-retry", "lost-before-persistence"])
+def test_tracked_terminal_observed_during_sqlite_contention(
+    recovery_gateway, gated_provider, tmp_path, record_property, crash,
+):
+    source = tmp_path / "tracked-contended.db"
+    gated_provider.gate_buffered = True
+    outcomes = []
+    with recovery_gateway(source, tracked=True) as gateway:
+        configured = gateway.client.post("/admin/budget", headers=ADMIN, json={
+            "scope": SCOPES[0], "limit_tokens": 10000, "window": "total", "policy": "block",
+        })
+        assert configured.status_code == 200, configured.text
+        key = mint(gateway.client)["virtual_key"]
+        assert observed_tokens(gateway.client) == {}
+
+        def request():
+            try:
+                with httpx.Client(base_url=str(gateway.client.base_url), timeout=10) as client:
+                    outcomes.append(call(client, key))
+            except httpx.TransportError as error:
+                outcomes.append(error)
+
+        thread = threading.Thread(target=request, daemon=True)
+        thread.start()
+        try:
+            assert gated_provider.entered.wait(5), "origin never accepted buffered request"
+            admitted = tracked_rows(source)
+            intent, = admitted["budget_execution_intent"]
+            correlation, = admitted["budget_request_correlation"]
+            fence, = admitted["budget_dispatch_fence"]
+            assert correlation[0] == fence[0] == intent[0]
+            assert correlation[1] and fence[1] == 1 and fence[2] is not None
+            assert admitted["budget_terminal_observation"] == []
+            assert admitted["budget_settlement_outbox"] == admitted["usage_events"] == []
+            held, = leases(source, 1)
+            assert held[1] == intent[1] and held[2] > 0 and held[3:5] == (0, 0)
+
+            with closing(sqlite3.connect(source, timeout=1)) as blocker:
+                blocker.execute("BEGIN IMMEDIATE")
+                try:
+                    gated_provider.release.set()
+                    # Provider-send completion is insufficient. A positive gateway
+                    # observation proves qualified usage reached the retained owner.
+                    expected = {"fresh_input": 7, "cache_read": 4, "output": 3, "billable": 14}
+                    deadline = time.monotonic() + 5
+                    while observed_tokens(gateway.client) != expected:
+                        assert time.monotonic() < deadline, gateway.client.get(
+                            "/metrics", headers=ADMIN).text
+                        time.sleep(0.02)
+                    thread.join(timeout=5)
+                    assert not thread.is_alive(), "accounting wait did not return"
+                    response, = outcomes
+                    assert isinstance(response, httpx.Response), response
+                    assert response.status_code == 502, response.text
+                    assert response.headers["x-sandhi-request-id"] == correlation[1]
+                    # Wait for the original blocked accounting operation to end,
+                    # not just its shorter HTTP wait. Survival must require a
+                    # retained retry rather than completion of the first write.
+                    deadline = time.monotonic() + 12
+                    while True:
+                        metrics = gateway.client.get("/metrics", headers=ADMIN)
+                        assert metrics.status_code == 200, metrics.text
+                        if "sandhi_shutdown_active_operations 0" in metrics.text.splitlines():
+                            break
+                        assert time.monotonic() < deadline, metrics.text
+                        time.sleep(0.02)
+                    assert tracked_rows(source) == admitted, "lock did not prevent publication"
+                    if crash:
+                        gateway.process.kill()
+                        assert gateway.process.wait(timeout=3) == -9
+                finally:
+                    blocker.rollback()
+            if not crash:
+                recovered = await_receipt(source)
+                terminal, = recovered["budget_terminal_observation"]
+                receipt, = recovered["budget_settlement_outbox"]
+                assert terminal[0] == intent[0] and terminal[3] == 14
+                assert receipt[1:4] == (intent[1], held[0], 14)
+                for table in ("budget_execution_intent", "budget_request_correlation",
+                              "budget_dispatch_fence"):
+                    assert recovered[table] == admitted[table], table
+                assert leases(source, 1)[0][3:5] == (14, 1)
+                assert observed_tokens(gateway.client) == expected
+                gateway.stop()
+                recovered = tracked_rows(source)
+                # The locked best-effort sink may lose its event. It must never
+                # duplicate or misattribute one; it is not a settlement outbox.
+                with closing(sqlite3.connect(source)) as connection:
+                    events = connection.execute(
+                        "SELECT request_id, session_id, run_id, step_id, tokens_in, tokens_out, "
+                        "cache_creation_tokens, cache_read_tokens FROM usage_events"
+                    ).fetchall()
+                assert events in ([], [(correlation[1], "recovery-session", "recovery-run",
+                                       "seed", 7, 3, 0, 4)])
+            record_property("executable_sha256", gateway.executable_sha256)
+        finally:
+            gated_provider.release.set()
+            thread.join(timeout=11)
+            assert not thread.is_alive(), "client thread leaked"
+
+    with recovery_gateway(source, tracked=True) as restarted:
+        assert restarted.executable_sha256 == gateway.executable_sha256
+        if crash:
+            changed = restarted.client.post("/admin/budget", headers=ADMIN, json={
+                "scope": held[0], "limit_tokens": held[2], "window": "total", "policy": "block",
+            })
+            assert changed.status_code == 200, changed.text
+            assert call(restarted.client, key, step="held-capacity").status_code == 429
+            restarted.stop(expected_status=124)
+            assert tracked_rows(source) == admitted
+        else:
+            assert tracked_rows(source) == recovered
+            budget, = get(restarted.client, "/dashboard/api/budgets")["budgets"]
+            assert budget["spent"] == 14
+            restarted.stop()
+            assert tracked_rows(source) == recovered
+    assert len(gated_provider.requests) == 1, "accounting recovery replayed inference"
+
+
+def test_tracked_sigkill_after_origin_acceptance_retains_unknown_liability(
+    recovery_gateway, gated_provider, tmp_path, record_property,
+):
+    source = tmp_path / "tracked-unknown.db"
+    gated_provider.gate_buffered = True
+    outcomes = []
+    with recovery_gateway(source, tracked=True) as gateway:
+        key = mint(gateway.client)["virtual_key"]
+
+        def request():
+            try:
+                with httpx.Client(base_url=str(gateway.client.base_url), timeout=10) as client:
+                    outcomes.append(call(client, key))
+            except httpx.TransportError as error:
+                outcomes.append(error)
+
+        thread = threading.Thread(target=request, daemon=True)
+        thread.start()
+        try:
+            assert gated_provider.entered.wait(5), "origin never accepted buffered request"
+            admitted = tracked_rows(source)
+            intent, = admitted["budget_execution_intent"]
+            correlation, = admitted["budget_request_correlation"]
+            fence, = admitted["budget_dispatch_fence"]
+            assert correlation[0] == fence[0] == intent[0]
+            assert correlation[1] and fence[1] == 1 and fence[2] is not None
+            assert admitted["budget_terminal_observation"] == []
+            assert admitted["budget_settlement_outbox"] == []
+            assert admitted["usage_events"] == []
+            held, = leases(source, 1)
+            assert held[1] == intent[1] and held[2] > 0 and held[3:5] == (0, 0)
+            gateway.process.kill()
+            assert gateway.process.wait(timeout=3) == -9
+        finally:
+            gated_provider.release.set()
+            thread.join(timeout=5)
+            assert not thread.is_alive(), "client did not observe gateway death"
+        assert len(outcomes) == 1 and isinstance(outcomes[0], httpx.TransportError), outcomes
+        record_property("executable_sha256", gateway.executable_sha256)
+
+    with recovery_gateway(source, tracked=True) as restarted:
+        assert restarted.executable_sha256 == gateway.executable_sha256
+        # The held ceiling must still deny new work after all RAM owners are lost.
+        changed = restarted.client.post("/admin/budget", headers=ADMIN, json={
+            "scope": held[0], "limit_tokens": held[2], "window": "total", "policy": "block",
+        })
+        assert changed.status_code == 200, changed.text
+        denied = call(restarted.client, key, step="held-capacity")
+        assert denied.status_code == 429, denied.text
+        restarted.stop(expected_status=124)
+    assert tracked_rows(source) == admitted
+    assert len(gated_provider.requests) == 1
+
+
+def test_tracked_sigkill_after_terminal_persistence_recovers_one_receipt(
+    recovery_gateway, gated_provider, tmp_path, record_property,
+):
+    source = tmp_path / "tracked-ready.db"
+    with recovery_gateway(source, tracked=True) as gateway:
+        configured = gateway.client.post("/admin/budget", headers=ADMIN, json={
+            "scope": SCOPES[0], "limit_tokens": 10000, "window": "total", "policy": "block",
+        })
+        assert configured.status_code == 200, configured.text
+        key = mint(gateway.client)["virtual_key"]
+        # Synthetic fault injection at the existing transaction boundary; this
+        # does not claim a naturally occurring disk failure or a timed crash gap.
+        with closing(sqlite3.connect(source, timeout=1)) as connection:
+            connection.execute("""CREATE TRIGGER reject_test_receipt
+                BEFORE INSERT ON budget_settlement_outbox BEGIN
+                SELECT RAISE(ABORT, 'synthetic receipt failure'); END""")
+            connection.commit()
+        response = call(gateway.client, key)
+        assert response.status_code == 502, response.text
+        request_id = response.headers["x-sandhi-request-id"]
+        before = await_terminal(source)
+        intent, = before["budget_execution_intent"]
+        terminal, = before["budget_terminal_observation"]
+        assert terminal[0] == intent[0] and terminal[3] == 14
+        assert before["budget_request_correlation"] == [(intent[0], request_id)]
+        assert before["budget_settlement_outbox"] == []
+        held, = leases(source, 1)
+        assert held[1] == intent[1] and held[3:5] == (0, 0)
+        wait_usage(gateway.client, 1)
+        before = tracked_rows(source)
+        gateway.process.kill()
+        assert gateway.process.wait(timeout=3) == -9
+        record_property("executable_sha256", gateway.executable_sha256)
+
+    # Remove only the disposable fault while its sole writer is stopped.
+    with closing(sqlite3.connect(source, timeout=1)) as connection:
+        connection.execute("DROP TRIGGER reject_test_receipt")
+        connection.commit()
+    with recovery_gateway(source, tracked=True) as restarted:
+        assert restarted.executable_sha256 == gateway.executable_sha256
+        recovered = await_receipt(source)
+        receipt, = recovered["budget_settlement_outbox"]
+        assert receipt[1:4] == (intent[1], held[0], 14)
+        settled, = leases(source, 1)
+        assert settled[1] == intent[1] and settled[3:5] == (14, 1)
+        for table in ("budget_execution_intent", "budget_request_correlation",
+                      "budget_dispatch_fence", "budget_terminal_observation", "usage_events"):
+            assert recovered[table] == before[table], table
+        budget, = get(restarted.client, "/dashboard/api/budgets")["budgets"]
+        assert budget["spent"] == 14
+        restarted.stop()
+    # Another process boundary must preserve receipt identity, time and spend.
+    with recovery_gateway(source, tracked=True) as again:
+        assert again.executable_sha256 == gateway.executable_sha256
+        assert tracked_rows(source) == recovered
+        budget, = get(again.client, "/dashboard/api/budgets")["budgets"]
+        assert budget["spent"] == 14
+        again.stop()
+    assert tracked_rows(source) == recovered
+    assert len(gated_provider.requests) == 1

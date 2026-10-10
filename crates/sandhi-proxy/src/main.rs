@@ -229,8 +229,14 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
         );
     }
     let vault = store_path.as_deref().map(|p| {
-        let vault = VaultStore::with_backend(p, VaultStore::backend_from_env())
-            .unwrap_or_else(|_| startup_store_fatal("vault"));
+        // The library reports backend misconfiguration as Err; the binary owns
+        // the exit — a bad SANDHI_CREDENTIALS_DIR is fatal at startup.
+        let backend = VaultStore::backend_from_env().unwrap_or_else(|error| {
+            eprintln!("sandhi-proxy: {error}");
+            std::process::exit(1);
+        });
+        let vault =
+            VaultStore::with_backend(p, backend).unwrap_or_else(|_| startup_store_fatal("vault"));
         eprintln!(
             "sandhi-proxy: credential vault (backend: {}) at {p}",
             vault.backend_name()
@@ -525,6 +531,44 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
     // explicitly dropped below while the process-wide shutdown deadline still applies.
     state.otel = otel_recorder;
     let state = Arc::new(state);
+    let tracked = match std::env::var("SANDHI_BUFFERED_ACCOUNTING") {
+        Err(std::env::VarError::NotPresent) => false,
+        Ok(value) if value == "off" => false,
+        Ok(value) if value == "tracked" => true,
+        _ => {
+            eprintln!("sandhi-proxy: SANDHI_BUFFERED_ACCOUNTING must be off or tracked");
+            return 2;
+        }
+    };
+    if tracked {
+        let config = sandhi_proxy::settlement::buffered::Config::new(
+            64,
+            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(120),
+        )
+        .expect("static bounds");
+        if let Err(error) = sandhi_proxy::settlement::buffered::enable(&state, config) {
+            eprintln!("sandhi-proxy: {error}");
+            return 2;
+        }
+    }
+    let recovery_task = tracked.then(|| {
+        let recovery_state = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+            loop {
+                tick.tick().await;
+                if !recovery_state.lifecycle.is_running() {
+                    break;
+                }
+                if let Err(reason) =
+                    sandhi_proxy::settlement::buffered::recover(recovery_state.clone()).await
+                {
+                    tracing::warn!(reason, "tracked accounting recovery incomplete");
+                }
+            }
+        })
+    });
 
     // ADR-0005 D2: reclaim leases left dangling by a crash on a timer, so an abandoned scope's
     // held capacity is released without waiting for its next request (`reserve` also reclaims
@@ -580,6 +624,10 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
     // deadline, so no stage below receives another fresh grace period.
     let deadline = state.lifecycle.begin_quiesce(shutdown_grace);
     shutdown.arm(deadline);
+    if let Some(recovery) = recovery_task {
+        recovery.abort();
+        let _ = tokio::time::timeout_at(deadline.into(), recovery).await;
+    }
     reclaim_task.abort();
     let _ = tokio::time::timeout_at(deadline.into(), reclaim_task).await;
     // Detached admission/settlement work can outlive an HTTP connection task. It must stop
@@ -590,7 +638,18 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
     {
         return 124;
     }
-    let mut cleanup_complete = true;
+    let mut cleanup_complete =
+        match sandhi_proxy::settlement::buffered::finish_shutdown(state.clone()).await {
+            Ok(complete) => complete,
+            Err(reason) => {
+                tracing::error!(reason, "tracked accounting shutdown check failed");
+                false
+            }
+        };
+    if !cleanup_complete {
+        tracing::error!(retained = sandhi_proxy::settlement::buffered::retained(&state),
+            "tracked accounting shutdown incomplete; durable uncertainty or partial inventory remains");
+    }
     if let Some(buffered) = buffered_alert_store {
         if !buffered.close(shutdown.remaining()) {
             cleanup_complete = false;

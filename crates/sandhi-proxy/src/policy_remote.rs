@@ -400,13 +400,9 @@ impl ScoreBackend for Remote {
             return Err(EvaluationError);
         }
         let deadline = deadline.min(Instant::now() + self.timeout);
-        // fetch_update is deprecated on Rust 1.99+ (renamed to try_update,
-        // stable since 1.95) while the workspace MSRV is 1.75; switch to
-        // try_update when the MSRV is raised.
-        #[allow(deprecated)]
         let id = self
             .sequence
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_add(1))
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_add(1))
             .map_err(|_| EvaluationError)?
             .to_string();
         let first = self.cursor.fetch_add(1, Ordering::Relaxed) % self.slots.len();
