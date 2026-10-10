@@ -844,3 +844,8 @@ and [owning contract](../product/attempt-accounting-and-evidence.md#owned-buffer
 Broad streaming lifecycle, amendments, alert/receipt export, release/deployment
 and actual-member C5 acceptance remain open. No provider or event replay is
 introduced, and best-effort observations are not atomic settlement delivery.
+
+Tracked buffered TLS/OIDC now has [synthetic source acceptance](../product/attempt-accounting-and-evidence.md#tracked-buffered-tlsoidc-source-acceptance):
+verified TLS shutdown, OIDC request/intent/event/receipt joins, exact bound-scope
+spend, pre-admission denials and the existing browser role matrix. This does not
+close deployed OIDC, OIDC crash/restart composition, streaming lifecycle or C5.

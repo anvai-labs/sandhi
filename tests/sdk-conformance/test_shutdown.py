@@ -10,6 +10,7 @@ import json
 import os
 import socket
 import sqlite3
+import ssl
 import subprocess
 import threading
 import time
@@ -131,7 +132,8 @@ def shutdown_gateway(proxy_binary, gated_provider, tmp_path):
             process = subprocess.Popen([str(proxy_binary)], env=env, cwd=REPO_ROOT,
                                        stdout=subprocess.DEVNULL, stderr=log)
             try:
-                with httpx.Client(base_url=base, verify=False, timeout=2) as client:
+                verify = ssl.create_default_context(cafile=config["tls"]["cert"]) if tls else True
+                with httpx.Client(base_url=base, verify=verify, timeout=2) as client:
                     deadline = time.monotonic() + 15
                     while True:
                         assert process.poll() is None, "gateway exited before startup"
@@ -351,14 +353,17 @@ def test_locked_settlement_cannot_extend_shutdown_past_watchdog(
                 assert len(gated_provider.requests) == 1
 
 
+@pytest.mark.parametrize("tls", [False, True], ids=["http", "tls"])
 @pytest.mark.parametrize("missing_usage", [False, True], ids=["settled", "unresolved"])
 def test_tracked_buffered_binary_correlation_and_shutdown(
-    shutdown_gateway, gated_provider, missing_usage,
+    shutdown_gateway, gated_provider, missing_usage, tls,
 ):
     """Exercise the shipped switch, real HTTP and SIGTERM against disposable state."""
     gated_provider.omit_usage = missing_usage
-    with shutdown_gateway(tracked=True) as (process, base, database, _port):
-        with httpx.Client(base_url=base, timeout=5) as client:
+    certificate = REPO_ROOT / "crates/sandhi-proxy/tests/fixtures/tls/localhost-cert.pem"
+    verify = ssl.create_default_context(cafile=certificate) if tls else True
+    with shutdown_gateway(tracked=True, tls=tls) as (process, base, database, _port):
+        with httpx.Client(base_url=base, timeout=5, verify=verify) as client:
             response = client.post("/v1/chat/completions", headers=CLIENT,
                                    json={**BODY, "max_tokens": 10})
             assert response.status_code == (502 if missing_usage else 200), response.text
