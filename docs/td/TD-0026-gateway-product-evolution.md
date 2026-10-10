@@ -861,3 +861,17 @@ ZAI. Three HTTP 200 responses reconcile 46 fresh-input, 5 output and explicit ze
 cache-read tokens across wire, persisted attribution, receipts, run totals and
 dashboard; clean shutdown exits 0. Managed state and historical rows are preserved.
 This is new provider smoke evidence, not a managed cutover, live crash drill or C5.
+
+### Strict stream usage prerequisite (2026-10-10)
+
+The additive [core event qualifier](../product/attempt-accounting-and-evidence.md#openai-chat-stream-usage-qualification-w05c-prerequisite)
+recognizes validated request-total usage on complete empty-choices OpenAI Chat
+events independently of `[DONE]`. It reuses the buffered counter validator and
+canonical parser. Null/absent usage stays unavailable; malformed/nonfinal reports
+return structured errors. Existing numeric tests cover both qualification paths;
+one new envelope test and two negative controls pin the distinction.
+
+Transport framing and immutable observation retention/conflict detection are next.
+The raw path currently splits lines, so complete SSE-event reconstruction must
+precede integration with streaming ownership and durable settlement. Legacy defaults
+are unchanged; tracked streaming, release/deployment and full C5 remain open.

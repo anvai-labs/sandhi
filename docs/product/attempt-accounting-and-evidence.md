@@ -639,6 +639,46 @@ page/time bounds, including unbudgeted key scopes; a repeated page-one scan can
 starve later ready records. W05c–e and actual-member C5 remain open.
 
 
+## OpenAI Chat stream usage qualification (W05c prerequisite)
+
+The additive Rust `sandhi_core::usage::qualify_openai_stream_usage` API accepts one
+complete decoded event and returns `Result<Option<ParsedUsage>, StreamUsageError>`.
+It shares buffered counter validation and the existing OpenAI parser; it introduces
+no alternate token derivation, SSE parser or streaming state owner.
+
+| Event | Qualified result |
+|---|---|
+| `chat.completion.chunk`, empty `choices`, valid non-null usage | `Some` provider-reported request totals; explicit zero is valid |
+| Chat chunk with absent/null usage, including a finish-reason event | `None`; no final measurement |
+| Non-null usage on nonempty choices | Structured `NonFinalUsage` error |
+| Malformed chunk envelope or error-bearing event | Structured `InvalidChunk` error |
+| Missing, malformed or inconsistent counters inside a usage object | Existing counter-validation error wrapped as `InvalidUsage`; no qualified zero |
+
+The [OpenAI include-usage contract](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)
+places whole-request usage in an empty-choices event before `[DONE]`. The qualifier
+therefore needs no terminator to recognize that measurement. Later cancellation
+or delivery failure must not erase accepted usage; EOF, `[DONE]` and finish reason
+alone cannot create it. This says nothing about successful delivery, tokenizer
+correctness, executed cache reuse or committed settlement.
+
+The existing numeric-validation matrix now exercises both buffered and streaming
+qualification; one envelope-focused test covers the new distinction. No duplicated
+parser or storage matrix is added. Initial RED compilation identifies the missing
+API; negative controls bypassing numeric validation or the empty-choices guard each
+fail assertions. Both controls are removed before final validation.
+
+**Next gate:** the transport must reconstruct complete SSE events, bind them to the
+request, retain the first accepted observation immutably and surface conflicting
+later reports. The current raw metering callback receives lines, not complete SSE
+events: multiline data, truncated frames and oversized discarded lines require
+explicit treatment before wiring this API. Reuse the existing bounded splitter
+and streaming/settlement owners; do not treat a parsed data line as final evidence.
+The qualifier does not validate every chat-chunk field or arbitrary vendor framing.
+
+This is a core prerequisite only. Legacy parsing, wire bytes and HTTP defaults are
+unchanged; tracked mode still rejects streaming before admission. No provider
+transport, binding facade, deployment or C5 gate is activated by this change.
+
 ## Owned buffered HTTP and recovery (W05c/d limited activation)
 
 The [operator mode](../operator/buffered-accounting.md) connects the previously
