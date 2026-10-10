@@ -877,7 +877,15 @@ an opt-in mode of the existing splitter and the core qualifier. Five observer te
 plus the extended splitter matrices and four guard-bypass negative controls cover
 fragmentation, truncation, unknown usage, conflicting reports and bounded input.
 
-Next: bind one observer to the existing upstream response/request owner and prove
-cancellation, shutdown, terminal publication and settlement/recovery. The legacy
-raw path is still line-based and is not rewired by this prerequisite. Legacy defaults
-are unchanged; tracked streaming, release/deployment and full C5 remain open.
+The opt-in raw Chat stream now binds one observer to each upstream response with
+existing attempt/session/request correlation and shared setup/idle deadlines.
+Its copied latest snapshot retains qualified usage through drop, timeout, protocol
+failure and diagnostic-channel loss. DONE is independent of the terminal outcome;
+malformed bytes still forward unchanged with explicit qualification failure.
+Existing HTTP/deadline fixtures and two lifecycle matrices cover the new owner;
+no duplicated parser/storage suite or new retry/task registry is introduced.
+
+Next: reuse the proxy body owner for producer shutdown, durable terminal publication
+and settlement/recovery. The snapshot is in-memory evidence, not crash durability.
+Legacy metered defaults are unchanged; tracked streaming, release/deployment and
+full C5 remain open.
