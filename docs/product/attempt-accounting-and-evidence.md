@@ -667,17 +667,50 @@ parser or storage matrix is added. Initial RED compilation identifies the missin
 API; negative controls bypassing numeric validation or the empty-choices guard each
 fail assertions. Both controls are removed before final validation.
 
-**Next gate:** the transport must reconstruct complete SSE events, bind them to the
-request, retain the first accepted observation immutably and surface conflicting
-later reports. The current raw metering callback receives lines, not complete SSE
-events: multiline data, truncated frames and oversized discarded lines require
-explicit treatment before wiring this API. Reuse the existing bounded splitter
-and streaming/settlement owners; do not treat a parsed data line as final evidence.
-The qualifier does not validate every chat-chunk field or arbitrary vendor framing.
+### Bounded event observation
 
-This is a core prerequisite only. Legacy parsing, wire bytes and HTTP defaults are
-unchanged; tracked mode still rejects streaming before admission. No provider
-transport, binding facade, deployment or C5 gate is activated by this change.
+`sandhi_providers::stream_usage::OpenAiStreamUsageObserver` composes the core qualifier
+with opt-in SSE framing in the existing `LineSplitter`. Construct one per upstream
+HTTP response; the existing request/attempt owner supplies correlation. SSE `id`
+fields cannot replace Sandhi request IDs. No identifier derivation or registry is added.
+
+| Input / state | Observation contract |
+|---|---|
+| LF, CRLF or CR, including split boundaries | Complete blank-line-delimited events; CR dispatches immediately |
+| Initial BOM, comments, ignored fields, multiline data | One leading BOM; data lines joined with newlines; ordinary message events supported |
+| Pending/completed line or aggregate event over 8 MiB | Static structured error; no discarded suffix can become new evidence |
+| Arbitrarily large input chunk | Inspect 8 KiB slices; never copy the whole input chunk into the pending buffer |
+| First qualified usage | Retain immutable counts and cache-reporting evidence |
+| Identical / conflicting later usage | Idempotent / sticky `ConflictingUsage`; first evidence remains inspectable |
+| Later malformed event, partial EOF or cancellation | Prior usage survives; failure or cancellation is a separate fact |
+| Complete `[DONE]` without usage | Protocol completion only; measurement stays absent |
+| Data after `[DONE]` | Explicit failure; cannot manufacture or replace usage |
+
+The line/event ceiling counts ignored fields and comments; CRLF is normalized to
+one line terminator for this bound. Parsing storage is bounded independently of the
+incoming chunk size; total memory also includes bounded splitter, slice and JSON
+parsing overhead. UTF-8/JSON errors, repeated BOMs and unsupported named events
+fail explicitly. `finish()` never adds a delimiter and reports incomplete framing
+or a missing terminator; `usage()`, `is_done()` and `error()` remain separate. Once
+finished, the instance rejects reuse. No reconnect or inference replay is performed.
+Framing follows the [SSE event interpretation rules](https://html.spec.whatwg.org/multipage/server-sent-events.html#event-stream-interpretation);
+the strict application contract rejects malformed input instead of treating it as
+successful accounting.
+
+Existing splitter boundary and deterministic linearity matrices cover both modes;
+five observer tests cover framing, incomplete/unknown measurement, immutable
+retention, invalid events and memory bounds. Four temporary guard-bypass controls
+reject last-write-wins, whole-chunk copying and missing line/event bounds. Numeric
+counter validation remains owned by the core tests; no copied parser/storage suite.
+
+**Next gate:** wire one observer into each owned upstream response, retaining the
+existing request/attempt context and canonical admission/terminal/settlement owner.
+The legacy raw callback still receives lines and does not use this observer. Prove
+retention across cancellation, owner shutdown and durable settlement/recovery before
+activating tracked streaming. This prerequisite does not prove transport ownership,
+HTTP completion, durable publication or arbitrary vendor compatibility. Legacy
+parsing, wire bytes and HTTP defaults are unchanged; tracked mode still rejects
+streaming before admission. No deployed runtime or C5 gate is activated.
 
 ## Owned buffered HTTP and recovery (W05c/d limited activation)
 
