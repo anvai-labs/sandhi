@@ -697,9 +697,9 @@ Both controls fail their assertions; the committed tests retain tracked mode.
 The trigger is explicit synthetic fault injection, not a naturally occurring disk
 failure or proof of a crash at an individual instruction. The unknown drill proves
 retained liability and shutdown reconciliation, not an independently witnessed
-background sweep. These checks use local HTTP, synthetic provider responses and
-virtual-key compatibility auth. Tracked TLS/OIDC parity, streaming ownership,
-release/deployment and actual-member C5 remain separate gates. No production hook,
+background sweep. These two checks now run with both local HTTP/virtual-key auth
+and CA-verified HTTPS/OIDC; provider responses remain synthetic. Streaming ownership,
+managed tracked deployment and actual-member C5 remain separate gates. No production hook,
 provider retry or automatic closure of unknown liability is added.
 
 The same fixture now covers the earlier terminal-publication boundary. After one
@@ -734,7 +734,7 @@ fixture default changes; tracked configuration remains opt-in.
 | Boundary | Evidence | Limit |
 |---|---|---|
 | HTTP/TLS shutdown | Same tracked buffered test verifies one origin call, request correlation, receipt or retained uncertainty, and exit 0/124 over both transports | TLS client verifies the fixture CA and hostname; no external trust-store deployment |
-| OIDC bearer accounting | One successful call joins returned request ID, execution intent, attributed usage event and receipt; session/run/step IDs persist | Fixture introspection maps its access token to admin only |
+| OIDC bearer accounting | One successful call joins returned request ID, execution intent, attributed usage event and receipt; session/run/step IDs persist | Initial dashboard case uses an admin bearer; recovery cases use separate admin/member identities |
 | Budget settlement | Grant binds to `group:dashboard`; Block policy charges exactly 14 tokens (7 fresh input + 4 cache read + 3 output) | Synthetic usage; not tokenizer or executed-cache-reuse evidence |
 | Pre-admission denial | Invalid bearer, disallowed model and subject spoof leave origin count, intent/correlation/receipt/event counts and budget spend unchanged | Focused composition checks; protocol/authorization matrices remain with their existing owners |
 | Browser roles | Existing viewer/operator/admin login, mutation, secure cookie and logout matrix runs with legacy and tracked configurations | Browser ignores its disposable fixture certificate; HTTP client and gateway-to-IdP paths verify CA trust |
@@ -751,6 +751,62 @@ assertions. The fixture-consumer regression suite includes management, metrics,
 reasoning, run rendering, acceptance decisions, recovery, store startup and the
 existing AgentBrowser smoke. No second browser harness is introduced.
 
-This is source-level synthetic buffered acceptance. Deployed tracked OIDC,
-OIDC crash/restart composition, streaming ownership, broader lifecycle,
-release/deployment qualification and full actual-member C5 remain separate gates.
+The two existing tracked SIGKILL cases are parameterized over token compatibility
+and TLS/OIDC instead of adding a second recovery harness. The OIDC member has its
+own access token, viewer role and inference grant; the admin has no inference grant.
+The background request, admin client and gateway-to-authority connection verify CA
+trust. Initial RED checks caught the old fixture serving HTTP for the OIDC cases.
+A temporary negative control retained the inference grant on restart: new dispatch
+returned 200 instead of the required 403, and the test failed. The final source
+restores revocation; the control touches only disposable synthetic state.
+
+| OIDC restart boundary | Required evidence |
+|---|---|
+| Unknown post-dispatch liability | Same member remains authorized; the original bound scope stays held; a new call returns budget-exhausted 429 without another origin request or fabricated receipt |
+| Persisted terminal usage | Revoke only the member's inference grant before restart, preserving its active identity/viewer role; recovery commits the original 14-token receipt without fresh inference authorization |
+| Revoked new dispatch | Member gets 403; receipts, events, spend and the single origin request stay unchanged |
+| Second restart | Same immutable gateway binary, original receipt identity/time and scope/spend; clean shutdown |
+
+Source validation passes all 63 recovery/dashboard/shutdown cases plus the existing
+AgentBrowser recovery smoke (including its negative display controls). The 316-case
+SDK collection passes. The duplicate audit leaves parser, authorization and ledger
+transaction matrices with their existing owners.
+
+This is source-level synthetic buffered acceptance. Actual IdP/released-binary
+qualification, managed tracked deployment, streaming ownership, broader lifecycle
+and full actual-member C5 remain distinct gates.
+
+### Isolated released-binary OIDC qualification (2026-10-10)
+
+New evidence qualifies the official macOS 0.12.0 gateway with the deployed
+AnvaiIdentity policy and existing local credential references. A private loopback
+TLS candidate used an online SQLite backup containing 1,071 historical events,
+tracked buffered accounting and a bound Block budget. The managed gateway, its
+configuration and historical rows remained unchanged; it still uses default
+accounting. No credentials were transferred and no shared cache was cleared.
+
+| Route | Request ID | Fresh input / output / cache read | Receipt charge |
+|---|---|---|---|
+| InferFlux `qwen3-coder-30b` | `req_1791638904926_0` | 14 / 1 / 0 | 15 |
+| InferFlux `qwen2.5-coder-14b` | `req_1791638905151_1` | 14 / 1 / 0 | 15 |
+| ZAI `glm-5.3` | `req_1791638905788_2` | 18 / 3 / 0 | 21 |
+
+- Binary SHA-256: `b138480cd96f4c5a1d830a1f9bf1615ba5dd7519362531323d1c37619ed00e34`.
+- Issuer: `https://id.anvaiops.com/oauth2/openid/sandhi`; member and accounting
+  observer use separate credentials through Victor's existing OAuth helper.
+- All three responses are HTTP 200 with nonempty content. Wire/SQLite/run/receipt
+  joins verify request, member, group, model and distinct session/run IDs; dashboard
+  deltas match 3 calls, 46 fresh-input, 5 output and 0 cache-read tokens. Reporting
+  coverage is explicit for all three; receipts sum to 51 tokens.
+- Gateway buffered deadline remains 120 seconds; client timeout is 125 seconds.
+  No inference retries. Clean candidate shutdown exits 0; database integrity and
+  copied historical events remain intact.
+- Retained local evidence: `var/sandhi-oidc-recovery-2026-10-10/` in the originating
+  Victor checkout, including the reviewed harness and private candidate database.
+  Two initial helper-import failures occurred before any server launch or call.
+
+This is a simple new provider smoke, not actual-member evidence, live crash
+recovery, a managed tracked-mode cutover or C5. Zero reported cache does not prove
+zero executed reuse. Streaming, tokenizer/session-lifecycle correctness and broad
+failure acceptance remain open. The managed streaming route must not be switched
+globally to tracked mode, which currently rejects streaming before admission.

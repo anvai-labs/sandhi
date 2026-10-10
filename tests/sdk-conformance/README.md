@@ -65,6 +65,9 @@ a claim that SQLite commits succeeded.
 complete fixed-shard file sets, integrity, checksums and private, disjoint destinations.
 `test_recovery.py` compares real-process restart/restore evidence, holds uncertain leases
 across SIGKILL and reconciles post-snapshot revocations before enabling credentials.
+Its two tracked SIGKILL cases cover token compatibility and CA-verified TLS/OIDC
+with separate admin/member identities, retained unknown liability and once-only
+settlement after inference-grant revocation. Other recovery cases retain their defaults.
 `test_recovery_broker.py` checks restored metadata against unavailable and re-provisioned
 synthetic broker authority. `test_store_startup.py` proves configured database initialization
 failures exit before serving, without replacing persisted enforcement with memory. See the

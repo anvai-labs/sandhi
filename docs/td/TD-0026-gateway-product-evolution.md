@@ -848,4 +848,16 @@ introduced, and best-effort observations are not atomic settlement delivery.
 Tracked buffered TLS/OIDC now has [synthetic source acceptance](../product/attempt-accounting-and-evidence.md#tracked-buffered-tlsoidc-source-acceptance):
 verified TLS shutdown, OIDC request/intent/event/receipt joins, exact bound-scope
 spend, pre-admission denials and the existing browser role matrix. This does not
-close deployed OIDC, OIDC crash/restart composition, streaming lifecycle or C5.
+close managed tracked deployment, streaming lifecycle or C5. The existing two
+SIGKILL drills now also pass with CA-verified TLS/OIDC and separate admin/member
+identities: unknown liability retains its bound scope, and persisted final usage
+settles once after grant revocation while new dispatch is denied without accounting
+changes. All 63 recovery/dashboard/shutdown cases and the existing AgentBrowser
+recovery smoke pass; 316 SDK cases collect. This remains synthetic source evidence.
+
+A separate [isolated 0.12.0 qualification](../product/attempt-accounting-and-evidence.md#isolated-released-binary-oidc-qualification-2026-10-10)
+uses the actual deployed AnvaiIdentity policy and both InferFlux Qwen routes plus
+ZAI. Three HTTP 200 responses reconcile 46 fresh-input, 5 output and explicit zero
+cache-read tokens across wire, persisted attribution, receipts, run totals and
+dashboard; clean shutdown exits 0. Managed state and historical rows are preserved.
+This is new provider smoke evidence, not a managed cutover, live crash drill or C5.

@@ -109,13 +109,16 @@ Do not restore older writers over a database containing tracked evidence.
 | Persisted final usage | One receipt recovered; another restart preserves spend and identity | #339, synthetic receipt-write failure |
 | Terminal publication contention | Retained retry commits once if process survives; death preserves unknown liability | [#340](https://github.com/anvai-labs/sandhi/pull/340) |
 | Tracked buffered TLS/OIDC | CA-verified shutdown and OIDC accounting/denial joins; existing browser role matrix | [Synthetic source acceptance](../product/attempt-accounting-and-evidence.md#tracked-buffered-tlsoidc-source-acceptance) |
-| Deployed tracked OIDC and streaming lifecycle | Pending | Separate acceptance gates |
+| OIDC crash/restart | Unknown liability retains its bound scope; final usage settles once after inference-grant revocation; new dispatch is denied without accounting changes | Same two recovery cases parameterized over token and TLS/OIDC modes |
+| Released binary with deployed OIDC policy | 0.12.0 isolated TLS candidate: both Qwen routes and ZAI reconcile three receipts / 51 tokens | [Qualification and limits](../product/attempt-accounting-and-evidence.md#isolated-released-binary-oidc-qualification-2026-10-10); managed gateway unchanged |
+| Managed tracked OIDC and streaming lifecycle | Pending | Separate acceptance gates |
 | Executed cache reuse, tokenizer correctness and actual-member C5 | Pending | Source drills cannot establish these |
 | Released tracked-mode deployment | Pending | Existing 0.12.0 default-mode deployment does not qualify tracked lifecycle |
 
-The restart drills use the same copied/hashed binary, local synthetic HTTP
-responses and token compatibility mode. TLS/OIDC composition uses the separately
-described disposable authority. Each successful drill observes one origin request.
+The restart drills use the same copied/hashed binary and local synthetic provider
+responses. The two original SIGKILL drills run with token compatibility and
+CA-verified TLS/OIDC using the disposable authority; terminal-publication contention
+remains a separate token-mode drill. Each successful drill observes one origin request.
 See the [full acceptance record](../product/attempt-accounting-and-evidence.md#tracked-buffered-crashrestart-acceptance).
 
 !!! note "Telemetry is not a settlement outbox"
