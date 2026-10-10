@@ -59,7 +59,9 @@ require more recovery before shutdown; the final check does not extend grace.
 
 Receipts establish committed accounting. Usage events, metrics and tracing are
 best-effort observations and may be absent after a telemetry failure; they are
-not an atomic receipt-delivery outbox. Threshold alerts are not fired by this
+not an atomic receipt-delivery outbox. Tracked token counters can increase before
+terminal usage or settlement persists; a success-labelled observation does not
+prove a successful client response or committed spend. Threshold alerts are not fired by this
 tracked path. Retained intent capacity remains bounded at 100,000; retention,
 observation amendments, network export and multi-shard migration are separate
 work. Do not restore older writers over a database containing tracked evidence.
@@ -74,5 +76,8 @@ hashed binary: unknown dispatch keeps liability and incomplete shutdown; persist
 final usage recovers one receipt after a synthetic receipt-write failure. A second
 restart preserves spend and receipt identity. See the
 [acceptance scope and remaining gates](../product/attempt-accounting-and-evidence.md#tracked-buffered-crashrestart-acceptance).
+Additional contention drills witness gateway usage before terminal persistence:
+survival retries retained usage into one receipt, while death before persistence
+retains unknown liability. Neither branch repeats the provider request.
 These synthetic HTTP/token-mode checks do not establish tracked TLS/OIDC, streaming
 or deployed-provider acceptance.
