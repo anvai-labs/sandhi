@@ -49,7 +49,7 @@ flowchart LR
 ## Recent source changes and their limits
 
 !!! warning "Develop is ahead of the serving release"
-    Tracked buffered accounting is opt-in work in the [0.12.0 release scope](releases/v0.12.0.md).
+    Tracked buffered accounting is opt-in in the [published 0.12.0 release](releases/v0.12.0.md).
     Passing source tests do not establish a released deployment or full mixed-team
     acceptance. Check [release artifacts](https://github.com/anvai-labs/sandhi/releases)
     and your actual binary identity before enabling it.
