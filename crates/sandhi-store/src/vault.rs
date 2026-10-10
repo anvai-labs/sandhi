@@ -306,6 +306,16 @@ impl Vault for CredentialStoreVault {
             );
         }
         for path in candidates {
+            // Reject symlinks outright: a swapped link could redirect the
+            // read outside the provisioned directory, and the systemd
+            // credential store is plain files by contract.
+            if std::fs::symlink_metadata(&path)
+                .map(|meta| meta.file_type().is_symlink())
+                .unwrap_or(true)
+            {
+                tracing::warn!("credstore: skipping symlink candidate {path:?}");
+                continue;
+            }
             match std::fs::read(&path) {
                 // systemd-creds output may carry a trailing newline; trim
                 // surrounding Unicode whitespace — the secret itself is
@@ -590,7 +600,7 @@ impl VaultStore {
     /// `$CREDENTIALS_DIRECTORY` inside a system unit); refusing to start
     /// without it is deliberate — an empty directory would silently drop
     /// every provider credential.
-    pub fn backend_from_env() -> Box<dyn Vault> {
+    pub fn backend_from_env() -> Result<Box<dyn Vault>, String> {
         match std::env::var("SANDHI_VAULT_BACKEND")
             .unwrap_or_else(|_| "keyring".into())
             .trim()
@@ -603,34 +613,33 @@ impl VaultStore {
                     .trim()
                     .to_string();
                 if dir.is_empty() {
-                    eprintln!(
-                        "sandhi-proxy: SANDHI_VAULT_BACKEND=credstore requires SANDHI_CREDENTIALS_DIR"
+                    return Err(
+                        "SANDHI_VAULT_BACKEND=credstore requires SANDHI_CREDENTIALS_DIR"
+                            .to_string(),
                     );
-                    std::process::exit(1);
                 }
                 let dir = std::path::PathBuf::from(&dir);
                 if !dir.is_dir() {
-                    eprintln!(
-                        "sandhi-proxy: SANDHI_CREDENTIALS_DIR '{}' is not a directory",
+                    return Err(format!(
+                        "SANDHI_CREDENTIALS_DIR '{}' is not a directory",
                         dir.display()
-                    );
-                    std::process::exit(1);
+                    ));
                 }
-                Box::new(CredentialStoreVault::new(dir))
+                Ok(Box::new(CredentialStoreVault::new(dir)))
             }
             "sentinelpass" => {
                 if std::env::var("SANDHI_SENTINELPASS_FALLBACK_CLI").as_deref() == Ok("1") {
-                    Box::new(SentinelPassVault::new())
+                    Ok(Box::new(SentinelPassVault::new()))
                 } else {
                     #[cfg(feature = "sentinelpass-ipc")]
                     {
                         match SentinelPassIpcVault::new() {
-                            Ok(backend) => Box::new(backend),
+                            Ok(backend) => Ok(Box::new(backend)),
                             Err(_) => {
                                 tracing::warn!(
                                     "native vault configuration unavailable; no fallback selected"
                                 );
-                                Box::new(UnavailableVault)
+                                Ok(Box::new(UnavailableVault))
                             }
                         }
                     }
@@ -640,12 +649,12 @@ impl VaultStore {
                             "SANDHI_VAULT_BACKEND=sentinelpass daemon IPC requires the \
                              `sentinelpass-ipc` feature; no fallback selected"
                         );
-                        Box::new(UnavailableVault)
+                        Ok(Box::new(UnavailableVault))
                     }
                 }
             }
-            "keyring" => Box::new(KeyringVault),
-            _ => Box::new(UnavailableVault),
+            "keyring" => Ok(Box::new(KeyringVault)),
+            _ => Ok(Box::new(UnavailableVault)),
         }
     }
 
@@ -1140,5 +1149,37 @@ mod credstore_tests {
         ));
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn credstore_symlink_candidate_is_skipped_not_followed() {
+        use std::os::unix::fs::symlink;
+
+        let dir = temp_dir("symlink");
+        // The link points at a file OUTSIDE the provisioned directory: if the
+        // reader followed it, the outside secret would leak into the vault.
+        let outside = dir.parent().unwrap().join("outside-secret.txt");
+        std::fs::write(&outside, "leaked").unwrap();
+        let link = dir.join("inferflux__default");
+        symlink(&outside, &link).unwrap();
+
+        let vault = CredentialStoreVault::new(dir.clone());
+        assert!(vault.get_secret("inferflux", "default").unwrap().is_none());
+        std::fs::remove_file(&outside).ok();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn backend_from_env_credstore_without_dir_is_an_error_not_an_exit() {
+        // Serialize: backend_from_env reads process-global env vars.
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("SANDHI_VAULT_BACKEND", "credstore");
+        std::env::remove_var("SANDHI_CREDENTIALS_DIR");
+        assert!(VaultStore::backend_from_env().is_err());
+        std::env::set_var("SANDHI_CREDENTIALS_DIR", "/nonexistent-credstore-dir");
+        assert!(VaultStore::backend_from_env().is_err());
+        std::env::remove_var("SANDHI_VAULT_BACKEND");
+        std::env::remove_var("SANDHI_CREDENTIALS_DIR");
     }
 }

@@ -14,7 +14,7 @@ alone do not close remote authority setup or authorize a release tag.
 | Target | Required artifacts |
 |---|---|
 | GitHub release | Linux x86_64 and macOS arm64 archives; each contains `sandhi-proxy` and `sandhi` |
-| PyPI | `sandhi-gateway` wheels covering Linux x86_64, macOS arm64 and Windows amd64 |
+| PyPI | `sandhi-gateway` wheels covering Linux x86_64/aarch64, macOS arm64 and Windows amd64 |
 | crates.io | `sandhi-core`, `sandhi-providers`, `sandhi-store`, `sandhi-proxy`, all non-yanked |
 | npm | `@anvailabs/sandhi`, `@anvailabs/sandhi-linux-x64-gnu`, `@anvailabs/sandhi-darwin-arm64`; root optional dependencies pin both platform packages exactly |
 
@@ -188,6 +188,15 @@ python3 scripts/verify-release.py vX.Y.Z --targets npm
 (cd bindings/node && npm ci --ignore-scripts --no-audit --no-fund)
 python3 -m pytest tests/release -q
 ```
+
+Linux wheels use the manylinux2014 baseline. The aarch64 build runs natively on
+`ubuntu-24.04-arm`; PR CI installs its release-mode abi3 wheel into fresh Python
+3.11, 3.12 and 3.13 environments and runs the binding suite before `CI Success`.
+The verifier requires a portable manylinux aarch64 artifact (a host-only `linux_aarch64`
+or musllinux wheel does not satisfy this target). For historical releases predating
+this target, pass `--pypi-platforms linux-x86_64,macos-arm64,windows-amd64` explicitly.
+Adding this build does not backfill already-published package versions; downstream
+consumers need a new Sandhi release and dependency-pin update.
 
 The verifier distinguishes `MISSING`, `INVALID` and `UNAVAILABLE`, retries within bounded limits,
 checks declared wheel/platform coverage and npm dependencies, and streams GitHub archives to check

@@ -19,6 +19,46 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-10-10
+
+### Added
+
+- Linux aarch64 Python wheels using manylinux2014 and the existing CPython 3.11+
+  stable ABI. Native arm64 CI tests the release wheel on Python 3.11–3.13, and
+  release verification now requires this platform alongside the existing wheels.
+- Opt-in tracked buffered HTTP accounting: atomically correlated admission,
+  qualified terminal usage, retained ownership and bounded recovery through the
+  original ledger. Actual-process tests cover crash/restart and terminal publication
+  under SQLite contention. Tracked TLS/OIDC, streaming lifecycle, release/deployment
+  and full mixed-team acceptance remain separate gates (#337–#340).
+- Opt-in prepared admission in the existing bounded settlement worker registry,
+  with typed result ownership across waiter cancellation and late commit. Existing
+  Rust Work/Outcome APIs and HTTP defaults are unchanged; tracked HTTP activation
+  is opt-in, with full lifecycle acceptance still a separate gate.
+
+### Changed
+- Update SentinelPass protocol to 0.17.0 and the hyper-util/tokio-rustls transport
+  dependencies. Qualify integration with InferFlux 0.5.0 and optional AgentBrowser
+  1.16.0; AgentBrowser remains a test tool, not a gateway runtime dependency.
+- Raise the declared MSRV to 1.95 and migrate the atomic `fetch_update`
+  call sites to `try_update` (renamed upstream; the alias is deprecated
+  since 1.99).
+
+### Fixed
+- Update the documentation toolchain past the Material search-suggestion XSS
+  and PyMdown path-traversal/ReDoS advisories.
+- `VaultStore::backend_from_env` reports backend misconfiguration as an
+  error instead of terminating the process; the proxy binary owns the
+  exit, so library consumers no longer die at startup.
+- The credstore backend rejects symlinked credential files, keeping the
+  read inside the provisioned directory.
+
+### Docs
+- Add the MkDocs operator site with visual accounting guidance, a canonical-source
+  documentation map and AnvaiOps-aligned light/dark/system styling.
+- Restore per-version compare links in the changelog footer (0.8.0
+  through 0.11.0 were resolving to plain text).
+
 ## [0.11.0] — 2026-10-02
 
 ### Added
@@ -1313,7 +1353,14 @@ inline reverse-proxy, the durable store, and both language bindings.
   ([#9](https://github.com/anvai-labs/sandhi/pull/9),
   [#10](https://github.com/anvai-labs/sandhi/pull/10))
 
-[Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/anvai-labs/sandhi/compare/v0.11.0...v0.12.0
+[0.11.0]: https://github.com/anvai-labs/sandhi/compare/v0.10.1...v0.11.0
+[0.10.1]: https://github.com/anvai-labs/sandhi/compare/v0.10.0...v0.10.1
+[0.10.0]: https://github.com/anvai-labs/sandhi/compare/v0.9.1...v0.10.0
+[0.9.1]: https://github.com/anvai-labs/sandhi/compare/v0.9.0...v0.9.1
+[0.9.0]: https://github.com/anvai-labs/sandhi/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/anvai-labs/sandhi/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/anvai-labs/sandhi/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/anvai-labs/sandhi/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/anvai-labs/sandhi/compare/v0.5.1...v0.6.0

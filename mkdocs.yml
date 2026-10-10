@@ -1,0 +1,91 @@
+site_name: Sandhi
+site_description: AI usage, attribution and controlled access — measured in neutral units.
+site_url: https://anvai-labs.github.io/sandhi/
+repo_url: https://github.com/anvai-labs/sandhi
+repo_name: anvai-labs/sandhi
+edit_uri: edit/develop/docs/
+docs_dir: docs
+site_dir: site
+strict: true
+theme:
+  name: material
+  custom_dir: docs/overrides
+  font: false
+  icon:
+    logo: material/transit-connection-variant
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-4
+        name: Switch to system preference
+plugins:
+  - search
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+hooks:
+  - scripts/docs_links.py
+extra_css:
+  - assets/stylesheets/brand.css
+exclude_docs: |
+  /README.md
+  overrides/
+  product/evidence/
+nav:
+  - Start here: index.md
+  - Operate:
+      - Identity and access: operator/oidc-sso.md
+      - Identity groups: operator/identity-groups.md
+      - Buffered accounting: operator/buffered-accounting.md
+      - Buffered deadlines: operator/buffered-deadlines.md
+      - Streaming deadlines: operator/streaming-deadlines.md
+      - Stream body ownership: operator/stream-body-lifetime.md
+      - Recovery drills: operator/recovery-drill.md
+      - Embeddings and completions: operator/text-endpoints.md
+      - Policy evaluation: operator/policy-evaluation.md
+  - Understand:
+      - Architecture and wire contract: adr/0001-sandhi-architecture-and-wire-contract.md
+      - Two processing planes: adr/0004-two-plane-proxy-and-enforcement-boundary.md
+      - Budget guarantees: product/metering-and-budget-guarantees.md
+      - Accounting and evidence: product/attempt-accounting-and-evidence.md
+      - Cache reporting: adr/0010-cache-read-reporting-availability.md
+  - Project:
+      - Version 0.12.0: releases/v0.12.0.md
+      - Documentation map: map.md
+      - Release safeguards: product/release-safeguards.md
+      - Contributing to these docs: contributing-docs.md
+extra:
+  generator: false

@@ -2059,3 +2059,130 @@ fn dispatch_fence_rejects_expired_and_damaged_evidence() {
         );
     }
 }
+
+#[test]
+fn correlated_admission_is_atomic_scoped_and_survives_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("correlated.db");
+    let mut ledger = SqliteLedger::open(path.to_str().unwrap()).unwrap();
+    let IntentAdmission::Admitted(intent) = ledger
+        .reserve_correlated_durable(
+            "vk:removed",
+            100,
+            OffsetDateTime::now_utc(),
+            Duration::minutes(5),
+            10,
+            "req-once",
+        )
+        .unwrap()
+    else {
+        panic!("denied")
+    };
+    drop(ledger);
+    let mut ledger = SqliteLedger::open(path.to_str().unwrap()).unwrap();
+    assert_eq!(
+        ledger
+            .request_id_durable("vk:removed", &intent.execution_id)
+            .unwrap()
+            .as_deref(),
+        Some("req-once")
+    );
+    assert!(matches!(
+        ledger.request_id_durable("other", &intent.execution_id),
+        Err(EvidenceError::WrongScope)
+    ));
+    let old = tracked(&mut ledger);
+    assert_eq!(
+        ledger
+            .request_id_durable("team", &old.execution_id)
+            .unwrap(),
+        None
+    );
+    let before: i64 = ledger
+        .conn
+        .query_row("SELECT COUNT(*) FROM budget_execution_intent", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert!(matches!(
+        ledger.reserve_correlated_durable(
+            "vk:removed",
+            1,
+            OffsetDateTime::now_utc(),
+            Duration::minutes(5),
+            10,
+            ""
+        ),
+        Err(EvidenceError::InvalidInput)
+    ));
+    // A failure inserting correlation rolls the reservation and intent back too.
+    ledger.conn.execute_batch("CREATE TRIGGER refuse_correlation BEFORE INSERT ON budget_request_correlation BEGIN SELECT RAISE(ABORT, 'fixture'); END;").unwrap();
+    assert!(ledger
+        .reserve_correlated_durable(
+            "vk:removed",
+            1,
+            OffsetDateTime::now_utc(),
+            Duration::minutes(5),
+            10,
+            "req-fail"
+        )
+        .is_err());
+    assert_eq!(
+        ledger
+            .conn
+            .query_row("SELECT COUNT(*) FROM budget_execution_intent", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        before
+    );
+}
+
+#[test]
+fn recovery_scope_inventory_is_bounded_and_freezes_new_admissions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("scopes.db");
+    let mut ledger = SqliteLedger::open(path.to_str().unwrap()).unwrap();
+    for scope in ["a", "z"] {
+        ledger
+            .reserve_correlated_durable(
+                scope,
+                1,
+                OffsetDateTime::now_utc(),
+                Duration::minutes(5),
+                20,
+                "request",
+            )
+            .unwrap();
+    }
+    let first = ledger.recovery_scopes_durable(None, 1).unwrap();
+    assert_eq!(first.scopes, ["a"]);
+    ledger
+        .reserve_correlated_durable(
+            "b",
+            1,
+            OffsetDateTime::now_utc(),
+            Duration::minutes(5),
+            20,
+            "new",
+        )
+        .unwrap();
+    let second = ledger
+        .recovery_scopes_durable(first.next.as_ref(), 1)
+        .unwrap();
+    assert_eq!(second.scopes, ["z"]);
+    assert!(ledger
+        .recovery_scopes_durable(second.next.as_ref(), 1)
+        .unwrap()
+        .scopes
+        .is_empty());
+    assert_eq!(
+        ledger.recovery_scopes_durable(None, 10).unwrap().scopes,
+        ["a", "b", "z"]
+    );
+    for limit in [0, 101] {
+        assert!(matches!(
+            ledger.recovery_scopes_durable(None, limit),
+            Err(EvidenceError::InvalidInput)
+        ));
+    }
+}

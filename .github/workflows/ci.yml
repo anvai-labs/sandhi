@@ -162,6 +162,7 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'scripts/coverage-bindings.sh'
+              - '.github/workflows/release.yml'
               - '.github/workflows/ci.yml'
             node:
               - 'crates/**'
@@ -226,7 +227,10 @@ jobs:
       - name: Container resource enforcement on hosted Linux
         if: ${{ runner.environment == 'github-hosted' }}
         run: |
-          docker build --iidfile "$RUNNER_TEMP/evaluator-image.id" templates/python-evaluator
+          # Use the official mirror with the Dockerfile's single immutable pin;
+          # hosted runners otherwise share Docker Hub's anonymous pull quota.
+          image="mirror.gcr.io/library/$(sed -n 's/^ARG PYTHON_IMAGE=//p' templates/python-evaluator/Dockerfile)"
+          docker build --build-arg PYTHON_IMAGE="$image" --iidfile "$RUNNER_TEMP/evaluator-image.id" templates/python-evaluator
           python scripts/smoke_policy_container.py --sandhi "$GITHUB_WORKSPACE" --image "$(cat "$RUNNER_TEMP/evaluator-image.id")"
       # Scope 5 (TD-0011 P3): the `otel-otlp` feature is default-off. Verify it builds, clippy-
       # cleans, and tests when opted in — and that the default build stays free of the
@@ -319,6 +323,52 @@ jobs:
         # Instrumented rebuild + harness → llvm-cov over bindings/python/src/lib.rs only. The
         # --workspace coverage job never sees the glue (separate cargo workspace, foreign runtime).
         run: bash scripts/coverage-bindings.sh python
+
+  python-wheel-arm64:
+    name: Python manylinux aarch64 wheel
+    needs: changes
+    if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.python == 'true' }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    env:
+      PYTHONNOUSERSITE: 1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: |
+            3.11
+            3.12
+            3.13
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b
+        with:
+          command: build
+          args: --release --locked -m bindings/python/Cargo.toml --out dist
+          target: aarch64-unknown-linux-gnu
+          manylinux: '2014'
+      - name: Install the portable abi3 wheel and test each supported interpreter
+        shell: bash
+        run: |
+          # Reject a host-only linux tag or a wheel for the wrong CPU/ABI.
+          test "$(uname -m)" = aarch64
+          wheels=(dist/*-cp311-abi3-manylinux*aarch64.whl)
+          test "${#wheels[@]}" -eq 1 && test -f "${wheels[0]}"
+          for version in 3.11 3.12 3.13; do
+            venv="$RUNNER_TEMP/wheel-$version"
+            "python$version" -m venv "$venv"
+            "$venv/bin/python" -m pip install --no-index --no-deps --only-binary=:all: "${wheels[0]}"
+            "$venv/bin/python" -m pip install pytest==8.4.1
+            "$venv/bin/python" -I -c 'import sandhi_gateway; assert sandhi_gateway.__file__.startswith(__import__("sys").prefix)'
+            "$venv/bin/python" -m pytest bindings/python/tests/ -q
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: tested-manylinux-aarch64-wheel
+          path: dist/*.whl
+          if-no-files-found: error
 
   attribution:
     needs: authorize-owner
@@ -433,7 +483,7 @@ jobs:
         with:
           components: rustfmt, clippy, llvm-tools-preview
       - uses: taiki-e/install-action@ea647c55f74bb153499600c054578c0d83fa19d5 # cargo-llvm-cov 2026-08-30
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
       - name: fmt + clippy (the node binding is its own workspace)
@@ -589,7 +639,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
       - run: python -m pip install pytest==8.4.1 PyYAML==6.0.2
@@ -622,7 +672,7 @@ jobs:
           vars.OWNER_PRIVATE_CI_ENABLED == 'true' &&
           needs.authorize-owner.result == 'success')
       )
-    needs: [authorize-owner, changes, rust, schema, python-binding, node-binding, attribution, coverage, codegen-drift, sdk-conformance, security, lint-title, release-safeguards]
+    needs: [authorize-owner, changes, rust, schema, python-binding, python-wheel-arm64, node-binding, attribution, coverage, codegen-drift, sdk-conformance, security, lint-title, release-safeguards]
     steps:
       - name: Verify no required job failed (skipped is OK for docs-only)
         env:

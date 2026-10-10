@@ -91,7 +91,7 @@ where
         });
     };
     let deadline = tokio::time::Instant::now() + lifetime.duration();
-    let fits_lease = accounting.reservation.as_ref().map_or(true, |reservation| {
+    let fits_lease = accounting.reservation.as_ref().is_none_or(|reservation| {
         crate::deadlines::fits_lease(
             lifetime.duration(),
             reservation.expires_at,

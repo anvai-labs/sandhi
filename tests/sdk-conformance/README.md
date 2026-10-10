@@ -11,6 +11,19 @@ python -m playwright install chromium
 python -m pytest tests/sdk-conformance/ -q
 ```
 
+The binary fixtures expect the worktree's default `target/` directory; omit a
+`CARGO_TARGET_DIR` override for these tests. On macOS, use a fresh short temporary
+directory for broker cases because the default pytest path can exceed the Unix
+socket path limit:
+
+```sh
+python -m pytest tests/sdk-conformance/ -q --basetemp "$(mktemp -d /tmp/sandhi-sdk.XXXXXX)"
+```
+
+Pytest clears its base directory, so never point `--basetemp` at retained evidence
+or an existing service directory. These fixtures build source binaries; their
+results are not installed-release or live-provider acceptance.
+
 `test_dashboard.py` covers authentication, keyboard usage, public/disabled modes, mutation
 feedback, one-time key visibility, token clearing and stale replies, hostile metadata, failed
 database reads, served CSP/assets and mobile overflow. A synthetic-data screenshot is written
@@ -91,6 +104,10 @@ terminal usage/cache details, request and trace correlation, credential/attribut
 and the direct origin error envelope. CI checks out and builds that exact full commit SHA with
 ccache; no model or GPU is required.
 
+The qualified pin is InferFlux **v0.5.0** (`bfdf32c00ccf40c7af73b86df2eedabc20a7ae85`).
+All 16 existing origin-contract cases also passed against the installed macOS
+Homebrew release. This is synthetic wire evidence, not GPU or actual-member C5 acceptance.
+
 For a local focused run, build the pinned InferFlux checkout and provide both paths:
 
 ```sh
@@ -104,19 +121,24 @@ the new revision must pass this focused suite before the pin moves.
 
 ## Optional AgentBrowser integration
 
-Use a built sibling checkout with Node 22 and its Chromium installed. Reviewed source revision:
-`dec28b3882eb2da9cbe2dbefa571efbbbb951292`. Build that checkout using its documented `pnpm build`
+Use a built sibling checkout with Node 24 LTS and its Chromium installed. Qualified source:
+AgentBrowser **v1.16.0**, `104e11d064761058047d7270f5aff7a25f8c634c`.
+Build that exact tag using its frozen lockfile and documented `pnpm build`
 workflow before running; stale `dist/` packages may not have the snapshot/plan methods.
 
 ```sh
 SANDHI_AGENTBROWSER_ROOT=/absolute/path/to/agentbrowser \
-  python -m pytest tests/sdk-conformance/test_agentbrowser_smoke.py -q
+  .venv-codesign/bin/python -m pytest tests/sdk-conformance/test_agentbrowser_smoke.py \
+  tests/sdk-conformance/test_recovery_agentbrowser.py -q
 ```
 
 Without that variable the optional test skips; an explicitly configured broken checkout fails.
 The regular CI job runs the Playwright regressions but does not fetch a sibling repository.
 `test_recovery_agentbrowser.py` uses the same optional checkout to verify restored dashboard
 evidence, Refresh and token clearing without generating new inference observations.
+Both existing tests pass against v1.16.0, including the recovery test's negative
+numeric/DOM evidence controls. This is an optional test integration, not a Sandhi
+runtime package dependency; no AgentBrowser package is added to gateway installs.
 It also compares accessibility-visible attribution/budget rows against restored evidence and
 deliberately corrupts values, headings and visibility to check that the verifier rejects
 mismatches. Overview cards receive exact DOM-value/label checks only: the current sibling
