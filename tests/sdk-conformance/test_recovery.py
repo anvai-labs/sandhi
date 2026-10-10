@@ -11,11 +11,12 @@ import json
 import os
 import shutil
 import sqlite3
+import ssl
 import subprocess
 import threading
 import time
 from contextlib import closing, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,6 +25,7 @@ import pytest
 
 from conftest import REAL_OPENAI_KEY, REPO_ROOT, _free_port
 from recovery_snapshot import restore, snapshot
+from oidc_fixture import oidc_authority  # noqa: F401 - same disposable HTTPS authority
 from test_shutdown import BODY, gated_provider  # noqa: F401 - synthetic gated upstream fixture
 
 
@@ -42,6 +44,9 @@ class Gateway:
     shards: int
     executable_sha256: str
     contract_version: dict
+    admin_headers: dict = field(default_factory=lambda: dict(ADMIN))
+    verify: ssl.SSLContext | bool = True
+    member_token: str | None = None
 
     def stop(self, *, expected_status=0):
         self.process.terminate()
@@ -49,7 +54,12 @@ class Gateway:
 
 
 @pytest.fixture
-def recovery_gateway(proxy_binary, gated_provider, tmp_path):
+def recovery_gateway(proxy_binary, gated_provider, tmp_path, request):
+    mode = getattr(request, "param", "tokens")
+    assert mode in ("tokens", "oidc")
+    authority = request.getfixturevalue("oidc_authority") if mode == "oidc" else None
+    if authority:
+        authority.access_tokens["recovery-member-access"] = "recovery-member"
     # Other feature fixtures rebuild target/debug. Every restart in a drill must
     # execute the same immutable binary, not whichever build ran most recently.
     executable = tmp_path / "recovery-proxy"
@@ -59,7 +69,7 @@ def recovery_gateway(proxy_binary, gated_provider, tmp_path):
     launches = 0
 
     @contextmanager
-    def launch(database, *, shards=1, provider_enabled=True, tracked=False):
+    def launch(database, *, shards=1, provider_enabled=True, tracked=False, oidc_grant=True):
         nonlocal launches
         launches += 1
         database = Path(database)
@@ -79,13 +89,41 @@ def recovery_gateway(proxy_binary, gated_provider, tmp_path):
         })
         if tracked:
             env["SANDHI_BUFFERED_ACCOUNTING"] = "tracked"
+        verify = True
+        admin_headers = dict(ADMIN)
+        member_token = None
+        scheme = "http"
+        if authority:
+            scheme = "https"
+            config.write_text(json.dumps({"tls": {
+                "cert": str(authority.certificate), "key": str(authority.key),
+            }}))
+            policy = tmp_path / f"oidc-{launches}.json"
+            policy.write_text(json.dumps({
+                "issuer": authority.issuer, "client_id": "sandhi-browser",
+                "redirect_url": f"https://localhost:{env['SANDHI_BIND'].rsplit(':', 1)[1]}/auth/callback",
+                "ca_file": str(authority.certificate),
+                "subjects": {
+                    "admin": {"role": "admin"},
+                    "recovery-member": {"role": "viewer", "grants": {"member": {
+                        "upstream": "openai", "models": ["gpt-mock"],
+                        "group": "recovery-a", "budget_scope": SCOPES[0],
+                    }} if oidc_grant else {}},
+                },
+            }))
+            env.pop("SANDHI_AUTH_MODE")
+            env["SANDHI_OIDC_CONFIG"] = str(policy)
+            verify = ssl.create_default_context(cafile=authority.certificate)
+            admin_headers = {"Authorization": "Bearer fixture-access"}
+            member_token = "recovery-member-access"
         if provider_enabled:
             env.update(SANDHI_OPENAI_KEY=REAL_OPENAI_KEY, SANDHI_OPENAI_BASE=gated_provider.base)
         with (tmp_path / f"launch-{launches}.stderr").open("wb") as logs:
             process = subprocess.Popen([str(executable)], cwd=REPO_ROOT, env=env,
                                        stdout=subprocess.DEVNULL, stderr=logs)
             try:
-                with httpx.Client(base_url="http://" + env["SANDHI_BIND"], timeout=3) as client:
+                with httpx.Client(base_url=scheme + "://" + env["SANDHI_BIND"],
+                                  timeout=3, verify=verify) as client:
                     deadline = time.monotonic() + 15
                     while True:
                         assert process.poll() is None, "recovery gateway exited during startup"
@@ -98,7 +136,8 @@ def recovery_gateway(proxy_binary, gated_provider, tmp_path):
                         time.sleep(0.02)
                     version = client.get("/version")
                     assert version.status_code == 200, version.text
-                    yield Gateway(process, client, database, shards, executable_sha256, version.json())
+                    yield Gateway(process, client, database, shards, executable_sha256, version.json(),
+                                  admin_headers, verify, member_token)
             finally:
                 if process.poll() is None:
                     process.terminate()
@@ -150,8 +189,8 @@ def leases(base, shards):
     return sorted(rows)
 
 
-def get(client, path):
-    response = client.get(path, headers=ADMIN)
+def get(client, path, *, headers=ADMIN):
+    response = client.get(path, headers=headers)
     assert response.status_code == 200, response.text
     return response.json()
 
@@ -163,10 +202,10 @@ def call(client, secret, *, step="seed", stream=False):
     }, json={**BODY, "stream": stream, "max_tokens": 64})
 
 
-def wait_usage(client, count):
+def wait_usage(client, count, *, headers=ADMIN):
     deadline = time.monotonic() + 5
     while True:
-        usage = get(client, "/dashboard/api/usage")
+        usage = get(client, "/dashboard/api/usage", headers=headers)
         if usage["total"]["calls"] == count:
             return usage
         assert time.monotonic() < deadline, usage
@@ -532,23 +571,27 @@ def test_tracked_terminal_observed_during_sqlite_contention(
     assert len(gated_provider.requests) == 1, "accounting recovery replayed inference"
 
 
+@pytest.mark.parametrize("recovery_gateway", ["tokens", "oidc"], indirect=True)
 def test_tracked_sigkill_after_origin_acceptance_retains_unknown_liability(
-    recovery_gateway, gated_provider, tmp_path, record_property,
+    recovery_gateway, gated_provider, tmp_path, record_property, request,
 ):
     source = tmp_path / "tracked-unknown.db"
     gated_provider.gate_buffered = True
     outcomes = []
     with recovery_gateway(source, tracked=True) as gateway:
-        key = mint(gateway.client)["virtual_key"]
+        expected_scheme = "https" if request.node.callspec.params["recovery_gateway"] == "oidc" else "http"
+        assert gateway.client.base_url.scheme == expected_scheme
+        key = gateway.member_token if gateway.member_token is not None else mint(gateway.client)["virtual_key"]
 
-        def request():
+        def send_request():
             try:
-                with httpx.Client(base_url=str(gateway.client.base_url), timeout=10) as client:
+                with httpx.Client(base_url=str(gateway.client.base_url), timeout=10,
+                                  verify=gateway.verify) as client:
                     outcomes.append(call(client, key))
             except httpx.TransportError as error:
                 outcomes.append(error)
 
-        thread = threading.Thread(target=request, daemon=True)
+        thread = threading.Thread(target=send_request, daemon=True)
         thread.start()
         try:
             assert gated_provider.entered.wait(5), "origin never accepted buffered request"
@@ -562,6 +605,7 @@ def test_tracked_sigkill_after_origin_acceptance_retains_unknown_liability(
             assert admitted["budget_settlement_outbox"] == []
             assert admitted["usage_events"] == []
             held, = leases(source, 1)
+            assert held[0] == SCOPES[0]
             assert held[1] == intent[1] and held[2] > 0 and held[3:5] == (0, 0)
             gateway.process.kill()
             assert gateway.process.wait(timeout=3) == -9
@@ -575,27 +619,31 @@ def test_tracked_sigkill_after_origin_acceptance_retains_unknown_liability(
     with recovery_gateway(source, tracked=True) as restarted:
         assert restarted.executable_sha256 == gateway.executable_sha256
         # The held ceiling must still deny new work after all RAM owners are lost.
-        changed = restarted.client.post("/admin/budget", headers=ADMIN, json={
+        changed = restarted.client.post("/admin/budget", headers=restarted.admin_headers, json={
             "scope": held[0], "limit_tokens": held[2], "window": "total", "policy": "block",
         })
         assert changed.status_code == 200, changed.text
         denied = call(restarted.client, key, step="held-capacity")
         assert denied.status_code == 429, denied.text
+        assert denied.json()["error"]["message"] == "budget exhausted"
         restarted.stop(expected_status=124)
     assert tracked_rows(source) == admitted
     assert len(gated_provider.requests) == 1
 
 
+@pytest.mark.parametrize("recovery_gateway", ["tokens", "oidc"], indirect=True)
 def test_tracked_sigkill_after_terminal_persistence_recovers_one_receipt(
-    recovery_gateway, gated_provider, tmp_path, record_property,
+    recovery_gateway, gated_provider, tmp_path, record_property, request,
 ):
     source = tmp_path / "tracked-ready.db"
     with recovery_gateway(source, tracked=True) as gateway:
-        configured = gateway.client.post("/admin/budget", headers=ADMIN, json={
+        expected_scheme = "https" if request.node.callspec.params["recovery_gateway"] == "oidc" else "http"
+        assert gateway.client.base_url.scheme == expected_scheme
+        configured = gateway.client.post("/admin/budget", headers=gateway.admin_headers, json={
             "scope": SCOPES[0], "limit_tokens": 10000, "window": "total", "policy": "block",
         })
         assert configured.status_code == 200, configured.text
-        key = mint(gateway.client)["virtual_key"]
+        key = gateway.member_token if gateway.member_token is not None else mint(gateway.client)["virtual_key"]
         # Synthetic fault injection at the existing transaction boundary; this
         # does not claim a naturally occurring disk failure or a timed crash gap.
         with closing(sqlite3.connect(source, timeout=1)) as connection:
@@ -613,8 +661,14 @@ def test_tracked_sigkill_after_terminal_persistence_recovers_one_receipt(
         assert before["budget_request_correlation"] == [(intent[0], request_id)]
         assert before["budget_settlement_outbox"] == []
         held, = leases(source, 1)
+        assert held[0] == SCOPES[0]
         assert held[1] == intent[1] and held[3:5] == (0, 0)
-        wait_usage(gateway.client, 1)
+        wait_usage(gateway.client, 1, headers=gateway.admin_headers)
+        subject = "recovery-member" if gateway.member_token is not None else "recovery-subject"
+        with closing(sqlite3.connect(source)) as connection:
+            assert connection.execute(
+                "SELECT subject_id, group_id, session_id, run_id, step_id FROM usage_events"
+            ).fetchall() == [(subject, "recovery-a", "recovery-session", "recovery-run", "seed")]
         before = tracked_rows(source)
         gateway.process.kill()
         assert gateway.process.wait(timeout=3) == -9
@@ -624,7 +678,7 @@ def test_tracked_sigkill_after_terminal_persistence_recovers_one_receipt(
     with closing(sqlite3.connect(source, timeout=1)) as connection:
         connection.execute("DROP TRIGGER reject_test_receipt")
         connection.commit()
-    with recovery_gateway(source, tracked=True) as restarted:
+    with recovery_gateway(source, tracked=True, oidc_grant=False) as restarted:
         assert restarted.executable_sha256 == gateway.executable_sha256
         recovered = await_receipt(source)
         receipt, = recovered["budget_settlement_outbox"]
@@ -634,14 +688,21 @@ def test_tracked_sigkill_after_terminal_persistence_recovers_one_receipt(
         for table in ("budget_execution_intent", "budget_request_correlation",
                       "budget_dispatch_fence", "budget_terminal_observation", "usage_events"):
             assert recovered[table] == before[table], table
-        budget, = get(restarted.client, "/dashboard/api/budgets")["budgets"]
+        budget, = get(restarted.client, "/dashboard/api/budgets", headers=restarted.admin_headers)["budgets"]
         assert budget["spent"] == 14
+        if restarted.member_token is not None:
+            denied = call(restarted.client, key, step="revoked-grant")
+            assert denied.status_code == 403, denied.text
+            assert tracked_rows(source) == recovered
+            assert get(restarted.client, "/dashboard/api/budgets",
+                       headers=restarted.admin_headers)["budgets"] == [budget]
+            assert len(gated_provider.requests) == 1
         restarted.stop()
     # Another process boundary must preserve receipt identity, time and spend.
-    with recovery_gateway(source, tracked=True) as again:
+    with recovery_gateway(source, tracked=True, oidc_grant=False) as again:
         assert again.executable_sha256 == gateway.executable_sha256
         assert tracked_rows(source) == recovered
-        budget, = get(again.client, "/dashboard/api/budgets")["budgets"]
+        budget, = get(again.client, "/dashboard/api/budgets", headers=again.admin_headers)["budgets"]
         assert budget["spent"] == 14
         again.stop()
     assert tracked_rows(source) == recovered

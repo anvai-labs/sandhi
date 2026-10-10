@@ -31,6 +31,7 @@ def oidc_authority():
     authority.lifetime = 300
     authority.codes = {}
     authority.exchanges = 0
+    authority.access_tokens = {"fixture-access": "admin"}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_):
@@ -96,9 +97,10 @@ def oidc_authority():
                                 "id_token": jwt.encode(claims, key, algorithm="RS256",
                                                        headers={"kid": "browser-fixture"})})
             elif self.path == "/introspect":
-                self.send_json({"active": query.get("token") == "fixture-access",
+                subject = authority.access_tokens.get(query.get("token"), "admin")
+                self.send_json({"active": query.get("token") in authority.access_tokens,
                                 "iss": authority.issuer, "aud": "sandhi-browser",
-                                "sub": "admin", "exp": int(time.time()) + 300,
+                                "sub": subject, "exp": int(time.time()) + 300,
                                 "token_type": "Bearer"})
             else:
                 self.send_json({"error": "not found"}, 404)
