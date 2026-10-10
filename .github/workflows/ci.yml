@@ -364,7 +364,7 @@ jobs:
             "$venv/bin/python" -I -c 'import sandhi_gateway; assert sandhi_gateway.__file__.startswith(__import__("sys").prefix)'
             "$venv/bin/python" -m pytest bindings/python/tests/ -q
           done
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: tested-manylinux-aarch64-wheel
           path: dist/*.whl
@@ -483,7 +483,7 @@ jobs:
         with:
           components: rustfmt, clippy, llvm-tools-preview
       - uses: taiki-e/install-action@ea647c55f74bb153499600c054578c0d83fa19d5 # cargo-llvm-cov 2026-08-30
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
       - name: fmt + clippy (the node binding is its own workspace)
@@ -639,7 +639,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
       - run: python -m pip install pytest==8.4.1 PyYAML==6.0.2
