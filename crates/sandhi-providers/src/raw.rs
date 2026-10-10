@@ -61,6 +61,8 @@ pub struct RawQualifiedStreamResponse {
     pub headers: HeaderMap,
     pub stream: RawChunkStream,
     pub observation: QualifiedStreamObservation,
+    /// Canonical provider correlation ID extracted once from the response headers.
+    pub upstream_request_id: Option<String>,
 }
 
 /// A content-faithful, envelope-normalized raw forwarder. One HTTP client (connection pool)
@@ -536,6 +538,8 @@ impl RawForwarder {
             .setup_stream(path, body, session, correlation, call_headers)
             .await?;
         let status = response.status().as_u16();
+        let upstream_request_id =
+            crate::provider_request_id(response.headers(), self.response_request_id_header);
         let headers = filter_response_headers(response.headers());
         use futures_util::StreamExt;
         let raw = Box::pin(
@@ -549,6 +553,7 @@ impl RawForwarder {
             headers,
             stream,
             observation,
+            upstream_request_id,
         })
     }
 
@@ -1551,6 +1556,10 @@ data: [DONE]\n\n";
             .unwrap();
         assert_eq!(response.status, 200);
         assert_eq!(response.headers["x-request-id"], "provider-canonical");
+        assert_eq!(
+            response.upstream_request_id.as_deref(),
+            Some("provider-canonical")
+        );
         assert!(!response.headers.contains_key("set-cookie"));
         let mut stream = response.stream;
         let mut bytes = Vec::new();

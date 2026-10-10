@@ -887,5 +887,18 @@ no duplicated parser/storage suite or new retry/task registry is introduced.
 
 Next: reuse the proxy body owner for producer shutdown, durable terminal publication
 and settlement/recovery. The snapshot is in-memory evidence, not crash durability.
-Legacy metered defaults are unchanged; tracked streaming, release/deployment and
+Legacy metered defaults are unchanged; released streaming acceptance, deployment and
 full C5 remain open.
+
+### W05c/d bounded streaming HTTP bridge (development source)
+
+The [owned HTTP contract](../operator/buffered-accounting.md) extends the existing
+tracked admission, body producer and settlement jobs to bounded transparent OpenAI
+Chat streaming. One dispatch and one immutable terminal observation retain qualified
+counts through cancellation and shutdown. Invalid/absent evidence holds liability;
+clean HTTP EOF requires a receipt. Existing accounting-only recovery handles failed
+terminal publication. No new registry, parser, retry or default-mode behavior.
+
+Source tests cover the ownership seams, setup policy, publication refusal, telemetry
+panic and partial observed-total conservation. Standalone crash/restart and TLS/OIDC
+streaming, released deployment, broader lifecycle and C5 remain separate gates.
