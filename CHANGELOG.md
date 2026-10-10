@@ -19,6 +19,8 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-10-10
+
 ### Added
 
 - Linux aarch64 Python wheels using manylinux2014 and the existing CPython 3.11+
@@ -35,6 +37,9 @@ A partly published release remains incomplete even when some artifacts are avail
   is opt-in, with full lifecycle acceptance still a separate gate.
 
 ### Changed
+- Update SentinelPass protocol to 0.17.0 and the hyper-util/tokio-rustls transport
+  dependencies. Qualify integration with InferFlux 0.5.0 and optional AgentBrowser
+  1.16.0; AgentBrowser remains a test tool, not a gateway runtime dependency.
 - Raise the declared MSRV to 1.95 and migrate the atomic `fetch_update`
   call sites to `try_update` (renamed upstream; the alias is deprecated
   since 1.99).
@@ -1348,7 +1353,8 @@ inline reverse-proxy, the durable store, and both language bindings.
   ([#9](https://github.com/anvai-labs/sandhi/pull/9),
   [#10](https://github.com/anvai-labs/sandhi/pull/10))
 
-[Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/anvai-labs/sandhi/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/anvai-labs/sandhi/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/anvai-labs/sandhi/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/anvai-labs/sandhi/compare/v0.9.1...v0.10.0

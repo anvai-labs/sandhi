@@ -1,9 +1,10 @@
 # Owned buffered accounting
 
-!!! warning "Opt-in development feature"
+!!! warning "Opt-in accounting; lifecycle acceptance remains separate"
     `SANDHI_BUFFERED_ACCOUNTING=tracked` enables durable buffered HTTP accounting.
-    It is merged after the 0.11.0 release; source acceptance is not a released or
-    deployed acceptance claim. Unset or `off` preserves the existing path. Any
+    It is included in the [0.12.0 release scope](../releases/v0.12.0.md); check that
+    page for publication status. A package release does not establish deployment
+    acceptance. Unset or `off` preserves the existing path. Any
     other value fails startup.
 
 Keep the existing authentication, TLS, credential and `SANDHI_STORE` configuration.
