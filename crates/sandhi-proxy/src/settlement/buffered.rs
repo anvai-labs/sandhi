@@ -115,8 +115,12 @@ pub(crate) async fn handle(
     _effective_max: u64,
     input_len: usize,
     configured_deadline: Option<Duration>,
+    streaming_limits: Option<crate::deadlines::StreamLimits>,
 ) -> Response {
-    if wants_stream
+    if (wants_stream
+        && (streaming_limits.is_none()
+            || !transparent_eligible
+            || !matches!(dialect, IngressDialect::OpenAi)))
         || !matches!(dialect, IngressDialect::OpenAi | IngressDialect::Anthropic)
         || !provider.supports_owned_buffered()
         || policy != Policy::Block
@@ -124,10 +128,16 @@ pub(crate) async fn handle(
         || request.max_output_tokens.is_none()
     {
         return ingress_error(dialect, StatusCode::BAD_REQUEST,
-            "tracked accounting requires buffered chat, a retry-free built-in OpenAI-compatible provider, Block policy, explicit output limit and no idempotency key");
+            "tracked accounting requires buffered chat or transparent OpenAI Chat streaming with a configured streaming deadline, a retry-free built-in OpenAI-compatible provider, Block policy, explicit output limit and no idempotency key");
     }
-    let transport = configured_deadline.unwrap_or(owner.config.transport_timeout);
-    if transport > Duration::from_secs(600) {
+    let transport = if wants_stream {
+        streaming_limits
+            .expect("validated streaming policy")
+            .dispatch_duration()
+    } else {
+        configured_deadline.unwrap_or(owner.config.transport_timeout)
+    };
+    if !wants_stream && transport > Duration::from_secs(600) {
         return ingress_error(
             dialect,
             StatusCode::BAD_REQUEST,
@@ -149,6 +159,13 @@ pub(crate) async fn handle(
         },
     );
     accounting.input_len = input_len;
+    if wants_stream {
+        accounting.stream_body_lifetime = Some(
+            streaming_limits
+                .expect("validated streaming policy")
+                .body_lifetime(),
+        );
+    }
     accounting.finalized = true; // no event for refused or unknown admission
     let request_id = accounting.request_id.clone();
     let mut obligation = match owner.jobs.obligation() {
@@ -223,7 +240,19 @@ pub(crate) async fn handle(
         accounting.finalized = false;
         let full_error_detail = state.error_detail_full;
         let dispatch = async move {
-            if transparent {
+            if wants_stream {
+                transparent_stream_response(
+                    provider,
+                    body,
+                    request.metadata.session_id.clone(),
+                    dialect,
+                    accounting,
+                    full_error_detail,
+                    None,
+                    permit,
+                )
+                .await
+            } else if transparent {
                 transparent_complete_response(
                     provider,
                     body,
@@ -248,9 +277,17 @@ pub(crate) async fn handle(
             }
         };
         // Tokio task-local transport policies do not propagate through spawn.
-        sandhi_providers::BufferedDeadline::new(transport)
-            .scope(dispatch)
-            .await
+        if wants_stream {
+            streaming_limits
+                .expect("validated streaming policy")
+                .transport()
+                .scope(dispatch)
+                .await
+        } else {
+            sandhi_providers::BufferedDeadline::new(transport)
+                .scope(dispatch)
+                .await
+        }
     });
     let mut response = match tokio::time::timeout(transport + wait * 3, task).await {
         Ok(Ok(response)) => response,

@@ -729,11 +729,35 @@ tests cover exact response bytes, canonical correlation, one POST and pre-dispat
 rejection; the existing stalled-error deadline fixture now covers this path too.
 Numeric counters and SSE framing stay in their existing test owners.
 
-**Next gate:** connect the existing proxy body owner to canonical durable terminal
-publication and settlement/recovery. Prove retention through producer shutdown and
-publication/settlement failure without replaying inference. Legacy metered callers
-are unchanged; tracked mode still rejects streaming before admission. No deployed
-runtime, binding facade or C5 gate is activated by this Rust source increment.
+The development-source bridge now connects this handle to the existing proxy body
+owner and canonical durable settlement. Legacy metered callers remain unchanged.
+Only tracked, bounded transparent OpenAI Chat streams are admitted; see the
+[operator contract](../operator/buffered-accounting.md). This is not in 0.12.0 and
+does not qualify a deployed runtime, binding facade or C5.
+
+### Owned streaming HTTP and settlement (development source)
+
+| Boundary | Implementation and test evidence |
+|---|---|
+| Admission | Existing correlated intent, dispatch fence and retained slot; explicit output limit, Block policy, retry-free transport and complete route streaming policy |
+| Duration | Setup + body + accounting headroom in the lease; task-local setup/idle policy inside the detached task |
+| Terminal capture | Source drops before reading the surviving snapshot; final qualified counts survive disconnect, body deadline and shutdown |
+| Settlement | Existing immutable terminal record and jobs owner; clean HTTP EOF waits for a committed receipt |
+| Invalid/missing evidence | First counts remain Partial with bounded error reason, or Unavailable; held liability, no zero settlement |
+| Failure/recovery | Injected terminal-write failure retains one snapshot; recovery commits once without another origin call or usage event |
+| Shutdown | Delivery reserves an accounting wait inside the original grace; no deadline extension or guarantee of hard SQLite timing |
+| Telemetry | Throwing sink cannot erase terminal ownership; partial observed totals conserve across metrics and events without becoming spend |
+
+Tests extend the existing HTTP sink-panic and unsupported-shape matrices. The new
+HTTP seam tests cover settlement, lifecycle, publication recovery and setup bounds;
+numeric/framing tests remain in their existing owners. No duplicate parser or
+storage matrix was added. Independent review drove explicit missing-usage outcomes
+and observed-total conservation; the latter failed before its fix.
+
+**Next gates:** standalone streaming crash/restart and TLS/OIDC acceptance, packaged
+artifact verification, preserved-state deployment, Victor repin and actual-member
+C5. Synthetic source HTTP tests prove neither origin cancellation nor executed cache
+reuse. A process killed before terminal persistence still leaves unknown liability.
 
 ## Owned buffered HTTP and recovery (W05c/d limited activation)
 
@@ -904,5 +928,6 @@ accounting. No credentials were transferred and no shared cache was cleared.
 This is a simple new provider smoke, not actual-member evidence, live crash
 recovery, a managed tracked-mode cutover or C5. Zero reported cache does not prove
 zero executed reuse. Streaming, tokenizer/session-lifecycle correctness and broad
-failure acceptance remain open. The managed streaming route must not be switched
-globally to tracked mode, which currently rejects streaming before admission.
+failure acceptance remain open. The managed streaming route must not be switched globally to tracked mode before
+released streaming lifecycle acceptance. The development-source extension above
+does not retroactively qualify the 0.12.0 binary used for this evidence.
