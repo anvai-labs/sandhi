@@ -22,7 +22,7 @@ flowchart TD
     E -. storage failure .-> H[Retry retained accounting work]
     H --> F
     E -. process dies before persistence .-> I[Unknown liability remains held]
-    D -. best effort .-> J[Metrics and usage event]
+    E -. best effort .-> J[Metrics and usage event]
 ```
 
 | Evidence | What it proves | What it does not prove |
@@ -34,6 +34,8 @@ flowchart TD
 
 A disconnected client does not cancel owned admission, the provider call or
 settlement. Recovery never repeats inference or re-emits usage events.
+Usage is retained before telemetry callbacks; a failing sink cannot discard the
+snapshot needed for accounting recovery.
 
 ## Supported activation
 
