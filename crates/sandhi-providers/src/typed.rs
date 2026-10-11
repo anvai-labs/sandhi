@@ -1169,6 +1169,26 @@ fn encode_tool_choice(choice: &ToolChoiceV1) -> Value {
     }
 }
 
+/// Only structured text is displayable. Conflicting aliases and opaque values
+/// are protocol errors, not candidates for prose repair or stringification.
+fn openai_reasoning_text(message: &Value) -> Result<Option<&str>, ProviderError> {
+    let read = |key| match message.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text.as_str())),
+        _ => Err(ProviderError::InvalidResponse(format!(
+            "OpenAI {key} must be text or null"
+        ))),
+    };
+    let primary = read("reasoning_content")?;
+    let alias = read("reasoning")?;
+    if matches!((primary, alias), (Some(a), Some(b)) if a != b) {
+        return Err(ProviderError::InvalidResponse(
+            "OpenAI reasoning fields disagree".into(),
+        ));
+    }
+    Ok(primary.or(alias))
+}
+
 pub fn decode_openai_response(
     body: Value,
     parsed_usage: ParsedUsage,
@@ -1200,6 +1220,7 @@ pub fn decode_openai_response(
             .unwrap_or(requested_model)
             .into(),
         output: AssistantOutputV1 {
+            reasoning: openai_reasoning_text(&body["choices"][0]["message"])?.map(str::to_owned),
             content,
             tool_calls,
             refusal: message
@@ -1329,8 +1350,7 @@ fn decode_openai_stream_inner(mut raw: ByteStream, requested_model: String) -> C
                         if let Some(text) = delta.get("content").and_then(Value::as_str) {
                             yield ChatStreamEventV1::TextDelta { delta: text.into() };
                         }
-                        if let Some(text) = delta.get("reasoning_content")
-                            .or_else(|| delta.get("reasoning")).and_then(Value::as_str) {
+                        if let Some(text) = openai_reasoning_text(delta)? {
                             yield ChatStreamEventV1::ReasoningDelta { delta: text.into() };
                         }
                         if let Some(text) = delta.get("refusal").and_then(Value::as_str) {
@@ -1408,6 +1428,7 @@ impl ProviderError {
         let mut request_id = None;
         let (code, retryable, http_status) = match self {
             Self::InvalidRequest(_) => ("invalid_request", false, Some(400)),
+            Self::InvalidResponse(_) => ("invalid_response", false, Some(502)),
             Self::Auth => ("authentication_error", false, Some(401)),
             Self::RateLimited => ("rate_limited", true, Some(429)),
             Self::Upstream {
@@ -2416,6 +2437,110 @@ mod tests {
         // Neutral contract untouched.
         assert_eq!(out.output.content, Some(MessageContent::Text("hi".into())));
         assert_eq!(out.finish_reason, Some(FinishReasonV1::Stop));
+    }
+
+    #[tokio::test]
+    async fn reasoning_output_survives_native_body_opt_out() {
+        for field in ["reasoning_content", "reasoning"] {
+            for include_native in [false, true] {
+                let mut provider = canned_openai_provider();
+                let mut body = json!({
+                    "model":"fixture", "choices":[{"message":{
+                        "role":"assistant", "content":"ordinary answer",
+                        "tool_calls":[{"id":"call-fixture","type":"function",
+                            "function":{"name":"fixture_read","arguments":"{}"}}]
+                    }, "finish_reason":"tool_calls"}]
+                });
+                body["choices"][0]["message"][field] = json!("synthetic reasoning");
+                provider.raw = Arc::new(CannedRaw(body));
+                let mut req = request();
+                req.include_native_response = include_native;
+                let out = provider
+                    .complete(req, http::HeaderMap::new())
+                    .await
+                    .unwrap();
+                let value = serde_json::to_value(&out).unwrap();
+                assert_eq!(value["output"]["reasoning"], "synthetic reasoning");
+                assert_eq!(value["output"]["content"], "ordinary answer");
+                assert_eq!(out.output.tool_calls[0].id, "call-fixture");
+                assert_eq!(out.extensions.contains_key("openai"), include_native);
+            }
+        }
+    }
+
+    #[test]
+    fn reasoning_fields_are_explicit_text_and_do_not_infer_from_content() {
+        for (message, expected) in [
+            (
+                json!({"content":"<think>ordinary quoted text</think>"}),
+                Value::Null,
+            ),
+            (json!({"reasoning_content":null}), Value::Null),
+            (json!({"reasoning_content":""}), json!("")),
+            (
+                json!({"reasoning_content":null,"reasoning":"fixture"}),
+                json!("fixture"),
+            ),
+            (
+                json!({"reasoning_content":"fixture","reasoning":"fixture"}),
+                json!("fixture"),
+            ),
+        ] {
+            let out = decode_openai_response(
+                json!({"choices":[{"message":message}]}),
+                ParsedUsage::default(),
+                "fixture",
+            )
+            .unwrap();
+            let value = serde_json::to_value(out).unwrap();
+            assert_eq!(value["output"]["reasoning"], expected);
+            if expected.is_null() {
+                assert!(value["output"].get("reasoning").is_none());
+            }
+        }
+        for message in [
+            json!({"reasoning_content":42}),
+            json!({"reasoning":{"encrypted":"fixture"}}),
+            json!({"reasoning_content":"first","reasoning":"different"}),
+            json!({"reasoning_content":"valid","reasoning":[]}),
+        ] {
+            let error = decode_openai_response(
+                json!({"choices":[{"message":message}]}),
+                ParsedUsage::default(),
+                "fixture",
+            )
+            .unwrap_err();
+            assert!(!error.as_typed(Some("openai")).retryable);
+        }
+    }
+
+    #[tokio::test]
+    async fn reasoning_stream_rejects_malformed_or_conflicting_aliases() {
+        use futures_util::StreamExt;
+        for delta in [
+            json!({"reasoning_content":42}),
+            json!({"reasoning_content":"a","reasoning":"b"}),
+        ] {
+            let data = format!("data: {}\n\n", json!({"choices":[{"delta":delta}]}));
+            let raw: ByteStream =
+                Box::pin(futures_util::stream::iter(vec![Ok(crate::StreamChunk {
+                    data: bytes::Bytes::from(data),
+                    usage: None,
+                    usage_running: None,
+                    cache_read_observation: None,
+                    attempts: 1,
+                    terminal: false,
+                })]));
+            let events: Vec<_> = decode_openai_stream(raw, "fixture".into()).collect().await;
+            let error = events
+                .iter()
+                .find_map(|event| event.as_ref().err())
+                .unwrap();
+            assert!(!error.as_typed(Some("openai")).retryable);
+            assert!(!events
+                .iter()
+                .any(|event| matches!(event, Ok(ChatStreamEventV1::ReasoningDelta { .. }))));
+        }
     }
 
     /// Canned typed provider for the W3b latency-stamp tests.

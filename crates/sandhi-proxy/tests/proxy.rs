@@ -240,7 +240,10 @@ async fn version_endpoint_is_unauthenticated_and_reports_the_contract() {
     assert_eq!(value["package_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(value["wire_contract_version"], "1");
     assert_eq!(value["chat_contract_version"], "1");
-    assert_eq!(value["chat_contract_minor"], 10);
+    assert_eq!(
+        value["chat_contract_minor"],
+        sandhi_core::CHAT_CONTRACT_MINOR
+    );
     let dialects = value["dialects"].as_array().unwrap();
     for expected in ["openai", "anthropic", "responses", "gemini"] {
         assert!(

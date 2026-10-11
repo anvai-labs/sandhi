@@ -371,6 +371,7 @@ impl AttemptGuard {
             ),
             ProviderError::Timeout(_) => (AttemptOutcome::Timeout, None, None),
             ProviderError::InvalidRequest(_)
+            | ProviderError::InvalidResponse(_)
             | ProviderError::Transport(_)
             | ProviderError::CircuitOpen => (AttemptOutcome::TransportError, None, None),
         };

@@ -410,10 +410,39 @@ pub(crate) fn decode_responses_response(
             ProviderError::Transport("OpenAI Responses response has no output array".into())
         })?;
     let mut text = String::new();
+    let mut reasoning: Option<String> = None;
     let mut refusal = String::new();
     let mut tool_calls = Vec::new();
     for item in output {
         match item.get("type").and_then(Value::as_str) {
+            Some("reasoning") => {
+                // Only explicit summary text is displayable; encrypted_content and
+                // item IDs belong to a separate, provider-scoped replay contract.
+                match item.get("summary") {
+                    None | Some(Value::Null) => {}
+                    Some(Value::Array(parts)) => {
+                        for part in parts {
+                            let text = part
+                                .get("text")
+                                .and_then(Value::as_str)
+                                .filter(|_| {
+                                    part.get("type").and_then(Value::as_str) == Some("summary_text")
+                                })
+                                .ok_or_else(|| {
+                                    ProviderError::InvalidResponse(
+                                        "Responses reasoning summary must contain summary_text strings".into(),
+                                    )
+                                })?;
+                            reasoning.get_or_insert_with(String::new).push_str(text);
+                        }
+                    }
+                    _ => {
+                        return Err(ProviderError::InvalidResponse(
+                            "Responses reasoning summary must be an array".into(),
+                        ))
+                    }
+                }
+            }
             Some("message") => {
                 for part in item
                     .get("content")
@@ -462,6 +491,7 @@ pub(crate) fn decode_responses_response(
             .unwrap_or(requested_model)
             .into(),
         output: AssistantOutputV1 {
+            reasoning,
             content: (!text.is_empty()).then_some(MessageContent::Text(text)),
             tool_calls,
             refusal: (!refusal.is_empty()).then_some(refusal),
@@ -512,6 +542,7 @@ async fn aggregate_stream(mut stream: ChatEventStream) -> Result<ChatResponseV1,
     let mut id = None;
     let mut model = String::new();
     let mut text = String::new();
+    let mut reasoning: Option<String> = None;
     let mut refusal = String::new();
     let mut tools = BTreeMap::<u32, ToolCallV1>::new();
     let mut usage = UsageV2::default();
@@ -527,7 +558,9 @@ async fn aggregate_stream(mut stream: ChatEventStream) -> Result<ChatResponseV1,
             }
             ChatStreamEventV1::TextDelta { delta } => text.push_str(&delta),
             ChatStreamEventV1::RefusalDelta { delta } => refusal.push_str(&delta),
-            ChatStreamEventV1::ReasoningDelta { .. } => {}
+            ChatStreamEventV1::ReasoningDelta { delta } => {
+                reasoning.get_or_insert_with(String::new).push_str(&delta);
+            }
             ChatStreamEventV1::ToolCallStart { index, id, name } => {
                 tools.insert(
                     index,
@@ -567,6 +600,7 @@ async fn aggregate_stream(mut stream: ChatEventStream) -> Result<ChatResponseV1,
         id,
         model,
         output: AssistantOutputV1 {
+            reasoning,
             content: (!text.is_empty()).then_some(MessageContent::Text(text)),
             tool_calls: tools.into_values().collect(),
             refusal: (!refusal.is_empty()).then_some(refusal),
@@ -747,6 +781,12 @@ mod tests {
             CacheReadObservation, CacheReadStatus, ChatStreamEventV1, UsageCompleteness, UsageV2,
         };
         let events = vec![
+            Ok(ChatStreamEventV1::ReasoningDelta {
+                delta: "fixture ".into(),
+            }),
+            Ok(ChatStreamEventV1::ReasoningDelta {
+                delta: "summary".into(),
+            }),
             Ok(ChatStreamEventV1::Usage {
                 usage: UsageV2 {
                     tokens_in: 8,
@@ -775,6 +815,10 @@ mod tests {
             (8, 3)
         );
         assert_eq!(response.usage.completeness, UsageCompleteness::Final);
+        assert_eq!(
+            serde_json::to_value(&response).unwrap()["output"]["reasoning"],
+            "fixture summary"
+        );
         assert_eq!(
             response.usage.cache_read_observation.unwrap().status,
             CacheReadStatus::Malformed
@@ -971,6 +1015,10 @@ mod tests {
         let body = json!({
             "id":"resp_1","model":"gpt-test","status":"completed",
             "output":[
+                {"type":"reasoning","encrypted_content":"opaque-not-displayable", "summary":[
+                    {"type":"summary_text","text":"fixture "},
+                    {"type":"summary_text","text":"summary"}
+                ]},
                 {"type":"message","content":[{"type":"output_text","text":"hi"}]},
                 {"type":"function_call","call_id":"call_1","name":"weather","arguments":"{}"}
             ],
@@ -989,6 +1037,42 @@ mod tests {
         assert_eq!(response.usage.tokens_in, 40);
         assert_eq!(response.usage.cache_read_tokens, 60);
         assert_eq!(response.usage.reasoning_tokens, Some(7));
+        assert_eq!(
+            response.output.reasoning.as_deref(),
+            Some("fixture summary")
+        );
+        let mut without_native = response;
+        without_native.extensions.remove("openai_responses");
+        assert!(!serde_json::to_string(&without_native)
+            .unwrap()
+            .contains("opaque-not-displayable"));
+    }
+
+    #[test]
+    fn summaries_do_not_display_opaque_state_or_malformed_objects() {
+        for summary in [
+            json!(false),
+            json!([{"type":"summary_text","text":42}]),
+            json!([{"type":"unknown","text":"not a summary"}]),
+        ] {
+            let error = decode_responses_response(
+                json!({"output":[{"type":"reasoning","summary":summary}]}),
+                ParsedUsage::default(),
+                "fixture",
+            )
+            .unwrap_err();
+            let typed = error.as_typed(Some("openai"));
+            assert_eq!(typed.code, "invalid_response");
+            assert!(!typed.retryable);
+        }
+        for summary in [Value::Null, json!([])] {
+            let out = decode_responses_response(
+                json!({"output":[{"type":"reasoning","summary":summary,"encrypted_content":"opaque"}]}),
+                ParsedUsage::default(),
+                "fixture",
+            ).unwrap();
+            assert_eq!(out.output.reasoning, None);
+        }
     }
 
     #[tokio::test]

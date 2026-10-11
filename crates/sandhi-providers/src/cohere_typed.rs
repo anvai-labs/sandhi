@@ -275,6 +275,7 @@ pub fn decode_cohere_response(
         id: body.get("id").and_then(Value::as_str).map(str::to_owned),
         model: requested_model.into(),
         output: AssistantOutputV1 {
+            reasoning: None,
             content: (!text.is_empty()).then_some(MessageContent::Text(text)),
             tool_calls,
             refusal: None,

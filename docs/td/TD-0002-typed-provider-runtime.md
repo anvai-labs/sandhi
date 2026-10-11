@@ -78,6 +78,48 @@ layer. These are protocol facts, not token-string or URL heuristics.
 
 ## Runtime and front doors
 
+### Displayable reasoning (contract minor 11; unreleased)
+
+`ChatResponseV1.output.reasoning` is optional provider-supplied text, separate from the
+answer and from `usage.reasoning_tokens`. It survives `include_native_response=false`;
+that flag controls the raw response echo, not the typed output. Sandhi never derives
+reasoning from answer prose or `<think>` tags.
+
+| Source | Typed output | Buffered translation back to a client |
+| --- | --- | --- |
+| OpenAI-compatible `reasoning_content` / `reasoning` | Explicit text; equal aliases accepted, conflicting aliases rejected | Chat `message.reasoning_content` |
+| Anthropic thinking text | Existing extraction, also retained in legacy `extensions.reasoning` | `extensions.sandhi.reasoning`; ordinary content blocks unchanged |
+| Gemini thought text | Existing extraction, also retained in legacy `extensions.reasoning` | A `thought: true` text part |
+| Responses `summary_text` parts | Concatenated summary text; subscription stream aggregation also retains reasoning deltas | `extensions.sandhi.reasoning`; ordinary output items unchanged |
+| Cohere / Ollama | No new reasoning extraction in this increment | No additional qualification claimed |
+
+The Anthropic and Responses translation extensions are **display-only**, not native
+thinking/reasoning blocks. Native SDK reasoning accessors will not read them automatically.
+Sandhi does not invent required signatures or item IDs. Encrypted content, thought
+signatures, provider-scoped continuation, and request-history replay are separate contracts.
+Same-family transparent forwarding remains byte-exact.
+
+Absent reasoning omits the new field and preserves existing JSON bytes. Explicit Chat
+and Responses summary strings preserve empty text. Existing Anthropic/Gemini extraction
+continues to omit an empty aggregate. Malformed Chat reasoning values, conflicting Chat
+aliases, and malformed buffered Responses summary parts fail with `invalid_response`
+(HTTP 502, `retryable: false`), including when retries are explicitly enabled. Validation
+does not undo an upstream inference or its usage; it prevents an automatic replay.
+
+| Compatibility surface | Migration |
+| --- | --- |
+| JSON / generated Python and TypeScript facades | Additive optional field, contract minor 11; no request default changes |
+| Rust `AssistantOutputV1` literals | Set `reasoning: None` when constructing output without reasoning |
+| Rust `ProviderError` matches | Internal exhaustive matches handle `InvalidResponse`; external matches must continue honoring the existing `#[non_exhaustive]` contract |
+| Victor / other consumers | Prefer the typed field; consumer history, UI policy, and release qualification remain followups |
+
+This is output preservation, not automatic activation of model thinking. The
+[Responses API requires explicit summary opt-in](https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries).
+[DeepSeek's tool-turn reasoning replay requirements](https://api-docs.deepseek.com/guides/thinking_mode/)
+need a separate request-history contract; this change does not establish multi-turn
+reasoning continuity. Local fixture tests establish extraction, projection, FFI parity,
+and non-retry behavior, not live-provider or streaming lifecycle/C5 acceptance.
+
 `ProviderRuntime` creates persistent, shareable provider handles. A handle owns the HTTP pool and
 resilience state; calls do not rebuild adapters. The Python shape is:
 
