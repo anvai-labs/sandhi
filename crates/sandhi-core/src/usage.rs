@@ -228,6 +228,51 @@ pub fn validate_openai_buffered_usage(response: &Value) -> Result<(), BufferedUs
     Ok(())
 }
 
+/// Why a decoded OpenAI Chat stream event cannot qualify final usage.
+/// These errors contain only static contract facts, never response content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamUsageError {
+    InvalidChunk,
+    NonFinalUsage,
+    InvalidUsage(BufferedUsageError),
+}
+
+/// Qualify the request-total usage event from OpenAI Chat's `include_usage` stream.
+///
+/// The caller must supply one complete decoded SSE event, not a data line or a
+/// truncated frame. Only a usage-bearing `chat.completion.chunk` with empty
+/// `choices` qualifies. Absent/null usage is normal and returns `Ok(None)`;
+/// explicit zero qualifies through the same counter rules as buffered usage.
+/// Counts and cache reporting are derived once by the existing OpenAI parser.
+///
+/// This event precedes `[DONE]`. Later delivery failure must not erase an accepted
+/// measurement; conversely EOF, `[DONE]`, or `finish_reason` cannot manufacture one.
+/// The caller owns immutable observation retention and conflicting-event detection.
+/// This pure, opt-in API proves neither stream completion nor durable settlement.
+pub fn qualify_openai_stream_usage(event: &Value) -> Result<Option<ParsedUsage>, StreamUsageError> {
+    if event.get("object").and_then(Value::as_str) != Some("chat.completion.chunk")
+        || event.get("error").is_some()
+    {
+        return Err(StreamUsageError::InvalidChunk);
+    }
+    let choices = event
+        .get("choices")
+        .and_then(Value::as_array)
+        .ok_or(StreamUsageError::InvalidChunk)?;
+    if event.get("usage").is_none_or(Value::is_null) {
+        return Ok(None);
+    }
+    if !choices.is_empty() {
+        return Err(StreamUsageError::NonFinalUsage);
+    }
+    validate_openai_buffered_usage(event).map_err(StreamUsageError::InvalidUsage)?;
+    parse_openai_usage(event)
+        .map(Some)
+        .ok_or(StreamUsageError::InvalidUsage(
+            BufferedUsageError::MissingUsage,
+        ))
+}
+
 /// Parse an OpenAI (or OpenAI-compatible) Chat Completions response `usage` object.
 ///
 /// `prompt_tokens` is the *total* prompt including cache; `prompt_tokens_details.cached_tokens`
@@ -506,7 +551,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn buffered_qualification_rejects_missing_malformed_and_inconsistent_usage() {
+    fn qualification_rejects_missing_malformed_and_inconsistent_usage() {
         use BufferedUsageError::*;
         let good = json!({"prompt_tokens": 10, "completion_tokens": 4});
         let mut cases = vec![
@@ -586,11 +631,21 @@ mod tests {
         }
         for (body, error) in cases {
             assert_eq!(validate_openai_buffered_usage(&body), Err(error), "{body}");
+            // Missing/null usage is normal on stream content events. All non-null
+            // counter validation is shared with buffered responses, not copied.
+            if let Some(usage) = body.get("usage").filter(|v| !v.is_null()) {
+                let event = json!({"object":"chat.completion.chunk", "choices":[], "usage":usage});
+                assert_eq!(
+                    qualify_openai_stream_usage(&event),
+                    Err(StreamUsageError::InvalidUsage(error)),
+                    "{event}"
+                );
+            }
         }
     }
 
     #[test]
-    fn buffered_qualification_accepts_explicit_zero_and_consistent_cache_shapes() {
+    fn qualification_accepts_explicit_zero_and_consistent_cache_shapes() {
         for usage in [
             json!({"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}),
             json!({"prompt_tokens":10,"completion_tokens":4}),
@@ -602,10 +657,56 @@ mod tests {
             let body = json!({"usage":usage});
             assert_eq!(validate_openai_buffered_usage(&body), Ok(()), "{body}");
             let parsed = parse_openai_usage(&body).unwrap();
+            let event =
+                json!({"object":"chat.completion.chunk", "choices":[], "usage":body["usage"]});
+            assert_eq!(qualify_openai_stream_usage(&event), Ok(Some(parsed)));
             assert_eq!(
                 parsed.tokens_in + parsed.cache_read_tokens,
                 body["usage"]["prompt_tokens"].as_u64().unwrap()
             );
+        }
+    }
+
+    #[test]
+    fn stream_qualification_requires_final_usage_event_not_finish_or_terminator() {
+        let usage = json!({"prompt_tokens":10,"completion_tokens":4});
+        for event in [
+            json!(null),
+            json!([]),
+            json!("[DONE]"),
+            json!({}),
+            json!({"object":"chat.completion", "choices":[], "usage":usage}),
+            json!({"object":"chat.completion.chunk", "usage":usage}),
+            json!({"object":"chat.completion.chunk", "choices":null, "usage":usage}),
+            json!({"object":"chat.completion.chunk", "choices":{}, "usage":usage}),
+            json!({"object":"chat.completion.chunk", "choices":[], "usage":usage, "error":null}),
+        ] {
+            assert_eq!(
+                qualify_openai_stream_usage(&event),
+                Err(StreamUsageError::InvalidChunk)
+            );
+        }
+        for choices in [
+            json!([]),
+            json!([{"delta":{"content":"hello"}}]),
+            json!([{"finish_reason":"stop"}]),
+        ] {
+            let mut event = json!({"object":"chat.completion.chunk", "choices":choices});
+            assert_eq!(qualify_openai_stream_usage(&event), Ok(None));
+            event["usage"] = Value::Null;
+            assert_eq!(qualify_openai_stream_usage(&event), Ok(None));
+            event["usage"] = usage.clone();
+            if choices.as_array().unwrap().is_empty() {
+                assert_eq!(
+                    qualify_openai_stream_usage(&event),
+                    Ok(parse_openai_usage(&event))
+                );
+            } else {
+                assert_eq!(
+                    qualify_openai_stream_usage(&event),
+                    Err(StreamUsageError::NonFinalUsage)
+                );
+            }
         }
     }
 

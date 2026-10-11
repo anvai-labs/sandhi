@@ -4062,13 +4062,28 @@ fn owned_state(
     sink: Arc<InMemorySink>,
     timeout: std::time::Duration,
 ) -> Arc<ProxyState> {
-    let state = state_with(
+    owned_state_with_stream_limits(uri, path, sink, timeout, None)
+}
+fn owned_state_with_stream_limits(
+    uri: String,
+    path: &std::path::Path,
+    sink: Arc<InMemorySink>,
+    timeout: std::time::Duration,
+    limits: Option<serde_json::Value>,
+) -> Arc<ProxyState> {
+    let mut state = state_with(
         uri,
         sink,
         ProxyLedger::Durable(
             sandhi_store::ShardedLedger::open_sharded(path.to_str().unwrap(), 1).unwrap(),
         ),
     );
+    if let Some(limits) = limits {
+        Arc::get_mut(&mut state).unwrap().streaming_deadlines = Some(
+            serde_json::from_value(serde_json::json!({"ceiling_ms":10000,"default":limits}))
+                .unwrap(),
+        );
+    }
     sandhi_proxy::settlement::buffered::enable(
         &state,
         sandhi_proxy::settlement::buffered::Config::new(
@@ -4219,24 +4234,33 @@ async fn owned_buffered_deadline_is_installed_inside_spawn_for_both_planes() {
 
 #[tokio::test]
 async fn owned_buffered_unsupported_shapes_refuse_before_admission() {
-    for case in ["stream", "unbounded", "dedup", "retry"] {
+    for case in [
+        "stream",
+        "unbounded",
+        "dedup",
+        "retry",
+        "stream_cross_family",
+        "stream_retry",
+    ] {
         let upstream = MockServer::start().await;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("owned.db");
-        let state = owned_state(
+        let state = owned_state_with_stream_limits(
             upstream.uri(),
             &path,
             Arc::new(InMemorySink::new()),
             std::time::Duration::from_secs(2),
+            case.starts_with("stream_")
+                .then(|| serde_json::json!({"setup_ms":1000,"idle_ms":1000,"body_ms":2000})),
         );
         let mut body = owned_body();
-        if case == "stream" {
+        if case.starts_with("stream") {
             body["stream"] = true.into();
         }
         if case == "unbounded" {
             body.as_object_mut().unwrap().remove("max_tokens");
         }
-        if case == "retry" {
+        if case.ends_with("retry") {
             state.providers.lock().unwrap().insert(
                 "up1".into(),
                 ProviderRuntime::new().openai_compat(
@@ -4250,7 +4274,14 @@ async fn owned_buffered_unsupported_shapes_refuse_before_admission() {
                 ),
             );
         }
-        let mut request = owned_request("/v1/chat/completions", body);
+        let mut request = owned_request(
+            if case == "stream_cross_family" {
+                "/v1/messages"
+            } else {
+                "/v1/chat/completions"
+            },
+            body,
+        );
         if case == "dedup" {
             request
                 .headers_mut()
@@ -4380,7 +4411,7 @@ async fn owned_buffered_restart_recovers_later_ready_rows_and_unbudgeted_removed
 }
 
 #[tokio::test]
-async fn owned_buffered_sink_panic_cannot_erase_terminal_evidence() {
+async fn owned_http_sink_panic_cannot_erase_terminal_evidence() {
     struct PanicSink(std::sync::atomic::AtomicUsize);
     impl sandhi_core::Sink for PanicSink {
         fn emit(&self, _: &sandhi_core::UsageEvent) {
@@ -4388,39 +4419,407 @@ async fn owned_buffered_sink_panic_cannot_erase_terminal_evidence() {
             panic!("injected telemetry panic");
         }
     }
-    let upstream = MockServer::start().await;
-    Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"choices":[{"message":{"content":"done"}}],"usage":{"prompt_tokens":3,"completion_tokens":2}}))).expect(1).mount(&upstream).await;
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("owned.db");
-    let sink = Arc::new(PanicSink(std::sync::atomic::AtomicUsize::new(0)));
-    let mut state = Arc::try_unwrap(state_with(
-        upstream.uri(),
-        Arc::new(InMemorySink::new()),
-        ProxyLedger::durable(path.to_str().unwrap(), 1).unwrap(),
-    ))
-    .ok()
-    .unwrap();
-    state.sink = sink.clone();
-    let state = Arc::new(state);
-    sandhi_proxy::settlement::buffered::enable(
-        &state,
-        sandhi_proxy::settlement::buffered::Config::new(
-            4,
-            std::time::Duration::from_secs(2),
-            std::time::Duration::from_secs(2),
+    for streaming in [false, true] {
+        let upstream = MockServer::start().await;
+        let response = if streaming {
+            ResponseTemplate::new(200).set_body_string("data: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2}}\n\ndata: [DONE]\n\n")
+        } else {
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"choices":[{"message":{"content":"done"}}],"usage":{"prompt_tokens":3,"completion_tokens":2}}))
+        };
+        Mock::given(method("POST"))
+            .respond_with(response)
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owned.db");
+        let sink = Arc::new(PanicSink(std::sync::atomic::AtomicUsize::new(0)));
+        let mut state = Arc::try_unwrap(state_with(
+            upstream.uri(),
+            Arc::new(InMemorySink::new()),
+            ProxyLedger::durable(path.to_str().unwrap(), 1).unwrap(),
+        ))
+        .ok()
+        .unwrap();
+        state.sink = sink.clone();
+        state.streaming_deadlines = Some(serde_json::from_value(serde_json::json!({"ceiling_ms":10000,"default":{"setup_ms":1000,"idle_ms":1000,"body_ms":2000}})).unwrap());
+        let state = Arc::new(state);
+        sandhi_proxy::settlement::buffered::enable(
+            &state,
+            sandhi_proxy::settlement::buffered::Config::new(
+                4,
+                std::time::Duration::from_secs(2),
+                std::time::Duration::from_secs(2),
+            )
+            .unwrap(),
         )
-        .unwrap(),
-    )
-    .unwrap();
-    let response = build_app(state.clone())
-        .oneshot(owned_request("/v1/chat/completions", owned_body()))
+        .unwrap();
+        let mut body = owned_body();
+        body["stream"] = streaming.into();
+        let response = build_app(state.clone())
+            .oneshot(owned_request("/v1/chat/completions", body))
+            .await
+            .unwrap();
+        if streaming {
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .is_err());
+        } else {
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        }
+        state.lifecycle.wait_idle().await;
+        sandhi_proxy::settlement::buffered::recover(state.clone())
+            .await
+            .unwrap();
+        assert_eq!(state.ledger.lock().unwrap().spent("group:platform"), 5);
+        assert_eq!(sink.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn owned_stream_terminal_evidence_controls_settlement_and_http_completion() {
+    use sandhi_core::UsageCompleteness;
+    use sandhi_store::ledger::evidence::RecoveryState;
+    let measured = "data: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2}}\n\n";
+    for case in ["final", "missing", "conflict", "missing_done"] {
+        let upstream = MockServer::start().await;
+        let wire = match case {
+            "final" => format!("{measured}data: [DONE]\n\n"),
+            "missing" => "data: [DONE]\n\n".into(),
+            "conflict" => format!(
+                "{measured}{}data: [DONE]\n\n",
+                measured.replace(":10", ":11")
+            ),
+            _ => measured.into(),
+        };
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .insert_header("x-request-id", "origin-stream")
+                    .set_body_string(wire.clone()),
+            )
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owned.db");
+        let sink = Arc::new(InMemorySink::new());
+        let state = owned_state_with_stream_limits(
+            upstream.uri(),
+            &path,
+            sink.clone(),
+            std::time::Duration::from_secs(2),
+            Some(serde_json::json!({"setup_ms":1000,"idle_ms":1000,"body_ms":2000})),
+        );
+        let mut request = owned_body();
+        request["stream"] = true.into();
+        let response = build_app(state.clone())
+            .oneshot(owned_request("/v1/chat/completions", request))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{case}");
+        let request_id = response.headers()["x-sandhi-request-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let result = axum::body::to_bytes(response.into_body(), usize::MAX).await;
+        if case == "final" {
+            assert_eq!(result.unwrap().as_ref(), wire.as_bytes());
+        } else {
+            assert!(result.is_err(), "unresolved {case} must not give clean EOF");
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while state.lifecycle.active_operations() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let mut ledger = sandhi_store::SqliteLedger::open(path.to_str().unwrap()).unwrap();
+        let page = ledger
+            .recovery_page_durable("group:platform", None, 10)
+            .unwrap();
+        assert_eq!(page.entries.len(), 1);
+        let entry = &page.entries[0];
+        let usage = ledger
+            .terminal_durable("group:platform", &entry.execution_id)
+            .unwrap()
+            .unwrap()
+            .usage;
+        assert_eq!(usage.upstream_request_id.as_deref(), Some("origin-stream"));
+        if case == "final" {
+            assert!(
+                matches!(entry.state, RecoveryState::Settled(ref receipt) if receipt.charged_tokens == 12)
+            );
+            assert_eq!(usage.completeness, UsageCompleteness::Final);
+        } else {
+            assert!(matches!(entry.state, RecoveryState::UnresolvedObservation));
+            assert_eq!(
+                usage.completeness,
+                if case == "missing" {
+                    UsageCompleteness::Unavailable
+                } else {
+                    UsageCompleteness::Partial
+                }
+            );
+        }
+        if case == "missing" {
+            assert_eq!(
+                usage.outcome.as_deref(),
+                Some("stream_usage_unavailable;delivery:success")
+            );
+        }
+        if case != "missing" {
+            assert_eq!((usage.tokens_in, usage.tokens_out), (10, 2));
+        }
+        assert_eq!(
+            ledger
+                .request_id_durable("group:platform", &entry.execution_id)
+                .unwrap()
+                .as_deref(),
+            Some(request_id.as_str())
+        );
+        let events = sink.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].request_id, request_id);
+        let observed_total = if case == "missing" { 0 } else { 12 };
+        assert_eq!(events[0].billable_tokens(), observed_total);
+        let metrics = state.metrics.render();
+        let billable = metrics
+            .lines()
+            .find(|line| {
+                line.starts_with("sandhi_tokens_total{") && line.contains("kind=\"billable\"")
+            })
+            .map(|line| line.rsplit_once(' ').unwrap().1.parse::<u64>().unwrap())
+            .unwrap_or(0);
+        assert_eq!(billable, observed_total, "{case}");
+        assert_eq!(
+            state.ledger.lock().unwrap().spent("group:platform"),
+            if case == "final" { 12 } else { 0 }
+        );
+
+        assert_eq!(
+            events[0].upstream_request_id.as_deref(),
+            Some("origin-stream")
+        );
+        sandhi_proxy::settlement::buffered::recover(state.clone())
+            .await
+            .unwrap();
+        assert_eq!(sink.events().len(), 1);
+        assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
+    }
+}
+
+// Tests the HTTP ownership seam, not the observer's existing framing/numeric matrix.
+#[tokio::test]
+async fn owned_stream_disconnect_deadline_and_shutdown_retain_qualified_usage() {
+    use futures_util::StreamExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    for case in ["disconnect", "deadline", "shutdown", "expired_shutdown"] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_in = calls.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().route("/chat/completions", axum::routing::post(move || {
+            let calls = calls_in.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                // Usage first; a response larger than the bounded producer queue then
+                // prevents further polling. No EOF or DONE can supply the final counts.
+                let wire = format!("data: {{\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{{\"prompt_tokens\":7,\"completion_tokens\":3}}}}\n\n:{}\n\n", "x".repeat(256 * 1024));
+                Body::from_stream(async_stream::stream! {
+                    yield Ok::<_, std::io::Error>(axum::body::Bytes::from(wire));
+                    std::future::pending::<()>().await;
+                })
+            }
+        }));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owned.db");
+        let sink = Arc::new(InMemorySink::new());
+        let state = owned_state_with_stream_limits(
+            format!("http://{address}"),
+            &path,
+            sink.clone(),
+            Duration::from_secs(2),
+            Some(
+                serde_json::json!({"setup_ms":1000,"idle_ms":3000,"body_ms":if case == "deadline" {100} else {3000}}),
+            ),
+        );
+        let mut request = owned_body();
+        request["stream"] = true.into();
+        let response = build_app(state.clone())
+            .oneshot(owned_request("/v1/chat/completions", request))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body().into_data_stream();
+        let first = tokio::time::timeout(Duration::from_secs(2), body.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&first).contains("prompt_tokens"));
+        if case.ends_with("shutdown") {
+            state
+                .lifecycle
+                .begin_quiesce(if case == "expired_shutdown" {
+                    Duration::ZERO
+                } else {
+                    Duration::from_secs(2)
+                });
+        }
+        if case == "disconnect" {
+            drop(body);
+        } else {
+            // Leave the producer backpressured until its lifetime/shutdown expires.
+            tokio::time::timeout(Duration::from_secs(3), state.lifecycle.wait_idle())
+                .await
+                .unwrap();
+            assert!(body.next().await.unwrap().is_err());
+        }
+        tokio::time::timeout(Duration::from_secs(3), state.lifecycle.wait_idle())
+            .await
+            .unwrap();
+        assert_eq!(
+            state.ledger.lock().unwrap().spent("group:platform"),
+            if case == "expired_shutdown" { 0 } else { 10 },
+            "{case}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let mut ledger = sandhi_store::SqliteLedger::open(path.to_str().unwrap()).unwrap();
+        let page = ledger
+            .recovery_page_durable("group:platform", None, 10)
+            .unwrap();
+        assert_eq!(page.entries.len(), 1);
+        if case == "expired_shutdown" {
+            assert!(matches!(
+                page.entries[0].state,
+                sandhi_store::ledger::evidence::RecoveryState::MayHaveDispatched
+            ));
+            assert_eq!(sandhi_proxy::settlement::buffered::retained(&state), 1);
+        } else {
+            assert!(matches!(
+                page.entries[0].state,
+                sandhi_store::ledger::evidence::RecoveryState::Settled(_)
+            ));
+        }
+        let events = sink.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].usage_completeness,
+            sandhi_core::UsageCompleteness::Final
+        );
+        assert_eq!(
+            events[0].outcome.as_deref(),
+            Some(match case {
+                "deadline" => "timeout",
+                "disconnect" => "cancelled",
+                _ => "error",
+            })
+        );
+        server.abort();
+        let _ = server.await;
+    }
+}
+
+#[tokio::test]
+async fn owned_stream_failed_terminal_publication_recovers_without_replaying_inference() {
+    let upstream = MockServer::start().await;
+    let wire = "data: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2}}\n\ndata: [DONE]\n\n";
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(wire))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("owned.db");
+    let sink = Arc::new(InMemorySink::new());
+    let state = owned_state_with_stream_limits(
+        upstream.uri(),
+        &path,
+        sink.clone(),
+        std::time::Duration::from_secs(2),
+        Some(serde_json::json!({"setup_ms":1000,"idle_ms":1000,"body_ms":2000})),
+    );
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("CREATE TRIGGER reject_terminal BEFORE INSERT ON budget_terminal_observation BEGIN SELECT RAISE(FAIL, 'injected'); END;").unwrap();
+    let mut request = owned_body();
+    request["stream"] = true.into();
+    let response = build_app(state.clone())
+        .oneshot(owned_request("/v1/chat/completions", request))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .is_err());
     state.lifecycle.wait_idle().await;
+    assert_eq!(state.ledger.lock().unwrap().spent("group:platform"), 0);
+    assert_eq!(sandhi_proxy::settlement::buffered::retained(&state), 1);
+    let mut ledger = sandhi_store::SqliteLedger::open(path.to_str().unwrap()).unwrap();
+    let page = ledger
+        .recovery_page_durable("group:platform", None, 10)
+        .unwrap();
+    assert!(matches!(
+        page.entries[0].state,
+        sandhi_store::ledger::evidence::RecoveryState::MayHaveDispatched
+    ));
+    conn.execute_batch("DROP TRIGGER reject_terminal").unwrap();
     sandhi_proxy::settlement::buffered::recover(state.clone())
         .await
         .unwrap();
-    assert_eq!(state.ledger.lock().unwrap().spent("group:platform"), 5);
-    assert_eq!(sink.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(state.ledger.lock().unwrap().spent("group:platform"), 12);
+    assert_eq!(sandhi_proxy::settlement::buffered::retained(&state), 0);
+    sandhi_proxy::settlement::buffered::recover(state.clone())
+        .await
+        .unwrap();
+    assert_eq!(state.ledger.lock().unwrap().spent("group:platform"), 12);
+    assert_eq!(sink.events().len(), 1);
+    assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn owned_stream_setup_deadline_is_scoped_inside_admission_task() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_millis(300)))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("owned.db");
+    let sink = Arc::new(InMemorySink::new());
+    let state = owned_state_with_stream_limits(
+        upstream.uri(),
+        &path,
+        sink.clone(),
+        std::time::Duration::from_secs(2),
+        Some(serde_json::json!({"setup_ms":25,"idle_ms":1000,"body_ms":2000})),
+    );
+    let mut request = owned_body();
+    request["stream"] = true.into();
+    let response = build_app(state.clone())
+        .oneshot(owned_request("/v1/chat/completions", request))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let mut ledger = sandhi_store::SqliteLedger::open(path.to_str().unwrap()).unwrap();
+    let page = ledger
+        .recovery_page_durable("group:platform", None, 10)
+        .unwrap();
+    assert_eq!(page.entries.len(), 1);
+    assert!(matches!(
+        page.entries[0].state,
+        sandhi_store::ledger::evidence::RecoveryState::UnresolvedObservation
+    ));
+    assert_eq!(
+        sink.events()[0].usage_completeness,
+        sandhi_core::UsageCompleteness::Unavailable
+    );
 }

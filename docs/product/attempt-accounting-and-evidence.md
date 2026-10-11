@@ -33,8 +33,8 @@ liability through expiry. The opt-in buffered mode below uses that admission and
 |---|---|---|
 | W05a | Atomic settlement receipt/outbox storage, immutable IDs, bounded claims and acknowledgement, rollback/reopen/concurrency tests | Integrated; receipt storage is used by opt-in tracked buffered HTTP; network exporter remains pending |
 | W05b | Transport-owned attempt lifecycle and neutral draft contract | Integrated through PR #246 after clean adversarial review and green exact-head/post-merge CI; remains opt-in diagnostics only, while downstream accounting review still gates authoritative use and external release |
-| W05c | Connect admission, settlement and evidence without bypassing correctness | Limited buffered HTTP integration implemented: correlated prepared admission, detached owner and qualified terminal settlement; broader physical-attempt linkage, logical dedup and no-lease policy remain pending |
-| W05d | Unknown-liability and late-settlement recovery | Limited buffered recovery implemented over the original ledger: bounded advancing scope/execution inventory and retained terminal retry, including unbudgeted/removed keys; actual-process drills cover unknown liability, receipt recovery and terminal publication under SQLite contention/process death without replay. Amendments, broad lifecycle acceptance and TD-0024 retention remain pending |
+| W05c | Connect admission, settlement and evidence without bypassing correctness | Limited buffered and bounded transparent streaming HTTP integration implemented: correlated prepared admission, detached owner and qualified terminal settlement; broader physical-attempt linkage, logical dedup and no-lease policy remain pending |
+| W05d | Unknown-liability and late-settlement recovery | Limited buffered/streaming recovery implemented over the original ledger: bounded advancing scope/execution inventory and retained terminal retry, including unbudgeted/removed keys; actual-process drills cover unknown liability, receipt recovery and terminal publication under SQLite contention/process death without replay. Amendments, broad lifecycle acceptance and TD-0024 retention remain pending |
 | W05e | Receiver contract, exporter and operator evidence | Pending: receiver idempotency, authenticated/scoped transport, retry/backoff, backlog/freshness UX, safe retention, multi-shard cursor/migration and real consumer review |
 
 W05 completes only after all substeps and joint contract gates have evidence. No code in W05a
@@ -639,6 +639,149 @@ page/time bounds, including unbudgeted key scopes; a repeated page-one scan can
 starve later ready records. W05c–e and actual-member C5 remain open.
 
 
+## OpenAI Chat stream usage qualification (W05c prerequisite)
+
+The additive Rust `sandhi_core::usage::qualify_openai_stream_usage` API accepts one
+complete decoded event and returns `Result<Option<ParsedUsage>, StreamUsageError>`.
+It shares buffered counter validation and the existing OpenAI parser; it introduces
+no alternate token derivation, SSE parser or streaming state owner.
+
+| Event | Qualified result |
+|---|---|
+| `chat.completion.chunk`, empty `choices`, valid non-null usage | `Some` provider-reported request totals; explicit zero is valid |
+| Chat chunk with absent/null usage, including a finish-reason event | `None`; no final measurement |
+| Non-null usage on nonempty choices | Structured `NonFinalUsage` error |
+| Malformed chunk envelope or error-bearing event | Structured `InvalidChunk` error |
+| Missing, malformed or inconsistent counters inside a usage object | Existing counter-validation error wrapped as `InvalidUsage`; no qualified zero |
+
+The [OpenAI include-usage contract](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)
+places whole-request usage in an empty-choices event before `[DONE]`. The qualifier
+therefore needs no terminator to recognize that measurement. Later cancellation
+or delivery failure must not erase accepted usage; EOF, `[DONE]` and finish reason
+alone cannot create it. This says nothing about successful delivery, tokenizer
+correctness, executed cache reuse or committed settlement.
+
+The existing numeric-validation matrix now exercises both buffered and streaming
+qualification; one envelope-focused test covers the new distinction. No duplicated
+parser or storage matrix is added. Initial RED compilation identifies the missing
+API; negative controls bypassing numeric validation or the empty-choices guard each
+fail assertions. Both controls are removed before final validation.
+
+### Bounded event observation
+
+`sandhi_providers::stream_usage::OpenAiStreamUsageObserver` composes the core qualifier
+with opt-in SSE framing in the existing `LineSplitter`. Construct one per upstream
+HTTP response; the existing request/attempt owner supplies correlation. SSE `id`
+fields cannot replace Sandhi request IDs. No identifier derivation or registry is added.
+
+| Input / state | Observation contract |
+|---|---|
+| LF, CRLF or CR, including split boundaries | Complete blank-line-delimited events; CR dispatches immediately |
+| Initial BOM, comments, ignored fields, multiline data | One leading BOM; data lines joined with newlines; ordinary message events supported |
+| Pending/completed line or aggregate event over 8 MiB | Static structured error; no discarded suffix can become new evidence |
+| Arbitrarily large input chunk | Inspect 8 KiB slices; never copy the whole input chunk into the pending buffer |
+| First qualified usage | Retain immutable counts and cache-reporting evidence |
+| Identical / conflicting later usage | Idempotent / sticky `ConflictingUsage`; first evidence remains inspectable |
+| Later malformed event, partial EOF or cancellation | Prior usage survives; failure or cancellation is a separate fact |
+| Complete `[DONE]` without usage | Protocol completion only; measurement stays absent |
+| Data after `[DONE]` | Explicit failure; cannot manufacture or replace usage |
+
+The line/event ceiling counts ignored fields and comments; CRLF is normalized to
+one line terminator for this bound. Parsing storage is bounded independently of the
+incoming chunk size; total memory also includes bounded splitter, slice and JSON
+parsing overhead. UTF-8/JSON errors, repeated BOMs and unsupported named events
+fail explicitly. `finish()` never adds a delimiter and reports incomplete framing
+or a missing terminator; `usage()`, `is_done()` and `error()` remain separate. Once
+finished, the instance rejects reuse. No reconnect or inference replay is performed.
+Framing follows the [SSE event interpretation rules](https://html.spec.whatwg.org/multipage/server-sent-events.html#event-stream-interpretation);
+the strict application contract rejects malformed input instead of treating it as
+successful accounting.
+
+Existing splitter boundary and deterministic linearity matrices cover both modes;
+five observer tests cover framing, incomplete/unknown measurement, immutable
+retention, invalid events and memory bounds. Four temporary guard-bypass controls
+reject last-write-wins, whole-chunk copying and missing line/event bounds. Numeric
+counter validation remains owned by the core tests; no copied parser/storage suite.
+
+### Response-owned stream binding (source prerequisite)
+
+`RawForwarder::forward_stream_qualified_with_headers` binds one observer to one
+OpenAI-compatible Chat response. Unsupported operations and conflicting stream
+modes fail before dispatch. It shares the existing physical send, setup/idle
+deadlines and session/request header policy; there is no second retry path.
+
+| Fact | Contract |
+| --- | --- |
+| Wire delivery | Every received chunk is returned unchanged, including malformed SSE; qualification errors are separate facts |
+| Measurement | First qualified request-total usage is published before yielding its bytes and survives cancellation, errors and drop |
+| Completion | `[DONE]` publishes protocol completion, not delivery success; the single attempt terminal waits for EOF, error or drop so later invalid data remains observable |
+| Correlation | Existing attempt/request context and response headers remain authoritative; SSE `id` is never attribution |
+| Observation handle | Cloneable read-only copied latest snapshot, bounded in memory and surviving stream drop; no public lock borrow, task or queue |
+| Diagnostic loss | Full/disconnected attempt channels cannot erase the response snapshot; diagnostics still expose their dropped-observation counter |
+| Failure | Qualified usage stays Final even when delivery is Cancelled/Timeout/IncompleteStream; a qualification error must remain visible to reconciliation |
+
+The handle does not poll an abandoned stream, prove origin cancellation or persist
+anything. A diagnostic terminal alone cannot authorize settlement, particularly
+when the first measurement conflicts with later data. Existing lifecycle tests
+cover drop before polling, usage/DONE before drop, timeout, missing DONE, malformed
+or conflicting reports, post-DONE data, transport errors and channel loss. Raw HTTP
+tests cover exact response bytes, canonical correlation, one POST and pre-dispatch
+rejection; the existing stalled-error deadline fixture now covers this path too.
+Numeric counters and SSE framing stay in their existing test owners.
+
+The development-source bridge now connects this handle to the existing proxy body
+owner and canonical durable settlement. Legacy metered callers remain unchanged.
+Only tracked, bounded transparent OpenAI Chat streams are admitted; see the
+[operator contract](../operator/buffered-accounting.md). This is not in 0.12.0 and
+does not qualify a deployed runtime, binding facade or C5.
+
+### Owned streaming HTTP and settlement (development source)
+
+| Boundary | Implementation and test evidence |
+|---|---|
+| Admission | Existing correlated intent, dispatch fence and retained slot; explicit output limit, Block policy, retry-free transport and complete route streaming policy |
+| Duration | Setup + body + accounting headroom in the lease; task-local setup/idle policy inside the detached task |
+| Terminal capture | Source drops before reading the surviving snapshot; final qualified counts survive disconnect, body deadline and shutdown |
+| Settlement | Existing immutable terminal record and jobs owner; clean HTTP EOF waits for a committed receipt |
+| Invalid/missing evidence | First counts remain Partial with bounded error reason, or Unavailable; held liability, no zero settlement |
+| Failure/recovery | Injected terminal-write failure retains one snapshot; recovery commits once without another origin call or usage event |
+| Shutdown | Delivery reserves an accounting wait inside the original grace; no deadline extension or guarantee of hard SQLite timing |
+| Telemetry | Throwing sink cannot erase terminal ownership; partial observed totals conserve across metrics and events without becoming spend |
+
+Tests extend the existing HTTP sink-panic and unsupported-shape matrices. The new
+HTTP seam tests cover settlement, lifecycle, publication recovery and setup bounds;
+numeric/framing tests remain in their existing owners. No duplicate parser or
+storage matrix was added. Independent review drove explicit missing-usage outcomes
+and observed-total conservation; the latter failed before its fix.
+
+**Next gates:** packaged artifact verification, preserved-state deployment, Victor repin and actual-member
+C5. Synthetic source HTTP tests prove neither origin cancellation nor executed cache
+reuse. A process killed before terminal persistence still leaves unknown liability.
+
+### Standalone streaming lifecycle source acceptance
+
+The existing `test_shutdown.py` and `test_recovery.py` process fixtures now exercise
+tracked streaming alongside buffered requests. They launch the built proxy with a
+complete streaming deadline policy, disposable SQLite state and a synthetic origin.
+The legacy SDK stream fixture remains unchanged; only tracked cases opt into the
+separate empty-choices usage event required by the strict qualifier.
+
+| Boundary | Evidence | Limit |
+|---|---|---|
+| HTTP/TLS shutdown | Final usage produces one receipt and exit 0; missing usage retains liability and exits 124 | Fixture CA and hostname verified; no deployment claim |
+| SIGKILL before terminal persistence | Held capacity survives restart and blocks a new dispatch | Unknown usage is not reconstructed or silently settled to zero |
+| SIGKILL after terminal persistence | Same copied/hashed binary recovers one receipt; second restart preserves identity and spend | Receipt failure is injected with a disposable SQLite trigger |
+| SQLite contention | Surviving owner recovers one receipt; process death retains unknown liability | Token and TLS/OIDC modes; no inference or event replay |
+| TLS/OIDC stream lifetime | Clean completion, client disconnect and SIGTERM after a complete usage event preserve 7 fresh + 4 cache-read + 3 output tokens and one 14-token receipt | Synthetic usage verifies accounting, not tokenizer units or executed reuse |
+| Grant revocation | Recovery settles existing evidence after restart with inference permission withdrawn; new requests are denied | Existing authority, scope and request/session/run/step joins remain enforced |
+
+These are synthetic **source/binary** acceptance drills, not released artifacts or
+live-provider acceptance. The deadline-policy negative control returns HTTP 400
+before streaming admission. Numeric/framing and storage failure tests retain their
+existing owners; no parallel parser, dispatch path or ledger was introduced.
+Managed rollout, upstream cancellation, broad provider lifecycle, export and C5
+remain separate gates.
+
 ## Owned buffered HTTP and recovery (W05c/d limited activation)
 
 The [operator mode](../operator/buffered-accounting.md) connects the previously
@@ -697,9 +840,9 @@ Both controls fail their assertions; the committed tests retain tracked mode.
 The trigger is explicit synthetic fault injection, not a naturally occurring disk
 failure or proof of a crash at an individual instruction. The unknown drill proves
 retained liability and shutdown reconciliation, not an independently witnessed
-background sweep. These checks use local HTTP, synthetic provider responses and
-virtual-key compatibility auth. Tracked TLS/OIDC parity, streaming ownership,
-release/deployment and actual-member C5 remain separate gates. No production hook,
+background sweep. These two checks now run with both local HTTP/virtual-key auth
+and CA-verified HTTPS/OIDC; provider responses remain synthetic. Streaming ownership,
+managed tracked deployment and actual-member C5 remain separate gates. No production hook,
 provider retry or automatic closure of unknown liability is added.
 
 The same fixture now covers the earlier terminal-publication boundary. After one
@@ -724,3 +867,90 @@ mis-correlated events. This is not atomic telemetry delivery. Negative controls
 omit provider usage or disable retained retry and must fail the corresponding
 observation or receipt assertion. Existing in-process/storage tests remain the
 owners of field and transaction matrices; no duplicate matrix was added.
+
+## Tracked buffered TLS/OIDC source acceptance
+
+The existing SDK shutdown and SSO owners cover tracked buffered accounting with
+synthetic providers and a disposable HTTPS authority. No production behavior or
+fixture default changes; tracked configuration remains opt-in.
+
+| Boundary | Evidence | Limit |
+|---|---|---|
+| HTTP/TLS shutdown | Same tracked buffered test verifies one origin call, request correlation, receipt or retained uncertainty, and exit 0/124 over both transports | TLS client verifies the fixture CA and hostname; no external trust-store deployment |
+| OIDC bearer accounting | One successful call joins returned request ID, execution intent, attributed usage event and receipt; session/run/step IDs persist | Initial dashboard case uses an admin bearer; recovery cases use separate admin/member identities |
+| Budget settlement | Grant binds to `group:dashboard`; Block policy charges exactly 14 tokens (7 fresh input + 4 cache read + 3 output) | Synthetic usage; not tokenizer or executed-cache-reuse evidence |
+| Pre-admission denial | Invalid bearer, disallowed model and subject spoof leave origin count, intent/correlation/receipt/event counts and budget spend unchanged | Focused composition checks; protocol/authorization matrices remain with their existing owners |
+| Browser roles | Existing viewer/operator/admin login, mutation, secure cookie and logout matrix runs with legacy and tracked configurations | Browser ignores its disposable fixture certificate; HTTP client and gateway-to-IdP paths verify CA trust |
+
+The initial regression fails against the old fixture: one usage event exists but
+no tracked intent, correlation or receipt. Enabling the tracked option requires
+an explicit output bound and a bound Block budget. The shared mock origin retains
+requests across cases, so each gateway records its starting count instead of
+assuming an empty shared history. No requests or cache are cleared.
+
+The duplicate-test audit retained the existing shutdown, SSO role, protocol,
+parser and recovery owners; it adds only the missing cross-boundary accounting
+assertions. The fixture-consumer regression suite includes management, metrics,
+reasoning, run rendering, acceptance decisions, recovery, store startup and the
+existing AgentBrowser smoke. No second browser harness is introduced.
+
+The two existing tracked SIGKILL cases are parameterized over token compatibility
+and TLS/OIDC instead of adding a second recovery harness. The OIDC member has its
+own access token, viewer role and inference grant; the admin has no inference grant.
+The background request, admin client and gateway-to-authority connection verify CA
+trust. Initial RED checks caught the old fixture serving HTTP for the OIDC cases.
+A temporary negative control retained the inference grant on restart: new dispatch
+returned 200 instead of the required 403, and the test failed. The final source
+restores revocation; the control touches only disposable synthetic state.
+
+| OIDC restart boundary | Required evidence |
+|---|---|
+| Unknown post-dispatch liability | Same member remains authorized; the original bound scope stays held; a new call returns budget-exhausted 429 without another origin request or fabricated receipt |
+| Persisted terminal usage | Revoke only the member's inference grant before restart, preserving its active identity/viewer role; recovery commits the original 14-token receipt without fresh inference authorization |
+| Revoked new dispatch | Member gets 403; receipts, events, spend and the single origin request stay unchanged |
+| Second restart | Same immutable gateway binary, original receipt identity/time and scope/spend; clean shutdown |
+
+Source validation passes all 63 recovery/dashboard/shutdown cases plus the existing
+AgentBrowser recovery smoke (including its negative display controls). The 316-case
+SDK collection passes. The duplicate audit leaves parser, authorization and ledger
+transaction matrices with their existing owners.
+
+This is source-level synthetic buffered acceptance. Actual IdP/released-binary
+qualification, managed tracked deployment, streaming ownership, broader lifecycle
+and full actual-member C5 remain distinct gates.
+
+### Isolated released-binary OIDC qualification (2026-10-10)
+
+New evidence qualifies the official macOS 0.12.0 gateway with the deployed
+AnvaiIdentity policy and existing local credential references. A private loopback
+TLS candidate used an online SQLite backup containing 1,071 historical events,
+tracked buffered accounting and a bound Block budget. The managed gateway, its
+configuration and historical rows remained unchanged; it still uses default
+accounting. No credentials were transferred and no shared cache was cleared.
+
+| Route | Request ID | Fresh input / output / cache read | Receipt charge |
+|---|---|---|---|
+| InferFlux `qwen3-coder-30b` | `req_1791638904926_0` | 14 / 1 / 0 | 15 |
+| InferFlux `qwen2.5-coder-14b` | `req_1791638905151_1` | 14 / 1 / 0 | 15 |
+| ZAI `glm-5.3` | `req_1791638905788_2` | 18 / 3 / 0 | 21 |
+
+- Binary SHA-256: `b138480cd96f4c5a1d830a1f9bf1615ba5dd7519362531323d1c37619ed00e34`.
+- Issuer: `https://id.anvaiops.com/oauth2/openid/sandhi`; member and accounting
+  observer use separate credentials through Victor's existing OAuth helper.
+- All three responses are HTTP 200 with nonempty content. Wire/SQLite/run/receipt
+  joins verify request, member, group, model and distinct session/run IDs; dashboard
+  deltas match 3 calls, 46 fresh-input, 5 output and 0 cache-read tokens. Reporting
+  coverage is explicit for all three; receipts sum to 51 tokens.
+- Gateway buffered deadline remains 120 seconds; client timeout is 125 seconds.
+  No inference retries. Clean candidate shutdown exits 0; database integrity and
+  copied historical events remain intact.
+- Retained local evidence: `var/sandhi-oidc-recovery-2026-10-10/` in the originating
+  Victor checkout, including the reviewed harness and private candidate database.
+  Two initial helper-import failures occurred before any server launch or call.
+
+This is a simple new provider smoke, not actual-member evidence, live crash
+recovery, a managed tracked-mode cutover or C5. Zero reported cache does not prove
+zero executed reuse. Streaming, tokenizer/session-lifecycle correctness and broad
+failure acceptance remain open. The managed streaming route must not be switched globally to tracked mode before
+released streaming lifecycle acceptance. The development-source extension above
+does not retroactively qualify the 0.12.0 binary used for this evidence.

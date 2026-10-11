@@ -65,6 +65,12 @@ a claim that SQLite commits succeeded.
 complete fixed-shard file sets, integrity, checksums and private, disjoint destinations.
 `test_recovery.py` compares real-process restart/restore evidence, holds uncertain leases
 across SIGKILL and reconciles post-snapshot revocations before enabling credentials.
+Its tracked SIGKILL and SQLite-contention cases cover buffered/streaming requests,
+token compatibility and CA-verified TLS/OIDC with separate admin/member identities,
+retained unknown liability and once-only settlement after inference-grant revocation.
+The same fixtures exercise OIDC streaming completion, disconnect and SIGTERM after
+qualified usage, preserving counts and correlation. `test_shutdown.py` covers
+buffered/streamed final and missing usage over HTTP/TLS. Legacy cases retain their defaults.
 `test_recovery_broker.py` checks restored metadata against unavailable and re-provisioned
 synthetic broker authority. `test_store_startup.py` proves configured database initialization
 failures exit before serving, without replacing persisted enforcement with memory. See the
@@ -122,7 +128,7 @@ the new revision must pass this focused suite before the pin moves.
 ## Optional AgentBrowser integration
 
 Use a built sibling checkout with Node 24 LTS and its Chromium installed. Qualified source:
-AgentBrowser **v1.16.0**, `104e11d064761058047d7270f5aff7a25f8c634c`.
+AgentBrowser **v1.16.1** (re-qualified 2026-10-11; smoke + recovery pass).
 Build that exact tag using its frozen lockfile and documented `pnpm build`
 workflow before running; stale `dist/` packages may not have the snapshot/plan methods.
 
@@ -136,7 +142,7 @@ Without that variable the optional test skips; an explicitly configured broken c
 The regular CI job runs the Playwright regressions but does not fetch a sibling repository.
 `test_recovery_agentbrowser.py` uses the same optional checkout to verify restored dashboard
 evidence, Refresh and token clearing without generating new inference observations.
-Both existing tests pass against v1.16.0, including the recovery test's negative
+Both tests pass against v1.16.1, including the recovery test's negative
 numeric/DOM evidence controls. This is an optional test integration, not a Sandhi
 runtime package dependency; no AgentBrowser package is added to gateway installs.
 It also compares accessibility-visible attribution/budget rows against restored evidence and

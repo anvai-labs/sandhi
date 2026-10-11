@@ -844,3 +844,65 @@ and [owning contract](../product/attempt-accounting-and-evidence.md#owned-buffer
 Broad streaming lifecycle, amendments, alert/receipt export, release/deployment
 and actual-member C5 acceptance remain open. No provider or event replay is
 introduced, and best-effort observations are not atomic settlement delivery.
+
+Tracked buffered TLS/OIDC now has [synthetic source acceptance](../product/attempt-accounting-and-evidence.md#tracked-buffered-tlsoidc-source-acceptance):
+verified TLS shutdown, OIDC request/intent/event/receipt joins, exact bound-scope
+spend, pre-admission denials and the existing browser role matrix. This does not
+close managed tracked deployment, streaming lifecycle or C5. The existing two
+SIGKILL drills now also pass with CA-verified TLS/OIDC and separate admin/member
+identities: unknown liability retains its bound scope, and persisted final usage
+settles once after grant revocation while new dispatch is denied without accounting
+changes. All 63 recovery/dashboard/shutdown cases and the existing AgentBrowser
+recovery smoke pass; 316 SDK cases collect. This remains synthetic source evidence.
+
+A separate [isolated 0.12.0 qualification](../product/attempt-accounting-and-evidence.md#isolated-released-binary-oidc-qualification-2026-10-10)
+uses the actual deployed AnvaiIdentity policy and both InferFlux Qwen routes plus
+ZAI. Three HTTP 200 responses reconcile 46 fresh-input, 5 output and explicit zero
+cache-read tokens across wire, persisted attribution, receipts, run totals and
+dashboard; clean shutdown exits 0. Managed state and historical rows are preserved.
+This is new provider smoke evidence, not a managed cutover, live crash drill or C5.
+
+### Strict stream usage prerequisite (2026-10-10)
+
+The additive [core event qualifier](../product/attempt-accounting-and-evidence.md#openai-chat-stream-usage-qualification-w05c-prerequisite)
+recognizes validated request-total usage on complete empty-choices OpenAI Chat
+events independently of `[DONE]`. It reuses the buffered counter validator and
+canonical parser. Null/absent usage stays unavailable; malformed/nonfinal reports
+return structured errors. Existing numeric tests cover both qualification paths;
+one new envelope test and two negative controls pin the distinction.
+
+The additive provider observer now supplies bounded complete-event framing and
+immutable first-usage retention with explicit conflict/failure states. It reuses
+an opt-in mode of the existing splitter and the core qualifier. Five observer tests
+plus the extended splitter matrices and four guard-bypass negative controls cover
+fragmentation, truncation, unknown usage, conflicting reports and bounded input.
+
+The opt-in raw Chat stream now binds one observer to each upstream response with
+existing attempt/session/request correlation and shared setup/idle deadlines.
+Its copied latest snapshot retains qualified usage through drop, timeout, protocol
+failure and diagnostic-channel loss. DONE is independent of the terminal outcome;
+malformed bytes still forward unchanged with explicit qualification failure.
+Existing HTTP/deadline fixtures and two lifecycle matrices cover the new owner;
+no duplicated parser/storage suite or new retry/task registry is introduced.
+
+Next: reuse the proxy body owner for producer shutdown, durable terminal publication
+and settlement/recovery. The snapshot is in-memory evidence, not crash durability.
+Legacy metered defaults are unchanged; released streaming acceptance, deployment and
+full C5 remain open.
+
+### W05c/d bounded streaming HTTP bridge (development source)
+
+The [owned HTTP contract](../operator/buffered-accounting.md) extends the existing
+tracked admission, body producer and settlement jobs to bounded transparent OpenAI
+Chat streaming. One dispatch and one immutable terminal observation retain qualified
+counts through cancellation and shutdown. Invalid/absent evidence holds liability;
+clean HTTP EOF requires a receipt. Existing accounting-only recovery handles failed
+terminal publication. No new registry, parser, retry or default-mode behavior.
+
+Source tests cover the ownership seams, setup policy, publication refusal, telemetry
+panic and partial observed-total conservation. The existing process fixtures now
+also cover [standalone streaming lifecycle](../product/attempt-accounting-and-evidence.md#standalone-streaming-lifecycle-source-acceptance):
+HTTP/TLS shutdown, token/OIDC crash/restart and contention, revoked-grant recovery,
+and TLS/OIDC completion/disconnect/SIGTERM after qualified usage. One origin call,
+one receipt and conserved counts are required. Packaged artifact verification,
+preserved-state deployment, Victor repin, broader lifecycle and C5 remain separate gates.

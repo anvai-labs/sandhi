@@ -29,10 +29,12 @@ pub(crate) struct LineSplitter {
     /// lines-per-chunk, which is the common case for small SSE deltas. The head is reclaimed by
     /// an amortised compaction below.
     consumed: usize,
-    /// Absolute index into `buf` up to which we have already looked for a `\n`. Only newly-arrived
+    /// Absolute index into `buf` up to which we have looked for a line terminator. Newly-arrived
     /// bytes are searched, which is what makes a newline-*free* stream O(n) rather than O(n²).
     searched_to: usize,
     budget: usize,
+    sse: bool,
+    skip_lf: bool,
     /// Bytes examined by newline searches. Compiled out of release builds — it exists so the O(n)
     /// property can be asserted deterministically instead of by timing, which would flake.
     #[cfg(test)]
@@ -51,10 +53,21 @@ impl LineSplitter {
             consumed: 0,
             searched_to: 0,
             budget,
+            sse: false,
+            skip_lf: false,
             #[cfg(test)]
             scanned: 0,
             #[cfg(test)]
             compacted: 0,
+        }
+    }
+
+    /// Opt-in SSE framing: CR and LF terminate immediately; CRLF is one boundary,
+    /// even across chunks. The legacy newline-only constructor is unchanged.
+    pub(crate) fn new_sse(budget: usize) -> Self {
+        Self {
+            sse: true,
+            ..Self::new(budget)
         }
     }
 
@@ -63,15 +76,27 @@ impl LineSplitter {
         self.buf.extend_from_slice(chunk);
     }
 
-    /// Drain the next complete line, **including** its trailing `\n`, or `None` when the buffer
-    /// holds no further line boundary.
+    /// Drain a complete line including its terminator. In SSE mode a CR is returned
+    /// immediately and a following LF is consumed separately, without a phantom line.
     pub(crate) fn next_line(&mut self) -> Option<Vec<u8>> {
+        if self.skip_lf && self.consumed < self.buf.len() {
+            if self.buf[self.consumed] == b'\n' {
+                self.consumed += 1;
+                self.searched_to = self.consumed;
+                #[cfg(test)]
+                {
+                    self.scanned += 1;
+                }
+            }
+            self.skip_lf = false;
+            self.compact_if_worthwhile();
+        }
         if self.searched_to >= self.buf.len() {
             return None;
         }
         let found = self.buf[self.searched_to..]
             .iter()
-            .position(|byte| *byte == b'\n');
+            .position(|byte| *byte == b'\n' || (self.sse && *byte == b'\r'));
         #[cfg(test)]
         {
             let examined = match found {
@@ -83,6 +108,7 @@ impl LineSplitter {
         match found {
             Some(rel) => {
                 let newline = self.searched_to + rel;
+                self.skip_lf = self.sse && self.buf[newline] == b'\r';
                 let line = self.buf[self.consumed..=newline].to_vec();
                 self.consumed = newline + 1;
                 self.searched_to = self.consumed;
@@ -123,6 +149,7 @@ impl LineSplitter {
         self.buf.clear();
         self.consumed = 0;
         self.searched_to = 0;
+        self.skip_lf = false;
     }
 
     /// The trailing bytes that never got a newline, for an end-of-stream flush.
@@ -205,14 +232,31 @@ mod tests {
     fn splitting_is_invariant_across_every_byte_boundary() {
         // The property the six decoders depend on: where the transport chunks the bytes must not
         // change the lines produced.
-        let wire = b"alpha\nbeta\ngamma\n";
-        for split in 0..=wire.len() {
-            let mut splitter = LineSplitter::new(BUDGET);
-            splitter.push(&wire[..split]);
-            let mut got = lines(&mut splitter);
-            splitter.push(&wire[split..]);
-            got.extend(lines(&mut splitter));
-            assert_eq!(got, vec!["alpha\n", "beta\n", "gamma\n"], "split {split}");
+        for (sse, wire, expected) in [
+            (
+                false,
+                b"alpha\nbeta\ngamma\n".as_slice(),
+                vec!["alpha\n", "beta\n", "gamma\n"],
+            ),
+            (
+                true,
+                b"alpha\r\nbeta\ngamma\r".as_slice(),
+                vec!["alpha\r", "beta\n", "gamma\r"],
+            ),
+            (true, b"alpha\r\r".as_slice(), vec!["alpha\r", "\r"]),
+        ] {
+            for split in 0..=wire.len() {
+                let mut splitter = if sse {
+                    LineSplitter::new_sse(BUDGET)
+                } else {
+                    LineSplitter::new(BUDGET)
+                };
+                splitter.push(&wire[..split]);
+                let mut got = lines(&mut splitter);
+                splitter.push(&wire[split..]);
+                got.extend(lines(&mut splitter));
+                assert_eq!(got, expected, "sse={sse}, split {split}");
+            }
         }
     }
 
@@ -292,43 +336,62 @@ mod tests {
         // Deterministic stand-in for "O(n), not O(n²)". The pre-TD-0006 implementation rescanned
         // the whole accumulated buffer on every chunk, so 10k chunks of 64 B would examine ~3.2e9
         // bytes; the cursor keeps it at one pass over the 640 KB actually received.
-        let mut splitter = LineSplitter::new(usize::MAX);
-        let chunk = vec![b'x'; 64];
-        let chunks = 10_000;
-        for _ in 0..chunks {
-            splitter.push(&chunk);
-            while splitter.next_line().is_some() {}
+        for sse in [false, true] {
+            let mut splitter = if sse {
+                LineSplitter::new_sse(usize::MAX)
+            } else {
+                LineSplitter::new(usize::MAX)
+            };
+            let chunk = vec![b'x'; 64];
+            let chunks = 10_000;
+            for _ in 0..chunks {
+                splitter.push(&chunk);
+                while splitter.next_line().is_some() {}
+            }
+            let total = chunks * chunk.len();
+            assert_eq!(splitter.buffered_len(), total);
+            assert!(
+                splitter.work_done() <= total,
+                "scanned {} bytes for {total} received — the search cursor is not holding",
+                splitter.work_done()
+            );
         }
-        let total = chunks * chunk.len();
-        assert_eq!(splitter.buffered_len(), total);
-        assert!(
-            splitter.work_done() <= total,
-            "scanned {} bytes for {total} received — the search cursor is not holding",
-            splitter.work_done()
-        );
     }
 
     #[test]
     fn many_lines_in_one_chunk_stay_linear_in_total_work() {
-        let mut splitter = LineSplitter::new(usize::MAX);
-        let wire: Vec<u8> = std::iter::repeat_n(b"line\n".as_slice(), 5_000)
+        for sse in [false, true] {
+            let mut splitter = if sse {
+                LineSplitter::new_sse(usize::MAX)
+            } else {
+                LineSplitter::new(usize::MAX)
+            };
+            let wire: Vec<u8> = std::iter::repeat_n(
+                if sse {
+                    b"line\r\n".as_slice()
+                } else {
+                    b"line\n".as_slice()
+                },
+                5_000,
+            )
             .flatten()
             .copied()
             .collect();
-        splitter.push(&wire);
-        assert_eq!(lines(&mut splitter).len(), 5_000);
-        // Total work — search plus compaction memmove — must stay a small multiple of the input.
-        // This is the assertion an earlier version got wrong: it counted only the SEARCH, which is
-        // linear by construction, and so certified a linearity the code did not have. Draining
-        // per line memmoves the remainder every time, which is O(k · len) for k lines in one
-        // buffer; adversarial review measured 4x input -> 8.5x time. The head offset plus
-        // amortised compaction is what actually makes this linear.
-        assert!(
-            splitter.work_done() <= 3 * wire.len(),
-            "5k lines in one chunk cost {} for {} bytes — a per-line drain would be quadratic",
-            splitter.work_done(),
-            wire.len()
-        );
+            splitter.push(&wire);
+            assert_eq!(lines(&mut splitter).len(), 5_000);
+            // Total work — search plus compaction memmove — must stay a small multiple of the input.
+            // This is the assertion an earlier version got wrong: it counted only the SEARCH, which is
+            // linear by construction, and so certified a linearity the code did not have. Draining
+            // per line memmoves the remainder every time, which is O(k · len) for k lines in one
+            // buffer; adversarial review measured 4x input -> 8.5x time. The head offset plus
+            // amortised compaction is what actually makes this linear.
+            assert!(
+                splitter.work_done() <= 3 * wire.len(),
+                "5k lines in one chunk cost {} for {} bytes — a per-line drain would be quadratic",
+                splitter.work_done(),
+                wire.len()
+            );
+        }
     }
 
     #[test]

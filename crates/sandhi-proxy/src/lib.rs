@@ -2564,6 +2564,7 @@ async fn handle_with_policy_receipt(
             effective_max,
             input_len,
             buffered_deadline.map(|d| d.duration()),
+            streaming_deadline,
         )
         .await;
     }
@@ -2909,14 +2910,14 @@ async fn transparent_complete_response(
             usage.outcome.get_or_insert_with(|| "success".into());
             accounting.observe(&usage);
             accounting.set_outcome("success");
-            if !accounting.finalize_buffered().await {
+            if !accounting.finalize_owned().await {
                 return settlement::buffered::accounting_error(dialect, &accounting.request_id);
             }
             raw_response_to_axum(raw, dialect)
         }
         Err(err) => {
             accounting.set_outcome("error");
-            if !accounting.finalize_buffered().await {
+            if !accounting.finalize_owned().await {
                 return settlement::buffered::accounting_error(dialect, &accounting.request_id);
             }
             provider_error(&err, dialect, provider.slug(), full_error_detail)
@@ -2939,6 +2940,18 @@ async fn transparent_stream_response(
     gemini: Option<GeminiRoute>,
     permit: Arc<AdmissionPermit>,
 ) -> Response {
+    if accounting.owned.is_some() {
+        return streaming::qualified_response(
+            provider,
+            body,
+            session,
+            dialect,
+            accounting,
+            full_error_detail,
+            permit,
+        )
+        .await;
+    }
     let started = std::time::Instant::now();
     let Some(forwarder) = provider.raw_forwarder() else {
         accounting.set_outcome("error");
@@ -3154,6 +3167,7 @@ fn blocking_section<T>(operation: impl FnOnce() -> T) -> T {
 /// abandoned. Counts are always measured; an unavailable observation releases the reservation.
 struct RequestAccounting {
     owned: Option<settlement::buffered::Accounting>,
+    stream_observation: Option<streaming::OwnedObservation>,
     /// Bounded metric dimensions for this call (TD-0011 D2) — set once at dispatch.
     dialect: &'static str,
     plane: metrics::Plane,
@@ -3215,6 +3229,7 @@ impl RequestAccounting {
         };
         Self {
             owned: None,
+            stream_observation: None,
             operation: None,
             stream_body_lifetime: state.stream_body_lifetime,
             state,
@@ -3453,15 +3468,19 @@ impl RequestAccounting {
         self.state.sink.emit(&event);
     }
 
-    async fn finalize_buffered(&mut self) -> bool {
+    async fn finalize_owned(&mut self) -> bool {
         let Some(mut owned) = self.owned.take() else {
             self.finalize();
             return true;
         };
         self.finalized = true;
+        streaming::capture_terminal(self);
         let mut usage = self.usage.take().unwrap_or_default();
         usage.outcome.get_or_insert_with(|| self.outcome.into());
-        let measured = usage.completeness == UsageCompleteness::Final;
+        let measured = matches!(
+            usage.completeness,
+            UsageCompleteness::Final | UsageCompleteness::Partial
+        );
         // Retain immutable terminal evidence BEFORE invoking arbitrary best-effort
         // telemetry. A panicking sink must not erase a completed model's usage.
         let pending = owned.execution.into_settlement(usage.clone());
@@ -3530,14 +3549,14 @@ async fn complete_response(
             accounting.observe(&response.usage);
             accounting.finish_reason = response.finish_reason;
             accounting.set_outcome("success");
-            if !accounting.finalize_buffered().await {
+            if !accounting.finalize_owned().await {
                 return settlement::buffered::accounting_error(dialect, &accounting.request_id);
             }
             Json(encode_response(dialect, &response)).into_response()
         }
         Err(error) => {
             accounting.set_outcome("error");
-            if !accounting.finalize_buffered().await {
+            if !accounting.finalize_owned().await {
                 return settlement::buffered::accounting_error(dialect, &accounting.request_id);
             }
             provider_error(&error, dialect, provider.slug(), full_error_detail)

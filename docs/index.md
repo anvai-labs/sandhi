@@ -50,6 +50,7 @@ flowchart LR
 
 !!! warning "Develop is ahead of the serving release"
     Tracked buffered accounting is opt-in in the [published 0.12.0 release](releases/v0.12.0.md).
+    The [0.13.0 candidate](releases/v0.13.0.md) adds bounded tracked OpenAI Chat streaming.
     Passing source tests do not establish a released deployment or full mixed-team
     acceptance. Check [release artifacts](https://github.com/anvai-labs/sandhi/releases)
     and your actual binary identity before enabling it.

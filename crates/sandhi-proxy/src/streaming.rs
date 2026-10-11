@@ -1,6 +1,9 @@
 //! Opt-in streaming body ownership, independent of downstream polling.
 use std::time::Duration;
 
+mod qualified;
+pub(super) use qualified::{capture_terminal, qualified_response, OwnedObservation};
+
 /// Body-only lifetime after upstream headers; setup and idle transport limits are unchanged.
 /// This is not a bound on synchronous parsing, settlement, or origin-side cancellation.
 #[derive(Clone, Copy, Debug)]
@@ -39,6 +42,7 @@ enum Failure {
     Lease,
     Source,
     Panic,
+    Accounting,
 }
 
 impl Failure {
@@ -50,6 +54,7 @@ impl Failure {
             Self::Lease => "insufficient reservation lifetime after stream setup",
             Self::Source => "stream body failed",
             Self::Panic => "stream producer panicked",
+            Self::Accounting => "accounting unresolved; do not automatically retry",
         }
     }
 
@@ -99,13 +104,16 @@ where
         )
     });
     let lifecycle = accounting.state.lifecycle.clone();
+    // Tracked streams leave their existing accounting wait inside the original
+    // shutdown grace. Legacy streams retain the full delivery grace unchanged.
+    let settlement_headroom = accounting.owned.as_ref().map(|owned| owned.wait);
     let (tx, rx) = mpsc::channel(QUEUE_FRAMES);
     let (terminal_tx, terminal_rx) = watch::channel(Terminal::Running);
     tokio::spawn(async move {
         let open = accounting.state.metrics.stream_open_guard();
         // Catch producer panics without losing the accounting/operation owner. The borrowed
         // source drops on every select exit BEFORE any synchronous settlement is scheduled.
-        let result = std::panic::AssertUnwindSafe(async {
+        let mut result = std::panic::AssertUnwindSafe(async {
             let mut source = make(&mut accounting);
             if !fits_lease {
                 return Err(Failure::Lease);
@@ -113,6 +121,9 @@ where
             let grace = async {
                 lifecycle.cancelled().await;
                 if let Some(at) = lifecycle.deadline() {
+                    let at = settlement_headroom.map_or(at, |wait| {
+                        at.checked_sub(wait).unwrap_or_else(std::time::Instant::now)
+                    });
                     tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await;
                 }
             };
@@ -143,6 +154,29 @@ where
             if let Some(usage) = accounting.usage.as_mut() {
                 usage.outcome = Some(outcome.into());
             }
+        }
+        if accounting.owned.is_some() {
+            // A failure is visible promptly; the accounting owner still outlives the wire.
+            if let Err(reason) = result {
+                terminal_tx.send_replace(Terminal::Failed(reason));
+            }
+            // Read the snapshot only after the borrowed source has dropped. Retain the
+            // permit and lifecycle guard through submission and the bounded settlement wait.
+            let committed = std::panic::AssertUnwindSafe(accounting.finalize_owned())
+                .catch_unwind()
+                .await
+                .unwrap_or(false);
+            if !committed && result.is_ok() {
+                result = Err(Failure::Accounting);
+            }
+            drop(tx);
+            terminal_tx.send_replace(match result {
+                Ok(()) => Terminal::Complete,
+                Err(reason) => Terminal::Failed(reason),
+            });
+            drop(permit);
+            drop(accounting);
+            return;
         }
         drop(tx);
         terminal_tx.send_replace(match result {
