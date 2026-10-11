@@ -191,22 +191,55 @@ async fn exchange_mints_token_that_authorizes_inference() {
 
 #[tokio::test]
 async fn unknown_client_and_bad_secret_are_indistinguishable() {
-    let app = build_app(state_with_registry(Some(
-        ClientCredentialRegistry::load(&registry_file(&[entry()])).unwrap(),
-    )));
-    let (unknown_status, unknown_body) = exchange(
-        &app,
-        json!({"client_id": "no-such-client", "client_secret": "whatever"}),
-    )
-    .await;
-    let (bad_status, bad_body) = exchange(
-        &app,
-        json!({"client_id": CLIENT_ID, "client_secret": "wrong"}),
-    )
-    .await;
-    assert_eq!(unknown_status, StatusCode::UNAUTHORIZED);
-    assert_eq!(bad_status, StatusCode::UNAUTHORIZED);
-    assert_eq!(unknown_body, bad_body);
+    use sandhi_proxy::lifecycle::Phase;
+    for phase in [
+        Phase::Running,
+        Phase::Quiescing,
+        Phase::Draining,
+        Phase::Stopped,
+    ] {
+        let state = state_with_registry(Some(
+            ClientCredentialRegistry::load(&registry_file(&[entry()])).unwrap(),
+        ));
+        if phase != Phase::Running {
+            state
+                .lifecycle
+                .begin_quiesce(std::time::Duration::from_secs(1));
+        }
+        if matches!(phase, Phase::Draining | Phase::Stopped) {
+            state.lifecycle.start_draining();
+        }
+        if phase == Phase::Stopped {
+            state.lifecycle.stop();
+        }
+        let app = build_app(state.clone());
+        let (unknown_status, unknown_body) = exchange(
+            &app,
+            json!({"client_id": "no-such-client", "client_secret": "whatever"}),
+        )
+        .await;
+        let (bad_status, bad_body) = exchange(
+            &app,
+            json!({"client_id": CLIENT_ID, "client_secret": "wrong"}),
+        )
+        .await;
+        assert_eq!(unknown_status, StatusCode::UNAUTHORIZED, "{phase:?}");
+        assert_eq!(bad_status, StatusCode::UNAUTHORIZED, "{phase:?}");
+        assert_eq!(unknown_body, bad_body, "{phase:?}");
+        if phase != Phase::Running {
+            // Admission follows authentication: an invalid credential cannot
+            // distinguish a known client by observing the shutdown response.
+            let (status, body) = exchange(
+                &app,
+                json!({"client_id": CLIENT_ID, "client_secret": CLIENT_SECRET}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{phase:?}");
+            assert_eq!(body["code"], "gateway_draining");
+        }
+        assert!(state.vkeys.as_ref().unwrap().list().unwrap().is_empty());
+        assert_eq!(state.lifecycle.active_operations(), 0);
+    }
 }
 
 #[tokio::test]

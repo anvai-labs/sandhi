@@ -1,8 +1,8 @@
 # TD-0025: Ingress funnel decomposition and the family registry
 
-- **Status:** Draft (proposed). Owns **G32** in the [ADR-0006](../adr/0006-layer-boundary-and-protocol-scope.md)
-  gap register. Nothing is scheduled; the phases are ordered so each lands as an independently
-  revertable, zero-behavior PR.
+- **Status:** P3 preparation/boundary refactor in progress; P1/P2/P4 remain proposed. Owns **G32** in the [ADR-0006](../adr/0006-layer-boundary-and-protocol-scope.md)
+  gap register. Each phase lands as an independently revertable, zero-behavior PR. The scoped
+  P3 preparation extraction is independent of the proposed family registry.
 - **Relates to:** [ADR-0004](../adr/0004-two-plane-proxy-and-enforcement-boundary.md) (the
   two-plane dispatch this funnel implements), [TD-0010](TD-0010-ingress-dialect-parity.md) (D5:
   real-SDK conformance is the proof that must stay green), [TD-0022](TD-0022-per-call-transport-context.md)
@@ -10,7 +10,7 @@
   (P3's `IngressError` unification is a prerequisite for the error-shaping stage), the
   2026-09-01 design audit (findings P1–P10, P17).
 
-## Why this exists
+## Original audit motivation
 
 The audit measured the co-edit surface that the #196 incident demonstrated the hard way: adding
 or changing a provider family currently touches **≥13 `match`-on-family sites** (adapter
@@ -73,3 +73,50 @@ green, and the new plane-differential test green.
 | P2 | `TypedAdapter<C>` (D2) with concrete-type back-compat | Low-mid; published-crate API care |
 | P3 | Funnel stages (D3), after TD-0021 P3's `IngressError` lands | Mid; largest diff, pure moves |
 | P4 | Stream guard + plane-differential metering test (D4) | Mid; the differential test is net-new coverage |
+
+## 2026-10-11 graph audit: scoped P3 increment
+
+Victor `dacac4d1` indexed Sandhi `a2b0f0c`: 189 files, 107 Rust files,
+194 resolved cross-file imports and 72 calls. These are static lower bounds;
+macros, conditional code and ambiguous receivers remain unresolved. Cargo's four
+crate dependency graph is acyclic. Provider-facade fan-in is expected API reuse,
+not a reason to split the provider crate or change languages.
+
+| Item | Design and acceptance | Status |
+|---|---|---|
+| Shared access helpers | Move the existing comparison, HTTP error and mutation-admission primitives out of the admin handler; lifecycle admission accepts only its owner. Preserve error bodies and hold guards through publication. | Implemented; local gates passed, [PR #365](https://github.com/anvai-labs/sandhi/pull/365) open |
+| Typed request preparation | Borrow only deadline, rate-limit, metrics and policy capabilities. Preserve auth → decode → allowlist → attribution → rate limit → policy → reservation → dispatch order. | Implemented; local gates passed, [PR #365](https://github.com/anvai-labs/sandhi/pull/365) open |
+| Explicit integration dependencies | Remove production wildcard imports in buffered/qualified-stream integration; retain canonical accounting and lifecycle owners. | Implemented; local gates passed, [PR #365](https://github.com/anvai-labs/sandhi/pull/365) open |
+| Verification | Reuse existing auth, proxy, cancellation, settlement and recovery owners. Extend missing shutdown/credential ordering coverage without duplicating suites; run workspace tests, Clippy, coverage, conformance, docs and independent review. | 875 workspace tests (6 ignored), Clippy, 89.54% line coverage, 315 SDK tests (19 skipped), strict docs + 3 docs tests passed |
+
+Working branch: `fix/proxy-boundaries`, baseline `a2b0f0c`. No deployment, public
+API, wire-contract or default changes are intended. This increment does not close
+P1/P2/P4, claim distributed enforcement, or establish mixed-team C5 acceptance.
+
+The design uses narrow contexts as recommended by
+[Axum's state guidance](https://docs.rs/axum/0.7.9/axum/extract/struct.State.html),
+without changing public `ProxyState` fields. It preserves
+[Tokio's short synchronous critical-section pattern](https://tokio.rs/tokio/tutorial/shared-state):
+no mutex guards across awaits and no unmeasured lock/language rewrite. Success is
+fewer dependencies at each internal boundary with identical externally observable
+behavior; no runtime speedup is claimed from source or graph size.
+
+Local verification used the unchanged canonical suites, with the existing credential
+non-enumeration test extended across running/quiescing/draining/stopped phases and
+the existing comparison test moved with its helper. The 231-test pre-change baseline
+and extended characterization passed before extraction. Independent working-diff
+review found no blocker; exact-commit review and hosted CI/approval remain gates.
+
+The first SDK attempt was stopped for a shared-build-cache fixture path mismatch;
+correcting local binary links and using a short macOS socket directory yielded the
+315-test pass. The 19 skips are 16 InferFlux-origin cases, two opt-in AgentBrowser cases and
+one opt-in three-repository Victor module; this is not live InferFlux or C5 acceptance. No product behavior was changed to make fixtures pass. Review and
+published PR evidence, rather than temporary machine logs, determine merge status.
+
+Hosted CI initially rejected the pinned OIDC adapter fingerprint after its single
+helper-import change. Independent reassessment confirmed identical authentication
+operations and comparison implementation; the record was updated without extending
+its expiry or advisory scope. The fingerprint/dependency-route gate and all three
+cargo-deny graphs passed, as did 349 release-safeguard tests (147 subtests). No CI
+check was disabled or relaxed. Hosted CI and required PR approval remain the merge
+gates for #365.

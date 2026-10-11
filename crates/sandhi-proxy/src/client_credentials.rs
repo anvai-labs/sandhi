@@ -33,7 +33,7 @@ use sha2::{Digest, Sha256};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
-use crate::operator::{admit_mutation, constant_time_eq, err};
+use crate::access::{admit_mutation, constant_time_eq, err};
 use crate::{ProxyState, VirtualKey};
 use sandhi_store::MintRequest;
 
@@ -246,7 +246,7 @@ pub(crate) async fn client_token(
     if req.ttl_seconds == Some(0) {
         return err(StatusCode::BAD_REQUEST, "ttl_seconds must be at least 1");
     }
-    let _operation = match admit_mutation(&state) {
+    let _operation = match admit_mutation(&state.lifecycle) {
         Ok(operation) => operation,
         Err(response) => return response,
     };
