@@ -33,8 +33,8 @@ liability through expiry. The opt-in buffered mode below uses that admission and
 |---|---|---|
 | W05a | Atomic settlement receipt/outbox storage, immutable IDs, bounded claims and acknowledgement, rollback/reopen/concurrency tests | Integrated; receipt storage is used by opt-in tracked buffered HTTP; network exporter remains pending |
 | W05b | Transport-owned attempt lifecycle and neutral draft contract | Integrated through PR #246 after clean adversarial review and green exact-head/post-merge CI; remains opt-in diagnostics only, while downstream accounting review still gates authoritative use and external release |
-| W05c | Connect admission, settlement and evidence without bypassing correctness | Limited buffered HTTP integration implemented: correlated prepared admission, detached owner and qualified terminal settlement; broader physical-attempt linkage, logical dedup and no-lease policy remain pending |
-| W05d | Unknown-liability and late-settlement recovery | Limited buffered recovery implemented over the original ledger: bounded advancing scope/execution inventory and retained terminal retry, including unbudgeted/removed keys; actual-process drills cover unknown liability, receipt recovery and terminal publication under SQLite contention/process death without replay. Amendments, broad lifecycle acceptance and TD-0024 retention remain pending |
+| W05c | Connect admission, settlement and evidence without bypassing correctness | Limited buffered and bounded transparent streaming HTTP integration implemented: correlated prepared admission, detached owner and qualified terminal settlement; broader physical-attempt linkage, logical dedup and no-lease policy remain pending |
+| W05d | Unknown-liability and late-settlement recovery | Limited buffered/streaming recovery implemented over the original ledger: bounded advancing scope/execution inventory and retained terminal retry, including unbudgeted/removed keys; actual-process drills cover unknown liability, receipt recovery and terminal publication under SQLite contention/process death without replay. Amendments, broad lifecycle acceptance and TD-0024 retention remain pending |
 | W05e | Receiver contract, exporter and operator evidence | Pending: receiver idempotency, authenticated/scoped transport, retry/backoff, backlog/freshness UX, safe retention, multi-shard cursor/migration and real consumer review |
 
 W05 completes only after all substeps and joint contract gates have evidence. No code in W05a
@@ -754,10 +754,33 @@ numeric/framing tests remain in their existing owners. No duplicate parser or
 storage matrix was added. Independent review drove explicit missing-usage outcomes
 and observed-total conservation; the latter failed before its fix.
 
-**Next gates:** standalone streaming crash/restart and TLS/OIDC acceptance, packaged
-artifact verification, preserved-state deployment, Victor repin and actual-member
+**Next gates:** packaged artifact verification, preserved-state deployment, Victor repin and actual-member
 C5. Synthetic source HTTP tests prove neither origin cancellation nor executed cache
 reuse. A process killed before terminal persistence still leaves unknown liability.
+
+### Standalone streaming lifecycle source acceptance
+
+The existing `test_shutdown.py` and `test_recovery.py` process fixtures now exercise
+tracked streaming alongside buffered requests. They launch the built proxy with a
+complete streaming deadline policy, disposable SQLite state and a synthetic origin.
+The legacy SDK stream fixture remains unchanged; only tracked cases opt into the
+separate empty-choices usage event required by the strict qualifier.
+
+| Boundary | Evidence | Limit |
+|---|---|---|
+| HTTP/TLS shutdown | Final usage produces one receipt and exit 0; missing usage retains liability and exits 124 | Fixture CA and hostname verified; no deployment claim |
+| SIGKILL before terminal persistence | Held capacity survives restart and blocks a new dispatch | Unknown usage is not reconstructed or silently settled to zero |
+| SIGKILL after terminal persistence | Same copied/hashed binary recovers one receipt; second restart preserves identity and spend | Receipt failure is injected with a disposable SQLite trigger |
+| SQLite contention | Surviving owner recovers one receipt; process death retains unknown liability | Token and TLS/OIDC modes; no inference or event replay |
+| TLS/OIDC stream lifetime | Clean completion, client disconnect and SIGTERM after a complete usage event preserve 7 fresh + 4 cache-read + 3 output tokens and one 14-token receipt | Synthetic usage verifies accounting, not tokenizer units or executed reuse |
+| Grant revocation | Recovery settles existing evidence after restart with inference permission withdrawn; new requests are denied | Existing authority, scope and request/session/run/step joins remain enforced |
+
+These are synthetic **source/binary** acceptance drills, not released artifacts or
+live-provider acceptance. The deadline-policy negative control returns HTTP 400
+before streaming admission. Numeric/framing and storage failure tests retain their
+existing owners; no parallel parser, dispatch path or ledger was introduced.
+Managed rollout, upstream cancellation, broad provider lifecycle, export and C5
+remain separate gates.
 
 ## Owned buffered HTTP and recovery (W05c/d limited activation)
 
