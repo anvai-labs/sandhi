@@ -111,7 +111,7 @@ perpetually open.
 | [0001](td/TD-0001-provider-adapter-qa-and-codegen.md) | Complete | — |
 | [0002](td/TD-0002-typed-provider-runtime.md) | Complete | Consumer-repository cleanup is outside Sandhi's completion gate |
 | [0003](td/TD-0003-operator-surface-keys-budgets-attribution.md) | Complete | — |
-| [0004](td/TD-0004-catalog-governance-dual-mode.md) | In progress | Shared-governance core and optional in-process durable surface; policy engine is TD-0005 |
+| [0004](td/TD-0004-catalog-governance-dual-mode.md) | In progress | Shared-governance core and optional in-process durable surface; DeepSeek descriptor refresh and consumer gates; policy engine is TD-0005 |
 | [0005](td/TD-0005-declarative-policy-engine.md) | In progress | Opt-in [policy MVP](operator/policy-evaluation.md): regex/threshold/lexical checks, verified identity selection, durable metadata receipts and dispatch denial; [Python workers/offline MLflow](operator/python-ml-evaluators.md) implemented as candidates; [embedded ONNX](operator/embedded-onnx.md) profile and multi-model remote service/replica adapter implemented; semantic models, payload quarantine and signed distribution remain proposed |
 | [0006](td/TD-0006-two-plane-proxy-transparent-metering.md) | Complete | — |
 | [0007](td/TD-0007-enforcement-ledger-backends.md) | In progress | Shared/HA backend selection and implementation |

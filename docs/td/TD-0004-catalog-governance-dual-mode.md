@@ -37,6 +37,49 @@ named here (transport, metering, keys, budgets, attribution) is already Sandhi's
    attributes; it does **not** price. `$`/tier/SKU/invoicing stays the downstream commercial layer
    (AnvaiOps ADR-0047 D4). The catalog therefore carries **no pricing** fields.
 
+## DeepSeek catalog refresh (2026-10-11)
+
+Victor G84 found that the released catalog omitted the canonical IDs returned by
+DeepSeek discovery. This additive refresh uses the existing descriptor owner and
+Python/Node exports; it adds no transport, pricing or model-selection policy.
+
+| Canonical ID | Context window | Maximum output | Image input | Thinking/tool use |
+| --- | ---: | ---: | --- | --- |
+| `deepseek-flash` | 1,048,576 | 393,216 | Yes | Yes |
+| `deepseek-v4-pro` | 1,048,576 | 393,216 | No | Yes |
+
+The vendor's [model schema](https://api-docs.deepseek.com/api/list-models/)
+supplies these facts and the supported effort values `low`, `high`, `max`.
+`max_input_tokens` retains this catalog's context-window convention: the provider
+window includes output, so consumers must reserve output within it; the two limits
+are not additive. These are provider maxima, not tested workloads or request budgets.
+
+The [thinking contract](https://api-docs.deepseek.com/guides/thinking_mode/)
+enables thinking by default and ignores temperature there, so these descriptors
+omit `default_temperature`. Tool conversations must retain prior reasoning data;
+that continuation requirement still needs consumer qualification. The
+[tool guide](https://api-docs.deepseek.com/guides/tool_calls/) places strict tool
+schemas behind a beta endpoint. This change does not qualify that endpoint or
+parallel tool calls: `structured_output` and `parallel_tool_calls` stay false for
+these entries. Prompt-cache reporting uses the existing DeepSeek parser.
+
+The two legacy entries and their order are retained as compatibility snapshots;
+they are not renewed assertions about current aliases or endpoint capability.
+No alias mapping or endpoint change is introduced. Extend the existing Rust,
+Python and Node catalog tests rather than create another catalog/test owner.
+
+| Follow-up gate | Owner / acceptance |
+| --- | --- |
+| Publish corrected descriptors | Sandhi reviewed merge, promotion and release |
+| Consume released metadata | Victor release pin and policy/descriptor regression tests; preserve explicit operating budgets |
+| Thinking/tool continuation | Victor + Sandhi actual request-history qualification; no silent field loss |
+| Live formation acceptance | Released stream repair and tracked lifecycle first; preserve original C5 and separate DeepSeek cohorts |
+
+Catalog metadata alone does not establish streaming settlement, long-context,
+vision or tool execution acceptance. The separate stream repair is
+[Sandhi #362](https://github.com/anvai-labs/sandhi/pull/362); explicit Victor OIDC
+matrix admission merged in [Victor #1292](https://github.com/anvai-labs/victor/pull/1292).
+
 ## Context
 
 ### Why Sandhi declined a catalog (the prior stance)
