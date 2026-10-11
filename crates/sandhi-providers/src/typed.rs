@@ -248,6 +248,11 @@ fn build_raw_forwarder(config: &ProviderTransportConfig) -> crate::raw::RawForwa
     )
     .with_client_request_id_header(crate::client_request_id_header(&config.slug))
     .with_provider_request_id_header(response_request_id_header)
+    .with_stream_usage_profile(
+        crate::resolve_openai_compat_provider(&config.slug)
+            .map(|spec| spec.stream_usage_profile())
+            .unwrap_or_default(),
+    )
 }
 
 #[derive(Clone)]
@@ -1974,6 +1979,98 @@ mod tests {
             .complete_with(request, http::HeaderMap::new())
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn final_choice_stream_profile_is_catalog_bound_and_wire_preserving() {
+        use futures_util::StreamExt;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Sanitized shape of the new 2026-10-11 wire capture, not a member replay.
+        let wire = concat!(
+            "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}],",
+            "\"usage\":{\"prompt_tokens\":19,\"completion_tokens\":32,\"total_tokens\":51,",
+            "\"prompt_tokens_details\":{\"cached_tokens\":0},\"completion_tokens_details\":{\"reasoning_tokens\":30}}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        for slug in [
+            "zai",
+            "zhipu",
+            "zhipuai",
+            "zai-coding-plan",
+            "zai-coding",
+            "glm-coding",
+            "deepseek",
+            "openai",
+            "inferflux",
+            "custom",
+        ] {
+            for reason in ["length", "sensitive", "aborted"] {
+                let wire = wire.replace("length", reason);
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/chat/completions"))
+                    .respond_with(
+                        ResponseTemplate::new(200).set_body_raw(wire.clone(), "text/event-stream"),
+                    )
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                let handle = ProviderRuntime::new().openai_compat(
+                    slug,
+                    server.uri(),
+                    "test",
+                    http::HeaderMap::new(),
+                    Some(0),
+                    None,
+                    None,
+                );
+                let (context, _) = crate::AttemptContext::channel("profile-test", 4).unwrap();
+                // A diagnostic provider label must never select the usage contract.
+                let raw = handle
+                    .raw_forwarder()
+                    .unwrap()
+                    .clone()
+                    .with_metered_attempt_context("zai", None, context);
+                let response = raw
+                    .forward_stream_qualified_with_headers(
+                        "/chat/completions",
+                        bytes::Bytes::from_static(b"{\"model\":\"glm-5.3\",\"stream\":true}"),
+                        None,
+                        None,
+                        &http::HeaderMap::new(),
+                    )
+                    .await
+                    .unwrap();
+                let mut stream = response.stream;
+                let mut received = Vec::new();
+                while let Some(chunk) = stream.next().await {
+                    received.extend_from_slice(&chunk.unwrap());
+                }
+                assert_eq!(received, wire.as_bytes());
+                let snapshot = response.observation.snapshot();
+                if ["openai", "inferflux", "custom"].contains(&slug)
+                    || (reason == "sensitive" && slug == "deepseek")
+                    || (reason == "aborted" && slug != "deepseek")
+                {
+                    assert!(snapshot.usage.is_none(), "{slug}");
+                    assert!(snapshot.qualification_error.is_some(), "{slug}");
+                } else {
+                    assert_eq!(snapshot.qualification_error, None, "{slug}");
+                    let usage = snapshot.usage.unwrap();
+                    assert_eq!(
+                        (usage.tokens_in, usage.tokens_out, usage.cache_read_tokens),
+                        (19, 32, 0)
+                    );
+                    assert_eq!(
+                        (usage.reasoning_tokens, usage.reasoning_included),
+                        (30, Some(true))
+                    );
+                    assert_eq!(snapshot.outcome, Some(crate::AttemptOutcome::Success));
+                }
+            }
+        }
     }
 
     #[tokio::test]

@@ -6,7 +6,9 @@
 //! streaming. Legacy byte forwarding and metering are unchanged.
 
 use crate::{linesplit::LineSplitter, ParsedUsage, MAX_STREAM_LINE_BYTES};
-use sandhi_core::usage::{qualify_openai_stream_usage, StreamUsageError};
+use sandhi_core::usage::{
+    qualify_openai_stream_usage_with_profile, OpenAiStreamUsageProfile, StreamUsageError,
+};
 
 // Bound the extra copy when a caller supplies an arbitrarily large HTTP chunk.
 const INPUT_SLICE_BYTES: usize = 8192;
@@ -30,8 +32,9 @@ pub enum StreamObservationError {
 
 /// Response-scoped measurement, independent of delivery success or settlement.
 ///
-/// Usage is accepted at a complete empty-choices usage event, before `[DONE]`.
-/// Identical observations are idempotent; conflicts and malformed/truncated later
+/// Usage is accepted at the catalog-selected final usage event, before `[DONE]`.
+/// Strict OpenAI identical observations are idempotent; final-choice profiles require a sole final
+/// chunk followed only by `[DONE]`. Conflicts and malformed/truncated later
 /// events preserve the first observation and set a sticky error. Inspect both
 /// [`usage`](Self::usage) and [`error`](Self::error); neither erases the other.
 /// Complete post-DONE data events fail explicitly and cannot change usage.
@@ -41,6 +44,7 @@ pub enum StreamObservationError {
 /// one initial BOM, multiline data and ordinary message events are supported. EOF
 /// never dispatches a partial event. This is not an EventSource/reconnection client.
 pub struct OpenAiStreamUsageObserver {
+    profile: OpenAiStreamUsageProfile,
     splitter: LineSplitter,
     limit: usize,
     first_line: bool,
@@ -67,8 +71,17 @@ impl OpenAiStreamUsageObserver {
         Self::with_limit(MAX_STREAM_LINE_BYTES)
     }
 
+    /// Select the trusted provider catalog's envelope; SSE framing stays shared.
+    pub fn with_profile(profile: OpenAiStreamUsageProfile) -> Self {
+        Self {
+            profile,
+            ..Self::new()
+        }
+    }
+
     fn with_limit(limit: usize) -> Self {
         Self {
+            profile: OpenAiStreamUsageProfile::default(),
             splitter: LineSplitter::new_sse(limit),
             limit,
             first_line: true,
@@ -204,10 +217,15 @@ impl OpenAiStreamUsageObserver {
             self.done = true;
             return Ok(());
         }
+        if self.profile != OpenAiStreamUsageProfile::OpenAi && self.usage.is_some() {
+            return Err(StreamObservationError::InvalidUsage(
+                StreamUsageError::NonFinalUsage,
+            ));
+        }
         let event =
             serde_json::from_slice(&self.data).map_err(|_| StreamObservationError::InvalidJson)?;
-        if let Some(next) =
-            qualify_openai_stream_usage(&event).map_err(StreamObservationError::InvalidUsage)?
+        if let Some(next) = qualify_openai_stream_usage_with_profile(&event, self.profile)
+            .map_err(StreamObservationError::InvalidUsage)?
         {
             match self.usage {
                 None => self.usage = Some(next),
@@ -230,6 +248,52 @@ mod tests {
             json!({"object":"chat.completion.chunk","choices":[],
             "usage":{"prompt_tokens":tokens,"completion_tokens":4}})
         )
+    }
+
+    #[test]
+    fn zai_stream_observer_frames_terminal_usage_and_rejects_later_content() {
+        let terminal = format!(
+            "data: {}\n\n",
+            json!({"choices":[{"index":0,"delta":{},"finish_reason":"length"}],
+            "usage":{"prompt_tokens":19,"completion_tokens":32,"total_tokens":51}})
+        );
+        let wire = format!("{terminal}data: [DONE]\n\n");
+        for split in 0..=wire.len() {
+            let mut observer =
+                OpenAiStreamUsageObserver::with_profile(OpenAiStreamUsageProfile::ZaiFinalChoice);
+            observer.push(&wire.as_bytes()[..split]).unwrap();
+            observer.push(&wire.as_bytes()[split..]).unwrap();
+            assert_eq!(observer.finish(), Ok(()));
+            assert_eq!(observer.usage().unwrap().tokens_out, 32);
+        }
+        for trim in [1, 2, 10] {
+            let mut observer =
+                OpenAiStreamUsageObserver::with_profile(OpenAiStreamUsageProfile::ZaiFinalChoice);
+            observer
+                .push(&terminal.as_bytes()[..terminal.len() - trim])
+                .unwrap();
+            assert_eq!(
+                observer.finish(),
+                Err(StreamObservationError::TruncatedEvent)
+            );
+            assert!(observer.usage().is_none());
+        }
+        for suffix in [
+            terminal.clone(),
+            terminal.replace("\"delta\":{}", "\"delta\":{\"content\":\"late\"}"),
+            terminal.replace("\"delta\":{}", "\"delta\":{\"tool_calls\":[{}]}"),
+            terminal.replace("length", "stop"),
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"late\"}}]}\n\n".into(),
+        ] {
+            let mut observer =
+                OpenAiStreamUsageObserver::with_profile(OpenAiStreamUsageProfile::ZaiFinalChoice);
+            observer.push(terminal.as_bytes()).unwrap();
+            let first = observer.usage();
+            let error = StreamObservationError::InvalidUsage(StreamUsageError::NonFinalUsage);
+            assert_eq!(observer.push(suffix.as_bytes()), Err(error));
+            assert_eq!(observer.usage(), first);
+            assert_eq!(observer.finish(), Err(error));
+        }
     }
 
     #[test]
