@@ -19,6 +19,37 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-10-10
+
+### Added
+
+- Opt-in bounded transparent OpenAI Chat streaming through the existing tracked
+  admission, immutable terminal observation and durable settlement owners. Clean
+  HTTP completion waits for a receipt; qualified final counts survive disconnect,
+  timeout and shutdown without replaying inference (#352–#355).
+- Strict complete-event streamed usage qualification and an opt-in Rust raw-response
+  observation handle. Invalid, conflicting or absent evidence retains unresolved
+  liability instead of inventing a zero charge. Existing metered defaults and
+  Python/Node transport facades remain unchanged.
+- Standalone buffered/streaming process acceptance across token and CA-verified
+  TLS/OIDC modes: SIGKILL before/after terminal persistence, SQLite contention,
+  grant-revoked recovery and stream completion/disconnect/SIGTERM (#350, #351, #356).
+
+### Changed
+
+- Re-qualify optional AgentBrowser integration against 1.16.1; it remains a test
+  tool, not a runtime dependency.
+- Synchronize all package identities to 0.13.0. Wire contract versions are unchanged.
+
+### Compatibility and limits
+
+- Tracked streaming requires complete route streaming deadlines, an explicit output
+  bound, retry-free transparent OpenAI Chat transport and Block policy. Unsupported
+  shapes are refused before admission; no alternate provider or protocol fallback.
+- This source milestone does not establish packaged-artifact, managed deployment,
+  upstream cancellation, tokenizer/cache/session or mixed-team C5 acceptance. Follow
+  the [release and adoption gates](docs/releases/v0.13.0.md).
+
 ## [0.12.0] — 2026-10-10
 
 ### Added
@@ -1353,7 +1384,8 @@ inline reverse-proxy, the durable store, and both language bindings.
   ([#9](https://github.com/anvai-labs/sandhi/pull/9),
   [#10](https://github.com/anvai-labs/sandhi/pull/10))
 
-[Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/anvai-labs/sandhi/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/anvai-labs/sandhi/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/anvai-labs/sandhi/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/anvai-labs/sandhi/compare/v0.10.0...v0.10.1
