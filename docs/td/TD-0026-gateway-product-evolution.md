@@ -900,5 +900,9 @@ clean HTTP EOF requires a receipt. Existing accounting-only recovery handles fai
 terminal publication. No new registry, parser, retry or default-mode behavior.
 
 Source tests cover the ownership seams, setup policy, publication refusal, telemetry
-panic and partial observed-total conservation. Standalone crash/restart and TLS/OIDC
-streaming, released deployment, broader lifecycle and C5 remain separate gates.
+panic and partial observed-total conservation. The existing process fixtures now
+also cover [standalone streaming lifecycle](../product/attempt-accounting-and-evidence.md#standalone-streaming-lifecycle-source-acceptance):
+HTTP/TLS shutdown, token/OIDC crash/restart and contention, revoked-grant recovery,
+and TLS/OIDC completion/disconnect/SIGTERM after qualified usage. One origin call,
+one receipt and conserved counts are required. Packaged artifact verification,
+preserved-state deployment, Victor repin, broader lifecycle and C5 remain separate gates.
