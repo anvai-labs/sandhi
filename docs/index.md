@@ -46,20 +46,21 @@ flowchart LR
 | Enforce proxy budgets and admission | Yes, single node | No proxy ledger enforcement |
 | Price usage or bill customers | Downstream responsibility | Downstream responsibility |
 
-## Recent source changes and their limits
+## Released changes and their adoption gates
 
-!!! warning "Develop is ahead of the serving release"
+!!! warning "Release verified; managed adoption remains pending"
     Tracked buffered accounting is opt-in in the [published 0.12.0 release](releases/v0.12.0.md).
-    The [0.13.0 candidate](releases/v0.13.0.md) adds bounded tracked OpenAI Chat streaming.
-    Passing source tests do not establish a released deployment or full mixed-team
-    acceptance. Check [release artifacts](https://github.com/anvai-labs/sandhi/releases)
+    The [0.13.0 release](releases/v0.13.0.md) adds bounded tracked OpenAI Chat streaming.
+    All artifact targets verify; publication does not establish managed deployment
+    or full mixed-team acceptance. Check [release artifacts](https://github.com/anvai-labs/sandhi/releases)
     and your actual binary identity before enabling it.
 
 | Change | What it gives you | Still to qualify |
 |---|---|---|
-| Owned buffered admission and recovery ([#338](https://github.com/anvai-labs/sandhi/pull/338)) | Correlated intent, retained final usage and bounded recovery | Broader lifecycle and release/deployment |
+| Owned buffered admission and recovery ([#338](https://github.com/anvai-labs/sandhi/pull/338)) | Correlated intent, retained final usage and bounded recovery | Preserved-state managed deployment and broader lifecycle |
 | Actual process restart drills ([#339](https://github.com/anvai-labs/sandhi/pull/339)) | Held unknown liability; one recovered receipt without another model call | Live provider/member acceptance |
-| Terminal publication under contention ([#340](https://github.com/anvai-labs/sandhi/pull/340)) | Recovery if RAM survives; explicit uncertainty if it does not | Tracked TLS/OIDC and streaming lifecycle |
+| Terminal publication under contention ([#340](https://github.com/anvai-labs/sandhi/pull/340)) | Recovery if RAM survives; explicit uncertainty if it does not | Live provider/session behavior and deployed lifecycle |
+| Bounded tracked streaming ([#355](https://github.com/anvai-labs/sandhi/pull/355), [#356](https://github.com/anvai-labs/sandhi/pull/356)) | Durable final usage, receipt-gated completion and synthetic TLS/OIDC restart acceptance | Managed rollout and actual-member C5 |
 
 [Accounting contract and evidence](product/attempt-accounting-and-evidence.md)
 contains the complete status. [The documentation map](README.md) separates current
