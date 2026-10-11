@@ -35,6 +35,7 @@ use sandhi_store::{
     VirtualKeyRecord, VirtualKeyStore,
 };
 
+use crate::access::{admit_mutation, constant_time_eq, err};
 use crate::{ProxyLedger, ProxyState};
 
 /// Public request/response types — shared with the `sandhi` CLI client.
@@ -243,39 +244,6 @@ pub(crate) fn require_admin(state: &ProxyState, headers: &HeaderMap) -> Result<(
         Some(t) if constant_time_eq(t.as_bytes(), expected.as_bytes()) => Ok(()),
         _ => Err(err(StatusCode::UNAUTHORIZED, "invalid admin token")),
     }
-}
-
-/// Constant-time byte comparison for the admin token (ADR-0004 D4): every byte is visited
-/// regardless of where the first mismatch is, so response timing does not leak a prefix-match
-/// oracle. Delegates to `subtle::ConstantTimeEq`, which carries optimizer barriers a
-/// hand-rolled `|=` loop lacks (LLVM is permitted to short-circuit one). `ct_eq` on slices
-/// returns early on a length mismatch — acceptable, the token length is not a secret.
-pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    use subtle::ConstantTimeEq;
-    a.ct_eq(b).into()
-}
-
-pub(crate) fn err(status: StatusCode, msg: &str) -> Response {
-    (status, Json(json!({ "error": msg }))).into_response()
-}
-
-fn draining_response() -> Response {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        [("retry-after", "1")],
-        Json(json!({"error": "Gateway is draining; mutation not admitted", "code": "gateway_draining"})),
-    )
-        .into_response()
-}
-
-#[allow(clippy::result_large_err)]
-pub(crate) fn admit_mutation(
-    state: &ProxyState,
-) -> Result<crate::lifecycle::OperationGuard, Response> {
-    state
-        .lifecycle
-        .try_operation()
-        .ok_or_else(draining_response)
 }
 
 /// Preserve only our handler's canonical, secret-free reconciliation fields in a batch result.
@@ -542,7 +510,7 @@ async fn register_credential(
     req: admin::RegisterReferenceRequest,
     supplied: Option<String>,
 ) -> Response {
-    let operation = match admit_mutation(&state) {
+    let operation = match admit_mutation(&state.lifecycle) {
         Ok(operation) => operation,
         Err(response) => return response,
     };
@@ -690,7 +658,7 @@ pub(crate) async fn revoke_key(
     if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Admin, true).await {
         return r;
     }
-    let operation = match admit_mutation(&state) {
+    let operation = match admit_mutation(&state.lifecycle) {
         Ok(operation) => operation,
         Err(response) => return response,
     };
@@ -730,7 +698,7 @@ pub(crate) async fn share_key(
     if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Admin, true).await {
         return r;
     }
-    let _operation = match admit_mutation(&state) {
+    let _operation = match admit_mutation(&state.lifecycle) {
         Ok(operation) => operation,
         Err(response) => return response,
     };
@@ -839,7 +807,7 @@ pub(crate) async fn revoke_virtual_key(
     if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Admin, true).await {
         return r;
     }
-    let _operation = match admit_mutation(&state) {
+    let _operation = match admit_mutation(&state.lifecycle) {
         Ok(operation) => operation,
         Err(response) => return response,
     };
@@ -867,7 +835,7 @@ pub(crate) async fn set_budget(
     if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Operate, true).await {
         return r;
     }
-    let _operation = match admit_mutation(&state) {
+    let _operation = match admit_mutation(&state.lifecycle) {
         Ok(operation) => operation,
         Err(response) => return response,
     };
@@ -1295,7 +1263,7 @@ pub(crate) async fn create_alert(
     if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Operate, true).await {
         return r;
     }
-    let _operation = match admit_mutation(&state) {
+    let _operation = match admit_mutation(&state.lifecycle) {
         Ok(operation) => operation,
         Err(response) => return response,
     };
@@ -1337,7 +1305,7 @@ pub(crate) async fn ack_alert(
     if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Operate, true).await {
         return r;
     }
-    let _operation = match admit_mutation(&state) {
+    let _operation = match admit_mutation(&state.lifecycle) {
         Ok(operation) => operation,
         Err(response) => return response,
     };
@@ -1365,7 +1333,7 @@ pub(crate) async fn delete_alert(
     if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Operate, true).await {
         return r;
     }
-    let _operation = match admit_mutation(&state) {
+    let _operation = match admit_mutation(&state.lifecycle) {
         Ok(operation) => operation,
         Err(response) => return response,
     };
@@ -1649,7 +1617,7 @@ pub(crate) async fn config_apply(
     if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Admin, true).await {
         return r;
     }
-    let _operation = match admit_mutation(&state) {
+    let _operation = match admit_mutation(&state.lifecycle) {
         Ok(operation) => operation,
         Err(response) => return response,
     };
@@ -2250,25 +2218,6 @@ mod mutation_lifecycle_tests {
             .is_empty());
         assert!(state.vkeys.as_ref().unwrap().list().unwrap().is_empty());
         assert_eq!(state.lifecycle.active_operations(), 0);
-    }
-}
-
-#[cfg(test)]
-mod ct_tests {
-    use super::constant_time_eq;
-
-    #[test]
-    fn constant_time_eq_matches_equality_semantics() {
-        assert!(constant_time_eq(b"admin-secret", b"admin-secret"));
-        assert!(constant_time_eq(b"", b""));
-        // Same length, differing at the first / middle / last byte.
-        assert!(!constant_time_eq(b"admin-secret", b"bdmin-secret"));
-        assert!(!constant_time_eq(b"admin-secret", b"admin+secret"));
-        assert!(!constant_time_eq(b"admin-secret", b"admin-secreT"));
-        // Length mismatches, including prefix relationships.
-        assert!(!constant_time_eq(b"admin", b"admin-secret"));
-        assert!(!constant_time_eq(b"admin-secret", b"admin"));
-        assert!(!constant_time_eq(b"", b"x"));
     }
 }
 
