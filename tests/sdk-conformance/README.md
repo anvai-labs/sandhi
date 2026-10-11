@@ -125,7 +125,7 @@ the new revision must pass this focused suite before the pin moves.
 ## Optional AgentBrowser integration
 
 Use a built sibling checkout with Node 24 LTS and its Chromium installed. Qualified source:
-AgentBrowser **v1.16.0**, `104e11d064761058047d7270f5aff7a25f8c634c`.
+AgentBrowser **v1.16.1** (re-qualified 2026-10-11; smoke + recovery pass).
 Build that exact tag using its frozen lockfile and documented `pnpm build`
 workflow before running; stale `dist/` packages may not have the snapshot/plan methods.
 
@@ -139,7 +139,7 @@ Without that variable the optional test skips; an explicitly configured broken c
 The regular CI job runs the Playwright regressions but does not fetch a sibling repository.
 `test_recovery_agentbrowser.py` uses the same optional checkout to verify restored dashboard
 evidence, Refresh and token clearing without generating new inference observations.
-Both existing tests pass against v1.16.0, including the recovery test's negative
+Both tests pass against v1.16.1, including the recovery test's negative
 numeric/DOM evidence controls. This is an optional test integration, not a Sandhi
 runtime package dependency; no AgentBrowser package is added to gateway installs.
 It also compares accessibility-visible attribution/budget rows against restored evidence and
