@@ -1,6 +1,6 @@
 # TD-0025: Ingress funnel decomposition and the family registry
 
-- **Status:** P3 preparation/boundary refactor in progress; P1/P2/P4 remain proposed. Owns **G32** in the [ADR-0006](../adr/0006-layer-boundary-and-protocol-scope.md)
+- **Status:** Scoped P3 preparation/boundary increment landed in [PR #365](https://github.com/anvai-labs/sandhi/pull/365); broader P3 remains partial and P1/P2/P4 remain proposed. Owns **G32** in the [ADR-0006](../adr/0006-layer-boundary-and-protocol-scope.md)
   gap register. Each phase lands as an independently revertable, zero-behavior PR. The scoped
   P3 preparation extraction is independent of the proposed family registry.
 - **Relates to:** [ADR-0004](../adr/0004-two-plane-proxy-and-enforcement-boundary.md) (the
@@ -84,13 +84,14 @@ not a reason to split the provider crate or change languages.
 
 | Item | Design and acceptance | Status |
 |---|---|---|
-| Shared access helpers | Move the existing comparison, HTTP error and mutation-admission primitives out of the admin handler; lifecycle admission accepts only its owner. Preserve error bodies and hold guards through publication. | Implemented; local gates passed, [PR #365](https://github.com/anvai-labs/sandhi/pull/365) open |
-| Typed request preparation | Borrow only deadline, rate-limit, metrics and policy capabilities. Preserve auth → decode → allowlist → attribution → rate limit → policy → reservation → dispatch order. | Implemented; local gates passed, [PR #365](https://github.com/anvai-labs/sandhi/pull/365) open |
-| Explicit integration dependencies | Remove production wildcard imports in buffered/qualified-stream integration; retain canonical accounting and lifecycle owners. | Implemented; local gates passed, [PR #365](https://github.com/anvai-labs/sandhi/pull/365) open |
+| Shared access helpers | Move the existing comparison, HTTP error and mutation-admission primitives out of the admin handler; lifecycle admission accepts only its owner. Preserve error bodies and hold guards through publication. | ✅ Merged in [PR #365](https://github.com/anvai-labs/sandhi/pull/365) (`b34772b0`) |
+| Typed request preparation | Borrow only deadline, rate-limit, metrics and policy capabilities. Preserve auth → decode → allowlist → attribution → rate limit → policy → reservation → dispatch order. | ✅ Merged in [PR #365](https://github.com/anvai-labs/sandhi/pull/365) (`b34772b0`) |
+| Explicit integration dependencies | Remove production wildcard imports in buffered/qualified-stream integration; retain canonical accounting and lifecycle owners. | ✅ Merged in [PR #365](https://github.com/anvai-labs/sandhi/pull/365) (`b34772b0`) |
 | Verification | Reuse existing auth, proxy, cancellation, settlement and recovery owners. Extend missing shutdown/credential ordering coverage without duplicating suites; run workspace tests, Clippy, coverage, conformance, docs and independent review. | 875 workspace tests (6 ignored), Clippy, 89.54% line coverage, 315 SDK tests (19 skipped), strict docs + 3 docs tests passed |
 
-Working branch: `fix/proxy-boundaries`, baseline `a2b0f0c`. No deployment, public
-API, wire-contract or default changes are intended. This increment does not close
+Merged into `develop` as `b34772b0` on 2026-10-11, from baseline `a2b0f0c`
+and independently reviewed head `d104f80a3b941786cd6eb1265b3407fa5864d61d`.
+No deployment, public API, wire-contract or default changes were made. This increment does not close
 P1/P2/P4, claim distributed enforcement, or establish mixed-team C5 acceptance.
 
 The design uses narrow contexts as recommended by
@@ -105,7 +106,8 @@ Local verification used the unchanged canonical suites, with the existing creden
 non-enumeration test extended across running/quiescing/draining/stopped phases and
 the existing comparison test moved with its helper. The 231-test pre-change baseline
 and extended characterization passed before extraction. Independent working-diff
-review found no blocker; exact-commit review and hosted CI/approval remain gates.
+review and the final exact-commit review found no blocker; all applicable hosted CI
+gates passed before merge.
 
 The first SDK attempt was stopped for a shared-build-cache fixture path mismatch;
 correcting local binary links and using a short macOS socket directory yielded the
@@ -118,5 +120,7 @@ helper-import change. Independent reassessment confirmed identical authenticatio
 operations and comparison implementation; the record was updated without extending
 its expiry or advisory scope. The fingerprint/dependency-route gate and all three
 cargo-deny graphs passed, as did 349 release-safeguard tests (147 subtests). No CI
-check was disabled or relaxed. Hosted CI and required PR approval remain the merge
-gates for #365.
+check was disabled or relaxed. After clean exact-commit independent review and green
+hosted CI, #365 was squash-merged using the explicitly authorized admin bypass of
+the required PR approval. This records a scoped implementation milestone, not full
+TD-0025 completion or a release/deployment acceptance result.
