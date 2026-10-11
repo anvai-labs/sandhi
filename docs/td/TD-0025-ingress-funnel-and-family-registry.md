@@ -84,9 +84,9 @@ not a reason to split the provider crate or change languages.
 
 | Item | Design and acceptance | Status |
 |---|---|---|
-| Shared access helpers | Move the existing comparison, HTTP error and mutation-admission primitives out of the admin handler; lifecycle admission accepts only its owner. Preserve error bodies and hold guards through publication. | Implemented; local gates passed, PR pending |
-| Typed request preparation | Borrow only deadline, rate-limit, metrics and policy capabilities. Preserve auth → decode → allowlist → attribution → rate limit → policy → reservation → dispatch order. | Implemented; local gates passed, PR pending |
-| Explicit integration dependencies | Remove production wildcard imports in buffered/qualified-stream integration; retain canonical accounting and lifecycle owners. | Implemented; local gates passed, PR pending |
+| Shared access helpers | Move the existing comparison, HTTP error and mutation-admission primitives out of the admin handler; lifecycle admission accepts only its owner. Preserve error bodies and hold guards through publication. | Implemented; local gates passed, [PR #365](https://github.com/anvai-labs/sandhi/pull/365) open |
+| Typed request preparation | Borrow only deadline, rate-limit, metrics and policy capabilities. Preserve auth → decode → allowlist → attribution → rate limit → policy → reservation → dispatch order. | Implemented; local gates passed, [PR #365](https://github.com/anvai-labs/sandhi/pull/365) open |
+| Explicit integration dependencies | Remove production wildcard imports in buffered/qualified-stream integration; retain canonical accounting and lifecycle owners. | Implemented; local gates passed, [PR #365](https://github.com/anvai-labs/sandhi/pull/365) open |
 | Verification | Reuse existing auth, proxy, cancellation, settlement and recovery owners. Extend missing shutdown/credential ordering coverage without duplicating suites; run workspace tests, Clippy, coverage, conformance, docs and independent review. | 875 workspace tests (6 ignored), Clippy, 89.54% line coverage, 315 SDK tests (19 skipped), strict docs + 3 docs tests passed |
 
 Working branch: `fix/proxy-boundaries`, baseline `a2b0f0c`. No deployment, public
@@ -112,3 +112,11 @@ correcting local binary links and using a short macOS socket directory yielded t
 315-test pass. The 19 skips are 16 InferFlux-origin cases, two opt-in AgentBrowser cases and
 one opt-in three-repository Victor module; this is not live InferFlux or C5 acceptance. No product behavior was changed to make fixtures pass. Review and
 published PR evidence, rather than temporary machine logs, determine merge status.
+
+Hosted CI initially rejected the pinned OIDC adapter fingerprint after its single
+helper-import change. Independent reassessment confirmed identical authentication
+operations and comparison implementation; the record was updated without extending
+its expiry or advisory scope. The fingerprint/dependency-route gate and all three
+cargo-deny graphs passed, as did 349 release-safeguard tests (147 subtests). No CI
+check was disabled or relaxed. Hosted CI and required PR approval remain the merge
+gates for #365.

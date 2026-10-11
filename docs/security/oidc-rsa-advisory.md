@@ -55,3 +55,11 @@ private RSA operations. Review traced both PKCS#1 and PSS verification through
 all-feature dependency graphs retain the sole production route
 `sandhi-proxy -> openidconnect -> rsa`; neither binding graph includes RSA.
 The adapter fingerprint now binds this amendment. The expiry remains 2026-10-22.
+
+The TD-0025 access-helper extraction was independently reassessed on 2026-10-11.
+`auth.rs` is byte-identical after substituting `operator::constant_time_eq` with
+`access::constant_time_eq`; the comparison implementation and all authentication
+call sites are unchanged. Manifests, lockfiles and ordinary RSA/OIDC use sites are
+unchanged, so the refactor introduces no private-key operation or new dependency
+route. The fingerprint binds that scoped change; the expiry remains 2026-10-22.
+This is neither a vulnerability fix nor an expanded advisory exemption.
