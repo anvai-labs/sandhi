@@ -144,13 +144,14 @@ Do not restore older writers over a database containing tracked evidence.
 | Managed tracked OIDC and streaming lifecycle | Pending | Source HTTP tests do not qualify deployed lifecycle |
 | Strict streamed usage qualification | Core qualifier, bounded event observer and opt-in raw response owner; usage survives drop/error; no automatic replay | [Source prerequisite](../product/attempt-accounting-and-evidence.md#openai-chat-stream-usage-qualification-w05c-prerequisite); Rust raw transport plus opt-in tracked HTTP bridge; unreleased |
 | Tracked streaming HTTP ownership | Source tests | Clean EOF after receipt, bounded disconnect/deadline/shutdown, partial/absent usage, setup timeout, failed terminal write and accounting-only retry, panicking telemetry |
+| Standalone streaming lifecycle | Built-proxy HTTP/TLS and OIDC fixtures | [Process death/restart, contention, revoked-grant recovery and completion/disconnect/SIGTERM](../product/attempt-accounting-and-evidence.md#standalone-streaming-lifecycle-source-acceptance); synthetic source evidence, unreleased |
 | Executed cache reuse, tokenizer correctness and actual-member C5 | Pending | Source drills cannot establish these |
 | Released tracked-mode deployment | Pending | Existing 0.12.0 default-mode deployment does not qualify tracked lifecycle |
 
 The restart drills use the same copied/hashed binary and local synthetic provider
-responses. The two original SIGKILL drills run with token compatibility and
-CA-verified TLS/OIDC using the disposable authority; terminal-publication contention
-remains a separate token-mode drill. Each successful drill observes one origin request.
+responses. The existing SIGKILL and terminal-publication contention drills run with
+buffered and streaming requests in token compatibility and CA-verified TLS/OIDC
+modes using the disposable authority. Each drill observes one origin request.
 See the [full acceptance record](../product/attempt-accounting-and-evidence.md#tracked-buffered-crashrestart-acceptance).
 
 !!! note "Telemetry is not a settlement outbox"

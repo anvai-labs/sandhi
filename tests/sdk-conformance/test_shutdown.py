@@ -29,6 +29,10 @@ pytestmark = pytest.mark.skipif(os.name != "posix", reason="This suite exercises
 ADMIN = {"Authorization": "Bearer shutdown-test-admin"}
 CLIENT = {"Authorization": f"Bearer {VK_OPENAI}"}
 BODY = {"model": "gpt-mock", "messages": [{"role": "user", "content": "ping"}]}
+STREAMING_DEADLINES = {
+    "ceiling_ms": 30000,
+    "default": {"setup_ms": 2000, "idle_ms": 20000, "body_ms": 20000},
+}
 
 
 @dataclass
@@ -39,6 +43,8 @@ class GatedProvider:
     base: str = ""
     omit_usage: bool = False
     gate_buffered: bool = False
+    qualified_stream: bool = False
+    gate_after_usage: bool = False
 
 
 @pytest.fixture
@@ -54,6 +60,18 @@ def gated_provider():
             provider.requests.append(body)
             streaming = body.get("stream", False)
             payload = _openai_chat_body(streaming).encode()
+            if streaming and provider.qualified_stream:
+                # Preserve the legacy SDK fixture. Tracked streams use its same
+                # buffered counters in a separate, complete empty-choices event.
+                events = [json.loads(event[6:]) for event in payload.decode().split("\n\n")
+                          if event.startswith("data: {")]
+                for event in events:
+                    event.pop("usage", None)
+                if not provider.omit_usage:
+                    events.append({"object": "chat.completion.chunk", "choices": [],
+                                   "usage": json.loads(_openai_chat_body(False))["usage"]})
+                payload = ("".join(f"data: {json.dumps(event)}\n\n" for event in events)
+                           + "data: [DONE]\n\n").encode()
             if not streaming and provider.omit_usage:
                 completed = json.loads(payload)
                 completed.pop("usage")
@@ -70,8 +88,13 @@ def gated_provider():
                 if streaming:
                     # Send one complete event before blocking: the downstream owns an
                     # active response body/admission slot, not just a pending header read.
-                    first, remainder = payload.split(b"\n\n", 1)
-                    self.wfile.write(first + b"\n\n")
+                    if provider.gate_after_usage:
+                        first, remainder = payload.rsplit(b"data: [DONE]", 1)
+                        remainder = b"data: [DONE]" + remainder
+                    else:
+                        first, remainder = payload.split(b"\n\n", 1)
+                        first += b"\n\n"
+                    self.wfile.write(first)
                     self.wfile.flush()
                     provider.entered.set()
                     if not provider.release.wait(20):
@@ -102,6 +125,8 @@ def shutdown_gateway(proxy_binary, gated_provider, tmp_path):
         port = _free_port()
         database = tmp_path / "shutdown.db"
         config = {"providers": [], "vkeys": [], "budgets": [], "alerts": []}
+        if tracked:
+            config["streaming_deadlines"] = STREAMING_DEADLINES
         if tls:
             fixtures = REPO_ROOT / "crates/sandhi-proxy/tests/fixtures/tls"
             config["tls"] = {
@@ -355,19 +380,27 @@ def test_locked_settlement_cannot_extend_shutdown_past_watchdog(
 
 @pytest.mark.parametrize("tls", [False, True], ids=["http", "tls"])
 @pytest.mark.parametrize("missing_usage", [False, True], ids=["settled", "unresolved"])
-def test_tracked_buffered_binary_correlation_and_shutdown(
-    shutdown_gateway, gated_provider, missing_usage, tls,
+@pytest.mark.parametrize("streaming", [False, True], ids=["buffered", "streaming"])
+def test_tracked_binary_correlation_and_shutdown(
+    shutdown_gateway, gated_provider, missing_usage, tls, streaming,
 ):
     """Exercise the shipped switch, real HTTP and SIGTERM against disposable state."""
     gated_provider.omit_usage = missing_usage
+    gated_provider.qualified_stream = streaming
+    gated_provider.release.set()
     certificate = REPO_ROOT / "crates/sandhi-proxy/tests/fixtures/tls/localhost-cert.pem"
     verify = ssl.create_default_context(cafile=certificate) if tls else True
     with shutdown_gateway(tracked=True, tls=tls) as (process, base, database, _port):
         with httpx.Client(base_url=base, timeout=5, verify=verify) as client:
-            response = client.post("/v1/chat/completions", headers=CLIENT,
-                                   json={**BODY, "max_tokens": 10})
-            assert response.status_code == (502 if missing_usage else 200), response.text
-            request_id = response.headers["x-sandhi-request-id"]
+            with client.stream("POST", "/v1/chat/completions", headers=CLIENT,
+                               json={**BODY, "max_tokens": 10, "stream": streaming}) as response:
+                assert response.status_code == (502 if missing_usage and not streaming else 200)
+                request_id = response.headers["x-sandhi-request-id"]
+                if streaming and missing_usage:
+                    with pytest.raises(httpx.RemoteProtocolError):
+                        response.read()
+                else:
+                    response.read()
         assert len(gated_provider.requests) == 1
         process.terminate()
         assert process.wait(timeout=6) == (124 if missing_usage else 0)
