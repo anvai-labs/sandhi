@@ -59,7 +59,8 @@ markdown_extensions:
 hooks:
   - scripts/docs_links.py
 extra_css:
-  - assets/stylesheets/brand.css
+  - stylesheets/tokens.css
+  - stylesheets/brand.css
 exclude_docs: |
   /README.md
   overrides/
