@@ -27,11 +27,14 @@ publishing it does not promote a runtime release.
 
 ## Family styling
 
-The local CSS uses AnvaiOps' neutral teal/slate palette from
-`site/assets/brand.css` at `46b8afcc3030a5a83ed70f4f8e1e5acd7d8ddc39`.
-It is a small OSS styling surface, not a dependency on the commercial control plane.
-Light, dark and system modes share the same content and navigation. System fonts
-avoid external font requests; reduced motion and keyboard focus remain explicit.
+The site wears the Anvai family brand shared by every Anvai docs site:
+`docs/stylesheets/tokens.css` is a verbatim copy of AnvaiOps `design/tokens.css`
+(at `e8215fc`) and `docs/stylesheets/brand.css` is the shared Material mapping (ink
+brand bar, teal accent). Both are copied files, not a dependency on the commercial
+control plane; `scripts/check_brand_tokens.py` pins them by digest, so re-copy them
+rather than editing here. Light, dark and system modes share the same content and
+navigation. Inter is self-hosted under `docs/stylesheets/fonts/` (SIL OFL 1.1), so
+there are no external font requests; reduced motion and keyboard focus remain explicit.
 
 Use Material's native [palette configuration](https://squidfunk.github.io/mkdocs-material/setup/changing-the-colors/)
 and [Mermaid diagrams](https://squidfunk.github.io/mkdocs-material/reference/diagrams/).
