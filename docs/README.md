@@ -108,6 +108,7 @@ perpetually open.
 
 | TD | State | Remaining scope |
 |---|---|---|
+| [0032](td/TD-0032-weighted-allowance-policy.md) | W01 candidate | Opt-in weighted allowance arithmetic; reporting provenance, admission-bound policy snapshots, durable enforcement and live acceptance pending |
 | [0001](td/TD-0001-provider-adapter-qa-and-codegen.md) | Complete | — |
 | [0002](td/TD-0002-typed-provider-runtime.md) | Complete | Consumer-repository cleanup is outside Sandhi's completion gate |
 | [0003](td/TD-0003-operator-surface-keys-budgets-attribution.md) | Complete | — |

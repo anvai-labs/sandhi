@@ -10,6 +10,7 @@
 //! emits dollars or tier/SKU names.
 
 pub mod alerts;
+pub mod allowance;
 pub mod budget;
 pub mod cache_read;
 pub mod chat;
