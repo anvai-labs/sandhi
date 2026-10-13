@@ -20,6 +20,7 @@ fn subscription_scheme_selects_codex_codec_and_disables_raw_forwarding() {
     )
     .expect("valid leased subscription credential");
     assert_eq!(handle.family(), ProviderFamily::OpenAiResponses);
+    assert!(handle.supports_streaming_deadlines());
     assert!(
         handle.raw_forwarder().is_none(),
         "raw forwarding bypasses subscription constraints"
@@ -114,7 +115,7 @@ async fn independent_clients_share_subscription_but_not_identity_or_authority() 
                 .insert_header("content-type", "text/event-stream")
                 .set_body_string(sse),
         )
-        .expect(2)
+        .expect(4)
         .mount(&upstream)
         .await;
     let mut headers = axum::http::HeaderMap::new();
@@ -144,27 +145,38 @@ async fn independent_clients_share_subscription_but_not_identity_or_authority() 
         });
     }
     let sink = Arc::new(InMemorySink::new());
-    let state = Arc::new(ProxyState::new(
+    let mut state = ProxyState::new(
         keys,
         ProxyLedger::in_memory(),
         sink.clone(),
         HashMap::from([("openai:subscription".into(), handle)]),
         None,
-    ));
-    let app = build_app(state);
-    for client in ["a", "b"] {
+    );
+    state.streaming_deadlines = sandhi_proxy::deadlines::streaming_from_json(
+        r#"{"streaming_deadlines":{"ceiling_ms":10000,"default":{"setup_ms":2000,"idle_ms":2000,"body_ms":5000}}}"#,
+    ).unwrap();
+    let app = build_app(Arc::new(state));
+    for (client, streaming) in [("a", false), ("b", false), ("a", true), ("b", true)] {
         let req=Request::builder().method("POST").uri("/v1/chat/completions")
             .header("authorization",format!("Bearer vk_{client}")).header("content-type","application/json")
             .header("chatgpt-account-id","attacker")
-            .body(Body::from(json!({"model":"allowed","messages":[{"role":"system","content":"Be concise"},{"role":"user","content":"hello"}]}).to_string())).unwrap();
+            .body(Body::from(json!({"model":"allowed","stream":streaming,"messages":[{"role":"system","content":"Be concise"},{"role":"user","content":"hello"}]}).to_string())).unwrap();
         let response = app.clone().oneshot(req).await.unwrap();
         let status = response.status();
         let body = to_bytes(response.into_body(), 100000).await.unwrap();
         assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
         assert!(String::from_utf8_lossy(&body).contains("hello"));
     }
+    // Owned streams finalize accounting asynchronously; wire EOF is not its receipt.
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while sink.events().len() != 4 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     let events = sink.events();
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 4);
     assert_eq!(events[0].subject_id.as_deref(), Some("victor:a"));
     assert_eq!(events[1].subject_id.as_deref(), Some("victor:b"));
     for e in events {
@@ -199,5 +211,100 @@ async fn independent_clients_share_subscription_but_not_identity_or_authority() 
             .unwrap()
             .contains("Be concise"));
         assert!(!String::from_utf8_lossy(&request.body).contains("vk_"));
+    }
+}
+
+#[tokio::test]
+async fn subscription_stream_enforces_idle_and_body_limits_without_replay() {
+    use axum::{
+        body::{to_bytes, Body, Bytes},
+        http::{Request, StatusCode},
+        routing::post,
+        Router,
+    };
+    use sandhi_core::{InMemorySink, KeyStore, VirtualKey};
+    use sandhi_proxy::{build_app, ProxyLedger, ProxyState};
+    use std::{
+        collections::HashMap,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
+    use tower::ServiceExt;
+
+    for (idle_ms, body_ms) in [(30, 2000), (2000, 30)] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed_calls = calls.clone();
+        let origin = Router::new().route("/responses", post(move || {
+            observed_calls.fetch_add(1, Ordering::SeqCst);
+            async {
+                let bytes = async_stream::stream! {
+                    yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"fake\",\"model\":\"fixture\"}}\n\n"));
+                    futures_util::future::pending::<()>().await;
+                };
+                ([("content-type", "text/event-stream")], Body::from_stream(bytes))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, origin).await.unwrap();
+        });
+        let handle = ProviderRuntime::new()
+            .chatgpt_responses(
+                "openai",
+                format!("http://{address}"),
+                "synthetic",
+                Default::default(),
+                Some(0),
+                None,
+                None,
+            )
+            .with_credential_expiry(4_000_000_000);
+        assert!(handle.raw_forwarder().is_none());
+        let keys = KeyStore::new();
+        keys.insert(VirtualKey {
+            id: "vk_fixture".into(),
+            upstream_ref: "openai:codex".into(),
+            ..Default::default()
+        });
+        let sink = Arc::new(InMemorySink::new());
+        let mut state = ProxyState::new(
+            keys,
+            ProxyLedger::in_memory(),
+            sink.clone(),
+            HashMap::from([("openai:codex".into(), handle)]),
+            None,
+        );
+        state.streaming_deadlines = sandhi_proxy::deadlines::streaming_from_json(&json!({
+            "streaming_deadlines":{"ceiling_ms":10000,"default":{"setup_ms":2000,"idle_ms":idle_ms,"body_ms":body_ms}}
+        }).to_string()).unwrap();
+        let state = Arc::new(state);
+        let request = Request::builder().method("POST").uri("/v1/chat/completions")
+            .header("authorization", "Bearer vk_fixture").header("content-type", "application/json")
+            .body(Body::from(json!({"model":"fixture","stream":true,"messages":[{"role":"system","content":"Be concise"},{"role":"user","content":"hello"}]}).to_string())).unwrap();
+        let response = build_app(state.clone()).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            to_bytes(response.into_body(), 100000),
+        )
+        .await
+        .expect("configured limit terminates body");
+        assert!(
+            result.is_err(),
+            "failed streams must not appear successfully complete"
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while sink.events().len() != 1 || state.lifecycle.active_operations() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "never replay a model POST");
+        server.abort();
     }
 }
