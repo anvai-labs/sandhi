@@ -584,6 +584,39 @@ fn decode_responses_stream(raw: ByteStream, requested_model: String) -> ChatEven
     crate::cache_read::decode_with_observation(raw, requested_model, decode_responses_stream_inner)
 }
 
+#[derive(Default)]
+struct StreamedToolArguments {
+    emitted: String,
+    finalized: bool,
+}
+
+impl StreamedToolArguments {
+    fn delta(&mut self, delta: &str) -> Result<(), ProviderError> {
+        if self.finalized && !delta.is_empty() {
+            return Err(ProviderError::Transport(
+                "tool arguments delta after completion".into(),
+            ));
+        }
+        self.emitted.push_str(delta);
+        Ok(())
+    }
+
+    fn complete(&mut self, arguments: &str) -> Result<String, ProviderError> {
+        // Terminal snapshots repeat prior deltas or supply their missing suffix.
+        // Rewriting an already-emitted prefix cannot be represented by this
+        // append-only contract: fail instead of executing corrupted arguments.
+        if (self.finalized && arguments != self.emitted) || !arguments.starts_with(&self.emitted) {
+            return Err(ProviderError::Transport(
+                "conflicting completed tool arguments".into(),
+            ));
+        }
+        let suffix = arguments[self.emitted.len()..].to_owned();
+        self.emitted = arguments.to_owned();
+        self.finalized = true;
+        Ok(suffix)
+    }
+}
+
 fn decode_responses_stream_inner(mut raw: ByteStream, requested_model: String) -> ChatEventStream {
     use futures_util::StreamExt;
     let stream = async_stream::try_stream! {
@@ -591,7 +624,7 @@ fn decode_responses_stream_inner(mut raw: ByteStream, requested_model: String) -
         // over-budget POLICY differs, and it is applied below. See MAX_STREAM_LINE_BYTES.
         let mut splitter = crate::linesplit::LineSplitter::new(crate::MAX_STREAM_LINE_BYTES);
         let mut started = false;
-        let mut open_tools = BTreeMap::<u32, ()>::new();
+        let mut open_tools = BTreeMap::<u32, StreamedToolArguments>::new();
         let mut emitted_usage = false;
         let mut emitted_finish = false;
         // TD-0014 P2b: after the real chunks end, ONE synthetic empty chunk flushes any
@@ -639,7 +672,7 @@ fn decode_responses_stream_inner(mut raw: ByteStream, requested_model: String) -
                         started = true;
                     } else if !started && matches!(kind,
                         "response.output_text.delta" | "response.refusal.delta" |
-                        "response.function_call_arguments.delta") {
+                        "response.function_call_arguments.delta" | "response.output_item.added") {
                         yield ChatStreamEventV1::ResponseStart { id: None, model: requested_model.clone() };
                         started = true;
                     }
@@ -661,20 +694,46 @@ fn decode_responses_stream_inner(mut raw: ByteStream, requested_model: String) -
                                     item.get("call_id").and_then(Value::as_str),
                                     item.get("name").and_then(Value::as_str),
                                 ) {
-                                    open_tools.insert(index, ());
+                                    open_tools.insert(index, StreamedToolArguments::default());
                                     yield ChatStreamEventV1::ToolCallStart { index, id:id.into(), name:name.into() };
+                                    if let Some(arguments) = item.get("arguments").and_then(Value::as_str) {
+                                        open_tools.get_mut(&index).unwrap().delta(arguments)?;
+                                        if !arguments.is_empty() {
+                                            yield ChatStreamEventV1::ToolCallArgumentsDelta { index, delta: arguments.into() };
+                                        }
+                                    }
                                 }
                             }
                         }
                         "response.function_call_arguments.delta" => {
                             let index = event.get("output_index").and_then(Value::as_u64).unwrap_or(0) as u32;
                             if let Some(delta) = event.get("delta").and_then(Value::as_str) {
+                                let state = open_tools.get_mut(&index).ok_or_else(||
+                                    ProviderError::Transport("tool arguments delta without an open call".into()))?;
+                                state.delta(delta)?;
                                 yield ChatStreamEventV1::ToolCallArgumentsDelta { index, delta:delta.into() };
+                            }
+                        }
+                        "response.function_call_arguments.done" => {
+                            let index = event.get("output_index").and_then(Value::as_u64).unwrap_or(0) as u32;
+                            if let Some(arguments) = event.get("arguments").and_then(Value::as_str) {
+                                let state = open_tools.get_mut(&index).ok_or_else(||
+                                    ProviderError::Transport("completed tool arguments without an open call".into()))?;
+                                let suffix = state.complete(arguments)?;
+                                if !suffix.is_empty() {
+                                    yield ChatStreamEventV1::ToolCallArgumentsDelta { index, delta:suffix };
+                                }
                             }
                         }
                         "response.output_item.done" => {
                             let index = event.get("output_index").and_then(Value::as_u64).unwrap_or(0) as u32;
-                            if open_tools.remove(&index).is_some() {
+                            if let Some(mut state) = open_tools.remove(&index) {
+                                if let Some(arguments) = event.pointer("/item/arguments").and_then(Value::as_str) {
+                                    let suffix = state.complete(arguments)?;
+                                    if !suffix.is_empty() {
+                                        yield ChatStreamEventV1::ToolCallArgumentsDelta { index, delta:suffix };
+                                    }
+                                }
                                 yield ChatStreamEventV1::ToolCallEnd { index };
                             }
                         }
@@ -741,6 +800,125 @@ fn decode_responses_stream_inner(mut raw: ByteStream, requested_model: String) -
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn conflicting_tool_snapshots_fail_the_stream_before_tool_end() {
+        for terminal in [
+            "response.function_call_arguments.done",
+            "response.output_item.done",
+        ] {
+            let events = [
+                json!({"type":"response.output_item.added","output_index":0,
+                    "item":{"type":"function_call","call_id":"call_1","name":"read_file"}}),
+                json!({"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"path\":\"a"}),
+                if terminal == "response.output_item.done" {
+                    json!({"type":terminal,"output_index":0,"item":{"type":"function_call","arguments":"{\"path\":\"b.py\"}"}})
+                } else {
+                    json!({"type":terminal,"output_index":0,"arguments":"{\"path\":\"b.py\"}"})
+                },
+                json!({"type":"response.completed","response":{"status":"completed","output":[]}}),
+            ];
+            let wire = events
+                .iter()
+                .map(|event| format!("data: {event}\n\n"))
+                .collect::<String>();
+            let raw = Box::pin(futures_util::stream::iter(vec![Ok(crate::StreamChunk {
+                data: Bytes::from(wire),
+                cache_read_observation: None,
+                usage: None,
+                usage_running: None,
+                attempts: 1,
+                terminal: false,
+            })]));
+            let decoded: Vec<_> = decode_responses_stream(raw, "test".into()).collect().await;
+            assert!(decoded.last().unwrap().is_err(), "{terminal}");
+            assert!(!decoded.iter().any(|event| matches!(
+                event,
+                Ok(ChatStreamEventV1::ToolCallEnd { .. } | ChatStreamEventV1::Finish { .. })
+            )));
+        }
+    }
+
+    #[test]
+    fn completed_tool_arguments_reject_conflicts_and_late_deltas() {
+        let mut state = StreamedToolArguments::default();
+        state.delta("{\"path\":").unwrap();
+        assert!(state.complete("{\"cmd\":\"pwd\"}").is_err());
+        assert_eq!(state.complete("{\"path\":\"a.py\"}").unwrap(), "\"a.py\"}");
+        assert_eq!(state.complete("{\"path\":\"a.py\"}").unwrap(), "");
+        assert!(state.complete("{\"path\":\"b.py\"}").is_err());
+        assert!(state.delta("unexpected").is_err());
+    }
+
+    #[tokio::test]
+    async fn codex_parallel_tool_arguments_done_are_preserved_without_duplication() {
+        for mode in ["done_only", "deltas", "partial", "item_only", "initial"] {
+            let mut wire = Vec::new();
+            for index in [1, 3, 4, 7] {
+                let arguments = format!("{{\"path\":\"file{index}.py\"}}");
+                wire.push(json!({"type":"response.output_item.added","output_index":index,
+                    "item":{"type":"function_call","call_id":format!("call_{index}"),
+                        "name":"read_file","arguments":if mode == "initial" {&arguments} else {""}}}));
+                if mode == "deltas" || mode == "partial" {
+                    let prefix = if mode == "deltas" {
+                        arguments.as_str()
+                    } else {
+                        "{\"path\":"
+                    };
+                    wire.push(json!({"type":"response.function_call_arguments.delta",
+                        "output_index":index,"delta":prefix}));
+                }
+                if mode != "item_only" {
+                    wire.push(json!({"type":"response.function_call_arguments.done",
+                        "output_index":index,"arguments":arguments}));
+                }
+                wire.push(
+                    json!({"type":"response.output_item.done","output_index":index,
+                    "item":{"type":"function_call","arguments":arguments}}),
+                );
+            }
+            wire.push(
+                json!({"type":"response.completed","response":{"status":"completed",
+                "output":[{"type":"function_call"}],"usage":{"input_tokens":3,"output_tokens":4}}}),
+            );
+            let sse = wire
+                .iter()
+                .map(|event| format!("data: {event}\n\n"))
+                .collect::<String>();
+            for chunk_size in [1, 17, sse.len()] {
+                let chunks = sse
+                    .as_bytes()
+                    .chunks(chunk_size)
+                    .map(|chunk| {
+                        Ok(crate::StreamChunk {
+                            data: Bytes::copy_from_slice(chunk),
+                            cache_read_observation: None,
+                            usage: None,
+                            usage_running: None,
+                            attempts: 1,
+                            terminal: false,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let stream = decode_responses_stream(
+                    Box::pin(futures_util::stream::iter(chunks)),
+                    "test".into(),
+                );
+                let response = aggregate_stream(stream).await.unwrap();
+                assert_eq!(response.output.tool_calls.len(), 4, "{mode}");
+                for (call, index) in response.output.tool_calls.iter().zip([1, 3, 4, 7]) {
+                    assert_eq!(call.id, format!("call_{index}"));
+                    assert_eq!(
+                        call.arguments,
+                        format!("{{\"path\":\"file{index}.py\"}}"),
+                        "{mode}"
+                    );
+                }
+                assert_eq!(response.usage.tokens_out, 4);
+                assert_eq!(response.finish_reason, Some(FinishReasonV1::ToolCalls));
+            }
+        }
+    }
+
     #[tokio::test]
     async fn aggregate_keeps_numeric_final_after_metadata_only_correction() {
         use sandhi_core::{
