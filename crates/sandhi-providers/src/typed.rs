@@ -262,8 +262,11 @@ pub struct ProviderHandle {
     /// The raw byte-forwarder for the same-family transparent plane (TD-0006 / ADR-0004 D1), built
     /// from the **same** transport config as `inner`. `None` for handles created via the
     /// [`new`](Self::new) escape hatch (host-owned typed providers), which carry no transport
-    /// config to forward with — those fall back to the typed translation path.
+    /// config to forward with. Subscription and expiry-fenced handles also disable raw
+    /// forwarding; all such handles use the typed translation path.
     raw: Option<crate::raw::RawForwarder>,
+    /// Built-in transport supports setup/idle deadlines independently of raw forwarding.
+    streaming_deadline_capable: bool,
     credential_expires_at: Option<u64>,
     qualified_single_attempt: bool,
 }
@@ -283,6 +286,7 @@ impl ProviderHandle {
             inner,
             family: ProviderFamily::OpenAiCompat,
             raw: None,
+            streaming_deadline_capable: false,
             credential_expires_at: None,
             qualified_single_attempt: false,
         }
@@ -318,6 +322,14 @@ impl ProviderHandle {
         self.qualified_single_attempt
             && self.raw.is_some()
             && self.family == ProviderFamily::OpenAiCompat
+    }
+
+    /// Whether the owned transport enforces gateway streaming setup/idle limits.
+    /// This does not grant raw forwarding: subscription codecs and credential expiry
+    /// must remain on the typed path. Host-owned providers cannot opt in by changing family.
+    #[must_use]
+    pub fn supports_streaming_deadlines(&self) -> bool {
+        self.streaming_deadline_capable
     }
 
     pub fn raw_forwarder(&self) -> Option<&crate::raw::RawForwarder> {
@@ -599,6 +611,7 @@ impl ProviderRuntime {
             inner: Arc::new(TypedOpenAiCompat { slug, raw }),
             family: ProviderFamily::OpenAiCompat,
             raw: raw_forwarder,
+            streaming_deadline_capable: true,
             credential_expires_at: None,
             qualified_single_attempt: max_retries.unwrap_or(0) == 0,
         }
@@ -638,6 +651,7 @@ impl ProviderRuntime {
             )),
             family: ProviderFamily::OpenAiResponses,
             raw: raw_forwarder,
+            streaming_deadline_capable: true,
             credential_expires_at: None,
             qualified_single_attempt: false,
         }
@@ -679,6 +693,7 @@ impl ProviderRuntime {
             )),
             family: ProviderFamily::OpenAiResponses,
             raw: raw_forwarder,
+            streaming_deadline_capable: true,
             credential_expires_at: None,
             qualified_single_attempt: false,
         }
@@ -708,6 +723,7 @@ impl ProviderRuntime {
             inner: Arc::new(crate::anthropic_typed::TypedAnthropic::new(raw)),
             family: ProviderFamily::Anthropic,
             raw: raw_forwarder,
+            streaming_deadline_capable: true,
             credential_expires_at: None,
             qualified_single_attempt: false,
         }
@@ -735,6 +751,7 @@ impl ProviderRuntime {
             inner: Arc::new(crate::ollama_typed::TypedOllama::new(raw)),
             family: ProviderFamily::Ollama,
             raw: raw_forwarder,
+            streaming_deadline_capable: true,
             credential_expires_at: None,
             qualified_single_attempt: false,
         }
@@ -764,6 +781,7 @@ impl ProviderRuntime {
             inner: Arc::new(crate::gemini_typed::TypedGemini::new(raw)),
             family: ProviderFamily::Gemini,
             raw: raw_forwarder,
+            streaming_deadline_capable: true,
             credential_expires_at: None,
             qualified_single_attempt: false,
         }
@@ -791,6 +809,7 @@ impl ProviderRuntime {
             inner: Arc::new(crate::cohere_typed::TypedCohere::new(raw)),
             family: ProviderFamily::Cohere,
             raw: raw_forwarder,
+            streaming_deadline_capable: true,
             credential_expires_at: None,
             qualified_single_attempt: false,
         }
@@ -1922,7 +1941,16 @@ mod tests {
             anthropic.raw_forwarder().is_some(),
             "a factory handle carries a raw forwarder for the transparent plane"
         );
+        assert!(anthropic.supports_streaming_deadlines());
+        assert!(anthropic
+            .clone()
+            .with_credential_expiry(1)
+            .supports_streaming_deadlines());
         let escape_hatch = ProviderHandle::new(Arc::new(NoOpProvider));
+        assert!(!escape_hatch
+            .clone()
+            .with_family(ProviderFamily::OpenAiResponses)
+            .supports_streaming_deadlines());
         assert!(
             escape_hatch.raw_forwarder().is_none(),
             "an escape-hatch handle has no transport config to forward with"

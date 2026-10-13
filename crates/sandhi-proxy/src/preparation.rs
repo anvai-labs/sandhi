@@ -232,7 +232,7 @@ pub(super) async fn prepare(
     let body_lifetime = streaming_deadline
         .map(|policy| policy.body_lifetime())
         .or(context.stream_body_lifetime);
-    if wants_stream && body_lifetime.is_some() && provider.raw_forwarder().is_none() {
+    if wants_stream && body_lifetime.is_some() && !provider.supports_streaming_deadlines() {
         return Err(ingress_error(
             dialect,
             StatusCode::BAD_GATEWAY,
