@@ -17,7 +17,7 @@ mistaken for shipped behavior.
 | What is the supported architecture and scope? | Accepted records in [`adr/`](adr/) |
 | What is complete or still open? | This index and the status line at the top of each record in [`td/`](td/) |
 | What is the public data contract? | Rust types in `sandhi-core`; generated JSON Schemas in [`../schemas/`](../schemas/) |
-| What changed in a release? | [0.13.0 release and adoption gates](releases/v0.13.0.md), [0.12.0 release evidence](releases/v0.12.0.md), [CHANGELOG](../CHANGELOG.md) and [release guide](../RELEASING.md) |
+| What changed in a release? | [0.14.0 release and adoption gates](releases/v0.14.0.md), [0.13.0 release](releases/v0.13.0.md), [0.12.0 release evidence](releases/v0.12.0.md), [CHANGELOG](../CHANGELOG.md) and [release guide](../RELEASING.md) |
 | How do sibling repositories integrate? | [`upstream/`](upstream/) snapshots; these are non-normative and may be historical |
 | What product evolution is proposed and how is it tracked? | [TD-0026 delivery plan](td/TD-0026-gateway-product-evolution.md), [product specification](product/gateway-vision-and-requirements.md), and [2026-09-04 review](reviews/gateway-review-2026-09-04.md); proposals, not shipped claims |
 | What evidence gates the M1 checkpoint? | [Workload and acceptance](product/m1-acceptance.md); UA01 accepts engineering evidence for this release and defers hands-on usability until before production |
@@ -108,7 +108,7 @@ perpetually open.
 
 | TD | State | Remaining scope |
 |---|---|---|
-| [0032](td/TD-0032-weighted-allowance-policy.md) | W01 candidate | Opt-in weighted allowance arithmetic; reporting provenance, admission-bound policy snapshots, durable enforcement and live acceptance pending |
+| [0032](td/TD-0032-weighted-allowance-policy.md) | W01 released in 0.14.0 | Opt-in weighted allowance arithmetic; reporting provenance, admission-bound policy snapshots, durable enforcement and live acceptance pending |
 | [0001](td/TD-0001-provider-adapter-qa-and-codegen.md) | Complete | — |
 | [0002](td/TD-0002-typed-provider-runtime.md) | Complete | Consumer-repository cleanup is outside Sandhi's completion gate |
 | [0003](td/TD-0003-operator-surface-keys-budgets-attribution.md) | Complete | — |
