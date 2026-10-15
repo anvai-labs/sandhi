@@ -17,9 +17,10 @@ pub const CHAT_SCHEMA_VERSION_V1: &str = "1";
 /// 6 = `RunCostTreeV1` — the ADR-0005 D7 agent-run cost tree;
 /// 7 = explicit reasoning inclusion in output (TD-0026 W03), 8 = per-field latency provenance
 /// (TD-0027 S4); 9 = cache-read observation and same-population coverage (TD-0028 C2).
+/// 10 = policy documents and decisions; 11 = typed displayable assistant reasoning.
 /// Consumers feature-detect the binding export and treat an absent fn as
 /// minor 0.
-pub const CHAT_CONTRACT_MINOR: u32 = 10;
+pub const CHAT_CONTRACT_MINOR: u32 = 11;
 
 fn schema_v1() -> String {
     CHAT_SCHEMA_VERSION_V1.to_owned()
@@ -365,6 +366,11 @@ pub enum FinishReasonV1 {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct AssistantOutputV1 {
+    /// Provider-supplied displayable reasoning or summary text, separate from the answer.
+    /// Not an opaque replay token, signature, or authority to execute an action.
+    /// Retained even when the optional native response echo is disabled (minor 11).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<MessageContent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -854,10 +860,33 @@ mod tests {
         let digest = fnv1a(concatenated.as_bytes());
         assert_eq!(
             (CHAT_CONTRACT_MINOR, digest),
-            (10, 0xbfac4906491040d9_u64),
+            (11, 0xd7db4c194114e625_u64),
             "contract schemas changed: bump CHAT_CONTRACT_MINOR and update this digest \
              (new digest = {digest:#x})"
         );
+    }
+
+    #[test]
+    fn assistant_reasoning_is_additive_and_strictly_text() {
+        use serde_json::json;
+        let legacy = r#"{"content":"answer","tool_calls":[{"id":"c","name":"read","arguments":"{}"}],"refusal":"no"}"#;
+        let output: AssistantOutputV1 = serde_json::from_str(legacy).unwrap();
+        assert_eq!(serde_json::to_string(&output).unwrap(), legacy);
+        for text in ["", "fixture summary\nλ"] {
+            let mut value = serde_json::to_value(&output).unwrap();
+            value["reasoning"] = json!(text);
+            let decoded: AssistantOutputV1 = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), value);
+        }
+        for invalid in [
+            json!(false),
+            json!(42),
+            json!({"encrypted_content":"opaque"}),
+        ] {
+            assert!(
+                serde_json::from_value::<AssistantOutputV1>(json!({"reasoning":invalid})).is_err()
+            );
+        }
     }
 
     #[test]

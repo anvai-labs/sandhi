@@ -9,7 +9,7 @@ import { Gateway, parseUsage, wireContractVersion } from "../index.js";
 import { ProviderRuntime } from "../sandhi.js";
 import "./cache-read-observation.test.mjs";
 
-function assertCompleteOpenAiStream(events, cached = false) {
+function assertCompleteOpenAiStream(events, cached = false, reasoning = false) {
   // Availability can precede content. It is not another numeric usage verdict.
   const semantic = [];
   const finalUsages = [];
@@ -41,7 +41,7 @@ function assertCompleteOpenAiStream(events, cached = false) {
   assert.deepEqual(finalUsages[0].cache_read_observation, {
     status: cached ? "reported" : "absent", source: "origin_usage",
   });
-  assert.deepEqual(semantic, ["response_start", "text_delta", "usage", "finish"]);
+  assert.deepEqual(semantic, ["response_start", "text_delta", ...(reasoning ? ["reasoning_delta"] : []), "usage", "finish"]);
   assert.equal(events.filter(event => event.event === "text_delta").map(event => event.delta).join(""), "he");
   return finalUsages[0];
 }
@@ -281,14 +281,15 @@ test("static headersJson reaches all four non-OpenAI families (TD-0022 D3)", asy
   }
 });
 
-test("persistent typed provider completes and streams neutral documents", async () => {
+for (const includeNative of [false, true]) {
+test(`persistent typed provider completes and streams neutral documents (native=${includeNative})`, async () => {
   const server = await localServer([
     {
       contentType: "application/json",
       body: JSON.stringify({
         id: "r1",
         model: "gpt-test",
-        choices: [{ message: { content: "hello" }, finish_reason: "stop" }],
+        choices: [{ message: { content: "hello", reasoning_content: "fixture summary" }, finish_reason: "stop" }],
         usage: {
           prompt_tokens: 10,
           completion_tokens: 3,
@@ -299,7 +300,7 @@ test("persistent typed provider completes and streams neutral documents", async 
     {
       contentType: "text/event-stream",
       body:
-        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{"content":"he"},"finish_reason":null}]}\n\n' +
+        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{"content":"he","reasoning_content":"fixture summary"},"finish_reason":null}]}\n\n' +
         'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":4}}}\n\n' +
         "data: [DONE]\n\n",
     },
@@ -315,11 +316,14 @@ test("persistent typed provider completes and streams neutral documents", async 
     );
     const request = JSON.stringify({
       schema_version: "1",
+      include_native_response: includeNative,
       model: "gpt-test",
       messages: [{ role: "user", content: "hi" }],
     });
     const response = JSON.parse(await provider.completeJson(request));
     assert.equal(response.output.content, "hello");
+    assert.equal(response.output.reasoning, "fixture summary");
+    assert.equal("openai" in (response.extensions ?? {}), includeNative);
     assert.equal(response.usage.tokens_in, 6);
     assert.deepEqual(response.usage.cache_read_observation, {
       status: "reported", source: "origin_usage",
@@ -327,7 +331,8 @@ test("persistent typed provider completes and streams neutral documents", async 
 
     const events = [];
     for await (const event of provider.streamJson(request)) events.push(JSON.parse(event));
-    const finalUsage = assertCompleteOpenAiStream(events, true);
+    assert.equal(events.filter(e => e.event === "reasoning_delta").map(e => e.delta).join(""), "fixture summary");
+    const finalUsage = assertCompleteOpenAiStream(events, true, true);
     assert.deepEqual(finalUsage.cache_read_observation,
       response.usage.cache_read_observation);
     assert.equal(finalUsage.tokens_in, 6);
@@ -338,6 +343,7 @@ test("persistent typed provider completes and streams neutral documents", async 
     await server.close();
   }
 });
+}
 
 test("Anthropic bearer auth is explicit across the typed binding", async () => {
   const server = await localServer([

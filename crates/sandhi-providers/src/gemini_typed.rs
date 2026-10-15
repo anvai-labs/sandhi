@@ -320,7 +320,7 @@ pub fn decode_gemini_response(
     }
     let mut extensions = BTreeMap::from([("gemini".into(), body.clone())]);
     if !reasoning.is_empty() {
-        extensions.insert("reasoning".into(), Value::String(reasoning));
+        extensions.insert("reasoning".into(), Value::String(reasoning.clone()));
     }
     Ok(ChatResponseV1 {
         schema_version: sandhi_core::CHAT_SCHEMA_VERSION_V1.into(),
@@ -334,6 +334,7 @@ pub fn decode_gemini_response(
             .unwrap_or(requested_model)
             .into(),
         output: AssistantOutputV1 {
+            reasoning: (!reasoning.is_empty()).then_some(reasoning),
             content: (!text.is_empty()).then_some(MessageContent::Text(text)),
             tool_calls,
             refusal: None,
@@ -767,6 +768,7 @@ mod tests {
             json!({
                 "modelVersion":"gemini-test",
                 "candidates":[{"finishReason":"STOP","content":{"parts":[
+                    {"text":"fixture summary","thought":true,"thoughtSignature":"opaque"},
                     {"text":"ok"}, {"functionCall":{"name":"lookup","args":{"q":1}}}
                 ]}}]
             }),
@@ -784,6 +786,11 @@ mod tests {
             Some(MessageContent::Text("ok".into()))
         );
         assert_eq!(response.output.tool_calls[0].arguments, "{\"q\":1}");
+        assert_eq!(
+            response.output.reasoning.as_deref(),
+            Some("fixture summary")
+        );
+        assert_eq!(response.extensions["reasoning"], "fixture summary");
         assert_eq!(response.finish_reason, Some(FinishReasonV1::Stop));
     }
 }

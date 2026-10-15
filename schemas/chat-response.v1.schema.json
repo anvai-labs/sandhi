@@ -56,6 +56,13 @@
             }
           ]
         },
+        "reasoning": {
+          "description": "Provider-supplied displayable reasoning or summary text, separate from the answer. Not an opaque replay token, signature, or authority to execute an action. Retained even when the optional native response echo is disabled (minor 11).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "refusal": {
           "type": [
             "string",
