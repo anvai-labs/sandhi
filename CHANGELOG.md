@@ -23,6 +23,8 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ### Fixed
 
+- Update Rustls to 0.23.46 in all three lockfiles for RUSTSEC-2026-0346 through
+  RUSTSEC-2026-0349; raise the proxy direct dependency minimum accordingly.
 - Preserve completed Codex tool arguments when the terminal response contains the
   authoritative payload (#368).
 - Admit Codex streams with explicit bounded deadlines through the existing proxy
@@ -39,6 +41,8 @@ A partly published release remains incomplete even when some artifacts are avail
 - Isolate proxy request preparation and shared access helpers (#365).
 - Align documentation with the Anvai family design tokens (#367).
 - Synchronize Rust, Python, Node and binary package identities to 0.14.0.
+- Pin the optional SentinelPass IPC protocol exactly to the latest published
+  non-yanked 0.17.0; the resolved version is unchanged.
 
 ### Compatibility and limits
 

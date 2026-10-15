@@ -67,7 +67,7 @@ hyper-util = { version = "0.1", features = ["server-graceful", "http1", "service
 # TD-0017 P1: opt-in TLS termination. These versions are already present in the
 # normal dependency graph through reqwest; declaring them makes the listener's
 # ownership explicit without adding a second TLS implementation.
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 ipnet = "2"
 serde = { version = "1", features = ["derive"] }
