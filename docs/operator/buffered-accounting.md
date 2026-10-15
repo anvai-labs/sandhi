@@ -54,6 +54,12 @@ snapshot needed for accounting recovery.
 | Policy | Explicit output limit and Block policy | Warn, fail-open, retry and logical-idempotency combinations |
 | Processing plane | Buffered transparent/translated; streaming transparent only | No silent downgrade to legacy accounting |
 
+ZAI and DeepSeek tracked streaming use catalog-selected terminal-choice usage envelopes;
+other OpenAI-compatible providers keep strict empty-choices qualification.
+See [G83's contract and evidence limits](../product/attempt-accounting-and-evidence.md#provider-terminal-choice-compatibility-victor-g83).
+This provider compatibility repair is development source, not a claim that managed
+tracked deployment or mixed-team C5 acceptance has passed.
+
 ## Bounds and configuration
 
 | Bound | Standalone value | Configuration / meaning |

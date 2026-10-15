@@ -8,6 +8,7 @@
 //! routing). Admitting a provider's model data here does not advertise pricing or
 //! dictate selection policy.
 
+use sandhi_core::usage::OpenAiStreamUsageProfile;
 use sandhi_core::{
     EndpointFamilyV1, ModelDescriptorV1, ProviderCapabilitiesV1, ProviderDescriptorV1,
 };
@@ -53,6 +54,17 @@ pub struct OpenAiCompatProviderSpec {
 }
 
 impl OpenAiCompatProviderSpec {
+    /// Final usage envelope for tracked streaming. Aliases resolve to this canonical
+    /// spec before selection; URL, model and attempt labels never select a profile.
+    #[must_use]
+    pub fn stream_usage_profile(&self) -> OpenAiStreamUsageProfile {
+        match self.slug {
+            "zai" => OpenAiStreamUsageProfile::ZaiFinalChoice,
+            "deepseek" => OpenAiStreamUsageProfile::DeepSeekFinalChoice,
+            _ => OpenAiStreamUsageProfile::OpenAi,
+        }
+    }
+
     #[must_use]
     pub fn base_url_for_model(&self, model: &str) -> &'static str {
         self.model_routes

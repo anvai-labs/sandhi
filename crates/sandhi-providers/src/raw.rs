@@ -87,6 +87,7 @@ pub struct RawForwarder {
     /// Vendor response-correlation header. This is transport configuration and is deliberately
     /// independent of the diagnostic provider label carried by an attempt observation.
     response_request_id_header: Option<&'static str>,
+    stream_usage_profile: sandhi_core::usage::OpenAiStreamUsageProfile,
     complete_timeout: Duration,
     stream_setup_timeout: Duration,
     stream_idle_timeout: Option<Duration>,
@@ -127,11 +128,22 @@ impl RawForwarder {
                 ProviderFamily::Anthropic => Some("anthropic-request-id"),
                 _ => None,
             },
+            stream_usage_profile: Default::default(),
             complete_timeout: Duration::from_secs(120),
             stream_setup_timeout: Duration::from_secs(30),
             stream_idle_timeout: Some(Duration::from_secs(90)),
             attempt: None,
         }
+    }
+
+    /// Set the trusted catalog's stream envelope independently of diagnostic labels.
+    #[must_use]
+    pub fn with_stream_usage_profile(
+        mut self,
+        profile: sandhi_core::usage::OpenAiStreamUsageProfile,
+    ) -> Self {
+        self.stream_usage_profile = profile;
+        self
     }
 
     /// Add caller-supplied provider headers. Transport-owned names are stripped via
@@ -547,7 +559,11 @@ impl RawForwarder {
                 .bytes_stream()
                 .map(|chunk| chunk.map_err(|error| ProviderError::Transport(error.to_string()))),
         );
-        let (stream, observation) = qualified_stream::observe(with_idle_timeout(raw, idle), guard);
+        let (stream, observation) = qualified_stream::observe(
+            with_idle_timeout(raw, idle),
+            guard,
+            self.stream_usage_profile,
+        );
         Ok(RawQualifiedStreamResponse {
             status,
             headers,

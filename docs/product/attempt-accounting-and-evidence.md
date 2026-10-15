@@ -667,6 +667,67 @@ parser or storage matrix is added. Initial RED compilation identifies the missin
 API; negative controls bypassing numeric validation or the empty-choices guard each
 fail assertions. Both controls are removed before final validation.
 
+### Provider terminal-choice compatibility (Victor G83)
+
+The catalog's `stream_usage_profile()` selects `ZaiFinalChoice` for canonical
+`zai` and its existing aliases, and `DeepSeekFinalChoice` for `deepseek`.
+Other providers, including InferFlux, custom endpoints and OpenAI, keep the strict
+empty-choices contract above. Endpoint URLs,
+model names and diagnostic attempt labels never select the profile. Raw callers
+may explicitly set the trusted profile; the default remains strict OpenAI.
+
+| ZAI event | Result |
+|---|---|
+| One choice, integer index 0, object delta, documented terminal reason, valid usage | Provider-reported totals through the existing validator/parser |
+| Missing `object` | Allowed by ZAI's documented streaming envelope; an explicit wrong/null object is rejected |
+| Missing/null usage, including finish-only or DONE | No measurement; no inferred zero |
+| Empty/multiple choices, wrong index, malformed delta or unknown finish reason with usage | `NonFinalUsage`; no settlement |
+| Any data event after qualified usage except DONE | Sticky `NonFinalUsage`; retain first counts as unresolved evidence, including repeated identical usage |
+| Truncated event or missing DONE at EOF | Existing framing failure; no clean accounting completion |
+
+ZAI documents final usage on its single terminal choice before DONE in its
+[streaming guide](https://docs.z.ai/guides/capabilities/streaming). Its
+[API reference](https://docs.z.ai/api-reference/llm/chat-completion) lists the
+terminal reasons admitted here. A terminal reason such as `length`, `sensitive`
+or `network_error` does **not** prove successful task completion. Reasoning stays
+included in completion tokens; it is never added twice.
+
+Evidence provenance: an isolated released-0.13 tracked request failed with
+`InvalidUsage(NonFinalUsage)` and remains unresolved. Its raw response was not
+retained. A **separate new** bounded default-mode capture on 2026-10-11 showed a
+single `length` choice with 19 prompt, 32 completion (including 30 reasoning) and
+explicit zero cache, then DONE. Raw-wire SHA-256:
+`2926ca8d0271845f66dacbbc4509c67d804e1f3ff128487a5a81980d70ffe746`.
+This is provider-contract evidence, not actual-member replay or C5 acceptance.
+Original failed evidence is preserved; this repair never replays or settles it.
+
+DeepSeek's [current streaming contract](https://api-docs.deepseek.com/api/create-chat-completion/)
+also places totals on its sole terminal choice. Its profile requires the explicit
+`chat.completion.chunk` object, a documented DeepSeek finish reason, and no new
+content, reasoning or tool-call delta on that terminal event. Its allowed reasons
+are `stop`, `length`, `tool_calls`, `content_filter`, `insufficient_system_resource`
+and `aborted`. It shares ZAI's post-final-data rejection, but does not inherit
+ZAI-only reasons or optional-object handling.
+
+A new released-0.13 in-process DeepSeek probe on 2026-10-11 returned content and
+conserved 35 prompt + 15 completion tokens (13 reasoning included), explicit zero
+cache, a single terminal `stop` choice and DONE. Raw SHA-256:
+`f568d826f5b645f527628a03a37b72510592f1f991f4a3154b6506cdd971fdc0`.
+Adding DeepSeek to the factory regression reproduced `NonFinalUsage` before the
+catalog/profile repair. The legacy in-process pass does not establish tracked
+settlement. No credentials or raw response content are committed.
+
+**Catalog follow-up:** the live DeepSeek model endpoint reported `deepseek-flash`
+and `deepseek-v4-pro`; the bundled descriptor still lists `deepseek-chat` and
+`deepseek-reasoner`. Refresh their capabilities and limits from primary sources
+in a separate catalog increment; do not guess limits or silently alias models.
+
+Tests extend the existing numeric/parity, raw lifecycle and durable HTTP
+settlement matrices. New envelope and catalog-binding assertions cover the
+provider distinction without another SSE parser, token derivation or recovery
+owner. Managed tracked deployment, lifecycle qualification and full mixed-team C5
+remain separate gates; this source change is not yet a released deployment.
+
 ### Bounded event observation
 
 `sandhi_providers::stream_usage::OpenAiStreamUsageObserver` composes the core qualifier
@@ -681,7 +742,7 @@ fields cannot replace Sandhi request IDs. No identifier derivation or registry i
 | Pending/completed line or aggregate event over 8 MiB | Static structured error; no discarded suffix can become new evidence |
 | Arbitrarily large input chunk | Inspect 8 KiB slices; never copy the whole input chunk into the pending buffer |
 | First qualified usage | Retain immutable counts and cache-reporting evidence |
-| Identical / conflicting later usage | Idempotent / sticky `ConflictingUsage`; first evidence remains inspectable |
+| Identical / conflicting later usage | Strict OpenAI: idempotent / sticky `ConflictingUsage`; Final-choice profiles: any later data except DONE is `NonFinalUsage`; first evidence remains inspectable |
 | Later malformed event, partial EOF or cancellation | Prior usage survives; failure or cancellation is a separate fact |
 | Complete `[DONE]` without usage | Protocol completion only; measurement stays absent |
 | Data after `[DONE]` | Explicit failure; cannot manufacture or replace usage |
