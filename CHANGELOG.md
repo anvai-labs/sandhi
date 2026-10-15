@@ -19,6 +19,34 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+## [0.14.0] — release candidate
+
+### Fixed
+
+- Preserve completed Codex tool arguments when the terminal response contains the
+  authoritative payload (#368).
+- Admit Codex streams with explicit bounded deadlines through the existing proxy
+  admission path (#369).
+
+### Added
+
+- Opt-in Rust weighted allowance quotes over qualified usage, with checked arithmetic
+  and separate cache/input/output/reasoning categories (#370). This is a calculator;
+  proxy budgets and durable settlement still use their existing neutral units.
+
+### Changed
+
+- Isolate proxy request preparation and shared access helpers (#365).
+- Align documentation with the Anvai family design tokens (#367).
+- Synchronize Rust, Python, Node and binary package identities to 0.14.0.
+
+### Compatibility and limits
+
+- Wire contracts and default accounting behavior remain unchanged. Private-CA support
+  from earlier releases is retained.
+- Weighted enforcement, managed deployment and mixed-team C5 acceptance remain open.
+  See [release gates](docs/releases/v0.14.0.md). Open PRs #362–#364 are not included.
+
 ## [0.13.0] — 2026-10-10
 
 ### Added
@@ -1384,7 +1412,8 @@ inline reverse-proxy, the durable store, and both language bindings.
   ([#9](https://github.com/anvai-labs/sandhi/pull/9),
   [#10](https://github.com/anvai-labs/sandhi/pull/10))
 
-[Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/anvai-labs/sandhi/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/anvai-labs/sandhi/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/anvai-labs/sandhi/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/anvai-labs/sandhi/compare/v0.10.1...v0.11.0

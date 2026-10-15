@@ -1,6 +1,6 @@
 # TD-0032: Weighted allowances over unchanged usage measurements
 
-**Status:** W01 implementation candidate; W02–W05 pending. No live weighted enforcement.
+**Status:** W01 merged in [#370](https://github.com/anvai-labs/sandhi/pull/370); W02–W05 pending. No live weighted enforcement.
 **Owner:** Victor/Sandhi co-design session, branch `feat/weighted-budget-policy`.
 **Baseline:** `origin/develop` at `c25f006` (2026-10-13).
 
@@ -55,7 +55,7 @@ raw measurements ─────────────────────
 
 | Gate | State | Required evidence / next action |
 |---|---|---|
-| W01 arithmetic | Candidate | Pure calculator; red import before implementation; category, qualification, rounding, config and overflow tests; independent review |
+| W01 arithmetic | Merged (#370) | Pure calculator; red import before implementation; category, qualification, rounding, config and overflow tests; independent review |
 | W02 reporting provenance | Pending | Preserve explicit-zero / absent / malformed / unsupported reasoning through parsers; persist basis/completeness and category coverage; generate additive contracts and test bindings |
 | W03 durable policy ownership | Pending | Store immutable policy revision + scale with admission; atomically reserve and settle in allowance units; restart/replay/idempotency tests; no reinterpretation of old spend |
 | W04 operator integration | Pending | Strict admin/config/CLI contracts; per-scope policy; dashboard separates raw tokens, reserved estimates and settled allowance units; unsupported paths fail explicitly |
