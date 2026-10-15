@@ -42,7 +42,8 @@ A partly published release remains incomplete even when some artifacts are avail
 - Align documentation with the Anvai family design tokens (#367).
 - Synchronize Rust, Python, Node and binary package identities to 0.14.0.
 - Pin the optional SentinelPass IPC protocol exactly to the latest published
-  non-yanked 0.17.0; the resolved version is unchanged.
+  non-yanked 0.17.0; the resolved version is unchanged. The scheduled updater
+  preserves exact pins and verifies that only the live dependency changes.
 
 ### Compatibility and limits
 
