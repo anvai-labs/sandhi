@@ -19,7 +19,7 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
-## [0.14.0] — release candidate
+## [0.14.0] — 2026-10-15
 
 ### Fixed
 
