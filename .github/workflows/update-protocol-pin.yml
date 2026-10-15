@@ -35,11 +35,8 @@ jobs:
         id: current
         run: |
           set -euo pipefail
-          # The manifest may pin by VERSION (main, post-#188) or by GIT TAG
-          # (historical branches) — read whichever shape is present. Both are
-          # normalized BARE (no "v" prefix) so the gate compares like-for-like
-          # against the crates.io latest above.
-          cur=$(python3 -c 'import pathlib,re; t=pathlib.Path("crates/sandhi-store/Cargo.toml").read_text(); m=re.search(r"sentinelpass-protocol = \{[^}]*(?:version = \"([^\"+]+)\"|tag = \"(v[^\"+]+)\")", t); s=(m.group(1) or m.group(2)) if m else ""; print(s.removeprefix("v"))')
+          # One parser normalizes registry versions, exact pins and historical tags.
+          cur=$(python3 .github/scripts/bump_protocol_pin.py --current)
           echo "version=$cur" >> "$GITHUB_OUTPUT"
 
       - name: Skip when the pin is already current
