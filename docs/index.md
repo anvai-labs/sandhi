@@ -48,6 +48,9 @@ flowchart LR
 
 ## Released changes and their adoption gates
 
+The [0.14.0 candidate](releases/v0.14.0.md) collects subsequent Codex transport fixes
+and opt-in Rust allowance arithmetic. It is not yet a published or deployed release.
+
 !!! warning "Release verified; managed adoption remains pending"
     Tracked buffered accounting is opt-in in the [published 0.12.0 release](releases/v0.12.0.md).
     The [0.13.0 release](releases/v0.13.0.md) adds bounded tracked OpenAI Chat streaming.

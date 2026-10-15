@@ -45,7 +45,10 @@ One absolute setup deadline is captured before the lease check and reused by nes
 built-in transports and any explicitly enabled setup retry/backoff. It includes
 rejected response-body collection. Idle is captured into the returned stream;
 background body tasks do not depend on task-local inheritance. Clients and pools
-are reused. Unsupported custom transports fail before dispatch under this policy.
+are reused. Built-in Codex subscription transports support these limits through
+the constrained typed codec; raw forwarding remains disabled and credential
+expiry is still checked before dispatch. Unsupported custom transports fail
+before dispatch under this policy, even when declaring a built-in provider family.
 
 The [body owner](stream-body-lifetime.md) enforces body duration after successful
 upstream headers, independently of downstream polling, on both proxy planes.

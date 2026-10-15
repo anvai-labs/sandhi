@@ -1,5 +1,5 @@
 //! TD-0029: one OIDC identity boundary for dashboard and agent access.
-use crate::{operator::constant_time_eq, ProxyState};
+use crate::{access::constant_time_eq, ProxyState};
 use axum::{
     extract::{Query, State},
     http::{HeaderMap, HeaderValue, StatusCode},
