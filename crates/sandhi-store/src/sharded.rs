@@ -232,14 +232,22 @@ impl ShardedLedger {
     /// supports only a single file-backed ledger; use the original database and fixed
     /// topology. Caller-supplied reservation metadata must match the persisted intent.
     /// It confers no caller authorization and does not enable tracked HTTP admission.
+    /// `cache_read_bp` is server-admitted operator config (TD-0032): callers of the
+    /// settlement API can never choose a cheaper settlement weight.
     pub fn record_terminal_for_intent_durable(
         &self,
         intent: &ExecutionIntent,
         usage: &sandhi_core::UsageV2,
+        cache_read_bp: u32,
     ) -> Result<ObservationOutcome, EvidenceError> {
         let mut ledger = self.tracked_ledger()?;
         let original = Self::checked_intent(&ledger, intent)?;
-        ledger.record_terminal_durable(&original.reservation.scope, &original.execution_id, usage)
+        ledger.record_terminal_durable(
+            &original.reservation.scope,
+            &original.execution_id,
+            usage,
+            cache_read_bp,
+        )
     }
 
     // One full binding check shared by terminal evidence and dispatch transitions.
@@ -597,7 +605,11 @@ mod tests {
             reservation,
         };
         assert!(matches!(
-            ledger.record_terminal_for_intent_durable(&intent, &sandhi_core::UsageV2::default()),
+            ledger.record_terminal_for_intent_durable(
+                &intent,
+                &sandhi_core::UsageV2::default(),
+                10_000,
+            ),
             Err(EvidenceError::ShardPoisoned)
         ));
         assert!(matches!(

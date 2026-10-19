@@ -19,6 +19,26 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+### Changed
+
+- Policy request-inspection ceiling raised from 256 KiB to 4 MiB
+  (`max_body_bytes`, issue #380): agentic client sessions exceed 256 KiB
+  mid-conversation and were denied fail-closed. Evaluator text-view caps
+  (embedded ONNX, Python workers, remote) were raised in step so a body that
+  passes the engine gate does not fail closed inside an extension. Regex
+  evaluation remains linear-time and deadline-checked; the policy-document
+  schema is unchanged.
+- Budgets can now discount prefix-cached input: `SANDHI_CACHE_READ_WEIGHT`
+  (basis points, default 10,000 = 1x neutral) scales only the cache-read term
+  of the budget charge — reservations stay conservative full-price, raw usage
+  recording and the SQL `billable` aggregate stay neutral, alerts follow the
+  discounted spend automatically (issue #381; interim global knob ahead of
+  TD-0032 W03/W04). Applies to new settlements; historical charges are
+  immutable. The Prometheus usage series reports the weighted charge while
+  the usage event and dashboard `billable` stay neutral — the two surfaces
+  intentionally diverge when the weight is set.
+
+
 ## [0.14.0] — 2026-10-15
 
 ### Fixed

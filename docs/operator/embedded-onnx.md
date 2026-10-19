@@ -92,7 +92,7 @@ The initial `ascii_word_counts_v1` profile requires ASCII text, lowercases it an
 counts words of at least two ASCII alphanumeric/underscore characters. It inspects
 both separated and concatenated text views. Vocabulary entries are unique,
 lowercase, 2–256 characters; vocabulary size is 1–4,096. Each text view is bounded
-at 256 KiB. Unsupported Unicode input returns policy_unavailable rather than
+at 4 MiB. Unsupported Unicode input returns policy_unavailable rather than
 silently using a different tokenizer. Multilingual input needs another validated
 preprocessing profile/backend.
 

@@ -52,6 +52,46 @@ fn unwrap_observation(outcome: ObservationOutcome) -> TerminalObservation {
 }
 
 #[test]
+fn weighted_frozen_charge_scales_only_cache_read() {
+    // Issue #381: 1,000 bp discounts only the cache-read term of the durable
+    // frozen charge. usage(40, 20, 0, 60): neutral 120, weighted 40 + 6 + 20.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("weighted.db");
+    let mut ledger = SqliteLedger::open(path.to_str().unwrap()).unwrap();
+    let intent = tracked(&mut ledger);
+    let usage = UsageV2 {
+        tokens_in: 40,
+        tokens_out: 20,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 60,
+        completeness: sandhi_core::UsageCompleteness::Final,
+        ..Default::default()
+    };
+    let observed = unwrap_observation(
+        ledger
+            .record_terminal_durable("team", &intent.execution_id, &usage, 1_000)
+            .unwrap(),
+    );
+    assert_eq!(observed.frozen_charge, Some(66));
+    ledger
+        .settle_terminal_durable("team", &intent.execution_id)
+        .unwrap();
+    assert_eq!(ledger.spent_durable("team").unwrap(), 66);
+    // Neutral weight on the same shape settles 120 (parity with the proxy test).
+    let intent2 = tracked(&mut ledger);
+    let observed2 = unwrap_observation(
+        ledger
+            .record_terminal_durable("team", &intent2.execution_id, &usage, 10_000)
+            .unwrap(),
+    );
+    assert_eq!(observed2.frozen_charge, Some(120));
+    ledger
+        .settle_terminal_durable("team", &intent2.execution_id)
+        .unwrap();
+    assert_eq!(ledger.spent_durable("team").unwrap(), 186);
+}
+
+#[test]
 fn terminal_snapshot_is_immutable_and_survives_reopen_and_settlement() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("terminal.db");
@@ -66,7 +106,7 @@ fn terminal_snapshot_is_immutable_and_survives_reopen_and_settlement() {
     let usage = observed_usage();
     let original = unwrap_observation(
         ledger
-            .record_terminal_durable("team", &intent.execution_id, &usage)
+            .record_terminal_durable("team", &intent.execution_id, &usage, 10_000)
             .unwrap(),
     );
     assert_eq!(original.version, 1);
@@ -104,12 +144,12 @@ fn terminal_snapshot_is_immutable_and_survives_reopen_and_settlement() {
         },
     ] {
         assert!(matches!(
-            ledger.record_terminal_durable("team", &intent.execution_id, &changed),
+            ledger.record_terminal_durable("team", &intent.execution_id, &changed, 10_000),
             Err(EvidenceError::ConflictingObservation)
         ));
     }
     assert!(matches!(
-        ledger.record_terminal_durable("other", &intent.execution_id, &usage),
+        ledger.record_terminal_durable("other", &intent.execution_id, &usage, 10_000),
         Err(EvidenceError::WrongScope)
     ));
     assert!(matches!(
@@ -121,7 +161,7 @@ fn terminal_snapshot_is_immutable_and_survives_reopen_and_settlement() {
         .unwrap();
     assert_eq!(
         ledger
-            .record_terminal_durable("team", &intent.execution_id, &usage)
+            .record_terminal_durable("team", &intent.execution_id, &usage, 10_000)
             .unwrap(),
         ObservationOutcome::AlreadyRecorded(original)
     );
@@ -158,7 +198,7 @@ fn terminal_unknown_zero_partial_and_reasoning_keep_their_meanings() {
         let intent = tracked(&mut ledger);
         let value = unwrap_observation(
             ledger
-                .record_terminal_durable("team", &intent.execution_id, &usage)
+                .record_terminal_durable("team", &intent.execution_id, &usage, 10_000)
                 .unwrap(),
         );
         assert_eq!(value.usage, usage);
@@ -203,13 +243,13 @@ fn terminal_missing_settled_invalid_and_lossy_input_are_rejected() {
         },
     ] {
         assert!(matches!(
-            ledger.record_terminal_durable("team", &intent.execution_id, &usage),
+            ledger.record_terminal_durable("team", &intent.execution_id, &usage, 10_000),
             Err(EvidenceError::InvalidInput)
         ));
     }
     for id in ["bad".to_string(), "z".repeat(64)] {
         assert!(matches!(
-            ledger.record_terminal_durable("team", &id, &observed_usage()),
+            ledger.record_terminal_durable("team", &id, &observed_usage(), 10_000),
             Err(EvidenceError::InvalidInput)
         ));
         assert!(matches!(
@@ -218,7 +258,7 @@ fn terminal_missing_settled_invalid_and_lossy_input_are_rejected() {
         ));
     }
     assert!(matches!(
-        ledger.record_terminal_durable("team", &"0".repeat(64), &observed_usage()),
+        ledger.record_terminal_durable("team", &"0".repeat(64), &observed_usage(), 10_000),
         Err(EvidenceError::MissingIntent)
     ));
     assert_eq!(
@@ -240,7 +280,7 @@ fn terminal_missing_settled_invalid_and_lossy_input_are_rejected() {
         )
         .unwrap();
     assert!(matches!(
-        ledger.record_terminal_durable("team", &intent.execution_id, &observed_usage()),
+        ledger.record_terminal_durable("team", &intent.execution_id, &observed_usage(), 10_000),
         Err(EvidenceError::AlreadySettled)
     ));
 }
@@ -252,7 +292,7 @@ fn terminal_failed_or_ignored_insert_leaves_liability_and_can_retry() {
         let intent = tracked(&mut ledger);
         ledger.conn.execute_batch(&format!("CREATE TRIGGER reject_terminal BEFORE INSERT ON budget_terminal_observation BEGIN SELECT {failure}; END;")).unwrap();
         assert!(matches!(
-            ledger.record_terminal_durable("team", &intent.execution_id, &observed_usage()),
+            ledger.record_terminal_durable("team", &intent.execution_id, &observed_usage(), 10_000),
             Err(EvidenceError::Storage(_))
         ));
         assert_eq!(
@@ -268,7 +308,7 @@ fn terminal_failed_or_ignored_insert_leaves_liability_and_can_retry() {
             .execute_batch("DROP TRIGGER reject_terminal")
             .unwrap();
         assert!(matches!(
-            ledger.record_terminal_durable("team", &intent.execution_id, &observed_usage()),
+            ledger.record_terminal_durable("team", &intent.execution_id, &observed_usage(), 10_000),
             Ok(ObservationOutcome::Recorded(_))
         ));
     }
@@ -293,7 +333,7 @@ fn terminal_independent_connections_have_one_immutable_winner() {
                         usage.tokens_in += i;
                     }
                     barrier.wait();
-                    connection.record_terminal_durable("team", &id, &usage)
+                    connection.record_terminal_durable("team", &id, &usage, 10_000)
                 })
             })
             .collect();
@@ -349,7 +389,7 @@ fn terminal_read_rejects_unsupported_or_corrupt_snapshots_without_rewriting() {
         let mut ledger = SqliteLedger::open(":memory:").unwrap();
         let intent = tracked(&mut ledger);
         ledger
-            .record_terminal_durable("team", &intent.execution_id, &observed_usage())
+            .record_terminal_durable("team", &intent.execution_id, &observed_usage(), 10_000)
             .unwrap();
         ledger.conn.execute_batch(&format!("PRAGMA foreign_keys = OFF; PRAGMA ignore_check_constraints = ON; {mutation}")).unwrap();
         let reserved_after_mutation = ledger.reserved_durable("team").unwrap();
@@ -358,7 +398,7 @@ fn terminal_read_rejects_unsupported_or_corrupt_snapshots_without_rewriting() {
             Err(EvidenceError::CorruptObservation)
         ));
         assert!(matches!(
-            ledger.record_terminal_durable("team", &intent.execution_id, &observed_usage()),
+            ledger.record_terminal_durable("team", &intent.execution_id, &observed_usage(), 10_000),
             Err(EvidenceError::CorruptObservation)
         ));
         assert_eq!(ledger.reserved_durable("team").unwrap(), reserved_after_mutation);
@@ -822,7 +862,7 @@ fn process_exit_helper() {
                 .unwrap();
         } else if mode == "terminal_committed" {
             ledger
-                .record_terminal_durable("team", &execution_id, &observed_usage())
+                .record_terminal_durable("team", &execution_id, &observed_usage(), 10_000)
                 .unwrap();
         } else {
             ledger.conn.execute_batch("BEGIN IMMEDIATE").unwrap();
@@ -885,7 +925,12 @@ fn process_exit_preserves_committed_pair_and_discards_uncommitted_pair() {
             let intent = tracked(&mut ledger);
             if mode == "settlement_committed" {
                 ledger
-                    .record_terminal_durable("team", &intent.execution_id, &observed_usage())
+                    .record_terminal_durable(
+                        "team",
+                        &intent.execution_id,
+                        &observed_usage(),
+                        10_000,
+                    )
                     .unwrap();
             }
             Some(intent.execution_id)
@@ -1010,7 +1055,7 @@ fn durable_intent_survives_both_expiry_paths_and_reopen() {
         intent.reservation.id
     );
     ledger
-        .record_terminal_durable("team", &intent.execution_id, &observed_usage())
+        .record_terminal_durable("team", &intent.execution_id, &observed_usage(), 10_000)
         .unwrap();
     let receipt = ledger
         .settle_terminal_durable("team", &intent.execution_id)
@@ -1102,6 +1147,7 @@ fn intent_capacity_is_atomic_and_retains_settled_identities() {
                 completeness: UsageCompleteness::Final,
                 ..UsageV2::default()
             },
+            10_000,
         )
         .unwrap();
     ledger
@@ -1206,7 +1252,7 @@ fn terminal_settlement_binds_frozen_charge_and_blocks_caller_charge_bypasses() {
                 Err(EvidenceError::MissingObservation)
             ));
             ledger
-                .record_terminal_durable("team", &intent.execution_id, &observed_usage())
+                .record_terminal_durable("team", &intent.execution_id, &observed_usage(), 10_000)
                 .unwrap();
             // A retained snapshot may use an older version's charging formula.
             // Settlement must use its frozen value, never derive a new charge.
@@ -1286,7 +1332,7 @@ fn terminal_settlement_retains_unresolved_usage_and_accepts_measured_zero() {
                 ..UsageV2::default()
             };
             ledger
-                .record_terminal_durable("team", &intent.execution_id, &usage)
+                .record_terminal_durable("team", &intent.execution_id, &usage, 10_000)
                 .unwrap();
             let resolved =
                 completeness == UsageCompleteness::Final && basis == UsageBasis::ProviderReported;
@@ -1324,7 +1370,7 @@ fn terminal_settlement_failure_preserves_observation_and_liability() {
         let mut ledger = SqliteLedger::open(":memory:").unwrap();
         let intent = tracked(&mut ledger);
         let observed = ledger
-            .record_terminal_durable("team", &intent.execution_id, &observed_usage())
+            .record_terminal_durable("team", &intent.execution_id, &observed_usage(), 10_000)
             .unwrap();
         ledger.conn.execute_batch(&format!("CREATE TRIGGER reject_receipt BEFORE INSERT ON budget_settlement_outbox BEGIN SELECT {fault}; END;")).unwrap();
         assert!(matches!(
@@ -1357,7 +1403,7 @@ fn terminal_settlement_failure_preserves_observation_and_liability() {
     let mut ledger = SqliteLedger::open(":memory:").unwrap();
     let intent = tracked(&mut ledger);
     ledger
-        .record_terminal_durable("team", &intent.execution_id, &observed_usage())
+        .record_terminal_durable("team", &intent.execution_id, &observed_usage(), 10_000)
         .unwrap();
     ledger
         .conn
@@ -1380,7 +1426,7 @@ fn terminal_settlement_concurrent_replay_returns_one_receipt() {
     let mut ledger = SqliteLedger::open(path.to_str().unwrap()).unwrap();
     let intent = tracked(&mut ledger);
     ledger
-        .record_terminal_durable("team", &intent.execution_id, &observed_usage())
+        .record_terminal_durable("team", &intent.execution_id, &observed_usage(), 10_000)
         .unwrap();
     let barrier = Arc::new(Barrier::new(4));
     let workers: Vec<_> = (0..4)
@@ -1431,10 +1477,10 @@ fn recovery_pages_are_scoped_read_only_and_bounded_across_reopen() {
     let second = tracked(&mut ledger);
     let third = tracked(&mut ledger);
     ledger
-        .record_terminal_durable("team", &second.execution_id, &observed_usage())
+        .record_terminal_durable("team", &second.execution_id, &observed_usage(), 10_000)
         .unwrap();
     ledger
-        .record_terminal_durable("team", &third.execution_id, &observed_usage())
+        .record_terminal_durable("team", &third.execution_id, &observed_usage(), 10_000)
         .unwrap();
     let receipt = unwrap_receipt(
         ledger
@@ -1515,7 +1561,7 @@ fn recovery_cursor_freezes_admission_range_but_rechecks_current_state() {
     let later = tracked(&mut writer);
     for intent in [&first, &second] {
         writer
-            .record_terminal_durable("team", &intent.execution_id, &observed_usage())
+            .record_terminal_durable("team", &intent.execution_id, &observed_usage(), 10_000)
             .unwrap();
     }
     let next = ledger
@@ -1608,7 +1654,7 @@ fn recovery_rejects_damaged_bindings_observations_and_receipts_without_writes() 
         let mut ledger = SqliteLedger::open(":memory:").unwrap();
         let intent = tracked(&mut ledger);
         ledger
-            .record_terminal_durable("team", &intent.execution_id, &observed_usage())
+            .record_terminal_durable("team", &intent.execution_id, &observed_usage(), 10_000)
             .unwrap();
         ledger
             .settle_terminal_durable("team", &intent.execution_id)
@@ -1717,7 +1763,7 @@ fn prepared_closure_is_durable_without_provider_usage_or_receipt() {
         RecoveryState::Prepared
     ));
     assert!(matches!(
-        ledger.record_terminal_durable("team", &intent.execution_id, &observed_usage()),
+        ledger.record_terminal_durable("team", &intent.execution_id, &observed_usage(), 10_000),
         Err(EvidenceError::DispatchNotAuthorized)
     ));
     assert!(matches!(
@@ -1767,7 +1813,7 @@ fn prepared_closure_is_durable_without_provider_usage_or_receipt() {
         RecoveryState::ClosedBeforeDispatch(closure)
     );
     assert!(matches!(
-        ledger.record_terminal_durable("team", &intent.execution_id, &observed_usage()),
+        ledger.record_terminal_durable("team", &intent.execution_id, &observed_usage(), 10_000),
         Err(EvidenceError::DispatchNotAuthorized)
     ));
     assert!(matches!(
@@ -1845,7 +1891,7 @@ fn dispatch_authorization_survives_lost_permit_and_retains_liability() {
         100
     );
     ledger
-        .record_terminal_durable("team", &intent.execution_id, &observed_usage())
+        .record_terminal_durable("team", &intent.execution_id, &observed_usage(), 10_000)
         .unwrap();
     assert!(matches!(
         ledger
@@ -1886,7 +1932,7 @@ fn legacy_intents_never_acquire_never_dispatched_proof() {
             Err(EvidenceError::UnfencedIntent)
         ));
         ledger
-            .record_terminal_durable("team", &intent.execution_id, &observed_usage())
+            .record_terminal_durable("team", &intent.execution_id, &observed_usage(), 10_000)
             .unwrap();
         ledger
             .settle_terminal_durable("team", &intent.execution_id)

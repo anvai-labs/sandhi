@@ -246,14 +246,20 @@ mod embedded {
         remaining(deadline)?;
         let mut values = vec![0.; 2 * words.len()];
         for (row, text) in [&input.text, &input.joined].iter().enumerate() {
-            if text.len() > 262144 || !text.is_ascii() {
+            if text.len() > sandhi_core::policy::MAX_EVALUATOR_TEXT_BYTES || !text.is_ascii() {
                 return Err(EvaluationError);
             }
             for word in text
                 .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
                 .filter(|w| w.len() >= 2)
+                .enumerate()
             {
-                if let Some(index) = words.get(&word.to_ascii_lowercase()) {
+                // Mid-loop deadline check (mirrors trigram_counts): the raised
+                // 4 MiB views grow the scan window between boundary checks.
+                if word.0 % 1024 == 0 {
+                    remaining(deadline)?;
+                }
+                if let Some(index) = words.get(&word.1.to_ascii_lowercase()) {
                     values[row * words.len() + index] += 1.;
                 }
             }
@@ -265,7 +271,7 @@ mod embedded {
         remaining(deadline)?;
         let mut values = vec![0.; 1024];
         for (row, text) in [&input.text, &input.joined].iter().enumerate() {
-            if text.len() > 262144 {
+            if text.len() > sandhi_core::policy::MAX_EVALUATOR_TEXT_BYTES {
                 return Err(EvaluationError);
             }
             for (i, gram) in text.as_bytes().windows(3).enumerate() {
@@ -367,7 +373,7 @@ mod embedded {
             );
             assert!(trigram_counts(
                 &Inspection {
-                    text: "x".repeat(262145),
+                    text: "x".repeat(sandhi_core::policy::MAX_EVALUATOR_TEXT_BYTES + 1),
                     joined: String::new(),
                     body_bytes: 0,
                     max_output_tokens: None
@@ -406,7 +412,7 @@ mod embedded {
             );
             input.text = "privaté".into();
             assert!(counts(&input, &vocabulary, Instant::now() + Duration::from_secs(1)).is_err());
-            input.text = "x".repeat(262145);
+            input.text = "x".repeat(sandhi_core::policy::MAX_EVALUATOR_TEXT_BYTES + 1);
             assert!(counts(&input, &vocabulary, Instant::now() + Duration::from_secs(1)).is_err());
             assert!(counts(&input, &vocabulary, Instant::now()).is_err());
         }

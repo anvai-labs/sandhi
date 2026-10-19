@@ -61,6 +61,15 @@ raw measurements ─────────────────────
 | W04 operator integration | Pending | Strict admin/config/CLI contracts; per-scope policy; dashboard separates raw tokens, reserved estimates and settled allowance units; unsupported paths fail explicitly |
 | W05 released/live acceptance | Pending | Both proxy planes, streaming/nonstreaming, embeddings, cancellation and missing usage; direct/in-process consumers; actual Victor member; release and deployment evidence |
 
+### Interim global knob (pre-W03)
+
+`SANDHI_CACHE_READ_WEIGHT` (basis points, default 10,000) ships as an interim
+operator knob: it scales only the cache-read term of the budget charge at
+settlement, is server-admitted process config (never caller data), and leaves
+raw usage recording and the neutral SQL aggregate untouched. It is a strict
+subset of W03/W04 — per-scope weighted policies with durable revisions
+supersede it, and the knob should be retired when those land.
+
 ### Why W02 and W03 precede activation
 
 Current `ParsedUsage` conversion drops zero reasoning counts to `None`. That loses the distinction
