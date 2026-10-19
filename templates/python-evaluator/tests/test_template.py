@@ -42,6 +42,9 @@ def deployment(tmp_path):
     return tmp_path
 
 
+from evaluator_app.protocol import MAX_FRAME
+
+
 def config(root):
     from evaluator_app.settings import Settings
 
@@ -195,7 +198,7 @@ def test_http_auth_provenance_validation_and_score_parity(deployment):
             client.post(
                 f"/v1/evaluators/{c.name}/evaluate",
                 headers=headers,
-                data=b"x" * 2097153,
+                data=b"x" * (MAX_FRAME + 1),
                 content_type="application/json",
             ).status_code
             == 413
