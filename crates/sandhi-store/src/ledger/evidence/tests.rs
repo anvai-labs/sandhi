@@ -52,6 +52,46 @@ fn unwrap_observation(outcome: ObservationOutcome) -> TerminalObservation {
 }
 
 #[test]
+fn weighted_frozen_charge_scales_only_cache_read() {
+    // Issue #381: 1,000 bp discounts only the cache-read term of the durable
+    // frozen charge. usage(40, 20, 0, 60): neutral 120, weighted 40 + 6 + 20.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("weighted.db");
+    let mut ledger = SqliteLedger::open(path.to_str().unwrap()).unwrap();
+    let intent = tracked(&mut ledger);
+    let usage = UsageV2 {
+        tokens_in: 40,
+        tokens_out: 20,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 60,
+        completeness: sandhi_core::UsageCompleteness::Final,
+        ..Default::default()
+    };
+    let observed = unwrap_observation(
+        ledger
+            .record_terminal_durable("team", &intent.execution_id, &usage, 1_000)
+            .unwrap(),
+    );
+    assert_eq!(observed.frozen_charge, Some(66));
+    ledger
+        .settle_terminal_durable("team", &intent.execution_id)
+        .unwrap();
+    assert_eq!(ledger.spent_durable("team").unwrap(), 66);
+    // Neutral weight on the same shape settles 120 (parity with the proxy test).
+    let intent2 = tracked(&mut ledger);
+    let observed2 = unwrap_observation(
+        ledger
+            .record_terminal_durable("team", &intent2.execution_id, &usage, 10_000)
+            .unwrap(),
+    );
+    assert_eq!(observed2.frozen_charge, Some(120));
+    ledger
+        .settle_terminal_durable("team", &intent2.execution_id)
+        .unwrap();
+    assert_eq!(ledger.spent_durable("team").unwrap(), 186);
+}
+
+#[test]
 fn terminal_snapshot_is_immutable_and_survives_reopen_and_settlement() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("terminal.db");

@@ -252,8 +252,14 @@ mod embedded {
             for word in text
                 .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
                 .filter(|w| w.len() >= 2)
+                .enumerate()
             {
-                if let Some(index) = words.get(&word.to_ascii_lowercase()) {
+                // Mid-loop deadline check (mirrors trigram_counts): the raised
+                // 4 MiB views grow the scan window between boundary checks.
+                if word.0 % 1024 == 0 {
+                    remaining(deadline)?;
+                }
+                if let Some(index) = words.get(&word.1.to_ascii_lowercase()) {
                     values[row * words.len() + index] += 1.;
                 }
             }

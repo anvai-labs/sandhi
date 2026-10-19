@@ -76,6 +76,25 @@ pub fn billable_parts(
 /// Explicit per-call reasoning semantics. `None` preserves historical accounting; never infer
 /// a new record's marker from provider labels, which may identify a compatible custom server.
 #[must_use]
+/// Reasoning tokens billed as their own term when the provider reports them
+/// as NOT included in `tokens_out` (or, absent a marker, when they cannot
+/// fit). Shared by the neutral and weighted billable formulas so the two
+/// bases cannot drift apart.
+#[must_use]
+pub(crate) fn unfolded_reasoning(
+    reasoning_tokens: u64,
+    tokens_out: u64,
+    reasoning_included: Option<bool>,
+) -> u64 {
+    if reasoning_included == Some(false)
+        || (reasoning_included.is_none() && reasoning_tokens > tokens_out)
+    {
+        reasoning_tokens
+    } else {
+        0
+    }
+}
+
 pub fn billable_parts_with_reasoning(
     tokens_in: u64,
     cache_creation_tokens: u64,
@@ -84,13 +103,7 @@ pub fn billable_parts_with_reasoning(
     reasoning_tokens: u64,
     reasoning_included: Option<bool>,
 ) -> u64 {
-    let unfolded_reasoning = if reasoning_included == Some(false)
-        || (reasoning_included.is_none() && reasoning_tokens > tokens_out)
-    {
-        reasoning_tokens
-    } else {
-        0
-    };
+    let unfolded_reasoning = unfolded_reasoning(reasoning_tokens, tokens_out, reasoning_included);
     // Saturate, never wrap: a malformed/adversarial upstream returning u64-near-MAX in any one
     // dimension must not wrap the billable total to a small number (silently under-charging the
     // budget and the durable aggregate). Mirrors `reserve`/`check`, which already saturate.
@@ -119,13 +132,7 @@ pub fn billable_parts_weighted(
     reasoning_included: Option<bool>,
     cache_read_bp: u32,
 ) -> u64 {
-    let unfolded_reasoning = if reasoning_included == Some(false)
-        || (reasoning_included.is_none() && reasoning_tokens > tokens_out)
-    {
-        reasoning_tokens
-    } else {
-        0
-    };
+    let unfolded_reasoning = unfolded_reasoning(reasoning_tokens, tokens_out, reasoning_included);
     let scaled_cache_read = (u128::from(cache_read_tokens) * u128::from(cache_read_bp) / 10_000)
         .min(u128::from(u64::MAX)) as u64;
     // Saturate, never wrap — same contract as the neutral formula.

@@ -334,7 +334,10 @@ fn request(
     }
     let body = serde_json::json!({"version":1,"id":job.id,"text":job.text,"joined":job.joined,"timeout_ms":ms.min(d.timeout_ms),"evaluator":d.name,"artifact_sha256":d.artifact_sha256,"code_sha256":d.code_sha256});
     let bytes = serde_json::to_vec(&body).map_err(|_| EvaluationError)?;
-    if bytes.len() > 2097152 {
+    // Frame carries BOTH text views plus JSON overhead: cap at
+    // 2x MAX_EVALUATOR_TEXT_BYTES + slack so the raised per-view bound
+    // (issue #380) is not silently strangled to ~half by the frame limit.
+    if bytes.len() > 2 * sandhi_core::policy::MAX_EVALUATOR_TEXT_BYTES + 262_144 {
         return Err(EvaluationError);
     }
     let response = client

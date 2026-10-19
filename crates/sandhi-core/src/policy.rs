@@ -25,9 +25,12 @@ pub struct Identity {
 pub const MAX_BODY_BYTES_CEILING: usize = 4 * 1024 * 1024;
 
 /// Cap on the derived text views handed to evaluator extensions (ONNX,
-/// Python workers, remote). Kept in step with MAX_BODY_BYTES_CEILING so a
-/// body that passes the engine gate does not fail closed inside an
-/// extension evaluator.
+/// Python workers, remote). Sized with MAX_BODY_BYTES_CEILING so a body
+/// that passes the engine gate does not fail closed inside an extension
+/// evaluator. Not a structural guarantee: text-view derivation can
+/// duplicate tool-call arguments (decoded plus raw), so a body near the
+/// cap dominated by one arguments string can still exceed this — the
+/// window is narrow and extension evaluators fail closed there.
 pub const MAX_EVALUATOR_TEXT_BYTES: usize = MAX_BODY_BYTES_CEILING;
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]

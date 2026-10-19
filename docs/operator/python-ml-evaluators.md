@@ -78,7 +78,7 @@ Policy rule:
 ```
 
 The manifest allows up to four deployments with at most four total workers.
-Executables and files require absolute paths. Script (4 MiB maximum) and JSON
+Executables and files require absolute paths. Script (256 KiB maximum) and JSON
 artifact (1 MiB maximum) SHA-256 values are checked at startup/replacement. Protect
 the files and interpreter/environment with immutable deployment permissions.
 Hashes do not pin transitive Python dependencies or defend against a privileged

@@ -34,9 +34,10 @@ A partly published release remains incomplete even when some artifacts are avail
   recording and the SQL `billable` aggregate stay neutral, alerts follow the
   discounted spend automatically (issue #381; interim global knob ahead of
   TD-0032 W03/W04). Applies to new settlements; historical charges are
-  immutable.
+  immutable. The Prometheus usage series reports the weighted charge while
+  the usage event and dashboard `billable` stay neutral — the two surfaces
+  intentionally diverge when the weight is set.
 
-## [Unreleased]
 
 ## [0.14.0] — 2026-10-15
 
