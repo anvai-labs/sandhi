@@ -75,7 +75,6 @@ pub fn billable_parts(
 
 /// Explicit per-call reasoning semantics. `None` preserves historical accounting; never infer
 /// a new record's marker from provider labels, which may identify a compatible custom server.
-#[must_use]
 /// Reasoning tokens billed as their own term when the provider reports them
 /// as NOT included in `tokens_out` (or, absent a marker, when they cannot
 /// fit). Shared by the neutral and weighted billable formulas so the two

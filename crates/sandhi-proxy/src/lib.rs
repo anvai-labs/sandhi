@@ -65,9 +65,9 @@ use tower::{Layer, Service as TowerService};
 use time::OffsetDateTime;
 
 use sandhi_core::{
-    billable, AlertRegistry, Backend, ChatRequestV1, FinishReasonV1, KeyStore, LatencySource,
-    ParsedUsage, Policy, RequestMetadataV1, Reservation, Sink, UsageBasis, UsageCompleteness,
-    UsageEvent, UsageV2, VirtualKey,
+    AlertRegistry, Backend, ChatRequestV1, FinishReasonV1, KeyStore, LatencySource, ParsedUsage,
+    Policy, RequestMetadataV1, Reservation, Sink, UsageBasis, UsageCompleteness, UsageEvent,
+    UsageV2, VirtualKey,
 };
 use sandhi_providers::{
     token_estimate::baseline_estimate, ProviderError, ProviderFamily, ProviderHandle,
@@ -4098,7 +4098,7 @@ mod partial_accounting_tests {
         // `billable()` counts all four categories (ADR-0005 D4). The byte-only fallback would have
         // settled 10 here; the real exposure is three orders of magnitude larger, which is what
         // made this an evasion vector rather than a rounding error.
-        let billed = billable(&usage);
+        let billed = sandhi_core::billable(&usage);
         assert_eq!(billed, 1024 + 2048 + 4096 + 10);
         assert!(
             billed > 100 * (40 / 4),
@@ -4694,7 +4694,7 @@ fn reasoning_survives_event_and_partial_conversion() {
         let event = usage_event("gemini", "m", &RequestMetadataV1::default(), &usage, None);
         assert_eq!(event.billable_tokens(), 140 + thoughts);
         let partial = partial_usage(Some(reported_parts(&usage)), 0);
-        assert_eq!(billable(&partial), 140 + thoughts);
+        assert_eq!(sandhi_core::billable(&partial), 140 + thoughts);
         assert_eq!(partial.reasoning_included, Some(false));
     }
 }

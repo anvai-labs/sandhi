@@ -130,7 +130,6 @@ impl PendingSettlement {
     /// Set the budget cost-basis weight applied to the tracked frozen charge
     /// (basis points; 10,000 = neutral). Server-admitted operator config -
     /// callers of the settlement API can never choose a cheaper weight.
-    #[must_use]
     pub fn with_cache_read_weight(mut self, cache_read_bp: u32) -> Self {
         self.cache_read_bp = cache_read_bp;
         self
