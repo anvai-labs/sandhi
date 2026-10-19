@@ -105,7 +105,7 @@ This validates the runtime contract, not the classifier's quality.
 At most four model deployments load per gateway. Each has one session with one
 intra-op and one inter-op thread, sequential execution, no CPU arena and no memory
 pattern cache. A busy session rejects another evaluation immediately. Manifest,
-preprocessor, graph and native-library file bounds are 64 KiB, 4 MiB, 8 MiB and
+preprocessor, graph and native-library file bounds are 64 KiB, 256 KiB, 8 MiB and
 256 MiB respectively. These file/input limits are not a native heap-memory cap:
 only reviewed graphs are allowed. The exporter emits a self-contained graph;
 the loader trusts model operations and does not sandbox arbitrary ONNX programs.

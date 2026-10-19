@@ -4,7 +4,7 @@ import hashlib
 import json
 import math
 
-MAX_FRAME = 2 * (4 * 1024 * 1024) + 262144  # 2x MAX_TEXT + JSON overhead
+MAX_FRAME = 2 * (4 * 1024 * 1024) + (4 * 1024 * 1024) // 2  # 2x MAX_TEXT + escape slack
 MAX_TEXT = 4 * 1024 * 1024  # keep in step with sandhi-core MAX_EVALUATOR_TEXT_BYTES
 
 

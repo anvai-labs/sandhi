@@ -337,7 +337,10 @@ fn request(
     // Frame carries BOTH text views plus JSON overhead: cap at
     // 2x MAX_EVALUATOR_TEXT_BYTES + slack so the raised per-view bound
     // (issue #380) is not silently strangled to ~half by the frame limit.
-    if bytes.len() > 2 * sandhi_core::policy::MAX_EVALUATOR_TEXT_BYTES + 262_144 {
+    if bytes.len()
+        > 2 * sandhi_core::policy::MAX_EVALUATOR_TEXT_BYTES
+            + sandhi_core::policy::MAX_EVALUATOR_TEXT_BYTES / 2
+    {
         return Err(EvaluationError);
     }
     let response = client

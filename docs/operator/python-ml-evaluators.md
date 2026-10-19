@@ -94,7 +94,8 @@ groups, provider URL or policy decisions. Standard error is discarded, and reply
 frames contain only protocol version, matching ID and normalized score.
 Malformed/unknown fields, NaN/out-of-range values, oversized frames, EOF and stale
 IDs deny admission. The adapter re-applies an absolute deadline to partial reads
-and writes. Text views are capped at 4 MiB each, request frames at 2 MiB and
+and writes. Text views are capped at 4 MiB each, request frames at ~12.5 MiB (2x views
+plus escape slack) and
 response frames at 4 KiB.
 
 Readiness loads the model and exercises known/empty inputs before serving.
