@@ -396,7 +396,9 @@ impl ScoreBackend for Remote {
     }
     fn score(&self, input: &Inspection, deadline: Instant) -> Result<f64, EvaluationError> {
         remaining(deadline)?;
-        if input.text.len() > 262144 || input.joined.len() > 262144 {
+        if input.text.len() > sandhi_core::policy::MAX_EVALUATOR_TEXT_BYTES
+            || input.joined.len() > sandhi_core::policy::MAX_EVALUATOR_TEXT_BYTES
+        {
             return Err(EvaluationError);
         }
         let deadline = deadline.min(Instant::now() + self.timeout);

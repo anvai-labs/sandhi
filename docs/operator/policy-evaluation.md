@@ -100,7 +100,7 @@ codec-generated instructions remain trusted code and need review when changed.
 ## Bounds and failure behavior
 
 - Policy document: at most 128 KiB and 32 rules; rule IDs at most 64 characters.
-- Request inspection: configured `max_body_bytes`, maximum 256 KiB; no truncation.
+- Request inspection: configured `max_body_bytes`, maximum 4 MiB; no truncation. (Raised from 256 KiB — agentic client sessions exceed it mid-conversation and were denied fail-closed; issue #380. Evaluator text-view caps were raised in step.)
 - Regex: at most 4 KiB pattern and 256 KiB compiled/DFA limits per rule.
 - Lexical reference: at most 4 KiB; tokenization stops with failure above 8,192 words.
 - Four policy evaluation slots per process; excess concurrency is rejected without queueing.

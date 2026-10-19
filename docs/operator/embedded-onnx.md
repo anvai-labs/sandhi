@@ -92,7 +92,7 @@ The initial `ascii_word_counts_v1` profile requires ASCII text, lowercases it an
 counts words of at least two ASCII alphanumeric/underscore characters. It inspects
 both separated and concatenated text views. Vocabulary entries are unique,
 lowercase, 2–256 characters; vocabulary size is 1–4,096. Each text view is bounded
-at 256 KiB. Unsupported Unicode input returns policy_unavailable rather than
+at 4 MiB. Unsupported Unicode input returns policy_unavailable rather than
 silently using a different tokenizer. Multilingual input needs another validated
 preprocessing profile/backend.
 
@@ -105,7 +105,7 @@ This validates the runtime contract, not the classifier's quality.
 At most four model deployments load per gateway. Each has one session with one
 intra-op and one inter-op thread, sequential execution, no CPU arena and no memory
 pattern cache. A busy session rejects another evaluation immediately. Manifest,
-preprocessor, graph and native-library file bounds are 64 KiB, 256 KiB, 8 MiB and
+preprocessor, graph and native-library file bounds are 64 KiB, 4 MiB, 8 MiB and
 256 MiB respectively. These file/input limits are not a native heap-memory cap:
 only reviewed graphs are allowed. The exporter emits a self-contained graph;
 the loader trusts model operations and does not sandbox arbitrary ONNX programs.

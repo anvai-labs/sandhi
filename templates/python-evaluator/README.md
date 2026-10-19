@@ -107,7 +107,7 @@ matching ID, score, evaluator and both hashes. No identities, groups, user virtu
 keys, OIDC tokens or provider secrets are sent. Sandhi owns identity, permissions,
 budgets, policy effects and receipts.
 
-Input is bounded to 2 MiB JSON and 256 KiB per text view. Deadline is 1..2000 ms,
+Input is bounded to 2 MiB JSON and 4 MiB per text view. Deadline is 1..2000 ms,
 further limited by each model configuration (default 200 ms). Auth/validation precede
 execution. Errors contain canonical codes, never exception strings or input text.
 The HTTP deadline starts at Flask handler entry; Sandhi independently enforces the

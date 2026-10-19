@@ -479,6 +479,21 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
         "SANDHI_MAX_IN_FLIGHT_AI_REQUESTS",
         DEFAULT_MAX_IN_FLIGHT_AI_REQUESTS,
     );
+    // Budget cost-basis weight for cache-read tokens, basis points
+    // (10,000 = 1x neutral; 1,000 = 0.1x typical cached-input pricing).
+    // Startup-only: applies to new settlements (issue #381, TD-0032 interim).
+    state.cache_read_weight_bp = match std::env::var("SANDHI_CACHE_READ_WEIGHT") {
+        Ok(raw) => sandhi_core::allowance::Weight::new(raw.parse::<u32>().unwrap_or_else(|_| {
+            panic!("SANDHI_CACHE_READ_WEIGHT must be basis points (u32), got {raw:?}")
+        }))
+        .unwrap_or_else(|_| {
+            panic!(
+                "SANDHI_CACHE_READ_WEIGHT must be within 0..=1_000_000 basis points, got {raw:?}"
+            )
+        })
+        .basis_points(),
+        Err(_) => sandhi_core::allowance::Weight::default().basis_points(),
+    };
     // TD-0014 P3: connection-level limits (see the field docs for semantics).
     state.max_connections = positive_usize_env("SANDHI_MAX_CONNECTIONS", DEFAULT_MAX_CONNECTIONS);
     // 0 is the DEFAULT and DISABLES the per-IP cap (opt-in control — see the

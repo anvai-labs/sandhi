@@ -5,7 +5,7 @@ import json
 import math
 
 MAX_FRAME = 2097152
-MAX_TEXT = 262144
+MAX_TEXT = 4 * 1024 * 1024  # keep in step with sandhi-core MAX_EVALUATOR_TEXT_BYTES
 
 
 def strict_json(data):

@@ -78,7 +78,7 @@ Policy rule:
 ```
 
 The manifest allows up to four deployments with at most four total workers.
-Executables and files require absolute paths. Script (256 KiB maximum) and JSON
+Executables and files require absolute paths. Script (4 MiB maximum) and JSON
 artifact (1 MiB maximum) SHA-256 values are checked at startup/replacement. Protect
 the files and interpreter/environment with immutable deployment permissions.
 Hashes do not pin transitive Python dependencies or defend against a privileged
@@ -94,7 +94,7 @@ groups, provider URL or policy decisions. Standard error is discarded, and reply
 frames contain only protocol version, matching ID and normalized score.
 Malformed/unknown fields, NaN/out-of-range values, oversized frames, EOF and stale
 IDs deny admission. The adapter re-applies an absolute deadline to partial reads
-and writes. Text views are capped at 256 KiB each, request frames at 2 MiB and
+and writes. Text views are capped at 4 MiB each, request frames at 2 MiB and
 response frames at 4 KiB.
 
 Readiness loads the model and exercises known/empty inputs before serving.

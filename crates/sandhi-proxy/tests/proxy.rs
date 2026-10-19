@@ -214,6 +214,50 @@ async fn complete_attributes_meters_and_records_budget() {
     assert_eq!(state.ledger.lock().unwrap().reserved("group:platform"), 0);
 }
 
+#[tokio::test]
+async fn cache_read_weight_discounts_budget_enforcement_not_raw_usage() {
+    // Issue #381: budgets billed discounted cache-read tokens at full price.
+    // SANDHI_CACHE_READ_WEIGHT (here: state.cache_read_weight_bp = 1_000, i.e.
+    // 0.1x) discounts ONLY the budget charge; usage events stay raw.
+    let upstream = MockServer::start().await;
+    let resp = serde_json::json!({
+        "choices": [{ "message": { "content": "hi" } }],
+        "usage": { "prompt_tokens": 100, "completion_tokens": 20,
+                   "prompt_tokens_details": { "cached_tokens": 60 } }
+    });
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(resp))
+        .mount(&upstream)
+        .await;
+
+    let sink = Arc::new(InMemorySink::new());
+    let mut state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    Arc::get_mut(&mut state)
+        .expect("test owns the only Arc ref")
+        .cache_read_weight_bp = 1_000;
+    let app = build_app(state.clone());
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("authorization", "Bearer vk_demo")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"model":"gpt-x","messages":[]}"#))
+        .unwrap();
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Raw usage recording is unchanged (neutral billable 120).
+    let events = sink.events();
+    assert_eq!(events[0].tokens_in, 40);
+    assert_eq!(events[0].cache_read_tokens, 60);
+    assert_eq!(events[0].billable_tokens(), 120);
+    // Budget enforcement charges the weighted total: 40 + 6 + 20.
+    assert_eq!(state.ledger.lock().unwrap().spent("group:platform"), 66);
+    assert_eq!(state.ledger.lock().unwrap().reserved("group:platform"), 0);
+}
+
 // ───────────────────────── Contract version discovery (TD-0021 P2) ─────────────────────────
 
 #[tokio::test]
@@ -4333,6 +4377,7 @@ async fn owned_buffered_restart_recovers_later_ready_rows_and_unbudgeted_removed
                     completeness: sandhi_core::UsageCompleteness::Final,
                     ..Default::default()
                 },
+                10_000,
             )
             .unwrap();
         if i < 34 {

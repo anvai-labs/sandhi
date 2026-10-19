@@ -16,6 +16,20 @@ pub struct Identity {
     pub directory_known: bool,
 }
 
+/// Ceiling for the policy document's `max_body_bytes` (4 MiB).
+///
+/// Agentic client sessions routinely exceed the original 256 KiB bound
+/// mid-conversation; every subsequent request was denied fail-closed
+/// (issue #380). Linear-time evaluators (regex) scan 4 MiB comfortably
+/// inside the deadline budget.
+pub const MAX_BODY_BYTES_CEILING: usize = 4 * 1024 * 1024;
+
+/// Cap on the derived text views handed to evaluator extensions (ONNX,
+/// Python workers, remote). Kept in step with MAX_BODY_BYTES_CEILING so a
+/// body that passes the engine gate does not fail closed inside an
+/// extension evaluator.
+pub const MAX_EVALUATOR_TEXT_BYTES: usize = MAX_BODY_BYTES_CEILING;
+
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyDocumentV1 {
@@ -260,7 +274,7 @@ impl Engine {
         if document.schema_version != "1"
             || document.revision == 0
             || !(1..=2000).contains(&document.deadline_ms)
-            || !(1..=262144).contains(&document.max_body_bytes)
+            || !(1..=MAX_BODY_BYTES_CEILING).contains(&document.max_body_bytes)
             || document.rules.is_empty()
             || document.rules.len() > 32
         {
