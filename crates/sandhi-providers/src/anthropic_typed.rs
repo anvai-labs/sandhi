@@ -341,7 +341,7 @@ pub fn decode_anthropic_response(
     }
     let mut extensions = BTreeMap::from([("anthropic".into(), body.clone())]);
     if !reasoning.is_empty() {
-        extensions.insert("reasoning".into(), Value::String(reasoning));
+        extensions.insert("reasoning".into(), Value::String(reasoning.clone()));
     }
     Ok(ChatResponseV1 {
         schema_version: sandhi_core::CHAT_SCHEMA_VERSION_V1.into(),
@@ -352,6 +352,7 @@ pub fn decode_anthropic_response(
             .unwrap_or(requested_model)
             .into(),
         output: AssistantOutputV1 {
+            reasoning: (!reasoning.is_empty()).then_some(reasoning),
             content: (!text.is_empty()).then_some(MessageContent::Text(text)),
             tool_calls,
             refusal: None,
@@ -629,6 +630,10 @@ mod tests {
         assert!(out.extensions.contains_key("anthropic"));
         out.extensions.remove("anthropic");
         assert_eq!(out.extensions["reasoning"], "consider");
+        assert_eq!(
+            serde_json::to_value(out).unwrap()["output"]["reasoning"],
+            "consider"
+        );
     }
 
     use super::*;

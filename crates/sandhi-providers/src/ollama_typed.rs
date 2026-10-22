@@ -302,6 +302,7 @@ pub fn decode_ollama_response(
             .unwrap_or(requested_model)
             .into(),
         output: AssistantOutputV1 {
+            reasoning: None,
             content: message
                 .get("content")
                 .and_then(Value::as_str)

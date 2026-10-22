@@ -308,6 +308,8 @@ pub type ByteStream = Pin<Box<dyn Stream<Item = Result<StreamChunk, ProviderErro
 pub enum ProviderError {
     /// The caller supplied a malformed provider-native request. Never retry.
     InvalidRequest(String),
+    /// A received response violates the structured output contract. Never retry.
+    InvalidResponse(String),
     /// 401 / 403 — bad or missing credential.
     Auth,
     /// 429 — provider rate limit.
@@ -334,6 +336,7 @@ impl std::fmt::Display for ProviderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ProviderError::InvalidRequest(e) => write!(f, "invalid request: {e}"),
+            ProviderError::InvalidResponse(e) => write!(f, "invalid response: {e}"),
             ProviderError::Auth => write!(f, "auth failed (401/403)"),
             ProviderError::RateLimited => write!(f, "rate limited (429)"),
             ProviderError::Upstream {

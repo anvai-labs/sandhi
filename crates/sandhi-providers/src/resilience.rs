@@ -271,9 +271,10 @@ fn is_retryable(e: &ProviderError) -> bool {
             true
         }
         ProviderError::Upstream { status, .. } => *status >= 500,
-        ProviderError::InvalidRequest(_) | ProviderError::Auth | ProviderError::CircuitOpen => {
-            false
-        }
+        ProviderError::InvalidRequest(_)
+        | ProviderError::InvalidResponse(_)
+        | ProviderError::Auth
+        | ProviderError::CircuitOpen => false,
     }
 }
 
@@ -1216,11 +1217,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn does_not_retry_auth() {
-        let flaky = Flaky::new(vec![Err(ProviderError::Auth), Ok(ok_resp())]);
-        let p = ResilientProvider::new(flaky.clone()).with_retry(5, Duration::from_millis(1));
-        assert!(matches!(p.complete(req()).await, Err(ProviderError::Auth)));
-        assert_eq!(flaky.calls(), 1); // Auth is terminal — no retry
+    async fn does_not_retry_terminal_errors_even_with_retries_enabled() {
+        for error in [
+            ProviderError::Auth,
+            ProviderError::InvalidResponse("malformed reasoning".into()),
+        ] {
+            let expected_code = error.as_typed(None).code;
+            let flaky = Flaky::new(vec![Err(error), Ok(ok_resp())]);
+            let p = ResilientProvider::new(flaky.clone()).with_retry(5, Duration::from_millis(1));
+            assert_eq!(
+                p.complete(req()).await.unwrap_err().as_typed(None).code,
+                expected_code
+            );
+            assert_eq!(flaky.calls(), 1);
+        }
     }
 
     #[tokio::test]

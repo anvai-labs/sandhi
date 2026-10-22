@@ -158,6 +158,10 @@ impl IngressError {
             sandhi_providers::ProviderError::Auth => {
                 (axum::http::StatusCode::BAD_GATEWAY, "upstream auth failed")
             }
+            sandhi_providers::ProviderError::InvalidResponse(_) => (
+                axum::http::StatusCode::BAD_GATEWAY,
+                "invalid provider response",
+            ),
             sandhi_providers::ProviderError::RateLimited => (
                 axum::http::StatusCode::TOO_MANY_REQUESTS,
                 "upstream rate limited",
@@ -646,6 +650,9 @@ fn gemini_parts_text(parts: Option<&Value>) -> Option<String> {
 /// still expects Gemini's shape, so this is the mirror of the adapter's response parser.
 fn encode_gemini_response(response: &ChatResponseV1) -> Value {
     let mut parts: Vec<Value> = Vec::new();
+    if let Some(reasoning) = &response.output.reasoning {
+        parts.push(json!({"text":reasoning,"thought":true}));
+    }
     if let Some(content) = &response.output.content {
         match content {
             MessageContent::Text(text) if !text.is_empty() => parts.push(json!({ "text": text })),
@@ -1484,18 +1491,33 @@ fn responses_response_format(format: &Value) -> Result<Value, String> {
 }
 
 pub(crate) fn encode_response(dialect: IngressDialect, response: &ChatResponseV1) -> Value {
-    match dialect {
+    let mut body = match dialect {
         IngressDialect::OpenAi | IngressDialect::Embeddings | IngressDialect::Completions => {
             encode_openai_response(response)
         }
         IngressDialect::Anthropic => encode_anthropic_response(response),
         IngressDialect::Responses => encode_responses_response(response),
         IngressDialect::Gemini => encode_gemini_response(response),
+    };
+    // Display text cannot reconstruct signed Anthropic thinking blocks or
+    // identified Responses reasoning Items. Preserve it in an explicit gateway
+    // extension instead of emitting a malformed or fabricated replay object.
+    if matches!(
+        dialect,
+        IngressDialect::Anthropic | IngressDialect::Responses
+    ) {
+        if let Some(reasoning) = &response.output.reasoning {
+            body["extensions"] = json!({"sandhi":{"reasoning":reasoning}});
+        }
     }
+    body
 }
 
 fn encode_openai_response(response: &ChatResponseV1) -> Value {
     let mut message = Map::from_iter([("role".into(), Value::String("assistant".into()))]);
+    if let Some(reasoning) = &response.output.reasoning {
+        message.insert("reasoning_content".into(), Value::String(reasoning.clone()));
+    }
     message.insert(
         "content".into(),
         response
@@ -1944,6 +1966,97 @@ mod tests {
     use super::*;
     use sandhi_core::AssistantOutputV1;
 
+    #[test]
+    fn malformed_provider_response_is_redacted_and_nonretryable() {
+        let error = IngressError::from_provider_redacted(
+            &sandhi_providers::ProviderError::InvalidResponse("private provider text".into()),
+            "fixture",
+        );
+        assert_eq!(error.status, axum::http::StatusCode::BAD_GATEWAY);
+        assert_eq!(error.message, "invalid provider response");
+        assert_eq!(error.typed.as_ref().unwrap().code, "invalid_response");
+        assert!(!error.typed.as_ref().unwrap().retryable);
+    }
+
+    #[test]
+    fn reasoning_egress_is_display_text_without_fabricated_replay_state() {
+        let mut response: ChatResponseV1 = serde_json::from_value(json!({
+            "model":"fixture", "output":{"content":"answer","reasoning":"fixture summary"},
+            "usage":{"tokens_in":2,"tokens_out":3,"cache_creation_tokens":0,"cache_read_tokens":0}
+        }))
+        .unwrap();
+        let cases = [
+            (
+                IngressDialect::OpenAi,
+                "/choices/0/message/reasoning_content",
+            ),
+            (IngressDialect::Anthropic, "/extensions/sandhi/reasoning"),
+            (IngressDialect::Responses, "/extensions/sandhi/reasoning"),
+            (IngressDialect::Gemini, "/candidates/0/content/parts/0/text"),
+        ];
+        for (dialect, pointer) in cases {
+            let body = encode_response(dialect, &response);
+            assert_eq!(body.pointer(pointer).unwrap(), "fixture summary");
+            let wire = serde_json::to_string(&body).unwrap();
+            assert!(!wire.contains("encrypted_content"));
+            assert!(!wire.contains("signature"));
+            assert!(!wire.contains("thoughtSignature"));
+            if dialect == IngressDialect::Anthropic {
+                assert_eq!(body["content"][0]["type"], "text");
+                assert_eq!(body["content"].as_array().unwrap().len(), 1);
+            }
+            if dialect == IngressDialect::Responses {
+                assert_eq!(body["output"][0]["type"], "message");
+                assert_eq!(body["output"].as_array().unwrap().len(), 1);
+            }
+        }
+        response.output.reasoning = Some(String::new());
+        for (dialect, pointer) in cases {
+            assert_eq!(
+                encode_response(dialect, &response).pointer(pointer),
+                Some(&json!(""))
+            );
+        }
+        response.output.reasoning = None;
+        for (dialect, _) in cases {
+            let body = encode_response(dialect, &response);
+            assert!(body.get("extensions").is_none());
+            match dialect {
+                IngressDialect::OpenAi => assert!(body["choices"][0]["message"]
+                    .get("reasoning_content")
+                    .is_none()),
+                IngressDialect::Gemini => assert!(body["candidates"][0]["content"]["parts"][0]
+                    .get("thought")
+                    .is_none()),
+                _ => {}
+            }
+        }
+        assert!(encode_openai_response(&response)["choices"][0]["message"]
+            .get("reasoning_content")
+            .is_none());
+        assert_eq!(
+            encode_anthropic_response(&response)["content"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            encode_responses_response(&response)["output"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            encode_gemini_response(&response)["candidates"][0]["content"]["parts"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
         let mut map = HeaderMap::new();
         for (name, value) in pairs {
@@ -2107,6 +2220,7 @@ mod tests {
             id: Some("r".into()),
             model: "m".into(),
             output: AssistantOutputV1 {
+                reasoning: None,
                 content: Some(MessageContent::Text("ok".into())),
                 tool_calls: Vec::new(),
                 refusal: None,
@@ -2197,6 +2311,7 @@ mod tests {
             id: Some("resp_1".into()),
             model: "gpt-test".into(),
             output: AssistantOutputV1 {
+                reasoning: None,
                 content: Some(MessageContent::Text("hi".into())),
                 tool_calls: vec![ToolCallV1 {
                     id: "call_1".into(),
@@ -2243,6 +2358,7 @@ mod tests {
             id: None,
             model: "m".into(),
             output: AssistantOutputV1 {
+                reasoning: None,
                 content: Some(MessageContent::Text("...".into())),
                 tool_calls: Vec::new(),
                 refusal: None,
@@ -2505,6 +2621,7 @@ mod gemini_codec_tests {
             id: Some("resp_1".into()),
             model: "gpt-mock".into(),
             output: AssistantOutputV1 {
+                reasoning: None,
                 content: Some(MessageContent::Text("pong".into())),
                 tool_calls: vec![ToolCallV1 {
                     id: "call_1".into(),

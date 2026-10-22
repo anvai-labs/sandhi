@@ -14,7 +14,7 @@ import pytest
 import sandhi_gateway as sg
 
 
-def _assert_complete_openai_stream(events, *, cached=False):
+def _assert_complete_openai_stream(events, *, cached=False, reasoning=False):
     """Keep metadata-only updates separate from the one final numeric verdict."""
     semantic = []
     final_usages = []
@@ -45,7 +45,7 @@ def _assert_complete_openai_stream(events, *, cached=False):
     assert final_usages[0]["cache_read_observation"] == {
         "status": "reported" if cached else "absent", "source": "origin_usage"
     }
-    assert semantic == ["response_start", "text_delta", "usage", "finish"]
+    assert semantic == ["response_start", "text_delta", *(["reasoning_delta"] if reasoning else []), "usage", "finish"]
     assert "".join(event["delta"] for event in events if event["event"] == "text_delta") == "he"
     return final_usages[0]
 
@@ -214,12 +214,13 @@ def test_parse_usage_keeps_cache_split_single_sourced():
     assert event["time_to_first_token_source"] == "origin"
 
 
-def test_persistent_typed_provider_complete_and_stream():
+@pytest.mark.parametrize("include_native", [False, True])
+def test_persistent_typed_provider_complete_and_stream(include_native):
     complete_body = json.dumps(
         {
             "id": "r1",
             "model": "gpt-test",
-            "choices": [{"message": {"content": "hello"}, "finish_reason": "stop"}],
+            "choices": [{"message": {"content": "hello", "reasoning_content": "fixture summary"}, "finish_reason": "stop"}],
             "usage": {
                 "prompt_tokens": 10,
                 "completion_tokens": 3,
@@ -228,7 +229,7 @@ def test_persistent_typed_provider_complete_and_stream():
         }
     ).encode()
     stream_body = (
-        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{"content":"he"},"finish_reason":null}]}\n\n'
+        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{"content":"he","reasoning_content":"fixture summary"},"finish_reason":null}]}\n\n'
         'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{},"finish_reason":"stop"}],'
         '"usage":{"prompt_tokens":10,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":4}}}\n\n'
         "data: [DONE]\n\n"
@@ -262,6 +263,7 @@ def test_persistent_typed_provider_complete_and_stream():
         request = json.dumps(
             {
                 "schema_version": "1",
+                "include_native_response": include_native,
                 "model": "gpt-test",
                 "messages": [{"role": "user", "content": "hi"}],
             }
@@ -277,11 +279,14 @@ def test_persistent_typed_provider_complete_and_stream():
         response, events = asyncio.run(run())
         assert provider.provider == "openai"
         assert response["output"]["content"] == "hello"
+        assert response["output"]["reasoning"] == "fixture summary"
+        assert ("openai" in response.get("extensions", {})) is include_native
+        assert "".join(e["delta"] for e in events if e["event"] == "reasoning_delta") == "fixture summary"
         assert response["usage"]["tokens_in"] == 6
         assert response["usage"]["cache_read_observation"] == {
             "status": "reported", "source": "origin_usage"
         }
-        usage = _assert_complete_openai_stream(events, cached=True)
+        usage = _assert_complete_openai_stream(events, cached=True, reasoning=True)
         assert usage["cache_read_observation"] == response["usage"]["cache_read_observation"]
         assert (usage["tokens_in"], usage["tokens_out"], usage["cache_read_tokens"]) == (6, 3, 4)
         assert Handler.calls == 2
