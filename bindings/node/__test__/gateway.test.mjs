@@ -559,6 +559,17 @@ test("catalog surface serves curated model data (TD-0004)", async () => {
   // Seeded compat vendor lineups resolve through aliases too.
   const grok = JSON.parse(providerModelsJson("grok"));
   assert.ok(grok.some((m) => m.id === "grok-4"));
+  const deepseek = JSON.parse(providerModelsJson("deepseek"));
+  for (const [id, vision] of [["deepseek-flash", true], ["deepseek-v4-pro", false]]) {
+    const model = deepseek.find((entry) => entry.id === id);
+    assert.ok(model, id);
+    assert.equal(model.max_input_tokens, 1048576);
+    assert.equal(model.max_output_tokens, 393216);
+    assert.equal(model.capabilities.vision, vision);
+    assert.equal(model.capabilities.reasoning, true);
+    assert.deepEqual(model.extensions.reasoning_effort_values, ["low", "high", "max"]);
+    assert.equal(model.default_temperature, undefined);
+  }
   // Aggregators stay empty (dynamic hosting catalogs — live discovery).
   assert.deepEqual(JSON.parse(providerModelsJson("openrouter")), []);
   // Self-hosted InferFlux: model ids are operator config server-side, never vendor facts.

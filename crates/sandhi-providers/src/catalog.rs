@@ -522,31 +522,64 @@ fn compat_models(slug: &str) -> Vec<ModelDescriptorV1> {
                 },
             ),
         ],
-        "deepseek" => vec![
-            compat_entry(
-                "deepseek-chat",
-                "DeepSeek Chat",
-                131_072,
-                Some(8_192),
-                ProviderCapabilitiesV1 {
-                    prompt_cache_usage: true,
-                    ..base.clone()
-                },
-            ),
-            compat_entry(
-                "deepseek-reasoner",
-                "DeepSeek Reasoner",
-                131_072,
-                Some(65_536),
-                ProviderCapabilitiesV1 {
-                    // Function calling is not supported on the reasoner endpoint.
-                    tools: false,
-                    parallel_tool_calls: false,
-                    prompt_cache_usage: true,
-                    ..reasoning.clone()
-                },
-            ),
-        ],
+        "deepseek" => {
+            let mut models = vec![
+                compat_entry(
+                    "deepseek-chat",
+                    "DeepSeek Chat",
+                    131_072,
+                    Some(8_192),
+                    ProviderCapabilitiesV1 {
+                        prompt_cache_usage: true,
+                        ..base.clone()
+                    },
+                ),
+                compat_entry(
+                    "deepseek-reasoner",
+                    "DeepSeek Reasoner",
+                    131_072,
+                    Some(65_536),
+                    ProviderCapabilitiesV1 {
+                        // Historical compatibility snapshot; not current-model qualification.
+                        tools: false,
+                        parallel_tool_calls: false,
+                        prompt_cache_usage: true,
+                        ..reasoning.clone()
+                    },
+                ),
+            ];
+            // Current canonical IDs verified against the vendor's /models schema
+            // on 2026-10-11. Keep legacy entries/order unchanged; no alias guessing.
+            // Sources and unqualified capability flags: TD-0004, DeepSeek refresh.
+            for (id, name, vision) in [
+                ("deepseek-flash", "DeepSeek-V4.1-Flash", true),
+                ("deepseek-v4-pro", "DeepSeek-V4-Pro", false),
+            ] {
+                let mut model = compat_entry(
+                    id,
+                    name,
+                    1_048_576,
+                    Some(393_216),
+                    ProviderCapabilitiesV1 {
+                        streaming: true,
+                        tools: true,
+                        vision,
+                        reasoning: true,
+                        prompt_cache_usage: true,
+                        ..ProviderCapabilitiesV1::default()
+                    },
+                );
+                // Thinking is on by default and ignores temperature. Do not
+                // advertise the generic compat helper's temperature as a fact.
+                model.default_temperature = None;
+                model.extensions.insert(
+                    "reasoning_effort_values".into(),
+                    serde_json::json!(["low", "high", "max"]),
+                );
+                models.push(model);
+            }
+            models
+        }
         "mistral" => vec![
             compat_entry(
                 "mistral-large-latest",
@@ -943,7 +976,8 @@ mod tests {
         // First-party vendors (and stable hosting flagships) carry curated model facts.
         for (slug, expected_id) in [
             ("xai", "grok-4-1-fast"),
-            ("deepseek", "deepseek-chat"),
+            ("deepseek", "deepseek-flash"),
+            ("deepseek", "deepseek-v4-pro"),
             ("mistral", "mistral-large-latest"),
             ("zai", "glm-4.6"),
             ("qwen", "qwen3-max"),
@@ -965,8 +999,39 @@ mod tests {
         // Alias resolution reaches the same lineup.
         let grok = provider_descriptor("grok").unwrap();
         assert!(grok.models.iter().any(|m| m.id == "grok-4"));
-        // The reasoner endpoint does not admit function calling (fact, not policy).
         let deepseek = provider_descriptor("deepseek").unwrap();
+        assert_eq!(
+            deepseek
+                .models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "deepseek-chat",
+                "deepseek-reasoner",
+                "deepseek-flash",
+                "deepseek-v4-pro"
+            ]
+        );
+        for (id, vision) in [("deepseek-flash", true), ("deepseek-v4-pro", false)] {
+            let model = deepseek.models.iter().find(|model| model.id == id).unwrap();
+            assert_eq!(model.max_input_tokens, Some(1_048_576));
+            assert_eq!(model.max_output_tokens, Some(393_216));
+            assert_eq!(model.default_temperature, None);
+            assert!(model.capabilities.tools);
+            assert!(model.capabilities.streaming);
+            assert!(model.capabilities.reasoning);
+            assert!(model.capabilities.prompt_cache_usage);
+            assert_eq!(model.capabilities.vision, vision);
+            assert!(!model.capabilities.structured_output);
+            assert!(!model.capabilities.parallel_tool_calls);
+            assert!(model.aliases.is_empty());
+            assert_eq!(
+                model.extensions["reasoning_effort_values"],
+                serde_json::json!(["low", "high", "max"])
+            );
+        }
+        // Retained legacy snapshot: this increment does not requalify or retarget it.
         let reasoner = deepseek
             .models
             .iter()
