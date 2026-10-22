@@ -4527,133 +4527,168 @@ async fn owned_stream_terminal_evidence_controls_settlement_and_http_completion(
     use sandhi_core::UsageCompleteness;
     use sandhi_store::ledger::evidence::RecoveryState;
     let measured = "data: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2}}\n\n";
-    for case in ["final", "missing", "conflict", "missing_done"] {
-        let upstream = MockServer::start().await;
-        let wire = match case {
-            "final" => format!("{measured}data: [DONE]\n\n"),
-            "missing" => "data: [DONE]\n\n".into(),
-            "conflict" => format!(
-                "{measured}{}data: [DONE]\n\n",
-                measured.replace(":10", ":11")
-            ),
-            _ => measured.into(),
-        };
-        Mock::given(method("POST"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .insert_header("x-request-id", "origin-stream")
-                    .set_body_string(wire.clone()),
+    for slug in ["openai", "zai", "deepseek"] {
+        let measured = if slug != "openai" {
+            measured.replace(
+                "\"choices\":[]",
+                "\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]",
             )
-            .expect(1)
-            .mount(&upstream)
-            .await;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("owned.db");
-        let sink = Arc::new(InMemorySink::new());
-        let state = owned_state_with_stream_limits(
-            upstream.uri(),
-            &path,
-            sink.clone(),
-            std::time::Duration::from_secs(2),
-            Some(serde_json::json!({"setup_ms":1000,"idle_ms":1000,"body_ms":2000})),
-        );
-        let mut request = owned_body();
-        request["stream"] = true.into();
-        let response = build_app(state.clone())
-            .oneshot(owned_request("/v1/chat/completions", request))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK, "{case}");
-        let request_id = response.headers()["x-sandhi-request-id"]
-            .to_str()
-            .unwrap()
-            .to_owned();
-        let result = axum::body::to_bytes(response.into_body(), usize::MAX).await;
-        if case == "final" {
-            assert_eq!(result.unwrap().as_ref(), wire.as_bytes());
         } else {
-            assert!(result.is_err(), "unresolved {case} must not give clean EOF");
-        }
-        tokio::time::timeout(std::time::Duration::from_secs(3), async {
-            while state.lifecycle.active_operations() != 0 {
-                tokio::task::yield_now().await;
+            measured.into()
+        };
+        for case in [
+            "final",
+            "missing",
+            "conflict",
+            "missing_done",
+            "late_content",
+        ] {
+            if case == "late_content" && slug == "openai" {
+                continue;
             }
-        })
-        .await
-        .unwrap();
-        let mut ledger = sandhi_store::SqliteLedger::open(path.to_str().unwrap()).unwrap();
-        let page = ledger
-            .recovery_page_durable("group:platform", None, 10)
-            .unwrap();
-        assert_eq!(page.entries.len(), 1);
-        let entry = &page.entries[0];
-        let usage = ledger
-            .terminal_durable("group:platform", &entry.execution_id)
-            .unwrap()
-            .unwrap()
-            .usage;
-        assert_eq!(usage.upstream_request_id.as_deref(), Some("origin-stream"));
-        if case == "final" {
-            assert!(
-                matches!(entry.state, RecoveryState::Settled(ref receipt) if receipt.charged_tokens == 12)
+            let upstream = MockServer::start().await;
+            let wire = match case {
+                "final" => format!("{measured}data: [DONE]\n\n"),
+                "missing" => "data: [DONE]\n\n".into(),
+                "conflict" => format!(
+                    "{measured}{}data: [DONE]\n\n",
+                    measured.replace(":10", ":11")
+                ),
+                "late_content" => format!(
+                    "{measured}{}data: [DONE]\n\n",
+                    measured.replace("\"delta\":{}", "\"delta\":{\"content\":\"late\"}")
+                ),
+                _ => measured.clone(),
+            };
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "text/event-stream")
+                        .insert_header("x-request-id", "origin-stream")
+                        .set_body_string(wire.clone()),
+                )
+                .expect(1)
+                .mount(&upstream)
+                .await;
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("owned.db");
+            let sink = Arc::new(InMemorySink::new());
+            let state = owned_state_with_stream_limits(
+                upstream.uri(),
+                &path,
+                sink.clone(),
+                std::time::Duration::from_secs(2),
+                Some(serde_json::json!({"setup_ms":1000,"idle_ms":1000,"body_ms":2000})),
             );
-            assert_eq!(usage.completeness, UsageCompleteness::Final);
-        } else {
-            assert!(matches!(entry.state, RecoveryState::UnresolvedObservation));
-            assert_eq!(
-                usage.completeness,
-                if case == "missing" {
-                    UsageCompleteness::Unavailable
-                } else {
-                    UsageCompleteness::Partial
-                }
+            state.providers.lock().unwrap().insert(
+                "up1".into(),
+                ProviderRuntime::new().openai_compat(
+                    slug,
+                    upstream.uri(),
+                    "REAL-KEY",
+                    Default::default(),
+                    Some(0),
+                    None,
+                    None,
+                ),
             );
-        }
-        if case == "missing" {
-            assert_eq!(
-                usage.outcome.as_deref(),
-                Some("stream_usage_unavailable;delivery:success")
-            );
-        }
-        if case != "missing" {
-            assert_eq!((usage.tokens_in, usage.tokens_out), (10, 2));
-        }
-        assert_eq!(
-            ledger
-                .request_id_durable("group:platform", &entry.execution_id)
+            let mut request = owned_body();
+            request["stream"] = true.into();
+            let response = build_app(state.clone())
+                .oneshot(owned_request("/v1/chat/completions", request))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{case}");
+            let request_id = response.headers()["x-sandhi-request-id"]
+                .to_str()
                 .unwrap()
-                .as_deref(),
-            Some(request_id.as_str())
-        );
-        let events = sink.events();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].request_id, request_id);
-        let observed_total = if case == "missing" { 0 } else { 12 };
-        assert_eq!(events[0].billable_tokens(), observed_total);
-        let metrics = state.metrics.render();
-        let billable = metrics
-            .lines()
-            .find(|line| {
-                line.starts_with("sandhi_tokens_total{") && line.contains("kind=\"billable\"")
+                .to_owned();
+            let result = axum::body::to_bytes(response.into_body(), usize::MAX).await;
+            if case == "final" {
+                assert_eq!(result.unwrap().as_ref(), wire.as_bytes());
+            } else {
+                assert!(result.is_err(), "unresolved {case} must not give clean EOF");
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while state.lifecycle.active_operations() != 0 {
+                    tokio::task::yield_now().await;
+                }
             })
-            .map(|line| line.rsplit_once(' ').unwrap().1.parse::<u64>().unwrap())
-            .unwrap_or(0);
-        assert_eq!(billable, observed_total, "{case}");
-        assert_eq!(
-            state.ledger.lock().unwrap().spent("group:platform"),
-            if case == "final" { 12 } else { 0 }
-        );
-
-        assert_eq!(
-            events[0].upstream_request_id.as_deref(),
-            Some("origin-stream")
-        );
-        sandhi_proxy::settlement::buffered::recover(state.clone())
             .await
             .unwrap();
-        assert_eq!(sink.events().len(), 1);
-        assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
+            let mut ledger = sandhi_store::SqliteLedger::open(path.to_str().unwrap()).unwrap();
+            let page = ledger
+                .recovery_page_durable("group:platform", None, 10)
+                .unwrap();
+            assert_eq!(page.entries.len(), 1);
+            let entry = &page.entries[0];
+            let usage = ledger
+                .terminal_durable("group:platform", &entry.execution_id)
+                .unwrap()
+                .unwrap()
+                .usage;
+            assert_eq!(usage.upstream_request_id.as_deref(), Some("origin-stream"));
+            if case == "final" {
+                assert!(
+                    matches!(entry.state, RecoveryState::Settled(ref receipt) if receipt.charged_tokens == 12)
+                );
+                assert_eq!(usage.completeness, UsageCompleteness::Final);
+            } else {
+                assert!(matches!(entry.state, RecoveryState::UnresolvedObservation));
+                assert_eq!(
+                    usage.completeness,
+                    if case == "missing" {
+                        UsageCompleteness::Unavailable
+                    } else {
+                        UsageCompleteness::Partial
+                    }
+                );
+            }
+            if case == "missing" {
+                assert_eq!(
+                    usage.outcome.as_deref(),
+                    Some("stream_usage_unavailable;delivery:success")
+                );
+            }
+            if case != "missing" {
+                assert_eq!((usage.tokens_in, usage.tokens_out), (10, 2));
+            }
+            assert_eq!(
+                ledger
+                    .request_id_durable("group:platform", &entry.execution_id)
+                    .unwrap()
+                    .as_deref(),
+                Some(request_id.as_str())
+            );
+            let events = sink.events();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].request_id, request_id);
+            let observed_total = if case == "missing" { 0 } else { 12 };
+            assert_eq!(events[0].billable_tokens(), observed_total);
+            let metrics = state.metrics.render();
+            let billable = metrics
+                .lines()
+                .find(|line| {
+                    line.starts_with("sandhi_tokens_total{") && line.contains("kind=\"billable\"")
+                })
+                .map(|line| line.rsplit_once(' ').unwrap().1.parse::<u64>().unwrap())
+                .unwrap_or(0);
+            assert_eq!(billable, observed_total, "{case}");
+            assert_eq!(
+                state.ledger.lock().unwrap().spent("group:platform"),
+                if case == "final" { 12 } else { 0 }
+            );
+
+            assert_eq!(
+                events[0].upstream_request_id.as_deref(),
+                Some("origin-stream")
+            );
+            sandhi_proxy::settlement::buffered::recover(state.clone())
+                .await
+                .unwrap();
+            assert_eq!(sink.events().len(), 1);
+            assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
+        }
     }
 }
 

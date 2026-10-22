@@ -237,6 +237,17 @@ pub enum StreamUsageError {
     InvalidUsage(BufferedUsageError),
 }
 
+/// Catalog-selected final-usage envelope. Unknown providers remain strict OpenAI.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum OpenAiStreamUsageProfile {
+    #[default]
+    OpenAi,
+    /// ZAI reports request totals on its sole terminal choice, before `[DONE]`.
+    ZaiFinalChoice,
+    /// DeepSeek reports totals on a sole terminal choice with no new content.
+    DeepSeekFinalChoice,
+}
+
 /// Qualify the request-total usage event from OpenAI Chat's `include_usage` stream.
 ///
 /// The caller must supply one complete decoded SSE event, not a data line or a
@@ -250,9 +261,19 @@ pub enum StreamUsageError {
 /// The caller owns immutable observation retention and conflicting-event detection.
 /// This pure, opt-in API proves neither stream completion nor durable settlement.
 pub fn qualify_openai_stream_usage(event: &Value) -> Result<Option<ParsedUsage>, StreamUsageError> {
-    if event.get("object").and_then(Value::as_str) != Some("chat.completion.chunk")
-        || event.get("error").is_some()
-    {
+    qualify_openai_stream_usage_with_profile(event, OpenAiStreamUsageProfile::OpenAi)
+}
+
+/// Qualify a catalog-declared envelope using the same counter validation and
+/// derivation as strict OpenAI. ZAI also documents chunks with `object` omitted;
+/// an explicitly wrong/null object remains invalid. Neither profile infers usage.
+pub fn qualify_openai_stream_usage_with_profile(
+    event: &Value,
+    profile: OpenAiStreamUsageProfile,
+) -> Result<Option<ParsedUsage>, StreamUsageError> {
+    let valid_object = event.get("object").and_then(Value::as_str) == Some("chat.completion.chunk")
+        || (profile == OpenAiStreamUsageProfile::ZaiFinalChoice && event.get("object").is_none());
+    if !valid_object || event.get("error").is_some() {
         return Err(StreamUsageError::InvalidChunk);
     }
     let choices = event
@@ -262,7 +283,58 @@ pub fn qualify_openai_stream_usage(event: &Value) -> Result<Option<ParsedUsage>,
     if event.get("usage").is_none_or(Value::is_null) {
         return Ok(None);
     }
-    if !choices.is_empty() {
+    let final_usage = match profile {
+        OpenAiStreamUsageProfile::OpenAi => choices.is_empty(),
+        OpenAiStreamUsageProfile::ZaiFinalChoice
+        | OpenAiStreamUsageProfile::DeepSeekFinalChoice => {
+            let reason = choices
+                .first()
+                .and_then(|choice| choice.get("finish_reason"))
+                .and_then(Value::as_str);
+            let valid_reason = match profile {
+                OpenAiStreamUsageProfile::ZaiFinalChoice => matches!(
+                    reason,
+                    Some(
+                        "stop"
+                            | "length"
+                            | "tool_calls"
+                            | "sensitive"
+                            | "model_context_window_exceeded"
+                            | "network_error"
+                    )
+                ),
+                _ => matches!(
+                    reason,
+                    Some(
+                        "stop"
+                            | "length"
+                            | "tool_calls"
+                            | "content_filter"
+                            | "insufficient_system_resource"
+                            | "aborted"
+                    )
+                ),
+            };
+            choices.len() == 1
+                && choices[0].get("index").and_then(Value::as_u64) == Some(0)
+                && choices[0].get("delta").is_some_and(Value::is_object)
+                && valid_reason
+                && (profile != OpenAiStreamUsageProfile::DeepSeekFinalChoice
+                    || ["content", "reasoning_content", "tool_calls"]
+                        .iter()
+                        .all(|field| {
+                            choices[0]["delta"].get(*field).is_none_or(|value| {
+                                value.is_null()
+                                    || if *field == "tool_calls" {
+                                        value.as_array().is_some_and(Vec::is_empty)
+                                    } else {
+                                        value.as_str().is_some_and(str::is_empty)
+                                    }
+                            })
+                        }))
+        }
+    };
+    if !final_usage {
         return Err(StreamUsageError::NonFinalUsage);
     }
     validate_openai_buffered_usage(event).map_err(StreamUsageError::InvalidUsage)?;
@@ -634,12 +706,15 @@ mod tests {
             // Missing/null usage is normal on stream content events. All non-null
             // counter validation is shared with buffered responses, not copied.
             if let Some(usage) = body.get("usage").filter(|v| !v.is_null()) {
-                let event = json!({"object":"chat.completion.chunk", "choices":[], "usage":usage});
-                assert_eq!(
-                    qualify_openai_stream_usage(&event),
-                    Err(StreamUsageError::InvalidUsage(error)),
-                    "{event}"
-                );
+                for (profile, choices) in stream_profiles() {
+                    let event =
+                        json!({"object":"chat.completion.chunk", "choices":choices, "usage":usage});
+                    assert_eq!(
+                        qualify_openai_stream_usage_with_profile(&event, profile),
+                        Err(StreamUsageError::InvalidUsage(error)),
+                        "{event}"
+                    );
+                }
             }
         }
     }
@@ -657,14 +732,171 @@ mod tests {
             let body = json!({"usage":usage});
             assert_eq!(validate_openai_buffered_usage(&body), Ok(()), "{body}");
             let parsed = parse_openai_usage(&body).unwrap();
-            let event =
-                json!({"object":"chat.completion.chunk", "choices":[], "usage":body["usage"]});
-            assert_eq!(qualify_openai_stream_usage(&event), Ok(Some(parsed)));
+            for (profile, choices) in stream_profiles() {
+                let event = json!({"object":"chat.completion.chunk", "choices":choices, "usage":body["usage"]});
+                assert_eq!(
+                    qualify_openai_stream_usage_with_profile(&event, profile),
+                    Ok(Some(parsed))
+                );
+            }
             assert_eq!(
                 parsed.tokens_in + parsed.cache_read_tokens,
                 body["usage"]["prompt_tokens"].as_u64().unwrap()
             );
         }
+    }
+
+    fn stream_profiles() -> [(OpenAiStreamUsageProfile, Value); 3] {
+        [
+            (OpenAiStreamUsageProfile::OpenAi, json!([])),
+            (
+                OpenAiStreamUsageProfile::DeepSeekFinalChoice,
+                json!([{"index":0,"delta":{},"finish_reason":"stop"}]),
+            ),
+            (
+                OpenAiStreamUsageProfile::ZaiFinalChoice,
+                json!([{"index":0,"delta":{},"finish_reason":"stop"}]),
+            ),
+        ]
+    }
+
+    #[test]
+    fn deepseek_stream_qualification_requires_terminal_empty_delta_and_own_reasons() {
+        let profile = OpenAiStreamUsageProfile::DeepSeekFinalChoice;
+        let base = json!({"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"","role":null},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":35,"completion_tokens":15,"total_tokens":50,"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":35,"prompt_tokens_details":{"cached_tokens":0},"completion_tokens_details":{"reasoning_tokens":13}}});
+        for reason in [
+            "stop",
+            "length",
+            "tool_calls",
+            "content_filter",
+            "insufficient_system_resource",
+            "aborted",
+        ] {
+            let mut event = base.clone();
+            event["choices"][0]["finish_reason"] = json!(reason);
+            assert_eq!(
+                qualify_openai_stream_usage_with_profile(&event, profile),
+                Ok(parse_openai_usage(&event))
+            );
+            assert_eq!(
+                qualify_openai_stream_usage(&event),
+                Err(StreamUsageError::NonFinalUsage)
+            );
+        }
+        for delta in [
+            json!({"content":"late"}),
+            json!({"reasoning_content":"late"}),
+            json!({"tool_calls":[{}]}),
+            json!({"content":false}),
+            json!({"content":[]}),
+            json!({"tool_calls":{}}),
+            json!({"tool_calls":""}),
+        ] {
+            let mut event = base.clone();
+            event["choices"][0]["delta"] = delta;
+            assert_eq!(
+                qualify_openai_stream_usage_with_profile(&event, profile),
+                Err(StreamUsageError::NonFinalUsage)
+            );
+        }
+        for reason in [
+            "sensitive",
+            "network_error",
+            "model_context_window_exceeded",
+            "unknown",
+            "",
+        ] {
+            let mut event = base.clone();
+            event["choices"][0]["finish_reason"] = json!(reason);
+            assert_eq!(
+                qualify_openai_stream_usage_with_profile(&event, profile),
+                Err(StreamUsageError::NonFinalUsage)
+            );
+        }
+        let mut event = base;
+        event.as_object_mut().unwrap().remove("object");
+        assert_eq!(
+            qualify_openai_stream_usage_with_profile(&event, profile),
+            Err(StreamUsageError::InvalidChunk)
+        );
+    }
+
+    #[test]
+    fn zai_stream_qualification_requires_one_documented_terminal_choice() {
+        let profile = OpenAiStreamUsageProfile::ZaiFinalChoice;
+        let base = json!({"object":"chat.completion.chunk", "choices":[{
+            "index":0,"delta":{},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":19,"completion_tokens":32,"total_tokens":51,
+            "completion_tokens_details":{"reasoning_tokens":30},
+            "prompt_tokens_details":{"cached_tokens":0}}});
+        for reason in [
+            "stop",
+            "length",
+            "tool_calls",
+            "sensitive",
+            "model_context_window_exceeded",
+            "network_error",
+        ] {
+            for object_present in [true, false] {
+                let mut event = base.clone();
+                event["choices"][0]["finish_reason"] = json!(reason);
+                if !object_present {
+                    event.as_object_mut().unwrap().remove("object");
+                }
+                assert_eq!(
+                    qualify_openai_stream_usage_with_profile(&event, profile),
+                    Ok(parse_openai_usage(&event))
+                );
+                assert!(qualify_openai_stream_usage(&event).is_err());
+                event.as_object_mut().unwrap().remove("usage");
+                assert_eq!(
+                    qualify_openai_stream_usage_with_profile(&event, profile),
+                    Ok(None)
+                );
+                event["usage"] = Value::Null;
+                assert_eq!(
+                    qualify_openai_stream_usage_with_profile(&event, profile),
+                    Ok(None)
+                );
+            }
+        }
+        for choices in [
+            json!([]),
+            json!([null]),
+            json!([{}]),
+            json!([{"index":0,"delta":{},"finish_reason":null}]),
+            json!([{"index":0,"delta":{},"finish_reason":"unknown"}]),
+            json!([{"index":0,"delta":{},"finish_reason":7}]),
+            json!([{"index":1,"delta":{},"finish_reason":"stop"}]),
+            json!([{"index":"0","delta":{},"finish_reason":"stop"}]),
+            json!([{"index":0,"delta":null,"finish_reason":"stop"}]),
+            json!([{"index":0,"finish_reason":"stop"}]),
+            json!([base["choices"][0], {"index":1,"delta":{},"finish_reason":null}]),
+            json!([base["choices"][0], base["choices"][0]]),
+        ] {
+            let mut event = base.clone();
+            event["choices"] = choices;
+            assert_eq!(
+                qualify_openai_stream_usage_with_profile(&event, profile),
+                Err(StreamUsageError::NonFinalUsage),
+                "{event}"
+            );
+        }
+        for object in [json!(null), json!("chat.completion"), json!(42)] {
+            let mut event = base.clone();
+            event["object"] = object;
+            assert_eq!(
+                qualify_openai_stream_usage_with_profile(&event, profile),
+                Err(StreamUsageError::InvalidChunk)
+            );
+        }
+        let mut event = base;
+        event["error"] = Value::Null;
+        assert_eq!(
+            qualify_openai_stream_usage_with_profile(&event, profile),
+            Err(StreamUsageError::InvalidChunk)
+        );
     }
 
     #[test]

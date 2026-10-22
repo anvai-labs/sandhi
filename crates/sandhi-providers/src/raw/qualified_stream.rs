@@ -37,12 +37,13 @@ impl QualifiedStreamObservation {
 pub(super) fn observe(
     inner: RawChunkStream,
     guard: Option<AttemptGuard>,
+    profile: sandhi_core::usage::OpenAiStreamUsageProfile,
 ) -> (RawChunkStream, QualifiedStreamObservation) {
     let (sender, receiver) = watch::channel(QualifiedStreamSnapshot::default());
     (
         Box::pin(QualifiedStream {
             inner,
-            observer: OpenAiStreamUsageObserver::new(),
+            observer: OpenAiStreamUsageObserver::with_profile(profile),
             sender,
             guard,
             outcome: None,
@@ -165,114 +166,128 @@ mod tests {
 
     #[tokio::test]
     async fn qualified_stream_retains_evidence_across_terminal_paths() {
-        for mode in [
-            "unpolled",
-            "usage_drop",
-            "done_drop",
-            "timeout_drop",
-            "eof",
-            "missing_done",
-            "conflict",
-            "malformed",
-            "post_done",
-            "transport",
-            "idle",
+        for profile in [
+            sandhi_core::usage::OpenAiStreamUsageProfile::OpenAi,
+            sandhi_core::usage::OpenAiStreamUsageProfile::ZaiFinalChoice,
+            sandhi_core::usage::OpenAiStreamUsageProfile::DeepSeekFinalChoice,
         ] {
-            let (context, receiver) = AttemptContext::channel("execution", 4).unwrap();
-            let guard = context.begin("inferflux", Some("test")).unwrap();
-            let mut chunks = vec![Ok(Bytes::from_static(USAGE))];
-            if matches!(mode, "eof" | "done_drop" | "post_done") {
-                chunks.push(Ok(Bytes::from_static(DONE)));
-            }
-            if mode == "conflict" {
-                chunks.push(Ok(Bytes::from(
-                    String::from_utf8_lossy(USAGE).replace(":6", ":7"),
-                )));
-            }
-            if mode == "malformed" || mode == "post_done" {
-                chunks.push(Ok(Bytes::from_static(b"data: nope\n\n")));
-            }
-            if mode == "transport" {
-                chunks.push(Err(ProviderError::Transport("lost body".into())));
-            }
-            let expected_bytes: Vec<u8> = chunks
-                .iter()
-                .filter_map(|c| c.as_ref().ok())
-                .flat_map(|b| b.iter().copied())
-                .collect();
-            let inner: RawChunkStream = if mode == "idle" {
-                super::super::with_idle_timeout(
-                    Box::pin(stream::iter(chunks).chain(stream::pending())),
-                    Some(Duration::from_millis(1)),
+            let usage = String::from_utf8_lossy(USAGE).into_owned();
+            let usage = if profile != sandhi_core::usage::OpenAiStreamUsageProfile::OpenAi {
+                usage.replace(
+                    "\"choices\":[]",
+                    "\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]",
                 )
             } else {
-                Box::pin(stream::iter(chunks))
+                usage
             };
-            let drops = Arc::new(AtomicUsize::new(0));
-            let (mut stream, observation) = observe(
-                Box::pin(DropObservedStream(inner, drops.clone())),
-                Some(guard),
-            );
-            let mut forwarded = Vec::new();
-            if mode != "unpolled" {
-                let chunk = stream.next().await.unwrap().unwrap();
-                forwarded.extend_from_slice(&chunk);
-                let snapshot = observation.snapshot();
-                assert_eq!(snapshot.usage.unwrap().tokens_in, 6);
-                assert_eq!(snapshot.outcome, None, "usage is not delivery success");
-                if mode == "done_drop" {
-                    forwarded.extend_from_slice(&stream.next().await.unwrap().unwrap());
-                    assert!(observation.snapshot().protocol_done);
-                    assert_eq!(observation.snapshot().outcome, None);
-                } else if !matches!(mode, "usage_drop" | "timeout_drop") {
-                    while let Some(chunk) = stream.next().await {
-                        if let Ok(chunk) = chunk {
-                            forwarded.extend_from_slice(&chunk);
-                        }
-                    }
-                    assert_eq!(forwarded, expected_bytes, "including malformed bytes");
-                    assert!(stream.next().await.is_none(), "terminal stream is fused");
-                    assert_eq!(
-                        drops.load(Ordering::SeqCst),
-                        1,
-                        "release inner while retaining wrapper: {mode}"
-                    );
+            for mode in [
+                "unpolled",
+                "usage_drop",
+                "done_drop",
+                "timeout_drop",
+                "eof",
+                "missing_done",
+                "conflict",
+                "malformed",
+                "post_done",
+                "transport",
+                "idle",
+            ] {
+                let (context, receiver) = AttemptContext::channel("execution", 4).unwrap();
+                let guard = context.begin("inferflux", Some("test")).unwrap();
+                let mut chunks = vec![Ok(Bytes::from(usage.clone()))];
+                if matches!(mode, "eof" | "done_drop" | "post_done") {
+                    chunks.push(Ok(Bytes::from_static(DONE)));
                 }
-            }
-            if mode == "timeout_drop" {
-                context.mark_timeout();
-            }
-            drop(stream);
-            assert_eq!(
-                drops.load(Ordering::SeqCst),
-                1,
-                "exactly one release: {mode}"
-            );
-            let snapshot = observation.clone().snapshot();
-            let expected = match mode {
-                "unpolled" | "usage_drop" | "done_drop" => AttemptOutcome::Cancelled,
-                "timeout_drop" | "idle" => AttemptOutcome::Timeout,
-                "transport" => AttemptOutcome::TransportError,
-                "eof" => AttemptOutcome::Success,
-                _ => AttemptOutcome::IncompleteStream,
-            };
-            assert_eq!(snapshot.outcome, Some(expected), "{mode}");
-            assert_eq!(snapshot.usage.is_some(), mode != "unpolled");
-            assert_eq!(
-                snapshot.qualification_error.is_some(),
-                matches!(
-                    mode,
-                    "missing_done" | "conflict" | "malformed" | "post_done"
-                )
-            );
-            let observations = receiver.drain();
-            assert_eq!(observations.len(), 2, "one terminal: {mode}");
-            assert_eq!(observations[0].attempt_id, observations[1].attempt_id);
-            assert_eq!(observations[1].execution_id, "execution");
-            assert!(
-                matches!(&observations[1].phase, AttemptPhase::Terminal { outcome, usage, usage_completeness, .. }
+                if mode == "conflict" {
+                    chunks.push(Ok(Bytes::from(usage.replace(":6", ":7"))));
+                }
+                if mode == "malformed" || mode == "post_done" {
+                    chunks.push(Ok(Bytes::from_static(b"data: nope\n\n")));
+                }
+                if mode == "transport" {
+                    chunks.push(Err(ProviderError::Transport("lost body".into())));
+                }
+                let expected_bytes: Vec<u8> = chunks
+                    .iter()
+                    .filter_map(|c| c.as_ref().ok())
+                    .flat_map(|b| b.iter().copied())
+                    .collect();
+                let inner: RawChunkStream = if mode == "idle" {
+                    super::super::with_idle_timeout(
+                        Box::pin(stream::iter(chunks).chain(stream::pending())),
+                        Some(Duration::from_millis(1)),
+                    )
+                } else {
+                    Box::pin(stream::iter(chunks))
+                };
+                let drops = Arc::new(AtomicUsize::new(0));
+                let (mut stream, observation) = observe(
+                    Box::pin(DropObservedStream(inner, drops.clone())),
+                    Some(guard),
+                    profile,
+                );
+                let mut forwarded = Vec::new();
+                if mode != "unpolled" {
+                    let chunk = stream.next().await.unwrap().unwrap();
+                    forwarded.extend_from_slice(&chunk);
+                    let snapshot = observation.snapshot();
+                    assert_eq!(snapshot.usage.unwrap().tokens_in, 6);
+                    assert_eq!(snapshot.outcome, None, "usage is not delivery success");
+                    if mode == "done_drop" {
+                        forwarded.extend_from_slice(&stream.next().await.unwrap().unwrap());
+                        assert!(observation.snapshot().protocol_done);
+                        assert_eq!(observation.snapshot().outcome, None);
+                    } else if !matches!(mode, "usage_drop" | "timeout_drop") {
+                        while let Some(chunk) = stream.next().await {
+                            if let Ok(chunk) = chunk {
+                                forwarded.extend_from_slice(&chunk);
+                            }
+                        }
+                        assert_eq!(forwarded, expected_bytes, "including malformed bytes");
+                        assert!(stream.next().await.is_none(), "terminal stream is fused");
+                        assert_eq!(
+                            drops.load(Ordering::SeqCst),
+                            1,
+                            "release inner while retaining wrapper: {mode}"
+                        );
+                    }
+                }
+                if mode == "timeout_drop" {
+                    context.mark_timeout();
+                }
+                drop(stream);
+                assert_eq!(
+                    drops.load(Ordering::SeqCst),
+                    1,
+                    "exactly one release: {mode}"
+                );
+                let snapshot = observation.clone().snapshot();
+                let expected = match mode {
+                    "unpolled" | "usage_drop" | "done_drop" => AttemptOutcome::Cancelled,
+                    "timeout_drop" | "idle" => AttemptOutcome::Timeout,
+                    "transport" => AttemptOutcome::TransportError,
+                    "eof" => AttemptOutcome::Success,
+                    _ => AttemptOutcome::IncompleteStream,
+                };
+                assert_eq!(snapshot.outcome, Some(expected), "{mode}");
+                assert_eq!(snapshot.usage.is_some(), mode != "unpolled");
+                assert_eq!(
+                    snapshot.qualification_error.is_some(),
+                    matches!(
+                        mode,
+                        "missing_done" | "conflict" | "malformed" | "post_done"
+                    )
+                );
+                let observations = receiver.drain();
+                assert_eq!(observations.len(), 2, "one terminal: {mode}");
+                assert_eq!(observations[0].attempt_id, observations[1].attempt_id);
+                assert_eq!(observations[1].execution_id, "execution");
+                assert!(
+                    matches!(&observations[1].phase, AttemptPhase::Terminal { outcome, usage, usage_completeness, .. }
                 if *outcome == expected && *usage == snapshot.usage && *usage_completeness == if mode == "unpolled" { UsageCompleteness::Unavailable } else { UsageCompleteness::Final })
-            );
+                );
+            }
         }
     }
 
@@ -287,6 +302,7 @@ mod tests {
             let (mut stream, observation) = observe(
                 Box::pin(stream::iter([Ok(Bytes::from_static(USAGE))])),
                 Some(guard),
+                Default::default(),
             );
             stream.next().await.unwrap().unwrap();
             drop(stream);
@@ -297,8 +313,11 @@ mod tests {
             );
             assert_eq!(context.dropped_observations(), 1);
         }
-        let (mut stream, observation) =
-            observe(Box::pin(stream::iter([Ok(Bytes::from_static(DONE))])), None);
+        let (mut stream, observation) = observe(
+            Box::pin(stream::iter([Ok(Bytes::from_static(DONE))])),
+            None,
+            Default::default(),
+        );
         while stream.next().await.is_some() {}
         assert_eq!(observation.snapshot().usage, None);
         assert_eq!(
