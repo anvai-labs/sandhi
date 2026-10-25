@@ -131,6 +131,7 @@ async fn independent_clients_share_subscription_but_not_identity_or_authority() 
             Some(0),
             None,
             None,
+            None,
         )
         .with_credential_expiry(4_000_000_000);
     let keys = KeyStore::new();
@@ -259,6 +260,7 @@ async fn subscription_stream_enforces_idle_and_body_limits_without_replay() {
                 "synthetic",
                 Default::default(),
                 Some(0),
+                None,
                 None,
                 None,
             )

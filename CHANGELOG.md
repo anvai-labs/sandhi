@@ -21,6 +21,17 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ### Changed
 
+- Stream-setup (time-to-first-byte) timeout default raised from 30s to 90s
+  (`TimeoutConfig::stream_setup`): measured glm-5.3 cache-miss prefills of
+  ~50K-token prompts through a chained LAN gateway regularly exceed 30s
+  before response headers; the old bound converted a healthy-but-slow
+  prefill into a 504 plus a full re-prefill retry. The bound is now also
+  configurable per transport — `stream_setup_timeout_secs` on
+  `ProviderTransportConfig`, every typed factory constructor, and the
+  Python/Node bindings (`provider(...)` / `openai_compat(...)` /
+  `openai_responses(...)`), mirroring `stream_idle_timeout_secs`. `None`
+  inherits the new default.
+
 - Policy request-inspection ceiling raised from 256 KiB to 4 MiB
   (`max_body_bytes`, issue #380): agentic client sessions exceed 256 KiB
   mid-conversation and were denied fail-closed. Evaluator text-view caps

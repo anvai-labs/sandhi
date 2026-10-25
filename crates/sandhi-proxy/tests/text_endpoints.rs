@@ -36,6 +36,7 @@ async fn setup(
             Some(0),
             None,
             None,
+            None,
         )
     } else {
         ProviderRuntime::new().openai_compat(
@@ -44,6 +45,7 @@ async fn setup(
             "upstream-secret",
             Default::default(),
             Some(0),
+            None,
             None,
             None,
         )

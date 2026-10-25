@@ -51,6 +51,14 @@ pub struct TimeoutConfig {
     pub complete: Duration,
     /// Bound on stream *setup* (POST → response headers), per attempt. Generation streams
     /// after headers, so this only limits time-to-first-byte, never a long generation.
+    ///
+    /// The 90s default (raised from 30s) accommodates measured first-token latencies on
+    /// cache-miss prefills of large prompts: a ~50K-token payload whose provider prompt
+    /// cache misses (observed on glm-5.3 via a chained LAN gateway) regularly exceeds 30s
+    /// before headers. 30s turned a slow-but-healthy prefill into a 504 and a full retry —
+    /// strictly worse than waiting, since the retry re-prefills everything. It matches the
+    /// idle default's magnitude (several missed keepalives) rather than the whole-call
+    /// `complete` bound, and stays per-attempt so retries still get a fresh budget.
     pub stream_setup: Duration,
     /// Max gap between stream items; `None` disables. Providers emit SSE keepalives every
     /// ~15–30s, so the default (90s) is several missed keepalives — a strong stall signal.
@@ -62,7 +70,7 @@ impl Default for TimeoutConfig {
     fn default() -> Self {
         Self {
             complete: Duration::from_secs(120),
-            stream_setup: Duration::from_secs(30),
+            stream_setup: Duration::from_secs(90),
             idle: Some(Duration::from_secs(90)),
         }
     }
@@ -426,6 +434,17 @@ mod tests {
     use sandhi_core::UsageCompleteness;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    #[test]
+    fn timeout_config_default_pinned() {
+        let timeouts = TimeoutConfig::default();
+        assert_eq!(timeouts.complete, Duration::from_secs(120));
+        // 90s, not 30s: measured cache-miss prefills of ~50K-token prompts (glm-5.3
+        // through a chained LAN gateway) exceed 30s to first byte. Failing fast there
+        // converted a healthy-but-slow prefill into a 504 + full re-prefill retry.
+        assert_eq!(timeouts.stream_setup, Duration::from_secs(90));
+        assert_eq!(timeouts.idle, Some(Duration::from_secs(90)));
+    }
 
     /// A test double: returns queued results in order and counts how many times it was called.
     struct Flaky {

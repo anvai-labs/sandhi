@@ -126,6 +126,9 @@ pub struct ProviderTransportConfig {
     /// is an explicit assertion by the caller that replay is safe for this provider contract.
     pub max_retries: Option<u32>,
     pub timeout_secs: Option<f64>,
+    /// Bound on stream setup (POST → response headers); `None` inherits the
+    /// [`crate::TimeoutConfig`] default.
+    pub stream_setup_timeout_secs: Option<f64>,
     pub stream_idle_timeout_secs: Option<f64>,
     pub anthropic_auth_scheme: AnthropicAuthScheme,
     pub gemini_auth_scheme: GeminiAuthScheme,
@@ -148,6 +151,7 @@ impl ProviderTransportConfig {
             headers: http::HeaderMap::new(),
             max_retries: None,
             timeout_secs: None,
+            stream_setup_timeout_secs: None,
             stream_idle_timeout_secs: None,
             anthropic_auth_scheme: AnthropicAuthScheme::ApiKey,
             gemini_auth_scheme: GeminiAuthScheme::ApiKey,
@@ -224,6 +228,9 @@ fn build_raw_forwarder(config: &ProviderTransportConfig) -> crate::raw::RawForwa
     let mut timeouts = TimeoutConfig::default();
     if let Some(secs) = config.timeout_secs {
         timeouts.complete = std::time::Duration::from_secs_f64(secs.max(0.001));
+    }
+    if let Some(secs) = config.stream_setup_timeout_secs {
+        timeouts.stream_setup = std::time::Duration::from_secs_f64(secs.max(0.001));
     }
     if let Some(secs) = config.stream_idle_timeout_secs {
         timeouts.idle = Some(std::time::Duration::from_secs_f64(secs.max(0.001)));
@@ -577,6 +584,9 @@ impl ProviderRuntime {
         if let Some(secs) = config.timeout_secs {
             timeouts.complete = std::time::Duration::from_secs_f64(secs.max(0.001));
         }
+        if let Some(secs) = config.stream_setup_timeout_secs {
+            timeouts.stream_setup = std::time::Duration::from_secs_f64(secs.max(0.001));
+        }
         if let Some(secs) = config.stream_idle_timeout_secs {
             timeouts.idle = Some(std::time::Duration::from_secs_f64(secs.max(0.001)));
         }
@@ -592,6 +602,7 @@ impl ProviderRuntime {
         headers: http::HeaderMap,
         max_retries: Option<u32>,
         timeout_secs: Option<f64>,
+        stream_setup_timeout_secs: Option<f64>,
         stream_idle_timeout_secs: Option<f64>,
     ) -> ProviderHandle {
         let slug = slug.into();
@@ -604,6 +615,7 @@ impl ProviderRuntime {
         config.headers = headers;
         config.max_retries = max_retries;
         config.timeout_secs = timeout_secs;
+        config.stream_setup_timeout_secs = stream_setup_timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
         let raw_forwarder = Some(build_raw_forwarder(&config));
         let raw = self.transport(config);
@@ -628,6 +640,7 @@ impl ProviderRuntime {
         headers: http::HeaderMap,
         max_retries: Option<u32>,
         timeout_secs: Option<f64>,
+        stream_setup_timeout_secs: Option<f64>,
         stream_idle_timeout_secs: Option<f64>,
     ) -> ProviderHandle {
         let slug = slug.into();
@@ -640,6 +653,7 @@ impl ProviderRuntime {
         config.headers = headers;
         config.max_retries = max_retries;
         config.timeout_secs = timeout_secs;
+        config.stream_setup_timeout_secs = stream_setup_timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
         let raw_forwarder = Some(build_raw_forwarder(&config));
         let raw = self.transport(config);
@@ -668,6 +682,7 @@ impl ProviderRuntime {
         headers: http::HeaderMap,
         max_retries: Option<u32>,
         timeout_secs: Option<f64>,
+        stream_setup_timeout_secs: Option<f64>,
         stream_idle_timeout_secs: Option<f64>,
     ) -> ProviderHandle {
         let slug = slug.into();
@@ -680,6 +695,7 @@ impl ProviderRuntime {
         config.headers = headers;
         config.max_retries = max_retries;
         config.timeout_secs = timeout_secs;
+        config.stream_setup_timeout_secs = stream_setup_timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
         config.openai_responses_profile = OpenAiResponsesProfile::ChatGptCodex;
         // Subscription payloads must always pass through the constrained codec.
@@ -708,6 +724,7 @@ impl ProviderRuntime {
         headers: http::HeaderMap,
         max_retries: Option<u32>,
         timeout_secs: Option<f64>,
+        stream_setup_timeout_secs: Option<f64>,
         stream_idle_timeout_secs: Option<f64>,
     ) -> ProviderHandle {
         let mut config =
@@ -716,6 +733,7 @@ impl ProviderRuntime {
         config.headers = headers;
         config.max_retries = max_retries;
         config.timeout_secs = timeout_secs;
+        config.stream_setup_timeout_secs = stream_setup_timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
         let raw_forwarder = Some(build_raw_forwarder(&config));
         let raw = self.transport(config);
@@ -737,6 +755,7 @@ impl ProviderRuntime {
         headers: http::HeaderMap,
         max_retries: Option<u32>,
         timeout_secs: Option<f64>,
+        stream_setup_timeout_secs: Option<f64>,
         stream_idle_timeout_secs: Option<f64>,
     ) -> ProviderHandle {
         let mut config =
@@ -744,6 +763,7 @@ impl ProviderRuntime {
         config.headers = headers;
         config.max_retries = max_retries;
         config.timeout_secs = timeout_secs;
+        config.stream_setup_timeout_secs = stream_setup_timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
         let raw_forwarder = Some(build_raw_forwarder(&config));
         let raw = self.transport(config);
@@ -766,6 +786,7 @@ impl ProviderRuntime {
         headers: http::HeaderMap,
         max_retries: Option<u32>,
         timeout_secs: Option<f64>,
+        stream_setup_timeout_secs: Option<f64>,
         stream_idle_timeout_secs: Option<f64>,
     ) -> ProviderHandle {
         let mut config =
@@ -774,6 +795,7 @@ impl ProviderRuntime {
         config.headers = headers;
         config.max_retries = max_retries;
         config.timeout_secs = timeout_secs;
+        config.stream_setup_timeout_secs = stream_setup_timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
         let raw_forwarder = Some(build_raw_forwarder(&config));
         let raw = self.transport(config);
@@ -795,6 +817,7 @@ impl ProviderRuntime {
         headers: http::HeaderMap,
         max_retries: Option<u32>,
         timeout_secs: Option<f64>,
+        stream_setup_timeout_secs: Option<f64>,
         stream_idle_timeout_secs: Option<f64>,
     ) -> ProviderHandle {
         let mut config =
@@ -802,6 +825,7 @@ impl ProviderRuntime {
         config.headers = headers;
         config.max_retries = max_retries;
         config.timeout_secs = timeout_secs;
+        config.stream_setup_timeout_secs = stream_setup_timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
         let raw_forwarder = Some(build_raw_forwarder(&config));
         let raw = self.transport(config);
@@ -826,6 +850,7 @@ impl ProviderRuntime {
         headers: http::HeaderMap,
         max_retries: Option<u32>,
         timeout_secs: Option<f64>,
+        stream_setup_timeout_secs: Option<f64>,
         stream_idle_timeout_secs: Option<f64>,
     ) -> Result<ProviderHandle, ProviderError> {
         let spec = crate::resolve_openai_compat_provider(provider).ok_or_else(|| {
@@ -838,6 +863,7 @@ impl ProviderRuntime {
             headers,
             max_retries,
             timeout_secs,
+            stream_setup_timeout_secs,
             stream_idle_timeout_secs,
         ))
     }
@@ -1851,6 +1877,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert_eq!(openai.family(), ProviderFamily::OpenAiCompat);
 
@@ -1859,6 +1886,7 @@ mod tests {
             "k",
             crate::AnthropicAuthScheme::ApiKey,
             HeaderMap::new(),
+            None,
             None,
             None,
             None,
@@ -1873,6 +1901,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert_eq!(gemini.family(), ProviderFamily::Gemini);
 
@@ -1880,6 +1909,7 @@ mod tests {
             "https://api.cohere.com",
             "k",
             HeaderMap::new(),
+            None,
             None,
             None,
             None,
@@ -1897,6 +1927,7 @@ mod tests {
             "k",
             crate::AnthropicAuthScheme::ApiKey,
             HeaderMap::new(),
+            None,
             None,
             None,
             None,
@@ -1933,6 +1964,7 @@ mod tests {
             "k",
             crate::AnthropicAuthScheme::ApiKey,
             HeaderMap::new(),
+            None,
             None,
             None,
             None,
@@ -1991,6 +2023,7 @@ mod tests {
             Some(0),
             None,
             None,
+            None,
         );
         let request: ChatRequestV1 = serde_json::from_value(serde_json::json!({
             "schema_version": "1", "model": "claude-test",
@@ -2032,6 +2065,7 @@ mod tests {
             Some(0),
             None,
             None,
+            None,
         );
         let request: ChatRequestV1 = serde_json::from_value(serde_json::json!({
             "schema_version": "1", "model": "gemini-x",
@@ -2064,7 +2098,8 @@ mod tests {
             http::HeaderName::from_static("x-sandhi-run-id"),
             http::HeaderValue::from_static("run-1"),
         );
-        let handle = ProviderRuntime::new().cohere(server.uri(), "k", headers, Some(0), None, None);
+        let handle =
+            ProviderRuntime::new().cohere(server.uri(), "k", headers, Some(0), None, None, None);
         let request: ChatRequestV1 = serde_json::from_value(serde_json::json!({
             "schema_version": "1", "model": "command-r",
             "messages": [{"role": "user", "content": "hi"}]
@@ -2096,7 +2131,8 @@ mod tests {
             http::HeaderName::from_static("x-sandhi-run-id"),
             http::HeaderValue::from_static("run-1"),
         );
-        let handle = ProviderRuntime::new().ollama(server.uri(), "k", headers, Some(0), None, None);
+        let handle =
+            ProviderRuntime::new().ollama(server.uri(), "k", headers, Some(0), None, None, None);
         let request: ChatRequestV1 = serde_json::from_value(serde_json::json!({
             "schema_version": "1", "model": "llama3",
             "messages": [{"role": "user", "content": "hi"}]
@@ -2146,6 +2182,7 @@ mod tests {
                 "key",
                 Default::default(),
                 Some(0),
+                None,
                 None,
                 None,
             );
@@ -2247,6 +2284,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert!(matches!(
             handle
@@ -2318,6 +2356,7 @@ mod tests {
             Some(0),
             None,
             None,
+            None,
         );
         let request: ChatRequestV1 = serde_json::from_value(serde_json::json!({
             "schema_version": "1",
@@ -2359,6 +2398,7 @@ mod tests {
             "k",
             Default::default(),
             Some(0),
+            None,
             None,
             None,
         );
@@ -2716,4 +2756,85 @@ mod tests {
 
     /// Minimal local import so the test compiles without adding a top-level `use`.
     use reqwest::header::HeaderMap;
+
+    /// A byte-level provider whose `stream()` never resolves: the POST stays in setup
+    /// forever, so the only thing that can end the call is the stream-setup deadline.
+    struct NeverSetup;
+
+    #[async_trait]
+    impl crate::Provider for NeverSetup {
+        fn slug(&self) -> &str {
+            "never-setup"
+        }
+
+        async fn complete(
+            &self,
+            _req: crate::ProviderRequest,
+        ) -> Result<crate::ProviderResponse, crate::ProviderError> {
+            std::future::pending().await
+        }
+
+        async fn stream(
+            &self,
+            _req: crate::ProviderRequest,
+        ) -> Result<crate::ByteStream, crate::ProviderError> {
+            std::future::pending().await
+        }
+    }
+
+    fn transport_config(setup_secs: Option<f64>) -> super::ProviderTransportConfig {
+        let mut config = super::ProviderTransportConfig::new(
+            super::ProviderFamily::Ollama,
+            "never-setup",
+            "http://never-setup.invalid",
+            "unused",
+        );
+        config.stream_setup_timeout_secs = setup_secs;
+        config
+    }
+
+    #[tokio::test]
+    async fn stream_setup_override_flows_through_decorate_transport() {
+        let runtime = super::ProviderRuntime::new();
+        let decorated = runtime.decorate_transport(
+            std::sync::Arc::new(NeverSetup),
+            &transport_config(Some(0.05)),
+        );
+        let start = std::time::Instant::now();
+        let outcome = decorated
+            .stream(crate::ProviderRequest::new("m", serde_json::json!({})))
+            .await;
+        // The fired deadline is identified by its exact configured duration: 50ms, not
+        // the 90s default — proof the override reached the decorator's TimeoutConfig.
+        // (Matched by hand because the Ok type — a boxed stream — is not Debug.)
+        let err = match outcome {
+            Err(err) => err,
+            Ok(_) => panic!("a never-setupting provider must hit the setup deadline"),
+        };
+        assert!(matches!(
+            err,
+            crate::ProviderError::Timeout(d)
+                if d == std::time::Duration::from_secs_f64(0.05)
+        ));
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn stream_setup_none_keeps_call_alive_past_a_tiny_window() {
+        // `None` must inherit the 90s default, not fall back to something short: with no
+        // override the same never-setupting call must still be pending after 150ms (i.e.
+        // well past the 50ms used above), then cancel cleanly.
+        let runtime = super::ProviderRuntime::new();
+        let decorated =
+            runtime.decorate_transport(std::sync::Arc::new(NeverSetup), &transport_config(None));
+        let attempt = tokio::time::timeout(
+            std::time::Duration::from_millis(150),
+            decorated.stream(crate::ProviderRequest::new("m", serde_json::json!({}))),
+        )
+        .await;
+        assert!(
+            attempt.is_err(),
+            "no override means the 90s default governs; the call must still be in setup"
+        );
+    }
 }

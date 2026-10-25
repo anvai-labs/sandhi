@@ -41,6 +41,7 @@ fn state_with(
             Some(0),
             None,
             None,
+            None,
         ),
     );
     Arc::new(ProxyState::new(keys, ledger, sink, providers, None))
@@ -731,6 +732,7 @@ async fn same_idempotency_key_inside_the_window_meters_once() {
             Some(0),
             None,
             None,
+            None,
         ),
     );
     let ledger2 = ProxyLedger::durable(store_path.to_str().unwrap(), 1).expect("ledger reopen");
@@ -867,6 +869,7 @@ async fn anthropic_state(upstream: &MockServer, sink: Arc<InMemorySink>) -> Arc<
             sandhi_providers::AnthropicAuthScheme::ApiKey,
             Default::default(),
             Some(0),
+            None,
             None,
             None,
         ),
@@ -1074,6 +1077,7 @@ async fn responses_ingress_same_family_forwards_transparently() {
             Some(0),
             None,
             None,
+            None,
         ),
     );
     let sink = Arc::new(InMemorySink::new());
@@ -1164,6 +1168,7 @@ async fn inferflux_state(upstream: &MockServer, sink: Arc<InMemorySink>) -> Arc<
             "local-key",
             Default::default(),
             Some(0),
+            None,
             None,
             None,
         ),
@@ -1257,6 +1262,7 @@ async fn correlation_id_sent_upstream_equals_the_events_request_id() {
             Some(0),
             None,
             None,
+            None,
         ),
     );
     let sink = Arc::new(InMemorySink::new());
@@ -1337,6 +1343,7 @@ async fn translation_plane_correlation_and_caller_traceparent_reach_the_upstream
             "local-key",
             Default::default(),
             Some(0),
+            None,
             None,
             None,
         ),
@@ -1422,6 +1429,7 @@ async fn transparent_plane_correlation_id_equals_the_events_request_id() {
             "local-key",
             Default::default(),
             Some(0),
+            None,
             None,
             None,
         ),
@@ -1534,6 +1542,7 @@ async fn inferflux_attribution_never_reaches_the_upstream() {
             "local-key",
             Default::default(),
             Some(0),
+            None,
             None,
             None,
         ),
@@ -1775,6 +1784,7 @@ async fn derived_sessions_are_scoped_by_virtual_key() {
             Some(0),
             None,
             None,
+            None,
         ),
     );
     let app = build_app(Arc::new(ProxyState::new(
@@ -1843,6 +1853,7 @@ async fn inferflux_affinity_header_fires_for_a_derived_session_too() {
             "local-key",
             Default::default(),
             Some(0),
+            None,
             None,
             None,
         ),
@@ -2045,6 +2056,7 @@ async fn attribution_headers_on_an_unbound_key_are_rejected() {
             "REAL-KEY",
             Default::default(),
             Some(0),
+            None,
             None,
             None,
         ),
@@ -2494,6 +2506,7 @@ async fn cross_family_ingress_routes_through_the_typed_translation_plane() {
             Some(0),
             None,
             None,
+            None,
         ),
     );
     let sink = Arc::new(InMemorySink::new());
@@ -2566,6 +2579,7 @@ async fn discovery_lists_only_the_models_the_key_permits() {
             upstream.uri(),
             "REAL-KEY",
             Default::default(),
+            None,
             None,
             None,
             None,
@@ -2876,6 +2890,7 @@ async fn rate_limited_requests_are_refused_without_consuming_budget() {
             None,
             None,
             None,
+            None,
         ),
     );
     let sink = Arc::new(InMemorySink::default());
@@ -3106,6 +3121,7 @@ fn paced_anthropic_state(upstream_uri: String, sink: Arc<InMemorySink>) -> Arc<P
             sandhi_providers::AnthropicAuthScheme::ApiKey,
             Default::default(),
             Some(0),
+            None,
             None,
             None,
         ),
@@ -3436,6 +3452,7 @@ async fn open_streams_hold_admission_slots_until_the_body_completes() {
                     Some(0),
                     None,
                     None,
+                    None,
                 ),
             );
             providers
@@ -3585,6 +3602,7 @@ async fn translation_plane_streams_hold_admission_slots_too() {
                     "REAL-KEY",
                     Default::default(),
                     Some(0),
+                    None,
                     None,
                     None,
                 ),
@@ -3774,6 +3792,7 @@ async fn serve_with_limits(
                     "REAL-KEY",
                     Default::default(),
                     Some(0),
+                    None,
                     None,
                     None,
                 ),
@@ -4313,6 +4332,7 @@ async fn owned_buffered_unsupported_shapes_refuse_before_admission() {
                     "key",
                     Default::default(),
                     Some(1),
+                    None,
                     None,
                     None,
                 ),

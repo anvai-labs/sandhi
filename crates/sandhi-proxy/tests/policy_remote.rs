@@ -305,6 +305,7 @@ async fn remote_findings_and_failures_hold_zero_provider_calls() {
             None,
             None,
             None,
+            None,
         );
         let mut state = ProxyState::new(
             keys,

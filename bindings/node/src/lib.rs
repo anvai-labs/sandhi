@@ -111,6 +111,7 @@ impl JsProviderRuntime {
         max_retries: Option<u32>,
         timeout_secs: Option<f64>,
         stream_idle_timeout_secs: Option<f64>,
+        stream_setup_timeout_secs: Option<f64>,
     ) -> Result<TypedProvider> {
         let headers = parse_headers_json(headers_json)?;
         let handle = self.inner.openai_compat(
@@ -120,6 +121,7 @@ impl JsProviderRuntime {
             headers,
             max_retries,
             timeout_secs,
+            stream_setup_timeout_secs,
             stream_idle_timeout_secs,
         );
         Ok(TypedProvider { provider, handle })
@@ -136,6 +138,7 @@ impl JsProviderRuntime {
         max_retries: Option<u32>,
         timeout_secs: Option<f64>,
         stream_idle_timeout_secs: Option<f64>,
+        stream_setup_timeout_secs: Option<f64>,
     ) -> Result<TypedProvider> {
         let handle = self.inner.openai_responses(
             provider.clone(),
@@ -144,6 +147,7 @@ impl JsProviderRuntime {
             parse_headers_json(headers_json)?,
             max_retries,
             timeout_secs,
+            stream_setup_timeout_secs,
             stream_idle_timeout_secs,
         );
         Ok(TypedProvider { provider, handle })
@@ -163,6 +167,7 @@ impl JsProviderRuntime {
         stream_idle_timeout_secs: Option<f64>,
         auth_scheme: Option<String>,
         protocol: Option<String>,
+        stream_setup_timeout_secs: Option<f64>,
     ) -> Result<TypedProvider> {
         let normalized = provider.trim().to_ascii_lowercase();
         let protocol = parse_openai_protocol(protocol.as_deref())?;
@@ -208,6 +213,7 @@ protocol; other families always authenticate with 'Authorization: Bearer' \
                     headers,
                     max_retries,
                     timeout_secs,
+                    stream_setup_timeout_secs,
                     stream_idle_timeout_secs,
                 )
             } else {
@@ -218,6 +224,7 @@ protocol; other families always authenticate with 'Authorization: Bearer' \
                     headers,
                     max_retries,
                     timeout_secs,
+                    stream_setup_timeout_secs,
                     stream_idle_timeout_secs,
                 )
             }
@@ -230,6 +237,7 @@ protocol; other families always authenticate with 'Authorization: Bearer' \
                     parse_headers_json(headers_json.clone())?,
                     max_retries,
                     timeout_secs,
+                    stream_setup_timeout_secs,
                     stream_idle_timeout_secs,
                 ),
                 "gemini" | "google" => self.inner.gemini(
@@ -239,6 +247,7 @@ protocol; other families always authenticate with 'Authorization: Bearer' \
                     parse_headers_json(headers_json.clone())?,
                     max_retries,
                     timeout_secs,
+                    stream_setup_timeout_secs,
                     stream_idle_timeout_secs,
                 ),
                 "cohere" => self.inner.cohere(
@@ -247,6 +256,7 @@ protocol; other families always authenticate with 'Authorization: Bearer' \
                     parse_headers_json(headers_json.clone())?,
                     max_retries,
                     timeout_secs,
+                    stream_setup_timeout_secs,
                     stream_idle_timeout_secs,
                 ),
                 "ollama" => self.inner.ollama(
@@ -255,6 +265,7 @@ protocol; other families always authenticate with 'Authorization: Bearer' \
                     parse_headers_json(headers_json.clone())?,
                     max_retries,
                     timeout_secs,
+                    stream_setup_timeout_secs,
                     stream_idle_timeout_secs,
                 ),
                 _ => {
@@ -267,6 +278,7 @@ protocol; other families always authenticate with 'Authorization: Bearer' \
                             headers,
                             max_retries,
                             timeout_secs,
+                            stream_setup_timeout_secs,
                             stream_idle_timeout_secs,
                         )
                     } else {
@@ -278,6 +290,7 @@ protocol; other families always authenticate with 'Authorization: Bearer' \
                                 headers,
                                 max_retries,
                                 timeout_secs,
+                                stream_setup_timeout_secs,
                                 stream_idle_timeout_secs,
                             )
                             .map_err(|error| typed_provider_error(error, &normalized))?
