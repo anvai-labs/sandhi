@@ -2821,9 +2821,10 @@ mod tests {
 
     #[tokio::test]
     async fn stream_setup_none_keeps_call_alive_past_a_tiny_window() {
-        // `None` must inherit the 90s default, not fall back to something short: with no
-        // override the same never-setupting call must still be pending after 150ms (i.e.
-        // well past the 50ms used above), then cancel cleanly.
+        // `None` must not silently shrink the window: with no override the same
+        // never-setupting call must still be pending after 150ms — far past the
+        // 50ms override above. (This bounds the None path from below only; the
+        // exact 90s value is pinned by resilience::tests::timeout_config_default_pinned.)
         let runtime = super::ProviderRuntime::new();
         let decorated =
             runtime.decorate_transport(std::sync::Arc::new(NeverSetup), &transport_config(None));

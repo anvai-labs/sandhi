@@ -101,17 +101,19 @@ impl PyProviderRuntime {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (provider, base_url, api_key, timeout_secs=None, stream_setup_timeout_secs=None, stream_idle_timeout_secs=None, max_retries=None, headers_json=None))]
+    #[pyo3(signature = (provider, base_url, api_key, timeout_secs=None, stream_idle_timeout_secs=None, max_retries=None, headers_json=None, stream_setup_timeout_secs=None))]
     fn openai_compat(
         &self,
         provider: String,
         base_url: String,
         api_key: String,
         timeout_secs: Option<f64>,
-        stream_setup_timeout_secs: Option<f64>,
         stream_idle_timeout_secs: Option<f64>,
         max_retries: Option<u32>,
         headers_json: Option<String>,
+        // Appended last (like the Node binding): inserting between the two
+        // timeout slots would silently rebind positional callers' 5th arg.
+        stream_setup_timeout_secs: Option<f64>,
     ) -> PyResult<TypedProvider> {
         let handle = self.inner.openai_compat(
             provider.clone(),
@@ -127,17 +129,19 @@ impl PyProviderRuntime {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (provider, base_url, bearer_token, timeout_secs=None, stream_setup_timeout_secs=None, stream_idle_timeout_secs=None, max_retries=None, headers_json=None))]
+    #[pyo3(signature = (provider, base_url, bearer_token, timeout_secs=None, stream_idle_timeout_secs=None, max_retries=None, headers_json=None, stream_setup_timeout_secs=None))]
     fn openai_responses(
         &self,
         provider: String,
         base_url: String,
         bearer_token: String,
         timeout_secs: Option<f64>,
-        stream_setup_timeout_secs: Option<f64>,
         stream_idle_timeout_secs: Option<f64>,
         max_retries: Option<u32>,
         headers_json: Option<String>,
+        // Appended last (like the Node binding): inserting between the two
+        // timeout slots would silently rebind positional callers' 5th arg.
+        stream_setup_timeout_secs: Option<f64>,
     ) -> PyResult<TypedProvider> {
         let handle = self.inner.openai_responses(
             provider.clone(),
@@ -153,7 +157,7 @@ impl PyProviderRuntime {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (provider, model, api_key, base_url=None, timeout_secs=None, stream_setup_timeout_secs=None, stream_idle_timeout_secs=None, max_retries=None, headers_json=None, auth_scheme=None, protocol=None))]
+    #[pyo3(signature = (provider, model, api_key, base_url=None, timeout_secs=None, stream_idle_timeout_secs=None, max_retries=None, headers_json=None, auth_scheme=None, protocol=None, stream_setup_timeout_secs=None))]
     fn provider(
         &self,
         provider: String,
@@ -161,12 +165,14 @@ impl PyProviderRuntime {
         api_key: String,
         base_url: Option<String>,
         timeout_secs: Option<f64>,
-        stream_setup_timeout_secs: Option<f64>,
         stream_idle_timeout_secs: Option<f64>,
         max_retries: Option<u32>,
         headers_json: Option<String>,
         auth_scheme: Option<String>,
         protocol: Option<String>,
+        // Appended last (like the Node binding): inserting between the two
+        // timeout slots would silently rebind positional callers' args.
+        stream_setup_timeout_secs: Option<f64>,
     ) -> PyResult<TypedProvider> {
         let normalized = provider.trim().to_ascii_lowercase();
         let protocol = parse_openai_protocol(protocol.as_deref())?;

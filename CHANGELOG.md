@@ -29,8 +29,18 @@ A partly published release remains incomplete even when some artifacts are avail
   configurable per transport — `stream_setup_timeout_secs` on
   `ProviderTransportConfig`, every typed factory constructor, and the
   Python/Node bindings (`provider(...)` / `openai_compat(...)` /
-  `openai_responses(...)`), mirroring `stream_idle_timeout_secs`. `None`
-  inherits the new default.
+  `openai_responses(...)`), mirroring `stream_idle_timeout_secs`. In both
+  bindings the new parameter is appended LAST so existing positional callers
+  keep their argument meanings; `None` inherits the new default. Note two
+  deliberate consequences of the raise: (a) callers that opted into retries
+  re-arm a fresh setup budget per attempt, so their worst-case hang against a
+  dead upstream grows in proportion (30s×attempts → 90s×attempts) and the
+  circuit breaker takes proportionally longer to open; (b) `timeout_secs`
+  bounds only non-streaming `complete()` calls — a streaming caller setting
+  `timeout_secs` below 90 no longer gets a coincidental sub-90s first-byte
+  bound and should set `stream_setup_timeout_secs` explicitly. The proxy's
+  configured streaming deadlines (when present) still take precedence over
+  these transport defaults, so proxy paths are unchanged.
 
 - Policy request-inspection ceiling raised from 256 KiB to 4 MiB
   (`max_body_bytes`, issue #380): agentic client sessions exceed 256 KiB
