@@ -1,8 +1,8 @@
 {
   "advisory": "RUSTSEC-2023-0071",
   "status": "not_affected_under_reviewed_usage",
-  "reviewed_on": "2026-09-28",
-  "expires_on": "2026-10-22",
+  "reviewed_on": "2026-10-25",
+  "expires_on": "2026-11-18",
   "adapter": "crates/sandhi-proxy/src/auth.rs",
   "adapter_sha256": "cb14a0b19712dca2c3d9c733f177f66d5577aa3c5b43d60dc61d32ef1239fbb0",
   "packages": {
@@ -17,5 +17,5 @@
       "checksum": "b8573f03f5883dcaebdfcf4725caa1ecb9c15b2ef50c43a07b816e06799bb12d"
     }
   },
-  "note": "2026-10-04 reassessment: adapter changed only by clippy 1.95 MSRV lints \u2014 three Option::map_or(true, f) rewritten to the equivalent is_none_or(f) (lines ~131, ~172, ~690); no change to private-key operation reachability. Prior checksum b31100404cae0eb2b79515dd665249523ac61478eb1f1d85afbbd069cd80f94e. 2026-10-11 independent scoped reassessment: auth.rs changes only the constant_time_eq import from operator to access; helper body and all auth call sites are unchanged, with no manifest/lock changes or new RSA/OIDC use sites/private-key operations. Prior adapter checksum 6505588365cd31ccc76ba6778effc2c7be331bd643149894c1f7a6f2b855c2ae. Existing expiry retained."
+  "note": "2026-10-04 reassessment: adapter changed only by clippy 1.95 MSRV lints \u2014 three Option::map_or(true, f) rewritten to the equivalent is_none_or(f) (lines ~131, ~172, ~690); no change to private-key operation reachability. Prior checksum b31100404cae0eb2b79515dd665249523ac61478eb1f1d85afbbd069cd80f94e. 2026-10-11 independent scoped reassessment: auth.rs changes only the constant_time_eq import from operator to access; helper body and all auth call sites are unchanged, with no manifest/lock changes or new RSA/OIDC use sites/private-key operations. Prior adapter checksum 6505588365cd31ccc76ba6778effc2c7be331bd643149894c1f7a6f2b855c2ae. Existing expiry retained. 2026-10-25 reassessment: expiry lapsed 2026-10-22 with no advisory-relevant change — adapter checksum cb14a0b19712dca2c3d9c733f177f66d5577aa3c5b43d60dc61d32ef1239fbb0 still matches crates/sandhi-proxy/src/auth.rs, the openidconnect 4.0.1 and rsa 0.9.10 Cargo.lock checksums are unchanged, and deny.toml is untouched since the 2026-10-11 assessment (subsequent tree churn is confined to the 0.14.0 workspace version bumps, a rustls 0.23.45→0.23.46 bump, and crates unrelated to the RSA/OIDC path). Review window re-dated 2026-10-25 → 2026-11-18 (24 days, prior convention)."
 }
