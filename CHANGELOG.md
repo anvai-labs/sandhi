@@ -19,6 +19,22 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+## [0.14.1] — 2026-10-25
+
+### Fixed
+
+- Security: four dependency advisories patched across all three lockfiles —
+  rustls-webpki 0.103.15→0.103.16 (RUSTSEC-2026-0382, distrusted intermediates
+  accepted), webpki-roots and webpki-root-certs 1.0.9→1.0.11
+  (RUSTSEC-2026-0381/-0383, distrusted emSign roots), tokio →1.53.3
+  (RUSTSEC-2026-0386, AsyncFd I/O-safety unsoundness). RUSTSEC-2026-0387
+  (crypto-bigint 0.5.5 constant-time variability, no in-range fix while
+  openidconnect pins the 0.13 curve family) is assessed
+  not_affected_under_reviewed_usage in a new machine-checked record; the OIDC
+  advisory gate now validates both records and enforces crypto-bigint
+  containment as a disconnect test. The RUSTSEC-2023-0071 record window was
+  re-dated after independent verification (#387).
+
 ### Changed
 
 - Stream-setup (time-to-first-byte) timeout default raised from 30s to 90s
@@ -1459,6 +1475,7 @@ inline reverse-proxy, the durable store, and both language bindings.
   [#10](https://github.com/anvai-labs/sandhi/pull/10))
 
 [Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.14.0...HEAD
+[0.14.1]: https://github.com/anvai-labs/sandhi/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/anvai-labs/sandhi/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/anvai-labs/sandhi/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/anvai-labs/sandhi/compare/v0.11.0...v0.12.0
