@@ -1006,6 +1006,7 @@ async fn multi_provider_grants_use_existing_accounting_and_correlation_path() {
                 Some(0),
                 None,
                 None,
+                None,
             ),
         );
     }
@@ -1125,6 +1126,7 @@ async fn group_grants_and_delegated_keys_share_budget_alerts_and_authority() {
                 "upstream-only",
                 HeaderMap::new(),
                 Some(0),
+                None,
                 None,
                 None,
             ),

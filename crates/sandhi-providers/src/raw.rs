@@ -127,9 +127,11 @@ impl RawForwarder {
                 ProviderFamily::Anthropic => Some("anthropic-request-id"),
                 _ => None,
             },
-            complete_timeout: Duration::from_secs(120),
-            stream_setup_timeout: Duration::from_secs(30),
-            stream_idle_timeout: Some(Duration::from_secs(90)),
+            // One source of default truth: drift here would disagree with every
+            // factory-built forwarder (which takes TimeoutConfig::default()).
+            complete_timeout: crate::TimeoutConfig::default().complete,
+            stream_setup_timeout: crate::TimeoutConfig::default().stream_setup,
+            stream_idle_timeout: crate::TimeoutConfig::default().idle,
             attempt: None,
         }
     }

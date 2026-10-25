@@ -334,7 +334,13 @@ fn request(
     }
     let body = serde_json::json!({"version":1,"id":job.id,"text":job.text,"joined":job.joined,"timeout_ms":ms.min(d.timeout_ms),"evaluator":d.name,"artifact_sha256":d.artifact_sha256,"code_sha256":d.code_sha256});
     let bytes = serde_json::to_vec(&body).map_err(|_| EvaluationError)?;
-    if bytes.len() > 2097152 {
+    // Frame carries BOTH text views plus JSON overhead: cap at
+    // 2x MAX_EVALUATOR_TEXT_BYTES + slack so the raised per-view bound
+    // (issue #380) is not silently strangled to ~half by the frame limit.
+    if bytes.len()
+        > 2 * sandhi_core::policy::MAX_EVALUATOR_TEXT_BYTES
+            + sandhi_core::policy::MAX_EVALUATOR_TEXT_BYTES / 2
+    {
         return Err(EvaluationError);
     }
     let response = client
@@ -396,7 +402,9 @@ impl ScoreBackend for Remote {
     }
     fn score(&self, input: &Inspection, deadline: Instant) -> Result<f64, EvaluationError> {
         remaining(deadline)?;
-        if input.text.len() > 262144 || input.joined.len() > 262144 {
+        if input.text.len() > sandhi_core::policy::MAX_EVALUATOR_TEXT_BYTES
+            || input.joined.len() > sandhi_core::policy::MAX_EVALUATOR_TEXT_BYTES
+        {
             return Err(EvaluationError);
         }
         let deadline = deadline.min(Instant::now() + self.timeout);

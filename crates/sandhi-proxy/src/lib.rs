@@ -65,9 +65,9 @@ use tower::{Layer, Service as TowerService};
 use time::OffsetDateTime;
 
 use sandhi_core::{
-    billable, AlertRegistry, Backend, ChatRequestV1, FinishReasonV1, KeyStore, LatencySource,
-    ParsedUsage, Policy, RequestMetadataV1, Reservation, Sink, UsageBasis, UsageCompleteness,
-    UsageEvent, UsageV2, VirtualKey,
+    AlertRegistry, Backend, ChatRequestV1, FinishReasonV1, KeyStore, LatencySource, ParsedUsage,
+    Policy, RequestMetadataV1, Reservation, Sink, UsageBasis, UsageCompleteness, UsageEvent,
+    UsageV2, VirtualKey,
 };
 use sandhi_providers::{
     token_estimate::baseline_estimate, ProviderError, ProviderFamily, ProviderHandle,
@@ -304,6 +304,10 @@ pub struct ProxyState {
     /// Concurrent AI requests allowed through the admission boundary. The concurrency layer wraps
     /// the routes outside body extraction, so queued calls do not each allocate a full body.
     pub max_in_flight_ai_requests: usize,
+    /// Budget cost-basis weight for cache-read tokens, basis points
+    /// (10,000 = 1x neutral; 1,000 = 0.1x typical cached-input pricing).
+    /// Startup-only env `SANDHI_CACHE_READ_WEIGHT` (issue #381, TD-0032 interim).
+    pub cache_read_weight_bp: u32,
     // --- TD-0014 P3: connection-level limits (pre-authentication blast-radius controls) ---
     /// Maximum concurrent TCP connections served. At the cap, new accepts are closed without a
     /// response — the AI admission path is where dialect-shaped shedding happens; this is the
@@ -378,6 +382,7 @@ impl ProxyState {
             error_detail_full: false,
             max_request_body_bytes: DEFAULT_MAX_REQUEST_BODY_BYTES,
             max_in_flight_ai_requests: DEFAULT_MAX_IN_FLIGHT_AI_REQUESTS,
+            cache_read_weight_bp: sandhi_core::allowance::Weight::default().basis_points(),
             max_connections: DEFAULT_MAX_CONNECTIONS,
             max_connections_per_ip: DEFAULT_MAX_CONNECTIONS_PER_IP,
             header_read_timeout_secs: DEFAULT_HEADER_READ_TIMEOUT_SECS,
@@ -3121,10 +3126,16 @@ impl RequestAccounting {
             usage.completeness,
             UsageCompleteness::Final | UsageCompleteness::Partial
         );
-        // Settle against the single neutral `billable()` (cache split included, ADR-0005 D4) so the
-        // ledger and the emitted usage event count the same quantity. An unmeasured (failed /
-        // cancelled) call settles `0`, which releases the lease without recording spend.
-        let actual = if measured { billable(&usage) } else { 0 };
+        // Settle against the operator-configured cache-read-weighted billable (10,000 bp =
+        // the neutral `billable()`, ADR-0005 D4) so the ledger and the emitted usage event
+        // count the same quantity. An unmeasured (failed / cancelled) call settles `0`,
+        // which releases the lease without recording spend.
+        let cache_read_bp = self.state.cache_read_weight_bp;
+        let actual = if measured {
+            sandhi_core::billable_weighted(&usage, cache_read_bp)
+        } else {
+            0
+        };
         // TD-0013 D6: the settled quantity is the measured one, even when it exceeds the ceiling
         // the call was admitted against — but the overshoot is counted.
         //
@@ -3255,11 +3266,22 @@ impl RequestAccounting {
         );
         // Retain immutable terminal evidence BEFORE invoking arbitrary best-effort
         // telemetry. A panicking sink must not erase a completed model's usage.
-        let pending = owned.execution.into_settlement(usage.clone());
+        let pending = owned
+            .execution
+            .into_settlement(usage.clone())
+            .with_cache_read_weight(self.state.cache_read_weight_bp);
         let submitted = owned
             .obligation
             .submit(settlement::jobs::Work::Settle(pending));
-        self.emit_usage(&usage, if measured { billable(&usage) } else { 0 }, true);
+        self.emit_usage(
+            &usage,
+            if measured {
+                sandhi_core::billable_weighted(&usage, self.state.cache_read_weight_bp)
+            } else {
+                0
+            },
+            true,
+        );
         let Ok(ticket) = submitted else {
             return false;
         };
@@ -4076,7 +4098,7 @@ mod partial_accounting_tests {
         // `billable()` counts all four categories (ADR-0005 D4). The byte-only fallback would have
         // settled 10 here; the real exposure is three orders of magnitude larger, which is what
         // made this an evasion vector rather than a rounding error.
-        let billed = billable(&usage);
+        let billed = sandhi_core::billable(&usage);
         assert_eq!(billed, 1024 + 2048 + 4096 + 10);
         assert!(
             billed > 100 * (40 / 4),
@@ -4672,7 +4694,7 @@ fn reasoning_survives_event_and_partial_conversion() {
         let event = usage_event("gemini", "m", &RequestMetadataV1::default(), &usage, None);
         assert_eq!(event.billable_tokens(), 140 + thoughts);
         let partial = partial_usage(Some(reported_parts(&usage)), 0);
-        assert_eq!(billable(&partial), 140 + thoughts);
+        assert_eq!(sandhi_core::billable(&partial), 140 + thoughts);
         assert_eq!(partial.reasoning_included, Some(false));
     }
 }

@@ -27,6 +27,22 @@ pub fn billable(u: &UsageV2) -> u64 {
     )
 }
 
+/// Weighted cost basis of a call: [`billable`] with the cache-read term
+/// scaled by `cache_read_bp` basis points (10,000 = neutral). Raw usage
+/// recording and SQL aggregates stay on the neutral formula.
+#[must_use]
+pub fn billable_weighted(u: &UsageV2, cache_read_bp: u32) -> u64 {
+    billable_parts_weighted(
+        u.tokens_in,
+        u.cache_creation_tokens,
+        u.cache_read_tokens,
+        u.tokens_out,
+        u.reasoning_tokens.unwrap_or(0),
+        u.reasoning_included,
+        cache_read_bp,
+    )
+}
+
 /// Legacy D4 compatibility wrapper for callers without a reasoning-inclusion marker.
 /// New measurements should use [`billable_parts_with_reasoning`].
 ///
@@ -59,7 +75,25 @@ pub fn billable_parts(
 
 /// Explicit per-call reasoning semantics. `None` preserves historical accounting; never infer
 /// a new record's marker from provider labels, which may identify a compatible custom server.
+/// Reasoning tokens billed as their own term when the provider reports them
+/// as NOT included in `tokens_out` (or, absent a marker, when they cannot
+/// fit). Shared by the neutral and weighted billable formulas so the two
+/// bases cannot drift apart.
 #[must_use]
+pub(crate) fn unfolded_reasoning(
+    reasoning_tokens: u64,
+    tokens_out: u64,
+    reasoning_included: Option<bool>,
+) -> u64 {
+    if reasoning_included == Some(false)
+        || (reasoning_included.is_none() && reasoning_tokens > tokens_out)
+    {
+        reasoning_tokens
+    } else {
+        0
+    }
+}
+
 pub fn billable_parts_with_reasoning(
     tokens_in: u64,
     cache_creation_tokens: u64,
@@ -68,19 +102,42 @@ pub fn billable_parts_with_reasoning(
     reasoning_tokens: u64,
     reasoning_included: Option<bool>,
 ) -> u64 {
-    let unfolded_reasoning = if reasoning_included == Some(false)
-        || (reasoning_included.is_none() && reasoning_tokens > tokens_out)
-    {
-        reasoning_tokens
-    } else {
-        0
-    };
+    let unfolded_reasoning = unfolded_reasoning(reasoning_tokens, tokens_out, reasoning_included);
     // Saturate, never wrap: a malformed/adversarial upstream returning u64-near-MAX in any one
     // dimension must not wrap the billable total to a small number (silently under-charging the
     // budget and the durable aggregate). Mirrors `reserve`/`check`, which already saturate.
     tokens_in
         .saturating_add(cache_creation_tokens)
         .saturating_add(cache_read_tokens)
+        .saturating_add(tokens_out)
+        .saturating_add(unfolded_reasoning)
+}
+
+/// Weighted billable total: identical to [`billable_parts_with_reasoning`]
+/// except the cache-read term is scaled by `cache_read_bp` basis points
+/// (10,000 = 1x = the neutral historical formula; 1,000 = 0.1x, typical
+/// provider pricing for prefix-cached input).
+///
+/// Interim global knob for budget cost-basis discounting (issue #381);
+/// TD-0032's per-scope weighted allowances (W03/W04) supersede it. Raw
+/// usage recording and the SQL aggregate stay on the neutral formula.
+#[must_use]
+pub fn billable_parts_weighted(
+    tokens_in: u64,
+    cache_creation_tokens: u64,
+    cache_read_tokens: u64,
+    tokens_out: u64,
+    reasoning_tokens: u64,
+    reasoning_included: Option<bool>,
+    cache_read_bp: u32,
+) -> u64 {
+    let unfolded_reasoning = unfolded_reasoning(reasoning_tokens, tokens_out, reasoning_included);
+    let scaled_cache_read = (u128::from(cache_read_tokens) * u128::from(cache_read_bp) / 10_000)
+        .min(u128::from(u64::MAX)) as u64;
+    // Saturate, never wrap — same contract as the neutral formula.
+    tokens_in
+        .saturating_add(cache_creation_tokens)
+        .saturating_add(scaled_cache_read)
         .saturating_add(tokens_out)
         .saturating_add(unfolded_reasoning)
 }
@@ -496,6 +553,31 @@ mod tests {
             120
         );
         assert_eq!(billable(&usage(0, 0, 0, 0)), 0);
+    }
+
+    #[test]
+    fn weighted_billable_is_neutral_at_ten_thousand_basis_points() {
+        let u = usage(40, 20, 0, 60);
+        assert_eq!(billable_weighted(&u, 10_000), billable(&u));
+        assert_eq!(billable_weighted(&u, 10_000), 120);
+    }
+
+    #[test]
+    fn weighted_billable_scales_only_cache_read() {
+        // 40 fresh in + 60 cache-read*0.1 + 20 out = 66.
+        assert_eq!(billable_weighted(&usage(40, 20, 0, 60), 1_000), 66);
+        // Zero weight: cache-read contributes nothing.
+        assert_eq!(billable_weighted(&usage(40, 20, 0, 60), 0), 60);
+        // Integer basis-point division truncates (61 bp on 1 token -> 0).
+        assert_eq!(billable_weighted(&usage(2, 0, 0, 1), 61), 2);
+    }
+
+    #[test]
+    fn weighted_billable_saturates_never_wraps() {
+        let huge = u64::MAX;
+        let u = usage(huge, huge, huge, huge);
+        assert_eq!(billable_weighted(&u, 10_000), billable(&u));
+        assert_eq!(billable_weighted(&u, 1_000_000), u64::MAX);
     }
 
     #[test]

@@ -147,6 +147,27 @@ fn policy_rejects_ambiguous_unsupported_and_unbounded_inputs() {
         br#"{"messages":[],"model":"test","unknown":"text"}"#.to_vec(),
         vec![b' ';65537],
     ] { assert_eq!(run(&e,&bytes,&identity()).disposition,Disposition::Unavailable); }
+    // Bodies between the old 256 KiB engine cap and the new 4 MiB ceiling
+    // must now evaluate (forward), not fail closed — with a document whose
+    // max_body_bytes covers them.
+    let big = Engine::from_slice(
+        &serde_json::to_vec(&json!({
+            "schema_version":"1","revision":1,"deadline_ms":200,
+            "max_body_bytes": sandhi_core::policy::MAX_BODY_BYTES_CEILING,
+            "rules":[rule("test",json!({"kind":"regex","pattern":"nomatch"}),"audit")]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut payload = br#"{"messages":[],"model":"test"}"#.to_vec();
+    let old_gap = 300 * 1024;
+    while payload.len() < old_gap {
+        payload.push(b' ');
+    }
+    assert_eq!(
+        run(&big, &payload, &identity()).disposition,
+        Disposition::Forward
+    );
     let d = e.evaluate(
         &body("hello"),
         &identity(),
@@ -225,7 +246,10 @@ fn policy_rejects_invalid_documents_instead_of_loading_empty_policy() {
         ("revision", json!(0)),
         ("deadline_ms", json!(0)),
         ("deadline_ms", json!(2001)),
-        ("max_body_bytes", json!(262145)),
+        (
+            "max_body_bytes",
+            json!(sandhi_core::policy::MAX_BODY_BYTES_CEILING + 1),
+        ),
         ("rules", json!([])),
         ("unknown", json!(true)),
     ] {
@@ -233,6 +257,11 @@ fn policy_rejects_invalid_documents_instead_of_loading_empty_policy() {
         document[field] = value;
         assert!(Engine::from_slice(&serde_json::to_vec(&document).unwrap()).is_err());
     }
+    // The raised ceiling itself (4 MiB) is accepted — agentic sessions
+    // exceed 256 KiB mid-conversation and were previously bricked (#380).
+    let mut at_ceiling = valid.clone();
+    at_ceiling["max_body_bytes"] = json!(sandhi_core::policy::MAX_BODY_BYTES_CEILING);
+    assert!(Engine::from_slice(&serde_json::to_vec(&at_ceiling).unwrap()).is_ok());
     let mut duplicate = valid.clone();
     duplicate["rules"]
         .as_array_mut()

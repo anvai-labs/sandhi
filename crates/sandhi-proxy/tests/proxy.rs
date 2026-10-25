@@ -41,6 +41,7 @@ fn state_with(
             Some(0),
             None,
             None,
+            None,
         ),
     );
     Arc::new(ProxyState::new(keys, ledger, sink, providers, None))
@@ -211,6 +212,50 @@ async fn complete_attributes_meters_and_records_budget() {
     // event helper above agrees with it exactly, so an operator reading usage sees what was
     // charged. (Unifying those two was the tracked follow-up this closes.)
     assert_eq!(state.ledger.lock().unwrap().spent("group:platform"), 120);
+    assert_eq!(state.ledger.lock().unwrap().reserved("group:platform"), 0);
+}
+
+#[tokio::test]
+async fn cache_read_weight_discounts_budget_enforcement_not_raw_usage() {
+    // Issue #381: budgets billed discounted cache-read tokens at full price.
+    // SANDHI_CACHE_READ_WEIGHT (here: state.cache_read_weight_bp = 1_000, i.e.
+    // 0.1x) discounts ONLY the budget charge; usage events stay raw.
+    let upstream = MockServer::start().await;
+    let resp = serde_json::json!({
+        "choices": [{ "message": { "content": "hi" } }],
+        "usage": { "prompt_tokens": 100, "completion_tokens": 20,
+                   "prompt_tokens_details": { "cached_tokens": 60 } }
+    });
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(resp))
+        .mount(&upstream)
+        .await;
+
+    let sink = Arc::new(InMemorySink::new());
+    let mut state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    Arc::get_mut(&mut state)
+        .expect("test owns the only Arc ref")
+        .cache_read_weight_bp = 1_000;
+    let app = build_app(state.clone());
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("authorization", "Bearer vk_demo")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"model":"gpt-x","messages":[]}"#))
+        .unwrap();
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Raw usage recording is unchanged (neutral billable 120).
+    let events = sink.events();
+    assert_eq!(events[0].tokens_in, 40);
+    assert_eq!(events[0].cache_read_tokens, 60);
+    assert_eq!(events[0].billable_tokens(), 120);
+    // Budget enforcement charges the weighted total: 40 + 6 + 20.
+    assert_eq!(state.ledger.lock().unwrap().spent("group:platform"), 66);
     assert_eq!(state.ledger.lock().unwrap().reserved("group:platform"), 0);
 }
 
@@ -687,6 +732,7 @@ async fn same_idempotency_key_inside_the_window_meters_once() {
             Some(0),
             None,
             None,
+            None,
         ),
     );
     let ledger2 = ProxyLedger::durable(store_path.to_str().unwrap(), 1).expect("ledger reopen");
@@ -823,6 +869,7 @@ async fn anthropic_state(upstream: &MockServer, sink: Arc<InMemorySink>) -> Arc<
             sandhi_providers::AnthropicAuthScheme::ApiKey,
             Default::default(),
             Some(0),
+            None,
             None,
             None,
         ),
@@ -1030,6 +1077,7 @@ async fn responses_ingress_same_family_forwards_transparently() {
             Some(0),
             None,
             None,
+            None,
         ),
     );
     let sink = Arc::new(InMemorySink::new());
@@ -1120,6 +1168,7 @@ async fn inferflux_state(upstream: &MockServer, sink: Arc<InMemorySink>) -> Arc<
             "local-key",
             Default::default(),
             Some(0),
+            None,
             None,
             None,
         ),
@@ -1213,6 +1262,7 @@ async fn correlation_id_sent_upstream_equals_the_events_request_id() {
             Some(0),
             None,
             None,
+            None,
         ),
     );
     let sink = Arc::new(InMemorySink::new());
@@ -1293,6 +1343,7 @@ async fn translation_plane_correlation_and_caller_traceparent_reach_the_upstream
             "local-key",
             Default::default(),
             Some(0),
+            None,
             None,
             None,
         ),
@@ -1378,6 +1429,7 @@ async fn transparent_plane_correlation_id_equals_the_events_request_id() {
             "local-key",
             Default::default(),
             Some(0),
+            None,
             None,
             None,
         ),
@@ -1490,6 +1542,7 @@ async fn inferflux_attribution_never_reaches_the_upstream() {
             "local-key",
             Default::default(),
             Some(0),
+            None,
             None,
             None,
         ),
@@ -1731,6 +1784,7 @@ async fn derived_sessions_are_scoped_by_virtual_key() {
             Some(0),
             None,
             None,
+            None,
         ),
     );
     let app = build_app(Arc::new(ProxyState::new(
@@ -1799,6 +1853,7 @@ async fn inferflux_affinity_header_fires_for_a_derived_session_too() {
             "local-key",
             Default::default(),
             Some(0),
+            None,
             None,
             None,
         ),
@@ -2001,6 +2056,7 @@ async fn attribution_headers_on_an_unbound_key_are_rejected() {
             "REAL-KEY",
             Default::default(),
             Some(0),
+            None,
             None,
             None,
         ),
@@ -2450,6 +2506,7 @@ async fn cross_family_ingress_routes_through_the_typed_translation_plane() {
             Some(0),
             None,
             None,
+            None,
         ),
     );
     let sink = Arc::new(InMemorySink::new());
@@ -2522,6 +2579,7 @@ async fn discovery_lists_only_the_models_the_key_permits() {
             upstream.uri(),
             "REAL-KEY",
             Default::default(),
+            None,
             None,
             None,
             None,
@@ -2832,6 +2890,7 @@ async fn rate_limited_requests_are_refused_without_consuming_budget() {
             None,
             None,
             None,
+            None,
         ),
     );
     let sink = Arc::new(InMemorySink::default());
@@ -3062,6 +3121,7 @@ fn paced_anthropic_state(upstream_uri: String, sink: Arc<InMemorySink>) -> Arc<P
             sandhi_providers::AnthropicAuthScheme::ApiKey,
             Default::default(),
             Some(0),
+            None,
             None,
             None,
         ),
@@ -3392,6 +3452,7 @@ async fn open_streams_hold_admission_slots_until_the_body_completes() {
                     Some(0),
                     None,
                     None,
+                    None,
                 ),
             );
             providers
@@ -3541,6 +3602,7 @@ async fn translation_plane_streams_hold_admission_slots_too() {
                     "REAL-KEY",
                     Default::default(),
                     Some(0),
+                    None,
                     None,
                     None,
                 ),
@@ -3730,6 +3792,7 @@ async fn serve_with_limits(
                     "REAL-KEY",
                     Default::default(),
                     Some(0),
+                    None,
                     None,
                     None,
                 ),
@@ -4271,6 +4334,7 @@ async fn owned_buffered_unsupported_shapes_refuse_before_admission() {
                     Some(1),
                     None,
                     None,
+                    None,
                 ),
             );
         }
@@ -4333,6 +4397,7 @@ async fn owned_buffered_restart_recovers_later_ready_rows_and_unbudgeted_removed
                     completeness: sandhi_core::UsageCompleteness::Final,
                     ..Default::default()
                 },
+                10_000,
             )
             .unwrap();
         if i < 34 {

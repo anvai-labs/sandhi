@@ -32,6 +32,9 @@ pub struct PendingSettlement {
     reservation: Option<Reservation>,
     charge: Option<u64>,
     tracked: Option<Box<TrackedObservation>>,
+    /// Budget cost-basis weight for the tracked frozen charge (basis points;
+    /// 10,000 = neutral). Server-admitted config, never caller data (TD-0032).
+    cache_read_bp: u32,
 }
 
 #[derive(Debug)]
@@ -63,6 +66,7 @@ impl PendingSettlement {
             request_id: self.request_id.clone(),
             reservation: self.reservation.clone(),
             charge: self.charge,
+            cache_read_bp: self.cache_read_bp,
             tracked: self.tracked.as_ref().map(|t| {
                 Box::new(TrackedObservation {
                     intent: t.intent.clone(),
@@ -77,6 +81,7 @@ impl PendingSettlement {
         Self {
             request_id,
             reservation,
+            cache_read_bp: sandhi_core::allowance::Weight::default().basis_points(),
             charge: match usage.completeness {
                 sandhi_core::UsageCompleteness::Final | sandhi_core::UsageCompleteness::Partial => {
                     Some(sandhi_core::billable(usage))
@@ -94,6 +99,7 @@ impl PendingSettlement {
             request_id,
             reservation: Some(intent.reservation.clone()),
             charge: None,
+            cache_read_bp: sandhi_core::allowance::Weight::default().basis_points(),
             tracked: Some(Box::new(TrackedObservation {
                 intent,
                 usage,
@@ -120,6 +126,14 @@ impl PendingSettlement {
     pub fn charge(&self) -> Option<u64> {
         self.charge
     }
+
+    /// Set the budget cost-basis weight applied to the tracked frozen charge
+    /// (basis points; 10,000 = neutral). Server-admitted operator config -
+    /// callers of the settlement API can never choose a cheaper weight.
+    pub fn with_cache_read_weight(mut self, cache_read_bp: u32) -> Self {
+        self.cache_read_bp = cache_read_bp;
+        self
+    }
     /// Try the existing receipt path without waiting for the proxy mutex. SQLite
     /// and the inner shard mutex may still wait: this is not an end-to-end deadline.
     /// An unresolved result owns the unchanged usage and must be retained.
@@ -144,7 +158,11 @@ impl PendingSettlement {
             if let Some(tracked) = self.tracked.as_mut() {
                 // Exact record replay is intentional, even after a previous recorded
                 // attempt: the current ledger must confirm identical retained evidence.
-                match durable.record_terminal_for_intent_durable(&tracked.intent, &tracked.usage) {
+                match durable.record_terminal_for_intent_durable(
+                    &tracked.intent,
+                    &tracked.usage,
+                    self.cache_read_bp,
+                ) {
                     Ok(_) => {
                         tracked.recorded = true;
                         durable.settle_terminal_durable(
