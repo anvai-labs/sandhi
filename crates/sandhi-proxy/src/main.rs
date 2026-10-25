@@ -126,7 +126,16 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
             .unwrap_or_else(|_| ProviderFamily::OpenAiCompat.default_base_url().to_owned());
         providers.insert(
             "openai".into(),
-            runtime.openai_compat("openai", base, key, Default::default(), None, None, None),
+            runtime.openai_compat(
+                "openai",
+                base,
+                key,
+                Default::default(),
+                None,
+                None,
+                None,
+                None,
+            ),
         );
         keys.insert(VirtualKey {
             id: "vk_openai_demo".into(),
@@ -142,7 +151,16 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
             .unwrap_or_else(|_| "http://127.0.0.1:8080/v1".into());
         providers.insert(
             "inferflux".into(),
-            runtime.openai_compat("inferflux", base, key, Default::default(), None, None, None),
+            runtime.openai_compat(
+                "inferflux",
+                base,
+                key,
+                Default::default(),
+                None,
+                None,
+                None,
+                None,
+            ),
         );
         keys.insert(VirtualKey {
             id: "vk_inferflux_demo".into(),
@@ -169,6 +187,7 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
                 None,
                 None,
                 None,
+                None,
             ),
         );
         keys.insert(VirtualKey {
@@ -191,6 +210,7 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
                 key,
                 GeminiAuthScheme::ApiKey,
                 HeaderMap::new(),
+                None,
                 None,
                 None,
                 None,

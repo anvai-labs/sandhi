@@ -129,6 +129,7 @@ async fn embedded_onnx_inflight_timeout_and_router_denial_never_dispatch() {
             None,
             None,
             None,
+            None,
         );
         let mut state = ProxyState::new(
             keys,

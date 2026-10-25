@@ -180,6 +180,7 @@ async fn python_worker_failure_and_findings_hold_zero_provider_calls() {
             None,
             None,
             None,
+            None,
         );
         let mut state = ProxyState::new(
             keys,

@@ -95,6 +95,7 @@ async fn raw_buffered_and_streamed_cache_availability_preserve_wire_bytes() {
                 Some(0),
                 None,
                 None,
+                None,
             );
             let response = build_app(state(provider, sink.clone()))
                 .oneshot(request(streaming))

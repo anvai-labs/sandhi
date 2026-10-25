@@ -348,6 +348,7 @@ pub fn build_provider_handle(
                     headers,
                     Some(0),
                     Some(120.0),
+                    None,
                     Some(90.0),
                 )
                 .with_credential_expiry(lease.expires_at),
@@ -363,7 +364,7 @@ pub fn build_provider_handle(
                 CredentialScheme::Bearer => AnthropicAuthScheme::Bearer,
                 _ => AnthropicAuthScheme::ApiKey,
             };
-            Some(runtime.anthropic(base, secret, auth, HeaderMap::new(), None, None, None))
+            Some(runtime.anthropic(base, secret, auth, HeaderMap::new(), None, None, None, None))
         }
         ProviderFamily::Gemini => Some(runtime.gemini(
             base,
@@ -373,12 +374,13 @@ pub fn build_provider_handle(
             None,
             None,
             None,
+            None,
         )),
         ProviderFamily::Cohere => {
-            Some(runtime.cohere(base, secret, HeaderMap::new(), None, None, None))
+            Some(runtime.cohere(base, secret, HeaderMap::new(), None, None, None, None))
         }
         ProviderFamily::Ollama => {
-            Some(runtime.ollama(base, secret, HeaderMap::new(), None, None, None))
+            Some(runtime.ollama(base, secret, HeaderMap::new(), None, None, None, None))
         }
         ProviderFamily::OpenAiCompat => Some(runtime.openai_compat(
             provider,
@@ -388,12 +390,14 @@ pub fn build_provider_handle(
             None,
             None,
             None,
+            None,
         )),
         ProviderFamily::OpenAiResponses => Some(runtime.openai_responses(
             provider,
             base,
             secret,
             Default::default(),
+            None,
             None,
             None,
             None,
