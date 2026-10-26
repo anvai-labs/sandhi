@@ -73,13 +73,15 @@ pub use typed::{
 };
 
 /// Shared HTTP client for the in-repo adapters: a 10s TCP/TLS connect bound as
-/// defense-in-depth under the decorator's per-attempt timeouts. Policy timeouts
-/// (whole-call / stream-setup / idle) live in [`TimeoutConfig`], not here.
+/// defense-in-depth under the decorator's per-attempt timeouts. Refuse redirects:
+/// a provider response must not send prompts or credentials to another origin.
+/// Policy timeouts (whole-call / stream-setup / idle) live in [`TimeoutConfig`], not here.
 pub(crate) fn default_client() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+        .expect("provider HTTP client with redirects disabled must be constructible")
 }
 
 /// AWS Bedrock — the usage parser is [`sandhi_core::usage::parse_bedrock_usage`]. Native
