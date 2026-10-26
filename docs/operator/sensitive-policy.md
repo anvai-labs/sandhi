@@ -52,7 +52,7 @@ and ONNX Runtime 1.26.0. The model card and golden scores ship beside the model.
 
 Preprocessing hashes UTF-8 byte trigrams into 512 bins using FNV-1a, lowercasing ASCII
 bytes only. It evaluates separated and concatenated message views. Input is capped
-at 256 KiB per view; Rust checks the deadline every 1,024 trigrams. The graph normalizes
+at 4 MiB per view; Rust checks the deadline every 1,024 trigrams. The graph normalizes
 counts, applies learned linear weights and a sigmoid, and returns the maximum of
 the two view scores. It uses the existing CPU-only, single-thread, bounded-admission
 ONNX adapter. Unicode is accepted; this does **not** establish multilingual detection.

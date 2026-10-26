@@ -117,6 +117,7 @@ async fn exercise_mode(
         Some(0),
         None,
         None,
+        None,
     );
     let mut state = ProxyState::new(
         keys,
@@ -366,6 +367,7 @@ async fn streaming_fixture(
         "fixture-not-a-credential",
         Default::default(),
         Some(0),
+        None,
         None,
         None,
     );

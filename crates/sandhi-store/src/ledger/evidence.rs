@@ -746,6 +746,7 @@ impl SqliteLedger {
         scope: &str,
         execution_id: &str,
         usage: &UsageV2,
+        cache_read_bp: u32,
     ) -> Result<ObservationOutcome, EvidenceError> {
         validate_scope(scope)?;
         validate_execution_id(execution_id)?;
@@ -768,10 +769,13 @@ impl SqliteLedger {
         if settled {
             return Err(EvidenceError::AlreadySettled);
         }
+        // Frozen at the operator's cache-read weight (10,000 bp = the neutral
+        // billable). The weight is server-admitted config threaded from the
+        // settlement path - never caller data (TD-0032 constraint).
         let frozen_charge = match usage.completeness {
             UsageCompleteness::Unavailable => None,
             UsageCompleteness::Final | UsageCompleteness::Partial => {
-                Some(sandhi_core::billable(usage))
+                Some(sandhi_core::billable_weighted(usage, cache_read_bp))
             }
         };
         let charge = frozen_charge

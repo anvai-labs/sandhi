@@ -1264,6 +1264,7 @@ mod tests {
                 Some(0),
                 None,
                 None,
+                None,
             )
             .complete(request)
             .await

@@ -421,12 +421,14 @@ def test_oidc_advisory_gate_precedes_scoped_ignore(oidc_advisory_guard):
     import datetime
     import json
     import tomllib
-    record = json.loads((ROOT / oidc_advisory_guard.RECORD).read_text())
-    oidc_advisory_guard.check_record(ROOT, record, datetime.date.fromisoformat(record["reviewed_on"]))
+    records = [json.loads((ROOT / path).read_text()) for path in oidc_advisory_guard.RECORDS]
+    for record in records:
+        oidc_advisory_guard.check_record(ROOT, record, datetime.date.fromisoformat(record["reviewed_on"]))
     job = commands(workflow("ci.yml")["jobs"]["security"])
     assert job.index("python3 scripts/check-oidc-advisory.py") < job.index("cargo deny")
     assert job.count("cargo deny --locked --all-features") == 3
-    assert tomllib.loads((ROOT / "deny.toml").read_text())["advisories"]["ignore"] == [record["advisory"]]
+    ignored = tomllib.loads((ROOT / "deny.toml").read_text())["advisories"]["ignore"]
+    assert ignored == [record["advisory"] for record in records]
     filters = str(workflow("ci.yml")["jobs"]["changes"])
     assert "scripts/check-oidc-advisory.py" in filters
     assert "docs/security/**" in filters
@@ -437,38 +439,53 @@ def test_oidc_advisory_rejects_review_drift(tmp_path, oidc_advisory_guard, drift
     import datetime
     import json
     import shutil
-    record = json.loads((ROOT / oidc_advisory_guard.RECORD).read_text())
-    for name in ["Cargo.lock", record["adapter"]]:
-        path = tmp_path / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(ROOT / name, path)
-    today = datetime.date.fromisoformat(record["reviewed_on"])
-    if drift == "expiry":
-        today = datetime.date.fromisoformat(record["expires_on"])
-    elif drift == "future_review":
-        today -= datetime.timedelta(days=1)
-    elif drift in {"version", "checksum"}:
-        record["packages"]["rsa"][drift] = "changed"
-    elif drift == "adapter":
-        (tmp_path / record["adapter"]).write_text("changed adapter")
-    else:
-        (tmp_path / "crates/new.rs").write_text("use openidconnect::core::CoreRsaPrivateSigningKey;")
-    with pytest.raises(ValueError):
-        oidc_advisory_guard.check_record(tmp_path, record, today)
+    for path in oidc_advisory_guard.RECORDS:
+        record = json.loads((ROOT / path).read_text())
+        for name in ["Cargo.lock", record["adapter"]]:
+            target = tmp_path / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / name, target)
+        today = datetime.date.fromisoformat(record["reviewed_on"])
+        if drift == "expiry":
+            today = datetime.date.fromisoformat(record["expires_on"])
+        elif drift == "future_review":
+            today -= datetime.timedelta(days=1)
+        elif drift in {"version", "checksum"}:
+            pinned = "rsa" if "rsa" in record["packages"] else "crypto-bigint"
+            record["packages"][pinned][drift] = "changed"
+        elif drift == "adapter":
+            (tmp_path / record["adapter"]).write_text("changed adapter")
+        else:
+            (tmp_path / "crates/new.rs").write_text("use openidconnect::core::CoreRsaPrivateSigningKey;")
+        with pytest.raises(ValueError):
+            oidc_advisory_guard.check_record(tmp_path, record, today)
 
 
 def test_oidc_advisory_rejects_additional_production_consumer(oidc_advisory_guard):
-    names = {"proxy": ("sandhi-proxy", "0.7.0"), "oidc": ("openidconnect", "4.0.1"), "rsa": ("rsa", "0.9.10")}
+    names = {"proxy": ("sandhi-proxy", "0.7.0"), "oidc": ("openidconnect", "4.0.1"),
+        "rsa": ("rsa", "0.9.10"), "bigint": ("crypto-bigint", "0.5.5")}
     edge = lambda target, kind: {"pkg": target, "dep_kinds": [{"kind": kind}]}
     metadata = {"workspace_members": ["proxy"],
         "packages": [{"id": key, "name": name, "version": version} for key, (name, version) in names.items()],
         "resolve": {"nodes": [{"id": "proxy", "deps": [edge("oidc", None), edge("rsa", "dev")]},
-            {"id": "oidc", "deps": [edge("rsa", None)]}, {"id": "rsa", "deps": []}]}}
+            {"id": "oidc", "deps": [edge("rsa", None), edge("bigint", None)]},
+            {"id": "rsa", "deps": []}, {"id": "bigint", "deps": []}]}}
     oidc_advisory_guard.check_graph(metadata, True)
     changed = copy.deepcopy(metadata)
     changed["resolve"]["nodes"][0]["deps"][-1]["dep_kinds"][0]["kind"] = None
     with pytest.raises(ValueError, match="additional production RSA consumer"):
         oidc_advisory_guard.check_graph(changed, True)
+    # A PARALLEL crypto-bigint chain that bypasses openidconnect must fail the
+    # disconnect test even though the openidconnect route still exists.
+    bypass = copy.deepcopy(metadata)
+    bypass["resolve"]["nodes"][0]["deps"].append(edge("bigint", None))
+    with pytest.raises(ValueError, match="outside openidconnect"):
+        oidc_advisory_guard.check_graph(bypass, True)
+    # Dropping the reviewed route entirely (direct proxy consumption only).
+    rerouted = copy.deepcopy(bypass)
+    rerouted["resolve"]["nodes"][1]["deps"] = [dep for dep in rerouted["resolve"]["nodes"][1]["deps"] if dep["pkg"] != "bigint"]
+    with pytest.raises(ValueError):
+        oidc_advisory_guard.check_graph(rerouted, True)
     with pytest.raises(ValueError, match="binding production graph"):
         oidc_advisory_guard.check_graph(metadata, False)
 

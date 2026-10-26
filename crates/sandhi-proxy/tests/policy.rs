@@ -56,6 +56,7 @@ async fn setup(audit: Arc<PolicyAuditStore>) -> (axum::Router, MockServer) {
         None,
         None,
         None,
+        None,
     );
     let mut state = ProxyState::new(
         keys,

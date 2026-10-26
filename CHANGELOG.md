@@ -19,6 +19,63 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+## [0.14.1] — 2026-10-25
+
+### Fixed
+
+- Security: four dependency advisories patched across all three lockfiles —
+  rustls-webpki 0.103.15→0.103.16 (RUSTSEC-2026-0382, distrusted intermediates
+  accepted), webpki-roots and webpki-root-certs 1.0.9→1.0.11
+  (RUSTSEC-2026-0381/-0383, distrusted emSign roots), tokio →1.53.3
+  (RUSTSEC-2026-0386, AsyncFd I/O-safety unsoundness). RUSTSEC-2026-0387
+  (crypto-bigint 0.5.5 constant-time variability, no in-range fix while
+  openidconnect pins the 0.13 curve family) is assessed
+  not_affected_under_reviewed_usage in a new machine-checked record; the OIDC
+  advisory gate now validates both records and enforces crypto-bigint
+  containment as a disconnect test. The RUSTSEC-2023-0071 record window was
+  re-dated after independent verification (#387).
+
+### Changed
+
+- Stream-setup (time-to-first-byte) timeout default raised from 30s to 90s
+  (`TimeoutConfig::stream_setup`): measured glm-5.3 cache-miss prefills of
+  ~50K-token prompts through a chained LAN gateway regularly exceed 30s
+  before response headers; the old bound converted a healthy-but-slow
+  prefill into a 504 plus a full re-prefill retry. The bound is now also
+  configurable per transport — `stream_setup_timeout_secs` on
+  `ProviderTransportConfig`, every typed factory constructor, and the
+  Python/Node bindings (`provider(...)` / `openai_compat(...)` /
+  `openai_responses(...)`), mirroring `stream_idle_timeout_secs`. In both
+  bindings the new parameter is appended LAST so existing positional callers
+  keep their argument meanings; `None` inherits the new default. Note two
+  deliberate consequences of the raise: (a) callers that opted into retries
+  re-arm a fresh setup budget per attempt, so their worst-case hang against a
+  dead upstream grows in proportion (30s×attempts → 90s×attempts) and the
+  circuit breaker takes proportionally longer to open; (b) `timeout_secs`
+  bounds only non-streaming `complete()` calls — a streaming caller setting
+  `timeout_secs` below 90 no longer gets a coincidental sub-90s first-byte
+  bound and should set `stream_setup_timeout_secs` explicitly. The proxy's
+  configured streaming deadlines (when present) still take precedence over
+  these transport defaults, so proxy paths are unchanged.
+
+- Policy request-inspection ceiling raised from 256 KiB to 4 MiB
+  (`max_body_bytes`, issue #380): agentic client sessions exceed 256 KiB
+  mid-conversation and were denied fail-closed. Evaluator text-view caps
+  (embedded ONNX, Python workers, remote) were raised in step so a body that
+  passes the engine gate does not fail closed inside an extension. Regex
+  evaluation remains linear-time and deadline-checked; the policy-document
+  schema is unchanged.
+- Budgets can now discount prefix-cached input: `SANDHI_CACHE_READ_WEIGHT`
+  (basis points, default 10,000 = 1x neutral) scales only the cache-read term
+  of the budget charge — reservations stay conservative full-price, raw usage
+  recording and the SQL `billable` aggregate stay neutral, alerts follow the
+  discounted spend automatically (issue #381; interim global knob ahead of
+  TD-0032 W03/W04). Applies to new settlements; historical charges are
+  immutable. The Prometheus usage series reports the weighted charge while
+  the usage event and dashboard `billable` stay neutral — the two surfaces
+  intentionally diverge when the weight is set.
+
+
 ## [0.14.0] — 2026-10-15
 
 ### Fixed
@@ -1418,6 +1475,7 @@ inline reverse-proxy, the durable store, and both language bindings.
   [#10](https://github.com/anvai-labs/sandhi/pull/10))
 
 [Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.14.0...HEAD
+[0.14.1]: https://github.com/anvai-labs/sandhi/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/anvai-labs/sandhi/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/anvai-labs/sandhi/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/anvai-labs/sandhi/compare/v0.11.0...v0.12.0

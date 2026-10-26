@@ -8,6 +8,7 @@ import os
 import pathlib
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
@@ -1247,3 +1248,70 @@ def test_parse_usage_reasoning_survives_custom_parser_roundtrip(provider, includ
     assert event["reasoning_tokens"] == (thoughts or None)
     assert event["reasoning_included"] is included
     assert gateway.spent("group:alias") == 140 + (0 if included else thoughts)
+
+
+def test_stream_setup_timeout_kwarg_bounds_time_to_first_byte():
+    """The stream-setup knob is configurable per handle through this binding.
+
+    A server that stalls before response headers is a slow-but-healthy prefill
+    stand-in: with a tiny ``stream_setup_timeout_secs`` the stream call must fail
+    fast with a typed timeout, while the same server under the default (90s)
+    setup budget must complete normally.
+    """
+
+    class SlowHeaders(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            time.sleep(0.6)
+            body = (
+                'data: {"id":"r1","model":"gpt-test","choices":[{"delta":{"content":"he"},'
+                '"finish_reason":null}]}\n\n'
+                'data: {"id":"r1","model":"gpt-test","choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+                "data: [DONE]\n\n"
+            ).encode()
+            self.send_response(200)
+            self.send_header("content-type", "text/event-stream")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), SlowHeaders)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        runtime = sg.ProviderRuntime()
+        base = f"http://127.0.0.1:{server.server_port}/v1"
+        request = json.dumps(
+            {
+                "schema_version": "1",
+                "model": "gpt-test",
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+        )
+
+        tight = runtime.openai_compat(
+            "openai", base, "key", max_retries=0, stream_setup_timeout_secs=0.1
+        )
+
+        async def run_tight():
+            async for _event in tight.stream_json(request):  # pragma: no cover
+                pass
+
+        start = time.monotonic()
+        with pytest.raises(sg.SandhiProviderError) as caught:
+            asyncio.run(run_tight())
+        assert time.monotonic() - start < 5, "the tight setup budget must fail fast"
+        payload = json.loads(str(caught.value))
+        assert payload["code"] == "timeout"
+        assert caught.value.__class__.__name__ == "SandhiProviderError"
+
+        default = runtime.openai_compat("openai", base, "key", max_retries=0)
+
+        async def run_default():
+            return [json.loads(e) async for e in default.stream_json(request)]
+
+        events = asyncio.run(run_default())
+        assert any(event["event"] == "finish" for event in events)
+    finally:
+        server.shutdown()
