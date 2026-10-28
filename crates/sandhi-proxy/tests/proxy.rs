@@ -4888,3 +4888,151 @@ async fn owned_stream_setup_deadline_is_scoped_inside_admission_task() {
         sandhi_core::UsageCompleteness::Unavailable
     );
 }
+
+// --- Anthropic ingress through the policy gate (Messages input format) ------
+
+/// Same mock anthropic upstream as `anthropic_state`, but the proxy carries a
+/// policy gate whose regex rule blocks the marker `SECRET-NNN` and audits
+/// `hello`. This is the shape production runs (the gate fails closed on any
+/// dialect it cannot inspect).
+async fn anthropic_policy_state(upstream: &MockServer, sink: Arc<InMemorySink>) -> Arc<ProxyState> {
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(header("x-api-key", "REAL-KEY"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id":"msg_1","type":"message","role":"assistant","model":"claude-test",
+            "content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn",
+            "usage":{"input_tokens":7,"output_tokens":3}
+        })))
+        .mount(upstream)
+        .await;
+
+    let keys = KeyStore::new();
+    keys.insert(VirtualKey {
+        id: "vk_demo".into(),
+        subject_id: Some("alice".into()),
+        group_id: Some("platform".into()),
+        upstream_ref: "up1".into(),
+        ..Default::default()
+    });
+    let mut providers = HashMap::new();
+    providers.insert(
+        "up1".into(),
+        ProviderRuntime::new().anthropic(
+            upstream.uri(),
+            "REAL-KEY",
+            sandhi_providers::AnthropicAuthScheme::ApiKey,
+            Default::default(),
+            Some(0),
+            None,
+            None,
+            None,
+        ),
+    );
+    let document = serde_json::json!({
+        "schema_version":"1","revision":1,"deadline_ms":200,"max_body_bytes":65536,
+        "rules":[
+            {"id":"block-secret","effect":"block",
+             "evaluator":{"kind":"regex","pattern":"SECRET-[0-9]+"}},
+            {"id":"audit-hello","effect":"audit",
+             "evaluator":{"kind":"regex","pattern":"hello"}}
+        ]
+    });
+    let engine = sandhi_core::policy::Engine::from_slice(&serde_json::to_vec(&document).unwrap())
+        .expect("policy document");
+    let audit = tempfile::tempdir().expect("tempdir");
+    let store = sandhi_store::policy::PolicyAuditStore::open(&audit.path().join("audit.db"), 1024)
+        .expect("audit store");
+    let mut state = ProxyState::new(keys, ProxyLedger::in_memory(), sink, providers, None);
+    state.policy = Some(Arc::new(sandhi_proxy::policy::PolicyGate::new(
+        engine,
+        Arc::new(store),
+    )));
+    Arc::new(state)
+}
+
+async fn anthropic_policy_request(
+    state: Arc<ProxyState>,
+    body: &str,
+) -> (StatusCode, serde_json::Value) {
+    let response = build_app(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("authorization", "Bearer vk_demo")
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_owned()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+/// The regression this PR fixes: an anthropic-dialect body used to hit the
+/// gate's `unsupported_dialect` fail-closed 503 before ever being inspected.
+/// Now the Messages input format is inspected — benign bodies forward through
+/// the transparent plane and meter normally.
+#[tokio::test]
+async fn anthropic_ingress_policy_inspects_and_forwards_benign_bodies() {
+    let upstream = MockServer::start().await;
+    let sink = Arc::new(InMemorySink::new());
+    let state = anthropic_policy_state(&upstream, sink.clone()).await;
+
+    let body = r#"{"model":"claude-test","max_tokens":32,
+        "system":"You are terse.",
+        "messages":[{"role":"user","content":[
+            {"type":"text","text":"say "},
+            {"type":"text","text":"hello"}]}],
+        "temperature":0.3,"stop_sequences":["\n\n"]}"#;
+    let (status, value) = anthropic_policy_request(state, body).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(value["content"][0]["text"], "hello");
+    assert_eq!(sink.events().len(), 1);
+    assert_eq!(sink.events()[0].provider, "anthropic");
+}
+
+/// A blocked pattern in any anthropic text surface is a 403 policy_blocked —
+/// inspected content, not an unavailable gate.
+#[tokio::test]
+async fn anthropic_ingress_policy_blocks_matching_content() {
+    let upstream = MockServer::start().await;
+    let sink = Arc::new(InMemorySink::new());
+    let state = anthropic_policy_state(&upstream, sink.clone()).await;
+
+    let body = r#"{"model":"claude-test","max_tokens":32,
+        "messages":[{"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"t1","content":"SECRET-42"}]}]}"#;
+    let (status, value) = anthropic_policy_request(state, body).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(value["error"]["code"], "policy_blocked");
+    assert!(value.to_string().contains("policy_blocked"));
+    // Never reached the provider, never metered.
+    assert_eq!(sink.events().len(), 0);
+}
+
+/// Malformed-for-inspection bodies still fail closed (503 policy_unavailable,
+/// reason incomplete evaluation) — the strictness that guards the other
+/// dialects applies to anthropic bodies too.
+#[tokio::test]
+async fn anthropic_ingress_policy_fails_closed_on_unknown_shapes() {
+    let upstream = MockServer::start().await;
+    let sink = Arc::new(InMemorySink::new());
+    let state = anthropic_policy_state(&upstream, sink.clone()).await;
+
+    let body = r#"{"model":"claude-test","max_tokens":32,
+        "messages":[{"role":"user","content":"ok"}],"undocumented_field":true}"#;
+    let (status, value) = anthropic_policy_request(state, body).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(value["error"]["code"], "policy_unavailable");
+    assert_eq!(sink.events().len(), 0);
+}

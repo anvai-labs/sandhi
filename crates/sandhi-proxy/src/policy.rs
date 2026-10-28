@@ -43,7 +43,7 @@ impl PolicyGate {
             serde_json::json!({"enabled":true, "revision":document.revision,
             "deadline_ms":document.deadline_ms, "max_body_bytes":document.max_body_bytes,
             "rules":rules, "receipts":self.audit.summary().map_err(|_| Unavailable)?,
-            "supported_input":"OpenAI chat, completions and embeddings text", "on_unavailable":"deny"}),
+            "supported_input":"OpenAI chat, completions and embeddings text; Anthropic messages", "on_unavailable":"deny"}),
         )
     }
     pub async fn check(
