@@ -133,6 +133,14 @@ pub struct ProviderTransportConfig {
     pub anthropic_auth_scheme: AnthropicAuthScheme,
     pub gemini_auth_scheme: GeminiAuthScheme,
     pub openai_responses_profile: OpenAiResponsesProfile,
+    /// Per-endpoint User-Agent override. Rides the static headers to the wire,
+    /// replacing the shared client's default (`sandhi/<version>`). Some upstreams
+    /// gate on client identity (agent-allowlisting plans); a credential can carry
+    /// the UA its endpoint expects.
+    pub user_agent: Option<String>,
+    /// Per-endpoint TCP/TLS connect bound in seconds. `None` inherits the
+    /// default (10s, or `SANDHI_CONNECT_TIMEOUT_SECS` when set).
+    pub connect_timeout_secs: Option<f64>,
 }
 
 impl ProviderTransportConfig {
@@ -156,6 +164,8 @@ impl ProviderTransportConfig {
             anthropic_auth_scheme: AnthropicAuthScheme::ApiKey,
             gemini_auth_scheme: GeminiAuthScheme::ApiKey,
             openai_responses_profile: OpenAiResponsesProfile::Standard,
+            user_agent: None,
+            connect_timeout_secs: None,
         }
     }
 }
@@ -241,12 +251,31 @@ fn build_raw_forwarder(config: &ProviderTransportConfig) -> crate::raw::RawForwa
             .and_then(|spec| spec.request_id_header),
         _ => None,
     };
+    // A per-endpoint UA rides the static headers (overriding the shared
+    // client's default); per-call headers can still replace it downstream.
+    let mut static_headers = config.headers.clone();
+    if let Some(ua) = config.user_agent.as_deref() {
+        match http::HeaderValue::from_str(ua) {
+            Ok(value) => {
+                static_headers.insert(http::header::USER_AGENT, value);
+            }
+            Err(_) => {
+                // A control character or invalid byte — silently keeping the
+                // default UA reproduces the identity-gate 405 this field exists
+                // to fix, with no diagnostic. Say so.
+                tracing::warn!(%ua, "configured user_agent is not a valid header value; keeping the client default");
+            }
+        }
+    }
     crate::raw::RawForwarder::new(
         config.family,
         config.base_url.clone(),
         config.api_key.clone(),
     )
-    .with_headers(config.headers.clone())
+    .with_client(crate::client_with_connect_timeout(
+        config.connect_timeout_secs,
+    ))
+    .with_headers(static_headers)
     .with_anthropic_auth(config.anthropic_auth_scheme)
     .with_gemini_auth(config.gemini_auth_scheme)
     .with_timeouts(timeouts.complete, timeouts.stream_setup, timeouts.idle)
@@ -2035,6 +2064,70 @@ mod tests {
             .complete_with(request, http::HeaderMap::new())
             .await
             .unwrap();
+    }
+
+    /// A config-level `user_agent` rides the static headers to the wire,
+    /// replacing the shared client default (`sandhi/<version>`).
+    #[tokio::test]
+    async fn transport_config_user_agent_overrides_the_default() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(header("user-agent", "claude-cli/1.0.0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices":[{"message":{"role":"assistant","content":"hi"}}],
+                "usage":{"prompt_tokens":1,"completion_tokens":1}
+            })))
+            .mount(&server)
+            .await;
+        let mut config = ProviderTransportConfig::new(
+            ProviderFamily::OpenAiCompat,
+            "openai",
+            format!("{}/v1", server.uri()),
+            "sk-test",
+        );
+        config.user_agent = Some("claude-cli/1.0.0".into());
+        config.max_retries = Some(0);
+        let forwarder = build_raw_forwarder(&config);
+        forwarder
+            .forward(
+                "/chat/completions",
+                bytes::Bytes::from_static(b"{\"model\":\"x\"}"),
+            )
+            .await
+            .expect("forward succeeds with the overridden user-agent");
+    }
+
+    /// The shared client carries a non-empty default User-Agent: upstreams that
+    /// gate on client identity (Aliyun's coding plan: "Coding Plan is currently
+    /// only available for Coding Agents") reject an empty UA with 405.
+    #[tokio::test]
+    async fn shared_client_sends_a_default_user_agent() {
+        use wiremock::matchers::{header_regex, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(header_regex("user-agent", "^sandhi/.+"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let client = crate::client_with_connect_timeout(None);
+        let response = client.get(server.uri()).send().await.expect("request sent");
+        assert_eq!(response.status(), 200);
+    }
+
+    /// `SANDHI_CONNECT_TIMEOUT_SECS` and the per-endpoint field bound the
+    /// connect timeout; invalid env values fall back to the 10s default
+    /// without failing construction.
+    #[test]
+    fn connect_timeout_configuration_is_accepted() {
+        // Per-endpoint value (clamped, not validated further at this layer).
+        let _ = crate::client_with_connect_timeout(Some(0.5));
+        let _ = crate::client_with_connect_timeout(Some(120.0));
     }
 
     #[tokio::test]

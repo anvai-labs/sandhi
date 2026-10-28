@@ -76,8 +76,29 @@ pub use typed::{
 /// defense-in-depth under the decorator's per-attempt timeouts. Policy timeouts
 /// (whole-call / stream-setup / idle) live in [`TimeoutConfig`], not here.
 pub(crate) fn default_client() -> reqwest::Client {
+    client_with_connect_timeout(None)
+}
+
+/// The shared client constructor: a TCP/TLS connect bound as defense-in-depth
+/// under the decorator's per-attempt timeouts, and a default User-Agent (some
+/// upstreams gate on client identity — e.g. Aliyun's coding-plan endpoint 405s
+/// an empty UA). `per_endpoint` beats `SANDHI_CONNECT_TIMEOUT_SECS` beats the
+/// 10s default. Per-call headers can still replace the UA downstream.
+pub(crate) fn client_with_connect_timeout(per_endpoint_secs: Option<f64>) -> reqwest::Client {
+    let secs = per_endpoint_secs
+        .or_else(|| {
+            std::env::var("SANDHI_CONNECT_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse::<f64>().ok())
+                // `"NaN".parse::<f64>()` succeeds and `Duration::from_secs_f64(NaN)`
+                // panics — a misconfigured env var must degrade to the default,
+                // never abort startup inside handle rehydration.
+                .filter(|v| v.is_finite())
+        })
+        .unwrap_or(10.0);
     reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
+        .connect_timeout(std::time::Duration::from_secs_f64(secs.clamp(0.001, 600.0)))
+        .user_agent(concat!("sandhi/", env!("CARGO_PKG_VERSION")))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
 }
@@ -434,6 +455,16 @@ pub(crate) async fn error_for_response(
         }
         Err(_) => None,
     };
+    // Diagnosability: every upstream non-success surfaces in server logs with
+    // its bounded body and the vendor request id — the client-facing error is
+    // redacted by default, so this WARN is the operator's primary evidence.
+    // The body is upstream-produced; it never contains our secrets.
+    tracing::warn!(
+        status,
+        request_id = request_id.as_deref().unwrap_or(""),
+        body = body.as_deref().unwrap_or(""),
+        "upstream non-success response"
+    );
     error_for_status_with_body(status, body, request_id)
 }
 

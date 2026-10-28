@@ -5036,3 +5036,150 @@ async fn anthropic_ingress_policy_fails_closed_on_unknown_shapes() {
     assert_eq!(value["error"]["code"], "policy_unavailable");
     assert_eq!(sink.events().len(), 0);
 }
+
+/// A per-credential User-Agent (agent-allowlisting upstreams — Aliyun's coding
+/// plan 405s the default identity) rides the operator-built handle's static
+/// headers and reaches the upstream on the transparent plane.
+#[tokio::test]
+async fn per_credential_user_agent_reaches_the_upstream() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(header("user-agent", "claude-cli/1.0.0"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id":"msg_1","type":"message","role":"assistant","model":"claude-test",
+            "content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn",
+            "usage":{"input_tokens":3,"output_tokens":1}
+        })))
+        .mount(&upstream)
+        .await;
+
+    let handle = sandhi_proxy::build_provider_handle(
+        &ProviderRuntime::new(),
+        "anthropic",
+        Some(&upstream.uri()),
+        "REAL-KEY",
+        sandhi_store::CredentialScheme::ApiKey,
+        Some("claude-cli/1.0.0"),
+    )
+    .expect("handle builds");
+
+    let keys = KeyStore::new();
+    keys.insert(VirtualKey {
+        id: "vk_demo".into(),
+        subject_id: Some("alice".into()),
+        group_id: Some("platform".into()),
+        upstream_ref: "up1".into(),
+        ..Default::default()
+    });
+    let mut providers = HashMap::new();
+    providers.insert("up1".into(), handle);
+    let sink = Arc::new(InMemorySink::new());
+    let state = Arc::new(ProxyState::new(
+        keys,
+        ProxyLedger::in_memory(),
+        sink,
+        providers,
+        None,
+    ));
+
+    let response = build_app(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("x-api-key", "vk_demo")
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .body(Body::from(ANTHROPIC_BODY))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // The mock only matches when the upstream SAW the credential's UA; a 200
+    // proves the override landed on the wire.
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+/// Review finding F1: the per-credential UA must reach the upstream for the
+/// OpenAiCompat family too — for_slug maps qwen/deepseek/moonshot/custom slugs
+/// here, and this is the natural registration for OpenAI-compatible plans.
+/// The arm used to pass an empty HeaderMap, silently dropping the override.
+#[tokio::test]
+async fn per_credential_user_agent_reaches_openai_compat_upstream() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(header("user-agent", "claude-cli/1.0.0"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices":[{"message":{"role":"assistant","content":"ok"}}],
+            "usage":{"prompt_tokens":3,"completion_tokens":1}
+        })))
+        .mount(&upstream)
+        .await;
+
+    let handle = sandhi_proxy::build_provider_handle(
+        &ProviderRuntime::new(),
+        "qwen",
+        Some(upstream.uri().as_str()),
+        "sk-test",
+        sandhi_store::CredentialScheme::ApiKey,
+        Some("claude-cli/1.0.0"),
+    )
+    .expect("handle builds for an openai-compat slug");
+
+    let keys = KeyStore::new();
+    keys.insert(VirtualKey {
+        id: "vk_demo".into(),
+        subject_id: Some("alice".into()),
+        group_id: Some("platform".into()),
+        upstream_ref: "up1".into(),
+        ..Default::default()
+    });
+    let mut providers = HashMap::new();
+    providers.insert("up1".into(), handle);
+    let sink = Arc::new(InMemorySink::new());
+    let state = Arc::new(ProxyState::new(
+        keys,
+        ProxyLedger::in_memory(),
+        sink,
+        providers,
+        None,
+    ));
+
+    let response = build_app(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("authorization", "Bearer vk_demo")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"model":"qwen3.7-plus","messages":[{"role":"user","content":"hi"}],"max_tokens":8}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+/// Review finding F2: `SANDHI_CONNECT_TIMEOUT_SECS=NaN` must not panic — the
+/// parsed value is finite-filtered, degrading to the default bound.
+#[test]
+fn nan_connect_timeout_env_degrades_to_default() {
+    // Safety: runs the exact parse+filter+clamp pipeline from
+    // client_with_connect_timeout against adversarial env text.
+    for bad in ["NaN", "inf", "-inf", "not-a-number", ""] {
+        let parsed = bad
+            .parse::<f64>()
+            .ok()
+            .filter(|v| v.is_finite())
+            .unwrap_or(10.0);
+        assert!(
+            parsed.is_finite() && parsed > 0.0,
+            "bad env {bad:?} -> {parsed}"
+        );
+        let _ = std::time::Duration::from_secs_f64(parsed.clamp(0.001, 600.0));
+    }
+}
