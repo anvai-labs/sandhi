@@ -294,6 +294,7 @@ pub(super) async fn prepare(
                 request.model.clone(),
                 match dialect {
                     IngressDialect::OpenAi => Some(sandhi_core::policy::InputFormat::Chat),
+                    IngressDialect::Anthropic => Some(sandhi_core::policy::InputFormat::Messages),
                     IngressDialect::Embeddings => {
                         Some(sandhi_core::policy::InputFormat::Embeddings)
                     }

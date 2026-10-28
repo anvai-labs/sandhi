@@ -252,6 +252,10 @@ impl Registry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputFormat {
     Chat,
+    /// Anthropic `/v1/messages` bodies: top-level `system`, `messages` with typed
+    /// content blocks (`text`, `thinking`, `tool_use`, `tool_result`, `image`,
+    /// `document`), `stop_sequences` instead of `stop`.
+    Messages,
     Embeddings,
     Completions,
 }
@@ -563,6 +567,27 @@ fn inspect_format(body: &[u8], format: InputFormat) -> Result<Inspection, Evalua
     ];
     let fields = match format {
         InputFormat::Chat => FIELDS,
+        InputFormat::Messages => &[
+            "model",
+            "messages",
+            "system",
+            "max_tokens",
+            "stream",
+            "temperature",
+            "top_p",
+            "top_k",
+            "stop_sequences",
+            "tools",
+            "tool_choice",
+            "metadata",
+            "thinking",
+            // SDK-documented params the wire carries on real agent traffic;
+            // string content is swept by the extras collect loop.
+            "service_tier",
+            "betas",
+            "mcp_servers",
+            "context_management",
+        ],
         InputFormat::Embeddings => &["model", "input", "encoding_format", "dimensions", "user"],
         InputFormat::Completions => &[
             "model",
@@ -591,11 +616,42 @@ fn inspect_format(body: &[u8], format: InputFormat) -> Result<Inspection, Evalua
     let mut parts = Vec::new();
     let empty = Vec::new();
     let text_field = match format {
-        InputFormat::Chat => "messages",
+        InputFormat::Chat | InputFormat::Messages => "messages",
         InputFormat::Embeddings => "input",
         InputFormat::Completions => "prompt",
     };
-    let messages = if format == InputFormat::Chat {
+    let messages = if matches!(format, InputFormat::Chat | InputFormat::Messages) {
+        if format == InputFormat::Messages {
+            // Anthropic carries the system prompt at top level: a string or an
+            // array of text blocks. Inspect it like any other user-authored text.
+            if let Some(system) = object.get("system") {
+                match system {
+                    Value::String(text) => parts.push(text.clone()),
+                    Value::Array(blocks) => {
+                        for block in blocks {
+                            let block = block.as_object().ok_or(EvaluationError)?;
+                            if !keys_are(block, &["type", "text"], &["cache_control"]) {
+                                return Err(EvaluationError);
+                            }
+                            if block.get("type").and_then(Value::as_str) != Some("text") {
+                                return Err(EvaluationError);
+                            }
+                            parts.push(
+                                block
+                                    .get("text")
+                                    .and_then(Value::as_str)
+                                    .ok_or(EvaluationError)?
+                                    .into(),
+                            );
+                            if let Some(v) = block.get("cache_control") {
+                                collect(v, &mut parts, 0)?;
+                            }
+                        }
+                    }
+                    _ => return Err(EvaluationError),
+                }
+            }
+        }
         value
             .get("messages")
             .and_then(Value::as_array)
@@ -614,6 +670,10 @@ fn inspect_format(body: &[u8], format: InputFormat) -> Result<Inspection, Evalua
     };
     for message in messages {
         let m = message.as_object().ok_or(EvaluationError)?;
+        if format == InputFormat::Messages {
+            inspect_anthropic_message(m, &mut parts)?;
+            continue;
+        }
         if m.keys().any(|k| {
             ![
                 "role",
@@ -672,7 +732,13 @@ fn inspect_format(body: &[u8], format: InputFormat) -> Result<Inspection, Evalua
     }
     // Include string-bearing extras and tool schemas; no hidden uninspected text fields.
     for (key, value) in object {
-        if key != text_field && key != "model" {
+        // Messages already inspected `system` strictly above; re-collecting it
+        // would double the system text in classifier inputs (regex/threshold
+        // rules only get stricter, but ONNX/remote scoring skews).
+        if key != text_field
+            && key != "model"
+            && !(format == InputFormat::Messages && key == "system")
+        {
             collect(value, &mut parts, 0)?;
         }
     }
@@ -691,6 +757,238 @@ fn inspect_format(body: &[u8], format: InputFormat) -> Result<Inspection, Evalua
         max_output_tokens,
     })
 }
+/// Inspect one Anthropic `/v1/messages` message: `{role, content}` where content
+/// is a string or an array of typed blocks. Key sets are exact — an unknown
+/// block shape is an evaluation error (fail closed), never a silent skip.
+fn inspect_anthropic_message(
+    m: &serde_json::Map<String, Value>,
+    parts: &mut Vec<String>,
+) -> Result<(), EvaluationError> {
+    if m.keys().any(|k| !["role", "content"].contains(&k.as_str())) {
+        return Err(EvaluationError);
+    }
+    match m.get("content") {
+        Some(Value::String(s)) => parts.push(s.clone()),
+        Some(Value::Null) | None => (),
+        Some(Value::Array(blocks)) => inspect_anthropic_blocks(blocks, parts)?,
+        _ => return Err(EvaluationError),
+    }
+    Ok(())
+}
+
+/// Validate a JSON object's key set: every required key present, no key
+/// outside required ∪ optional. Cardinality alone cannot do this — a block
+/// with the right NUMBER of keys but an unexpected one must fail closed, not
+/// carry uninspected strings past the gate.
+fn keys_are(object: &serde_json::Map<String, Value>, required: &[&str], optional: &[&str]) -> bool {
+    required.iter().all(|k| object.contains_key(*k))
+        && object
+            .keys()
+            .all(|k| required.contains(&k.as_str()) || optional.contains(&k.as_str()))
+}
+
+/// Base64 alphabet check for multimodal `data` payloads. The bytes themselves
+/// are not prose and are skipped; a value that is not even base64 is more
+/// likely smuggled plaintext than an encoding artifact, so it fails closed.
+fn looks_like_base64(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'\n' | b'\r'))
+}
+
+/// Inspect Anthropic content blocks: prose (`text`, `thinking`), tool traffic
+/// (`tool_use` input, `tool_result` payloads), and multimodal sources. Key
+/// sets are identity-checked (required + SDK-documented optional members like
+/// `cache_control` and `citations`, whose string content is collected — never
+/// skipped); unknown keys or block shapes are evaluation errors (fail closed).
+/// The one deliberate non-collection is base64 `data`: an opaque binary
+/// encoding, not prose, size-bounded by `max_body_bytes` and charset-checked.
+fn inspect_anthropic_blocks(
+    blocks: &[Value],
+    parts: &mut Vec<String>,
+) -> Result<(), EvaluationError> {
+    // SDK-documented optional members every block may carry; their string
+    // content is swept so nothing rides uninspected.
+    const BLOCK_EXTRAS: &[&str] = &["cache_control", "citations"];
+    for block in blocks {
+        let block = block.as_object().ok_or(EvaluationError)?;
+        let kind = block
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or(EvaluationError)?;
+        // Sweeps the optional extras' string content for this block.
+        macro_rules! sweep_extras {
+            () => {
+                for key in BLOCK_EXTRAS {
+                    if let Some(v) = block.get(*key) {
+                        collect(v, parts, 0)?;
+                    }
+                }
+            };
+        }
+        match kind {
+            "text" => {
+                if !keys_are(block, &["type", "text"], BLOCK_EXTRAS) {
+                    return Err(EvaluationError);
+                }
+                parts.push(
+                    block
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .ok_or(EvaluationError)?
+                        .into(),
+                );
+                sweep_extras!();
+            }
+            "thinking" => {
+                if !keys_are(block, &["type", "thinking", "signature"], BLOCK_EXTRAS) {
+                    return Err(EvaluationError);
+                }
+                parts.push(
+                    block
+                        .get("thinking")
+                        .and_then(Value::as_str)
+                        .ok_or(EvaluationError)?
+                        .into(),
+                );
+                parts.push(
+                    block
+                        .get("signature")
+                        .and_then(Value::as_str)
+                        .ok_or(EvaluationError)?
+                        .into(),
+                );
+                sweep_extras!();
+            }
+            "redacted_thinking" => {
+                if !keys_are(block, &["type", "data"], BLOCK_EXTRAS) {
+                    return Err(EvaluationError);
+                }
+                parts.push(
+                    block
+                        .get("data")
+                        .and_then(Value::as_str)
+                        .ok_or(EvaluationError)?
+                        .into(),
+                );
+                sweep_extras!();
+            }
+            "tool_use" => {
+                if !keys_are(block, &["type", "id", "name", "input"], BLOCK_EXTRAS) {
+                    return Err(EvaluationError);
+                }
+                parts.push(
+                    block
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .ok_or(EvaluationError)?
+                        .into(),
+                );
+                parts.push(
+                    block
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .ok_or(EvaluationError)?
+                        .into(),
+                );
+                collect(block.get("input").ok_or(EvaluationError)?, parts, 0)?;
+                sweep_extras!();
+            }
+            "tool_result" => {
+                if !keys_are(
+                    block,
+                    &["type", "tool_use_id"],
+                    &["content", "is_error", "cache_control", "citations"],
+                ) {
+                    return Err(EvaluationError);
+                }
+                parts.push(
+                    block
+                        .get("tool_use_id")
+                        .and_then(Value::as_str)
+                        .ok_or(EvaluationError)?
+                        .into(),
+                );
+                match block.get("content") {
+                    Some(Value::String(s)) => parts.push(s.clone()),
+                    Some(Value::Null) | None => (),
+                    Some(Value::Array(blocks)) => inspect_anthropic_blocks(blocks, parts)?,
+                    _ => return Err(EvaluationError),
+                }
+                if let Some(is_error) = block.get("is_error") {
+                    if !is_error.is_boolean() {
+                        return Err(EvaluationError);
+                    }
+                }
+                sweep_extras!();
+            }
+            "image" | "document" => {
+                if !keys_are(block, &["type", "source"], BLOCK_EXTRAS) {
+                    return Err(EvaluationError);
+                }
+                let source = block
+                    .get("source")
+                    .and_then(Value::as_object)
+                    .ok_or(EvaluationError)?;
+                let source_kind = source
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .ok_or(EvaluationError)?;
+                match source_kind {
+                    "url" => {
+                        if !keys_are(source, &["type", "url"], &[]) {
+                            return Err(EvaluationError);
+                        }
+                        parts.push(
+                            source
+                                .get("url")
+                                .and_then(Value::as_str)
+                                .ok_or(EvaluationError)?
+                                .into(),
+                        );
+                    }
+                    "base64" => {
+                        if !keys_are(source, &["type", "media_type", "data"], &[]) {
+                            return Err(EvaluationError);
+                        }
+                        parts.push(
+                            source
+                                .get("media_type")
+                                .and_then(Value::as_str)
+                                .ok_or(EvaluationError)?
+                                .into(),
+                        );
+                        let data = source
+                            .get("data")
+                            .and_then(Value::as_str)
+                            .ok_or(EvaluationError)?;
+                        if !looks_like_base64(data) {
+                            return Err(EvaluationError);
+                        }
+                    }
+                    "file" => {
+                        if !keys_are(source, &["type", "file_id"], &[]) {
+                            return Err(EvaluationError);
+                        }
+                        parts.push(
+                            source
+                                .get("file_id")
+                                .and_then(Value::as_str)
+                                .ok_or(EvaluationError)?
+                                .into(),
+                        );
+                    }
+                    _ => return Err(EvaluationError),
+                }
+                sweep_extras!();
+            }
+            _ => return Err(EvaluationError),
+        }
+    }
+    Ok(())
+}
+
 fn inspect_arguments(value: &Value, parts: &mut Vec<String>) -> Result<(), EvaluationError> {
     let args = value
         .get("arguments")
