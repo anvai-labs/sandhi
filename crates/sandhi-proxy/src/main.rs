@@ -985,6 +985,7 @@ fn rehydrate_providers_from_vault(
             entry.base_url.as_deref(),
             &secret,
             entry.scheme,
+            entry.user_agent.as_deref(),
         ) {
             providers.insert(entry.credential_id(), handle);
         }
@@ -1083,6 +1084,7 @@ mod tests {
                     "openai",
                     label,
                     sandhi_store::CredentialScheme::ApiKey,
+                    None,
                     None,
                     "synthetic-key",
                 )

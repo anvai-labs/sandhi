@@ -142,6 +142,12 @@ impl RawForwarder {
     /// `Accept-Encoding`, and the family credential headers `x-api-key`, `x-goog-api-key`,
     /// `anthropic-version`) so the forwarder controls framing and credentials.
     #[must_use]
+    /// Override the shared HTTP client (e.g. a per-endpoint connect bound).
+    pub fn with_client(mut self, client: reqwest::Client) -> Self {
+        self.client = client;
+        self
+    }
+
     pub fn with_headers(mut self, headers: HeaderMap) -> Self {
         // Single-sourced strip (TD-0022 D2) — same owned-name set as every family adapter.
         self.extra_headers = crate::strip_transport_owned(headers);
@@ -251,6 +257,7 @@ impl RawForwarder {
         response_request_id_header: Option<&str>,
     ) -> Result<RawResponse, ProviderError> {
         let url = self.url(path);
+        tracing::debug!(%url, "upstream dial");
         let out_body = normalize_envelope(self.family, &body, false);
         let deadline = crate::BufferedDeadline::current()
             .unwrap_or_else(|| crate::BufferedDeadline::new(self.complete_timeout));
@@ -296,6 +303,7 @@ impl RawForwarder {
         body: Bytes,
     ) -> Result<RawChunkStream, ProviderError> {
         let url = self.url(path);
+        tracing::debug!(%url, "upstream dial (stream)");
         let out_body = normalize_envelope(self.family, &body, true);
         let policy = crate::StreamingDeadline::current();
         let deadline = policy
@@ -581,6 +589,7 @@ impl RawForwarder {
         let model = attempt.and_then(|attempt| attempt.model.as_deref());
         let response_request_id_header = self.response_request_id_header;
         let url = self.url(path);
+        tracing::debug!(%url, "upstream dial (metered stream)");
         let out_body = normalize_envelope(self.family, &body, true);
         let policy = crate::StreamingDeadline::current();
         let deadline = policy
