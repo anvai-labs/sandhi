@@ -3015,9 +3015,9 @@ dependencies = [
 
 [[package]]
 name = "sentinelpass-protocol"
-version = "0.19.0"
+version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1c227f5bfb220cfbc4e1ca14bcf702368680aba0c0195a5df33dbe6bd46a914"
+checksum = "2f467baa0eef47e12263e083a87ac77126e0b04af7c4026003ed79ec93d79b55"
 dependencies = [
  "aes-gcm",
  "dirs",
