@@ -192,8 +192,20 @@ pub fn encode_anthropic_request(request: &ChatRequestV1) -> Result<Value, Provid
         ProviderError::InvalidRequest("Anthropic requires max_output_tokens".into())
     })?;
     body.insert("max_tokens".into(), max_tokens.into());
+    // Anthropic rejects `temperature` when extended thinking is active
+    // (API error: "temperature is not supported when thinking is enabled").
+    // Belt-and-suspenders guard: Victor's policy layer strips it before
+    // building ChatRequestV1, but we also drop it here so any future client
+    // that sends both is protected at the encoder level.
+    let thinking_enabled = request
+        .thinking
+        .as_ref()
+        .map(|t| t.enabled)
+        .unwrap_or(false);
     if let Some(temperature) = request.temperature {
-        body.insert("temperature".into(), json!(temperature));
+        if !thinking_enabled {
+            body.insert("temperature".into(), json!(temperature));
+        }
     }
     if let Some(stop) = &request.stop {
         body.insert("stop_sequences".into(), json!(stop));
