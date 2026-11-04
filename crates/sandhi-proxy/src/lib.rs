@@ -75,7 +75,7 @@ use sandhi_providers::{
 };
 use sandhi_store::{hash_secret, AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
 
-use codec::{encode_response, encode_stream_event, IngressDialect};
+use codec::{encode_response, IngressDialect, StreamEventEncoder};
 pub use operator::BudgetSpec;
 
 /// Default output maximum for a Block-budgeted scope when the client omits `max_output_tokens`.
@@ -651,6 +651,10 @@ fn ingress_routes(state: &Arc<ProxyState>) -> axum::Router<Arc<ProxyState>> {
         .route("/v1/embeddings", post(handle_embeddings))
         .route("/v1/completions", post(handle_completions))
         .route("/v1/messages", post(handle_anthropic))
+        .route(
+            "/v1/messages/count_tokens",
+            post(handle_anthropic_count_tokens),
+        )
         .route("/v1/responses", post(handle_responses))
         // Gemini's path carries the model AND the method, colon-separated
         // (`/v1beta/models/gemini-2.5-flash:generateContent`), so it matches as ONE segment and
@@ -1905,6 +1909,27 @@ async fn handle_anthropic(
     .await
 }
 
+async fn handle_anthropic_count_tokens(
+    State(state): State<Arc<ProxyState>>,
+    permit: Extension<Arc<AdmissionPermit>>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let body = match request_body(body, IngressDialect::Anthropic) {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
+    handle_count_tokens(
+        state,
+        permit.0,
+        headers,
+        body,
+        IngressDialect::Anthropic,
+        None,
+    )
+    .await
+}
+
 async fn handle_responses(
     State(state): State<Arc<ProxyState>>,
     permit: Extension<Arc<AdmissionPermit>>,
@@ -2131,6 +2156,20 @@ async fn handle_gemini(
             "expected /v1beta/models/{model}:generateContent",
         );
     };
+    if method == "countTokens" {
+        return handle_count_tokens(
+            state,
+            permit.0,
+            headers,
+            body,
+            IngressDialect::Gemini,
+            Some(GeminiRoute {
+                model: model.to_string(),
+                stream: false,
+            }),
+        )
+        .await;
+    }
     let stream = match method {
         "generateContent" => false,
         "streamGenerateContent" => true,
@@ -3380,6 +3419,9 @@ async fn stream_response(
     let body = streaming::body(accounting, permit, tail, move |accounting| {
         Box::pin(async_stream::stream! {
             let mut last_usage: Option<UsageV2> = None;
+            // Stateful per-stream egress encoder: Anthropic's content-block
+            // lifecycle and Gemini's whole-part tool calls need cross-event state.
+            let mut stream_encoder = StreamEventEncoder::new(dialect);
             // What the family has reported so far, for families that report before the end
             // (TD-0013 D3). `None` for a terminal-only family, for the whole stream.
             let mut running_reported: Option<ParsedUsage> = None;
@@ -3442,7 +3484,7 @@ async fn stream_response(
                             continue;
                         }
                         for (event_name, value) in
-                            encode_stream_event(dialect, &event, last_usage.as_ref())
+                            stream_encoder.encode(&event, last_usage.as_ref())
                         {
                             yield Ok::<Bytes, std::io::Error>(Bytes::from(sse_frame(event_name, &value)));
                         }
@@ -3453,7 +3495,7 @@ async fn stream_response(
                             error: error.as_typed(Some(provider.slug())),
                         };
                         for (event_name, value) in
-                            encode_stream_event(dialect, &typed, last_usage.as_ref())
+                            stream_encoder.encode(&typed, last_usage.as_ref())
                         {
                             yield Ok::<Bytes, std::io::Error>(Bytes::from(sse_frame(event_name, &value)));
                         }
@@ -3771,6 +3813,98 @@ enum VirtualKeyResolution {
     NotFound,
     Expired,
     Denied(StatusCode),
+}
+
+/// `POST /v1/messages/count_tokens` and `POST /v1beta/models/{model}:countTokens` —
+/// answer the dialect's token-counting endpoint from the request body alone.
+///
+/// Auth, decode validation, model allowlist, the policy input gate and the
+/// per-key rate limit all run exactly as on the generation path (`prepare`) —
+/// but nothing is reserved, generated or metered: no model call is made, so no
+/// lease and no UsageEvent. The estimate is the SAME number the gateway
+/// reserves against for generation (`TokenEstimator::estimate` over the
+/// request bytes), which keeps it consistent with budget enforcement, if
+/// approximate against a vendor tokenizer.
+async fn handle_count_tokens(
+    state: Arc<ProxyState>,
+    permit: Arc<AdmissionPermit>,
+    headers: HeaderMap,
+    body: Bytes,
+    dialect: IngressDialect,
+    gemini_route: Option<GeminiRoute>,
+) -> Response {
+    if !state.lifecycle.is_running() {
+        return draining_error(dialect);
+    }
+    // Admission already counted by the extractor; counting holds the slot only
+    // while it answers — it never dispatches.
+    drop(permit);
+    let Some(vk_token) = dialect.extract_credential(&headers) else {
+        return ingress_error(
+            dialect,
+            StatusCode::UNAUTHORIZED,
+            &format!(
+                "missing virtual key: send it as {}",
+                dialect.credential_hint()
+            ),
+        );
+    };
+    let (vk, rate_identity, policy_identity) = match resolve_virtual_key(&state, vk_token, &headers)
+        .await
+    {
+        VirtualKeyResolution::Denied(status) => {
+            return ingress_error(dialect, status, "OIDC inference authorization failed")
+        }
+        VirtualKeyResolution::Found(vk, rate_identity, identity) => (*vk, rate_identity, identity),
+        VirtualKeyResolution::Expired => {
+            return ingress_error(dialect, StatusCode::UNAUTHORIZED, "virtual key expired")
+        }
+        VirtualKeyResolution::NotFound => {
+            return ingress_error(dialect, StatusCode::UNAUTHORIZED, "unknown virtual key")
+        }
+    };
+    let Some(provider) = state
+        .providers
+        .lock()
+        .expect("providers poisoned")
+        .get(&vk.upstream_ref)
+        .cloned()
+    else {
+        return ingress_error(
+            dialect,
+            StatusCode::BAD_GATEWAY,
+            "no upstream registered for this key",
+        );
+    };
+    let receipt = Arc::new(Mutex::new(None));
+    let preparation::PreparedRequest { request, body, .. } = match preparation::prepare(
+        preparation::PreparationContext::from(state.as_ref()),
+        preparation::ResolvedRoute {
+            vk,
+            provider: provider.clone(),
+            rate_identity,
+            policy_identity,
+        },
+        &headers,
+        body,
+        dialect,
+        gemini_route.as_ref(),
+        &receipt,
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(response) => return response,
+    };
+    let tokens = state
+        .token_estimator
+        .lock()
+        .map(|estimator| estimator.estimate(provider.slug(), &request.model, body.len()))
+        .unwrap_or_else(|_| sandhi_providers::token_estimate::baseline_estimate(body.len()));
+    match dialect {
+        IngressDialect::Gemini => Json(json!({"totalTokens": tokens})).into_response(),
+        _ => Json(json!({"input_tokens": tokens})).into_response(),
+    }
 }
 
 /// Resolve a presented virtual-key token: exact (legacy demo) then by hash (operator-minted).

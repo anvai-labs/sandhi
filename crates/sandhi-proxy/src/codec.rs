@@ -735,6 +735,9 @@ fn encode_gemini_stream_event(
             None,
             json!({"candidates":[{"content":{"role":"model","parts":[{"text":delta}]},"index":0}]}),
         )],
+        // Gemini SSE surfaces failures as an `{"error": ...}` data frame, not a
+        // dropped stream — previously this fell into the silent catch-all.
+        ChatStreamEventV1::Error { error } => vec![(None, json!({"error": error}))],
         ChatStreamEventV1::Finish { reason } => {
             let mut chunk = json!({"candidates":[{
                 "content": {"role": "model", "parts": []},
@@ -1637,6 +1640,7 @@ fn encode_openai_response(response: &ChatResponseV1) -> Value {
     json!({
         "id": response.id,
         "object":"chat.completion",
+        "created":unix_now(),
         "model":response.model,
         "choices":[{"index":0,"message":message,"finish_reason":openai_finish(response.finish_reason)}],
         "usage":openai_usage(&response.usage),
@@ -1734,24 +1738,321 @@ fn responses_usage(usage: &UsageV2) -> Value {
     })
 }
 
-/// One canonical stream event may expand to multiple protocol SSE events (for example a finish
-/// event also closes an Anthropic message).
+/// Per-stream egress state for the dialects whose SSE protocols are stateful.
 ///
-/// `last_usage` carries the most recently observed terminal `Usage` event so the Responses
-/// egress can fold it into the terminal `response.completed` frame (in the canonical stream a
-/// `Usage` event always precedes `Finish`). The OpenAI/Anthropic encoders ignore it.
-pub(crate) fn encode_stream_event(
+/// Anthropic's stream is a content-BLOCK protocol: every block needs an explicit
+/// `content_block_start` with a unique index before its deltas and a
+/// `content_block_stop` after them, and thinking vs text are DIFFERENT block
+/// types. A stateless per-event encoder cannot express that — which SDKs
+/// tolerate loosely but the spec does not. Gemini has the opposite constraint:
+/// a function call is ONE complete part per chunk (no partial frame exists), so
+/// tool calls must be buffered from start/argument-deltas and emitted complete
+/// at `ToolCallEnd`. Both live here; the OpenAI-family dialects stay stateless
+/// and delegate unchanged.
+pub(crate) struct StreamEventEncoder {
     dialect: IngressDialect,
-    event: &ChatStreamEventV1,
-    last_usage: Option<&UsageV2>,
-) -> Vec<(Option<&'static str>, Value)> {
-    match dialect {
-        IngressDialect::OpenAi | IngressDialect::Embeddings | IngressDialect::Completions => {
-            encode_openai_stream_event(event, last_usage)
+    /// Next Anthropic content-block index (one space shared by prose + tools).
+    next_block: usize,
+    /// The open prose (non-tool) block: (block index, "text" | "thinking").
+    open_prose: Option<(usize, &'static str)>,
+    /// Open tool blocks: canonical tool-call index → assigned block index.
+    open_tools: BTreeMap<u32, usize>,
+    /// Gemini buffered calls: canonical tool-call index → (id, name, args JSON).
+    gemini_calls: BTreeMap<u32, (String, String, String)>,
+    /// Responses assembled output: streamed text plus buffered function calls,
+    /// folded into the terminal `response.completed` frame.
+    responses_text: String,
+    responses_calls: BTreeMap<u32, (String, String, String)>,
+}
+
+impl StreamEventEncoder {
+    pub(crate) fn new(dialect: IngressDialect) -> Self {
+        Self {
+            dialect,
+            next_block: 0,
+            open_prose: None,
+            open_tools: BTreeMap::new(),
+            gemini_calls: BTreeMap::new(),
+            responses_text: String::new(),
+            responses_calls: BTreeMap::new(),
         }
-        IngressDialect::Anthropic => encode_anthropic_stream_event(event, last_usage),
-        IngressDialect::Responses => encode_responses_stream_event(event, last_usage),
-        IngressDialect::Gemini => encode_gemini_stream_event(event, last_usage),
+    }
+
+    pub(crate) fn encode(
+        &mut self,
+        event: &ChatStreamEventV1,
+        last_usage: Option<&UsageV2>,
+    ) -> Vec<(Option<&'static str>, Value)> {
+        match self.dialect {
+            IngressDialect::Anthropic => self.encode_anthropic(event, last_usage),
+            IngressDialect::Gemini => self.encode_gemini(event, last_usage),
+            IngressDialect::Responses => self.encode_responses(event, last_usage),
+            _ => encode_openai_stream_event(event, last_usage),
+        }
+    }
+
+    /// Anthropic: maintain the block lifecycle. `last_usage` is unused here
+    /// (usage rides the terminal `message_delta`), matching the stateless arm.
+    fn encode_anthropic(
+        &mut self,
+        event: &ChatStreamEventV1,
+        _last_usage: Option<&UsageV2>,
+    ) -> Vec<(Option<&'static str>, Value)> {
+        let mut frames: Vec<(Option<&'static str>, Value)> = Vec::new();
+        match event {
+            ChatStreamEventV1::ResponseStart { id, model } => {
+                frames.push((
+                    Some("message_start"),
+                    json!({"type":"message_start","message":{
+                        "id":id,"type":"message","role":"assistant","model":model,"content":[],
+                        "stop_reason":Value::Null,"stop_sequence":Value::Null,
+                        "usage":{"input_tokens":0,"output_tokens":0}
+                    }}),
+                ));
+                // Spec-shaped keepalive; SDKs ignore it, strict consumers expect it.
+                frames.push((Some("ping"), json!({"type":"ping"})));
+            }
+            ChatStreamEventV1::TextDelta { delta } => {
+                let index = self.open_prose_block("text", &mut frames);
+                frames.push((
+                    Some("content_block_delta"),
+                    json!({"type":"content_block_delta","index":index,
+                        "delta":{"type":"text_delta","text":delta}}),
+                ));
+            }
+            ChatStreamEventV1::ReasoningDelta { delta } => {
+                let index = self.open_prose_block("thinking", &mut frames);
+                frames.push((
+                    Some("content_block_delta"),
+                    json!({"type":"content_block_delta","index":index,
+                        "delta":{"type":"thinking_delta","thinking":delta}}),
+                ));
+            }
+            ChatStreamEventV1::RefusalDelta { delta } => {
+                let index = self.open_prose_block("text", &mut frames);
+                frames.push((
+                    Some("content_block_delta"),
+                    json!({"type":"content_block_delta","index":index,
+                        "delta":{"type":"text_delta","text":delta}}),
+                ));
+            }
+            ChatStreamEventV1::ToolCallStart { index, id, name } => {
+                self.close_prose_block(&mut frames);
+                let block = self.next_block;
+                self.next_block += 1;
+                self.open_tools.insert(*index, block);
+                frames.push((
+                    Some("content_block_start"),
+                    json!({"type":"content_block_start","index":block,"content_block":{
+                        "type":"tool_use","id":id,"name":name,"input":{}
+                    }}),
+                ));
+            }
+            ChatStreamEventV1::ToolCallArgumentsDelta { index, delta } => {
+                let block = self
+                    .open_tools
+                    .get(index)
+                    .copied()
+                    .unwrap_or(*index as usize);
+                frames.push((
+                    Some("content_block_delta"),
+                    json!({"type":"content_block_delta","index":block,"delta":{
+                        "type":"input_json_delta","partial_json":delta
+                    }}),
+                ));
+            }
+            ChatStreamEventV1::ToolCallEnd { index } => {
+                let block = self.open_tools.remove(index).unwrap_or(*index as usize);
+                frames.push((
+                    Some("content_block_stop"),
+                    json!({"type":"content_block_stop","index":block}),
+                ));
+            }
+            ChatStreamEventV1::Usage { usage } => frames.push((
+                Some("message_delta"),
+                json!({"type":"message_delta","delta":{},"usage":anthropic_usage(usage)}),
+            )),
+            ChatStreamEventV1::Finish { reason } => {
+                self.close_prose_block(&mut frames);
+                let open: Vec<usize> = self.open_tools.values().copied().collect();
+                self.open_tools.clear();
+                for block in open {
+                    frames.push((
+                        Some("content_block_stop"),
+                        json!({"type":"content_block_stop","index":block}),
+                    ));
+                }
+                frames.push((
+                    Some("message_delta"),
+                    json!({"type":"message_delta","delta":{
+                        "stop_reason":anthropic_finish(Some(*reason)),"stop_sequence":Value::Null
+                    }}),
+                ));
+                frames.push((Some("message_stop"), json!({"type":"message_stop"})));
+            }
+            ChatStreamEventV1::Error { error } => {
+                // Close what is open so the SDK's block bookkeeping stays sane,
+                // then surface the error event.
+                self.close_prose_block(&mut frames);
+                let open: Vec<usize> = self.open_tools.values().copied().collect();
+                self.open_tools.clear();
+                for block in open {
+                    frames.push((
+                        Some("content_block_stop"),
+                        json!({"type":"content_block_stop","index":block}),
+                    ));
+                }
+                frames.push((Some("error"), json!({"type":"error","error":error})));
+            }
+        }
+        frames
+    }
+
+    /// Open (or reuse) the prose block of `kind`, emitting start/stop frames as
+    /// the delta kinds switch between text and thinking.
+    fn open_prose_block(
+        &mut self,
+        kind: &'static str,
+        frames: &mut Vec<(Option<&'static str>, Value)>,
+    ) -> usize {
+        if let Some((index, open_kind)) = self.open_prose {
+            if open_kind == kind {
+                return index;
+            }
+            frames.push((
+                Some("content_block_stop"),
+                json!({"type":"content_block_stop","index":index}),
+            ));
+        }
+        let index = self.next_block;
+        self.next_block += 1;
+        self.open_prose = Some((index, kind));
+        let content_block = match kind {
+            "thinking" => json!({"type":"thinking","thinking":""}),
+            _ => json!({"type":"text","text":""}),
+        };
+        frames.push((
+            Some("content_block_start"),
+            json!({"type":"content_block_start","index":index,"content_block":content_block}),
+        ));
+        index
+    }
+
+    fn close_prose_block(&mut self, frames: &mut Vec<(Option<&'static str>, Value)>) {
+        if let Some((index, _)) = self.open_prose.take() {
+            frames.push((
+                Some("content_block_stop"),
+                json!({"type":"content_block_stop","index":index}),
+            ));
+        }
+    }
+
+    /// Responses: accumulate the streamed output so the terminal
+    /// `response.completed` carries the FULL `output` items (the spec shape, and
+    /// what Codex-style clients re-read from the final frame) instead of an empty
+    /// list. `output_item.done` likewise carries the complete item.
+    fn encode_responses(
+        &mut self,
+        event: &ChatStreamEventV1,
+        last_usage: Option<&UsageV2>,
+    ) -> Vec<(Option<&'static str>, Value)> {
+        match event {
+            ChatStreamEventV1::TextDelta { delta } => {
+                self.responses_text.push_str(delta);
+            }
+            ChatStreamEventV1::RefusalDelta { delta } => {
+                self.responses_text.push_str(delta);
+            }
+            ChatStreamEventV1::ToolCallStart { index, id, name } => {
+                self.responses_calls
+                    .insert(*index, (id.clone(), name.clone(), String::new()));
+            }
+            ChatStreamEventV1::ToolCallArgumentsDelta { index, delta } => {
+                if let Some(call) = self.responses_calls.get_mut(index) {
+                    call.2.push_str(delta);
+                }
+            }
+            ChatStreamEventV1::ToolCallEnd { index } => {
+                if let Some((id, name, args)) = self.responses_calls.get(index) {
+                    return vec![(
+                        Some("response.output_item.done"),
+                        json!({"type":"response.output_item.done","output_index":index,
+                           "item":{"type":"function_call","id":id,"call_id":id,
+                                   "name":name,"arguments":args,"status":"completed"}}),
+                    )];
+                }
+            }
+            ChatStreamEventV1::Finish { reason } => {
+                let usage = last_usage
+                    .map(responses_usage)
+                    .unwrap_or_else(|| responses_usage(&UsageV2::default()));
+                let mut output = Vec::new();
+                if !self.responses_text.is_empty() {
+                    output.push(json!({"type":"message","role":"assistant","content":[
+                        {"type":"output_text","text":self.responses_text}
+                    ]}));
+                }
+                for (_, (id, name, args)) in std::mem::take(&mut self.responses_calls) {
+                    output.push(json!({
+                        "type":"function_call","id":id,"call_id":id,
+                        "name":name,"arguments":args,"status":"completed"
+                    }));
+                }
+                let status = responses_status(Some(*reason));
+                let mut response = json!({
+                    "object":"response","status":status,"output":output,"usage":usage
+                });
+                if matches!(reason, FinishReasonV1::Length) {
+                    response["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                } else if matches!(reason, FinishReasonV1::ContentFilter) {
+                    response["incomplete_details"] = json!({"reason":"content_filter"});
+                }
+                return vec![(
+                    Some("response.completed"),
+                    json!({"type":"response.completed","response":response}),
+                )];
+            }
+            _ => {}
+        }
+        encode_responses_stream_event(event, last_usage)
+    }
+
+    /// Gemini: buffer tool calls to whole `functionCall` parts (the protocol
+    /// has no partial frame), and render an error frame (previously dropped).
+    fn encode_gemini(
+        &mut self,
+        event: &ChatStreamEventV1,
+        last_usage: Option<&UsageV2>,
+    ) -> Vec<(Option<&'static str>, Value)> {
+        match event {
+            ChatStreamEventV1::ToolCallStart { index, id, name } => {
+                self.gemini_calls
+                    .insert(*index, (id.clone(), name.clone(), String::new()));
+                Vec::new()
+            }
+            ChatStreamEventV1::ToolCallArgumentsDelta { index, delta } => {
+                if let Some(call) = self.gemini_calls.get_mut(index) {
+                    call.2.push_str(delta);
+                }
+                Vec::new()
+            }
+            ChatStreamEventV1::ToolCallEnd { index } => match self.gemini_calls.remove(index) {
+                Some((id, name, args)) => {
+                    let args_value = serde_json::from_str(&args).unwrap_or(json!({}));
+                    vec![(
+                        None,
+                        json!({"candidates":[{
+                            "content":{"role":"model","parts":[{"functionCall":{
+                                "name":name,"id":id,"args":args_value
+                            }}]},
+                            "index":0
+                        }]}),
+                    )]
+                }
+                None => Vec::new(),
+            },
+            other => encode_gemini_stream_event(other, last_usage),
+        }
     }
 }
 
@@ -1761,7 +2062,7 @@ fn encode_openai_stream_event(
 ) -> Vec<(Option<&'static str>, Value)> {
     let value = match event {
         ChatStreamEventV1::ResponseStart { id, model } => json!({
-            "id":id,"object":"chat.completion.chunk","model":model,
+            "id":id,"object":"chat.completion.chunk","created":unix_now(),"model":model,
             "choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":Value::Null}]
         }),
         ChatStreamEventV1::TextDelta { delta } => openai_delta(json!({"content":delta})),
@@ -1776,8 +2077,11 @@ fn encode_openai_stream_event(
             "tool_calls":[{"index":index,"function":{"arguments":delta}}]
         })),
         ChatStreamEventV1::ToolCallEnd { .. } => return Vec::new(),
-        ChatStreamEventV1::Usage { usage } => json!({"choices":[],"usage":openai_usage(usage)}),
+        ChatStreamEventV1::Usage { usage } => {
+            json!({"object":"chat.completion.chunk","created":unix_now(),"choices":[],"usage":openai_usage(usage)})
+        }
         ChatStreamEventV1::Finish { reason } => json!({
+            "object":"chat.completion.chunk","created":unix_now(),
             "choices":[{"index":0,"delta":{},"finish_reason":openai_finish(Some(*reason))}]
         }),
         ChatStreamEventV1::Error { error } => json!({"error":error}),
@@ -1785,68 +2089,15 @@ fn encode_openai_stream_event(
     vec![(None, value)]
 }
 
-fn openai_delta(delta: Value) -> Value {
-    json!({"object":"chat.completion.chunk","choices":[{"index":0,"delta":delta,"finish_reason":Value::Null}]})
+/// Spec-required `created` unix timestamp for OpenAI completion objects and
+/// chunks (the OpenAI SDKs declare the field required; omitting it breaks
+/// strict client validation).
+fn unix_now() -> i64 {
+    time::OffsetDateTime::now_utc().unix_timestamp()
 }
 
-fn encode_anthropic_stream_event(
-    event: &ChatStreamEventV1,
-    _last_usage: Option<&UsageV2>,
-) -> Vec<(Option<&'static str>, Value)> {
-    match event {
-        ChatStreamEventV1::ResponseStart { id, model } => vec![(
-            Some("message_start"),
-            json!({"type":"message_start","message":{
-                "id":id,"type":"message","role":"assistant","model":model,"content":[],
-                "stop_reason":Value::Null,"stop_sequence":Value::Null,
-                "usage":{"input_tokens":0,"output_tokens":0}
-            }}),
-        )],
-        ChatStreamEventV1::TextDelta { delta } => vec![(
-            Some("content_block_delta"),
-            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":delta}}),
-        )],
-        ChatStreamEventV1::ReasoningDelta { delta } => vec![(
-            Some("content_block_delta"),
-            json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":delta}}),
-        )],
-        ChatStreamEventV1::RefusalDelta { delta } => vec![(
-            Some("content_block_delta"),
-            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":delta}}),
-        )],
-        ChatStreamEventV1::ToolCallStart { index, id, name } => vec![(
-            Some("content_block_start"),
-            json!({"type":"content_block_start","index":index,"content_block":{
-                "type":"tool_use","id":id,"name":name,"input":{}
-            }}),
-        )],
-        ChatStreamEventV1::ToolCallArgumentsDelta { index, delta } => vec![(
-            Some("content_block_delta"),
-            json!({"type":"content_block_delta","index":index,"delta":{
-                "type":"input_json_delta","partial_json":delta
-            }}),
-        )],
-        ChatStreamEventV1::ToolCallEnd { index } => vec![(
-            Some("content_block_stop"),
-            json!({"type":"content_block_stop","index":index}),
-        )],
-        ChatStreamEventV1::Usage { usage } => vec![(
-            Some("message_delta"),
-            json!({"type":"message_delta","delta":{},"usage":anthropic_usage(usage)}),
-        )],
-        ChatStreamEventV1::Finish { reason } => vec![
-            (
-                Some("message_delta"),
-                json!({"type":"message_delta","delta":{
-                    "stop_reason":anthropic_finish(Some(*reason)),"stop_sequence":Value::Null
-                }}),
-            ),
-            (Some("message_stop"), json!({"type":"message_stop"})),
-        ],
-        ChatStreamEventV1::Error { error } => {
-            vec![(Some("error"), json!({"type":"error","error":error}))]
-        }
-    }
+fn openai_delta(delta: Value) -> Value {
+    json!({"object":"chat.completion.chunk","created":unix_now(),"choices":[{"index":0,"delta":delta,"finish_reason":Value::Null}]})
 }
 
 /// Encode the canonical stream as OpenAI Responses SSE events — the inverse of
@@ -2081,6 +2332,230 @@ mod tests {
         let thinking = request.thinking.expect("thinking lifted");
         assert!(thinking.enabled);
         assert_eq!(thinking.budget_tokens, Some(2048));
+    }
+
+    #[test]
+    fn anthropic_stream_encoder_maintains_the_block_lifecycle() {
+        // The Anthropic stream is a content-BLOCK protocol: unique indices, an
+        // explicit start/stop per block, thinking and text as distinct block
+        // types, and a spec-shaped ping. Pinned end to end over a
+        // thinking→text→tool sequence.
+        use sandhi_core::{ChatStreamEventV1 as E, UsageV2};
+
+        let mut encoder = StreamEventEncoder::new(IngressDialect::Anthropic);
+        let mut frames: Vec<(Option<&'static str>, Value)> = Vec::new();
+        let events = [
+            E::ResponseStart {
+                id: Some("msg_1".into()),
+                model: "claude-test".into(),
+            },
+            E::ReasoningDelta {
+                delta: "thinking...".into(),
+            },
+            E::TextDelta {
+                delta: "answer".into(),
+            },
+            E::ToolCallStart {
+                index: 0,
+                id: "call_1".into(),
+                name: "lookup".into(),
+            },
+            E::ToolCallArgumentsDelta {
+                index: 0,
+                delta: "{\"q\":".into(),
+            },
+            E::ToolCallArgumentsDelta {
+                index: 0,
+                delta: "1}".into(),
+            },
+            E::ToolCallEnd { index: 0 },
+            E::Usage {
+                usage: UsageV2::default(),
+            },
+            E::Finish {
+                reason: sandhi_core::FinishReasonV1::ToolCalls,
+            },
+        ];
+        for event in &events {
+            frames.extend(encoder.encode(event, None));
+        }
+        let names: Vec<&str> = frames.iter().map(|(name, _)| name.unwrap()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "message_start",
+                "ping",
+                "content_block_start", // 0: thinking
+                "content_block_delta",
+                "content_block_stop",
+                "content_block_start", // 1: text
+                "content_block_delta",
+                "content_block_stop",
+                "content_block_start", // 2: tool_use
+                "content_block_delta",
+                "content_block_delta",
+                "content_block_stop",
+                "message_delta", // usage
+                "message_delta", // stop_reason
+                "message_stop",
+            ]
+        );
+        let block_starts: Vec<Value> = frames
+            .iter()
+            .filter(|(name, _)| *name == Some("content_block_start"))
+            .map(|(_, value)| value.clone())
+            .collect();
+        assert_eq!(block_starts[0]["index"], 0);
+        assert_eq!(block_starts[0]["content_block"]["type"], "thinking");
+        assert_eq!(block_starts[1]["index"], 1);
+        assert_eq!(block_starts[1]["content_block"]["type"], "text");
+        assert_eq!(block_starts[2]["index"], 2);
+        assert_eq!(block_starts[2]["content_block"]["type"], "tool_use");
+        // Deltas carry their block's index (tool args deltas target block 2).
+        let tool_deltas: Vec<&Value> = frames
+            .iter()
+            .filter(|(name, value)| {
+                *name == Some("content_block_delta") && value["delta"]["type"] == "input_json_delta"
+            })
+            .map(|(_, value)| value)
+            .collect();
+        assert_eq!(tool_deltas.len(), 2);
+        assert!(tool_deltas.iter().all(|d| d["index"] == 2));
+        // The terminal message_delta carries the tool_use stop reason.
+        let stop = frames
+            .iter()
+            .find(|(name, value)| {
+                *name == Some("message_delta") && value["delta"]["stop_reason"].is_string()
+            })
+            .map(|(_, value)| value.clone())
+            .unwrap();
+        assert_eq!(stop["delta"]["stop_reason"], "tool_use");
+    }
+
+    #[test]
+    fn gemini_stream_encoder_assembles_whole_function_calls() {
+        // Gemini has no partial tool-call frame: one complete functionCall part
+        // per chunk. Text flows immediately; the call is buffered across
+        // start/argument deltas and emitted complete at end; errors render as
+        // an error frame instead of vanishing.
+        use sandhi_core::{ChatStreamEventV1 as E, ProviderErrorV1};
+
+        let mut encoder = StreamEventEncoder::new(IngressDialect::Gemini);
+        let mut out: Vec<Value> = Vec::new();
+        for event in [
+            E::ToolCallStart {
+                index: 0,
+                id: "call_1".into(),
+                name: "lookup".into(),
+            },
+            E::ToolCallArgumentsDelta {
+                index: 0,
+                delta: "{\"q\":".into(),
+            },
+            E::TextDelta {
+                delta: "working".into(),
+            },
+            E::ToolCallArgumentsDelta {
+                index: 0,
+                delta: "1}".into(),
+            },
+            E::ToolCallEnd { index: 0 },
+        ] {
+            out.extend(encoder.encode(&event, None).into_iter().map(|(_, v)| v));
+        }
+        // Text passed through immediately; the call arrived as ONE complete part.
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out[0]["candidates"][0]["content"]["parts"][0]["text"],
+            "working"
+        );
+        let call = &out[1]["candidates"][0]["content"]["parts"][0]["functionCall"];
+        assert_eq!(call["name"], "lookup");
+        assert_eq!(call["id"], "call_1");
+        assert_eq!(call["args"]["q"], 1);
+
+        let error_frames = encoder.encode(
+            &E::Error {
+                error: ProviderErrorV1 {
+                    code: "upstream".into(),
+                    message: "boom".into(),
+                    retryable: false,
+                    http_status: None,
+                    provider: None,
+                    request_id: None,
+                    details: BTreeMap::new(),
+                },
+            },
+            None,
+        );
+        assert_eq!(error_frames.len(), 1, "errors must render, not vanish");
+        assert!(error_frames[0].1.get("error").is_some());
+    }
+
+    #[test]
+    fn responses_stream_encoder_folds_output_into_the_terminal_frame() {
+        // Codex-style clients re-read the final `response.output`; the terminal
+        // `response.completed` frame must carry the assembled items (text
+        // message + complete function calls), and `output_item.done` the full
+        // item — not stubs.
+        use sandhi_core::{ChatStreamEventV1 as E, FinishReasonV1, UsageV2};
+
+        let mut encoder = StreamEventEncoder::new(IngressDialect::Responses);
+        let mut frames: Vec<(Option<&'static str>, Value)> = Vec::new();
+        let events = [
+            E::ResponseStart {
+                id: Some("resp_1".into()),
+                model: "gpt-test".into(),
+            },
+            E::TextDelta {
+                delta: "hel".into(),
+            },
+            E::TextDelta { delta: "lo".into() },
+            E::ToolCallStart {
+                index: 0,
+                id: "call_1".into(),
+                name: "lookup".into(),
+            },
+            E::ToolCallArgumentsDelta {
+                index: 0,
+                delta: "{\"q\":".into(),
+            },
+            E::ToolCallArgumentsDelta {
+                index: 0,
+                delta: "1}".into(),
+            },
+            E::ToolCallEnd { index: 0 },
+            E::Finish {
+                reason: FinishReasonV1::ToolCalls,
+            },
+        ];
+        for event in &events {
+            frames.extend(encoder.encode(event, Some(&UsageV2::default())));
+        }
+        let done_item = frames
+            .iter()
+            .find(|(name, _)| *name == Some("response.output_item.done"))
+            .map(|(_, value)| value.clone())
+            .expect("output_item.done frame");
+        assert_eq!(done_item["item"]["type"], "function_call");
+        assert_eq!(done_item["item"]["call_id"], "call_1");
+        assert_eq!(done_item["item"]["name"], "lookup");
+        assert_eq!(done_item["item"]["arguments"], "{\"q\":1}");
+
+        let completed = frames
+            .iter()
+            .find(|(name, _)| *name == Some("response.completed"))
+            .map(|(_, value)| value.clone())
+            .expect("response.completed frame");
+        let output = &completed["response"]["output"];
+        assert_eq!(output[0]["type"], "message");
+        assert_eq!(output[0]["content"][0]["type"], "output_text");
+        assert_eq!(output[0]["content"][0]["text"], "hello");
+        assert_eq!(output[1]["type"], "function_call");
+        assert_eq!(output[1]["call_id"], "call_1");
+        assert_eq!(output[1]["arguments"], "{\"q\":1}");
+        assert_eq!(output[1]["status"], "completed");
+        assert_eq!(completed["response"]["status"], "completed");
     }
 
     #[test]

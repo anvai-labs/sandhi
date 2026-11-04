@@ -100,6 +100,7 @@ TD-0028 keeps its merge/deployment gates separate from the remaining diagnostic 
 | [0011](adr/0011-bounded-persisted-usage-diagnostics.md) | Accepted design: bounded persisted usage lookup; post-0.8.0 explicit OIDC diagnostics permission, token mode remains admin-only; no new capture or retention |
 | [0012](adr/0012-databricks-model-serving-provider.md) | Databricks Model Serving admitted as an OpenAI-compatible provider |
 | [0013](adr/0013-native-extensions-passthrough-and-auto-cache-control.md) | Guarded `sandhi_extensions` ingress passthrough; auto `cache_control` on the Anthropic translation path |
+| [0014](adr/0014-dialect-parity-counting-and-streaming-fidelity.md) | Token-count endpoints; stateful Anthropic/Gemini/Responses stream encoders; OpenAI `created`; translated-traffic route labels |
 
 ## Technical-design status
 

@@ -19,6 +19,32 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+### Added
+
+- Dialect parity for agent clients
+  ([ADR-0014](docs/adr/0014-dialect-parity-counting-and-streaming-fidelity.md)):
+  - `POST /v1/messages/count_tokens` (Claude Code) and
+    `POST /v1beta/models/{model}:countTokens` (Gemini clients) now answer
+    from the request body alone — full auth/allowlist/policy/rate-limit
+    pipeline, but no dispatch, reservation or usage event (previously 404 and
+    501 respectively). The estimate matches what budget reservation uses.
+  - Gemini SSE streams now render tool calls: buffered across the canonical
+    start/argument-delta events and emitted as one complete `functionCall`
+    part (the protocol has no partial frame — these events were previously
+    dropped, breaking agentic Gemini clients on cross-family routes). Stream
+    errors render as `{"error": ...}` frames instead of vanishing.
+  - Anthropic SSE streams maintain the content-block lifecycle: explicit
+    `content_block_start`/`content_block_stop` with unique indices, thinking
+    and text as distinct block types, and a spec-shaped `ping`.
+  - Responses SSE streams fold streamed text and buffered function calls into
+    the terminal `response.completed` frame's `output` (and complete
+    `output_item.done` items) — what Codex-class clients re-read.
+  - OpenAI completion objects and chunks carry the spec-required `created`
+    timestamp.
+  - Translated traffic stays labeled: every usage event carries the ingress
+    `route`, so OpenAI→Anthropic/Gemini translation never masquerades as
+    native-dialect traffic.
+
 ### Fixed
 
 - The neutral chat contract no longer rejects `temperature` alongside
