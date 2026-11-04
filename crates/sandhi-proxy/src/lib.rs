@@ -2156,6 +2156,13 @@ async fn handle_gemini(
             "expected /v1beta/models/{model}:generateContent",
         );
     };
+    if model.is_empty() {
+        return ingress_error(
+            IngressDialect::Gemini,
+            StatusCode::BAD_REQUEST,
+            "model is empty",
+        );
+    }
     if method == "countTokens" {
         return handle_count_tokens(
             state,
@@ -2173,8 +2180,9 @@ async fn handle_gemini(
     let stream = match method {
         "generateContent" => false,
         "streamGenerateContent" => true,
-        // countTokens, embedContent and the rest are not metered surfaces yet; say so in Gemini's
-        // own error shape rather than 404-ing with an empty body.
+        // embedContent and the rest are not metered surfaces yet; say so in Gemini's
+        // own error shape rather than 404-ing with an empty body. (countTokens
+        // is handled above, ahead of this match.)
         other => {
             return ingress_error(
                 IngressDialect::Gemini,
@@ -2183,13 +2191,6 @@ async fn handle_gemini(
             );
         }
     };
-    if model.is_empty() {
-        return ingress_error(
-            IngressDialect::Gemini,
-            StatusCode::BAD_REQUEST,
-            "model is empty",
-        );
-    }
     let route = GeminiRoute {
         model: model.to_string(),
         stream,
@@ -3833,12 +3834,15 @@ async fn handle_count_tokens(
     dialect: IngressDialect,
     gemini_route: Option<GeminiRoute>,
 ) -> Response {
+    // Underscore-binding keeps the admission permit alive to the end of the
+    // handler (the layer's unary invariant) without further use below.
+    let _permit = permit;
     if !state.lifecycle.is_running() {
         return draining_error(dialect);
     }
-    // Admission already counted by the extractor; counting holds the slot only
-    // while it answers — it never dispatches.
-    drop(permit);
+    // Hold the admission slot for the handler's duration, like every unary
+    // handler (parse + policy work run under it); it is released at return and
+    // counting never dispatches, so no generation slot is held upstream.
     let Some(vk_token) = dialect.extract_credential(&headers) else {
         return ingress_error(
             dialect,
@@ -3997,7 +4001,7 @@ fn ingress_error(dialect: IngressDialect, status: StatusCode, msg: &str) -> Resp
 fn dialect_for_path(path: &str) -> IngressDialect {
     if path.starts_with("/v1beta/") {
         IngressDialect::Gemini
-    } else if path == "/v1/messages" {
+    } else if path == "/v1/messages" || path == "/v1/messages/count_tokens" {
         IngressDialect::Anthropic
     } else if path == "/v1/responses" {
         IngressDialect::Responses

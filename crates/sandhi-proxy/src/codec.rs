@@ -750,15 +750,11 @@ fn encode_gemini_stream_event(
             }
             vec![(None, chunk)]
         }
-        // Known limitation, stated rather than faked: a STREAMED tool call cannot be rendered.
-        // Gemini has no partial-function-call frame — it sends one complete `functionCall` part —
-        // whereas the canonical stream reports a call as start / argument-deltas / end. Emitting
-        // those as Gemini text would corrupt the client's parse, and assembling them needs
-        // buffering this per-event signature cannot do. Cross-family tool calls therefore work
-        // NON-streaming (see `encode_gemini_response`); streaming them is tracked as follow-up.
-        ChatStreamEventV1::ToolCallStart { .. }
-        | ChatStreamEventV1::ToolCallArgumentsDelta { .. }
-        | ChatStreamEventV1::ToolCallEnd { .. } => Vec::new(),
+        // Tool-call events never reach this stateless encoder: the stateful
+        // `StreamEventEncoder::encode_gemini` buffers them across start /
+        // argument-deltas and emits ONE complete `functionCall` part at
+        // `ToolCallEnd` (Gemini has no partial frame). ResponseStart, Usage
+        // and reasoning deltas have no Gemini SSE frame — nothing to emit.
         _ => Vec::new(),
     }
 }
@@ -1760,9 +1756,23 @@ pub(crate) struct StreamEventEncoder {
     /// Gemini buffered calls: canonical tool-call index → (id, name, args JSON).
     gemini_calls: BTreeMap<u32, (String, String, String)>,
     /// Responses assembled output: streamed text plus buffered function calls,
-    /// folded into the terminal `response.completed` frame.
+    /// in FIRST-OPEN ORDER (the `output_index` space of the final frame), folded
+    /// into the terminal `response.completed`.
     responses_text: String,
     responses_calls: BTreeMap<u32, (String, String, String)>,
+    responses_order: Vec<ResponsesOutputItem>,
+    /// OpenAI chunk identity (id/model from ResponseStart), stamped on every
+    /// subsequent chunk — the spec requires them on all frames, and a client
+    /// strict enough to require `created` requires these too.
+    openai_id: Option<String>,
+    openai_model: Option<String>,
+}
+
+/// One item slot in the Responses output-index space (assigned at first open,
+/// matching the terminal frame's `output` ordering).
+enum ResponsesOutputItem {
+    Text,
+    Call(u32),
 }
 
 impl StreamEventEncoder {
@@ -1775,6 +1785,9 @@ impl StreamEventEncoder {
             gemini_calls: BTreeMap::new(),
             responses_text: String::new(),
             responses_calls: BTreeMap::new(),
+            responses_order: Vec::new(),
+            openai_id: None,
+            openai_model: None,
         }
     }
 
@@ -1787,7 +1800,7 @@ impl StreamEventEncoder {
             IngressDialect::Anthropic => self.encode_anthropic(event, last_usage),
             IngressDialect::Gemini => self.encode_gemini(event, last_usage),
             IngressDialect::Responses => self.encode_responses(event, last_usage),
-            _ => encode_openai_stream_event(event, last_usage),
+            _ => self.encode_openai(event, last_usage),
         }
     }
 
@@ -1956,29 +1969,58 @@ impl StreamEventEncoder {
         event: &ChatStreamEventV1,
         last_usage: Option<&UsageV2>,
     ) -> Vec<(Option<&'static str>, Value)> {
+        // The `output_index` space is assigned at first open (text lazily on its
+        // first delta, each call at its ToolCallStart) so added/delta/done
+        // frames and the terminal fold share one coherent ordering.
         match event {
             ChatStreamEventV1::TextDelta { delta } => {
+                let output_index = self.responses_open_text();
                 self.responses_text.push_str(delta);
+                return vec![(
+                    Some("response.output_text.delta"),
+                    json!({"type":"response.output_text.delta",
+                           "output_index":output_index,"content_index":0,"delta":delta}),
+                )];
             }
             ChatStreamEventV1::RefusalDelta { delta } => {
+                let output_index = self.responses_open_text();
                 self.responses_text.push_str(delta);
+                return vec![(
+                    Some("response.refusal.delta"),
+                    json!({"type":"response.refusal.delta",
+                           "output_index":output_index,"delta":delta}),
+                )];
             }
             ChatStreamEventV1::ToolCallStart { index, id, name } => {
+                let output_index = self.responses_open_call(*index);
                 self.responses_calls
                     .insert(*index, (id.clone(), name.clone(), String::new()));
+                return vec![(
+                    Some("response.output_item.added"),
+                    json!({"type":"response.output_item.added","output_index":output_index,
+                           "item":{"type":"function_call","id":id,"call_id":id,
+                                   "name":name,"arguments":"","status":"in_progress"}}),
+                )];
             }
             ChatStreamEventV1::ToolCallArgumentsDelta { index, delta } => {
                 if let Some(call) = self.responses_calls.get_mut(index) {
                     call.2.push_str(delta);
                 }
+                let output_index = self.responses_index_of_call(*index);
+                return vec![(
+                    Some("response.function_call_arguments.delta"),
+                    json!({"type":"response.function_call_arguments.delta",
+                           "output_index":output_index,"delta":delta}),
+                )];
             }
             ChatStreamEventV1::ToolCallEnd { index } => {
+                let output_index = self.responses_index_of_call(*index);
                 if let Some((id, name, args)) = self.responses_calls.get(index) {
                     return vec![(
                         Some("response.output_item.done"),
-                        json!({"type":"response.output_item.done","output_index":index,
-                           "item":{"type":"function_call","id":id,"call_id":id,
-                                   "name":name,"arguments":args,"status":"completed"}}),
+                        json!({"type":"response.output_item.done","output_index":output_index,
+                               "item":{"type":"function_call","id":id,"call_id":id,
+                                       "name":name,"arguments":args,"status":"completed"}}),
                     )];
                 }
             }
@@ -1986,18 +2028,28 @@ impl StreamEventEncoder {
                 let usage = last_usage
                     .map(responses_usage)
                     .unwrap_or_else(|| responses_usage(&UsageV2::default()));
+                // Fold in the SAME order the indices were assigned in.
                 let mut output = Vec::new();
-                if !self.responses_text.is_empty() {
-                    output.push(json!({"type":"message","role":"assistant","content":[
-                        {"type":"output_text","text":self.responses_text}
-                    ]}));
+                for item in &self.responses_order {
+                    match item {
+                        ResponsesOutputItem::Text => {
+                            if !self.responses_text.is_empty() {
+                                output.push(json!({"type":"message","role":"assistant","content":[
+                                    {"type":"output_text","text":self.responses_text}
+                                ]}));
+                            }
+                        }
+                        ResponsesOutputItem::Call(index) => {
+                            if let Some((id, name, args)) = self.responses_calls.get(index) {
+                                output.push(json!({
+                                    "type":"function_call","id":id,"call_id":id,
+                                    "name":name,"arguments":args,"status":"completed"
+                                }));
+                            }
+                        }
+                    }
                 }
-                for (_, (id, name, args)) in std::mem::take(&mut self.responses_calls) {
-                    output.push(json!({
-                        "type":"function_call","id":id,"call_id":id,
-                        "name":name,"arguments":args,"status":"completed"
-                    }));
-                }
+                self.responses_order.clear();
                 let status = responses_status(Some(*reason));
                 let mut response = json!({
                     "object":"response","status":status,"output":output,"usage":usage
@@ -2015,6 +2067,66 @@ impl StreamEventEncoder {
             _ => {}
         }
         encode_responses_stream_event(event, last_usage)
+    }
+
+    /// Open (or find) the text item's slot in the output-index space.
+    fn responses_open_text(&mut self) -> usize {
+        if let Some(position) = self
+            .responses_order
+            .iter()
+            .position(|item| matches!(item, ResponsesOutputItem::Text))
+        {
+            return position;
+        }
+        self.responses_order.push(ResponsesOutputItem::Text);
+        self.responses_order.len() - 1
+    }
+
+    /// Open (or find) a call item's slot in the output-index space.
+    fn responses_open_call(&mut self, canonical: u32) -> usize {
+        if let Some(position) = self.responses_order.iter().position(
+            |item| matches!(item, ResponsesOutputItem::Call(index) if *index == canonical),
+        ) {
+            return position;
+        }
+        self.responses_order
+            .push(ResponsesOutputItem::Call(canonical));
+        self.responses_order.len() - 1
+    }
+
+    fn responses_index_of_call(&self, canonical: u32) -> usize {
+        self.responses_order
+            .iter()
+            .position(
+                |item| matches!(item, ResponsesOutputItem::Call(index) if *index == canonical),
+            )
+            .unwrap_or(canonical as usize)
+    }
+
+    /// OpenAI: identical frames to the stateless encoder, plus the chunk
+    /// identity (id/model captured at ResponseStart) on every subsequent
+    /// chunk — the spec puts them on all frames, not only the first.
+    fn encode_openai(
+        &mut self,
+        event: &ChatStreamEventV1,
+        last_usage: Option<&UsageV2>,
+    ) -> Vec<(Option<&'static str>, Value)> {
+        if let ChatStreamEventV1::ResponseStart { id, model } = event {
+            self.openai_id = id.clone();
+            self.openai_model = Some(model.clone());
+        }
+        let mut frames = encode_openai_stream_event(event, last_usage);
+        for (_, value) in frames.iter_mut() {
+            if value.get("object").is_some() {
+                if let Some(id) = &self.openai_id {
+                    value["id"] = json!(id);
+                }
+                if let Some(model) = &self.openai_model {
+                    value["model"] = json!(model);
+                }
+            }
+        }
+        frames
     }
 
     /// Gemini: buffer tool calls to whole `functionCall` parts (the protocol
@@ -2532,11 +2644,20 @@ mod tests {
         for event in &events {
             frames.extend(encoder.encode(event, Some(&UsageV2::default())));
         }
+        let added = frames
+            .iter()
+            .find(|(name, _)| *name == Some("response.output_item.added"))
+            .map(|(_, value)| value.clone())
+            .expect("output_item.added frame");
+        // Text opened first (index 0), so the call lives at output_index 1 —
+        // and added/done/fold must agree on that single index space.
+        assert_eq!(added["output_index"], 1);
         let done_item = frames
             .iter()
             .find(|(name, _)| *name == Some("response.output_item.done"))
             .map(|(_, value)| value.clone())
             .expect("output_item.done frame");
+        assert_eq!(done_item["output_index"], added["output_index"]);
         assert_eq!(done_item["item"]["type"], "function_call");
         assert_eq!(done_item["item"]["call_id"], "call_1");
         assert_eq!(done_item["item"]["name"], "lookup");
