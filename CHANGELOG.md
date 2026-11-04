@@ -19,6 +19,18 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+### Fixed
+
+- The neutral chat contract no longer rejects `temperature` alongside
+  `thinking.enabled` at ingress. That earlier guard in this release train was
+  family-blind: `ChatRequestV1::validate()` runs for every dialect before the
+  target upstream is known, so legal non-Anthropic traffic (documented agent
+  profiles that pin temperature while thinking, e.g. kimi-k3 at
+  temperature 1.0) was refused with an "Anthropic API constraint" error where
+  it previously forwarded fine. The constraint stays family-scoped where it
+  belongs: the Anthropic encoder still drops `temperature` when thinking is
+  enabled.
+
 ### Added
 
 - Translation-plane prompt caching for third-party OpenAI-compat clients
@@ -39,7 +51,11 @@ A partly published release remains incomplete even when some artifacts are avail
   rejected, field removed from the body clone) and safe by encoder
   construction: every family encoder inserts the typed fields after cloning
   its bucket, so a passthrough can only add native extras, never override
-  the decoded contract.
+  the decoded contract. The reserved key is gateway-consumed, never
+  forwarded: it is an allowed (and classified — bucket text is classifier
+  input, not a policy blind spot) key in the strict Chat/Messages policy
+  allowlists, stripped from the forwarded bytes after the policy gate, and
+  dropped from the Anthropic/Responses decoder body clones.
 
 ## [0.14.1] — 2026-10-25
 

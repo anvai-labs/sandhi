@@ -59,6 +59,16 @@ native extras a family accepts beyond the contract — it can never override
 the decoded, validated request. Unknown family slugs are inert by
 construction: no encoder reads a bucket it does not own.
 
+**Policy-gate interplay.** A passthrough bucket can carry wire-visible text
+(e.g. an anthropic `system` block survives the encoder when the typed
+messages carry no system role), so the input-policy gate must classify it:
+`sandhi_extensions` is an allowed key in the strict Chat and Messages field
+allowlists, and the inspector's extras collect loop sweeps its bucket
+strings into classifier input. The gate sees the ORIGINAL request bytes;
+the gateway strips the reserved key only afterwards (D3). On policy-gated
+deployments the mechanism works, and hidden text in a bucket blocks like
+the same text anywhere else in the body.
+
 This is the general mechanism by which ANY third-party OpenAI-compat client
 exercises family-native request optimizations (Anthropic `cache_control`
 placement, provider `top_k`/`metadata`, Gemini `safetySettings`), not just
@@ -84,21 +94,44 @@ conversation tail uncached. This mirrors the placement policy typed clients
 - Non-Anthropic upstreams are untouched: no other family has explicit
   client-visible cache markers on this path.
 
+## D3. The reserved key is gateway-consumed, never forwarded
+
+`sandhi_extensions` is a gateway-reserved namespace on every dialect, but
+interpreted only on the OpenAI dialect. It must never reach an upstream:
+
+- The proxy strips the key from the **forwarded request bytes** after the
+  policy gate (which classifies the original bytes), rewriting the body only
+  when the key is present — ordinary traffic stays byte-exact on the
+  transparent plane and the raw text routes.
+- The Anthropic and Responses decoders drop the key from their family body
+  clones, so a cross-family translation re-encode never carries it either.
+- On non-OpenAI dialects the key is allowed (so a client library setting it
+  unconditionally is not failed by the strict allowlist), classified, and
+  dropped uninterpreted.
+
 ## Consumer decisions
 
 | Change | Consumer | Decision |
 |---|---|---|
 | Reserved `sandhi_extensions` ingress field | OpenAI-compat clients | Opt-in; absent field = byte-identical behavior |
+| Reserved key in policy allowlists | Policy-gated deployments | Allowed AND classified — bucket text is classifier input, never a blind spot |
+| Reserved key lifecycle | Upstreams | Gateway-consumed on every dialect/plane; never forwarded |
 | Auto cache markers, no bucket | Third-party translation-plane callers | Default-on caching; empty bucket opts out |
 | Encoder reads bucket, then typed fields win | Passthrough clients | Buckets add native extras only; contract fields are encode-authoritative |
 
 ## Testing
 
 - `codec.rs`: passthrough admission, shape/ownership validation, no leak into
-  the openai body clone, and the cross-crate seam test
+  the openai body clone, the reserved-key strip (top-level only; nested
+  mentions and non-object bodies stay byte-identical), decoder-side strips,
+  and the cross-crate seam test
   `openai_to_anthropic_translation_keeps_prompt_caching_alive` (ingress decode
   → `encode_anthropic_request`, via the `typed` re-export) pinning both the
   auto path and client-owned placement.
 - `anthropic_typed.rs`: marker placement (last system block, last tool only),
-  suppression by client bucket, no-op without cacheables, and the existing
-  index/name merge tests for client-supplied markers.
+  suppression by client bucket, the empty-bucket opt-out, no-op without
+  cacheables, and the existing index/name merge tests for client-supplied
+  markers.
+- `tests/policy.rs`: the field passes the strict Chat/Messages allowlists and
+  secret text inside a bucket blocks — the passthrough is not a policy blind
+  spot.

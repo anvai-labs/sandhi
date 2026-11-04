@@ -564,6 +564,11 @@ fn inspect_format(body: &[u8], format: InputFormat) -> Result<Inspection, Evalua
         "n",
         "service_tier",
         "reasoning_effort",
+        // Gateway-reserved native passthrough (ADR-0013), interpreted on this
+        // dialect by the proxy; its bucket strings are swept into classifier
+        // input by the extras collect loop below, so the passthrough cannot
+        // hide wire-visible text (e.g. an anthropic `system` block).
+        "sandhi_extensions",
     ];
     let fields = match format {
         InputFormat::Chat => FIELDS,
@@ -587,6 +592,10 @@ fn inspect_format(body: &[u8], format: InputFormat) -> Result<Inspection, Evalua
             "betas",
             "mcp_servers",
             "context_management",
+            // Gateway-reserved (ADR-0013) but NOT interpreted on this dialect —
+            // the proxy strips it before forwarding; allowed so a client
+            // library that sets it unconditionally is not failed here.
+            "sandhi_extensions",
         ],
         InputFormat::Embeddings => &["model", "input", "encoding_format", "dimensions", "user"],
         InputFormat::Completions => &[

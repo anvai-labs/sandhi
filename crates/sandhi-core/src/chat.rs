@@ -239,16 +239,15 @@ impl ChatRequestV1 {
         if self.model.trim().is_empty() {
             return Err("model must not be empty".into());
         }
-        // Anthropic's API rejects `temperature` when extended thinking is
-        // enabled. Catching it here surfaces a clear error at the
-        // Victor→Sandhi boundary rather than a cryptic 400 from the wire.
-        if self.thinking.as_ref().map(|t| t.enabled).unwrap_or(false) && self.temperature.is_some()
-        {
-            return Err("temperature must be absent when thinking is enabled \
-                 (Anthropic API constraint; strip temperature before \
-                 setting thinking.enabled = true)"
-                .into());
-        }
+        // NOTE: the neutral contract deliberately does NOT reject
+        // `temperature` alongside `thinking.enabled`. That combination is
+        // legal for non-Anthropic upstreams (e.g. documented agent profiles
+        // that pin temperature while thinking), and validate() runs at ingress
+        // for every dialect — before the target family is known. The
+        // constraint is family-scoped where it belongs: the Anthropic encoder
+        // drops `temperature` when thinking is enabled
+        // (sandhi-providers/src/anthropic_typed.rs), and clients that want an
+        // early, explicit error enforce it on their side.
         for message in &self.messages {
             match message {
                 ChatMessageV1::Tool { tool_call_id, .. } if tool_call_id.trim().is_empty() => {
@@ -748,6 +747,25 @@ fn usage_event_schema() -> schemars::schema::RootSchema {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn neutral_contract_allows_temperature_alongside_thinking() {
+        // Family-scoped constraint: non-Anthropic upstreams accept — and some
+        // documented agent profiles REQUIRE — temperature+thinking (e.g.
+        // kimi-k3 pinned at temperature 1.0 with thinking on). validate() runs
+        // at ingress for every dialect, before the target family is known, so
+        // it must stay family-blind; the Anthropic encoder owns the constraint
+        // (drops temperature when thinking is enabled).
+        let request: ChatRequestV1 = serde_json::from_value(serde_json::json!({
+            "model": "kimi-k3",
+            "max_output_tokens": 128,
+            "messages": [{"role": "user", "content": "hi"}],
+            "temperature": 1.0,
+            "thinking": {"enabled": true, "budget_tokens": 2048}
+        }))
+        .unwrap();
+        assert!(request.validate().is_ok());
+    }
+
     #[test]
     fn usage_latency_fields_are_absent_by_default() {
         // Old usage JSON (fields absent) round-trips; absent stays absent so

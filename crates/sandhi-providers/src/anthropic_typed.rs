@@ -767,6 +767,25 @@ mod tests {
         let body = encode_anthropic_request(&plain).unwrap();
         assert!(body.get("system").is_none());
         assert!(body.get("tools").is_none());
+
+        // The documented opt-out: an EMPTY client bucket suppresses auto
+        // markers (the client owns placement; nothing to place).
+        let opt_out: ChatRequestV1 = serde_json::from_value(json!({
+            "model":"claude-test", "max_output_tokens":128,
+            "messages":[
+                {"role":"system","content":"policy"},
+                {"role":"user","content":"hi"}
+            ],
+            "tools":[{"name":"lookup","parameters":{"type":"object"}}],
+            "extensions":{"anthropic":{}}
+        }))
+        .unwrap();
+        let body = encode_anthropic_request(&opt_out).unwrap();
+        assert!(
+            body["system"][0].get("cache_control").is_none(),
+            "empty bucket = explicit no-caching opt-out"
+        );
+        assert!(body["tools"][0].get("cache_control").is_none());
     }
 
     #[test]

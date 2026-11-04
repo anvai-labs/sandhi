@@ -805,6 +805,29 @@ fn decode_sandhi_extensions(body: &mut Value) -> Result<Vec<(String, Value)>, St
     Ok(entries)
 }
 
+/// Strip the gateway-reserved `sandhi_extensions` key from forwarded request
+/// bytes (ADR-0013): the key is gateway-consumed and must never reach an
+/// upstream on any plane. Rewrites the bytes only when the key is actually
+/// present at the top level, so ordinary traffic stays byte-exact — a mention
+/// inside message content parses to a nested position and leaves the bytes
+/// untouched, and non-JSON or non-object bodies pass through unchanged.
+pub(crate) fn strip_reserved_passthrough(body: bytes::Bytes) -> bytes::Bytes {
+    const RESERVED: &[u8] = b"sandhi_extensions";
+    if body.len() < RESERVED.len() || !body.windows(RESERVED.len()).any(|w| w == RESERVED) {
+        return body;
+    }
+    let Ok(mut value) = serde_json::from_slice::<Value>(&body) else {
+        return body;
+    };
+    let Some(object) = value.as_object_mut() else {
+        return body;
+    };
+    if object.remove("sandhi_extensions").is_some() {
+        return bytes::Bytes::from(serde_json::to_vec(&value).expect("re-serializing parsed JSON"));
+    }
+    body
+}
+
 pub(crate) fn decode_openai_request(
     mut body: Value,
     metadata: RequestMetadataV1,
@@ -1051,9 +1074,15 @@ fn decode_openai_tool_choice(value: &Value) -> Result<ToolChoiceV1, String> {
 }
 
 fn decode_anthropic_request(
-    body: Value,
+    mut body: Value,
     metadata: RequestMetadataV1,
 ) -> Result<(ChatRequestV1, bool), String> {
+    // `sandhi_extensions` is gateway-reserved and interpreted only on the
+    // OpenAI dialect (ADR-0013); drop it so the family body clone — the
+    // translation plane's re-encode base — never carries the key upstream.
+    if let Some(object) = body.as_object_mut() {
+        object.remove("sandhi_extensions");
+    }
     let object = body
         .as_object()
         .ok_or_else(|| "request body must be a JSON object".to_string())?;
@@ -1312,9 +1341,14 @@ fn decode_anthropic_tool_choice(value: &Value) -> Result<ToolChoiceV1, String> {
 /// raw body is retained under `extensions["openai_responses"]` so a Responses-backend upstream can
 /// re-read Responses-only fields (e.g. `reasoning.effort`) that have no canonical home.
 fn decode_responses_request(
-    body: Value,
+    mut body: Value,
     metadata: RequestMetadataV1,
 ) -> Result<(ChatRequestV1, bool), String> {
+    // Gateway-reserved, uninterpreted on this dialect (ADR-0013) — never let
+    // it ride the openai_responses body clone to an upstream.
+    if let Some(object) = body.as_object_mut() {
+        object.remove("sandhi_extensions");
+    }
     let object = body
         .as_object()
         .ok_or_else(|| "request body must be a JSON object".to_string())?;
@@ -2135,6 +2169,74 @@ mod tests {
             body["tools"][1].get("cache_control").is_none(),
             "client bucket present: auto placement must not add markers"
         );
+    }
+
+    #[test]
+    fn strip_reserved_passthrough_rewrites_only_when_the_key_is_top_level() {
+        use bytes::Bytes;
+
+        let with_key = Bytes::from(
+            serde_json::to_vec(&json!({
+                "model": "gpt-5",
+                "messages": [{"role": "user", "content": "hi"}],
+                "sandhi_extensions": {"anthropic": {"top_k": 5}}
+            }))
+            .unwrap(),
+        );
+        let stripped = strip_reserved_passthrough(with_key.clone());
+        assert_ne!(stripped, with_key, "the reserved key must be removed");
+        let value: Value = serde_json::from_slice(&stripped).unwrap();
+        assert!(value.get("sandhi_extensions").is_none());
+        assert_eq!(value["model"], "gpt-5");
+
+        // Absent key and mention inside message content: byte-identical.
+        let plain = Bytes::from_static(br#"{"model":"gpt-5","messages":[]}"#);
+        assert_eq!(strip_reserved_passthrough(plain.clone()), plain);
+        let nested = Bytes::from(
+            serde_json::to_vec(&json!({
+                "model":"gpt-5",
+                "messages":[{"role":"user","content":"sandhi_extensions is not a top-level key"}]
+            }))
+            .unwrap(),
+        );
+        assert_eq!(strip_reserved_passthrough(nested.clone()), nested);
+
+        // Non-object JSON containing the literal: unchanged.
+        let array = Bytes::from_static(br#"["sandhi_extensions"]"#);
+        assert_eq!(strip_reserved_passthrough(array.clone()), array);
+    }
+
+    #[test]
+    fn anthropic_and_responses_decodes_drop_the_reserved_key_from_body_clones() {
+        // ADR-0013: only the OpenAI dialect interprets `sandhi_extensions`;
+        // the other decoders must not let it ride their family body clone (the
+        // translation plane's re-encode base) to an upstream.
+        let (request, _) = decode_anthropic_request(
+            json!({
+                "model": "claude-test",
+                "max_tokens": 64,
+                "messages": [{"role": "user", "content": "hi"}],
+                "sandhi_extensions": {"anthropic": {"top_k": 5}}
+            }),
+            RequestMetadataV1::default(),
+        )
+        .unwrap();
+        assert!(request.extensions["anthropic"]
+            .get("sandhi_extensions")
+            .is_none());
+
+        let (request, _) = decode_responses_request(
+            json!({
+                "model": "gpt-5",
+                "input": "hi",
+                "sandhi_extensions": {"anthropic": {"top_k": 5}}
+            }),
+            RequestMetadataV1::default(),
+        )
+        .unwrap();
+        assert!(request.extensions["openai_responses"]
+            .get("sandhi_extensions")
+            .is_none());
     }
 
     #[test]
