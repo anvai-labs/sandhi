@@ -102,12 +102,17 @@ interpreted only on the OpenAI dialect. It must never reach an upstream:
 - The proxy strips the key from the **forwarded request bytes** after the
   policy gate (which classifies the original bytes), rewriting the body only
   when the key is present — ordinary traffic stays byte-exact on the
-  transparent plane and the raw text routes.
-- The Anthropic and Responses decoders drop the key from their family body
-  clones, so a cross-family translation re-encode never carries it either.
-- On non-OpenAI dialects the key is allowed (so a client library setting it
-  unconditionally is not failed by the strict allowlist), classified, and
-  dropped uninterpreted.
+  transparent plane and the raw text routes. The strip recognizes escaped
+  JSON spellings of the key: a literal-substring fast path covers standard
+  serializers, and any `\uXXXX` escape in the body triggers the parse-and-
+  remove path (any non-literal spelling of an ASCII key requires at least
+  one escape).
+- Every clone-keeping decoder — Anthropic, Responses, and Gemini — drops the
+  key from its family body clone, so a cross-family translation re-encode
+  never carries it either.
+- On non-OpenAI dialects (including the raw text routes) the key is allowed
+  (so a client library setting it unconditionally is not failed by the
+  strict allowlist), classified, and dropped uninterpreted.
 
 ## Consumer decisions
 

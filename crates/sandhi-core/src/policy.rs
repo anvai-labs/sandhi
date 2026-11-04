@@ -597,7 +597,17 @@ fn inspect_format(body: &[u8], format: InputFormat) -> Result<Inspection, Evalua
             // library that sets it unconditionally is not failed here.
             "sandhi_extensions",
         ],
-        InputFormat::Embeddings => &["model", "input", "encoding_format", "dimensions", "user"],
+        InputFormat::Embeddings => &[
+            "model",
+            "input",
+            "encoding_format",
+            "dimensions",
+            "user",
+            // Gateway-reserved (ADR-0013), uninterpreted here — the proxy
+            // strips it before forwarding; allowed so a client library that
+            // sets it unconditionally is not failed by the strict allowlist.
+            "sandhi_extensions",
+        ],
         InputFormat::Completions => &[
             "model",
             "prompt",
@@ -617,6 +627,8 @@ fn inspect_format(body: &[u8], format: InputFormat) -> Result<Inspection, Evalua
             "logit_bias",
             "user",
             "seed",
+            // Gateway-reserved (ADR-0013), uninterpreted here — see above.
+            "sandhi_extensions",
         ],
     };
     if object.keys().any(|k| !fields.contains(&k.as_str())) {

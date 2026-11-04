@@ -534,6 +534,10 @@ fn decode_gemini_request(
                 | "toolConfig"
                 | "generationConfig"
                 | "model"
+                // Gateway-reserved and interpreted only on the OpenAI dialect
+                // (ADR-0013) — never let it ride the gemini body clone (the
+                // translation plane's re-encode base) to an upstream.
+                | "sandhi_extensions"
         ) {
             gemini_body.insert(key.clone(), value.clone());
         }
@@ -813,7 +817,14 @@ fn decode_sandhi_extensions(body: &mut Value) -> Result<Vec<(String, Value)>, St
 /// untouched, and non-JSON or non-object bodies pass through unchanged.
 pub(crate) fn strip_reserved_passthrough(body: bytes::Bytes) -> bytes::Bytes {
     const RESERVED: &[u8] = b"sandhi_extensions";
-    if body.len() < RESERVED.len() || !body.windows(RESERVED.len()).any(|w| w == RESERVED) {
+    // Fast path: the literal bytes are absent AND no JSON unicode escape is
+    // present, so no spelling of the reserved key can exist — stay byte-exact
+    // without a parse. Any non-literal spelling of an ASCII key requires at
+    // least one `\uXXXX` escape, so checking for `\u` is a necessary condition
+    // (bodies carrying escaped non-ASCII text simply pay one parse).
+    let mentions_reserved = body.windows(RESERVED.len()).any(|w| w == RESERVED);
+    let mentions_escape = body.windows(2).any(|w| w == b"\\u");
+    if body.len() < RESERVED.len() || !(mentions_reserved || mentions_escape) {
         return body;
     }
     let Ok(mut value) = serde_json::from_slice::<Value>(&body) else {
@@ -2204,6 +2215,35 @@ mod tests {
         // Non-object JSON containing the literal: unchanged.
         let array = Bytes::from_static(br#"["sandhi_extensions"]"#);
         assert_eq!(strip_reserved_passthrough(array.clone()), array);
+
+        // A unicode-escaped spelling of the reserved key (hand-crafted; no
+        // standard serializer escapes ASCII) still parses to the same key and
+        // must be stripped — the `\u` presence check drives the parse.
+        let escaped = Bytes::from_static(
+            concat!(
+                r#"{"model":"gpt-5","#,
+                "\"\\u0073andhi_extensions\":{\"a\":1}}"
+            )
+            .as_bytes(),
+        );
+        let stripped = strip_reserved_passthrough(escaped.clone());
+        assert_ne!(stripped, escaped, "escaped spelling must not survive");
+        let value: Value = serde_json::from_slice(&stripped).unwrap();
+        assert!(value
+            .as_object()
+            .unwrap()
+            .get("sandhi_extensions")
+            .is_none());
+
+        // Escaped non-ASCII elsewhere with no reserved key: byte-identical
+        // (the parse finds nothing to remove).
+        let escaped_text = Bytes::from_static(
+            "{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"\u{4f60}\u{597d}\"}]}".as_bytes(),
+        );
+        assert_eq!(
+            strip_reserved_passthrough(escaped_text.clone()),
+            escaped_text
+        );
     }
 
     #[test]
@@ -2235,6 +2275,22 @@ mod tests {
         )
         .unwrap();
         assert!(request.extensions["openai_responses"]
+            .get("sandhi_extensions")
+            .is_none());
+
+        // The Gemini decoder copies every unmodeled top-level key into its
+        // body clone — the reserved key must be excluded so a forced
+        // translation re-encode never carries it to the Gemini upstream.
+        let (request, _) = decode_gemini_request(
+            json!({
+                "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+                "safetySettings": [{"category": "HARM_CATEGORY_HARASSMENT"}],
+                "sandhi_extensions": {"anthropic": {"top_k": 5}}
+            }),
+            RequestMetadataV1::default(),
+        )
+        .unwrap();
+        assert!(request.extensions["gemini"]
             .get("sandhi_extensions")
             .is_none());
     }

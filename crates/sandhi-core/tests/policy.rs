@@ -384,6 +384,52 @@ fn chat_passthrough_field_is_allowed_and_its_text_is_classified() {
     );
 }
 
+#[test]
+fn text_format_allowlists_admit_the_reserved_passthrough_key() {
+    // ADR-0013 D3: `sandhi_extensions` is allowed on EVERY dialect (a client
+    // library that sets it unconditionally is never failed by the strict
+    // allowlist); the proxy strips it before forwarding, uninterpreted.
+    let e = engine(vec![rule(
+        "secret",
+        json!({"kind":"regex","pattern":"secret"}),
+        "block",
+    )]);
+    let embeddings = serde_json::to_vec(&json!({
+        "model":"text-embedding-test","input":"hello",
+        "sandhi_extensions":{"anthropic":{"top_k":5}}
+    }))
+    .unwrap();
+    assert_eq!(
+        e.evaluate_with_format(
+            &embeddings,
+            &identity(),
+            "openai",
+            "text-embedding-test",
+            InputFormat::Embeddings,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .disposition,
+        Disposition::Forward
+    );
+    let completions = serde_json::to_vec(&json!({
+        "model":"gpt-5","prompt":"hello",
+        "sandhi_extensions":{"anthropic":{"top_k":5}}
+    }))
+    .unwrap();
+    assert_eq!(
+        e.evaluate_with_format(
+            &completions,
+            &identity(),
+            "openai",
+            "gpt-5",
+            InputFormat::Completions,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .disposition,
+        Disposition::Forward
+    );
+}
+
 fn run_messages(engine: &Engine, bytes: &[u8], who: &Identity) -> Decision {
     engine.evaluate_with_format(
         bytes,

@@ -53,9 +53,10 @@ A partly published release remains incomplete even when some artifacts are avail
   its bucket, so a passthrough can only add native extras, never override
   the decoded contract. The reserved key is gateway-consumed, never
   forwarded: it is an allowed (and classified — bucket text is classifier
-  input, not a policy blind spot) key in the strict Chat/Messages policy
-  allowlists, stripped from the forwarded bytes after the policy gate, and
-  dropped from the Anthropic/Responses decoder body clones.
+  input, not a policy blind spot) key in every strict policy allowlist,
+  stripped from the forwarded bytes after the policy gate (including escaped
+  JSON spellings), and dropped from the Anthropic/Responses/Gemini decoder
+  body clones.
 
 ## [0.14.1] — 2026-10-25
 
