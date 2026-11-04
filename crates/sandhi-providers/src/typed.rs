@@ -542,6 +542,13 @@ fn stamp_stream_latency(inner: ChatEventStream, started: std::time::Instant) -> 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ProviderRuntime;
 
+/// Re-export of the family encoder the proxy's translation-plane tests drive
+/// end to end (ingress decode → family encode), pinning the seam where
+/// cross-family extras like `cache_control` live or die. `encode_openai_request`
+/// below is pub for the same reason; the runtime remains the only production
+/// caller.
+pub use crate::anthropic_typed::encode_anthropic_request;
+
 impl ProviderRuntime {
     pub fn new() -> Self {
         Self

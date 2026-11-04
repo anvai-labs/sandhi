@@ -19,6 +19,28 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+### Added
+
+- Translation-plane prompt caching for third-party OpenAI-compat clients
+  ([ADR-0013](docs/adr/0013-native-extensions-passthrough-and-auto-cache-control.md)):
+  a cross-family route to an Anthropic upstream now auto-places
+  `cache_control: {type: ephemeral}` on the last system block and the last
+  tool when the request carries no client-supplied native bucket — previously
+  such requests silently lost prompt caching entirely (the OpenAI body has no
+  `cache_control` field and the decoder never synthesized one). A
+  client-supplied `extensions["anthropic"]` bucket — including the empty
+  object — suppresses auto placement and keeps marker placement client-owned.
+- Guarded `sandhi_extensions` passthrough on the OpenAI-compat ingress:
+  clients can exercise family-native request extras (Anthropic
+  `cache_control` placement, provider `top_k`/`metadata`, Gemini
+  `safetySettings`) via a reserved body field
+  (`"sandhi_extensions": {"<family>": {...}}`). Validated at decode
+  (object-of-objects, family-slug keys, decode-owned `openai` bucket
+  rejected, field removed from the body clone) and safe by encoder
+  construction: every family encoder inserts the typed fields after cloning
+  its bucket, so a passthrough can only add native extras, never override
+  the decoded contract.
+
 ## [0.14.1] — 2026-10-25
 
 ### Fixed

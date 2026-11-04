@@ -98,6 +98,8 @@ TD-0028 keeps its merge/deployment gates separate from the remaining diagnostic 
 | [0009](adr/0009-http1-only-listener.md) | No h2c sniffing; cleartext listener is HTTP/1 only |
 | [0010](adr/0010-cache-read-reporting-availability.md) | Accepted: additive cache-read observation and same-population reporting coverage |
 | [0011](adr/0011-bounded-persisted-usage-diagnostics.md) | Accepted design: bounded persisted usage lookup; post-0.8.0 explicit OIDC diagnostics permission, token mode remains admin-only; no new capture or retention |
+| [0012](adr/0012-databricks-model-serving-provider.md) | Databricks Model Serving admitted as an OpenAI-compatible provider |
+| [0013](adr/0013-native-extensions-passthrough-and-auto-cache-control.md) | Guarded `sandhi_extensions` ingress passthrough; auto `cache_control` on the Anthropic translation path |
 
 ## Technical-design status
 

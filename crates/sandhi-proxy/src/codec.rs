@@ -756,10 +756,67 @@ fn encode_gemini_stream_event(
     }
 }
 
+/// Extract and validate the reserved `sandhi_extensions` passthrough field.
+///
+/// Returns the admitted family buckets and removes the field from `body` so it
+/// never rides inside the decoded openai body clone. Guard rails (ADR-0013):
+/// the map must be family-slug → JSON object, and the decode-owned `openai`
+/// bucket is rejected so the ingress body clone stays authoritative. Unknown
+/// family slugs are inert by construction — no encoder reads a bucket it does
+/// not own.
+fn decode_sandhi_extensions(body: &mut Value) -> Result<Vec<(String, Value)>, String> {
+    let Some(value) = body.get("sandhi_extensions").cloned() else {
+        return Ok(Vec::new());
+    };
+    let map = match value {
+        Value::Object(map) => map,
+        _ => {
+            return Err(
+                "sandhi_extensions must be a JSON object mapping family slugs to native request objects"
+                    .to_string(),
+            )
+        }
+    };
+    let mut entries = Vec::with_capacity(map.len());
+    for (key, bucket) in map {
+        if key == "openai" {
+            return Err(
+                "sandhi_extensions cannot include the 'openai' bucket; it is owned by the decoded request body"
+                    .to_string(),
+            );
+        }
+        if key.is_empty()
+            || !key
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+        {
+            return Err(format!(
+                "sandhi_extensions key {key:?} is not a family slug (lowercase letters, digits, '-', '_')"
+            ));
+        }
+        if !bucket.is_object() {
+            return Err(format!("sandhi_extensions[{key}] must be a JSON object"));
+        }
+        entries.push((key, bucket));
+    }
+    body.as_object_mut()
+        .ok_or_else(|| "request body must be a JSON object".to_string())?
+        .remove("sandhi_extensions");
+    Ok(entries)
+}
+
 pub(crate) fn decode_openai_request(
-    body: Value,
+    mut body: Value,
     metadata: RequestMetadataV1,
 ) -> Result<(ChatRequestV1, bool), String> {
+    // Guarded native passthrough (ADR-0013): OpenAI-compat clients exercise
+    // family-native request extras (Anthropic `cache_control`, provider
+    // `top_k`) through the reserved `sandhi_extensions` body field. Validated
+    // here and merged into the typed `extensions` map — every family encoder
+    // inserts the typed fields (model, messages, tools, sampling params) AFTER
+    // cloning its bucket, so a passthrough bucket can only add native extras,
+    // never override the decoded, validated contract.
+    let passthrough = decode_sandhi_extensions(&mut body)?;
     let object = body
         .as_object()
         .ok_or_else(|| "request body must be a JSON object".to_string())?;
@@ -819,7 +876,13 @@ pub(crate) fn decode_openai_request(
         reasoning_effort: optional_string(object, "reasoning_effort")?,
         thinking: lift_openai_thinking(object),
         include_native_response: true,
-        extensions: BTreeMap::from([("openai".into(), body.clone())]),
+        extensions: {
+            let mut extensions = BTreeMap::from([("openai".into(), body.clone())]);
+            for (family, bucket) in passthrough {
+                extensions.insert(family, bucket);
+            }
+            extensions
+        },
     };
     request.validate()?;
     Ok((
@@ -1973,6 +2036,129 @@ mod tests {
         let thinking = request.thinking.expect("thinking lifted");
         assert!(thinking.enabled);
         assert_eq!(thinking.budget_tokens, Some(2048));
+    }
+
+    #[test]
+    fn openai_ingress_admits_guarded_native_extensions_passthrough() {
+        // Third-party OpenAI-compat clients exercise family-native request extras
+        // (e.g. Anthropic `cache_control`, provider `top_k`) through the reserved
+        // `sandhi_extensions` body field. Buckets merge into the typed extensions
+        // — where every family encoder inserts the typed fields AFTER cloning its
+        // bucket, so a passthrough can only ADD native extras, never override the
+        // decoded contract. The field itself never rides in the openai body clone.
+        let (request, _) = decode_openai_request(
+            json!({
+                "model": "claude-test",
+                "messages": [{"role": "user", "content": "hi"}],
+                "sandhi_extensions": {"anthropic": {"top_k": 5}}
+            }),
+            RequestMetadataV1::default(),
+        )
+        .unwrap();
+        assert_eq!(request.extensions["anthropic"]["top_k"], json!(5));
+        assert!(
+            request.extensions["openai"]
+                .get("sandhi_extensions")
+                .is_none(),
+            "the reserved field must not leak into the decoded openai body clone"
+        );
+    }
+
+    #[test]
+    fn openai_ingress_rejects_passthrough_overriding_the_decode_owned_bucket() {
+        let error = decode_openai_request(
+            json!({
+                "model": "gpt-5",
+                "messages": [{"role": "user", "content": "hi"}],
+                "sandhi_extensions": {"openai": {"temperature": 0}}
+            }),
+            RequestMetadataV1::default(),
+        )
+        .unwrap_err();
+        assert!(error.contains("openai"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn openai_to_anthropic_translation_keeps_prompt_caching_alive() {
+        // The Issue this ADR exists for, pinned end to end: a plain third-party
+        // OpenAI-compat request (no `cache_control` anywhere — the OpenAI body
+        // has no such field) decoded and re-encoded for an Anthropic upstream
+        // must still carry cache markers on the wire, and a client using the
+        // passthrough keeps marker placement in its own hands.
+        use sandhi_providers::typed::encode_anthropic_request;
+
+        let (decoded, _) = decode_openai_request(
+            json!({
+                "model": "claude-test",
+                "max_tokens": 512,
+                "messages": [
+                    {"role": "system", "content": "policy"},
+                    {"role": "user", "content": "hi"}
+                ],
+                "tools": [
+                    {"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}},
+                    {"type": "function", "function": {"name": "probe", "parameters": {"type": "object"}}}
+                ]
+            }),
+            RequestMetadataV1::default(),
+        )
+        .unwrap();
+        let body = encode_anthropic_request(&decoded).unwrap();
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+        assert!(body["tools"][0].get("cache_control").is_none());
+        assert_eq!(body["tools"][1]["cache_control"]["type"], "ephemeral");
+
+        // Passthrough alternative: the client places its own markers (here on
+        // the first tool only) and the auto placement must stand down.
+        let (decoded, _) = decode_openai_request(
+            json!({
+                "model": "claude-test",
+                "max_tokens": 512,
+                "messages": [
+                    {"role": "system", "content": "policy"},
+                    {"role": "user", "content": "hi"}
+                ],
+                "tools": [
+                    {"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}},
+                    {"type": "function", "function": {"name": "probe", "parameters": {"type": "object"}}}
+                ],
+                "sandhi_extensions": {"anthropic": {
+                    "tools": [{"name": "lookup", "cache_control": {"type": "ephemeral"}}]
+                }}
+            }),
+            RequestMetadataV1::default(),
+        )
+        .unwrap();
+        let body = encode_anthropic_request(&decoded).unwrap();
+        assert_eq!(body["tools"][0]["cache_control"]["type"], "ephemeral");
+        assert!(
+            body["tools"][1].get("cache_control").is_none(),
+            "client bucket present: auto placement must not add markers"
+        );
+    }
+
+    #[test]
+    fn openai_ingress_validates_passthrough_shapes() {
+        for bad in [
+            json!("nope"),
+            json!({"anthropic": "nope"}),
+            json!({"Anthropic": {}}),
+            json!({"anthropic": {"deep": {"nested": 1}}, "bad key!": {}}),
+        ] {
+            let error = decode_openai_request(
+                json!({
+                    "model": "gpt-5",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "sandhi_extensions": bad
+                }),
+                RequestMetadataV1::default(),
+            )
+            .unwrap_err();
+            assert!(
+                error.contains("sandhi_extensions"),
+                "unexpected error: {error}"
+            );
+        }
     }
 
     #[test]
