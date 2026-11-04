@@ -121,6 +121,17 @@ pub fn encode_anthropic_request(request: &ChatRequestV1) -> Result<Value, Provid
         .unwrap_or_default();
     let native_system = body.get("system").and_then(Value::as_array).cloned();
     let native_tools = body.get("tools").and_then(Value::as_array).cloned();
+    // Third-party prompt caching (proxy translation plane): OpenAI-compat
+    // clients have no way to express `cache_control` — the OpenAI body has no
+    // such field — so a cross-family route to Anthropic would lose prompt
+    // caching entirely at the decode boundary. When the request carries no
+    // client-supplied native bucket, mark the cache boundary here: the last
+    // system block and the last tool, mirroring Anthropic's stable-prefix
+    // guidance (tools → system cached as a prefix; the conversation tail stays
+    // uncached). A client-supplied bucket — including the empty object —
+    // suppresses this and keeps marker placement client-owned (empty = the
+    // documented opt-out).
+    let auto_cache_control = !request.extensions.contains_key("anthropic");
     let mut system = Vec::new();
     let mut messages = Vec::new();
     for message in &request.messages {
@@ -186,14 +197,31 @@ pub fn encode_anthropic_request(request: &ChatRequestV1) -> Result<Value, Provid
                 }
             }
         }
+        if auto_cache_control {
+            if let Some(block) = system.last_mut() {
+                block["cache_control"] = json!({"type": "ephemeral"});
+            }
+        }
         body.insert("system".into(), Value::Array(system));
     }
     let max_tokens = request.max_output_tokens.ok_or_else(|| {
         ProviderError::InvalidRequest("Anthropic requires max_output_tokens".into())
     })?;
     body.insert("max_tokens".into(), max_tokens.into());
+    // Anthropic rejects `temperature` when extended thinking is active
+    // (API error: "temperature is not supported when thinking is enabled").
+    // Belt-and-suspenders guard: Victor's policy layer strips it before
+    // building ChatRequestV1, but we also drop it here so any future client
+    // that sends both is protected at the encoder level.
+    let thinking_enabled = request
+        .thinking
+        .as_ref()
+        .map(|t| t.enabled)
+        .unwrap_or(false);
     if let Some(temperature) = request.temperature {
-        body.insert("temperature".into(), json!(temperature));
+        if !thinking_enabled {
+            body.insert("temperature".into(), json!(temperature));
+        }
     }
     if let Some(stop) = &request.stop {
         body.insert("stop_sequences".into(), json!(stop));
@@ -220,6 +248,11 @@ pub fn encode_anthropic_request(request: &ChatRequestV1) -> Result<Value, Provid
                 }) {
                     tool["cache_control"] = cache_control.clone();
                 }
+            }
+        }
+        if auto_cache_control {
+            if let Some(tool) = tools.last_mut() {
+                tool["cache_control"] = json!({"type": "ephemeral"});
             }
         }
         body.insert("tools".into(), Value::Array(tools));
@@ -674,6 +707,85 @@ mod tests {
         assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
         assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
         assert_eq!(body["tools"][0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn third_party_requests_get_auto_cache_control_markers() {
+        // OpenAI-compat clients cannot express `cache_control` (no such field in the
+        // OpenAI body), so a cross-family route to Anthropic would silently lose
+        // prompt caching at the decode boundary. With no client-supplied native
+        // bucket, the encoder marks the cache boundary itself: the LAST system
+        // block and the LAST tool — the stable-prefix boundary (tools → system)
+        // Anthropic documents, leaving the conversation tail uncached.
+        let request: ChatRequestV1 = serde_json::from_value(json!({
+            "model":"claude-test", "max_output_tokens":128,
+            "messages":[
+                {"role":"system","content":"policy"},
+                {"role":"user","content":"hi"}
+            ],
+            "tools":[
+                {"name":"stable_a","parameters":{"type":"object"}},
+                {"name":"stable_b","parameters":{"type":"object"}}
+            ]
+        }))
+        .unwrap();
+        let body = encode_anthropic_request(&request).unwrap();
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+        assert!(
+            body["tools"][0].get("cache_control").is_none(),
+            "only the last tool carries the boundary marker"
+        );
+        assert_eq!(body["tools"][1]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn auto_cache_control_is_suppressed_by_client_bucket_and_absent_without_cacheables() {
+        // A client-supplied bucket — even a minimal one — is authoritative: the
+        // client owns marker placement (an empty object is the documented
+        // opt-out). And with nothing cacheable there is nothing to mark.
+        let with_bucket: ChatRequestV1 = serde_json::from_value(json!({
+            "model":"claude-test", "max_output_tokens":128,
+            "messages":[
+                {"role":"system","content":"policy"},
+                {"role":"user","content":"hi"}
+            ],
+            "extensions":{"anthropic":{"top_k":5}}
+        }))
+        .unwrap();
+        let body = encode_anthropic_request(&with_bucket).unwrap();
+        assert!(
+            body["system"][0].get("cache_control").is_none(),
+            "client bucket present: no auto markers"
+        );
+        assert_eq!(body["top_k"], json!(5), "bucket extras still ride along");
+
+        let plain: ChatRequestV1 = serde_json::from_value(json!({
+            "model":"claude-test", "max_output_tokens":128,
+            "messages":[{"role":"user","content":"hi"}]
+        }))
+        .unwrap();
+        let body = encode_anthropic_request(&plain).unwrap();
+        assert!(body.get("system").is_none());
+        assert!(body.get("tools").is_none());
+
+        // The documented opt-out: an EMPTY client bucket suppresses auto
+        // markers (the client owns placement; nothing to place).
+        let opt_out: ChatRequestV1 = serde_json::from_value(json!({
+            "model":"claude-test", "max_output_tokens":128,
+            "messages":[
+                {"role":"system","content":"policy"},
+                {"role":"user","content":"hi"}
+            ],
+            "tools":[{"name":"lookup","parameters":{"type":"object"}}],
+            "extensions":{"anthropic":{}}
+        }))
+        .unwrap();
+        let body = encode_anthropic_request(&opt_out).unwrap();
+        assert!(
+            body["system"][0].get("cache_control").is_none(),
+            "empty bucket = explicit no-caching opt-out"
+        );
+        assert!(body["tools"][0].get("cache_control").is_none());
     }
 
     #[test]

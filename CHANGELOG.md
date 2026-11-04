@@ -19,6 +19,71 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+### Added
+
+- Dialect parity for agent clients
+  ([ADR-0014](docs/adr/0014-dialect-parity-counting-and-streaming-fidelity.md)):
+  - `POST /v1/messages/count_tokens` (Claude Code) and
+    `POST /v1beta/models/{model}:countTokens` (Gemini clients) now answer
+    from the request body alone — full auth/allowlist/policy/rate-limit
+    pipeline, but no dispatch, reservation or usage event (previously 404 and
+    501 respectively). The estimate matches what budget reservation uses.
+  - Gemini SSE streams now render tool calls: buffered across the canonical
+    start/argument-delta events and emitted as one complete `functionCall`
+    part (the protocol has no partial frame — these events were previously
+    dropped, breaking agentic Gemini clients on cross-family routes). Stream
+    errors render as `{"error": ...}` frames instead of vanishing.
+  - Anthropic SSE streams maintain the content-block lifecycle: explicit
+    `content_block_start`/`content_block_stop` with unique indices, thinking
+    and text as distinct block types, and a spec-shaped `ping`.
+  - Responses SSE streams fold streamed text and buffered function calls into
+    the terminal `response.completed` frame's `output` (and complete
+    `output_item.done` items) — what Codex-class clients re-read.
+  - OpenAI completion objects and chunks carry the spec-required `created`
+    timestamp.
+  - Translated traffic stays labeled: every usage event carries the ingress
+    `route`, so OpenAI→Anthropic/Gemini translation never masquerades as
+    native-dialect traffic.
+
+### Fixed
+
+- The neutral chat contract no longer rejects `temperature` alongside
+  `thinking.enabled` at ingress. That earlier guard in this release train was
+  family-blind: `ChatRequestV1::validate()` runs for every dialect before the
+  target upstream is known, so legal non-Anthropic traffic (documented agent
+  profiles that pin temperature while thinking, e.g. kimi-k3 at
+  temperature 1.0) was refused with an "Anthropic API constraint" error where
+  it previously forwarded fine. The constraint stays family-scoped where it
+  belongs: the Anthropic encoder still drops `temperature` when thinking is
+  enabled.
+
+### Added
+
+- Translation-plane prompt caching for third-party OpenAI-compat clients
+  ([ADR-0013](docs/adr/0013-native-extensions-passthrough-and-auto-cache-control.md)):
+  a cross-family route to an Anthropic upstream now auto-places
+  `cache_control: {type: ephemeral}` on the last system block and the last
+  tool when the request carries no client-supplied native bucket — previously
+  such requests silently lost prompt caching entirely (the OpenAI body has no
+  `cache_control` field and the decoder never synthesized one). A
+  client-supplied `extensions["anthropic"]` bucket — including the empty
+  object — suppresses auto placement and keeps marker placement client-owned.
+- Guarded `sandhi_extensions` passthrough on the OpenAI-compat ingress:
+  clients can exercise family-native request extras (Anthropic
+  `cache_control` placement, provider `top_k`/`metadata`, Gemini
+  `safetySettings`) via a reserved body field
+  (`"sandhi_extensions": {"<family>": {...}}`). Validated at decode
+  (object-of-objects, family-slug keys, decode-owned `openai` bucket
+  rejected, field removed from the body clone) and safe by encoder
+  construction: every family encoder inserts the typed fields after cloning
+  its bucket, so a passthrough can only add native extras, never override
+  the decoded contract. The reserved key is gateway-consumed, never
+  forwarded: it is an allowed (and classified — bucket text is classifier
+  input, not a policy blind spot) key in every strict policy allowlist,
+  stripped from the forwarded bytes after the policy gate (including escaped
+  JSON spellings), and dropped from the Anthropic/Responses/Gemini decoder
+  body clones.
+
 ## [0.14.1] — 2026-10-25
 
 ### Fixed

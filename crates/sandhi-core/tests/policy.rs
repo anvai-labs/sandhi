@@ -335,6 +335,101 @@ fn anthropic_body(messages: Value) -> Vec<u8> {
     .unwrap()
 }
 
+#[test]
+fn chat_passthrough_field_is_allowed_and_its_text_is_classified() {
+    // ADR-0013: `sandhi_extensions` is a gateway-reserved, ALLOWED Chat field —
+    // and its bucket strings must be swept into classifier input by the extras
+    // collect loop, so the passthrough cannot hide wire-visible text (e.g. an
+    // anthropic `system` block) from the gate.
+    let e = engine(vec![rule(
+        "secret",
+        json!({"kind":"regex","pattern":"secret"}),
+        "block",
+    )]);
+    let ok = serde_json::to_vec(&json!({
+        "model":"test","messages":[],"max_tokens":10,
+        "sandhi_extensions":{"anthropic":{"top_k":5}}
+    }))
+    .unwrap();
+    assert_eq!(run(&e, &ok, &identity()).disposition, Disposition::Forward);
+
+    let smuggling = serde_json::to_vec(&json!({
+        "model":"test","messages":[],"max_tokens":10,
+        "sandhi_extensions":{"anthropic":{
+            "system":[{"type":"text","text":"the secret plans"}]
+        }}
+    }))
+    .unwrap();
+    assert_eq!(
+        run(&e, &smuggling, &identity()).disposition,
+        Disposition::Block,
+        "bucket text is classifier input, not a policy blind spot"
+    );
+
+    // Allowed (and classified) on the Anthropic dialect too, where the proxy
+    // consumes it uninterpreted — a client library setting it unconditionally
+    // must not be failed by the strict allowlist.
+    assert_eq!(
+        run_messages(&e, &smuggling, &identity()).disposition,
+        Disposition::Block
+    );
+    let ok_messages = serde_json::to_vec(&json!({
+        "model":"claude-test","max_tokens":64,"messages":[],
+        "sandhi_extensions":{"anthropic":{"top_k":5}}
+    }))
+    .unwrap();
+    assert_eq!(
+        run_messages(&e, &ok_messages, &identity()).disposition,
+        Disposition::Forward
+    );
+}
+
+#[test]
+fn text_format_allowlists_admit_the_reserved_passthrough_key() {
+    // ADR-0013 D3: `sandhi_extensions` is allowed on EVERY dialect (a client
+    // library that sets it unconditionally is never failed by the strict
+    // allowlist); the proxy strips it before forwarding, uninterpreted.
+    let e = engine(vec![rule(
+        "secret",
+        json!({"kind":"regex","pattern":"secret"}),
+        "block",
+    )]);
+    let embeddings = serde_json::to_vec(&json!({
+        "model":"text-embedding-test","input":"hello",
+        "sandhi_extensions":{"anthropic":{"top_k":5}}
+    }))
+    .unwrap();
+    assert_eq!(
+        e.evaluate_with_format(
+            &embeddings,
+            &identity(),
+            "openai",
+            "text-embedding-test",
+            InputFormat::Embeddings,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .disposition,
+        Disposition::Forward
+    );
+    let completions = serde_json::to_vec(&json!({
+        "model":"gpt-5","prompt":"hello",
+        "sandhi_extensions":{"anthropic":{"top_k":5}}
+    }))
+    .unwrap();
+    assert_eq!(
+        e.evaluate_with_format(
+            &completions,
+            &identity(),
+            "openai",
+            "gpt-5",
+            InputFormat::Completions,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .disposition,
+        Disposition::Forward
+    );
+}
+
 fn run_messages(engine: &Engine, bytes: &[u8], who: &Identity) -> Decision {
     engine.evaluate_with_format(
         bytes,
