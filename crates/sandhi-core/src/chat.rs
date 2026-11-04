@@ -242,19 +242,12 @@ impl ChatRequestV1 {
         // Anthropic's API rejects `temperature` when extended thinking is
         // enabled. Catching it here surfaces a clear error at the
         // Victor→Sandhi boundary rather than a cryptic 400 from the wire.
-        if self
-            .thinking
-            .as_ref()
-            .map(|t| t.enabled)
-            .unwrap_or(false)
-            && self.temperature.is_some()
+        if self.thinking.as_ref().map(|t| t.enabled).unwrap_or(false) && self.temperature.is_some()
         {
-            return Err(
-                "temperature must be absent when thinking is enabled \
+            return Err("temperature must be absent when thinking is enabled \
                  (Anthropic API constraint; strip temperature before \
                  setting thinking.enabled = true)"
-                    .into(),
-            );
+                .into());
         }
         for message in &self.messages {
             match message {
