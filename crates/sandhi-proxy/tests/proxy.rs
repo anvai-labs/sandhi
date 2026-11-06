@@ -226,7 +226,9 @@ async fn dual_scheme_listeners_share_admission_and_meter_identically() {
     // A silent PLAINTEXT connection is admitted and holds the sole slot…
     use tokio::io::AsyncReadExt;
     let mut silent = tokio::net::TcpStream::connect(http_addr).await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    // Generous settle: the shed assertion below must land inside the 1s header
+    // window, and a loaded runner may take its time admitting the connection.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     // …so the TLS listener must shed, not admit: the connection budget spans
     // both listeners. A shed connection closes without any response bytes.
     let shed = tokio::time::timeout(
@@ -249,7 +251,7 @@ async fn dual_scheme_listeners_share_admission_and_meter_identically() {
         "silent plaintext connection must close without a response"
     );
     // The slot releases with the connection task; give the permit a beat to drop.
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
     // One process-wide slot means the plaintext chain must run on ONE pooled
     // keep-alive connection: healthz first, then the metered stream reusing it.
@@ -277,9 +279,10 @@ async fn dual_scheme_listeners_share_admission_and_meter_identically() {
     assert!(body.contains("hello"));
     assert!(body.contains("[DONE]"));
 
-    // The pooled plaintext connection idles out at the shared header deadline,
-    // releasing the sole slot; only then can the TLS listener serve.
-    tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+    // The pooled plaintext connection idles out at the shared header deadline
+    // (1s), releasing the sole slot; only then can the TLS listener serve.
+    // 2s = 2x margin so a loaded runner's late timer firing cannot flake this.
+    tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
     let health = client
         .get(format!("https://{tls_addr}/healthz"))
         .send()

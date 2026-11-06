@@ -814,13 +814,28 @@ fn parse_http_bind(
                 .into(),
         );
     }
-    if addr == primary {
+    if binds_collide(addr, primary) {
         return Err(
-            "SANDHI_HTTP_BIND must differ from SANDHI_BIND; each scheme needs its own socket"
+            "SANDHI_HTTP_BIND must not share a listening socket with SANDHI_BIND; \
+             pick a distinct port for each scheme"
                 .into(),
         );
     }
     Ok(Some(addr))
+}
+
+/// Two TCP bind addresses collide when they share a port within one address
+/// family and at least one side is the family wildcard (`0.0.0.0` covers every
+/// specific IPv4 address on that port, `[::]` every IPv6 one). Distinct
+/// specific addresses coexist, and v4 never collides with v6 — std forces
+/// `IPV6_V6ONLY`, so `[::]:P` and `0.0.0.0:P` are genuinely distinct sockets.
+/// This is startup diagnostics ahead of the bind; the kernel stays the
+/// authority for anything stranger (mapped addresses, exotic scopes), and a
+/// late `AddrInUse` still fails closed.
+fn binds_collide(a: SocketAddr, b: SocketAddr) -> bool {
+    a.port() == b.port()
+        && a.is_ipv4() == b.is_ipv4()
+        && (a.ip().is_unspecified() || b.ip().is_unspecified() || a.ip() == b.ip())
 }
 
 enum WatchdogMessage {
@@ -1098,7 +1113,7 @@ mod tests {
         );
         let error = parse_http_bind(Some("127.0.0.1:8787"), true, primary).unwrap_err();
         assert!(
-            error.contains("must differ from SANDHI_BIND"),
+            error.contains("must not share a listening socket"),
             "unexpected: {error}"
         );
         let error = parse_http_bind(Some("not a socket address"), true, primary).unwrap_err();
@@ -1106,6 +1121,37 @@ mod tests {
             error.contains("valid socket address"),
             "unexpected: {error}"
         );
+    }
+
+    #[test]
+    fn companion_socket_collision_covers_family_wildcards() {
+        let v4_wildcard: std::net::SocketAddr = "0.0.0.0:8787".parse().unwrap();
+        // The wildcard shadows every specific address of its family on the port.
+        for overlapping in ["127.0.0.1:8787", "0.0.0.0:8787", "192.168.1.10:8787"] {
+            let other: std::net::SocketAddr = overlapping.parse().unwrap();
+            assert!(super::binds_collide(v4_wildcard, other), "{overlapping}");
+        }
+        // v6 is a distinct socket family (std forces IPV6_V6ONLY)…
+        let v6_wildcard: std::net::SocketAddr = "[::]:8787".parse().unwrap();
+        assert!(!super::binds_collide(v4_wildcard, v6_wildcard));
+        assert!(super::binds_collide(
+            v6_wildcard,
+            "[::1]:8787".parse().unwrap()
+        ));
+        // …and a different port never collides, wildcard or not.
+        assert!(!super::binds_collide(
+            v4_wildcard,
+            "0.0.0.0:8788".parse().unwrap()
+        ));
+        assert!(!super::binds_collide(
+            "127.0.0.1:8787".parse().unwrap(),
+            "127.0.0.1:8788".parse().unwrap()
+        ));
+        // Distinct specific addresses on one port coexist (multi-homed hosts).
+        assert!(!super::binds_collide(
+            "127.0.0.1:8787".parse().unwrap(),
+            "192.168.1.10:8787".parse().unwrap()
+        ));
     }
 
     #[test]
