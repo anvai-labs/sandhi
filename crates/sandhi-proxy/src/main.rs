@@ -18,11 +18,11 @@ use sandhi_providers::{
     AnthropicAuthScheme, GeminiAuthScheme, ProviderFamily, ProviderHandle, ProviderRuntime,
 };
 use sandhi_proxy::{
-    plaintext_bind_warning, reclaim_sweep_at, rehydrate_alerts, rehydrate_budgets,
-    serve_with_shutdown_timeout, serve_with_tls_shutdown_timeout, BufferedAlertStore, ProxyLedger,
-    ProxyState, TlsConfig, DEFAULT_HEADER_READ_TIMEOUT_SECS, DEFAULT_MAX_CONNECTIONS,
-    DEFAULT_MAX_CONNECTIONS_PER_IP, DEFAULT_MAX_IN_FLIGHT_AI_REQUESTS,
-    DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_SHUTDOWN_GRACE,
+    dual_scheme_plaintext_warning, plaintext_bind_warning, reclaim_sweep_at, rehydrate_alerts,
+    rehydrate_budgets, serve_with_http_and_tls_shutdown_timeout, serve_with_shutdown_timeout,
+    serve_with_tls_shutdown_timeout, BufferedAlertStore, ProxyLedger, ProxyState, TlsConfig,
+    DEFAULT_HEADER_READ_TIMEOUT_SECS, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_CONNECTIONS_PER_IP,
+    DEFAULT_MAX_IN_FLIGHT_AI_REQUESTS, DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_SHUTDOWN_GRACE,
 };
 use sandhi_store::{AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
 
@@ -629,14 +629,35 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
         .parse()
         .expect("SANDHI_BIND must be a valid socket address");
 
+    // Dual-scheme serving (TD-0017 D7): TLS keeps the primary SANDHI_BIND socket;
+    // SANDHI_HTTP_BIND opts an explicit plaintext companion listener in for
+    // trusted-network clients that cannot speak HTTPS. Both listeners then share
+    // one process, one admission budget, and one drain.
+    let http_addr = match http_bind_from_env(tls.is_some(), addr) {
+        Ok(http_addr) => http_addr,
+        Err(error) => {
+            eprintln!("sandhi-proxy: {error}");
+            return 1;
+        }
+    };
+
     if let Some(warning) = plaintext_bind_warning(addr, tls.is_some()) {
         eprintln!("sandhi-proxy: {warning}");
     }
+    if let Some(warning) = http_addr.and_then(dual_scheme_plaintext_warning) {
+        eprintln!("sandhi-proxy: {warning}");
+    }
     let listener_scheme = if tls.is_some() { "https" } else { "http" };
-    eprintln!(
-        "sandhi-proxy listening on {listener_scheme}://{addr}  \
-         (OpenAI Chat/Responses | Anthropic Messages | Gemini, virtual-key auth)"
-    );
+    match http_addr {
+        Some(http_addr) => eprintln!(
+            "sandhi-proxy listening on {listener_scheme}://{addr} + http://{http_addr}  \
+             (OpenAI Chat/Responses | Anthropic Messages | Gemini, virtual-key auth)"
+        ),
+        None => eprintln!(
+            "sandhi-proxy listening on {listener_scheme}://{addr}  \
+             (OpenAI Chat/Responses | Anthropic Messages | Gemini, virtual-key auth)"
+        ),
+    }
     let shutdown_grace = shutdown_grace_from_env();
     let signal = {
         let lifecycle = Arc::clone(&state.lifecycle);
@@ -648,12 +669,26 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
             tracing::info!("shutdown signal received; quiescing and draining in-flight requests");
         }
     };
-    let serve_result = match tls {
-        Some(tls) => {
+    let serve_result = match (tls, http_addr) {
+        (Some(tls), Some(http_addr)) => {
+            serve_with_http_and_tls_shutdown_timeout(
+                Arc::clone(&state),
+                addr,
+                http_addr,
+                signal,
+                shutdown_grace,
+                tls,
+            )
+            .await
+        }
+        (Some(tls), None) => {
             serve_with_tls_shutdown_timeout(Arc::clone(&state), addr, signal, shutdown_grace, tls)
                 .await
         }
-        None => serve_with_shutdown_timeout(Arc::clone(&state), addr, signal, shutdown_grace).await,
+        // http_addr is Some only when TLS is configured (validated above).
+        (None, _) => {
+            serve_with_shutdown_timeout(Arc::clone(&state), addr, signal, shutdown_grace).await
+        }
     };
     // Listener failures also need bounded cleanup. begin_quiesce preserves the original signal
     // deadline, so no stage below receives another fresh grace period.
@@ -739,6 +774,68 @@ fn configured_store_path() -> Option<String> {
         Err(std::env::VarError::NotPresent) => None,
         _ => startup_store_fatal("configuration"),
     }
+}
+
+/// Resolve the optional plaintext companion listener from `SANDHI_HTTP_BIND`.
+/// See [`parse_http_bind`] for the validation contract.
+fn http_bind_from_env(
+    tls_configured: bool,
+    primary: SocketAddr,
+) -> Result<Option<SocketAddr>, String> {
+    match std::env::var("SANDHI_HTTP_BIND") {
+        Ok(raw) => parse_http_bind(Some(&raw), tls_configured, primary),
+        Err(std::env::VarError::NotPresent) => parse_http_bind(None, tls_configured, primary),
+        Err(std::env::VarError::NotUnicode(error)) => Err(format!(
+            "SANDHI_HTTP_BIND must be a valid socket address, got non-UTF-8 value: {error:?}"
+        )),
+    }
+}
+
+/// The plaintext companion port (dual-scheme serving, TD-0017 D7) is meaningful
+/// only alongside listener TLS — without it, the primary `SANDHI_BIND` socket
+/// already serves plaintext, so a companion would either silently duplicate the
+/// scheme or collide on the same address. Both are refused at startup rather
+/// than absorbed, so a stale env var can never quietly reshape the topology.
+fn parse_http_bind(
+    raw: Option<&str>,
+    tls_configured: bool,
+    primary: SocketAddr,
+) -> Result<Option<SocketAddr>, String> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let addr: SocketAddr = raw
+        .parse()
+        .map_err(|_| format!("SANDHI_HTTP_BIND must be a valid socket address, got {raw:?}"))?;
+    if !tls_configured {
+        return Err(
+            "SANDHI_HTTP_BIND requires listener TLS (tls.cert/tls.key in SANDHI_CONFIG); \
+             without TLS the SANDHI_BIND listener already serves plaintext HTTP"
+                .into(),
+        );
+    }
+    if binds_collide(addr, primary) {
+        return Err(
+            "SANDHI_HTTP_BIND must not share a listening socket with SANDHI_BIND; \
+             pick a distinct port for each scheme"
+                .into(),
+        );
+    }
+    Ok(Some(addr))
+}
+
+/// Two TCP bind addresses collide when they share a port within one address
+/// family and at least one side is the family wildcard (`0.0.0.0` covers every
+/// specific IPv4 address on that port, `[::]` every IPv6 one). Distinct
+/// specific addresses coexist, and v4 never collides with v6 — std forces
+/// `IPV6_V6ONLY`, so `[::]:P` and `0.0.0.0:P` are genuinely distinct sockets.
+/// This is startup diagnostics ahead of the bind; the kernel stays the
+/// authority for anything stranger (mapped addresses, exotic scopes), and a
+/// late `AddrInUse` still fails closed.
+fn binds_collide(a: SocketAddr, b: SocketAddr) -> bool {
+    a.port() == b.port()
+        && a.is_ipv4() == b.is_ipv4()
+        && (a.ip().is_unspecified() || b.ip().is_unspecified() || a.ip() == b.ip())
 }
 
 enum WatchdogMessage {
@@ -994,8 +1091,68 @@ fn rehydrate_providers_from_vault(
 
 #[cfg(test)]
 mod tests {
-    use super::listener_tls_entry_from_json;
+    use super::{listener_tls_entry_from_json, parse_http_bind};
     use std::path::Path;
+
+    #[test]
+    fn http_companion_bind_requires_tls_and_a_distinct_socket() {
+        let primary: std::net::SocketAddr = "127.0.0.1:8787".parse().unwrap();
+        // Unset stays None in every mode: single-scheme serving is untouched.
+        assert_eq!(parse_http_bind(None, true, primary).unwrap(), None);
+        assert_eq!(parse_http_bind(None, false, primary).unwrap(), None);
+        assert_eq!(
+            parse_http_bind(Some("0.0.0.0:18789"), true, primary).unwrap(),
+            Some("0.0.0.0:18789".parse().unwrap())
+        );
+        // Without TLS the primary socket is already plaintext — refuse rather
+        // than silently ignore a stale companion setting.
+        let error = parse_http_bind(Some("0.0.0.0:18789"), false, primary).unwrap_err();
+        assert!(
+            error.contains("requires listener TLS"),
+            "unexpected: {error}"
+        );
+        let error = parse_http_bind(Some("127.0.0.1:8787"), true, primary).unwrap_err();
+        assert!(
+            error.contains("must not share a listening socket"),
+            "unexpected: {error}"
+        );
+        let error = parse_http_bind(Some("not a socket address"), true, primary).unwrap_err();
+        assert!(
+            error.contains("valid socket address"),
+            "unexpected: {error}"
+        );
+    }
+
+    #[test]
+    fn companion_socket_collision_covers_family_wildcards() {
+        let v4_wildcard: std::net::SocketAddr = "0.0.0.0:8787".parse().unwrap();
+        // The wildcard shadows every specific address of its family on the port.
+        for overlapping in ["127.0.0.1:8787", "0.0.0.0:8787", "192.168.1.10:8787"] {
+            let other: std::net::SocketAddr = overlapping.parse().unwrap();
+            assert!(super::binds_collide(v4_wildcard, other), "{overlapping}");
+        }
+        // v6 is a distinct socket family (std forces IPV6_V6ONLY)…
+        let v6_wildcard: std::net::SocketAddr = "[::]:8787".parse().unwrap();
+        assert!(!super::binds_collide(v4_wildcard, v6_wildcard));
+        assert!(super::binds_collide(
+            v6_wildcard,
+            "[::1]:8787".parse().unwrap()
+        ));
+        // …and a different port never collides, wildcard or not.
+        assert!(!super::binds_collide(
+            v4_wildcard,
+            "0.0.0.0:8788".parse().unwrap()
+        ));
+        assert!(!super::binds_collide(
+            "127.0.0.1:8787".parse().unwrap(),
+            "127.0.0.1:8788".parse().unwrap()
+        ));
+        // Distinct specific addresses on one port coexist (multi-homed hosts).
+        assert!(!super::binds_collide(
+            "127.0.0.1:8787".parse().unwrap(),
+            "192.168.1.10:8787".parse().unwrap()
+        ));
+    }
 
     #[test]
     fn completion_without_a_live_deadline_is_not_success() {

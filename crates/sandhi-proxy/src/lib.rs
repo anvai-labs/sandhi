@@ -226,6 +226,21 @@ pub fn plaintext_bind_warning(addr: SocketAddr, tls_enabled: bool) -> Option<&'s
     )
 }
 
+/// Warning emitted when the dual-scheme plaintext companion listener
+/// (`SANDHI_HTTP_BIND`, TD-0017 D7) binds a non-loopback address. Unlike
+/// [`plaintext_bind_warning`] TLS *is* configured — the companion exists
+/// because the operator explicitly accepted cleartext for trusted-network
+/// clients, so the warning names that choice rather than suggesting TLS.
+/// Loopback companions stay quiet, mirroring the dev-trust posture.
+#[must_use]
+pub fn dual_scheme_plaintext_warning(addr: SocketAddr) -> Option<&'static str> {
+    (!addr.ip().is_loopback()).then_some(
+        "WARNING: the plaintext companion listener (SANDHI_HTTP_BIND) accepts bearer \
+         credentials in cleartext on a non-loopback address; restrict it to the trusted \
+         network segment, or unset SANDHI_HTTP_BIND to serve TLS only",
+    )
+}
+
 /// Shared server state: the virtual-key store, the budget ledger, the usage sink, and the
 /// registry of configured upstream providers (each already holding its real credential).
 pub struct ProxyState {
@@ -810,7 +825,16 @@ where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    serve_listener_with_shutdown(state, listener, shutdown, grace, None).await
+    serve_scheme_listeners_with_shutdown(
+        state,
+        SchemeListeners {
+            plaintext: Some(listener),
+            tls: None,
+        },
+        shutdown,
+        grace,
+    )
+    .await
 }
 
 /// TLS counterpart to [`serve_with_shutdown_timeout`]. The HTTP application,
@@ -827,22 +851,104 @@ where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    serve_listener_with_shutdown(state, listener, shutdown, grace, Some(tls.acceptor)).await
+    serve_scheme_listeners_with_shutdown(
+        state,
+        SchemeListeners {
+            plaintext: None,
+            tls: Some((listener, tls.acceptor)),
+        },
+        shutdown,
+        grace,
+    )
+    .await
 }
 
-async fn serve_listener_with_shutdown<F>(
+/// Dual-scheme counterpart to [`serve_with_shutdown_timeout`] and
+/// [`serve_with_tls_shutdown_timeout`] (TD-0017 P1 amendment, D7): one process
+/// serving a TLS listener **and** a plaintext HTTP listener on separate sockets.
+///
+/// Both sockets bind before either accepts, so a failed bind surfaces as a
+/// startup error instead of a half-configured topology silently taking traffic
+/// on the surviving port. The plaintext port is a deliberate operator choice
+/// (`SANDHI_HTTP_BIND`, trusted-network clients that cannot speak HTTPS);
+/// callers own the loud non-loopback warning. Both listeners share ONE
+/// connection budget, one per-IP table, and one graceful drain — the
+/// TD-0014 P3 bounds cap the process, not the port.
+pub async fn serve_with_http_and_tls_shutdown_timeout<F>(
     state: Arc<ProxyState>,
-    listener: tokio::net::TcpListener,
+    tls_addr: SocketAddr,
+    http_addr: SocketAddr,
     shutdown: F,
     grace: Duration,
-    tls: Option<tokio_rustls::TlsAcceptor>,
+    tls: TlsConfig,
 ) -> std::io::Result<()>
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
+    let tls_listener = tokio::net::TcpListener::bind(tls_addr).await?;
+    let http_listener = tokio::net::TcpListener::bind(http_addr).await?;
+    serve_scheme_listeners_with_shutdown(
+        state,
+        SchemeListeners {
+            plaintext: Some(http_listener),
+            tls: Some((tls_listener, tls.acceptor)),
+        },
+        shutdown,
+        grace,
+    )
+    .await
+}
+
+/// The listeners sharing one admission domain: a single connection budget,
+/// per-IP table, graceful-drain registry, and shutdown choreography. At least
+/// one listener must be present.
+struct SchemeListeners {
+    /// Plaintext HTTP/1 listener — the loopback default, or the deliberate
+    /// dual-scheme companion port.
+    plaintext: Option<tokio::net::TcpListener>,
+    /// TLS-wrapped HTTP/1 listener.
+    tls: Option<(tokio::net::TcpListener, tokio_rustls::TlsAcceptor)>,
+}
+
+/// The next accepted connection, tagged with the scheme whose listener
+/// produced it — the tag decides whether the connection task wraps the
+/// stream in a TLS session.
+enum AcceptedConnection {
+    Plaintext(std::io::Result<(tokio::net::TcpStream, SocketAddr)>),
+    Tls(std::io::Result<(tokio::net::TcpStream, SocketAddr)>),
+}
+
+/// Await the next connection on whichever listeners exist. The accept futures
+/// are rebuilt each time the surrounding `select!` drops this arm; dropping an
+/// accept future loses nothing — the connection stays in the kernel backlog.
+async fn accept_next_connection(listeners: &SchemeListeners) -> AcceptedConnection {
+    match (&listeners.plaintext, &listeners.tls) {
+        (Some(plain), Some((tls_listener, _))) => tokio::select! {
+            accepted = plain.accept() => AcceptedConnection::Plaintext(accepted),
+            accepted = tls_listener.accept() => AcceptedConnection::Tls(accepted),
+        },
+        (Some(plain), None) => AcceptedConnection::Plaintext(plain.accept().await),
+        (None, Some((tls_listener, _))) => AcceptedConnection::Tls(tls_listener.accept().await),
+        // Unreachable by construction (every constructor passes a listener).
+        (None, None) => std::future::pending().await,
+    }
+}
+
+async fn serve_scheme_listeners_with_shutdown<F>(
+    state: Arc<ProxyState>,
+    listeners: SchemeListeners,
+    shutdown: F,
+    grace: Duration,
+) -> std::io::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    debug_assert!(
+        listeners.plaintext.is_some() || listeners.tls.is_some(),
+        "serving requires at least one listener"
+    );
     let policy = ConnectionPolicy::from_state(&state);
-    serve_router_listener_with_shutdown(build_app(state), listener, shutdown, grace, policy, tls)
-        .await
+    serve_router_listener_with_shutdown(build_app(state), listeners, shutdown, grace, policy).await
 }
 
 /// Serve until `shutdown` resolves, with TD-0014 P3 connection-level defence:
@@ -852,11 +958,10 @@ where
 /// destructors may outlive cancellation; the binary watchdog owns the hard process bound.
 async fn serve_router_listener_with_shutdown<F>(
     app: Router,
-    listener: tokio::net::TcpListener,
+    listeners: SchemeListeners,
     shutdown: F,
     grace: Duration,
     policy: ConnectionPolicy,
-    tls: Option<tokio_rustls::TlsAcceptor>,
 ) -> std::io::Result<()>
 where
     F: std::future::Future<Output = ()> + Send + 'static,
@@ -867,11 +972,13 @@ where
     let per_ip: Arc<std::sync::Mutex<HashMap<std::net::IpAddr, usize>>> = Default::default();
     let graceful = Arc::new(hyper_util::server::graceful::GracefulShutdown::new());
     let mut tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+    // One acceptor shared by every TLS accept; cloned per connection as an Arc bump.
+    let tls_acceptor = listeners.tls.as_ref().map(|(_, acceptor)| acceptor.clone());
     tokio::pin!(shutdown);
 
     let mut quiescing = false;
     let mut quiesce_end = tokio::time::Instant::now();
-    // Keep the same HTTP/TLS listener for probes during bounded quiesce, without relaxing
+    // Keep the same listeners for probes during bounded quiesce, without relaxing
     // connection/per-IP limits. Under transport saturation a fresh probe may still be shed.
     loop {
         tokio::select! {
@@ -889,7 +996,13 @@ where
                     tracing::warn!(%error, "connection task failed");
                 }
             }
-            accepted = listener.accept() => {
+            accepted = accept_next_connection(&listeners) => {
+                // The scheme tag selects the transport wrapper; the admission
+                // and metering path below is shared, by construction.
+                let (acceptor, accepted) = match accepted {
+                    AcceptedConnection::Plaintext(accepted) => (None, accepted),
+                    AcceptedConnection::Tls(accepted) => (tls_acceptor.clone(), accepted),
+                };
                 let (stream, peer_addr) = match accepted {
                     Ok(pair) => pair,
                     Err(error) => {
@@ -937,7 +1050,7 @@ where
                 let watcher = graceful.watcher();
                 let metrics = Arc::clone(&policy.metrics);
                 let app = app.clone();
-                let tls = tls.clone();
+                let tls = acceptor;
                 let header_read_timeout = policy.header_read_timeout;
                 // Builder, connection, watcher, guards: one task owns all of
                 // it, because the connection borrows its builder.
@@ -981,7 +1094,7 @@ where
             }
         }
     }
-    drop(listener);
+    drop(listeners);
     policy.lifecycle.start_draining();
 
     // Grace window: signal every watched connection, wait until they finish or
@@ -1082,6 +1195,21 @@ mod server_lifecycle_tests {
     }
 
     #[test]
+    fn dual_scheme_companion_warning_is_only_for_non_loopback_ports() {
+        // TLS is configured in dual-scheme mode by definition, so the companion
+        // warning keys on the address alone.
+        assert!(dual_scheme_plaintext_warning("127.0.0.1:8787".parse().unwrap()).is_none());
+        assert!(dual_scheme_plaintext_warning("[::1]:8787".parse().unwrap()).is_none());
+        let warning = dual_scheme_plaintext_warning("0.0.0.0:8787".parse().unwrap())
+            .expect("a non-loopback plaintext companion must be loud");
+        assert!(warning.contains("cleartext"), "unexpected: {warning}");
+        assert!(
+            warning.contains("SANDHI_HTTP_BIND"),
+            "unexpected: {warning}"
+        );
+    }
+
+    #[test]
     fn tls_material_is_validated_before_listening() {
         let error = TlsConfig::from_pem(b"not a certificate", b"not a key")
             .err()
@@ -1130,14 +1258,16 @@ mod server_lifecycle_tests {
         )
         .expect("valid test identity");
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-        let server = tokio::spawn(serve_listener_with_shutdown(
+        let server = tokio::spawn(serve_scheme_listeners_with_shutdown(
             Arc::new(state),
-            listener,
+            SchemeListeners {
+                plaintext: None,
+                tls: Some((listener, tls.acceptor)),
+            },
             async {
                 let _ = shutdown_rx.await;
             },
             Duration::from_millis(50),
-            Some(tls.acceptor),
         ));
 
         let mut stalled = tokio::net::TcpStream::connect(addr)
@@ -1182,13 +1312,15 @@ mod server_lifecycle_tests {
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            serve_listener_with_shutdown(
+            serve_scheme_listeners_with_shutdown(
                 state,
-                listener,
+                SchemeListeners {
+                    plaintext: Some(listener),
+                    tls: None,
+                },
                 async {},
                 // This path should finish immediately; the bound is still part of the contract.
                 DEFAULT_SHUTDOWN_GRACE,
-                None,
             ),
         )
         .await
@@ -1217,13 +1349,15 @@ mod server_lifecycle_tests {
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(serve_router_listener_with_shutdown(
             app,
-            listener,
+            SchemeListeners {
+                plaintext: Some(listener),
+                tls: None,
+            },
             async move {
                 let _ = shutdown_rx.await;
             },
             Duration::from_millis(25),
             ConnectionPolicy::default(),
-            None,
         ));
         let client_call = tokio::spawn(async move {
             let _ = reqwest::get(format!("http://{addr}/stuck")).await;

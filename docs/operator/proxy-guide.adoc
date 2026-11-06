@@ -114,7 +114,11 @@ sandhi-proxy listening on http://127.0.0.1:8787  (OpenAI Chat/Responses | Anthro
 
 | `SANDHI_BIND`
 | `127.0.0.1:8787`
-| Listen socket. Must parse as a `SocketAddr`.
+| Listen socket. Must parse as a `SocketAddr`. When `tls` is configured this socket serves `https://`.
+
+| `SANDHI_HTTP_BIND`
+| _(unset → no plaintext listener)_
+| Optional second, **plaintext** HTTP listener served by the same process — for trusted-network clients that cannot speak HTTPS. Requires listener TLS (`tls.cert`/`tls.key`; without it the `SANDHI_BIND` socket is already plaintext, so setting this fails startup) and must differ from `SANDHI_BIND`. Both sockets share one admission budget, one per-IP table, and one graceful drain. A non-loopback plaintext port warns at startup because virtual keys are bearer credentials.
 
 | `SANDHI_CONFIG`
 | _(unset)_
@@ -304,6 +308,33 @@ Sandhi validates the complete pair before accepting traffic and serves `https://
 an incomplete, unreadable, malformed, or mismatched pair fails startup. Without the `tls` object,
 the listener remains byte-compatible plain HTTP. Certificate reload without interrupting existing
 streams is tracked separately; restart the process to replace the identity in this phase.
+
+==== Dual-scheme serving: HTTP and HTTPS in one process
+
+With TLS enabled, `SANDHI_HTTP_BIND` opens a second, **plaintext** listener alongside it — for
+trusted-network clients (LAN devices, simple tools) that cannot do HTTPS:
+
+[source,bash]
+----
+SANDHI_CONFIG=/etc/sandhi/config.json \
+SANDHI_BIND=0.0.0.0:18788 \
+SANDHI_HTTP_BIND=0.0.0.0:18789 \
+cargo run -p sandhi-proxy --bin sandhi-proxy
+----
+
+The TLS listener keeps `SANDHI_BIND`; the plaintext companion takes its own socket. Both bind
+before either accepts traffic, and they share one process-wide admission budget, one per-IP
+connection table, and one graceful drain — the connection caps (TD-0014 P3) bound the process,
+not the port. Each scheme is disabled by the absence of its setting: no `tls` object → HTTP only;
+no `SANDHI_HTTP_BIND` → HTTPS only. Same-port protocol multiplexing is deliberately not offered;
+see TD-0017 D7.
+
+[CAUTION]
+====
+Virtual keys are bearer credentials. A non-loopback `SANDHI_HTTP_BIND` warns at startup: keys and
+prompts cross that port in cleartext, so restrict it to the trusted network segment or front it
+with a TLS terminator.
+====
 
 === Optional reviewed desired state
 
