@@ -161,6 +161,149 @@ async fn tls_listener_serves_full_requests_and_complete_sse_streams() {
         .expect("TLS server exits cleanly");
 }
 
+/// TD-0017 D7: dual-scheme serving — one process, two sockets. The plaintext
+/// companion and the TLS listener share ONE admission budget (a silent
+/// plaintext connection holds the process-wide connection slot, so the TLS
+/// listener sheds until it times out), and both carry the identical Router —
+/// a metered SSE request over the plaintext port settles exactly like one
+/// over TLS.
+#[tokio::test]
+async fn dual_scheme_listeners_share_admission_and_meter_identically() {
+    let upstream = MockServer::start().await;
+    let sse = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2}}\n\n",
+        "data: [DONE]\n\n"
+    );
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse),
+        )
+        .mount(&upstream)
+        .await;
+
+    let sink = Arc::new(InMemorySink::new());
+    let mut state = Arc::try_unwrap(state_with(
+        upstream.uri(),
+        sink.clone(),
+        ProxyLedger::in_memory(),
+    ))
+    .ok()
+    .expect("test owns the only ProxyState reference");
+    state.header_read_timeout_secs = 1;
+    // One process-wide slot: whichever listener admits first, the other sheds.
+    state.max_connections = 1;
+    let state = Arc::new(state);
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tls_addr = probe.local_addr().unwrap();
+    drop(probe);
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http_addr = probe.local_addr().unwrap();
+    drop(probe);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let tls = TlsConfig::from_pem(TEST_TLS_CERT, TEST_TLS_KEY).unwrap();
+    let server = tokio::spawn(sandhi_proxy::serve_with_http_and_tls_shutdown_timeout(
+        state,
+        tls_addr,
+        http_addr,
+        async {
+            let _ = shutdown_rx.await;
+        },
+        std::time::Duration::from_secs(2),
+        tls,
+    ));
+
+    let root = reqwest::Certificate::from_pem(TEST_TLS_CERT).unwrap();
+    let client = reqwest::Client::builder()
+        .add_root_certificate(root)
+        .build()
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // A silent PLAINTEXT connection is admitted and holds the sole slot…
+    use tokio::io::AsyncReadExt;
+    let mut silent = tokio::net::TcpStream::connect(http_addr).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    // …so the TLS listener must shed, not admit: the connection budget spans
+    // both listeners. A shed connection closes without any response bytes.
+    let shed = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        client.get(format!("https://{tls_addr}/healthz")).send(),
+    )
+    .await;
+    assert!(
+        matches!(&shed, Ok(Err(_))),
+        "a connection holding the shared budget on the plaintext port must shed the TLS listener, got {shed:?}"
+    );
+    // The silent connection itself is bounded by the shared header deadline.
+    let mut one = [0u8; 1];
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(3), silent.read(&mut one))
+        .await
+        .expect("silent plaintext connection must be bounded")
+        .unwrap_or(0);
+    assert_eq!(
+        closed, 0,
+        "silent plaintext connection must close without a response"
+    );
+    // The slot releases with the connection task; give the permit a beat to drop.
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    // One process-wide slot means the plaintext chain must run on ONE pooled
+    // keep-alive connection: healthz first, then the metered stream reusing it.
+    let plain_health = client
+        .get(format!("http://{http_addr}/healthz"))
+        .send()
+        .await
+        .unwrap_or_else(|error| panic!("dual-scheme plaintext health request failed: {error:?}"));
+    assert_eq!(plain_health.status(), StatusCode::OK);
+
+    // A full metered SSE stream over the PLAINTEXT port settles identically.
+    let response = client
+        .post(format!("http://{http_addr}/v1/chat/completions"))
+        .header("authorization", "Bearer vk_demo")
+        .json(&serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": true
+        }))
+        .send()
+        .await
+        .expect("plaintext streaming request");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.text().await.expect("complete SSE body");
+    assert!(body.contains("hello"));
+    assert!(body.contains("[DONE]"));
+
+    // The pooled plaintext connection idles out at the shared header deadline,
+    // releasing the sole slot; only then can the TLS listener serve.
+    tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+    let health = client
+        .get(format!("https://{tls_addr}/healthz"))
+        .send()
+        .await
+        .unwrap_or_else(|error| panic!("dual-scheme TLS health request failed: {error:?}"));
+    assert_eq!(health.status(), StatusCode::OK);
+
+    let events = sink.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].tokens_in, 4);
+    assert_eq!(events[0].tokens_out, 2);
+    assert_eq!(
+        events[0].usage_completeness,
+        sandhi_core::UsageCompleteness::Final
+    );
+
+    let _ = shutdown_tx.send(());
+    tokio::time::timeout(std::time::Duration::from_secs(3), server)
+        .await
+        .expect("dual-scheme server drains")
+        .expect("dual-scheme server task joins")
+        .expect("dual-scheme server exits cleanly");
+}
+
 #[tokio::test]
 async fn complete_attributes_meters_and_records_budget() {
     let upstream = MockServer::start().await;

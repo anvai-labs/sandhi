@@ -1,7 +1,7 @@
 # TD-0017: Transport security and ingress protocol breadth — TLS, and finding out what HTTP versions we actually speak
 
-- **Status:** **In progress**, 2026-08-31. **P1 landed**; P2–P4 remain open. Owns gaps
-  **G05, G06** (G05 ✅).
+- **Status:** **In progress**, 2026-08-31. **P1 landed**; a P1 amendment (D7, dual-scheme
+  listeners) landed 2026-11-06; P2–P4 remain open. Owns gaps **G05, G06** (G05 ✅).
 - **Relates to:** [ADR-0006](../adr/0006-layer-boundary-and-protocol-scope.md) D2 (protocol breadth
   belongs at L5/L6/L7, and this TD is what that decision authorises),
   [TD-0014](TD-0014-data-plane-resource-safety.md) D4 (`ConnCtx`, which this TD populates with ALPN
@@ -128,6 +128,19 @@ TD-0011 D2, and SNI is caller-controlled.
 address without TLS, following the existing `SANDHI_STORE`-without-admin-token warning pattern. It
 fails loudly without failing closed on a posture that loopback and trusted-hop setups legitimately
 use.
+
+**D7 — Dual-scheme serving is opt-in, bounded, and shares one admission domain (P1 amendment,
+shipped 2026-11-06).** A process whose primary listener is TLS may open a second, plaintext HTTP
+listener on its own socket for trusted-network clients that cannot speak HTTPS
+(`SANDHI_HTTP_BIND`). **Rejected: same-port protocol multiplexing** (peeking the first byte for a
+TLS `ClientHello`). It buys one socket at the cost of a hand-rolled protocol discriminator in front
+of hyper — exactly the sniffing-bypass class [ADR-0009](../adr/0009-http1-only-listener.md)
+exists to keep out of the accept path — and provides no capability two sockets do not. The two
+listeners share ONE connection budget, one per-IP table, and one graceful drain: the TD-0014 P3
+bounds cap the *process*, not the port, so a peer cannot double its share by using both schemes.
+`SANDHI_HTTP_BIND` without TLS is a startup error (the primary `SANDHI_BIND` socket is already
+plaintext; a companion would silently duplicate the scheme or collide on the address), and a
+non-loopback companion warns per D6's loud-not-closed posture.
 
 ## Phases
 
