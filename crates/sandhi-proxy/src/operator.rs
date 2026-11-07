@@ -158,6 +158,26 @@ pub struct BudgetSpec {
 /// Admin auth. Returns `Ok(())` when the presented bearer matches the configured admin token.
 /// `403` when no admin token is configured; `401` when missing/wrong.
 #[allow(clippy::result_large_err)] // axum::Response is intentionally large; this is the idiomatic shape.
+/// `GET /admin/topology` — the optional deployment-topology projection
+/// (`SANDHI_TOPOLOGY_FILE`, crates/sandhi-proxy/src/topology.rs). Secret-free
+/// by construction; 404 when the feature is off, Read-gated like every other
+/// operator read.
+pub(crate) async fn topology(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -> Response {
+    if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Read, false).await {
+        return r;
+    }
+    let Some(file) = state.topology.clone() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": {"code": "topology_unconfigured",
+                "message": "topology not configured (set SANDHI_TOPOLOGY_FILE)"}})),
+        )
+            .into_response();
+    };
+    Json(crate::topology::topology_response(&file)).into_response()
+}
+
+#[allow(clippy::result_large_err)] // axum::Response is intentionally large; this is the idiomatic shape.
 /// Protected policy metadata, never prompt text, patterns, selectors or matched values.
 pub(crate) async fn policy_status(
     State(state): State<Arc<ProxyState>>,
