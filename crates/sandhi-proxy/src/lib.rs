@@ -28,6 +28,7 @@ pub mod ratelimit;
 pub mod settlement;
 pub mod streaming;
 mod text_endpoints;
+pub mod topology;
 
 /// First-party OTel/OTLP export of `gen_ai.*` spans + metrics (Scope 5, TD-0011 P3). Feature-gated
 /// (`otel-otlp`, default off); provides no-op stubs when the feature is off so call sites compile
@@ -246,6 +247,10 @@ pub fn dual_scheme_plaintext_warning(addr: SocketAddr) -> Option<&'static str> {
 pub struct ProxyState {
     buffered_accounting: std::sync::OnceLock<Arc<settlement::buffered::Buffered>>,
     pub policy: Option<Arc<policy::PolicyGate>>,
+    /// Optional deployment-topology projection (`SANDHI_TOPOLOGY_FILE`,
+    /// crates/sandhi-proxy/src/topology.rs) — served read-only via
+    /// `/admin/topology` and the dashboard. Absent = feature off.
+    pub topology: Option<Arc<topology::TopologyFile>>,
     /// Validated startup-only buffered transport policy; absent preserves transport defaults.
     pub buffered_deadlines: Option<deadlines::BufferedDeadlines>,
     /// Startup-only, per-authorized-route streaming setup/idle/body limits.
@@ -371,6 +376,7 @@ impl ProxyState {
         Self {
             buffered_accounting: std::sync::OnceLock::new(),
             policy: None,
+            topology: None,
             lifecycle: Arc::new(lifecycle::Lifecycle::new()),
             buffered_deadlines: None,
             streaming_deadlines: None,
@@ -727,6 +733,7 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         // TD-0003 P4 dashboard read-only endpoints (masked; admin-bearer-gated when an admin
         // token is configured, unless SANDHI_DASHBOARD_PUBLIC=1 — ADR-0004 D4).
         .route("/dashboard/api/keys", get(dashboard_keys))
+        .route("/dashboard/api/topology", get(dashboard_topology))
         .route("/dashboard/api/budgets", get(dashboard_budgets))
         .route("/dashboard/api/alerts", get(dashboard_alerts))
         // TD-0011 D5: /metrics reveals traffic shape and model mix, so it reuses the dashboard's
@@ -742,6 +749,7 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         // is operator information, gated like the rest of /admin.
         .route("/admin/version", get(operator::version_capabilities))
         .route("/admin/policy", get(operator::policy_status))
+        .route("/admin/topology", get(operator::topology))
         .route("/admin/keys/reference", post(operator::register_reference))
         .route(
             "/admin/keys",
@@ -1807,6 +1815,21 @@ async fn dashboard_api(State(state): State<Arc<ProxyState>>, headers: HeaderMap)
         }))
     })
     .await
+}
+
+/// `GET /dashboard/api/topology` — the optional deployment-topology projection
+/// (secret-free by construction; 404 when `SANDHI_TOPOLOGY_FILE` is unset).
+async fn dashboard_topology(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -> Response {
+    if let Err(denied) = require_dashboard_access(&state, &headers).await {
+        return denied;
+    }
+    let Some(file) = state.topology.clone() else {
+        return error(
+            StatusCode::NOT_FOUND,
+            "topology not configured (set SANDHI_TOPOLOGY_FILE)",
+        );
+    };
+    dashboard_read(move || Ok(crate::topology::topology_response(&file))).await
 }
 
 // --- TD-0003 P4 dashboard read-only endpoints ----------------------------------

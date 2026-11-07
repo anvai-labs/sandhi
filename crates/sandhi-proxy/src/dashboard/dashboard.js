@@ -409,6 +409,20 @@ function loadPolicy() {
   }, "read");
 }
 
+function loadTopology() {
+  return loadPanel("topology", "/dashboard/api/topology", data => {
+    requireFields(data, ["deployment", "peers"]);
+    const dep = data.deployment;
+    if (typeof dep.gateway_host !== "string") throw new ApiError(502, "Incomplete topology");
+    const peers = (data.peers || []).map(p =>
+      `<tr><td>${esc(p.name)}</td><td>${esc(p.kind || "")}</td><td>${esc(p.endpoint || "")}</td></tr>`).join("");
+    return `<p>Gateway <strong>${esc(dep.gateway_host)}</strong> — ${esc(dep.public_name || "no public name")}
+      (TLS ${esc(dep.tls_port ?? "-")}, HTTP ${esc(dep.http_port ?? "-")})</p>
+      <div class="table-scroll"><table><thead><tr><th>Peer</th><th>Reach</th><th>Endpoint</th></tr></thead>
+      <tbody>${peers || `<tr><td colspan=3>no peers declared</td></tr>`}</tbody></table></div>`;
+  }, "read");
+}
+
 function loadConfig() {
   return loadPanel("config", "/admin/config", data => {
     requireFields(data, ["providers", "budgets", "alerts", "vkeys"]);
@@ -499,7 +513,7 @@ async function refreshAll() {
     document.getElementById("auth-status").textContent = "Access verification unavailable. Retry with Refresh.";
     return;
   }
-  return Promise.all([loadUsage(), loadKeys(), loadBudgets(), loadAlerts(), loadConfig(), loadPolicy()]);
+  return Promise.all([loadUsage(), loadKeys(), loadBudgets(), loadAlerts(), loadConfig(), loadPolicy(), loadTopology()]);
 }
 
 // Attribute values are inert data, never JavaScript source. Only this fixed action table
