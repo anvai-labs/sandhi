@@ -2881,6 +2881,7 @@ dependencies = [
 name = "sandhi-store"
 version = "0.15.0"
 dependencies = [
+ "base64 0.22.1",
  "criterion",
  "getrandom 0.2.17",
  "keyring",

@@ -24,6 +24,7 @@ pub mod policy_onnx;
 pub mod policy_remote;
 pub mod policy_workers;
 mod preparation;
+pub mod profiles;
 pub mod ratelimit;
 pub mod settlement;
 pub mod streaming;
@@ -359,6 +360,10 @@ pub struct ProxyState {
     pub config_path: Option<std::path::PathBuf>,
     /// TD-0031: optional non-interactive client-credentials registry.
     pub client_credentials: Option<Arc<client_credentials::ClientCredentialRegistry>>,
+    /// Gateway-profiles store (Phase 5): the applied per-group `profiles` table + the
+    /// `profile_tokens` bearer credentials for `GET /auth/profile`. Opened against the same
+    /// SQLite file when `SANDHI_STORE` is set; absent otherwise.
+    pub profiles: Option<Arc<sandhi_store::ProfileStore>>,
 }
 
 impl ProxyState {
@@ -414,6 +419,7 @@ impl ProxyState {
             otel: None,
             config_path: None,
             client_credentials: None,
+            profiles: None,
         }
     }
 }
@@ -726,6 +732,10 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         .route("/auth/session", get(auth::session_status))
         .route("/auth/logout", post(auth::logout))
         .route("/auth/keys", post(auth::delegate_key))
+        // Gateway-profiles (Phase 5): a bearer profile token (skp_…) downloads the caller's
+        // assembled group profile — defaults + models, plus a shown-once minted virtual key in
+        // gateway mode. Issuer-agnostic seam (subject tokens later), see profiles.rs.
+        .route("/auth/profile", get(crate::profiles::profile))
         .route("/dashboard", get(dashboard_html))
         .route("/dashboard/assets/dashboard.js", get(dashboard_script))
         .route("/dashboard/assets/dashboard.css", get(dashboard_style))
@@ -781,6 +791,13 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         // Declarative desired-state config (SANDHI_CONFIG) — additive-only apply, see config.rs.
         .route("/admin/config", get(operator::config_preview))
         .route("/admin/config/apply", post(operator::config_apply))
+        // Gateway-profiles: mint / revoke the profile-download tokens (skp_…) that authenticate
+        // /auth/profile. Hash-only persistence; the plaintext is shown once at mint time.
+        .route("/admin/profile-tokens", post(operator::mint_profile_token))
+        .route(
+            "/admin/profile-tokens/revoke",
+            post(operator::revoke_profile_tokens),
+        )
         // Management responses can contain attribution or one-time credentials. This layer
         // deliberately precedes the ingress merge: provider response headers stay untouched.
         .layer(axum::middleware::map_response(management_no_store))

@@ -26,7 +26,7 @@
 use serde::Deserialize;
 use std::path::PathBuf;
 
-use sandhi_store::{AlertRuleRecord, VirtualKeyRecord};
+use sandhi_store::{AlertRuleRecord, ProfileRecord, VirtualKeyRecord};
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 pub struct SandhiFileConfig {
@@ -48,6 +48,10 @@ pub struct SandhiFileConfig {
     pub alerts: Vec<AlertEntry>,
     #[serde(default)]
     pub vkeys: Vec<VkeyEntry>,
+    /// Per-group assembled profiles (`GET /auth/profile` downloads). Applied additively into the
+    /// durable `profiles` table, like every other section here.
+    #[serde(default)]
+    pub profiles: Vec<ProfileEntry>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -109,6 +113,52 @@ pub struct VkeyEntry {
     pub rate_limit_per_min: Option<u32>,
 }
 
+/// A per-group profile: the defaults a `GET /auth/profile` caller receives, declared centrally
+/// by the operator. **No secret fields — masking is by construction**: the entry carries only
+/// names, numbers and model ids, so a leaked config file can never leak a credential. The
+/// `skp_…` profile token and the minted `vk_…` virtual key exist only at their respective
+/// mint moments and are shown exactly once; this file never references either.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ProfileEntry {
+    /// Owning attribution group (the `group_id` vocabulary of `RequestMetadataV1`).
+    pub group: String,
+    /// `"gateway"` (default): callers call THIS gateway; a profile download mints them a
+    /// virtual key bound to `upstream`. `"local"`: callers run the models themselves; the
+    /// download carries defaults + models only and never mints a key.
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// Upstream credential id (`provider:label`, same vocabulary as `VkeyEntry::upstream`) a
+    /// minted virtual key binds to. Required in practice for `gateway` mode — a virtual key
+    /// must route somewhere; ignored (may be absent) for `local` mode.
+    #[serde(default)]
+    pub upstream: Option<String>,
+    /// Model allowlist exposed to the group.
+    #[serde(default)]
+    pub models: Vec<String>,
+    /// Per-request defaults for profile consumers.
+    #[serde(default)]
+    pub defaults: ProfileDefaults,
+}
+
+/// Neutral defaults carried by a [`ProfileEntry`]. No dollars, no SKU/tier.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct ProfileDefaults {
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+}
+
+impl ProfileEntry {
+    /// The effective mode: `"gateway"` unless explicitly `"local"`.
+    pub fn effective_mode(&self) -> &str {
+        match self.mode.as_deref() {
+            Some("local") => "local",
+            _ => "gateway",
+        }
+    }
+}
+
 /// Resolve `channel` env var to a webhook string, or `"log"` when absent/unset. Mirrors
 /// `SetBudgetRequest`'s zero-config default so an entry with no `webhook_env` behaves the same
 /// as one that never mentioned alerting at all.
@@ -157,6 +207,20 @@ pub fn vkey_already_applied(existing: &[VirtualKeyRecord], entry: &VkeyEntry) ->
             && k.subject_id.as_deref() == entry.subject.as_deref()
             && k.group_id.as_deref() == entry.group.as_deref()
     })
+}
+
+/// Is the applied profile row for the entry's group exactly what the entry declares? Unlike the
+/// vkey helper above, profiles are a single row per group with **upsert** semantics, so this
+/// distinguishes the preview/apply verbs: absent → `create`, matching → satisfied, present but
+/// differing → `update` (same additive-only rule: an entry removed from the file never deletes
+/// the row).
+pub fn profile_matches(existing: &ProfileRecord, entry: &ProfileEntry) -> bool {
+    existing.group == entry.group
+        && existing.mode == entry.effective_mode()
+        && existing.upstream_ref == entry.upstream
+        && existing.models == entry.models
+        && existing.timeout_seconds == entry.defaults.timeout_seconds
+        && existing.max_tokens == entry.defaults.max_tokens
 }
 
 #[cfg(test)]
@@ -481,5 +545,103 @@ mod tests {
             rate_limit_per_min: None,
         };
         assert!(!vkey_already_applied(&existing, &entry));
+    }
+
+    fn profile_entry(group: &str, mode: Option<&str>) -> ProfileEntry {
+        ProfileEntry {
+            group: group.into(),
+            mode: mode.map(String::from),
+            upstream: Some("ollama:default".into()),
+            models: vec!["glm".into()],
+            defaults: ProfileDefaults {
+                timeout_seconds: Some(120),
+                max_tokens: Some(4096),
+            },
+        }
+    }
+
+    fn profile_record_from(entry: &ProfileEntry) -> ProfileRecord {
+        ProfileRecord {
+            group: entry.group.clone(),
+            mode: entry.effective_mode().into(),
+            upstream_ref: entry.upstream.clone(),
+            models: entry.models.clone(),
+            timeout_seconds: entry.defaults.timeout_seconds,
+            max_tokens: entry.defaults.max_tokens,
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn profile_entry_parses_with_every_field_defaulted() {
+        // Minimal shape: only the group is required; mode/upstream/models/defaults all default.
+        let entry: ProfileEntry =
+            serde_json::from_str(r#"{"group":"platform"}"#).expect("minimal entry parses");
+        assert_eq!(
+            entry.effective_mode(),
+            "gateway",
+            "mode defaults to gateway"
+        );
+        assert_eq!(entry.upstream, None);
+        assert!(entry.models.is_empty());
+        assert_eq!(
+            entry.defaults,
+            ProfileDefaults {
+                timeout_seconds: None,
+                max_tokens: None
+            }
+        );
+        // And a whole file that mentions profiles nowhere still parses.
+        let cfg: SandhiFileConfig = serde_json::from_str("{}").unwrap();
+        assert!(cfg.profiles.is_empty());
+    }
+
+    #[test]
+    fn profile_entry_parses_the_full_shape_and_mode_values() {
+        let json = r#"{"profiles":[
+            {"group":"platform","mode":"gateway","upstream":"ollama:default",
+             "models":["glm","claude-x"],"defaults":{"timeout_seconds":120,"max_tokens":8192}},
+            {"group":"research","mode":"local","models":["glm"],
+             "defaults":{"timeout_seconds":300}}
+        ]}"#;
+        let cfg: SandhiFileConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.profiles.len(), 2);
+        assert_eq!(cfg.profiles[0].effective_mode(), "gateway");
+        assert_eq!(cfg.profiles[0].defaults.max_tokens, Some(8192));
+        assert_eq!(cfg.profiles[1].effective_mode(), "local");
+        assert_eq!(cfg.profiles[1].upstream, None);
+    }
+
+    #[test]
+    fn profile_matches_distinguishes_create_satisfied_and_update() {
+        let entry = profile_entry("platform", None);
+        // Absent row → the apply verb is create (a row is written).
+        assert!(store_profile(None, &entry).is_some());
+
+        // Exact row → satisfied.
+        let satisfied = profile_record_from(&entry);
+        assert!(profile_matches(&satisfied, &entry));
+
+        // Any declared field differing → update.
+        let mut updated = satisfied.clone();
+        updated.max_tokens = Some(16384);
+        assert!(!profile_matches(&updated, &entry));
+        let mut rehomed = satisfied.clone();
+        rehomed.upstream_ref = Some("inferflux:a".into());
+        assert!(!profile_matches(&rehomed, &entry));
+        let mut mode_swapped = satisfied;
+        mode_swapped.mode = "local".into();
+        assert!(!profile_matches(&mode_swapped, &entry));
+    }
+
+    fn store_profile(
+        existing: Option<ProfileRecord>,
+        entry: &ProfileEntry,
+    ) -> Option<ProfileRecord> {
+        // The apply-side decision in miniature: skip when satisfied, else upsert.
+        match existing {
+            Some(ref cur) if profile_matches(cur, entry) => None,
+            _ => Some(profile_record_from(entry)),
+        }
     }
 }

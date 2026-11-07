@@ -24,7 +24,7 @@ use sandhi_proxy::{
     DEFAULT_HEADER_READ_TIMEOUT_SECS, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_CONNECTIONS_PER_IP,
     DEFAULT_MAX_IN_FLIGHT_AI_REQUESTS, DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_SHUTDOWN_GRACE,
 };
-use sandhi_store::{AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
+use sandhi_store::{AlertStore, ProfileStore, SqliteStore, VaultStore, VirtualKeyStore};
 
 #[derive(clap::Parser)]
 #[command(name = "sandhi-proxy", version = sandhi_proxy::PACKAGE_VERSION,
@@ -273,6 +273,14 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
         Arc::new(vkeys)
     });
 
+    // Gateway-profiles (Phase 5): per-group `profiles` rows (applied via POST /admin/config/apply)
+    // + the `skp_…` profile tokens that authenticate GET /auth/profile. Same file, disjoint tables.
+    let profiles = store_path.as_deref().map(|p| {
+        let profiles = ProfileStore::open(p).unwrap_or_else(|_| startup_store_fatal("profiles"));
+        eprintln!("sandhi-proxy: profile store at {p}");
+        Arc::new(profiles)
+    });
+
     // TD-0003 P2 alert rules: durable store + live registry (rehydrated from the store; webhook
     // transport injected from this tokio runtime).
     let (alert_store, alerts) = store_path
@@ -416,6 +424,7 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
     }
     state.vault = vault;
     state.vkeys = vkeys;
+    state.profiles = profiles;
     state.alert_store = alert_store;
     state.alert_writer = buffered_alert_store.clone();
     state.alerts = alerts;
