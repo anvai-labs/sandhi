@@ -14,6 +14,14 @@
 //! token resolved against the durable `profile_tokens` table. In OIDC mode this same route will
 //! instead accept the caller's subject token at the marked seam below — the resolution feeds an
 //! identical `(subject, group)` pair, so the response shape does not change.
+//!
+//! Lifecycle contract (deliberate, operator-visible): each download with an active token mints a
+//! FRESH attributed virtual key (subject+group = the token's own identity) with no expiry, and
+//! `POST /admin/profile-tokens/revoke` stops future downloads but does **not** cascade to
+//! already-minted keys. Offboarding is therefore two steps: revoke the `skp_` token(s), then
+//! revoke the identity's virtual keys via the existing `/admin/vkeys` surface. Cascade
+//! revocation and/or a default key expiry are the tracked follow-up if download volume ever
+//! makes per-key revocation impractical.
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};

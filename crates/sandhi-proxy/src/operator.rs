@@ -976,7 +976,16 @@ pub(crate) async fn revoke_profile_tokens(
             )
         }
     };
-    Json(json!({ "revoked": revoked, "subject": req.subject, "group": req.group })).into_response()
+    // Lifecycle note: revocation stops FUTURE profile downloads only — virtual keys already
+    // minted by those downloads stay active and must be revoked via the /admin/vkeys surface
+    // (profiles.rs module docs carry the full two-step offboarding contract).
+    Json(json!({
+        "revoked": revoked,
+        "subject": req.subject,
+        "group": req.group,
+        "note": "revocation stops future profile downloads; already-minted virtual keys must be revoked separately via /admin/vkeys",
+    }))
+    .into_response()
 }
 
 /// `POST /admin/budget` — set a neutral-token budget on a scope (P2: window + policy + alerts).
