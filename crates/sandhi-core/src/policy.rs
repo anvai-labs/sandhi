@@ -28,7 +28,7 @@ pub const MAX_BODY_BYTES_CEILING: usize = 4 * 1024 * 1024;
 /// Python workers, remote). Sized with MAX_BODY_BYTES_CEILING so a body
 /// that passes the engine gate does not fail closed inside an extension
 /// evaluator. Not a structural guarantee: text-view derivation can
-/// duplicate tool-call arguments (decoded plus raw), so a body near the
+/// duplicate tool-call arguments (decoded or escape-decoded, plus raw), so a body near the
 /// cap dominated by one arguments string can still exceed this — the
 /// window is narrow and extension evaluators fail closed there.
 pub const MAX_EVALUATOR_TEXT_BYTES: usize = MAX_BODY_BYTES_CEILING;
@@ -1015,8 +1015,111 @@ fn inspect_arguments(value: &Value, parts: &mut Vec<String>) -> Result<(), Evalu
         .get("arguments")
         .and_then(Value::as_str)
         .ok_or(EvaluationError)?;
-    let decoded = strict_json(args.as_bytes())?;
-    collect(&decoded, parts, 0)
+    match strict_json(args.as_bytes()) {
+        Ok(decoded) => collect(&decoded, parts, 0),
+        // Syntactically valid JSON that strict decoding rejects — duplicate keys,
+        // out-of-range numbers, lone surrogates, excess depth — could decode
+        // differently in a consumer than in the evaluator, so it fails closed.
+        Err(error) if serde_json::from_slice::<serde::de::IgnoredAny>(args.as_bytes()).is_ok() => {
+            Err(error)
+        }
+        // Not JSON at all. A model's malformed tool call is replayed in history
+        // verbatim, and failing closed here denied every later request of the
+        // session. A passthrough upstream reads it as text; the gateway's own
+        // translators (Anthropic/Gemini/Ollama) reject it as an invalid request,
+        // which fails safe. The raw string is already collected with the
+        // message's `tool_calls`/`function_call` below; add the JSON-escape-
+        // decoded view so escapes cannot hide content from evaluators.
+        Err(_) => {
+            if parts.len() > 4096 {
+                return Err(EvaluationError);
+            }
+            let unescaped = unescape_json_text(args);
+            if unescaped != args {
+                parts.push(unescaped);
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Decode JSON string escapes wherever they occur in `text`, one level deep —
+/// the depth a decodable arguments string receives. Malformed escapes are kept
+/// literally and lone surrogates become U+FFFD; nothing is dropped.
+fn unescape_json_text(text: &str) -> String {
+    fn hex4(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<u32> {
+        let mut digits = String::with_capacity(4);
+        for _ in 0..4 {
+            let c = *chars.peek()?;
+            if !c.is_ascii_hexdigit() {
+                return None;
+            }
+            digits.push(c);
+            chars.next();
+        }
+        u32::from_str_radix(&digits, 16).ok()
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek().copied() {
+            Some(e @ ('"' | '\\' | '/')) => {
+                chars.next();
+                out.push(e);
+            }
+            Some('b') => {
+                chars.next();
+                out.push('\u{8}');
+            }
+            Some('f') => {
+                chars.next();
+                out.push('\u{c}');
+            }
+            Some('n') => {
+                chars.next();
+                out.push('\n');
+            }
+            Some('r') => {
+                chars.next();
+                out.push('\r');
+            }
+            Some('t') => {
+                chars.next();
+                out.push('\t');
+            }
+            Some('u') => {
+                let mut probe = chars.clone();
+                probe.next();
+                let Some(high) = hex4(&mut probe) else {
+                    out.push('\\');
+                    continue;
+                };
+                chars = probe;
+                if (0xD800..0xDC00).contains(&high) {
+                    let mut pair = chars.clone();
+                    let low = (pair.next() == Some('\\') && pair.next() == Some('u'))
+                        .then(|| hex4(&mut pair))
+                        .flatten()
+                        .filter(|low| (0xDC00..0xE000).contains(low));
+                    if let Some(low) = low {
+                        chars = pair;
+                        let code = 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00);
+                        out.push(char::from_u32(code).unwrap_or('\u{FFFD}'));
+                    } else {
+                        out.push('\u{FFFD}');
+                    }
+                } else {
+                    out.push(char::from_u32(high).unwrap_or('\u{FFFD}'));
+                }
+            }
+            _ => out.push('\\'),
+        }
+    }
+    out
 }
 
 fn collect(value: &Value, out: &mut Vec<String>, depth: usize) -> Result<(), EvaluationError> {

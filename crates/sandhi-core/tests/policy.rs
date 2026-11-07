@@ -237,6 +237,95 @@ fn policy_decodes_tool_arguments_and_rejects_duplicate_keys_in_them() {
     }
 }
 
+fn tool_call_body(arguments: &str) -> Vec<u8> {
+    serde_json::to_vec(&json!({"model":"test","messages":[
+        {"role":"assistant","content":null,
+         "tool_calls":[{"id":"call","type":"function","function":{"name":"demo","arguments":arguments}}]},
+        {"role":"tool","tool_call_id":"call","content":"refused"}]}))
+    .unwrap()
+}
+
+/// A model's malformed tool call is replayed in history verbatim. Failing
+/// closed on it denied every later request of the session (observed: an
+/// unclosed brief string ending `"questions": }`). It is inspected as text.
+#[test]
+fn policy_inspects_undecodable_tool_arguments_as_text_instead_of_bricking_the_session() {
+    let e = engine(vec![rule(
+        "secret",
+        json!({"kind":"regex","pattern":"SECRET-123"}),
+        "block",
+    )]);
+    let observed = r#"{"findings": "[{\"id\": \"f1\"}]\", \"questions>
+", "questions": }"#;
+    for clean in [observed, "", "{\"a\": "] {
+        assert_eq!(
+            run(&e, &tool_call_body(clean), &identity()).disposition,
+            Disposition::Forward,
+            "clean undecodable arguments must not brick the session: {clean:?}"
+        );
+    }
+    let raw = r#"{"findings": "SECRET-123", "questions": }"#;
+    assert_ne!(
+        run(&e, &tool_call_body(raw), &identity()).disposition,
+        Disposition::Forward,
+        "raw secrets in undecodable arguments are still inspected"
+    );
+    // Backslashes are built at runtime and the inputs are checked to carry no
+    // plaintext marker, so these cases can only pass through escape decoding.
+    let bs = char::from(92u8);
+    for hidden in [
+        format!(r#"{{"findings": "{bs}u0053ECRET-123", "questions": }}"#),
+        format!(r#"{{"a": "{bs}ud800{bs}u0053ECRET-123"#),
+    ] {
+        assert!(
+            hidden.contains(bs) && !hidden.contains("SECRET"),
+            "{hidden:?}"
+        );
+        assert_ne!(
+            run(&e, &tool_call_body(&hidden), &identity()).disposition,
+            Disposition::Forward,
+            "escapes in undecodable arguments cannot hide content: {hidden:?}"
+        );
+    }
+}
+
+#[test]
+fn policy_decodes_surrogate_pair_escapes_in_undecodable_tool_arguments() {
+    let emoji = char::from_u32(0x1F600).unwrap().to_string();
+    let e = engine(vec![rule(
+        "emoji",
+        json!({"kind":"regex","pattern":emoji}),
+        "block",
+    )]);
+    let bs = char::from(92u8);
+    let args = format!(r#"{{"a": "{bs}ud83d{bs}ude00"#);
+    assert!(!args.contains(emoji.as_str()), "{args:?}");
+    assert_ne!(
+        run(&e, &tool_call_body(&args), &identity()).disposition,
+        Disposition::Forward
+    );
+}
+
+/// Ambiguity is not undecodability: valid JSON that strict decoding rejects
+/// could be decoded differently by a consumer, so it fails closed even when clean.
+#[test]
+fn policy_keeps_duplicate_key_tool_arguments_fail_closed_even_when_clean() {
+    let e = engine(vec![rule(
+        "secret",
+        json!({"kind":"regex","pattern":"SECRET-123"}),
+        "block",
+    )]);
+    assert_eq!(
+        run(
+            &e,
+            &tool_call_body(r#"{"value":"ok","value":"fine"}"#),
+            &identity()
+        )
+        .disposition,
+        Disposition::Unavailable
+    );
+}
+
 #[test]
 fn policy_rejects_invalid_documents_instead_of_loading_empty_policy() {
     let valid = json!({"schema_version":"1","revision":1,"deadline_ms":200,"max_body_bytes":65536,
