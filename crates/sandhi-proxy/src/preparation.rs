@@ -294,6 +294,7 @@ pub(super) async fn prepare(
                 request.model.clone(),
                 match dialect {
                     IngressDialect::OpenAi => Some(sandhi_core::policy::InputFormat::Chat),
+                    IngressDialect::Anthropic => Some(sandhi_core::policy::InputFormat::Messages),
                     IngressDialect::Embeddings => {
                         Some(sandhi_core::policy::InputFormat::Embeddings)
                     }
@@ -345,6 +346,15 @@ pub(super) async fn prepare(
             }
         }
     }
+
+    // ADR-0013: `sandhi_extensions` is gateway-consumed and must never reach an
+    // upstream on any plane. Strip it from the forwarded bytes AFTER the policy
+    // gate — the gate classifies the original bytes, so passthrough bucket text
+    // (e.g. an anthropic `system` block) cannot bypass input classification —
+    // and only when the key is actually present, so ordinary traffic stays
+    // byte-exact. The transparent plane and the raw text routes forward exactly
+    // these cleaned bytes; the decoders strip their own body clones.
+    let body = codec::strip_reserved_passthrough(body);
 
     Ok(PreparedRequest {
         vk,

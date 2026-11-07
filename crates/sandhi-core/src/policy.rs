@@ -28,7 +28,7 @@ pub const MAX_BODY_BYTES_CEILING: usize = 4 * 1024 * 1024;
 /// Python workers, remote). Sized with MAX_BODY_BYTES_CEILING so a body
 /// that passes the engine gate does not fail closed inside an extension
 /// evaluator. Not a structural guarantee: text-view derivation can
-/// duplicate tool-call arguments (decoded plus raw), so a body near the
+/// duplicate tool-call arguments (decoded or escape-decoded, plus raw), so a body near the
 /// cap dominated by one arguments string can still exceed this — the
 /// window is narrow and extension evaluators fail closed there.
 pub const MAX_EVALUATOR_TEXT_BYTES: usize = MAX_BODY_BYTES_CEILING;
@@ -252,6 +252,10 @@ impl Registry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputFormat {
     Chat,
+    /// Anthropic `/v1/messages` bodies: top-level `system`, `messages` with typed
+    /// content blocks (`text`, `thinking`, `tool_use`, `tool_result`, `image`,
+    /// `document`), `stop_sequences` instead of `stop`.
+    Messages,
     Embeddings,
     Completions,
 }
@@ -560,10 +564,50 @@ fn inspect_format(body: &[u8], format: InputFormat) -> Result<Inspection, Evalua
         "n",
         "service_tier",
         "reasoning_effort",
+        // Gateway-reserved native passthrough (ADR-0013), interpreted on this
+        // dialect by the proxy; its bucket strings are swept into classifier
+        // input by the extras collect loop below, so the passthrough cannot
+        // hide wire-visible text (e.g. an anthropic `system` block).
+        "sandhi_extensions",
     ];
     let fields = match format {
         InputFormat::Chat => FIELDS,
-        InputFormat::Embeddings => &["model", "input", "encoding_format", "dimensions", "user"],
+        InputFormat::Messages => &[
+            "model",
+            "messages",
+            "system",
+            "max_tokens",
+            "stream",
+            "temperature",
+            "top_p",
+            "top_k",
+            "stop_sequences",
+            "tools",
+            "tool_choice",
+            "metadata",
+            "thinking",
+            // SDK-documented params the wire carries on real agent traffic;
+            // string content is swept by the extras collect loop.
+            "service_tier",
+            "betas",
+            "mcp_servers",
+            "context_management",
+            // Gateway-reserved (ADR-0013) but NOT interpreted on this dialect —
+            // the proxy strips it before forwarding; allowed so a client
+            // library that sets it unconditionally is not failed here.
+            "sandhi_extensions",
+        ],
+        InputFormat::Embeddings => &[
+            "model",
+            "input",
+            "encoding_format",
+            "dimensions",
+            "user",
+            // Gateway-reserved (ADR-0013), uninterpreted here — the proxy
+            // strips it before forwarding; allowed so a client library that
+            // sets it unconditionally is not failed by the strict allowlist.
+            "sandhi_extensions",
+        ],
         InputFormat::Completions => &[
             "model",
             "prompt",
@@ -583,6 +627,8 @@ fn inspect_format(body: &[u8], format: InputFormat) -> Result<Inspection, Evalua
             "logit_bias",
             "user",
             "seed",
+            // Gateway-reserved (ADR-0013), uninterpreted here — see above.
+            "sandhi_extensions",
         ],
     };
     if object.keys().any(|k| !fields.contains(&k.as_str())) {
@@ -591,11 +637,42 @@ fn inspect_format(body: &[u8], format: InputFormat) -> Result<Inspection, Evalua
     let mut parts = Vec::new();
     let empty = Vec::new();
     let text_field = match format {
-        InputFormat::Chat => "messages",
+        InputFormat::Chat | InputFormat::Messages => "messages",
         InputFormat::Embeddings => "input",
         InputFormat::Completions => "prompt",
     };
-    let messages = if format == InputFormat::Chat {
+    let messages = if matches!(format, InputFormat::Chat | InputFormat::Messages) {
+        if format == InputFormat::Messages {
+            // Anthropic carries the system prompt at top level: a string or an
+            // array of text blocks. Inspect it like any other user-authored text.
+            if let Some(system) = object.get("system") {
+                match system {
+                    Value::String(text) => parts.push(text.clone()),
+                    Value::Array(blocks) => {
+                        for block in blocks {
+                            let block = block.as_object().ok_or(EvaluationError)?;
+                            if !keys_are(block, &["type", "text"], &["cache_control"]) {
+                                return Err(EvaluationError);
+                            }
+                            if block.get("type").and_then(Value::as_str) != Some("text") {
+                                return Err(EvaluationError);
+                            }
+                            parts.push(
+                                block
+                                    .get("text")
+                                    .and_then(Value::as_str)
+                                    .ok_or(EvaluationError)?
+                                    .into(),
+                            );
+                            if let Some(v) = block.get("cache_control") {
+                                collect(v, &mut parts, 0)?;
+                            }
+                        }
+                    }
+                    _ => return Err(EvaluationError),
+                }
+            }
+        }
         value
             .get("messages")
             .and_then(Value::as_array)
@@ -614,6 +691,10 @@ fn inspect_format(body: &[u8], format: InputFormat) -> Result<Inspection, Evalua
     };
     for message in messages {
         let m = message.as_object().ok_or(EvaluationError)?;
+        if format == InputFormat::Messages {
+            inspect_anthropic_message(m, &mut parts)?;
+            continue;
+        }
         if m.keys().any(|k| {
             ![
                 "role",
@@ -672,7 +753,13 @@ fn inspect_format(body: &[u8], format: InputFormat) -> Result<Inspection, Evalua
     }
     // Include string-bearing extras and tool schemas; no hidden uninspected text fields.
     for (key, value) in object {
-        if key != text_field && key != "model" {
+        // Messages already inspected `system` strictly above; re-collecting it
+        // would double the system text in classifier inputs (regex/threshold
+        // rules only get stricter, but ONNX/remote scoring skews).
+        if key != text_field
+            && key != "model"
+            && !(format == InputFormat::Messages && key == "system")
+        {
             collect(value, &mut parts, 0)?;
         }
     }
@@ -691,13 +778,348 @@ fn inspect_format(body: &[u8], format: InputFormat) -> Result<Inspection, Evalua
         max_output_tokens,
     })
 }
+/// Inspect one Anthropic `/v1/messages` message: `{role, content}` where content
+/// is a string or an array of typed blocks. Key sets are exact — an unknown
+/// block shape is an evaluation error (fail closed), never a silent skip.
+fn inspect_anthropic_message(
+    m: &serde_json::Map<String, Value>,
+    parts: &mut Vec<String>,
+) -> Result<(), EvaluationError> {
+    if m.keys().any(|k| !["role", "content"].contains(&k.as_str())) {
+        return Err(EvaluationError);
+    }
+    match m.get("content") {
+        Some(Value::String(s)) => parts.push(s.clone()),
+        Some(Value::Null) | None => (),
+        Some(Value::Array(blocks)) => inspect_anthropic_blocks(blocks, parts)?,
+        _ => return Err(EvaluationError),
+    }
+    Ok(())
+}
+
+/// Validate a JSON object's key set: every required key present, no key
+/// outside required ∪ optional. Cardinality alone cannot do this — a block
+/// with the right NUMBER of keys but an unexpected one must fail closed, not
+/// carry uninspected strings past the gate.
+fn keys_are(object: &serde_json::Map<String, Value>, required: &[&str], optional: &[&str]) -> bool {
+    required.iter().all(|k| object.contains_key(*k))
+        && object
+            .keys()
+            .all(|k| required.contains(&k.as_str()) || optional.contains(&k.as_str()))
+}
+
+/// Base64 alphabet check for multimodal `data` payloads. The bytes themselves
+/// are not prose and are skipped; a value that is not even base64 is more
+/// likely smuggled plaintext than an encoding artifact, so it fails closed.
+fn looks_like_base64(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'\n' | b'\r'))
+}
+
+/// Inspect Anthropic content blocks: prose (`text`, `thinking`), tool traffic
+/// (`tool_use` input, `tool_result` payloads), and multimodal sources. Key
+/// sets are identity-checked (required + SDK-documented optional members like
+/// `cache_control` and `citations`, whose string content is collected — never
+/// skipped); unknown keys or block shapes are evaluation errors (fail closed).
+/// The one deliberate non-collection is base64 `data`: an opaque binary
+/// encoding, not prose, size-bounded by `max_body_bytes` and charset-checked.
+fn inspect_anthropic_blocks(
+    blocks: &[Value],
+    parts: &mut Vec<String>,
+) -> Result<(), EvaluationError> {
+    // SDK-documented optional members every block may carry; their string
+    // content is swept so nothing rides uninspected.
+    const BLOCK_EXTRAS: &[&str] = &["cache_control", "citations"];
+    for block in blocks {
+        let block = block.as_object().ok_or(EvaluationError)?;
+        let kind = block
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or(EvaluationError)?;
+        // Sweeps the optional extras' string content for this block.
+        macro_rules! sweep_extras {
+            () => {
+                for key in BLOCK_EXTRAS {
+                    if let Some(v) = block.get(*key) {
+                        collect(v, parts, 0)?;
+                    }
+                }
+            };
+        }
+        match kind {
+            "text" => {
+                if !keys_are(block, &["type", "text"], BLOCK_EXTRAS) {
+                    return Err(EvaluationError);
+                }
+                parts.push(
+                    block
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .ok_or(EvaluationError)?
+                        .into(),
+                );
+                sweep_extras!();
+            }
+            "thinking" => {
+                if !keys_are(block, &["type", "thinking", "signature"], BLOCK_EXTRAS) {
+                    return Err(EvaluationError);
+                }
+                parts.push(
+                    block
+                        .get("thinking")
+                        .and_then(Value::as_str)
+                        .ok_or(EvaluationError)?
+                        .into(),
+                );
+                parts.push(
+                    block
+                        .get("signature")
+                        .and_then(Value::as_str)
+                        .ok_or(EvaluationError)?
+                        .into(),
+                );
+                sweep_extras!();
+            }
+            "redacted_thinking" => {
+                if !keys_are(block, &["type", "data"], BLOCK_EXTRAS) {
+                    return Err(EvaluationError);
+                }
+                parts.push(
+                    block
+                        .get("data")
+                        .and_then(Value::as_str)
+                        .ok_or(EvaluationError)?
+                        .into(),
+                );
+                sweep_extras!();
+            }
+            "tool_use" => {
+                if !keys_are(block, &["type", "id", "name", "input"], BLOCK_EXTRAS) {
+                    return Err(EvaluationError);
+                }
+                parts.push(
+                    block
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .ok_or(EvaluationError)?
+                        .into(),
+                );
+                parts.push(
+                    block
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .ok_or(EvaluationError)?
+                        .into(),
+                );
+                collect(block.get("input").ok_or(EvaluationError)?, parts, 0)?;
+                sweep_extras!();
+            }
+            "tool_result" => {
+                if !keys_are(
+                    block,
+                    &["type", "tool_use_id"],
+                    &["content", "is_error", "cache_control", "citations"],
+                ) {
+                    return Err(EvaluationError);
+                }
+                parts.push(
+                    block
+                        .get("tool_use_id")
+                        .and_then(Value::as_str)
+                        .ok_or(EvaluationError)?
+                        .into(),
+                );
+                match block.get("content") {
+                    Some(Value::String(s)) => parts.push(s.clone()),
+                    Some(Value::Null) | None => (),
+                    Some(Value::Array(blocks)) => inspect_anthropic_blocks(blocks, parts)?,
+                    _ => return Err(EvaluationError),
+                }
+                if let Some(is_error) = block.get("is_error") {
+                    if !is_error.is_boolean() {
+                        return Err(EvaluationError);
+                    }
+                }
+                sweep_extras!();
+            }
+            "image" | "document" => {
+                if !keys_are(block, &["type", "source"], BLOCK_EXTRAS) {
+                    return Err(EvaluationError);
+                }
+                let source = block
+                    .get("source")
+                    .and_then(Value::as_object)
+                    .ok_or(EvaluationError)?;
+                let source_kind = source
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .ok_or(EvaluationError)?;
+                match source_kind {
+                    "url" => {
+                        if !keys_are(source, &["type", "url"], &[]) {
+                            return Err(EvaluationError);
+                        }
+                        parts.push(
+                            source
+                                .get("url")
+                                .and_then(Value::as_str)
+                                .ok_or(EvaluationError)?
+                                .into(),
+                        );
+                    }
+                    "base64" => {
+                        if !keys_are(source, &["type", "media_type", "data"], &[]) {
+                            return Err(EvaluationError);
+                        }
+                        parts.push(
+                            source
+                                .get("media_type")
+                                .and_then(Value::as_str)
+                                .ok_or(EvaluationError)?
+                                .into(),
+                        );
+                        let data = source
+                            .get("data")
+                            .and_then(Value::as_str)
+                            .ok_or(EvaluationError)?;
+                        if !looks_like_base64(data) {
+                            return Err(EvaluationError);
+                        }
+                    }
+                    "file" => {
+                        if !keys_are(source, &["type", "file_id"], &[]) {
+                            return Err(EvaluationError);
+                        }
+                        parts.push(
+                            source
+                                .get("file_id")
+                                .and_then(Value::as_str)
+                                .ok_or(EvaluationError)?
+                                .into(),
+                        );
+                    }
+                    _ => return Err(EvaluationError),
+                }
+                sweep_extras!();
+            }
+            _ => return Err(EvaluationError),
+        }
+    }
+    Ok(())
+}
+
 fn inspect_arguments(value: &Value, parts: &mut Vec<String>) -> Result<(), EvaluationError> {
     let args = value
         .get("arguments")
         .and_then(Value::as_str)
         .ok_or(EvaluationError)?;
-    let decoded = strict_json(args.as_bytes())?;
-    collect(&decoded, parts, 0)
+    match strict_json(args.as_bytes()) {
+        Ok(decoded) => collect(&decoded, parts, 0),
+        // Syntactically valid JSON that strict decoding rejects — duplicate keys,
+        // out-of-range numbers, lone surrogates, excess depth — could decode
+        // differently in a consumer than in the evaluator, so it fails closed.
+        Err(error) if serde_json::from_slice::<serde::de::IgnoredAny>(args.as_bytes()).is_ok() => {
+            Err(error)
+        }
+        // Not JSON at all. A model's malformed tool call is replayed in history
+        // verbatim, and failing closed here denied every later request of the
+        // session. A passthrough upstream reads it as text; the gateway's own
+        // translators (Anthropic/Gemini/Ollama) reject it as an invalid request,
+        // which fails safe. The raw string is already collected with the
+        // message's `tool_calls`/`function_call` below; add the JSON-escape-
+        // decoded view so escapes cannot hide content from evaluators.
+        Err(_) => {
+            if parts.len() > 4096 {
+                return Err(EvaluationError);
+            }
+            let unescaped = unescape_json_text(args);
+            if unescaped != args {
+                parts.push(unescaped);
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Decode JSON string escapes wherever they occur in `text`, one level deep —
+/// the depth a decodable arguments string receives. Malformed escapes are kept
+/// literally and lone surrogates become U+FFFD; nothing is dropped.
+fn unescape_json_text(text: &str) -> String {
+    fn hex4(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<u32> {
+        let mut digits = String::with_capacity(4);
+        for _ in 0..4 {
+            let c = *chars.peek()?;
+            if !c.is_ascii_hexdigit() {
+                return None;
+            }
+            digits.push(c);
+            chars.next();
+        }
+        u32::from_str_radix(&digits, 16).ok()
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek().copied() {
+            Some(e @ ('"' | '\\' | '/')) => {
+                chars.next();
+                out.push(e);
+            }
+            Some('b') => {
+                chars.next();
+                out.push('\u{8}');
+            }
+            Some('f') => {
+                chars.next();
+                out.push('\u{c}');
+            }
+            Some('n') => {
+                chars.next();
+                out.push('\n');
+            }
+            Some('r') => {
+                chars.next();
+                out.push('\r');
+            }
+            Some('t') => {
+                chars.next();
+                out.push('\t');
+            }
+            Some('u') => {
+                let mut probe = chars.clone();
+                probe.next();
+                let Some(high) = hex4(&mut probe) else {
+                    out.push('\\');
+                    continue;
+                };
+                chars = probe;
+                if (0xD800..0xDC00).contains(&high) {
+                    let mut pair = chars.clone();
+                    let low = (pair.next() == Some('\\') && pair.next() == Some('u'))
+                        .then(|| hex4(&mut pair))
+                        .flatten()
+                        .filter(|low| (0xDC00..0xE000).contains(low));
+                    if let Some(low) = low {
+                        chars = pair;
+                        let code = 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00);
+                        out.push(char::from_u32(code).unwrap_or('\u{FFFD}'));
+                    } else {
+                        out.push('\u{FFFD}');
+                    }
+                } else {
+                    out.push(char::from_u32(high).unwrap_or('\u{FFFD}'));
+                }
+            }
+            _ => out.push('\\'),
+        }
+    }
+    out
 }
 
 fn collect(value: &Value, out: &mut Vec<String>, depth: usize) -> Result<(), EvaluationError> {

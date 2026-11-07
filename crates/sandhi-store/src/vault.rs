@@ -55,13 +55,16 @@ impl CredentialScheme {
 }
 
 /// Non-secret metadata for one stored credential. Returned by `list()` (masked).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct VaultEntry {
     pub provider: String,
     pub label: String,
     pub scheme: CredentialScheme,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    /// Per-endpoint User-Agent override (agent-allowlisting upstreams).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
     pub created_at: String,
     /// `active` / `revoked`.
     pub status: String,
@@ -665,11 +668,17 @@ impl VaultStore {
                 label      TEXT NOT NULL,
                 scheme     TEXT NOT NULL,
                 base_url   TEXT,
+                user_agent TEXT,
                 created_at TEXT NOT NULL,
                 status     TEXT NOT NULL DEFAULT 'active',
                 PRIMARY KEY (provider, label)
             );",
-        )
+        )?;
+        // Additive columns for databases created before the per-endpoint transport
+        // overrides existed. SQLite has no ADD COLUMN IF NOT EXISTS — attempt and
+        // ignore the duplicate-column error so init stays idempotent.
+        let _ = conn.execute("ALTER TABLE vault ADD COLUMN user_agent TEXT", []);
+        Ok(())
     }
 
     /// Store a credential: writes the secret to the backend and the metadata to SQLite.
@@ -680,11 +689,12 @@ impl VaultStore {
         label: &str,
         scheme: CredentialScheme,
         base_url: Option<&str>,
+        user_agent: Option<&str>,
         secret: &str,
     ) -> Result<String, VaultError> {
         validate_reference(provider, label)?;
         self.backend.set_secret(provider, label, secret)?;
-        self.register_metadata(provider, label, scheme, base_url)
+        self.register_metadata(provider, label, scheme, base_url, user_agent)
     }
 
     /// Index a reference only after its caller has successfully resolved and validated the secret.
@@ -695,13 +705,21 @@ impl VaultStore {
         label: &str,
         scheme: CredentialScheme,
         base_url: Option<&str>,
+        user_agent: Option<&str>,
     ) -> Result<String, VaultError> {
         validate_reference(provider, label)?;
         let conn = self.conn.lock().expect("vault conn poisoned");
         conn.execute(
-            "INSERT OR REPLACE INTO vault (provider, label, scheme, base_url, created_at, status) \
-             VALUES (?1, ?2, ?3, ?4, ?5, 'active')",
-            params![provider, label, scheme.as_db(), base_url, now_rfc3339()],
+            "INSERT OR REPLACE INTO vault (provider, label, scheme, base_url, user_agent, created_at, status) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active')",
+            params![
+                provider,
+                label,
+                scheme.as_db(),
+                base_url,
+                user_agent,
+                now_rfc3339()
+            ],
         )
         .map_err(|e| VaultError::Backend(format!("sqlite vault set: {e}")))?;
         Ok(account(provider, label))
@@ -729,7 +747,7 @@ impl VaultStore {
         let conn = self.conn.lock().expect("vault conn poisoned");
         let mut stmt = conn
             .prepare(
-                "SELECT provider, label, scheme, base_url, created_at, status \
+                "SELECT provider, label, scheme, base_url, user_agent, created_at, status \
                  FROM vault ORDER BY provider, label",
             )
             .map_err(|e| VaultError::Backend(format!("sqlite vault list: {e}")))?;
@@ -740,8 +758,9 @@ impl VaultStore {
                     label: r.get(1)?,
                     scheme: CredentialScheme::from_db(r.get::<_, String>(2)?.as_str()),
                     base_url: r.get(3)?,
-                    created_at: r.get(4)?,
-                    status: r.get(5)?,
+                    user_agent: r.get(4)?,
+                    created_at: r.get(5)?,
+                    status: r.get(6)?,
                 })
             })
             .map_err(|e| VaultError::Backend(format!("sqlite vault list: {e}")))?;
@@ -791,7 +810,7 @@ impl VaultStore {
         let conn = self.conn.lock().expect("vault conn poisoned");
         let mut stmt = conn
             .prepare(
-                "SELECT provider, label, scheme, base_url, created_at, status \
+                "SELECT provider, label, scheme, base_url, user_agent, created_at, status \
                  FROM vault WHERE provider = ?1 AND status = 'active' \
                  ORDER BY created_at LIMIT 1",
             )
@@ -802,8 +821,9 @@ impl VaultStore {
                 label: r.get(1)?,
                 scheme: CredentialScheme::from_db(r.get::<_, String>(2)?.as_str()),
                 base_url: r.get(3)?,
-                created_at: r.get(4)?,
-                status: r.get(5)?,
+                user_agent: r.get(4)?,
+                created_at: r.get(5)?,
+                status: r.get(6)?,
             })
         })
         .optional()
@@ -890,6 +910,7 @@ mod tests {
                 "default",
                 CredentialScheme::ApiKey,
                 None,
+                None,
                 "synthetic-key",
             )
             .unwrap();
@@ -910,6 +931,7 @@ mod tests {
                 "anthropic",
                 "default",
                 CredentialScheme::ApiKey,
+                None,
                 None,
                 "sk-secret-123456",
             )
@@ -949,6 +971,7 @@ mod tests {
                 "default",
                 CredentialScheme::ApiKey,
                 None,
+                None,
                 "key-one",
             )
             .unwrap();
@@ -965,6 +988,7 @@ mod tests {
                 "anthropic",
                 "default",
                 CredentialScheme::ApiKey,
+                None,
                 None,
                 "sk-x",
             )
@@ -1181,5 +1205,32 @@ mod credstore_tests {
         assert!(VaultStore::backend_from_env().is_err());
         std::env::remove_var("SANDHI_VAULT_BACKEND");
         std::env::remove_var("SANDHI_CREDENTIALS_DIR");
+    }
+}
+
+#[cfg(test)]
+mod user_agent_tests {
+    use super::*;
+
+    #[test]
+    fn user_agent_round_trips_through_metadata() {
+        let vault = VaultStore::in_memory().unwrap();
+        vault
+            .set(
+                "anthropic",
+                "codingplan",
+                CredentialScheme::Bearer,
+                Some("https://upstream.example/apps/anthropic"),
+                Some("claude-cli/1.0.0"),
+                "synthetic-secret",
+            )
+            .unwrap();
+        let entry = &vault.list().unwrap()[0];
+        assert_eq!(entry.user_agent.as_deref(), Some("claude-cli/1.0.0"));
+        let (resolved, _secret) = vault
+            .resolve("anthropic")
+            .unwrap()
+            .expect("active credential");
+        assert_eq!(resolved.user_agent.as_deref(), Some("claude-cli/1.0.0"));
     }
 }

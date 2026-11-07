@@ -75,7 +75,7 @@ use sandhi_providers::{
 };
 use sandhi_store::{hash_secret, AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
 
-use codec::{encode_response, encode_stream_event, IngressDialect};
+use codec::{encode_response, IngressDialect, StreamEventEncoder};
 pub use operator::BudgetSpec;
 
 /// Default output maximum for a Block-budgeted scope when the client omits `max_output_tokens`.
@@ -223,6 +223,21 @@ pub fn plaintext_bind_warning(addr: SocketAddr, tls_enabled: bool) -> Option<&'s
     (!tls_enabled && !addr.ip().is_loopback()).then_some(
         "WARNING: accepting bearer credentials over plaintext on a non-loopback listener; \
          configure tls.cert/tls.key in SANDHI_CONFIG or terminate TLS at a trusted proxy",
+    )
+}
+
+/// Warning emitted when the dual-scheme plaintext companion listener
+/// (`SANDHI_HTTP_BIND`, TD-0017 D7) binds a non-loopback address. Unlike
+/// [`plaintext_bind_warning`] TLS *is* configured — the companion exists
+/// because the operator explicitly accepted cleartext for trusted-network
+/// clients, so the warning names that choice rather than suggesting TLS.
+/// Loopback companions stay quiet, mirroring the dev-trust posture.
+#[must_use]
+pub fn dual_scheme_plaintext_warning(addr: SocketAddr) -> Option<&'static str> {
+    (!addr.ip().is_loopback()).then_some(
+        "WARNING: the plaintext companion listener (SANDHI_HTTP_BIND) accepts bearer \
+         credentials in cleartext on a non-loopback address; restrict it to the trusted \
+         network segment, or unset SANDHI_HTTP_BIND to serve TLS only",
     )
 }
 
@@ -651,6 +666,10 @@ fn ingress_routes(state: &Arc<ProxyState>) -> axum::Router<Arc<ProxyState>> {
         .route("/v1/embeddings", post(handle_embeddings))
         .route("/v1/completions", post(handle_completions))
         .route("/v1/messages", post(handle_anthropic))
+        .route(
+            "/v1/messages/count_tokens",
+            post(handle_anthropic_count_tokens),
+        )
         .route("/v1/responses", post(handle_responses))
         // Gemini's path carries the model AND the method, colon-separated
         // (`/v1beta/models/gemini-2.5-flash:generateContent`), so it matches as ONE segment and
@@ -806,7 +825,16 @@ where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    serve_listener_with_shutdown(state, listener, shutdown, grace, None).await
+    serve_scheme_listeners_with_shutdown(
+        state,
+        SchemeListeners {
+            plaintext: Some(listener),
+            tls: None,
+        },
+        shutdown,
+        grace,
+    )
+    .await
 }
 
 /// TLS counterpart to [`serve_with_shutdown_timeout`]. The HTTP application,
@@ -823,22 +851,104 @@ where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    serve_listener_with_shutdown(state, listener, shutdown, grace, Some(tls.acceptor)).await
+    serve_scheme_listeners_with_shutdown(
+        state,
+        SchemeListeners {
+            plaintext: None,
+            tls: Some((listener, tls.acceptor)),
+        },
+        shutdown,
+        grace,
+    )
+    .await
 }
 
-async fn serve_listener_with_shutdown<F>(
+/// Dual-scheme counterpart to [`serve_with_shutdown_timeout`] and
+/// [`serve_with_tls_shutdown_timeout`] (TD-0017 P1 amendment, D7): one process
+/// serving a TLS listener **and** a plaintext HTTP listener on separate sockets.
+///
+/// Both sockets bind before either accepts, so a failed bind surfaces as a
+/// startup error instead of a half-configured topology silently taking traffic
+/// on the surviving port. The plaintext port is a deliberate operator choice
+/// (`SANDHI_HTTP_BIND`, trusted-network clients that cannot speak HTTPS);
+/// callers own the loud non-loopback warning. Both listeners share ONE
+/// connection budget, one per-IP table, and one graceful drain — the
+/// TD-0014 P3 bounds cap the process, not the port.
+pub async fn serve_with_http_and_tls_shutdown_timeout<F>(
     state: Arc<ProxyState>,
-    listener: tokio::net::TcpListener,
+    tls_addr: SocketAddr,
+    http_addr: SocketAddr,
     shutdown: F,
     grace: Duration,
-    tls: Option<tokio_rustls::TlsAcceptor>,
+    tls: TlsConfig,
 ) -> std::io::Result<()>
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
+    let tls_listener = tokio::net::TcpListener::bind(tls_addr).await?;
+    let http_listener = tokio::net::TcpListener::bind(http_addr).await?;
+    serve_scheme_listeners_with_shutdown(
+        state,
+        SchemeListeners {
+            plaintext: Some(http_listener),
+            tls: Some((tls_listener, tls.acceptor)),
+        },
+        shutdown,
+        grace,
+    )
+    .await
+}
+
+/// The listeners sharing one admission domain: a single connection budget,
+/// per-IP table, graceful-drain registry, and shutdown choreography. At least
+/// one listener must be present.
+struct SchemeListeners {
+    /// Plaintext HTTP/1 listener — the loopback default, or the deliberate
+    /// dual-scheme companion port.
+    plaintext: Option<tokio::net::TcpListener>,
+    /// TLS-wrapped HTTP/1 listener.
+    tls: Option<(tokio::net::TcpListener, tokio_rustls::TlsAcceptor)>,
+}
+
+/// The next accepted connection, tagged with the scheme whose listener
+/// produced it — the tag decides whether the connection task wraps the
+/// stream in a TLS session.
+enum AcceptedConnection {
+    Plaintext(std::io::Result<(tokio::net::TcpStream, SocketAddr)>),
+    Tls(std::io::Result<(tokio::net::TcpStream, SocketAddr)>),
+}
+
+/// Await the next connection on whichever listeners exist. The accept futures
+/// are rebuilt each time the surrounding `select!` drops this arm; dropping an
+/// accept future loses nothing — the connection stays in the kernel backlog.
+async fn accept_next_connection(listeners: &SchemeListeners) -> AcceptedConnection {
+    match (&listeners.plaintext, &listeners.tls) {
+        (Some(plain), Some((tls_listener, _))) => tokio::select! {
+            accepted = plain.accept() => AcceptedConnection::Plaintext(accepted),
+            accepted = tls_listener.accept() => AcceptedConnection::Tls(accepted),
+        },
+        (Some(plain), None) => AcceptedConnection::Plaintext(plain.accept().await),
+        (None, Some((tls_listener, _))) => AcceptedConnection::Tls(tls_listener.accept().await),
+        // Unreachable by construction (every constructor passes a listener).
+        (None, None) => std::future::pending().await,
+    }
+}
+
+async fn serve_scheme_listeners_with_shutdown<F>(
+    state: Arc<ProxyState>,
+    listeners: SchemeListeners,
+    shutdown: F,
+    grace: Duration,
+) -> std::io::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    debug_assert!(
+        listeners.plaintext.is_some() || listeners.tls.is_some(),
+        "serving requires at least one listener"
+    );
     let policy = ConnectionPolicy::from_state(&state);
-    serve_router_listener_with_shutdown(build_app(state), listener, shutdown, grace, policy, tls)
-        .await
+    serve_router_listener_with_shutdown(build_app(state), listeners, shutdown, grace, policy).await
 }
 
 /// Serve until `shutdown` resolves, with TD-0014 P3 connection-level defence:
@@ -848,11 +958,10 @@ where
 /// destructors may outlive cancellation; the binary watchdog owns the hard process bound.
 async fn serve_router_listener_with_shutdown<F>(
     app: Router,
-    listener: tokio::net::TcpListener,
+    listeners: SchemeListeners,
     shutdown: F,
     grace: Duration,
     policy: ConnectionPolicy,
-    tls: Option<tokio_rustls::TlsAcceptor>,
 ) -> std::io::Result<()>
 where
     F: std::future::Future<Output = ()> + Send + 'static,
@@ -863,11 +972,13 @@ where
     let per_ip: Arc<std::sync::Mutex<HashMap<std::net::IpAddr, usize>>> = Default::default();
     let graceful = Arc::new(hyper_util::server::graceful::GracefulShutdown::new());
     let mut tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+    // One acceptor shared by every TLS accept; cloned per connection as an Arc bump.
+    let tls_acceptor = listeners.tls.as_ref().map(|(_, acceptor)| acceptor.clone());
     tokio::pin!(shutdown);
 
     let mut quiescing = false;
     let mut quiesce_end = tokio::time::Instant::now();
-    // Keep the same HTTP/TLS listener for probes during bounded quiesce, without relaxing
+    // Keep the same listeners for probes during bounded quiesce, without relaxing
     // connection/per-IP limits. Under transport saturation a fresh probe may still be shed.
     loop {
         tokio::select! {
@@ -885,7 +996,13 @@ where
                     tracing::warn!(%error, "connection task failed");
                 }
             }
-            accepted = listener.accept() => {
+            accepted = accept_next_connection(&listeners) => {
+                // The scheme tag selects the transport wrapper; the admission
+                // and metering path below is shared, by construction.
+                let (acceptor, accepted) = match accepted {
+                    AcceptedConnection::Plaintext(accepted) => (None, accepted),
+                    AcceptedConnection::Tls(accepted) => (tls_acceptor.clone(), accepted),
+                };
                 let (stream, peer_addr) = match accepted {
                     Ok(pair) => pair,
                     Err(error) => {
@@ -933,7 +1050,7 @@ where
                 let watcher = graceful.watcher();
                 let metrics = Arc::clone(&policy.metrics);
                 let app = app.clone();
-                let tls = tls.clone();
+                let tls = acceptor;
                 let header_read_timeout = policy.header_read_timeout;
                 // Builder, connection, watcher, guards: one task owns all of
                 // it, because the connection borrows its builder.
@@ -977,7 +1094,7 @@ where
             }
         }
     }
-    drop(listener);
+    drop(listeners);
     policy.lifecycle.start_draining();
 
     // Grace window: signal every watched connection, wait until they finish or
@@ -1078,6 +1195,21 @@ mod server_lifecycle_tests {
     }
 
     #[test]
+    fn dual_scheme_companion_warning_is_only_for_non_loopback_ports() {
+        // TLS is configured in dual-scheme mode by definition, so the companion
+        // warning keys on the address alone.
+        assert!(dual_scheme_plaintext_warning("127.0.0.1:8787".parse().unwrap()).is_none());
+        assert!(dual_scheme_plaintext_warning("[::1]:8787".parse().unwrap()).is_none());
+        let warning = dual_scheme_plaintext_warning("0.0.0.0:8787".parse().unwrap())
+            .expect("a non-loopback plaintext companion must be loud");
+        assert!(warning.contains("cleartext"), "unexpected: {warning}");
+        assert!(
+            warning.contains("SANDHI_HTTP_BIND"),
+            "unexpected: {warning}"
+        );
+    }
+
+    #[test]
     fn tls_material_is_validated_before_listening() {
         let error = TlsConfig::from_pem(b"not a certificate", b"not a key")
             .err()
@@ -1126,14 +1258,16 @@ mod server_lifecycle_tests {
         )
         .expect("valid test identity");
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-        let server = tokio::spawn(serve_listener_with_shutdown(
+        let server = tokio::spawn(serve_scheme_listeners_with_shutdown(
             Arc::new(state),
-            listener,
+            SchemeListeners {
+                plaintext: None,
+                tls: Some((listener, tls.acceptor)),
+            },
             async {
                 let _ = shutdown_rx.await;
             },
             Duration::from_millis(50),
-            Some(tls.acceptor),
         ));
 
         let mut stalled = tokio::net::TcpStream::connect(addr)
@@ -1178,13 +1312,15 @@ mod server_lifecycle_tests {
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            serve_listener_with_shutdown(
+            serve_scheme_listeners_with_shutdown(
                 state,
-                listener,
+                SchemeListeners {
+                    plaintext: Some(listener),
+                    tls: None,
+                },
                 async {},
                 // This path should finish immediately; the bound is still part of the contract.
                 DEFAULT_SHUTDOWN_GRACE,
-                None,
             ),
         )
         .await
@@ -1213,13 +1349,15 @@ mod server_lifecycle_tests {
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(serve_router_listener_with_shutdown(
             app,
-            listener,
+            SchemeListeners {
+                plaintext: Some(listener),
+                tls: None,
+            },
             async move {
                 let _ = shutdown_rx.await;
             },
             Duration::from_millis(25),
             ConnectionPolicy::default(),
-            None,
         ));
         let client_call = tokio::spawn(async move {
             let _ = reqwest::get(format!("http://{addr}/stuck")).await;
@@ -1905,6 +2043,27 @@ async fn handle_anthropic(
     .await
 }
 
+async fn handle_anthropic_count_tokens(
+    State(state): State<Arc<ProxyState>>,
+    permit: Extension<Arc<AdmissionPermit>>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let body = match request_body(body, IngressDialect::Anthropic) {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
+    handle_count_tokens(
+        state,
+        permit.0,
+        headers,
+        body,
+        IngressDialect::Anthropic,
+        None,
+    )
+    .await
+}
+
 async fn handle_responses(
     State(state): State<Arc<ProxyState>>,
     permit: Extension<Arc<AdmissionPermit>>,
@@ -2131,11 +2290,33 @@ async fn handle_gemini(
             "expected /v1beta/models/{model}:generateContent",
         );
     };
+    if model.is_empty() {
+        return ingress_error(
+            IngressDialect::Gemini,
+            StatusCode::BAD_REQUEST,
+            "model is empty",
+        );
+    }
+    if method == "countTokens" {
+        return handle_count_tokens(
+            state,
+            permit.0,
+            headers,
+            body,
+            IngressDialect::Gemini,
+            Some(GeminiRoute {
+                model: model.to_string(),
+                stream: false,
+            }),
+        )
+        .await;
+    }
     let stream = match method {
         "generateContent" => false,
         "streamGenerateContent" => true,
-        // countTokens, embedContent and the rest are not metered surfaces yet; say so in Gemini's
-        // own error shape rather than 404-ing with an empty body.
+        // embedContent and the rest are not metered surfaces yet; say so in Gemini's
+        // own error shape rather than 404-ing with an empty body. (countTokens
+        // is handled above, ahead of this match.)
         other => {
             return ingress_error(
                 IngressDialect::Gemini,
@@ -2144,13 +2325,6 @@ async fn handle_gemini(
             );
         }
     };
-    if model.is_empty() {
-        return ingress_error(
-            IngressDialect::Gemini,
-            StatusCode::BAD_REQUEST,
-            "model is empty",
-        );
-    }
     let route = GeminiRoute {
         model: model.to_string(),
         stream,
@@ -3380,6 +3554,9 @@ async fn stream_response(
     let body = streaming::body(accounting, permit, tail, move |accounting| {
         Box::pin(async_stream::stream! {
             let mut last_usage: Option<UsageV2> = None;
+            // Stateful per-stream egress encoder: Anthropic's content-block
+            // lifecycle and Gemini's whole-part tool calls need cross-event state.
+            let mut stream_encoder = StreamEventEncoder::new(dialect);
             // What the family has reported so far, for families that report before the end
             // (TD-0013 D3). `None` for a terminal-only family, for the whole stream.
             let mut running_reported: Option<ParsedUsage> = None;
@@ -3442,7 +3619,7 @@ async fn stream_response(
                             continue;
                         }
                         for (event_name, value) in
-                            encode_stream_event(dialect, &event, last_usage.as_ref())
+                            stream_encoder.encode(&event, last_usage.as_ref())
                         {
                             yield Ok::<Bytes, std::io::Error>(Bytes::from(sse_frame(event_name, &value)));
                         }
@@ -3453,7 +3630,7 @@ async fn stream_response(
                             error: error.as_typed(Some(provider.slug())),
                         };
                         for (event_name, value) in
-                            encode_stream_event(dialect, &typed, last_usage.as_ref())
+                            stream_encoder.encode(&typed, last_usage.as_ref())
                         {
                             yield Ok::<Bytes, std::io::Error>(Bytes::from(sse_frame(event_name, &value)));
                         }
@@ -3773,6 +3950,101 @@ enum VirtualKeyResolution {
     Denied(StatusCode),
 }
 
+/// `POST /v1/messages/count_tokens` and `POST /v1beta/models/{model}:countTokens` —
+/// answer the dialect's token-counting endpoint from the request body alone.
+///
+/// Auth, decode validation, model allowlist, the policy input gate and the
+/// per-key rate limit all run exactly as on the generation path (`prepare`) —
+/// but nothing is reserved, generated or metered: no model call is made, so no
+/// lease and no UsageEvent. The estimate is the SAME number the gateway
+/// reserves against for generation (`TokenEstimator::estimate` over the
+/// request bytes), which keeps it consistent with budget enforcement, if
+/// approximate against a vendor tokenizer.
+async fn handle_count_tokens(
+    state: Arc<ProxyState>,
+    permit: Arc<AdmissionPermit>,
+    headers: HeaderMap,
+    body: Bytes,
+    dialect: IngressDialect,
+    gemini_route: Option<GeminiRoute>,
+) -> Response {
+    // Underscore-binding keeps the admission permit alive to the end of the
+    // handler (the layer's unary invariant) without further use below.
+    let _permit = permit;
+    if !state.lifecycle.is_running() {
+        return draining_error(dialect);
+    }
+    // Hold the admission slot for the handler's duration, like every unary
+    // handler (parse + policy work run under it); it is released at return and
+    // counting never dispatches, so no generation slot is held upstream.
+    let Some(vk_token) = dialect.extract_credential(&headers) else {
+        return ingress_error(
+            dialect,
+            StatusCode::UNAUTHORIZED,
+            &format!(
+                "missing virtual key: send it as {}",
+                dialect.credential_hint()
+            ),
+        );
+    };
+    let (vk, rate_identity, policy_identity) = match resolve_virtual_key(&state, vk_token, &headers)
+        .await
+    {
+        VirtualKeyResolution::Denied(status) => {
+            return ingress_error(dialect, status, "OIDC inference authorization failed")
+        }
+        VirtualKeyResolution::Found(vk, rate_identity, identity) => (*vk, rate_identity, identity),
+        VirtualKeyResolution::Expired => {
+            return ingress_error(dialect, StatusCode::UNAUTHORIZED, "virtual key expired")
+        }
+        VirtualKeyResolution::NotFound => {
+            return ingress_error(dialect, StatusCode::UNAUTHORIZED, "unknown virtual key")
+        }
+    };
+    let Some(provider) = state
+        .providers
+        .lock()
+        .expect("providers poisoned")
+        .get(&vk.upstream_ref)
+        .cloned()
+    else {
+        return ingress_error(
+            dialect,
+            StatusCode::BAD_GATEWAY,
+            "no upstream registered for this key",
+        );
+    };
+    let receipt = Arc::new(Mutex::new(None));
+    let preparation::PreparedRequest { request, body, .. } = match preparation::prepare(
+        preparation::PreparationContext::from(state.as_ref()),
+        preparation::ResolvedRoute {
+            vk,
+            provider: provider.clone(),
+            rate_identity,
+            policy_identity,
+        },
+        &headers,
+        body,
+        dialect,
+        gemini_route.as_ref(),
+        &receipt,
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(response) => return response,
+    };
+    let tokens = state
+        .token_estimator
+        .lock()
+        .map(|estimator| estimator.estimate(provider.slug(), &request.model, body.len()))
+        .unwrap_or_else(|_| sandhi_providers::token_estimate::baseline_estimate(body.len()));
+    match dialect {
+        IngressDialect::Gemini => Json(json!({"totalTokens": tokens})).into_response(),
+        _ => Json(json!({"input_tokens": tokens})).into_response(),
+    }
+}
+
 /// Resolve a presented virtual-key token: exact (legacy demo) then by hash (operator-minted).
 /// Filters out expired keys.
 async fn resolve_virtual_key(
@@ -3863,7 +4135,7 @@ fn ingress_error(dialect: IngressDialect, status: StatusCode, msg: &str) -> Resp
 fn dialect_for_path(path: &str) -> IngressDialect {
     if path.starts_with("/v1beta/") {
         IngressDialect::Gemini
-    } else if path == "/v1/messages" {
+    } else if path == "/v1/messages" || path == "/v1/messages/count_tokens" {
         IngressDialect::Anthropic
     } else if path == "/v1/responses" {
         IngressDialect::Responses

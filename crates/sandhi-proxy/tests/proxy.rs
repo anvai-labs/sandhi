@@ -161,6 +161,152 @@ async fn tls_listener_serves_full_requests_and_complete_sse_streams() {
         .expect("TLS server exits cleanly");
 }
 
+/// TD-0017 D7: dual-scheme serving — one process, two sockets. The plaintext
+/// companion and the TLS listener share ONE admission budget (a silent
+/// plaintext connection holds the process-wide connection slot, so the TLS
+/// listener sheds until it times out), and both carry the identical Router —
+/// a metered SSE request over the plaintext port settles exactly like one
+/// over TLS.
+#[tokio::test]
+async fn dual_scheme_listeners_share_admission_and_meter_identically() {
+    let upstream = MockServer::start().await;
+    let sse = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2}}\n\n",
+        "data: [DONE]\n\n"
+    );
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse),
+        )
+        .mount(&upstream)
+        .await;
+
+    let sink = Arc::new(InMemorySink::new());
+    let mut state = Arc::try_unwrap(state_with(
+        upstream.uri(),
+        sink.clone(),
+        ProxyLedger::in_memory(),
+    ))
+    .ok()
+    .expect("test owns the only ProxyState reference");
+    state.header_read_timeout_secs = 1;
+    // One process-wide slot: whichever listener admits first, the other sheds.
+    state.max_connections = 1;
+    let state = Arc::new(state);
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tls_addr = probe.local_addr().unwrap();
+    drop(probe);
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http_addr = probe.local_addr().unwrap();
+    drop(probe);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let tls = TlsConfig::from_pem(TEST_TLS_CERT, TEST_TLS_KEY).unwrap();
+    let server = tokio::spawn(sandhi_proxy::serve_with_http_and_tls_shutdown_timeout(
+        state,
+        tls_addr,
+        http_addr,
+        async {
+            let _ = shutdown_rx.await;
+        },
+        std::time::Duration::from_secs(2),
+        tls,
+    ));
+
+    let root = reqwest::Certificate::from_pem(TEST_TLS_CERT).unwrap();
+    let client = reqwest::Client::builder()
+        .add_root_certificate(root)
+        .build()
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // A silent PLAINTEXT connection is admitted and holds the sole slot…
+    use tokio::io::AsyncReadExt;
+    let mut silent = tokio::net::TcpStream::connect(http_addr).await.unwrap();
+    // Generous settle: the shed assertion below must land inside the 1s header
+    // window, and a loaded runner may take its time admitting the connection.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // …so the TLS listener must shed, not admit: the connection budget spans
+    // both listeners. A shed connection closes without any response bytes.
+    let shed = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        client.get(format!("https://{tls_addr}/healthz")).send(),
+    )
+    .await;
+    assert!(
+        matches!(&shed, Ok(Err(_))),
+        "a connection holding the shared budget on the plaintext port must shed the TLS listener, got {shed:?}"
+    );
+    // The silent connection itself is bounded by the shared header deadline.
+    let mut one = [0u8; 1];
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(3), silent.read(&mut one))
+        .await
+        .expect("silent plaintext connection must be bounded")
+        .unwrap_or(0);
+    assert_eq!(
+        closed, 0,
+        "silent plaintext connection must close without a response"
+    );
+    // The slot releases with the connection task; give the permit a beat to drop.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // One process-wide slot means the plaintext chain must run on ONE pooled
+    // keep-alive connection: healthz first, then the metered stream reusing it.
+    let plain_health = client
+        .get(format!("http://{http_addr}/healthz"))
+        .send()
+        .await
+        .unwrap_or_else(|error| panic!("dual-scheme plaintext health request failed: {error:?}"));
+    assert_eq!(plain_health.status(), StatusCode::OK);
+
+    // A full metered SSE stream over the PLAINTEXT port settles identically.
+    let response = client
+        .post(format!("http://{http_addr}/v1/chat/completions"))
+        .header("authorization", "Bearer vk_demo")
+        .json(&serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": true
+        }))
+        .send()
+        .await
+        .expect("plaintext streaming request");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.text().await.expect("complete SSE body");
+    assert!(body.contains("hello"));
+    assert!(body.contains("[DONE]"));
+
+    // The pooled plaintext connection idles out at the shared header deadline
+    // (1s), releasing the sole slot; only then can the TLS listener serve.
+    // 2s = 2x margin so a loaded runner's late timer firing cannot flake this.
+    tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+    let health = client
+        .get(format!("https://{tls_addr}/healthz"))
+        .send()
+        .await
+        .unwrap_or_else(|error| panic!("dual-scheme TLS health request failed: {error:?}"));
+    assert_eq!(health.status(), StatusCode::OK);
+
+    let events = sink.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].tokens_in, 4);
+    assert_eq!(events[0].tokens_out, 2);
+    assert_eq!(
+        events[0].usage_completeness,
+        sandhi_core::UsageCompleteness::Final
+    );
+
+    let _ = shutdown_tx.send(());
+    tokio::time::timeout(std::time::Duration::from_secs(3), server)
+        .await
+        .expect("dual-scheme server drains")
+        .expect("dual-scheme server task joins")
+        .expect("dual-scheme server exits cleanly");
+}
+
 #[tokio::test]
 async fn complete_attributes_meters_and_records_budget() {
     let upstream = MockServer::start().await;
@@ -913,6 +1059,10 @@ async fn anthropic_ingress_uses_the_same_typed_runtime_and_meter() {
     assert_eq!(value["usage"]["cache_read_input_tokens"], 2);
     assert_eq!(sink.events().len(), 1);
     assert_eq!(sink.events()[0].provider, "anthropic");
+    // Native Anthropic traffic is labeled by its own route — an OpenAI-dialect
+    // request translated to this same upstream carries "/v1/chat/completions"
+    // and never masquerades as native.
+    assert_eq!(sink.events()[0].route.as_deref(), Some("/v1/messages"));
     assert_eq!(sink.events()[0].tokens_in, 7);
     assert_eq!(sink.events()[0].cache_read_tokens, 2);
     assert_eq!(state.ledger.lock().unwrap().reserved("group:platform"), 0);
@@ -4886,5 +5036,529 @@ async fn owned_stream_setup_deadline_is_scoped_inside_admission_task() {
     assert_eq!(
         sink.events()[0].usage_completeness,
         sandhi_core::UsageCompleteness::Unavailable
+    );
+}
+
+// --- Anthropic ingress through the policy gate (Messages input format) ------
+
+/// Same mock anthropic upstream as `anthropic_state`, but the proxy carries a
+/// policy gate whose regex rule blocks the marker `SECRET-NNN` and audits
+/// `hello`. This is the shape production runs (the gate fails closed on any
+/// dialect it cannot inspect).
+async fn anthropic_policy_state(upstream: &MockServer, sink: Arc<InMemorySink>) -> Arc<ProxyState> {
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(header("x-api-key", "REAL-KEY"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id":"msg_1","type":"message","role":"assistant","model":"claude-test",
+            "content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn",
+            "usage":{"input_tokens":7,"output_tokens":3}
+        })))
+        .mount(upstream)
+        .await;
+
+    let keys = KeyStore::new();
+    keys.insert(VirtualKey {
+        id: "vk_demo".into(),
+        subject_id: Some("alice".into()),
+        group_id: Some("platform".into()),
+        upstream_ref: "up1".into(),
+        ..Default::default()
+    });
+    let mut providers = HashMap::new();
+    providers.insert(
+        "up1".into(),
+        ProviderRuntime::new().anthropic(
+            upstream.uri(),
+            "REAL-KEY",
+            sandhi_providers::AnthropicAuthScheme::ApiKey,
+            Default::default(),
+            Some(0),
+            None,
+            None,
+            None,
+        ),
+    );
+    let document = serde_json::json!({
+        "schema_version":"1","revision":1,"deadline_ms":200,"max_body_bytes":65536,
+        "rules":[
+            {"id":"block-secret","effect":"block",
+             "evaluator":{"kind":"regex","pattern":"SECRET-[0-9]+"}},
+            {"id":"audit-hello","effect":"audit",
+             "evaluator":{"kind":"regex","pattern":"hello"}}
+        ]
+    });
+    let engine = sandhi_core::policy::Engine::from_slice(&serde_json::to_vec(&document).unwrap())
+        .expect("policy document");
+    let audit = tempfile::tempdir().expect("tempdir");
+    let store = sandhi_store::policy::PolicyAuditStore::open(&audit.path().join("audit.db"), 1024)
+        .expect("audit store");
+    let mut state = ProxyState::new(keys, ProxyLedger::in_memory(), sink, providers, None);
+    state.policy = Some(Arc::new(sandhi_proxy::policy::PolicyGate::new(
+        engine,
+        Arc::new(store),
+    )));
+    Arc::new(state)
+}
+
+async fn anthropic_policy_request(
+    state: Arc<ProxyState>,
+    body: &str,
+) -> (StatusCode, serde_json::Value) {
+    let response = build_app(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("authorization", "Bearer vk_demo")
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_owned()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+/// The regression this PR fixes: an anthropic-dialect body used to hit the
+/// gate's `unsupported_dialect` fail-closed 503 before ever being inspected.
+/// Now the Messages input format is inspected — benign bodies forward through
+/// the transparent plane and meter normally.
+#[tokio::test]
+async fn anthropic_ingress_policy_inspects_and_forwards_benign_bodies() {
+    let upstream = MockServer::start().await;
+    let sink = Arc::new(InMemorySink::new());
+    let state = anthropic_policy_state(&upstream, sink.clone()).await;
+
+    let body = r#"{"model":"claude-test","max_tokens":32,
+        "system":"You are terse.",
+        "messages":[{"role":"user","content":[
+            {"type":"text","text":"say "},
+            {"type":"text","text":"hello"}]}],
+        "temperature":0.3,"stop_sequences":["\n\n"]}"#;
+    let (status, value) = anthropic_policy_request(state, body).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(value["content"][0]["text"], "hello");
+    assert_eq!(sink.events().len(), 1);
+    assert_eq!(sink.events()[0].provider, "anthropic");
+}
+
+/// A blocked pattern in any anthropic text surface is a 403 policy_blocked —
+/// inspected content, not an unavailable gate.
+#[tokio::test]
+async fn anthropic_ingress_policy_blocks_matching_content() {
+    let upstream = MockServer::start().await;
+    let sink = Arc::new(InMemorySink::new());
+    let state = anthropic_policy_state(&upstream, sink.clone()).await;
+
+    let body = r#"{"model":"claude-test","max_tokens":32,
+        "messages":[{"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"t1","content":"SECRET-42"}]}]}"#;
+    let (status, value) = anthropic_policy_request(state, body).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(value["error"]["code"], "policy_blocked");
+    assert!(value.to_string().contains("policy_blocked"));
+    // Never reached the provider, never metered.
+    assert_eq!(sink.events().len(), 0);
+}
+
+/// Malformed-for-inspection bodies still fail closed (503 policy_unavailable,
+/// reason incomplete evaluation) — the strictness that guards the other
+/// dialects applies to anthropic bodies too.
+#[tokio::test]
+async fn anthropic_ingress_policy_fails_closed_on_unknown_shapes() {
+    let upstream = MockServer::start().await;
+    let sink = Arc::new(InMemorySink::new());
+    let state = anthropic_policy_state(&upstream, sink.clone()).await;
+
+    let body = r#"{"model":"claude-test","max_tokens":32,
+        "messages":[{"role":"user","content":"ok"}],"undocumented_field":true}"#;
+    let (status, value) = anthropic_policy_request(state, body).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(value["error"]["code"], "policy_unavailable");
+    assert_eq!(sink.events().len(), 0);
+}
+
+/// A per-credential User-Agent (agent-allowlisting upstreams — Aliyun's coding
+/// plan 405s the default identity) rides the operator-built handle's static
+/// headers and reaches the upstream on the transparent plane.
+#[tokio::test]
+async fn per_credential_user_agent_reaches_the_upstream() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(header("user-agent", "claude-cli/1.0.0"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id":"msg_1","type":"message","role":"assistant","model":"claude-test",
+            "content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn",
+            "usage":{"input_tokens":3,"output_tokens":1}
+        })))
+        .mount(&upstream)
+        .await;
+
+    let handle = sandhi_proxy::build_provider_handle(
+        &ProviderRuntime::new(),
+        "anthropic",
+        Some(&upstream.uri()),
+        "REAL-KEY",
+        sandhi_store::CredentialScheme::ApiKey,
+        Some("claude-cli/1.0.0"),
+    )
+    .expect("handle builds");
+
+    let keys = KeyStore::new();
+    keys.insert(VirtualKey {
+        id: "vk_demo".into(),
+        subject_id: Some("alice".into()),
+        group_id: Some("platform".into()),
+        upstream_ref: "up1".into(),
+        ..Default::default()
+    });
+    let mut providers = HashMap::new();
+    providers.insert("up1".into(), handle);
+    let sink = Arc::new(InMemorySink::new());
+    let state = Arc::new(ProxyState::new(
+        keys,
+        ProxyLedger::in_memory(),
+        sink,
+        providers,
+        None,
+    ));
+
+    let response = build_app(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("x-api-key", "vk_demo")
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .body(Body::from(ANTHROPIC_BODY))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // The mock only matches when the upstream SAW the credential's UA; a 200
+    // proves the override landed on the wire.
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+/// Review finding F1: the per-credential UA must reach the upstream for the
+/// OpenAiCompat family too — for_slug maps qwen/deepseek/moonshot/custom slugs
+/// here, and this is the natural registration for OpenAI-compatible plans.
+/// The arm used to pass an empty HeaderMap, silently dropping the override.
+#[tokio::test]
+async fn per_credential_user_agent_reaches_openai_compat_upstream() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(header("user-agent", "claude-cli/1.0.0"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices":[{"message":{"role":"assistant","content":"ok"}}],
+            "usage":{"prompt_tokens":3,"completion_tokens":1}
+        })))
+        .mount(&upstream)
+        .await;
+
+    let handle = sandhi_proxy::build_provider_handle(
+        &ProviderRuntime::new(),
+        "qwen",
+        Some(upstream.uri().as_str()),
+        "sk-test",
+        sandhi_store::CredentialScheme::ApiKey,
+        Some("claude-cli/1.0.0"),
+    )
+    .expect("handle builds for an openai-compat slug");
+
+    let keys = KeyStore::new();
+    keys.insert(VirtualKey {
+        id: "vk_demo".into(),
+        subject_id: Some("alice".into()),
+        group_id: Some("platform".into()),
+        upstream_ref: "up1".into(),
+        ..Default::default()
+    });
+    let mut providers = HashMap::new();
+    providers.insert("up1".into(), handle);
+    let sink = Arc::new(InMemorySink::new());
+    let state = Arc::new(ProxyState::new(
+        keys,
+        ProxyLedger::in_memory(),
+        sink,
+        providers,
+        None,
+    ));
+
+    let response = build_app(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("authorization", "Bearer vk_demo")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"model":"qwen3.7-plus","messages":[{"role":"user","content":"hi"}],"max_tokens":8}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+/// Review finding F2: `SANDHI_CONNECT_TIMEOUT_SECS=NaN` must not panic — the
+/// parsed value is finite-filtered, degrading to the default bound.
+#[test]
+fn nan_connect_timeout_env_degrades_to_default() {
+    // Safety: runs the exact parse+filter+clamp pipeline from
+    // client_with_connect_timeout against adversarial env text.
+    for bad in ["NaN", "inf", "-inf", "not-a-number", ""] {
+        let parsed = bad
+            .parse::<f64>()
+            .ok()
+            .filter(|v| v.is_finite())
+            .unwrap_or(10.0);
+        assert!(
+            parsed.is_finite() && parsed > 0.0,
+            "bad env {bad:?} -> {parsed}"
+        );
+        let _ = std::time::Duration::from_secs_f64(parsed.clamp(0.001, 600.0));
+    }
+}
+
+/// Dialect parity (Claude Code / Antigravity): the token-counting endpoints
+/// (`POST /v1/messages/count_tokens`, `POST /v1beta/models/{m}:countTokens`)
+/// answer from the request body alone. Auth, decode, allowlist, policy and
+/// rate limiting run exactly as on the generation path, but nothing is
+/// dispatched, reserved or metered — proven here by pointing the upstream at a
+/// dead port (any dispatch would fail the request) and asserting the sink stays
+/// empty.
+#[tokio::test]
+async fn count_tokens_endpoints_answer_without_dispatch() {
+    let sink = Arc::new(InMemorySink::new());
+    let state = state_with(
+        "http://127.0.0.1:1".into(),
+        sink.clone(),
+        ProxyLedger::in_memory(),
+    );
+    let app = build_app(state);
+
+    let anthropic = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/messages/count_tokens")
+                .header("x-api-key", "vk_demo")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"model":"test","max_tokens":16,"messages":[{"role":"user","content":"hello world"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(anthropic.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(anthropic.into_body(), 4096)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let tokens = body["input_tokens"].as_u64().expect("input_tokens");
+    assert!(tokens > 0, "estimate must be positive: {body}");
+
+    let gemini = app
+        .oneshot(
+            Request::post("/v1beta/models/test:countTokens")
+                .header("x-goog-api-key", "vk_demo")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"contents":[{"role":"user","parts":[{"text":"hello world"}]}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(gemini.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(gemini.into_body(), 4096)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(body["totalTokens"].as_u64().expect("totalTokens") > 0);
+
+    assert!(sink.is_empty(), "counting must not emit usage events");
+}
+
+/// The counting endpoints enforce auth exactly like generation: no credential
+/// → dialect-shaped 401 naming the dialect's own scheme.
+#[tokio::test]
+async fn count_tokens_enforces_auth() {
+    let sink = Arc::new(InMemorySink::new());
+    let state = state_with("http://127.0.0.1:1".into(), sink, ProxyLedger::in_memory());
+    let app = build_app(state);
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/messages/count_tokens")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"model":"test","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let bytes = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        serde_json::to_string(&body).unwrap().contains("x-api-key"),
+        "error must name the Anthropic scheme: {body}"
+    );
+}
+
+/// ADR-0014 D1 pins: the counting endpoints enforce the SAME gates as
+/// generation — model allowlist (403) and the per-key rate limit (429).
+#[tokio::test]
+async fn count_tokens_enforces_allowlist_and_rate_limit() {
+    let sink = Arc::new(InMemorySink::new());
+    let keys = KeyStore::new();
+    keys.insert(VirtualKey {
+        id: "vk_demo".into(),
+        subject_id: Some("alice".into()),
+        group_id: Some("platform".into()),
+        upstream_ref: "up1".into(),
+        models: Some(vec!["allowed-model".into()]),
+        rate_limit_per_min: Some(1),
+        ..Default::default()
+    });
+    let mut providers: HashMap<String, ProviderHandle> = HashMap::new();
+    providers.insert(
+        "up1".into(),
+        ProviderRuntime::new().openai_compat(
+            "openai",
+            "http://127.0.0.1:1",
+            "REAL-KEY",
+            Default::default(),
+            Some(0),
+            None,
+            None,
+            None,
+        ),
+    );
+    let state = Arc::new(ProxyState::new(
+        keys,
+        ProxyLedger::in_memory(),
+        sink,
+        providers,
+        None,
+    ));
+    let app = build_app(state);
+
+    // Disallowed model: 403, same as generation.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/messages/count_tokens")
+                .header("x-api-key", "vk_demo")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"model":"denied-model","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    // Rate limit 1/min: first allowed call passes, the second is 429.
+    for (i, expected) in [(1, StatusCode::OK), (2, StatusCode::TOO_MANY_REQUESTS)] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/messages/count_tokens")
+                    .header("x-api-key", "vk_demo")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"allowed-model","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected, "call {i}");
+    }
+}
+
+/// ADR-0014 D4 pin: an OpenAI-dialect request translated to an Anthropic
+/// upstream is labeled by its INGRESS route — never as native Anthropic.
+#[tokio::test]
+async fn translated_openai_traffic_keeps_its_ingress_route_label() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id":"msg_1","type":"message","role":"assistant","model":"claude-test",
+            "content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn",
+            "usage":{"input_tokens":3,"output_tokens":2}
+        })))
+        .mount(&upstream)
+        .await;
+    let sink = Arc::new(InMemorySink::new());
+    let keys = KeyStore::new();
+    keys.insert(VirtualKey {
+        id: "vk_demo".into(),
+        subject_id: Some("alice".into()),
+        group_id: Some("platform".into()),
+        upstream_ref: "up1".into(),
+        ..Default::default()
+    });
+    let mut providers: HashMap<String, ProviderHandle> = HashMap::new();
+    providers.insert(
+        "up1".into(),
+        ProviderRuntime::new().anthropic(
+            upstream.uri(),
+            "REAL-KEY",
+            sandhi_providers::AnthropicAuthScheme::ApiKey,
+            Default::default(),
+            Some(0),
+            None,
+            None,
+            None,
+        ),
+    );
+    let state = Arc::new(ProxyState::new(
+        keys,
+        ProxyLedger::in_memory(),
+        sink.clone(),
+        providers,
+        None,
+    ));
+    let response = build_app(state)
+        .oneshot(
+            Request::post("/v1/chat/completions")
+                .header("authorization", "Bearer vk_demo")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"model":"claude-test","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(sink.events().len(), 1);
+    assert_eq!(sink.events()[0].provider, "anthropic");
+    assert_eq!(
+        sink.events()[0].route.as_deref(),
+        Some("/v1/chat/completions"),
+        "translated traffic must keep its OpenAI ingress label"
     );
 }

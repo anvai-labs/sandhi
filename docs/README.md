@@ -98,6 +98,9 @@ TD-0028 keeps its merge/deployment gates separate from the remaining diagnostic 
 | [0009](adr/0009-http1-only-listener.md) | No h2c sniffing; cleartext listener is HTTP/1 only |
 | [0010](adr/0010-cache-read-reporting-availability.md) | Accepted: additive cache-read observation and same-population reporting coverage |
 | [0011](adr/0011-bounded-persisted-usage-diagnostics.md) | Accepted design: bounded persisted usage lookup; post-0.8.0 explicit OIDC diagnostics permission, token mode remains admin-only; no new capture or retention |
+| [0012](adr/0012-databricks-model-serving-provider.md) | Databricks Model Serving admitted as an OpenAI-compatible provider |
+| [0013](adr/0013-native-extensions-passthrough-and-auto-cache-control.md) | Guarded `sandhi_extensions` ingress passthrough; auto `cache_control` on the Anthropic translation path |
+| [0014](adr/0014-dialect-parity-counting-and-streaming-fidelity.md) | Token-count endpoints; stateful Anthropic/Gemini/Responses stream encoders; OpenAI `created`; translated-traffic route labels |
 
 ## Technical-design status
 
@@ -125,7 +128,7 @@ perpetually open.
 | [0014](td/TD-0014-data-plane-resource-safety.md) | In progress | P4 tenant fairness/sharded limiter; documented measurement follow-ups |
 | [0015](td/TD-0015-performance-baseline-and-fault-injection.md) | In progress | P2–P5 load, codec, fault, and CI harnesses |
 | [0016](td/TD-0016-enforcement-throughput-ceiling.md) | In progress | P2–P6; P0/P1 are complete |
-| [0017](td/TD-0017-transport-security-and-ingress-protocol-breadth.md) | In progress | P2 rotation, P3 ALPN/context, evidence-gated P4 HTTP/2 |
+| [0017](td/TD-0017-transport-security-and-ingress-protocol-breadth.md) | In progress | P1 + D7 dual-scheme listeners shipped; P2 rotation, P3 ALPN/context, evidence-gated P4 HTTP/2 |
 | [0018](td/TD-0018-duplex-session-metering.md) | Proposed | Spike, session abstraction, and WebSocket ingress |
 | [0019](td/TD-0019-ingress-codec-untrusted-input-hardening.md) | Proposed | Property/fuzz suites and lossy-field inventory |
 | [0020](td/TD-0020-operational-readiness-and-transport-observability.md) | In progress | W06a/b/c and W06d automation verified and integrated; actual-user acceptance pending. Remaining gauges, pool, shedding and DNS work still open |

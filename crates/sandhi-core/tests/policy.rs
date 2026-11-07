@@ -237,6 +237,95 @@ fn policy_decodes_tool_arguments_and_rejects_duplicate_keys_in_them() {
     }
 }
 
+fn tool_call_body(arguments: &str) -> Vec<u8> {
+    serde_json::to_vec(&json!({"model":"test","messages":[
+        {"role":"assistant","content":null,
+         "tool_calls":[{"id":"call","type":"function","function":{"name":"demo","arguments":arguments}}]},
+        {"role":"tool","tool_call_id":"call","content":"refused"}]}))
+    .unwrap()
+}
+
+/// A model's malformed tool call is replayed in history verbatim. Failing
+/// closed on it denied every later request of the session (observed: an
+/// unclosed brief string ending `"questions": }`). It is inspected as text.
+#[test]
+fn policy_inspects_undecodable_tool_arguments_as_text_instead_of_bricking_the_session() {
+    let e = engine(vec![rule(
+        "secret",
+        json!({"kind":"regex","pattern":"SECRET-123"}),
+        "block",
+    )]);
+    let observed = r#"{"findings": "[{\"id\": \"f1\"}]\", \"questions>
+", "questions": }"#;
+    for clean in [observed, "", "{\"a\": "] {
+        assert_eq!(
+            run(&e, &tool_call_body(clean), &identity()).disposition,
+            Disposition::Forward,
+            "clean undecodable arguments must not brick the session: {clean:?}"
+        );
+    }
+    let raw = r#"{"findings": "SECRET-123", "questions": }"#;
+    assert_ne!(
+        run(&e, &tool_call_body(raw), &identity()).disposition,
+        Disposition::Forward,
+        "raw secrets in undecodable arguments are still inspected"
+    );
+    // Backslashes are built at runtime and the inputs are checked to carry no
+    // plaintext marker, so these cases can only pass through escape decoding.
+    let bs = char::from(92u8);
+    for hidden in [
+        format!(r#"{{"findings": "{bs}u0053ECRET-123", "questions": }}"#),
+        format!(r#"{{"a": "{bs}ud800{bs}u0053ECRET-123"#),
+    ] {
+        assert!(
+            hidden.contains(bs) && !hidden.contains("SECRET"),
+            "{hidden:?}"
+        );
+        assert_ne!(
+            run(&e, &tool_call_body(&hidden), &identity()).disposition,
+            Disposition::Forward,
+            "escapes in undecodable arguments cannot hide content: {hidden:?}"
+        );
+    }
+}
+
+#[test]
+fn policy_decodes_surrogate_pair_escapes_in_undecodable_tool_arguments() {
+    let emoji = char::from_u32(0x1F600).unwrap().to_string();
+    let e = engine(vec![rule(
+        "emoji",
+        json!({"kind":"regex","pattern":emoji}),
+        "block",
+    )]);
+    let bs = char::from(92u8);
+    let args = format!(r#"{{"a": "{bs}ud83d{bs}ude00"#);
+    assert!(!args.contains(emoji.as_str()), "{args:?}");
+    assert_ne!(
+        run(&e, &tool_call_body(&args), &identity()).disposition,
+        Disposition::Forward
+    );
+}
+
+/// Ambiguity is not undecodability: valid JSON that strict decoding rejects
+/// could be decoded differently by a consumer, so it fails closed even when clean.
+#[test]
+fn policy_keeps_duplicate_key_tool_arguments_fail_closed_even_when_clean() {
+    let e = engine(vec![rule(
+        "secret",
+        json!({"kind":"regex","pattern":"SECRET-123"}),
+        "block",
+    )]);
+    assert_eq!(
+        run(
+            &e,
+            &tool_call_body(r#"{"value":"ok","value":"fine"}"#),
+            &identity()
+        )
+        .disposition,
+        Disposition::Unavailable
+    );
+}
+
 #[test]
 fn policy_rejects_invalid_documents_instead_of_loading_empty_policy() {
     let valid = json!({"schema_version":"1","revision":1,"deadline_ms":200,"max_body_bytes":65536,
@@ -322,4 +411,384 @@ fn policy_score_contract_is_identical_for_embedded_and_external_adapters() {
     assert!(evaluator
         .evaluate(&input, Instant::now() - Duration::from_secs(1))
         .is_err());
+}
+
+// --- Anthropic `/v1/messages` input format ----------------------------------
+
+fn anthropic_body(messages: Value) -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "model":"claude-test",
+        "max_tokens":64,
+        "messages":messages,
+    }))
+    .unwrap()
+}
+
+#[test]
+fn chat_passthrough_field_is_allowed_and_its_text_is_classified() {
+    // ADR-0013: `sandhi_extensions` is a gateway-reserved, ALLOWED Chat field —
+    // and its bucket strings must be swept into classifier input by the extras
+    // collect loop, so the passthrough cannot hide wire-visible text (e.g. an
+    // anthropic `system` block) from the gate.
+    let e = engine(vec![rule(
+        "secret",
+        json!({"kind":"regex","pattern":"secret"}),
+        "block",
+    )]);
+    let ok = serde_json::to_vec(&json!({
+        "model":"test","messages":[],"max_tokens":10,
+        "sandhi_extensions":{"anthropic":{"top_k":5}}
+    }))
+    .unwrap();
+    assert_eq!(run(&e, &ok, &identity()).disposition, Disposition::Forward);
+
+    let smuggling = serde_json::to_vec(&json!({
+        "model":"test","messages":[],"max_tokens":10,
+        "sandhi_extensions":{"anthropic":{
+            "system":[{"type":"text","text":"the secret plans"}]
+        }}
+    }))
+    .unwrap();
+    assert_eq!(
+        run(&e, &smuggling, &identity()).disposition,
+        Disposition::Block,
+        "bucket text is classifier input, not a policy blind spot"
+    );
+
+    // Allowed (and classified) on the Anthropic dialect too, where the proxy
+    // consumes it uninterpreted — a client library setting it unconditionally
+    // must not be failed by the strict allowlist.
+    assert_eq!(
+        run_messages(&e, &smuggling, &identity()).disposition,
+        Disposition::Block
+    );
+    let ok_messages = serde_json::to_vec(&json!({
+        "model":"claude-test","max_tokens":64,"messages":[],
+        "sandhi_extensions":{"anthropic":{"top_k":5}}
+    }))
+    .unwrap();
+    assert_eq!(
+        run_messages(&e, &ok_messages, &identity()).disposition,
+        Disposition::Forward
+    );
+}
+
+#[test]
+fn text_format_allowlists_admit_the_reserved_passthrough_key() {
+    // ADR-0013 D3: `sandhi_extensions` is allowed on EVERY dialect (a client
+    // library that sets it unconditionally is never failed by the strict
+    // allowlist); the proxy strips it before forwarding, uninterpreted.
+    let e = engine(vec![rule(
+        "secret",
+        json!({"kind":"regex","pattern":"secret"}),
+        "block",
+    )]);
+    let embeddings = serde_json::to_vec(&json!({
+        "model":"text-embedding-test","input":"hello",
+        "sandhi_extensions":{"anthropic":{"top_k":5}}
+    }))
+    .unwrap();
+    assert_eq!(
+        e.evaluate_with_format(
+            &embeddings,
+            &identity(),
+            "openai",
+            "text-embedding-test",
+            InputFormat::Embeddings,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .disposition,
+        Disposition::Forward
+    );
+    let completions = serde_json::to_vec(&json!({
+        "model":"gpt-5","prompt":"hello",
+        "sandhi_extensions":{"anthropic":{"top_k":5}}
+    }))
+    .unwrap();
+    assert_eq!(
+        e.evaluate_with_format(
+            &completions,
+            &identity(),
+            "openai",
+            "gpt-5",
+            InputFormat::Completions,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .disposition,
+        Disposition::Forward
+    );
+}
+
+fn run_messages(engine: &Engine, bytes: &[u8], who: &Identity) -> Decision {
+    engine.evaluate_with_format(
+        bytes,
+        who,
+        "anthropic",
+        "claude-test",
+        InputFormat::Messages,
+        Instant::now() + Duration::from_secs(1),
+    )
+}
+
+#[test]
+fn anthropic_messages_benign_body_forwards() {
+    let e = engine(vec![rule(
+        "noop",
+        json!({"kind":"regex","pattern":"NEVER-MATCHES"}),
+        "audit",
+    )]);
+    for body in [
+        anthropic_body(json!([{"role":"user","content":"hello"}])),
+        anthropic_body(json!([{"role":"user","content":[
+            {"type":"text","text":"part one "},
+            {"type":"text","text":"part two"},
+        ]}])),
+        serde_json::to_vec(&json!({
+            "model":"claude-test","max_tokens":64,
+            "system":"You are terse.",
+            "messages":[{"role":"user","content":"hi"}],
+            "temperature":0.2,"top_k":40,"stop_sequences":["\n\n"],
+            "thinking":{"type":"enabled","budget_tokens":1024},
+            "metadata":{"user_id":"u-1"},
+        }))
+        .unwrap(),
+    ] {
+        let d = run_messages(&e, &body, &identity());
+        assert_eq!(d.disposition, Disposition::Forward, "body: {body:?}");
+    }
+}
+
+#[test]
+fn anthropic_messages_block_rule_matches_every_text_surface() {
+    let e = engine(vec![rule(
+        "secret",
+        json!({"kind":"regex","pattern":"SECRET-[0-9]+"}),
+        "block",
+    )]);
+    for body in [
+        // system prompt (string and block-array forms)
+        serde_json::to_vec(&json!({"model":"m","max_tokens":1,"system":"SECRET-1",
+            "messages":[{"role":"user","content":"ok"}]}))
+        .unwrap(),
+        serde_json::to_vec(&json!({"model":"m","max_tokens":1,
+            "system":[{"type":"text","text":"SECRET-2"}],
+            "messages":[{"role":"user","content":"ok"}]}))
+        .unwrap(),
+        // message content: string, text block, split across blocks
+        anthropic_body(json!([{"role":"user","content":"SECRET-3"}])),
+        anthropic_body(json!([{"role":"user","content":[
+            {"type":"text","text":"SEC"},{"type":"text","text":"RET-4"}]}])),
+        // thinking text
+        anthropic_body(json!([{"role":"assistant","content":[
+            {"type":"thinking","thinking":"SECRET-5","signature":"sig"}]}])),
+        // tool_use input
+        anthropic_body(json!([{"role":"assistant","content":[
+            {"type":"tool_use","id":"t1","name":"read","input":{"path":"SECRET-6"}}]}])),
+        // tool_result payload (string and nested text block)
+        anthropic_body(json!([{"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"t1","content":"SECRET-7"}]}])),
+        anthropic_body(json!([{"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"t1","is_error":true,
+             "content":[{"type":"text","text":"SECRET-8"}]}]}])),
+        // image url source
+        anthropic_body(json!([{"role":"user","content":[
+            {"type":"image","source":{"type":"url","url":"https://x/SECRET-9.png"}}]}])),
+    ] {
+        let d = run_messages(&e, &body, &identity());
+        assert_eq!(d.disposition, Disposition::Block, "body: {body:?}");
+        assert_eq!(d.matched_rules, vec!["secret"]);
+        assert!(!serde_json::to_string(&d).unwrap().contains("SECRET"));
+    }
+}
+
+#[test]
+fn anthropic_messages_unknown_shapes_fail_closed() {
+    let e = engine(vec![rule(
+        "noop",
+        json!({"kind":"regex","pattern":"NEVER-MATCHES"}),
+        "audit",
+    )]);
+    for body in [
+        // unknown top-level field
+        serde_json::to_vec(&json!({"model":"m","max_tokens":1,
+            "messages":[{"role":"user","content":"ok"}],"surprise":1}))
+        .unwrap(),
+        // unknown message key
+        serde_json::to_vec(&json!({"model":"m","max_tokens":1,
+            "messages":[{"role":"user","content":"ok","name":"x"}]}))
+        .unwrap(),
+        // unknown block type
+        anthropic_body(json!([{"role":"user","content":[{"type":"video","text":"x"}]}])),
+        // malformed block (extra key)
+        anthropic_body(json!([{"role":"user","content":[
+            {"type":"text","text":"x","extra":1}]}])),
+        // messages missing entirely
+        serde_json::to_vec(&json!({"model":"m","max_tokens":1})).unwrap(),
+        // malformed system blocks
+        serde_json::to_vec(
+            &json!({"model":"m","max_tokens":1,"system":[{"type":"text"}],
+            "messages":[{"role":"user","content":"ok"}]}),
+        )
+        .unwrap(),
+        // malformed image source
+        anthropic_body(json!([{"role":"user","content":[
+            {"type":"image","source":{"type":"carrier-pigeon"}}]}])),
+    ] {
+        let d = run_messages(&e, &body, &identity());
+        assert_eq!(d.disposition, Disposition::Unavailable, "body: {body:?}");
+        assert_eq!(d.reason, "incomplete_evaluation");
+    }
+}
+
+#[test]
+fn anthropic_messages_redacted_thinking_and_base64_source_are_structurally_checked() {
+    let e = engine(vec![rule(
+        "noop",
+        json!({"kind":"regex","pattern":"NEVER-MATCHES"}),
+        "audit",
+    )]);
+    // redacted_thinking data is collected; base64 source requires the media_type/data shape.
+    let ok = serde_json::to_vec(&json!({
+        "model":"m","max_tokens":1,
+        "messages":[{"role":"assistant","content":[
+            {"type":"redacted_thinking","data":"opaque"}]}]}))
+    .unwrap();
+    assert_eq!(
+        run_messages(&e, &ok, &identity()).disposition,
+        Disposition::Forward
+    );
+    let ok2 = anthropic_body(json!([{"role":"user","content":[
+        {"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"AAAA"}}]}]));
+    assert_eq!(
+        run_messages(&e, &ok2, &identity()).disposition,
+        Disposition::Forward
+    );
+    // base64 without data is malformed
+    let bad = anthropic_body(json!([{"role":"user","content":[
+        {"type":"image","source":{"type":"base64","media_type":"image/png"}}]}]));
+    assert_eq!(
+        run_messages(&e, &bad, &identity()).disposition,
+        Disposition::Unavailable
+    );
+}
+
+/// Review round 1 (independent): cardinality-only checks on tool_result and
+/// base64 sources let junk keys carry uninspected text past every rule. These
+/// pin the identity-checked fix — each of the exploit shapes now fails closed.
+#[test]
+fn anthropic_messages_junk_keys_fail_closed() {
+    let e = engine(vec![rule(
+        "secret",
+        json!({"kind":"regex","pattern":"SECRET-[0-9]+"}),
+        "block",
+    )]);
+    for body in [
+        // junk key on tool_result (was: Forward — the exploit)
+        anthropic_body(json!([{"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"t1","x":"SECRET-42"}]}])),
+        anthropic_body(json!([{"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"t1","content":"ok","x":"SECRET-42"}]}])),
+        // junk key on a base64 source (was: Forward)
+        anthropic_body(json!([{"role":"user","content":[
+            {"type":"image","source":{"type":"base64","data":"QUFB","x":"SECRET-42"}}]}])),
+        // plaintext smuggled in the data field (not base64) fails closed
+        anthropic_body(json!([{"role":"user","content":[
+            {"type":"image","source":{"type":"base64","media_type":"image/png","data":"SECRET-42"}}]}])),
+        // junk key on a text block / tool_use / url source
+        anthropic_body(json!([{"role":"user","content":[
+            {"type":"text","text":"ok","x":"SECRET-42"}]}])),
+        anthropic_body(json!([{"role":"assistant","content":[
+            {"type":"tool_use","id":"t","name":"n","input":{},"x":"SECRET-42"}]}])),
+        anthropic_body(json!([{"role":"user","content":[
+            {"type":"image","source":{"type":"url","url":"https://x","x":"SECRET-42"}}]}])),
+        // junk key inside a system block
+        serde_json::to_vec(&json!({"model":"m","max_tokens":1,
+            "system":[{"type":"text","text":"ok","x":"SECRET-42"}],
+            "messages":[{"role":"user","content":"ok"}]}))
+        .unwrap(),
+    ] {
+        let d = run_messages(&e, &body, &identity());
+        assert_eq!(d.disposition, Disposition::Unavailable, "body: {body:?}");
+    }
+}
+
+/// Review round 1 (independent): real Claude SDK shapes — `cache_control`
+/// (prompt caching, pervasive in agent traffic), `citations` on text blocks,
+/// and documented top-level params — must forward, with their string content
+/// swept, not rejected.
+#[test]
+fn anthropic_messages_real_sdk_shapes_forward() {
+    let e = engine(vec![rule(
+        "noop",
+        json!({"kind":"regex","pattern":"NEVER"}),
+        "audit",
+    )]);
+    for body in [
+        // cache_control on a message text block
+        anthropic_body(json!([{"role":"user","content":[
+            {"type":"text","text":"cached context","cache_control":{"type":"ephemeral"}}]}])),
+        // cache_control on system blocks
+        serde_json::to_vec(&json!({"model":"m","max_tokens":1,
+            "system":[{"type":"text","text":"sys","cache_control":{"type":"ephemeral"}}],
+            "messages":[{"role":"user","content":"ok"}]}))
+        .unwrap(),
+        // citations on an assistant text block
+        anthropic_body(json!([{"role":"assistant","content":[
+            {"type":"text","text":"answer","citations":[{"cited_text":"src","document_index":0}]}]}])),
+        // cache_control on tool_result
+        anthropic_body(json!([{"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"t1","content":"ok",
+             "cache_control":{"type":"ephemeral"}}]}])),
+        // documented top-level params
+        serde_json::to_vec(&json!({"model":"m","max_tokens":1,
+            "service_tier":"standard",
+            "betas":["context-1m-2025-08-07"],
+            "messages":[{"role":"user","content":"ok"}]}))
+        .unwrap(),
+    ] {
+        let d = run_messages(&e, &body, &identity());
+        assert_eq!(d.disposition, Disposition::Forward, "body: {body:?}");
+    }
+}
+
+/// The extras (cache_control / citations / top-level params) are SWEPT, not
+/// merely tolerated: a blocked pattern inside them is a block.
+#[test]
+fn anthropic_messages_extras_are_swept_not_skipped() {
+    let e = engine(vec![rule(
+        "secret",
+        json!({"kind":"regex","pattern":"SECRET-[0-9]+"}),
+        "block",
+    )]);
+    for body in [
+        anthropic_body(json!([{"role":"user","content":[
+            {"type":"text","text":"ok","cache_control":{"type":"SECRET-1"}}]}])),
+        anthropic_body(json!([{"role":"assistant","content":[
+            {"type":"text","text":"ok","citations":[{"cited_text":"SECRET-2"}]}]}])),
+        serde_json::to_vec(&json!({"model":"m","max_tokens":1,"betas":["SECRET-3"],
+            "messages":[{"role":"user","content":"ok"}]}))
+        .unwrap(),
+    ] {
+        let d = run_messages(&e, &body, &identity());
+        assert_eq!(d.disposition, Disposition::Block, "body: {body:?}");
+    }
+}
+
+/// Review round 1: system was collected twice (strict branch + tail extras
+/// loop), doubling classifier input. The strict regex that only matches the
+/// doubled concatenation must now fail to match at all.
+#[test]
+fn anthropic_messages_system_collected_once() {
+    let e = engine(vec![rule(
+        "sysdouble",
+        json!({"kind":"regex","pattern":"SYS hello SYS"}),
+        "block",
+    )]);
+    let body = serde_json::to_vec(&json!({
+        "model":"m","max_tokens":1,"system":"SYS",
+        "messages":[{"role":"user","content":"hello"}]}))
+    .unwrap();
+    // parts order: "SYS", "hello" — the tail no longer re-collects system.
+    let d = run_messages(&e, &body, &identity());
+    assert_eq!(d.disposition, Disposition::Forward);
 }

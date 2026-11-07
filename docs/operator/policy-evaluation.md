@@ -82,14 +82,24 @@ system/developer/user/assistant prefill, tool results, tool descriptions/schemas
 decoded tool-argument JSON, and supported string-bearing request extras. Regex
 also runs over joined text to catch a marker split across text parts/messages.
 JSON escapes are decoded; duplicate keys in the request or tool arguments fail.
+Tool arguments that are not JSON at all — a model's malformed tool call replayed
+in history — are inspected as text: the raw string plus its JSON-escape-decoded
+view (one level, the depth decoded arguments receive). Failing closed on them
+denied every later request of an agent session. This unblocks passthrough
+OpenAI-family upstreams; the gateway's Anthropic, Gemini and Ollama translators
+still reject non-JSON arguments as an invalid request. Regex rules anchored to
+line or value boundaries match decoded argument values but not values inside
+such text; do not rely on anchors for tool arguments.
 Unknown top-level/message fields, image/file/audio content parts and other ingress
 dialects return `policy_unavailable` while the gate is enabled. There is no silent
 uninspected fallback. This narrower coverage is intentional for the MVP.
 
 No remote URLs are fetched. Arbitrary base64, steganography, other encodings and
 semantic paraphrases are not automatically decoded/detected. Text matching is not
-a guarantee against all secret exfiltration. Tool arguments must be complete JSON;
-partial assistant tool prefill may be rejected. No output-stream inspection or
+a guarantee against all secret exfiltration. Tool arguments are decoded when they
+are complete JSON and inspected as text when they are not; valid JSON that strict
+decoding rejects (duplicate keys, out-of-range numbers, lone surrogates, excess
+depth) is still rejected. No output-stream inspection or
 prompt redaction/transformation is implemented.
 
 Allowed same-family transparent requests keep their original body bytes. Existing

@@ -49,6 +49,7 @@ pub mod admin {
         pub label: Option<String>,
         pub scheme: Option<String>,
         pub base_url: Option<String>,
+        pub user_agent: Option<String>,
         pub secret: String,
     }
 
@@ -60,6 +61,10 @@ pub mod admin {
         pub label: Option<String>,
         pub scheme: Option<String>,
         pub base_url: Option<String>,
+        /// Per-endpoint User-Agent: rides the transport's static headers to the
+        /// upstream. Agent-allowlisting plans (e.g. Aliyun coding) reject an
+        /// empty/default-less identity; set the UA the endpoint expects.
+        pub user_agent: Option<String>,
     }
 
     /// `POST /admin/keys/share` — mint a scoped virtual key.
@@ -308,7 +313,21 @@ pub fn build_provider_handle(
     base_url: Option<&str>,
     secret: &str,
     scheme: CredentialScheme,
+    user_agent: Option<&str>,
 ) -> Option<ProviderHandle> {
+    // A per-endpoint UA rides the static header set; unset keeps the shared
+    // client default (`sandhi/<version>`).
+    let mut static_headers = HeaderMap::new();
+    if let Some(ua) = user_agent.map(str::trim).filter(|ua| !ua.is_empty()) {
+        match axum::http::HeaderValue::from_str(ua) {
+            Ok(value) => {
+                static_headers.insert(axum::http::header::USER_AGENT, value);
+            }
+            Err(_) => {
+                tracing::warn!(%ua, "configured user_agent is not a valid header value; keeping the client default");
+            }
+        }
+    }
     if provider == "openai" && scheme == CredentialScheme::Oauth {
         // This is an expiring access-token lease, never an API key or refresh token.
         // The login owner refreshes its grant; the gateway owns dispatch and expiry.
@@ -364,29 +383,29 @@ pub fn build_provider_handle(
                 CredentialScheme::Bearer => AnthropicAuthScheme::Bearer,
                 _ => AnthropicAuthScheme::ApiKey,
             };
-            Some(runtime.anthropic(base, secret, auth, HeaderMap::new(), None, None, None, None))
+            Some(runtime.anthropic(base, secret, auth, static_headers, None, None, None, None))
         }
         ProviderFamily::Gemini => Some(runtime.gemini(
             base,
             secret,
             GeminiAuthScheme::ApiKey,
-            HeaderMap::new(),
+            static_headers.clone(),
             None,
             None,
             None,
             None,
         )),
         ProviderFamily::Cohere => {
-            Some(runtime.cohere(base, secret, HeaderMap::new(), None, None, None, None))
+            Some(runtime.cohere(base, secret, static_headers, None, None, None, None))
         }
         ProviderFamily::Ollama => {
-            Some(runtime.ollama(base, secret, HeaderMap::new(), None, None, None, None))
+            Some(runtime.ollama(base, secret, static_headers.clone(), None, None, None, None))
         }
         ProviderFamily::OpenAiCompat => Some(runtime.openai_compat(
             provider,
             base,
             secret,
-            Default::default(),
+            static_headers.clone(),
             None,
             None,
             None,
@@ -396,7 +415,7 @@ pub fn build_provider_handle(
             provider,
             base,
             secret,
-            Default::default(),
+            static_headers,
             None,
             None,
             None,
@@ -492,6 +511,7 @@ pub(crate) async fn add_key(
             label: req.label,
             scheme: req.scheme,
             base_url: req.base_url,
+            user_agent: req.user_agent,
         },
         Some(req.secret),
     )
@@ -574,6 +594,7 @@ async fn register_credential(
             req.base_url.as_deref(),
             &secret,
             scheme,
+            req.user_agent.as_deref(),
         );
         if handle.is_none() {
             return err(
@@ -587,10 +608,17 @@ async fn register_credential(
                 label,
                 scheme,
                 req.base_url.as_deref(),
+                req.user_agent.as_deref(),
                 &secret,
             )
         } else {
-            vault.register_metadata(&req.provider, label, scheme, req.base_url.as_deref())
+            vault.register_metadata(
+                &req.provider,
+                label,
+                scheme,
+                req.base_url.as_deref(),
+                req.user_agent.as_deref(),
+            )
         };
         let cred_id = match committed {
             Ok(id) => id,
@@ -1663,6 +1691,7 @@ pub(crate) async fn config_apply(
             label: p.label.clone(),
             scheme: p.scheme.clone(),
             base_url: p.base_url.clone(),
+            user_agent: p.user_agent.clone(),
             secret,
         };
         let resp = add_key(State(state.clone()), headers.clone(), Json(req)).await;
@@ -1910,6 +1939,7 @@ mod mutation_lifecycle_tests {
                 "openai",
                 "default",
                 CredentialScheme::ApiKey,
+                None,
                 None,
                 "synthetic-provider",
             )

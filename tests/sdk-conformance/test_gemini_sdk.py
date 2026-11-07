@@ -95,14 +95,30 @@ def test_errors_come_back_in_googles_shape(proxy: str):
 
 
 def test_an_unsupported_method_is_refused_in_googles_shape(proxy: str):
+    # countTokens is SUPPORTED now (ADR-0014) — embedContent stands in as the
+    # still-unsupported method this 501 shape pins.
+    response = httpx.post(
+        f"{proxy}/v1beta/models/gemini-mock:embedContent",
+        headers={"x-goog-api-key": VK_GEMINI},
+        json={"content": {"parts": [{"text": "ping"}]}},
+        timeout=10,
+    )
+    assert response.status_code == 501
+    assert response.json()["error"]["status"] == "UNIMPLEMENTED"
+
+
+def test_count_tokens_answers_in_googles_shape(proxy: str):
+    # ADR-0014 D1: counting runs the full pre-dispatch pipeline and answers
+    # from the body alone — Gemini clients (Antigravity class) get a
+    # spec-shaped totalTokens without a generation.
     response = httpx.post(
         f"{proxy}/v1beta/models/gemini-mock:countTokens",
         headers={"x-goog-api-key": VK_GEMINI},
         json={"contents": [{"role": "user", "parts": [{"text": "ping"}]}]},
         timeout=10,
     )
-    assert response.status_code == 501
-    assert response.json()["error"]["status"] == "UNIMPLEMENTED"
+    assert response.status_code == 200
+    assert response.json()["totalTokens"] > 0
 
 
 def test_models_list_works_unmodified(client):

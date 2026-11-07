@@ -17,6 +17,7 @@ fn subscription_scheme_selects_codex_codec_and_disables_raw_forwarding() {
         None,
         &envelope(4_000_000_000),
         CredentialScheme::Oauth,
+        None,
     )
     .expect("valid leased subscription credential");
     assert_eq!(handle.family(), ProviderFamily::OpenAiResponses);
@@ -35,17 +36,23 @@ fn subscription_rejects_missing_expiry_and_upstream_override() {
         json!({"access_token":"x","account_id":"a"}).to_string(),
         envelope(1),
     ] {
-        assert!(
-            build_provider_handle(&runtime, "openai", None, &secret, CredentialScheme::Oauth)
-                .is_none()
-        );
+        assert!(build_provider_handle(
+            &runtime,
+            "openai",
+            None,
+            &secret,
+            CredentialScheme::Oauth,
+            None,
+        )
+        .is_none());
     }
     assert!(build_provider_handle(
         &runtime,
         "openai",
         Some("https://untrusted.test"),
         &envelope(4_000_000_000),
-        CredentialScheme::Oauth
+        CredentialScheme::Oauth,
+        None
     )
     .is_none());
 }
@@ -70,6 +77,7 @@ async fn expiry_fences_complete_and_stream_without_contacting_upstream() {
         None,
         &envelope(4_000_000_000),
         CredentialScheme::Oauth,
+        None,
     )
     .unwrap()
     .with_credential_expiry(1);

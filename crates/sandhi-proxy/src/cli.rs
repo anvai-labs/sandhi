@@ -134,6 +134,10 @@ enum KeysAction {
         /// Override the upstream base URL.
         #[arg(long)]
         base_url: Option<String>,
+        /// Per-endpoint User-Agent override (agent-allowlisting upstreams, e.g.
+        /// Aliyun's coding plan rejects the default identity).
+        #[arg(long)]
+        user_agent: Option<String>,
         /// The raw secret. If omitted, read one line from stdin (keeps it out of shell history).
         #[arg(long)]
         secret: Option<String>,
@@ -148,6 +152,9 @@ enum KeysAction {
         scheme: Option<String>,
         #[arg(long)]
         base_url: Option<String>,
+        /// Per-endpoint User-Agent override (agent-allowlisting upstreams).
+        #[arg(long)]
+        user_agent: Option<String>,
     },
     /// Revoke a provider credential.
     Revoke { provider: String, label: String },
@@ -243,6 +250,7 @@ pub(crate) fn admin_request(base_url: &str, command: &Command) -> AdminRequest {
                     label,
                     scheme,
                     base_url: bu,
+                    user_agent,
                     secret,
                 },
         } => {
@@ -251,6 +259,7 @@ pub(crate) fn admin_request(base_url: &str, command: &Command) -> AdminRequest {
                 "label": label,
                 "scheme": scheme,
                 "base_url": bu,
+                "user_agent": user_agent,
                 "secret": secret,
             });
             ("POST", "/admin/keys".into(), Some(body))
@@ -265,12 +274,14 @@ pub(crate) fn admin_request(base_url: &str, command: &Command) -> AdminRequest {
                     label,
                     scheme,
                     base_url,
+                    user_agent,
                 },
         } => (
             "POST",
             "/admin/keys/reference".into(),
             Some(json!({
                 "provider": provider, "label": label, "scheme": scheme, "base_url": base_url,
+                "user_agent": user_agent,
             })),
         ),
         Command::Keys {
@@ -916,6 +927,7 @@ mod tests {
                 label: Some("default".into()),
                 scheme: Some("api-key".into()),
                 base_url: None,
+                user_agent: None,
                 secret: Some("sk-x".into()),
             },
         };

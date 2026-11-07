@@ -67,6 +67,9 @@ pub struct ProviderEntry {
     pub base_url: Option<String>,
     #[serde(default)]
     pub scheme: Option<String>,
+    /// Per-endpoint User-Agent override (agent-allowlisting upstreams).
+    #[serde(default)]
+    pub user_agent: Option<String>,
     /// Env var to resolve the real secret from at apply time. Never the secret itself.
     #[serde(default)]
     pub secret_env: Option<String>,
