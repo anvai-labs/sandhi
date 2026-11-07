@@ -103,6 +103,15 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ### Fixed
 
+- Policy inspection no longer bricks a session whose history contains a
+  malformed tool call. A model's non-JSON `arguments` is replayed verbatim in
+  conversation history; failing the policy gate closed on it denied every
+  later request of the session. Such arguments are now inspected as text —
+  with a JSON-escape-decoded view added, so escapes cannot hide content from
+  evaluators — while syntactically-valid JSON that strict decoding rejects
+  (duplicate keys, out-of-range numbers, lone surrogates, excess depth) still
+  fails closed, because it could decode differently in a consumer than in the
+  evaluator (#400).
 - The neutral chat contract no longer rejects `temperature` alongside
   `thinking.enabled` at ingress. That earlier guard in this release train was
   family-blind: `ChatRequestV1::validate()` runs for every dialect before the
