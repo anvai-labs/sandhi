@@ -1529,6 +1529,10 @@ impl TokioWebhookSender {
     pub(crate) fn new() -> Option<Self> {
         let handle = tokio::runtime::Handle::try_current().ok()?;
         let client = reqwest::Client::builder()
+            // Never follow redirects: the alert payload would be re-POSTed to
+            // whatever host the 30x Location names (best-effort delivery means
+            // a redirect failure is dropped, not retried elsewhere).
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(10))
             .build()
             .ok()?;

@@ -855,6 +855,81 @@ async fn alert_fires_when_threshold_crossed_and_marks_last_fired_at() {
 }
 
 #[tokio::test]
+async fn webhook_alert_redirect_is_not_followed() {
+    // The webhook endpoint answers 307 pointing at a second server. The alert payload must
+    // NOT be re-POSTed to the redirect target: best-effort delivery drops the redirect, and
+    // the proxy request itself is unaffected.
+    let redirect_target = MockServer::start().await;
+    let webhook = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(307)
+                .append_header("Location", format!("{}/hook", redirect_target.uri())),
+        )
+        .mount(&webhook)
+        .await;
+    let upstream = MockServer::start().await;
+    mount_usage_upstream(&upstream, 50, 35).await; // 85 tokens
+    let state = admin_state();
+    let app = build_app(state.clone());
+    let secret = scoped_setup(&state, &app, &upstream.uri(), 100, "total", "warn", None).await;
+
+    let r = app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/admin/alerts",
+            Some(TOKEN),
+            Some(json!({
+                "scope": "group:platform",
+                "threshold_pct": 50,
+                "webhook_url": format!("{}/hook", webhook.uri()),
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+
+    // Crosses the threshold: the webhook fires, gets the 307, does not follow it, and the
+    // proxy request still succeeds.
+    let (status, _) = v1_request(&app, &secret).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a webhook redirect must never break the request"
+    );
+
+    // Delivery is spawned onto the runtime, so it may still be in flight when the response
+    // returns. Wait for the initial POST to reach the webhook endpoint before asserting the
+    // redirect target stayed empty — otherwise the guard can pass while delivery is pending.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let delivered = loop {
+        let hits = webhook.received_requests().await.unwrap();
+        if !hits.is_empty() {
+            break hits;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "webhook POST never reached the webhook endpoint (alert did not fire)"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert_eq!(
+        delivered.len(),
+        1,
+        "webhook sender delivered more than once: {} requests",
+        delivered.len()
+    );
+
+    let hits = redirect_target.received_requests().await.unwrap();
+    assert!(
+        hits.is_empty(),
+        "webhook sender followed the 307: {} requests landed on the redirect target",
+        hits.len()
+    );
+}
+
+#[tokio::test]
 async fn webhook_alert_failure_does_not_break_the_request() {
     // A webhook pointed at a non-listening endpoint: the POST fails, but best-effort delivery
     // must never break the request.
