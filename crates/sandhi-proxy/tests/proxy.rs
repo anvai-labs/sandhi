@@ -5094,10 +5094,19 @@ async fn anthropic_policy_state(upstream: &MockServer, sink: Arc<InMemorySink>) 
     let store = sandhi_store::policy::PolicyAuditStore::open(&audit.path().join("audit.db"), 1024)
         .expect("audit store");
     let mut state = ProxyState::new(keys, ProxyLedger::in_memory(), sink, providers, None);
-    state.policy = Some(Arc::new(sandhi_proxy::policy::PolicyGate::new(
-        engine,
-        Arc::new(store),
-    )));
+    // Generous deadline floor: these tests assert the gate's verdict (forward /
+    // block / fail-closed), not its timing. The 200 ms document deadline is
+    // wall-clock and a loaded CI runner can miss it on spawn_blocking
+    // scheduling or the audit fsync alone, which would flip the expected
+    // 200/403 into a fail-closed 503. Deadline enforcement itself is covered
+    // by `policy.rs::saturated_gate_and_late_extension_cannot_admit`.
+    state.policy = Some(Arc::new(
+        sandhi_proxy::policy::PolicyGate::with_deadline_floor(
+            engine,
+            Arc::new(store),
+            std::time::Duration::from_secs(30),
+        ),
+    ));
     Arc::new(state)
 }
 
