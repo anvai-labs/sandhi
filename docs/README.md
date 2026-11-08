@@ -101,6 +101,7 @@ TD-0028 keeps its merge/deployment gates separate from the remaining diagnostic 
 | [0012](adr/0012-databricks-model-serving-provider.md) | Databricks Model Serving admitted as an OpenAI-compatible provider |
 | [0013](adr/0013-native-extensions-passthrough-and-auto-cache-control.md) | Guarded `sandhi_extensions` ingress passthrough; auto `cache_control` on the Anthropic translation path |
 | [0014](adr/0014-dialect-parity-counting-and-streaming-fidelity.md) | Token-count endpoints; stateful Anthropic/Gemini/Responses stream encoders; OpenAI `created`; translated-traffic route labels |
+| [0015](adr/0015-upstream-budgets-back-leg-caps.md) | Back-leg caps: dual-lease admission and settlement against `upstream:{provider}`, per-provider only |
 
 ## Technical-design status
 

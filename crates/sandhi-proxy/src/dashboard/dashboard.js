@@ -374,7 +374,12 @@ function budgetsView(d) {
     const limit = b.limit_tokens, spent = b.spent;
     const pct = limit > 0 ? Math.min(100, Math.round(spent * 100 / limit)) : 0;
     const cls = pct >= 100 ? "over" : (pct >= 80 ? "warn" : "");
-    return `<tr><td><code>${esc(b.scope)}</code></td>`
+    // ADR-0015: `upstream:<provider>` scopes are back-leg caps (gateway→provider), distinct
+    // from the front-leg `vk:`/`group:` rows — badge them so operators can tell at a glance.
+    const backLeg = b.scope.startsWith("upstream:")
+      ? ' <span class="badge back-leg" title="back-leg cap on the resolved upstream">back leg</span>'
+      : "";
+    return `<tr><td><code>${esc(b.scope)}</code>${backLeg}</td>`
       + `<td>${fmt(spent)} <span class="muted">/ ${fmt(limit)}</span></td>`
       + `<td style="min-width:8rem"><div class="bar ${cls}"><span style="width:${pct}%"></span></div></td>`
       + `<td>${esc(b.window)}</td><td>${esc(b.policy)}</td></tr>`;

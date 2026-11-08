@@ -235,6 +235,55 @@ async fn mint_key(
     )
 }
 
+/// ADR-0015: the `upstream:` scope prefix is gateway-managed (the back-leg cap). A virtual key
+/// whose `budget_scope` used it would hold two leases on the same scope per call and settle the
+/// same actual twice — exhausting the cap at half — so minting rejects it.
+#[tokio::test]
+async fn share_rejects_an_upstream_prefixed_budget_scope() {
+    let app = build_app(admin_state());
+    add_upstream(&app, "anthropic", "https://api.anthropic.com", "sk-real").await;
+    for scope in ["upstream:openai", "upstream:anthropic", " upstream:openai"] {
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/admin/keys/share",
+                Some(TOKEN),
+                Some(json!({
+                    "upstream": "anthropic:default",
+                    "subject": "alice",
+                    "group": "platform",
+                    "budget_scope": scope,
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST, "scope: {scope:?}");
+        let body = body_json(r).await;
+        assert!(
+            body.to_string().contains("reserved 'upstream:' prefix"),
+            "error must name the reserved prefix: {body}"
+        );
+    }
+    // A legitimate front-leg scope still mints.
+    let r = app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/admin/keys/share",
+            Some(TOKEN),
+            Some(json!({
+                "upstream": "anthropic:default",
+                "subject": "alice",
+                "group": "platform",
+                "budget_scope": "group:platform",
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+}
+
 #[tokio::test]
 async fn share_list_revoke_virtual_key_never_exposes_plaintext() {
     let app = build_app(admin_state());
@@ -538,6 +587,90 @@ async fn budget_set_list_usage_and_enforcement() {
     assert_eq!(usage["spent"], 30);
     assert_eq!(usage["limit_tokens"], 50);
     assert_eq!(usage["remaining"], 20);
+}
+
+/// ADR-0015: an `upstream:{provider}` back-leg scope is ordinary scope data — it round-trips
+/// `POST /admin/budget` → the durable budgets table → startup rehydration → usage reads with
+/// zero special-casing.
+#[tokio::test]
+async fn upstream_scope_round_trips_budget_set_rehydration_and_usage() {
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let sink: Arc<dyn Sink> = store.clone();
+    // Durable ledger: only it persists budgets, so only it can prove rehydration.
+    let mut state = ProxyState::new(
+        KeyStore::new(),
+        ProxyLedger::durable(":memory:", 1).unwrap(),
+        sink,
+        HashMap::new(),
+        Some(store),
+    );
+    state.admin_token = Some(TOKEN.into());
+    let state = Arc::new(state);
+    let app = build_app(state.clone());
+
+    // Set a monthly Block cap on the provider scope.
+    let r = app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/admin/budget",
+            Some(TOKEN),
+            Some(json!({
+                "scope": "upstream:inferflux",
+                "limit_tokens": 5000,
+                "window": "monthly",
+                "policy": "block"
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+
+    // It lists like any other scope.
+    let r = app
+        .clone()
+        .oneshot(req("GET", "/admin/budget", Some(TOKEN), None))
+        .await
+        .unwrap();
+    let list = body_json(r).await;
+    let budget = list["budgets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["scope"] == "upstream:inferflux")
+        .expect("upstream scope listed")
+        .clone();
+    assert_eq!(budget["limit_tokens"], 5000);
+    assert_eq!(budget["window"], "monthly");
+    assert_eq!(budget["policy"], "block");
+
+    // Seeded spend reads back through the usage endpoint.
+    record_spend(&mut state.ledger.lock().unwrap(), "upstream:inferflux", 120);
+    let r = app
+        .clone()
+        .oneshot(req(
+            "GET",
+            "/admin/budget/usage?scope=upstream:inferflux",
+            Some(TOKEN),
+            None,
+        ))
+        .await
+        .unwrap();
+    let usage = body_json(r).await;
+    assert_eq!(usage["spent"], 120);
+    assert_eq!(usage["limit_tokens"], 5000);
+    assert_eq!(usage["remaining"], 4880);
+
+    // Restart rehydration (a fresh map, the way startup rebuilds it) carries the spec.
+    let budgets = std::sync::Mutex::new(HashMap::new());
+    sandhi_proxy::rehydrate_budgets(&state.ledger.lock().unwrap(), &budgets);
+    let rehydrated = budgets.lock().unwrap();
+    let spec = rehydrated
+        .get("upstream:inferflux")
+        .expect("upstream scope rehydrated");
+    assert_eq!(spec.limit_tokens, 5000);
+    assert_eq!(spec.window, "monthly");
+    assert_eq!(spec.policy, "block");
 }
 
 #[tokio::test]
