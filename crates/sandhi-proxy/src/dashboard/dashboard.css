@@ -1,10 +1,13 @@
   :root {
     color-scheme: light dark;
+    /* Approximate sticky-header height (padding + one wrapped row); nav offsets derive from it. */
+    --header-h: 4.75rem;
     --bg: #f7f7f8; --surface: #fff; --border: #e2e2e6; --border-soft: #ececef;
     --text: #16161a; --muted: #6b7280; --accent: #2563eb; --accent-soft: #eff4ff; --on-accent: #fff;
     --good: #047857; --good-soft: #ecfdf5; --warn: #b45309; --warn-soft: #fffbeb;
     --bad: #b91c1c; --bad-soft: #fef2f2; --shadow: 0 1px 2px rgb(0 0 0 / 0.04);
   }
+  html { scroll-behavior: smooth; }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #0f1115; --surface: #17191f; --border: #2a2d36; --border-soft: #23252c;
@@ -29,7 +32,7 @@
   .dot { width: .5rem; height: .5rem; border-radius: 50%; background: var(--border);
          box-shadow: 0 0 0 3px transparent; transition: background .15s; }
   .dot.on { background: var(--good); }
-  h2 { scroll-margin-top: 8rem; flex-wrap: wrap; font-size: 1.05rem; margin: 2.25rem 0 .75rem; font-weight: 700; letter-spacing: -.005em;
+  h2 { scroll-margin-top: calc(var(--header-h) + 1.5rem); flex-wrap: wrap; font-size: 1.05rem; margin: 2.25rem 0 .75rem; font-weight: 700; letter-spacing: -.005em;
        display: flex; align-items: center; gap: .5rem; }
   h2:first-of-type { margin-top: 1.75rem; }
   h2 .hint { font-weight: 400; color: var(--muted); font-size: .78rem; }
@@ -45,7 +48,7 @@
   .card { min-width: 0; }
   .card .n { overflow-wrap: anywhere; font-size: 1.65rem; font-weight: 700; font-variant-numeric: tabular-nums; }
   .card .l { color: var(--muted); font-size: .74rem; text-transform: uppercase; letter-spacing: .04em; }
-  table { width: 100%; border-collapse: collapse; }
+  table { width: 100%; border-collapse: separate; border-spacing: 0; }
   th, td { text-align: left; padding: .5rem .55rem; border-bottom: 1px solid var(--border-soft);
            vertical-align: middle; }
   th { color: var(--muted); font-weight: 600; font-size: .74rem; text-transform: uppercase;
@@ -118,22 +121,51 @@
   .card-detail .n { font-size: 1rem; line-height: 1.6; }
   .card .n .muted { display: block; font-size: .78rem; font-weight: 400; }
   .card .l { margin-top: .4rem; }
-  .table-scroll { overflow-x: auto; margin-bottom: 1.5rem; border: 1px solid var(--border); border-radius: 8px; }
-  .table-scroll table { min-width: 62rem; }
-  .table-scroll th { background: var(--bg); }
+  /* Tables scroll internally (both axes) so their headers can stick: an overflow container
+     is the nearest scrollport for position:sticky, so `top: 0` pins the header row inside
+     the box while the page keeps scrolling. max-height only bites on long tables. */
+  .table-scroll { overflow: auto; max-height: min(60vh, 42rem); margin-bottom: 1.5rem;
+                  border: 1px solid var(--border); border-radius: 8px; }
+  .table-scroll table { min-width: 0; }
+  .table-scroll.wide table { min-width: 62rem; }
+  .table-scroll thead th { position: sticky; top: 0; z-index: 1; background: var(--bg); }
   .table-scroll td:first-child { overflow-wrap: anywhere; min-width: 9rem; max-width: 16rem; }
   .table-scroll tr:last-child td { border-bottom: 0; }
   .section-nav { display: flex; flex-wrap: wrap; gap: .4rem; padding-block: 1.25rem 0; }
   .section-nav a { padding: .5rem .8rem; min-height: 2.5rem; border: 1px solid var(--border); border-radius: 8px;
     background: var(--surface); color: var(--text); text-decoration: none; font-size: .85rem; }
   .section-nav a:hover { border-color: var(--accent); color: var(--accent); }
+  .section-nav a.active { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+
+  /* Client-side pager under the flood-prone tables. */
+  .pager { display: flex; align-items: center; justify-content: space-between; gap: .75rem;
+           flex-wrap: wrap; margin: -.75rem 0 1.5rem; }
+  .pager-count { font-size: .76rem; font-variant-numeric: tabular-nums; }
+  .pager-controls { display: flex; align-items: center; gap: .3rem; }
+  .pager-controls .btn { min-height: 2.25rem; min-width: 2.5rem; padding: .3rem .55rem; font-size: .8rem; }
+  .pager-status { color: var(--muted); font-size: .78rem; padding-inline: .3rem;
+                  font-variant-numeric: tabular-nums; }
+
+  /* Desktop: vertical section rail beside the content column. Below 1100px the horizontal
+     strip above still renders (the same nav element, base styles). */
+  @media (min-width: 1100px) {
+    .wrap { max-width: 1360px; display: grid; grid-template-columns: minmax(11rem, 13rem) minmax(0, 1fr);
+            column-gap: 2.5rem; align-items: start; }
+    .section-nav { position: sticky; top: calc(var(--header-h) + 1.25rem); flex-direction: column;
+                   flex-wrap: nowrap; gap: .2rem; padding: 1.75rem 1.1rem 2rem 0;
+                   border-right: 1px solid var(--border-soft); }
+    .section-nav a { border-color: transparent; background: transparent; min-height: 2.25rem; }
+    .section-nav a:hover { border-color: var(--border); }
+    .section-nav a.active { background: var(--accent-soft); border-color: var(--accent);
+                            color: var(--accent); font-weight: 600; }
+  }
   .skip-link { position: fixed; top: .5rem; left: 1rem; z-index: 100; transform: translateY(-200%);
     padding: .7rem 1rem; border-radius: 8px; background: var(--surface); }
   .skip-link:focus { transform: none; }
   .field { max-width: 100%; }
   .field input, .field select { max-width: 100%; min-height: 2.5rem; }
   .tree .node { flex-wrap: wrap; overflow-wrap: anywhere; }
-  @media (prefers-reduced-motion: reduce) { .toast { animation: none; } .dot { transition: none; } }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .toast { animation: none; } .dot { transition: none; } }
 
   @media (max-width: 600px) {
     .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
