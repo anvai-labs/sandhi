@@ -23,6 +23,7 @@
     <button class="btn" type="button" data-action="clearToken">Clear token</button>
   </form>
   <button class="btn" type="button" data-action="refresh">Refresh</button>
+  <span id="refresh-status" class="muted" role="status"></span>
   <span id="auth-status" role="status">Checking access…</span>
 </header>
 <main class="wrap">
@@ -31,6 +32,7 @@
   <a href="#access">Keys &amp; credentials</a><a href="#budget-section">Budgets</a>
   <a href="#policy-section">Policy</a><a href="#alert-section">Alerts</a><a href="#run-section">Run lookup</a>
 </nav>
+<div class="content">
 
 <h2 id="overview" tabindex="-1">Overview</h2>
 <section class="panel" id="usage" aria-label="Usage overview"></section>
@@ -110,6 +112,7 @@
   and alerts, and administrators can manage credentials and configuration. Sign out ends this
   dashboard session. Token access is available only in the explicit compatibility mode.
 </footer>
+</div>
 </main>
 <div class="toast-wrap" id="toasts" role="status" aria-live="polite"></div>
 

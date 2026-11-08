@@ -73,6 +73,7 @@ function resetAuth(token) {
   for (const controller of pending) controller.abort();
   pending.clear();
   panels.clear();
+  pagers.clear();
   for (const id of ["usage", "keys", "budgets", "alerts", "config", "policy", "run-tree"]) {
     const el = document.getElementById(id);
     el.replaceChildren();
@@ -175,10 +176,9 @@ async function loadPanel(id, path, render, permission = null) {
     ticket.updated = new Date().toLocaleTimeString();
     el.innerHTML = ticket.html;
     el.dataset.state = "ready";
-    const updated = document.createElement("p");
-    updated.className = "muted";
-    updated.textContent = "Loaded at " + ticket.updated + ". Use Refresh to update.";
-    el.prepend(updated);
+    // Per-panel "Loaded at" lines are gone: the single header status line (#refresh-status,
+    // set by refreshAll) carries the dashboard-wide refresh time. ticket.updated survives
+    // only for the stale-data error message below.
   } catch (error) {
     if (revision !== authRevision || panels.get(id) !== ticket) return;
     const stale = ticket.html && error.status !== 401 && error.status !== 403 && error.status !== 404;
@@ -204,20 +204,74 @@ function requireFields(data, arrays, objects = []) {
   }
 }
 
-function tbl(title, rows) {
-  const body = rows.map(r => `<tr><td>${esc(r.key)}</td><td class="num">${fmt(r.calls)}</td>`
+// Client-side pagination for the flood-prone tables. All rows are already in memory; the
+// pager only slices what is painted. State is keyed by table id and re-created on every
+// panel render, so a Refresh naturally lands back on page 1.
+const PAGE_SIZE = 25;
+const pagers = new Map();
+
+function tableScroll(ariaLabel, head, body, wide = false, describedBy = null, pagerBodyId = null) {
+  return `<div class="table-scroll${wide ? " wide" : ""}" role="region" aria-label="${esc(ariaLabel)}"${describedBy ? ` aria-describedby="${esc(describedBy)}"` : ""} tabindex="0"><table><thead>${head}</thead><tbody${pagerBodyId ? ` data-pager-body="${esc(pagerBodyId)}"` : ""}>${body}</tbody></table></div>`;
+}
+
+function pagedTable(id, ariaLabel, head, rows, rowHtml, empty, noun, wide = false, describedBy = null) {
+  if (rows.length <= PAGE_SIZE) {
+    return tableScroll(ariaLabel, head, rows.map(rowHtml).join("") || empty, wide, describedBy);
+  }
+  const state = { ariaLabel, head, rows, rowHtml, empty, noun, page: 0 };
+  pagers.set(id, state);
+  return tableScroll(ariaLabel, head, pageRows(state), wide, describedBy, id) + pagerChrome(id, state);
+}
+
+function pageRows(state) {
+  const start = state.page * PAGE_SIZE;
+  return state.rows.slice(start, start + PAGE_SIZE).map(state.rowHtml).join("");
+}
+
+function pagerChrome(id, state) {
+  const pages = Math.ceil(state.rows.length / PAGE_SIZE);
+  const start = state.page * PAGE_SIZE + 1;
+  const end = Math.min(state.rows.length, start + PAGE_SIZE - 1);
+  const btn = (label, target, disabled, aria) =>
+    `<button class="btn" type="button" data-action="pager" data-pager="${esc(id)}" data-target="${target}"${disabled ? " disabled" : ""} aria-label="${aria}">${label}</button>`;
+  return `<div class="pager" data-pager-bar="${esc(id)}"><span class="pager-count muted">`
+    + `${fmt(start)}–${fmt(end)} of ${fmt(state.rows.length)} ${esc(state.noun)}</span>`
+    + `<div class="pager-controls">${btn("«", 0, state.page === 0, "First page")}`
+    + `${btn("‹", state.page - 1, state.page === 0, "Previous page")}`
+    + `<span class="pager-status" aria-live="polite">page ${state.page + 1} of ${pages}</span>`
+    + `${btn("›", state.page + 1, state.page >= pages - 1, "Next page")}`
+    + `${btn("»", pages - 1, state.page >= pages - 1, "Last page")}</div></div>`;
+}
+
+function paintPager(id) {
+  const state = pagers.get(id);
+  if (!state) return;
+  const body = document.querySelector(`[data-pager-body="${CSS.escape(id)}"]`);
+  if (body) body.innerHTML = pageRows(state);
+  const bar = document.querySelector(`[data-pager-bar="${CSS.escape(id)}"]`);
+  if (bar) bar.outerHTML = pagerChrome(id, state);
+}
+
+const ATTRIBUTION_HEAD = `<tr><th>key</th><th class="num">calls</th>`
+  + `<th class="num">in</th><th class="num">out</th><th class="num">cache write</th>`
+  + `<th class="num">cache read</th><th>cache reporting coverage</th><th class="num" title="ADR-0005 D4: the quantity budgets `
+  + `are enforced on — fresh input + cache split + output (+ unfolded reasoning)">billable`
+  + `</th><th class="num" title="p50 / p95 milliseconds over the sampled calls that reported a `
+  + `duration — approximate by design; tokens above are exact">latency</th></tr>`;
+
+function attributionRow(r) {
+  return `<tr><td>${esc(r.key)}</td><td class="num">${fmt(r.calls)}</td>`
     + `<td class="num">${fmt(r.tokens_in)}</td><td class="num">${fmt(r.tokens_out)}</td>`
     + `<td class="num">${fmt(r.cache_creation_tokens)}</td><td class="num">${cacheRead(r)}</td>`
     + `<td>${cacheCoverageLabel(r)}</td>`
     + `<td class="num">${fmt(r.billable_tokens)}</td>`
-    + `<td class="num">${lat(r.latency)}</td></tr>`).join("");
-  return `<h3>${title}</h3><div class="table-scroll" role="region" aria-label="${esc(title)} attribution" aria-describedby="table-help" tabindex="0"><table><thead><tr><th>key</th><th class="num">calls</th>`
-    + `<th class="num">in</th><th class="num">out</th><th class="num">cache write</th>`
-    + `<th class="num">cache read</th><th>cache reporting coverage</th><th class="num" title="ADR-0005 D4: the quantity budgets `
-    + `are enforced on — fresh input + cache split + output (+ unfolded reasoning)">billable`
-    + `</th><th class="num" title="p50 / p95 milliseconds over the sampled calls that reported a `
-    + `duration — approximate by design; tokens above are exact">latency</th></tr></thead>`
-    + `<tbody>${body || '<tr><td colspan=9>no data yet</td></tr>'}</tbody></table></div>`;
+    + `<td class="num">${lat(r.latency)}</td></tr>`;
+}
+
+function tbl(id, title, noun, rows) {
+  return `<h3>${esc(title)}</h3>`
+    + pagedTable(id, `${title} attribution`, ATTRIBUTION_HEAD, rows, attributionRow,
+      '<tr><td colspan=9>no data yet</td></tr>', noun, true, "table-help");
 }
 
 function loadUsage() {
@@ -230,35 +284,37 @@ function loadUsage() {
        ["latency p50/p95", lat(t.latency)]]
       .map(([l, n]) => `<div class="card${l === "cache reporting coverage" || l === "latency p50/p95" ? " card-detail" : ""}"><div class="n">${n}</div><div class="l">${l}</div></div>`).join("")
       + `</div><p class="muted">Cache read is reported cache-read input (origin or explicit caller observation), not proof of backend reuse; cache write is an explicit accounting category, not proof of new KV state. Counts are neutral tokens, not prices or savings. Reporting coverage counts calls in each displayed aggregate; it is not a cache hit rate. Mixed totals retain legacy numeric accounting.</p><h3>Attribution</h3><p id="table-help" class="muted">On narrow screens, scroll each table horizontally to see every column. Keyboard users can focus a table and use the arrow keys.</p><div id="tables">`
-      + tbl("By user (subject)", d.by_subject || [])
-      + tbl("By team (group)", d.by_group || [])
-      + tbl("By provider", d.by_provider || [])
-      + tbl("By model", d.by_model || [])
+      + tbl("attr-subject", "By user (subject)", "subjects", d.by_subject || [])
+      + tbl("attr-group", "By team (group)", "groups", d.by_group || [])
+      + tbl("attr-provider", "By provider", "providers", d.by_provider || [])
+      + tbl("attr-model", "By model", "models", d.by_model || [])
       + `</div>`;
   });
 }
 
 // Keys: masked virtual keys + vault entries. Never a secret. Revoke/add are admin-gated.
-function keysView(d) {
-  const vkeys = (d.virtual_keys || []).map(k => {
-    const status = k.revoked_at ? "revoked" : "active";
-    const disabled = status === "revoked" ? "disabled" : "";
-    return `<tr><td><code>${esc(k.id)}</code></td><td>${orDash(k.subject)}</td><td>${orDash(k.group)}</td>`
-      + `<td><code>${esc(k.upstream_ref)}</code></td><td>${(k.models||[]).map(esc).join(", ")||'<span class="muted">any</span>'}</td>`
-      + `<td><span class="badge ${status}">${status}</span></td><td>${humanExpiry(k.expires_at)}</td>`
-      + `<td><button class="btn danger" data-needs-token ${disabled} data-revoked="${!!k.revoked_at}" data-action="revokeVkey" data-id="${esc(k.id)}">Revoke</button></td></tr>`;
-  }).join("");
-  const vault = (d.vault || []).map(e => `<tr><td><code>${esc(e.credential_id)}</code></td>`
+function vkeyRow(k) {
+  const status = k.revoked_at ? "revoked" : "active";
+  const disabled = status === "revoked" ? "disabled" : "";
+  return `<tr><td><code>${esc(k.id)}</code></td><td>${orDash(k.subject)}</td><td>${orDash(k.group)}</td>`
+    + `<td><code>${esc(k.upstream_ref)}</code></td><td>${(k.models||[]).map(esc).join(", ")||'<span class="muted">any</span>'}</td>`
+    + `<td><span class="badge ${status}">${status}</span></td><td>${humanExpiry(k.expires_at)}</td>`
+    + `<td><button class="btn danger" data-needs-token ${disabled} data-revoked="${!!k.revoked_at}" data-action="revokeVkey" data-id="${esc(k.id)}">Revoke</button></td></tr>`;
+}
+function vaultRow(e) {
+  return `<tr><td><code>${esc(e.credential_id)}</code></td>`
     + `<td>${esc(e.scheme)}</td><td>${orDash(e.base_url)}</td>`
     + `<td><span class="badge ${e.status === "active" ? "active" : "revoked"}">${esc(e.status)}</span></td>`
-    + `<td><button class="btn danger" data-needs-token data-action="revokeCred" data-provider="${esc(e.provider)}" data-label="${esc(e.label)}">Revoke</button></td></tr>`).join("");
+    + `<td><button class="btn danger" data-needs-token data-action="revokeCred" data-provider="${esc(e.provider)}" data-label="${esc(e.label)}">Revoke</button></td></tr>`;
+}
+function keysView(d) {
+  const vault = (d.vault || []).map(vaultRow).join("");
   return `<h3>Virtual keys (masked — secrets are never stored)</h3>`
-    + `<table><thead><tr><th>id</th><th>subject</th><th>group</th><th>upstream</th><th>models</th><th>status</th><th>expires</th><th></th></tr></thead>`
-    + `<tbody>${vkeys || '<tr><td colspan=8>no virtual keys</td></tr>'}</tbody></table>`
+    + pagedTable("vkeys", "Virtual keys", `<tr><th>id</th><th>subject</th><th>group</th><th>upstream</th><th>models</th><th>status</th><th>expires</th><th></th></tr>`,
+      d.virtual_keys || [], vkeyRow, '<tr><td colspan=8>no virtual keys</td></tr>', "keys", true)
     + `<h3>Provider credentials (vault metadata)</h3>`
-    + `<table><thead><tr><th>credential</th><th>scheme</th><th>base url</th><th>status</th><th></th></tr></thead>`
-    + `<tbody>${vault || '<tr><td colspan=5>no provider credentials</td></tr>'}</tbody></table>`;
-
+    + tableScroll("Provider credentials", `<tr><th>credential</th><th>scheme</th><th>base url</th><th>status</th><th></th></tr>`,
+      vault || '<tr><td colspan=5>no provider credentials</td></tr>');
 }
 function loadKeys() {
   return loadPanel("keys", "/dashboard/api/keys", d => {
@@ -323,8 +379,8 @@ function budgetsView(d) {
       + `<td style="min-width:8rem"><div class="bar ${cls}"><span style="width:${pct}%"></span></div></td>`
       + `<td>${esc(b.window)}</td><td>${esc(b.policy)}</td></tr>`;
   }).join("");
-  return `<table><thead><tr><th>scope</th><th class="num">spent / limit (tokens)</th><th>utilization</th><th>window</th><th>policy</th></tr></thead>`
-    + `<tbody>${rows || '<tr><td colspan=5>no budgets configured</td></tr>'}</tbody></table>`;
+  return tableScroll("Budgets", `<tr><th>scope</th><th class="num">spent / limit (tokens)</th><th>utilization</th><th>window</th><th>policy</th></tr>`,
+    rows || '<tr><td colspan=5>no budgets configured</td></tr>');
 }
 function loadBudgets() {
   return loadPanel("budgets", "/dashboard/api/budgets", d => {
@@ -357,13 +413,12 @@ function alertRow(a) {
 }
 function alertsView(d) {
   const fired = (d.fired || []).map(alertRow).join("");
-  const rules = (d.rules || []).map(alertRow).join("");
+  const head = `<tr><th>id</th><th>scope</th><th class="num">threshold</th><th>channel</th><th>last fired</th><th></th></tr>`;
   return `<h3>Recently fired</h3>`
-    + `<table><thead><tr><th>id</th><th>scope</th><th class="num">threshold</th><th>channel</th><th>last fired</th><th></th></tr></thead>`
-    + `<tbody>${fired || '<tr><td colspan=6>none fired</td></tr>'}</tbody></table>`
+    + tableScroll("Recently fired alerts", head, fired || '<tr><td colspan=6>none fired</td></tr>')
     + `<h3 style="margin-top:1.5rem">All configured rules</h3>`
-    + `<table><thead><tr><th>id</th><th>scope</th><th class="num">threshold</th><th>channel</th><th>last fired</th><th></th></tr></thead>`
-    + `<tbody>${rules || '<tr><td colspan=6>no rules configured</td></tr>'}</tbody></table>`;
+    + pagedTable("alert-rules", "All configured alert rules", head, d.rules || [], alertRow,
+      '<tr><td colspan=6>no rules configured</td></tr>', "rules");
 }
 function loadAlerts() {
   return loadPanel("alerts", "/dashboard/api/alerts", d => {
@@ -384,8 +439,9 @@ const actionBadge = a => {
 };
 function configPlanTable(title, rows, cols) {
   const body = rows.map(r => `<tr>${cols.map(c => `<td>${orDash(r[c])}</td>`).join("")}<td>${actionBadge(r.action)}</td></tr>`).join("");
-  return `<h3>${title}</h3><table><thead><tr>${cols.map(c => `<th>${c}</th>`).join("")}<th>plan</th></tr></thead>`
-    + `<tbody>${body || `<tr><td colspan=${cols.length + 1}>none declared</td></tr>`}</tbody></table>`;
+  return `<h3>${esc(title)}</h3>`
+    + tableScroll(title, `<tr>${cols.map(c => `<th>${c}</th>`).join("")}<th>plan</th></tr>`,
+      body || `<tr><td colspan=${cols.length + 1}>none declared</td></tr>`);
 }
 function loadPolicy() {
   return loadPanel("policy", "/admin/policy", data => {
@@ -429,7 +485,7 @@ function loadTopology() {
       `<tr><td>${esc(p.name)}</td><td>${esc(p.kind || "")}</td><td>${esc(p.endpoint || "")}</td></tr>`).join("");
     return `<p>Gateway <strong>${esc(dep.gateway_host)}</strong> — ${esc(dep.public_name || "no public name")}
       (TLS ${esc(dep.tls_port ?? "-")}, HTTP ${esc(dep.http_port ?? "-")})</p>
-      <div class="table-scroll"><table><thead><tr><th>Peer</th><th>Reach</th><th>Endpoint</th></tr></thead>
+      <div class="table-scroll wide"><table><thead><tr><th>Peer</th><th>Reach</th><th>Endpoint</th></tr></thead>
       <tbody>${peers || `<tr><td colspan=3>no peers declared</td></tr>`}</tbody></table></div>`;
   }, "read");
 }
@@ -524,7 +580,8 @@ async function refreshAll() {
     document.getElementById("auth-status").textContent = "Access verification unavailable. Retry with Refresh.";
     return;
   }
-  return Promise.all([loadUsage(), loadKeys(), loadBudgets(), loadAlerts(), loadConfig(), loadPolicy(), loadTopology()]);
+  return Promise.all([loadUsage(), loadKeys(), loadBudgets(), loadAlerts(), loadConfig(), loadPolicy(), loadTopology()])
+    .then(() => { document.getElementById("refresh-status").textContent = "Updated " + new Date().toLocaleTimeString() + " — use Refresh to update."; });
 }
 
 // Attribute values are inert data, never JavaScript source. Only this fixed action table
@@ -540,6 +597,14 @@ const actions = {
   revokeCred: button => revokeCred(button.dataset.provider, button.dataset.label),
   ackAlert: button => ackAlert(button.dataset.id),
   mintVkey, addCredential, setBudget, applyConfig, lookupRun,
+  pager: button => {
+    const id = button.dataset.pager;
+    const state = pagers.get(id);
+    if (!state) return;
+    const pages = Math.max(1, Math.ceil(state.rows.length / PAGE_SIZE));
+    state.page = Math.min(pages - 1, Math.max(0, Number(button.dataset.target) || 0));
+    paintPager(id);
+  },
 };
 const busyButtons = new WeakSet();
 document.addEventListener("click", async event => {
@@ -553,5 +618,49 @@ document.addEventListener("click", async event => {
 });
 window.addEventListener("pagehide", () => { tokenEl.value = ""; ssoSession = null; clearTimeout(expiryTimer); resetAuth(""); });
 window.addEventListener("pageshow", event => { if (event.persisted) refreshAll(); });
+
+// Section nav highlighting: the nav link for the section currently under the sticky header
+// gets aria-current + .active. The observer watches a band at the top of the viewport, so
+// "active" means "the section you are reading", not "anywhere on screen". Dependency-free.
+const sectionLinks = new Map();
+for (const link of document.querySelectorAll(".section-nav a")) sectionLinks.set(link.hash.slice(1), link);
+const sectionOrder = [...sectionLinks.keys()];
+let activeSection = null;
+function markActiveSection() {
+  for (const [id, link] of sectionLinks) {
+    const on = id === activeSection;
+    link.classList.toggle("active", on);
+    if (on) link.setAttribute("aria-current", "true"); else link.removeAttribute("aria-current");
+  }
+}
+if (typeof IntersectionObserver === "function" && sectionOrder.length) {
+  activeSection = sectionOrder[0];
+  markActiveSection();
+  const inBand = new Map();
+  const sectionObserver = new IntersectionObserver(entries => {
+    for (const entry of entries) inBand.set(entry.target.id, entry.isIntersecting);
+    // Document order wins when several headings share the band; mid-scroll blanks keep the
+    // previous highlight rather than flickering to none.
+    for (const id of sectionOrder) {
+      if (inBand.get(id)) { if (activeSection !== id) { activeSection = id; markActiveSection(); } return; }
+    }
+  }, { rootMargin: "0px 0px -70% 0px" });
+  for (const id of sectionOrder) {
+    const heading = document.getElementById(id);
+    if (heading) sectionObserver.observe(heading);
+  }
+  for (const link of sectionLinks.values()) {
+    link.addEventListener("click", () => { activeSection = link.hash.slice(1); markActiveSection(); });
+  }
+  // The observer band never reaches the last short sections pinned above the footer, so a
+  // scroll pinned at page bottom always means the final section is the one being read.
+  window.addEventListener("scroll", () => {
+    const last = sectionOrder[sectionOrder.length - 1];
+    if (window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 1 && activeSection !== last) {
+      activeSection = last;
+      markActiveSection();
+    }
+  }, { passive: true });
+}
 refreshTokenState();
 refreshAll();
