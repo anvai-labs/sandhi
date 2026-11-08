@@ -245,7 +245,7 @@ function keysView(d) {
     const disabled = status === "revoked" ? "disabled" : "";
     return `<tr><td><code>${esc(k.id)}</code></td><td>${orDash(k.subject)}</td><td>${orDash(k.group)}</td>`
       + `<td><code>${esc(k.upstream_ref)}</code></td><td>${(k.models||[]).map(esc).join(", ")||'<span class="muted">any</span>'}</td>`
-      + `<td><span class="badge ${status}">${status}</span></td><td>${orDash(k.expires_at)}</td>`
+      + `<td><span class="badge ${status}">${status}</span></td><td>${humanExpiry(k.expires_at)}</td>`
       + `<td><button class="btn danger" data-needs-token ${disabled} data-revoked="${!!k.revoked_at}" data-action="revokeVkey" data-id="${esc(k.id)}">Revoke</button></td></tr>`;
   }).join("");
   const vault = (d.vault || []).map(e => `<tr><td><code>${esc(e.credential_id)}</code></td>`
@@ -409,9 +409,20 @@ function loadPolicy() {
   }, "read");
 }
 
+function humanExpiry(iso) {
+  if (!iso) return "—";
+  const then = new Date(iso).getTime();
+  if (!Number.isFinite(then)) return esc(String(iso).slice(0, 10));
+  const days = Math.round((then - Date.now()) / 86400000);
+  if (days > 1) return `in ${days}d`;
+  if (days === 1) return "in 1d";
+  if (days >= 0) return "soon";
+  return new Date(then).toISOString().slice(0, 10);
+}
+
 function loadTopology() {
   return loadPanel("topology", "/dashboard/api/topology", data => {
-    requireFields(data, ["deployment", "peers"]);
+    requireFields(data, ["peers"], ["deployment"]);
     const dep = data.deployment;
     if (typeof dep.gateway_host !== "string") throw new ApiError(502, "Incomplete topology");
     const peers = (data.peers || []).map(p =>
