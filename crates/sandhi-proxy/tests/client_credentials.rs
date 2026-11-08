@@ -386,6 +386,26 @@ fn registry_rejects_empty_and_blank_models() {
 }
 
 #[test]
+fn registry_rejects_an_upstream_prefixed_budget_scope() {
+    // ADR-0015: `upstream:` is the gateway's reserved back-leg scope prefix — a credential
+    // scoped there would double-count the cap. Fatal at load, like every malformed entry.
+    let mut e = entry();
+    e.budget_scope = Some("upstream:openai".into());
+    let error = match ClientCredentialRegistry::load(&registry_file(&[e])) {
+        Err(error) => error,
+        Ok(_) => panic!("reserved prefix must be fatal to load"),
+    };
+    assert!(
+        error.contains("reserved 'upstream:' prefix"),
+        "error must name the reserved prefix: {error}"
+    );
+    // The same registry loads cleanly with a front-leg scope.
+    let mut ok = entry();
+    ok.budget_scope = Some("victor:mac".into());
+    assert!(ClientCredentialRegistry::load(&registry_file(&[ok])).is_ok());
+}
+
+#[test]
 fn registry_rejects_world_readable_file() {
     let path = registry_file(&[entry()]);
     use std::os::unix::fs::PermissionsExt;

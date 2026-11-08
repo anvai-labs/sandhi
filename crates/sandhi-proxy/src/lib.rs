@@ -2538,7 +2538,18 @@ async fn handle_with_policy_receipt(
         .map(|estimator| estimator.estimate(provider.slug(), &request.model, input_len))
         .unwrap_or_else(|_| baseline_estimate(input_len));
     let (ceiling, effective_max) = reservation_ceiling(&request, estimated_input);
+    // Back-leg cap scope (ADR-0015): `upstream:{provider-slug}`, per resolved upstream only —
+    // never per-model, never hierarchical (owner-approved convention).
+    let upstream_scope = format!("upstream:{}", provider.slug());
     if let Some(owned) = state.buffered_accounting.get() {
+        // Tracked (buffered) accounting admits its primary lease inside the jobs machinery, so
+        // the back-leg lease is taken here, before hand-off; `buffered::handle` releases it on
+        // every pre-dispatch refusal and settles it with the same actual at finalize.
+        let upstream_reservation =
+            match reserve_upstream_budget(&state, &upstream_scope, ceiling, dialect).await {
+                Ok(reservation) => reservation,
+                Err(response) => return response,
+            };
         return settlement::buffered::handle(
             Arc::clone(&state),
             Arc::clone(owned),
@@ -2554,6 +2565,8 @@ async fn handle_with_policy_receipt(
             ceiling,
             effective_max,
             input_len,
+            upstream_scope,
+            upstream_reservation,
             buffered_deadline.map(|d| d.duration()),
             streaming_deadline,
         )
@@ -2601,8 +2614,42 @@ async fn handle_with_policy_receipt(
         return draining_error(dialect);
     };
     let capped = pending.capped;
+    // A front denial is already determined at reserve time — refuse BEFORE the back-leg
+    // reserve so a front denial never costs a back lease (ADR-0015 D2). `pending` still owns
+    // the outcome, but a `Denied` admission carries no lease, so its eventual `Drop` is a
+    // no-op.
+    if matches!(pending.admission, Some(Admission::Denied)) {
+        // A denial is the one enforcement outcome an operator must be able to see without
+        // reading the sink; `scope` is an operator-set budget name, not caller-supplied.
+        tracing::warn!(
+            scope = %scope,
+            ceiling,
+            provider = provider.slug(),
+            "reservation denied: budget exhausted"
+        );
+        // Labelled by POLICY, never by scope: a scope may be `vk:<id>`, which is per-key and
+        // therefore unbounded (TD-0011 D2).
+        state.metrics.record_denied(match policy {
+            Policy::Block => "block",
+            Policy::Warn => "warn",
+        });
+        return ingress_error(dialect, StatusCode::TOO_MANY_REQUESTS, "budget exhausted");
+    }
+    // Back-leg admission (ADR-0015): the SAME ceiling against `upstream:{provider}`, reserved
+    // while `pending` still owns the front lease — a cancellation of this future (client
+    // disconnect, drain) or a refusal below rolls the front lease back through
+    // `PendingAdmission`'s Drop, so no bare `Admission` ever outlives its rollback protection.
+    // The hold releases the back lease exactly once on every path between here and
+    // `RequestAccounting`, which settles it with the same actual at finalize.
+    let upstream_reservation =
+        match reserve_upstream_budget(&state, &upstream_scope, ceiling, dialect).await {
+            Ok(reservation) => reservation,
+            // Draining, or the upstream scope refused: `pending`'s Drop releases the front lease.
+            Err(response) => return response,
+        };
     let admission = pending.admission.take().expect("owned admission result");
     drop(pending);
+    let mut upstream_hold = UpstreamHold::new(Arc::clone(&state), upstream_reservation);
     let inject_output_bound = capped && request.max_output_tokens.is_none();
     if inject_output_bound {
         request.max_output_tokens = Some(effective_max);
@@ -2628,23 +2675,9 @@ async fn handle_with_policy_receipt(
             state.metrics.record_admitted_unmetered();
             None
         }
-        Admission::Denied => {
-            // A denial is the one enforcement outcome an operator must be able to see without
-            // reading the sink; `scope` is an operator-set budget name, not caller-supplied.
-            tracing::warn!(
-                scope = %scope,
-                ceiling,
-                provider = provider.slug(),
-                "reservation denied: budget exhausted"
-            );
-            // Labelled by POLICY, never by scope: a scope may be `vk:<id>`, which is per-key and
-            // therefore unbounded (TD-0011 D2).
-            state.metrics.record_denied(match policy {
-                Policy::Block => "block",
-                Policy::Warn => "warn",
-            });
-            return ingress_error(dialect, StatusCode::TOO_MANY_REQUESTS, "budget exhausted");
-        }
+        // Checked before the back-leg reserve above, so a front denial can never reach here
+        // holding a back lease.
+        Admission::Denied => unreachable!("front denial refuses before the back-leg reserve"),
     };
 
     let mut accounting = RequestAccounting::new(
@@ -2659,6 +2692,11 @@ async fn handle_with_policy_receipt(
     accounting.stream_body_lifetime = body_lifetime;
     accounting.input_len = input_len;
     accounting.operation = Some(operation);
+    // ADR-0015: the back-leg lease moves into the per-call accounting, which settles it with the
+    // same actual at finalize (synchronously in `finalize_owned`, where the primary settles via
+    // the canonical jobs path). The now-empty hold drops without settling anything.
+    let upstream_reservation = upstream_hold.take();
+    accounting.with_upstream_budget(upstream_scope, upstream_reservation);
     // TD-0021 P4 (D1): the METER records the LOGICAL call once — a repeat of a settled
     // `(vkey, idempotency-key)` inside the window has its duplicate usage event dropped
     // (the original stands). ENFORCEMENT still counts the physical call: the retry really
@@ -3140,6 +3178,101 @@ fn ledger_failure_admission(policy: Policy) -> Admission {
     }
 }
 
+/// Reserve the back-leg scope (`upstream:{provider}`, ADR-0015) with the SAME ceiling as the
+/// front scope. The LEGACY caller invokes this while its front-scope `PendingAdmission` still
+/// owns the front lease — a cancellation or `Err` return rolls it back through that Drop —
+/// and only after the front-denial check, so a front denial short-circuits without ever
+/// taking a back lease. The BUFFERED caller invokes it before its own admission machinery
+/// runs, so it holds no front lease here at all.
+///
+/// Ownership transfer on success: the returned `Option<Reservation>` (with the scope string)
+/// moves into an `UpstreamHold` in the caller, then into `RequestAccounting`, which settles it
+/// with the same actual at finalize — the helper never settles.
+///
+/// `Ok(None)` is the D6 fail-open admit (`Warn` upstream scope on a ledger backend error):
+/// admitted unmetered — logged and counted, never silent. `Err` covers gateway draining and an
+/// exhausted `Block` upstream scope; both render the enclosed dialect-shaped response. No lease
+/// was taken on `Err`, so the caller returns it without any back-leg cleanup of its own.
+#[allow(clippy::result_large_err)] // axum::Response is intentionally large; this is the idiomatic shape.
+async fn reserve_upstream_budget(
+    state: &Arc<ProxyState>,
+    upstream_scope: &str,
+    ceiling: u64,
+    dialect: IngressDialect,
+) -> Result<Option<Reservation>, Response> {
+    let policy = scope_policy(state, upstream_scope);
+    let Some(mut pending) = reserve_budget(state, upstream_scope, ceiling, policy).await else {
+        return Err(draining_error(dialect));
+    };
+    match pending.admission.take() {
+        Some(Admission::Leased(reservation)) => Ok(Some(reservation)),
+        Some(Admission::Unmetered) => {
+            tracing::warn!(
+                scope = %upstream_scope,
+                "upstream scope admitted WITHOUT a lease (fail-open)"
+            );
+            state.metrics.record_admitted_unmetered();
+            Ok(None)
+        }
+        Some(Admission::Denied) => {
+            // An exhausted back-leg cap is an operator-visible enforcement outcome, exactly
+            // like a front denial.
+            tracing::warn!(
+                scope = %upstream_scope,
+                ceiling,
+                "reservation denied: upstream budget exhausted"
+            );
+            // Labelled by POLICY, never by scope: a scope may be `vk:<id>`, which is per-key
+            // and therefore unbounded (TD-0011 D2).
+            state.metrics.record_denied(match policy {
+                Policy::Block => "block",
+                Policy::Warn => "warn",
+            });
+            Err(ingress_error(
+                dialect,
+                StatusCode::TOO_MANY_REQUESTS,
+                "budget exhausted",
+            ))
+        }
+        // `reserve_budget` always yields an admission once it returns a `PendingAdmission`
+        // (the blocking result or the D6 fallback); `None` would mean cancelled mid-task.
+        None => Err(draining_error(dialect)),
+    }
+}
+
+/// RAII hold over the back-leg lease between upstream admission and `RequestAccounting`
+/// construction (ADR-0015). Every early-return path in between releases the lease exactly
+/// once, mirroring [`PendingAdmission`]'s rollback (ADR-0005 D2) — settle 0, blocking, under
+/// the ledger lock.
+pub(crate) struct UpstreamHold {
+    state: Arc<ProxyState>,
+    reservation: Option<Reservation>,
+}
+
+impl UpstreamHold {
+    pub(crate) fn new(state: Arc<ProxyState>, reservation: Option<Reservation>) -> Self {
+        Self { state, reservation }
+    }
+
+    /// Hand the lease to the per-call accounting, which settles it at finalize. After this the
+    /// hold is empty and its `Drop` is a no-op.
+    pub(crate) fn take(&mut self) -> Option<Reservation> {
+        self.reservation.take()
+    }
+}
+
+impl Drop for UpstreamHold {
+    fn drop(&mut self) {
+        if let Some(reservation) = self.reservation.take() {
+            blocking_section(|| {
+                if let Ok(mut ledger) = self.state.ledger.lock() {
+                    ledger.settle(&reservation, 0);
+                }
+            });
+        }
+    }
+}
+
 /// Mark a synchronous correctness operation as blocking when running on Tokio's multithreaded
 /// runtime. Tests and embedders using a current-thread/no Tokio runtime execute inline instead;
 /// `block_in_place` would panic there.
@@ -3168,6 +3301,12 @@ struct RequestAccounting {
     /// The held lease to settle by id (ADR-0005 D2). `None` when the scope admitted fail-open with
     /// no durable lease (D6) — nothing to settle.
     reservation: Option<Reservation>,
+    /// Back-leg scope (`upstream:{provider}`, ADR-0015) this call was also admitted against.
+    /// `None` when the call never took a back-leg lease (count-tokens, embedders, tests).
+    upstream_scope: Option<String>,
+    /// The back-leg lease, settled with the SAME actual as the primary at finalize (ADR-0015).
+    /// `None` when the upstream scope admitted fail-open (D6) or no lease was taken.
+    upstream_reservation: Option<Reservation>,
     provider: String,
     model: String,
     /// UTF-8 request-body length paired with the final event for estimate calibration.
@@ -3226,6 +3365,8 @@ impl RequestAccounting {
             state,
             scope,
             reservation,
+            upstream_scope: None,
+            upstream_reservation: None,
             provider,
             model: request.model.clone(),
             input_len: 0,
@@ -3241,6 +3382,13 @@ impl RequestAccounting {
             otel_span,
             finish_reason: None,
         }
+    }
+
+    /// Attach the back-leg scope + lease (ADR-0015). Builder-style, so the four existing
+    /// `new(...)` call sites without an upstream budget stay untouched.
+    fn with_upstream_budget(&mut self, scope: String, reservation: Option<Reservation>) {
+        self.upstream_scope = Some(scope);
+        self.upstream_reservation = reservation;
     }
 
     /// The bounded label set for this call (TD-0011 D2).
@@ -3301,12 +3449,12 @@ impl RequestAccounting {
 
     /// Evaluate threshold alerts against the reconciled spend. Best-effort: any failure (registry
     /// poisoned, store unavailable) is logged and dropped — never propagated to the caller.
-    fn fire_alerts(&self, spent: u64, limit: Option<u64>) {
+    fn fire_alerts(&self, scope: &str, spent: u64, limit: Option<u64>) {
         let Some(registry) = &self.state.alerts else {
             return;
         };
         let fired = match registry.lock() {
-            Ok(mut reg) => reg.evaluate(&self.scope, spent, limit),
+            Ok(mut reg) => reg.evaluate(scope, spent, limit),
             Err(_) => return,
         };
         if let Some(store) = &self.state.alert_store {
@@ -3372,15 +3520,22 @@ impl RequestAccounting {
             }
         }
         // Settle the lease by id (idempotent, ADR-0005 D2), then capture the post-settle spent for
-        // the alert subsystem. Alerts evaluate only on a measured call.
+        // the alert subsystem. Alerts evaluate only on a measured call. The back-leg lease
+        // (ADR-0015) settles under the same lock with the SAME actual — one call, one quantity,
+        // charged to both scopes. No second overshoot observation: overshoot is a property of the
+        // call and is already counted once, on the primary scope.
         let mut dedup_reused = false;
-        let spent_after = blocking_section(|| {
+        let (spent_after, upstream_spent_after) = blocking_section(|| {
             let mut spent_after: Option<u64> = None;
+            let mut upstream_spent_after: Option<u64> = None;
             if let Ok(mut ledger) = self.state.ledger.lock() {
                 // TD-0021 P4 (D1): settle-then-record under one lock. A repeat arriving
                 // between this call's admission and settlement finds the record only after
                 // it exists — the insert is the linearization point.
                 if let Some(reservation) = &self.reservation {
+                    ledger.settle(reservation, actual);
+                }
+                if let Some(reservation) = &self.upstream_reservation {
                     ledger.settle(reservation, actual);
                 }
                 if let Some((vkey, idem_key)) = &self.dedup {
@@ -3393,9 +3548,12 @@ impl RequestAccounting {
                 }
                 if measured {
                     spent_after = Some(ledger.spent(&self.scope));
+                    if let Some(scope) = &self.upstream_scope {
+                        upstream_spent_after = Some(ledger.spent(scope));
+                    }
                 }
             }
-            spent_after
+            (spent_after, upstream_spent_after)
         });
         if dedup_reused {
             // D1: the repeat is the same LOGICAL call — its usage event is a duplicate
@@ -3420,7 +3578,18 @@ impl RequestAccounting {
                 .lock()
                 .ok()
                 .and_then(|budgets| budgets.get(&self.scope).map(|spec| spec.limit_tokens));
-            self.fire_alerts(spent, limit);
+            self.fire_alerts(&self.scope, spent, limit);
+        }
+        // ADR-0015: the upstream scope alerts against its own configured threshold, reusing the
+        // same helper and budget-metadata lookup as the primary scope.
+        if let (Some(scope), Some(spent)) = (&self.upstream_scope, upstream_spent_after) {
+            let limit = self
+                .state
+                .budgets
+                .lock()
+                .ok()
+                .and_then(|budgets| budgets.get(scope).map(|spec| spec.limit_tokens));
+            self.fire_alerts(scope, spent, limit);
         }
         self.emit_usage(&usage, actual, false);
     }
@@ -3484,18 +3653,26 @@ impl RequestAccounting {
             .execution
             .into_settlement(usage.clone())
             .with_cache_read_weight(self.state.cache_read_weight_bp);
+        let actual = if measured {
+            sandhi_core::billable_weighted(&usage, self.state.cache_read_weight_bp)
+        } else {
+            0
+        };
+        // ADR-0015: the back-leg lease settles SYNCHRONOUSLY here, with the same actual — the
+        // jobs machinery carries only the primary scope, so the `upstream:{provider}` lease has
+        // no canonical async path of its own. `settle` is idempotent by lease id (ADR-0005 D2),
+        // and a crash before this point leaves the lease to TTL reclaim, mirroring D2.
+        if let Some(reservation) = &self.upstream_reservation {
+            blocking_section(|| {
+                if let Ok(mut ledger) = self.state.ledger.lock() {
+                    ledger.settle(reservation, actual);
+                }
+            });
+        }
         let submitted = owned
             .obligation
             .submit(settlement::jobs::Work::Settle(pending));
-        self.emit_usage(
-            &usage,
-            if measured {
-                sandhi_core::billable_weighted(&usage, self.state.cache_read_weight_bp)
-            } else {
-                0
-            },
-            true,
-        );
+        self.emit_usage(&usage, actual, true);
         let Ok(ticket) = submitted else {
             return false;
         };
@@ -5008,5 +5185,345 @@ fn reasoning_survives_event_and_partial_conversion() {
         let partial = partial_usage(Some(reported_parts(&usage)), 0);
         assert_eq!(sandhi_core::billable(&partial), 140 + thoughts);
         assert_eq!(partial.reasoning_included, Some(false));
+    }
+}
+
+#[cfg(test)]
+mod upstream_budget_tests {
+    //! ADR-0015: back-leg (`upstream:{provider}`) budget admission and settlement. The same
+    //! call holds TWO leases — the front scope (`group:`/`vk:`/custom) and the resolved
+    //! upstream's per-provider scope — both reserved at the same ceiling and both settled with
+    //! the same measured actual.
+
+    use super::*;
+    use async_trait::async_trait;
+    use axum::http::Request;
+    use sandhi_core::{ChatResponseV1, InMemorySink, KeyStore, Window};
+    use sandhi_providers::{ChatEventStream, ChatProvider};
+    use tower::ServiceExt;
+
+    const FRONT_SCOPE: &str = "group:platform";
+    const UPSTREAM_SCOPE: &str = "upstream:echo";
+
+    fn state_with_echo(
+        sink: Arc<InMemorySink>,
+        ledger: ProxyLedger,
+        tokens: (u64, u64),
+    ) -> Arc<ProxyState> {
+        let keys = KeyStore::new();
+        keys.insert(VirtualKey {
+            id: "vk-test".into(),
+            group_id: Some("platform".into()),
+            upstream_ref: "echo".into(),
+            ..Default::default()
+        });
+        let provider: Arc<dyn ChatProvider> = Arc::new(EchoProvider {
+            tokens_in: tokens.0,
+            tokens_out: tokens.1,
+        });
+        let mut providers = HashMap::new();
+        providers.insert("echo".into(), ProviderHandle::new(provider));
+        Arc::new(ProxyState::new(keys, ledger, sink, providers, None))
+    }
+
+    fn capped_echo_request(max_tokens: u64) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("authorization", "Bearer vk-test")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                format!(r#"{{"model":"model","messages":[{{"role":"user","content":"hi"}}],"max_tokens":{max_tokens}}}"#),
+            ))
+            .unwrap()
+    }
+
+    /// A provider that answers immediately with a measured usage observation, so the full
+    /// request path reaches finalize and both leases settle.
+    struct EchoProvider {
+        tokens_in: u64,
+        tokens_out: u64,
+    }
+
+    #[async_trait]
+    impl ChatProvider for EchoProvider {
+        fn slug(&self) -> &str {
+            "echo"
+        }
+
+        async fn complete(
+            &self,
+            _request: ChatRequestV1,
+            _call_headers: axum::http::HeaderMap,
+        ) -> Result<ChatResponseV1, ProviderError> {
+            Ok(serde_json::from_value(serde_json::json!({
+                "model": "model",
+                "output": {},
+                "finish_reason": "stop",
+                "usage": {
+                    "tokens_in": self.tokens_in,
+                    "tokens_out": self.tokens_out,
+                    "cache_creation_tokens": 0,
+                    "cache_read_tokens": 0,
+                    "completeness": "final",
+                    "basis": "provider_reported",
+                }
+            }))
+            .expect("fixture decodes"))
+        }
+
+        async fn stream(
+            &self,
+            _request: ChatRequestV1,
+            _call_headers: axum::http::HeaderMap,
+        ) -> Result<ChatEventStream, ProviderError> {
+            Ok(Box::pin(futures_util::stream::pending()))
+        }
+    }
+
+    /// A provider that never answers, holding both leases while admitted (for concurrency
+    /// oversubscription).
+    struct StuckProvider {
+        entered: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl ChatProvider for StuckProvider {
+        fn slug(&self) -> &str {
+            "stuck"
+        }
+
+        async fn complete(
+            &self,
+            _request: ChatRequestV1,
+            _call_headers: axum::http::HeaderMap,
+        ) -> Result<ChatResponseV1, ProviderError> {
+            self.entered.notify_one();
+            std::future::pending().await
+        }
+
+        async fn stream(
+            &self,
+            _request: ChatRequestV1,
+            _call_headers: axum::http::HeaderMap,
+        ) -> Result<ChatEventStream, ProviderError> {
+            Ok(Box::pin(futures_util::stream::pending()))
+        }
+    }
+
+    fn poisoned_ledger_state(policy: &str) -> Arc<ProxyState> {
+        let state = state_with_echo(
+            Arc::new(InMemorySink::new()),
+            ProxyLedger::in_memory(),
+            (40, 20),
+        );
+        state.budgets.lock().unwrap().insert(
+            UPSTREAM_SCOPE.into(),
+            BudgetSpec {
+                scope: UPSTREAM_SCOPE.into(),
+                limit_tokens: 1_000,
+                window: "total".into(),
+                policy: policy.into(),
+            },
+        );
+        // Panic while holding the ledger lock → the mutex is poisoned → every later
+        // `ledger.lock()` is a backend error (the D6 trigger), without a real broken backend.
+        let poison_state = Arc::clone(&state);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = poison_state.ledger.lock().unwrap();
+            panic!("poison the ledger mutex");
+        }));
+        state
+    }
+
+    #[tokio::test]
+    async fn exhausted_upstream_cap_denies_and_releases_the_front_lease() {
+        let sink = Arc::new(InMemorySink::new());
+        let mut ledger = ProxyLedger::in_memory();
+        // Tiny hard cap: every request's conservative ceiling (input estimate + the 40-token
+        // output bound here, ≥ the 4096 default otherwise) cannot fit.
+        ledger
+            .set_budget(UPSTREAM_SCOPE, Some(10), Window::Total, Policy::Block)
+            .unwrap();
+        let state = state_with_echo(sink.clone(), ledger, (40, 20));
+        let app = build_app(state.clone());
+
+        let response = app
+            .oneshot(capped_echo_request(40))
+            .await
+            .expect("request completes");
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let ledger = state.ledger.lock().unwrap();
+        assert_eq!(
+            ledger.reserved(FRONT_SCOPE),
+            0,
+            "an upstream denial must release the already-held front lease"
+        );
+        assert_eq!(ledger.reserved(UPSTREAM_SCOPE), 0);
+        assert_eq!(ledger.spent(UPSTREAM_SCOPE), 0);
+        assert!(sink.is_empty(), "an undispached call emits no usage event");
+    }
+
+    #[tokio::test]
+    async fn settled_usage_lands_in_both_scopes_with_the_same_actual() {
+        let sink = Arc::new(InMemorySink::new());
+        let mut ledger = ProxyLedger::in_memory();
+        ledger
+            .set_budget(
+                UPSTREAM_SCOPE,
+                Some(1_000_000),
+                Window::Total,
+                Policy::Block,
+            )
+            .unwrap();
+        ledger
+            .set_budget(FRONT_SCOPE, Some(1_000_000), Window::Total, Policy::Block)
+            .unwrap();
+        let state = state_with_echo(sink.clone(), ledger, (40, 20));
+        let app = build_app(state.clone());
+
+        let response = app
+            .oneshot(capped_echo_request(50))
+            .await
+            .expect("request completes");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(sink.len(), 1);
+
+        let ledger = state.ledger.lock().unwrap();
+        assert_eq!(
+            ledger.spent(UPSTREAM_SCOPE),
+            60,
+            "40 in + 20 out, one actual"
+        );
+        assert_eq!(
+            ledger.spent(FRONT_SCOPE),
+            60,
+            "the same actual on the front leg"
+        );
+        assert_eq!(ledger.reserved(UPSTREAM_SCOPE), 0, "both leases settle");
+        assert_eq!(ledger.reserved(FRONT_SCOPE), 0);
+    }
+
+    #[tokio::test]
+    async fn front_denial_releases_the_upstream_lease() {
+        let sink = Arc::new(InMemorySink::new());
+        let mut ledger = ProxyLedger::in_memory();
+        // Front cap tiny (denied before dispatch); upstream cap generous (its reserve
+        // succeeds, so the hold IS taken and must be released on the front-denied return).
+        ledger
+            .set_budget(FRONT_SCOPE, Some(10), Window::Total, Policy::Block)
+            .unwrap();
+        ledger
+            .set_budget(
+                UPSTREAM_SCOPE,
+                Some(1_000_000),
+                Window::Total,
+                Policy::Block,
+            )
+            .unwrap();
+        let state = state_with_echo(sink.clone(), ledger, (40, 20));
+        let app = build_app(state.clone());
+
+        let response = app
+            .oneshot(capped_echo_request(40))
+            .await
+            .expect("request completes");
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let ledger = state.ledger.lock().unwrap();
+        assert_eq!(
+            ledger.reserved(UPSTREAM_SCOPE),
+            0,
+            "a front denial must not leave the back-leg lease held"
+        );
+        assert_eq!(ledger.reserved(FRONT_SCOPE), 0);
+        assert!(sink.is_empty());
+    }
+
+    #[tokio::test]
+    async fn upstream_warn_scope_fails_open_and_block_fails_closed_on_backend_error() {
+        let state = poisoned_ledger_state("warn");
+        let admitted = reserve_upstream_budget(&state, UPSTREAM_SCOPE, 100, IngressDialect::OpenAi)
+            .await
+            .expect("Warn fails open");
+        assert!(
+            admitted.is_none(),
+            "D6 fail-open: admitted unmetered, no lease to settle"
+        );
+
+        let state = poisoned_ledger_state("block");
+        let denied = reserve_upstream_budget(&state, UPSTREAM_SCOPE, 100, IngressDialect::OpenAi)
+            .await
+            .expect_err("Block fails closed with a rendered response");
+        assert_eq!(denied.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn second_in_flight_call_denied_once_the_upstream_lease_exhausts_the_cap() {
+        let keys = KeyStore::new();
+        keys.insert(VirtualKey {
+            id: "vk-test".into(),
+            group_id: Some("platform".into()),
+            upstream_ref: "stuck".into(),
+            ..Default::default()
+        });
+        let stuck = Arc::new(StuckProvider {
+            entered: tokio::sync::Notify::new(),
+        });
+        let mut providers = HashMap::new();
+        providers.insert("stuck".into(), ProviderHandle::new(stuck.clone()));
+        let mut ledger = ProxyLedger::in_memory();
+        // Two concurrent calls at ceiling ≈ input-estimate + 40 cannot both fit under 100.
+        ledger
+            .set_budget("upstream:stuck", Some(100), Window::Total, Policy::Block)
+            .unwrap();
+        let state = Arc::new(ProxyState::new(
+            keys,
+            ledger,
+            Arc::new(InMemorySink::new()),
+            providers,
+            None,
+        ));
+        let app = build_app(state.clone());
+
+        let first = tokio::spawn(app.clone().oneshot(capped_echo_request(40)));
+        stuck.entered.notified().await;
+        let held = {
+            let ledger = state.ledger.lock().unwrap();
+            (
+                ledger.reserved("upstream:stuck"),
+                ledger.reserved(FRONT_SCOPE),
+            )
+        };
+        assert!(held.0 > 0, "the in-flight call holds the back-leg lease");
+        assert_eq!(held.0, held.1, "both leases carry the same ceiling");
+
+        let second = app
+            .oneshot(capped_echo_request(40))
+            .await
+            .expect("request completes");
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+        {
+            let ledger = state.ledger.lock().unwrap();
+            assert_eq!(
+                ledger.reserved("upstream:stuck"),
+                held.0,
+                "the denial must not disturb the in-flight leases"
+            );
+        }
+
+        first.abort();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let reserved = state.ledger.lock().unwrap().reserved("upstream:stuck");
+                if reserved == 0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("aborting the in-flight call releases both leases");
     }
 }

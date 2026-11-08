@@ -120,9 +120,18 @@ pub(crate) async fn handle(
     ceiling: u64,
     _effective_max: u64,
     input_len: usize,
+    upstream_scope: String,
+    upstream_reservation: Option<sandhi_core::Reservation>,
     configured_deadline: Option<Duration>,
     streaming_limits: Option<crate::deadlines::StreamLimits>,
 ) -> Response {
+    // ADR-0015: the back-leg lease arrives already admitted (reserved by the caller), so it
+    // must be held BEFORE any refusal below — including the tracked-requirements and
+    // transport-deadline guards — or ineligible traffic would leak `reserved()` against a
+    // Block upstream cap until TTL reclaim. The hold settles it to 0 on every early return
+    // and is emptied into the accounting once dispatch is guaranteed, so exactly one path
+    // ever settles it.
+    let mut upstream_hold = crate::UpstreamHold::new(state.clone(), upstream_reservation);
     if (wants_stream
         && (streaming_limits.is_none()
             || !transparent_eligible
@@ -237,6 +246,10 @@ pub(crate) async fn handle(
             return accounting_error(dialect, &task_id);
         };
         accounting.reservation = Some(execution.intent().reservation.clone());
+        // ADR-0015: dispatch is now guaranteed for this call — hand the back-leg lease to the
+        // accounting (it settles with the same actual, synchronously, in `finalize_owned`).
+        // From here on every path reaches finalize, so the lease is never orphaned.
+        accounting.with_upstream_budget(upstream_scope, upstream_hold.take());
         accounting.operation = Some(operation);
         accounting.owned = Some(Accounting {
             obligation,

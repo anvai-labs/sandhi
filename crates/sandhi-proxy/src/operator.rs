@@ -783,6 +783,23 @@ pub(crate) async fn share_key(
             "virtual-key store not configured (set SANDHI_STORE)",
         );
     };
+    // ADR-0015: `upstream:` is the gateway's own back-leg scope prefix. A virtual key pointing
+    // its budget scope there would hold TWO leases on the same scope per call and settle the
+    // same actual into it twice — exhausting the cap at half its configured limit. Rejected at
+    // minting; the declarative vkeys section never carries a budget scope at all.
+    if let Some(scope) = req
+        .budget_scope
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| s.starts_with("upstream:"))
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "budget_scope '{scope}' uses the reserved 'upstream:' prefix: back-leg per-provider caps are gateway-managed, not per-key (ADR-0015)"
+            ),
+        );
+    }
     // The upstream credential must resolve (provider handle registered or vault entry active).
     let upstream = req.upstream.clone();
     if !state

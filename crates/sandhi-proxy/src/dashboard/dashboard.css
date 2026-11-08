@@ -60,6 +60,7 @@
            font-weight: 600; border: 1px solid transparent; }
   .badge.active { color: var(--good); background: var(--good-soft); }
   .badge.revoked { color: var(--bad); background: var(--bad-soft); }
+  .badge.back-leg { color: var(--accent); background: var(--accent-soft); }
   .bar { background: var(--border-soft); border-radius: 6px; height: 7px; overflow: hidden; min-width: 6rem; }
   .bar > span { display: block; height: 100%; background: var(--accent); }
   .bar.warn > span { background: var(--warn); }

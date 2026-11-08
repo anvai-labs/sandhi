@@ -257,6 +257,22 @@ mod tests {
     }
 
     #[test]
+    fn declarative_budgets_accept_an_upstream_back_leg_scope() {
+        // ADR-0015: `upstream:{provider}` is ordinary scope data — the declarative `budgets`
+        // section carries it with no special-casing (apply flows through the same
+        // `SetBudgetRequest` path as the operator API).
+        let json = r#"{
+            "budgets": [{"scope":"upstream:inferflux","limit_tokens":250000,"window":"monthly","policy":"warn"}]
+        }"#;
+        let cfg: SandhiFileConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.budgets.len(), 1);
+        assert_eq!(cfg.budgets[0].scope, "upstream:inferflux");
+        assert_eq!(cfg.budgets[0].limit_tokens, 250_000);
+        assert_eq!(cfg.budgets[0].window.as_deref(), Some("monthly"));
+        assert_eq!(cfg.budgets[0].policy.as_deref(), Some("warn"));
+    }
+
+    #[test]
     fn missing_sections_default_to_empty_not_an_error() {
         let cfg: SandhiFileConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(cfg, SandhiFileConfig::default());

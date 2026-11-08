@@ -167,6 +167,21 @@ impl ClientCredentialRegistry {
                     entry.client_id
                 ));
             }
+            // ADR-0015: `upstream:` is the gateway's reserved back-leg scope prefix. A client
+            // credential pointing its budget scope there would mint keys holding two leases on
+            // the same scope per call and settling the same actual into it twice — exhausting
+            // the cap at half. Fatal at load, like every other malformed entry: startup exits.
+            if let Some(scope) = entry
+                .budget_scope
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| s.starts_with("upstream:"))
+            {
+                return Err(format!(
+                    "client '{}' budget_scope '{scope}' uses the reserved 'upstream:' prefix: back-leg per-provider caps are gateway-managed, not per-client (ADR-0015)",
+                    entry.client_id
+                ));
+            }
             if entry.max_ttl_seconds == 0 || entry.max_ttl_seconds > MAX_TTL_CEILING_SECS {
                 return Err(format!(
                     "client '{}' max_ttl_seconds must be 1..={MAX_TTL_CEILING_SECS}",
