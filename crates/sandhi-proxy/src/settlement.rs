@@ -23,6 +23,12 @@ struct TrackedObservation {
     intent: ExecutionIntent,
     usage: UsageV2,
     recorded: bool,
+    /// ADR-0015 back-leg lease and the call's measured actual (0 when unmeasured). Settled in
+    /// the same ledger critical section as soon as this observation is durably recorded, so it
+    /// never contends with its own primary for the proxy mutex, follows the jobs lifecycle, and
+    /// is retained with the primary when the observation cannot yet be recorded. Lives here
+    /// (already boxed) because only tracked settlements carry a back leg.
+    back_leg: Option<(Reservation, u64)>,
 }
 
 #[derive(Debug)]
@@ -35,11 +41,6 @@ pub struct PendingSettlement {
     /// Budget cost-basis weight for the tracked frozen charge (basis points;
     /// 10,000 = neutral). Server-admitted config, never caller data (TD-0032).
     cache_read_bp: u32,
-    /// ADR-0015 back-leg lease and its actual, settled in the SAME ledger critical section as
-    /// the primary, immediately after the primary commits. Carried here so the back leg never
-    /// contends with its own call's primary for the proxy mutex, follows the jobs lifecycle,
-    /// and is retained with the primary across unresolved retries.
-    back_leg: Option<(Reservation, u64)>,
 }
 
 #[derive(Debug)]
@@ -72,12 +73,12 @@ impl PendingSettlement {
             reservation: self.reservation.clone(),
             charge: self.charge,
             cache_read_bp: self.cache_read_bp,
-            back_leg: self.back_leg.clone(),
             tracked: self.tracked.as_ref().map(|t| {
                 Box::new(TrackedObservation {
                     intent: t.intent.clone(),
                     usage: t.usage.clone(),
                     recorded: t.recorded,
+                    back_leg: t.back_leg.clone(),
                 })
             }),
         }
@@ -95,7 +96,6 @@ impl PendingSettlement {
                 sandhi_core::UsageCompleteness::Unavailable => None,
             },
             tracked: None,
-            back_leg: None,
         }
     }
     /// Own the exact terminal usage for an existing durable execution intent.
@@ -111,8 +111,8 @@ impl PendingSettlement {
                 intent,
                 usage,
                 recorded: false,
+                back_leg: None,
             })),
-            back_leg: None,
         }
     }
     pub fn terminal_usage(&self) -> Option<&UsageV2> {
@@ -143,15 +143,28 @@ impl PendingSettlement {
         self
     }
 
-    /// Attach the ADR-0015 back-leg lease, settled with `actual` once the primary commits.
-    pub fn with_back_leg(mut self, reservation: Option<Reservation>, actual: u64) -> Self {
-        self.back_leg = reservation.map(|reservation| (reservation, actual));
-        self
+    /// Attach the ADR-0015 back-leg lease, settled with `actual` once the terminal observation
+    /// is durably recorded. Only tracked settlements carry one; a legacy settlement hands the
+    /// reservation back so the caller can never lose it silently.
+    pub fn with_back_leg(
+        mut self,
+        reservation: Option<Reservation>,
+        actual: u64,
+    ) -> (Self, Option<Reservation>) {
+        match (self.tracked.as_mut(), reservation) {
+            (Some(tracked), Some(reservation)) => {
+                tracked.back_leg = Some((reservation, actual));
+                (self, None)
+            }
+            (_, reservation) => (self, reservation),
+        }
     }
 
     /// Detach the back-leg lease when this settlement will never run (refused submission).
     pub fn take_back_leg(&mut self) -> Option<(Reservation, u64)> {
-        self.back_leg.take()
+        self.tracked
+            .as_mut()
+            .and_then(|tracked| tracked.back_leg.take())
     }
     /// Try the existing receipt path without waiting for the proxy mutex. SQLite
     /// and the inner shard mutex may still wait: this is not an end-to-end deadline.
@@ -173,26 +186,10 @@ impl PendingSettlement {
                 };
             }
         }
-        let back_leg = &self.back_leg;
         let tracked = &mut self.tracked;
         let reservation = &self.reservation;
         let charge = self.charge;
         let result = with_durable_ledger(ledger, |durable| {
-            // ADR-0015 back leg, settled in this critical section. Idempotent by lease id
-            // (`settled=0` guard), so retained replays are no-ops; a failure never undoes the
-            // primary and leaves the lease to TTL reclaim.
-            let settle_back_leg = || {
-                if let Some((back, actual)) = back_leg {
-                    if let Err(error) = durable.settle_durable(&back.scope, back.id, *actual) {
-                        tracing::error!(
-                            lease = back.id,
-                            actual = *actual,
-                            %error,
-                            "durable back-leg settle FAILED — capacity stays reserved until the lease expires"
-                        );
-                    }
-                }
-            };
             if let Some(tracked) = tracked.as_mut() {
                 // Exact record replay is intentional, even after a previous recorded
                 // attempt: the current ledger must confirm identical retained evidence.
@@ -208,7 +205,20 @@ impl PendingSettlement {
                         // the receipt: a primary that never commits (upstream error, missing or
                         // non-final usage, a failing receipt, a crash before receipt recovery)
                         // must not park the back lease against the provider cap until TTL.
-                        settle_back_leg();
+                        // Idempotent by lease id (`settled=0` guard), so retained replays are
+                        // no-ops; a failure never undoes the primary and leaves the lease to TTL.
+                        if let Some((back, actual)) = &tracked.back_leg {
+                            if let Err(error) =
+                                durable.settle_durable(&back.scope, back.id, *actual)
+                            {
+                                tracing::error!(
+                                    lease = back.id,
+                                    actual = *actual,
+                                    %error,
+                                    "durable back-leg settle FAILED — capacity stays reserved until the lease expires"
+                                );
+                            }
+                        }
                         durable.settle_terminal_durable(
                             &tracked.intent.reservation.scope,
                             &tracked.intent.execution_id,
@@ -219,15 +229,11 @@ impl PendingSettlement {
                 }
             } else {
                 let reservation = reservation.as_ref().expect("legacy reservation checked");
-                let primary = durable.settle_with_evidence_durable(
+                durable.settle_with_evidence_durable(
                     &reservation.scope,
                     reservation.id,
                     charge.expect("legacy charge checked"),
-                );
-                if primary.is_ok() {
-                    settle_back_leg();
-                }
-                primary
+                )
             }
         });
         match result {

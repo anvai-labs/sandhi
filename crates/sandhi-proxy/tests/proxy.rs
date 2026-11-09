@@ -4551,7 +4551,11 @@ async fn owned_buffered_back_leg_never_races_its_primary_settle() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK, "call {call}");
         let ledger = state.ledger.lock().unwrap();
-        assert_eq!(ledger.reserved("upstream:openai"), 0, "call {call}: back lease held");
+        assert_eq!(
+            ledger.reserved("upstream:openai"),
+            0,
+            "call {call}: back lease held"
+        );
         assert_eq!(ledger.spent("upstream:openai"), 12 * call, "call {call}");
         assert_eq!(ledger.spent("group:platform"), 12 * call, "call {call}");
     }
@@ -4566,7 +4570,8 @@ async fn owned_buffered_unresolved_primary_still_releases_the_back_leg() {
     for case in ["upstream_error", "missing_usage"] {
         let upstream = MockServer::start().await;
         let template = if case == "upstream_error" {
-            ResponseTemplate::new(500).set_body_json(serde_json::json!({"error":{"message":"boom"}}))
+            ResponseTemplate::new(500)
+                .set_body_json(serde_json::json!({"error":{"message":"boom"}}))
         } else {
             ResponseTemplate::new(200).set_body_json(serde_json::json!(
                 {"choices":[{"message":{"content":"done"},"finish_reason":"stop"}]}
@@ -4592,8 +4597,16 @@ async fn owned_buffered_unresolved_primary_still_releases_the_back_leg() {
         assert_ne!(response.status(), StatusCode::OK, "{case}");
         state.lifecycle.wait_idle().await;
         let ledger = state.ledger.lock().unwrap();
-        assert_eq!(ledger.reserved("upstream:openai"), 0, "{case}: back lease parked");
-        assert_eq!(ledger.spent("upstream:openai"), 0, "{case}: unmeasured call charged");
+        assert_eq!(
+            ledger.reserved("upstream:openai"),
+            0,
+            "{case}: back lease parked"
+        );
+        assert_eq!(
+            ledger.spent("upstream:openai"),
+            0,
+            "{case}: unmeasured call charged"
+        );
     }
 }
 
@@ -4963,7 +4976,11 @@ async fn owned_http_sink_panic_cannot_erase_terminal_evidence() {
         // The back leg rides the primary's Settle work, attached before the panicking sink
         // runs, so the panic can neither strand its lease nor lose its spend.
         assert_eq!(ledger.spent("upstream:openai"), 5, "streaming={streaming}");
-        assert_eq!(ledger.reserved("upstream:openai"), 0, "streaming={streaming}");
+        assert_eq!(
+            ledger.reserved("upstream:openai"),
+            0,
+            "streaming={streaming}"
+        );
         drop(ledger);
         assert_eq!(sink.0.load(std::sync::atomic::Ordering::SeqCst), 1);
     }

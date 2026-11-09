@@ -3661,11 +3661,17 @@ impl RequestAccounting {
         // (the primary's nonblocking lock never races its own back leg) nor a panicking sink can
         // strand it. `settle` is idempotent by lease id (ADR-0005 D2); a crash before commit
         // leaves the lease to TTL reclaim, mirroring D2.
-        let pending = owned
+        let (pending, unattached) = owned
             .execution
             .into_settlement(usage.clone())
             .with_cache_read_weight(self.state.cache_read_weight_bp)
             .with_back_leg(self.upstream_reservation.take(), actual);
+        // `into_settlement` is always tracked, so nothing comes back; never drop it silently.
+        debug_assert!(
+            unattached.is_none(),
+            "tracked settlement refused its back leg"
+        );
+        self.upstream_reservation = unattached;
         let submitted = owned
             .obligation
             .submit(settlement::jobs::Work::Settle(pending));
