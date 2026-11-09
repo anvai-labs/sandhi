@@ -4557,6 +4557,46 @@ async fn owned_buffered_back_leg_never_races_its_primary_settle() {
     }
 }
 
+/// Regression: gating the back-leg settle on the primary RECEIPT parked the back lease until TTL
+/// for every tracked call whose primary never commits (upstream error, missing usage). During an
+/// outage that filled the per-provider cap and denied all traffic to it for the TTL. The back
+/// leg settles once the terminal observation is durable: released at 0 when unmeasured.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owned_buffered_unresolved_primary_still_releases_the_back_leg() {
+    for case in ["upstream_error", "missing_usage"] {
+        let upstream = MockServer::start().await;
+        let template = if case == "upstream_error" {
+            ResponseTemplate::new(500).set_body_json(serde_json::json!({"error":{"message":"boom"}}))
+        } else {
+            ResponseTemplate::new(200).set_body_json(serde_json::json!(
+                {"choices":[{"message":{"content":"done"},"finish_reason":"stop"}]}
+            ))
+        };
+        Mock::given(method("POST"))
+            .respond_with(template)
+            .mount(&upstream)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owned.db");
+        let sink = Arc::new(InMemorySink::new());
+        let state = owned_state(
+            upstream.uri(),
+            &path,
+            sink.clone(),
+            std::time::Duration::from_secs(2),
+        );
+        let response = build_app(state.clone())
+            .oneshot(owned_request("/v1/chat/completions", owned_body()))
+            .await
+            .unwrap();
+        assert_ne!(response.status(), StatusCode::OK, "{case}");
+        state.lifecycle.wait_idle().await;
+        let ledger = state.ledger.lock().unwrap();
+        assert_eq!(ledger.reserved("upstream:openai"), 0, "{case}: back lease parked");
+        assert_eq!(ledger.spent("upstream:openai"), 0, "{case}: unmeasured call charged");
+    }
+}
+
 /// Regression (ADR-0015 review P1-1): the caller reserves the upstream lease BEFORE
 /// `buffered::handle`, so handle's own refusals — here the tracked-requirements 400 on a
 /// streaming request — must still release it. Without the hold covering those guards, the

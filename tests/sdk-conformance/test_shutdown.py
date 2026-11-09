@@ -420,4 +420,10 @@ def test_tracked_binary_correlation_and_shutdown(
                 "SELECT charged_tokens FROM budget_settlement_outbox"
             ).fetchall()
             assert receipts == ([] if missing_usage else [(14,)])
+            # ADR-0015 back leg: settled once the terminal observation is durable, at the
+            # measured actual or 0 when unmeasured, even though a missing-usage primary never
+            # commits. It must not stay reserved against the provider cap until TTL.
+            assert connection.execute(
+                "SELECT actual, settled FROM budget_reservation WHERE scope LIKE 'upstream:%'"
+            ).fetchall() == [(0 if missing_usage else 14, 1)]
         assert len(gated_provider.requests) == 1

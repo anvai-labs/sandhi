@@ -793,11 +793,11 @@ def test_tracked_sigkill_after_terminal_persistence_recovers_one_receipt(
         held, = front_leases(source, 1)
         assert held[0] == SCOPES[0]
         assert held[1] == intent[1] and held[3:5] == (0, 0)
-        # The back leg settles only after its primary receipt commits (same Settle work).
-        # The receipt is rejected here, so the back lease stays held; after the crash its RAM
-        # owner is gone and it is left to TTL reclaim (ADR-0015 D4), never settled twice.
+        # The back leg settles as soon as the terminal observation is durable, before (and
+        # independently of) the rejected receipt, so crash recovery of the front leg can
+        # never leave the back leg undercounted.
         back, = back_leases(source, 1)
-        assert back[3:5] == (0, 0)
+        assert back[3:5] == (14, 1)
         wait_usage(gateway.client, 1, headers=gateway.admin_headers)
         subject = "recovery-member" if gateway.member_token is not None else "recovery-subject"
         with closing(sqlite3.connect(source)) as connection:

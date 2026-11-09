@@ -178,35 +178,11 @@ impl PendingSettlement {
         let reservation = &self.reservation;
         let charge = self.charge;
         let result = with_durable_ledger(ledger, |durable| {
-            let primary = if let Some(tracked) = tracked.as_mut() {
-                // Exact record replay is intentional, even after a previous recorded
-                // attempt: the current ledger must confirm identical retained evidence.
-                match durable.record_terminal_for_intent_durable(
-                    &tracked.intent,
-                    &tracked.usage,
-                    self.cache_read_bp,
-                ) {
-                    Ok(_) => {
-                        tracked.recorded = true;
-                        durable.settle_terminal_durable(
-                            &tracked.intent.reservation.scope,
-                            &tracked.intent.execution_id,
-                        )
-                    }
-                    Err(error) => Err(error),
-                }
-            } else {
-                let reservation = reservation.as_ref().expect("legacy reservation checked");
-                durable.settle_with_evidence_durable(
-                    &reservation.scope,
-                    reservation.id,
-                    charge.expect("legacy charge checked"),
-                )
-            };
-            if primary.is_ok() {
+            // ADR-0015 back leg, settled in this critical section. Idempotent by lease id
+            // (`settled=0` guard), so retained replays are no-ops; a failure never undoes the
+            // primary and leaves the lease to TTL reclaim.
+            let settle_back_leg = || {
                 if let Some((back, actual)) = back_leg {
-                    // Idempotent by lease id; a failure never undoes the committed primary
-                    // receipt. The lease then holds capacity until TTL reclaim (D4).
                     if let Err(error) = durable.settle_durable(&back.scope, back.id, *actual) {
                         tracing::error!(
                             lease = back.id,
@@ -216,8 +192,43 @@ impl PendingSettlement {
                         );
                     }
                 }
+            };
+            if let Some(tracked) = tracked.as_mut() {
+                // Exact record replay is intentional, even after a previous recorded
+                // attempt: the current ledger must confirm identical retained evidence.
+                match durable.record_terminal_for_intent_durable(
+                    &tracked.intent,
+                    &tracked.usage,
+                    self.cache_read_bp,
+                ) {
+                    Ok(_) => {
+                        tracked.recorded = true;
+                        // The terminal observation is durable, so the call's measured actual
+                        // (0 when unmeasured) is final for the back leg. Settle it NOW, before
+                        // the receipt: a primary that never commits (upstream error, missing or
+                        // non-final usage, a failing receipt, a crash before receipt recovery)
+                        // must not park the back lease against the provider cap until TTL.
+                        settle_back_leg();
+                        durable.settle_terminal_durable(
+                            &tracked.intent.reservation.scope,
+                            &tracked.intent.execution_id,
+                        )
+                    }
+                    // Not durably observed: the back leg stays with the retained primary.
+                    Err(error) => Err(error),
+                }
+            } else {
+                let reservation = reservation.as_ref().expect("legacy reservation checked");
+                let primary = durable.settle_with_evidence_durable(
+                    &reservation.scope,
+                    reservation.id,
+                    charge.expect("legacy charge checked"),
+                );
+                if primary.is_ok() {
+                    settle_back_leg();
+                }
+                primary
             }
-            primary
         });
         match result {
             Ok(outcome) => Attempt::Committed {
