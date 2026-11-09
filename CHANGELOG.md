@@ -19,6 +19,23 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+## [0.16.2] — 2026-11-09
+
+### Fixed
+
+- **Budgets (ADR-0015)**: tracked/buffered accounting settled the `upstream:`
+  back-leg lease with a blocking ledger write before handing off the primary
+  settlement, stalling the receipt and terminal observation under SQLite writer
+  contention. The back lease now settles inside the primary's Settle work, in
+  the same ledger critical section, as soon as the terminal observation is
+  durably recorded — at the measured actual, 0 when unmeasured — so failed or
+  unmeasured calls no longer park it against the provider cap until TTL and
+  crash recovery cannot leave it undercounted
+  ([#420](https://github.com/anvai-labs/sandhi/pull/420)).
+- **SDK conformance**: the suite (path-filtered, so it never ran on #414) now
+  asserts both budget legs per call; this was the red `main` check that blocked
+  publishing 0.16.1, which is superseded by this release.
+
 ## [0.16.1] — 2026-11-09
 
 ### Fixed
@@ -1634,7 +1651,8 @@ inline reverse-proxy, the durable store, and both language bindings.
   ([#9](https://github.com/anvai-labs/sandhi/pull/9),
   [#10](https://github.com/anvai-labs/sandhi/pull/10))
 
-[Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.16.1...HEAD
+[Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.16.2...HEAD
+[0.16.2]: https://github.com/anvai-labs/sandhi/compare/v0.16.1...v0.16.2
 [0.16.1]: https://github.com/anvai-labs/sandhi/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/anvai-labs/sandhi/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/anvai-labs/sandhi/compare/v0.14.1...v0.15.0
