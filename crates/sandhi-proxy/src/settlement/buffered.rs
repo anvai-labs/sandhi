@@ -247,7 +247,8 @@ pub(crate) async fn handle(
         };
         accounting.reservation = Some(execution.intent().reservation.clone());
         // ADR-0015: dispatch is now guaranteed for this call — hand the back-leg lease to the
-        // accounting (it settles with the same actual, synchronously, in `finalize_owned`).
+        // accounting (it settles with the same actual inside the primary's Settle work, which
+        // `finalize_owned` submits).
         // From here on every path reaches finalize, so the lease is never orphaned.
         accounting.with_upstream_budget(upstream_scope, upstream_hold.take());
         accounting.operation = Some(operation);

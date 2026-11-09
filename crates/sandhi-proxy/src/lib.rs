@@ -2693,8 +2693,9 @@ async fn handle_with_policy_receipt(
     accounting.input_len = input_len;
     accounting.operation = Some(operation);
     // ADR-0015: the back-leg lease moves into the per-call accounting, which settles it with the
-    // same actual at finalize (synchronously in `finalize_owned`, where the primary settles via
-    // the canonical jobs path). The now-empty hold drops without settling anything.
+    // same actual at finalize (on the legacy path under the same lock as the primary; in
+    // `finalize_owned` inside the primary's Settle work, right after the primary commits). The
+    // now-empty hold drops without settling anything.
     let upstream_reservation = upstream_hold.take();
     accounting.with_upstream_budget(upstream_scope, upstream_reservation);
     // TD-0021 P4 (D1): the METER records the LOGICAL call once — a repeat of a settled
@@ -3649,31 +3650,50 @@ impl RequestAccounting {
         );
         // Retain immutable terminal evidence BEFORE invoking arbitrary best-effort
         // telemetry. A panicking sink must not erase a completed model's usage.
-        let pending = owned
-            .execution
-            .into_settlement(usage.clone())
-            .with_cache_read_weight(self.state.cache_read_weight_bp);
         let actual = if measured {
             sandhi_core::billable_weighted(&usage, self.state.cache_read_weight_bp)
         } else {
             0
         };
-        // ADR-0015: the back-leg lease settles SYNCHRONOUSLY here, with the same actual — the
-        // jobs machinery carries only the primary scope, so the `upstream:{provider}` lease has
-        // no canonical async path of its own. `settle` is idempotent by lease id (ADR-0005 D2),
-        // and a crash before this point leaves the lease to TTL reclaim, mirroring D2.
-        if let Some(reservation) = &self.upstream_reservation {
-            blocking_section(|| {
-                if let Ok(mut ledger) = self.state.ledger.lock() {
-                    ledger.settle(reservation, actual);
-                }
-            });
-        }
+        // ADR-0015: the back-leg lease settles with the same actual, inside the primary's Settle
+        // work and its ledger critical section, right after the primary commits. It is attached
+        // BEFORE submission and before any best-effort telemetry, so neither a contended ledger
+        // (the primary's nonblocking lock never races its own back leg) nor a panicking sink can
+        // strand it. `settle` is idempotent by lease id (ADR-0005 D2); a crash before commit
+        // leaves the lease to TTL reclaim, mirroring D2.
+        let (pending, unattached) = owned
+            .execution
+            .into_settlement(usage.clone())
+            .with_cache_read_weight(self.state.cache_read_weight_bp)
+            .with_back_leg(self.upstream_reservation.take(), actual);
+        // `into_settlement` is always tracked, so nothing comes back; never drop it silently.
+        debug_assert!(
+            unattached.is_none(),
+            "tracked settlement refused its back leg"
+        );
+        self.upstream_reservation = unattached;
         let submitted = owned
             .obligation
             .submit(settlement::jobs::Work::Settle(pending));
+        let ticket = match submitted {
+            Ok(ticket) => Some(ticket),
+            Err(mut rejected) => {
+                // The Settle work will never run, so no primary commit can contend: release the
+                // back leg here rather than leave it to TTL. The primary stays retained as before.
+                if let settlement::jobs::Work::Settle(pending) = &mut rejected.work {
+                    if let Some((back, back_actual)) = pending.take_back_leg() {
+                        blocking_section(|| {
+                            if let Ok(mut ledger) = self.state.ledger.lock() {
+                                ledger.settle(&back, back_actual);
+                            }
+                        });
+                    }
+                }
+                None
+            }
+        };
         self.emit_usage(&usage, actual, true);
-        let Ok(ticket) = submitted else {
+        let Some(ticket) = ticket else {
             return false;
         };
         if tokio::time::timeout(owned.wait, ticket.wait())
