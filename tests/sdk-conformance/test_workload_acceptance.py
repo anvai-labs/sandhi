@@ -150,7 +150,8 @@ def test_request_failures_invalidate_acceptance(monkeypatch):
     assert "latency_ms" not in result
 
 
-@pytest.mark.parametrize("corruption", [None, "category", "duplicate", "scope_spend", "extra_scope", "run_total"])
+@pytest.mark.parametrize("corruption", [None, "category", "duplicate", "scope_spend", "extra_scope", "run_total",
+                                        "missing_back_leg", "back_leg_spend"])
 def test_accounting_requires_exact_events_and_independent_views(tmp_path, corruption):
     database = tmp_path / "accounting.db"
     with closing(sqlite3.connect(database)) as connection, connection:
@@ -160,6 +161,8 @@ def test_accounting_requires_exact_events_and_independent_views(tmp_path, corrup
         connection.execute("INSERT INTO usage_events VALUES(?,?,?,?,?,?,?,?,?)",
             ("0", "subject-0", "tenant-0", *workload.components(0), "test"))
         connection.execute("INSERT INTO budget_reservation VALUES('group:tenant-0',140,1)")
+        # ADR-0015 back leg: same call, same measured actual, on the resolved upstream.
+        connection.execute("INSERT INTO budget_reservation VALUES('upstream:openai',140,1)")
         if corruption == "category":
             connection.execute("UPDATE usage_events SET reasoning_included=1")
         elif corruption == "duplicate":
@@ -168,6 +171,10 @@ def test_accounting_requires_exact_events_and_independent_views(tmp_path, corrup
             connection.execute("UPDATE budget_reservation SET actual=139")
         elif corruption == "extra_scope":
             connection.execute("INSERT INTO budget_reservation VALUES('group:unexpected',1,1)")
+        elif corruption == "missing_back_leg":
+            connection.execute("DELETE FROM budget_reservation WHERE scope LIKE 'upstream:%'")
+        elif corruption == "back_leg_spend":
+            connection.execute("UPDATE budget_reservation SET actual=139 WHERE scope LIKE 'upstream:%'")
 
     def get(url, **_kwargs):
         if url.endswith("/metrics"):

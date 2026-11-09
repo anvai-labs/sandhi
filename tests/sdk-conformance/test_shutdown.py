@@ -285,7 +285,9 @@ def test_inflight_sse_finishes_but_queued_request_cannot_dispatch_after_sigterm(
                 assert_draining(result["response"])
         assert process.wait(timeout=6) == 0
         assert len(gated_provider.requests) == 1
-        assert evidence_counts(database) == (1, 1)
+        # One usage event; one front (group:) and one back (upstream:) lease per
+        # call, ADR-0015 D5.
+        assert evidence_counts(database) == (1, 2)
 
 
 def test_body_started_before_cutoff_cannot_dispatch_when_completed_after_cutoff(

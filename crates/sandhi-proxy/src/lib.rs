@@ -3287,6 +3287,22 @@ fn blocking_section<T>(operation: impl FnOnce() -> T) -> T {
     }
 }
 
+/// Settle an ADR-0015 back-leg lease without blocking the caller's task. With a Tokio runtime the
+/// ledger write runs on the blocking pool; without one (sync callers, some tests) it runs inline.
+fn settle_back_leg_detached(state: Arc<ProxyState>, reservation: Reservation, actual: u64) {
+    let settle = move || {
+        if let Ok(mut ledger) = state.ledger.lock() {
+            ledger.settle(&reservation, actual);
+        }
+    };
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn_blocking(settle);
+        }
+        Err(_) => settle(),
+    }
+}
+
 /// Owns the reservation and guarantees one terminal usage observation even when an HTTP body is
 /// abandoned. Counts are always measured; an unavailable observation releases the reservation.
 struct RequestAccounting {
@@ -3658,21 +3674,19 @@ impl RequestAccounting {
         } else {
             0
         };
-        // ADR-0015: the back-leg lease settles SYNCHRONOUSLY here, with the same actual — the
-        // jobs machinery carries only the primary scope, so the `upstream:{provider}` lease has
-        // no canonical async path of its own. `settle` is idempotent by lease id (ADR-0005 D2),
-        // and a crash before this point leaves the lease to TTL reclaim, mirroring D2.
-        if let Some(reservation) = &self.upstream_reservation {
-            blocking_section(|| {
-                if let Ok(mut ledger) = self.state.ledger.lock() {
-                    ledger.settle(reservation, actual);
-                }
-            });
-        }
         let submitted = owned
             .obligation
             .submit(settlement::jobs::Work::Settle(pending));
         self.emit_usage(&usage, actual, true);
+        // ADR-0015: the back-leg lease settles with the same actual. The jobs machinery carries
+        // only the primary scope, so the `upstream:{provider}` lease has no canonical async path
+        // of its own. It settles only AFTER the primary obligation is submitted and terminal
+        // usage is observed, and off this task: a contended ledger write must never delay the
+        // canonical receipt or terminal evidence. `settle` is idempotent by lease id (ADR-0005
+        // D2), and a crash before it runs leaves the lease to TTL reclaim, mirroring D2.
+        if let Some(reservation) = self.upstream_reservation.take() {
+            settle_back_leg_detached(Arc::clone(&self.state), reservation, actual);
+        }
         let Ok(ticket) = submitted else {
             return false;
         };

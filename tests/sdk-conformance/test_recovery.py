@@ -192,6 +192,19 @@ def leases(base, shards):
     return sorted(rows)
 
 
+BACK_LEG_PREFIX = "upstream:"
+
+
+def front_leases(base, shards):
+    """Front-leg (vk:/group:) leases; the recovery registry owns only these."""
+    return [row for row in leases(base, shards) if not row[0].startswith(BACK_LEG_PREFIX)]
+
+
+def back_leases(base, shards):
+    """ADR-0015 back-leg leases: outside the recovery registry, reclaimed by TTL."""
+    return [row for row in leases(base, shards) if row[0].startswith(BACK_LEG_PREFIX)]
+
+
 def get(client, path, *, headers=ADMIN):
     response = client.get(path, headers=headers)
     assert response.status_code == 200, response.text
@@ -365,9 +378,12 @@ def test_real_sigkill_preserves_unexpired_lease_without_fabricating_usage(
             assert b"data:" in next(chunks)
             assert gated_provider.entered.wait(1)
             admitted = leases(source, shards)
-            dangling = [row for row in admitted if row[4] == 0]
+            dangling = [row for row in front_leases(source, shards) if row[4] == 0]
             assert len(dangling) == 1 and dangling[0][2] > 0 and dangling[0][3] == 0
             assert dangling[0][5] > time.time(), "test must not use expired/retimed fixture leases"
+            # The back leg is reserved with the same ceiling and is equally unsettled.
+            back, = [row for row in back_leases(source, shards) if row[4] == 0]
+            assert back[2] == dangling[0][2] and back[3] == 0
             gateway.process.kill()
             assert gateway.process.wait(timeout=3) == -9
     gated_provider.release.set()
@@ -577,8 +593,10 @@ def test_tracked_terminal_observed_during_sqlite_contention(
             assert correlation[1] and fence[1] == 1 and fence[2] is not None
             assert admitted["budget_terminal_observation"] == []
             assert admitted["budget_settlement_outbox"] == admitted["usage_events"] == []
-            held, = leases(source, 1)
+            held, = front_leases(source, 1)
             assert held[1] == intent[1] and held[2] > 0 and held[3:5] == (0, 0)
+            back, = back_leases(source, 1)
+            assert back[2] == held[2] and back[3:5] == (0, 0)
 
             with closing(sqlite3.connect(source, timeout=1)) as blocker:
                 blocker.execute("BEGIN IMMEDIATE")
@@ -624,7 +642,8 @@ def test_tracked_terminal_observed_during_sqlite_contention(
                 for table in ("budget_execution_intent", "budget_request_correlation",
                               "budget_dispatch_fence"):
                     assert recovered[table] == admitted[table], table
-                assert leases(source, 1)[0][3:5] == (14, 1)
+                # Front leg settled via the retained owner; back leg settled synchronously.
+                assert [row[3:5] for row in leases(source, 1)] == [(14, 1), (14, 1)]
                 assert observed_tokens(gateway.client, headers=gateway.admin_headers) == expected
                 gateway.stop()
                 recovered = tracked_rows(source)
@@ -697,9 +716,11 @@ def test_tracked_sigkill_after_origin_acceptance_retains_unknown_liability(
             assert admitted["budget_terminal_observation"] == []
             assert admitted["budget_settlement_outbox"] == []
             assert admitted["usage_events"] == []
-            held, = leases(source, 1)
+            held, = front_leases(source, 1)
             assert held[0] == SCOPES[0]
             assert held[1] == intent[1] and held[2] > 0 and held[3:5] == (0, 0)
+            back, = back_leases(source, 1)
+            assert back[2] == held[2] and back[3:5] == (0, 0)
             gateway.process.kill()
             assert gateway.process.wait(timeout=3) == -9
         finally:
@@ -720,7 +741,15 @@ def test_tracked_sigkill_after_origin_acceptance_retains_unknown_liability(
         assert denied.status_code == 429, denied.text
         assert denied.json()["error"]["message"] == "budget exhausted"
         restarted.stop(expected_status=124)
-    assert tracked_rows(source) == admitted
+    after = tracked_rows(source)
+    # Tracked admission reserves the ADR-0015 back leg before the jobs machinery decides the
+    # front scope, so the denied held-capacity call leaves one released back-leg row. It must
+    # carry no spend, and every other durable fact must be untouched.
+    added = [row for row in after["budget_reservation"] if row not in admitted["budget_reservation"]]
+    assert all(row[1].startswith(BACK_LEG_PREFIX) and row[3:5] == (0, 1) for row in added), added
+    assert [row for row in after["budget_reservation"] if row not in added] == admitted["budget_reservation"]
+    assert {table: rows for table, rows in after.items() if table != "budget_reservation"} == {
+        table: rows for table, rows in admitted.items() if table != "budget_reservation"}
     assert len(gated_provider.requests) == 1
 
 
@@ -757,9 +786,13 @@ def test_tracked_sigkill_after_terminal_persistence_recovers_one_receipt(
         assert terminal[0] == intent[0] and terminal[3] == 14
         assert before["budget_request_correlation"] == [(intent[0], request_id)]
         assert before["budget_settlement_outbox"] == []
-        held, = leases(source, 1)
+        held, = front_leases(source, 1)
         assert held[0] == SCOPES[0]
         assert held[1] == intent[1] and held[3:5] == (0, 0)
+        # Tracked mode settles the back leg synchronously (ADR-0015); only the
+        # front leg waits on the canonical receipt path exercised here.
+        back, = back_leases(source, 1)
+        assert back[3:5] == (14, 1)
         wait_usage(gateway.client, 1, headers=gateway.admin_headers)
         subject = "recovery-member" if gateway.member_token is not None else "recovery-subject"
         with closing(sqlite3.connect(source)) as connection:
@@ -780,8 +813,10 @@ def test_tracked_sigkill_after_terminal_persistence_recovers_one_receipt(
         recovered = await_receipt(source)
         receipt, = recovered["budget_settlement_outbox"]
         assert receipt[1:4] == (intent[1], held[0], 14)
-        settled, = leases(source, 1)
+        settled, = front_leases(source, 1)
         assert settled[1] == intent[1] and settled[3:5] == (14, 1)
+        # Receipt recovery must not touch the already-settled back leg.
+        assert back_leases(source, 1) == [back]
         for table in ("budget_execution_intent", "budget_request_correlation",
                       "budget_dispatch_fence", "budget_terminal_observation", "usage_events"):
             assert recovered[table] == before[table], table

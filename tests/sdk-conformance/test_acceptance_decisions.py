@@ -28,6 +28,8 @@ pytestmark = [pytest.mark.skipif(os.name != "posix", reason="Synthetic Unix brok
 SUBJECT = "decision-user"
 GROUP = "decision-team"
 SCOPE = "group:" + GROUP
+# ADR-0015 back leg: resolved upstream of the synthetic OpenAI-compatible provider.
+UPSTREAM_SCOPE = "upstream:openai"
 SESSION = "decision-session"
 RUN = "decision-run"
 BODY = {"model": "gpt-mock", "messages": [{"role": "user", "content": "synthetic decision"}]}
@@ -181,7 +183,7 @@ def verify_attribution(page, client, database, steps):
         ).fetchall() == [(7, 3, 0, 4)] * len(steps)
         assert connection.execute(
             "SELECT scope,SUM(actual) FROM budget_reservation WHERE settled=1 GROUP BY scope"
-        ).fetchall() == [(SCOPE, 14 * len(steps))]
+        ).fetchall() == sorted([(SCOPE, 14 * len(steps)), (UPSTREAM_SCOPE, 14 * len(steps))])
         assert connection.execute("SELECT COUNT(*) FROM budget_reservation WHERE settled=0").fetchone() == (0,)
     tree_response = client.get("/admin/usage/run/" + RUN)
     assert tree_response.status_code == 200

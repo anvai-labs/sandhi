@@ -462,13 +462,20 @@ def accounting(client, base, database, run_id, config, before_spend, deadline):
     expected_spend = Counter()
     for i in range(config.requests):
         expected_spend[f"group:tenant-{i % config.tenants}"] += charge(i)
-    assert set(totals) <= set(expected_spend), "unexpected ledger scope"
+    back_leg = {scope: value for scope, value in totals.items() if scope.startswith("upstream:")}
+    front_leg = {scope: value for scope, value in totals.items() if scope not in back_leg}
+    assert set(front_leg) <= set(expected_spend), "unexpected ledger scope"
+    assert back_leg, "every call must also settle an upstream: back-leg lease (ADR-0015 D5)"
+    # Both legs settle with the same measured actual, so back-leg spend across
+    # resolved upstreams equals front-leg spend across tenants.
+    assert sum(value - before_spend.get(scope, 0) for scope, value in back_leg.items()) == sum(
+        expected_spend.values()), "back-leg spend diverged from front-leg spend"
     for scope, value in expected_spend.items():
         if time.monotonic() >= deadline:
             raise TimeoutError("accounting verification deadline")
-        assert totals.get(scope, 0) - before_spend.get(scope, 0) == value
+        assert front_leg.get(scope, 0) - before_spend.get(scope, 0) == value
         body = client.get(base + "/admin/budget/usage", params={"scope": scope}).json()
-        assert body["spent"] == totals[scope]
+        assert body["spent"] == front_leg[scope]
     tree = client.get(base + "/admin/usage/run/" + run_id).json()
     assert tree["run"]["total"]["billable_tokens"] == sum(expected_spend.values())
     assert_quiet(metrics(client.get(base + "/metrics").text))
