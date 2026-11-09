@@ -67,6 +67,14 @@ same conservative ceiling (`reservation_ceiling`, unchanged):
    front-denial check, so a front denial short-circuits without ever taking a
    back lease.
 
+**Tracked/buffered mode differs (known gap).** There the primary lease is
+admitted inside the settlement-jobs machinery, so the back lease is reserved
+*before* hand-off and released on every pre-dispatch refusal. A front-denied
+tracked call therefore takes and releases a back lease: one extra durable write
+and transient back-cap capacity, with zero recorded spend (pinned by the SDK
+conformance recovery tests). Aligning tracked admission with the front-first
+order above is follow-up work.
+
 The back reserve runs while the front-scope `PendingAdmission` still owns its
 lease: a cancellation of the handler future at the back reserve's await point
 (client disconnect, drain) rolls the front lease back through
@@ -112,11 +120,36 @@ only**. Tracked/buffered mode fires no alerts for either scope (a pre-existing
 gap, unchanged by this ADR; the primary scope did not alert there either).
 
 In the tracked/buffered path the primary lease settles canonically through
-the settlement-jobs machinery, which carries only the primary scope; the back
-lease therefore settles **synchronously** in `finalize_owned` with the same
-actual (settle is idempotent by lease id, ADR-0005 D2). Unfinalized calls
-(settle-on-drop) settle both leases the same way through the existing drop
-path.
+the settlement-jobs machinery. `finalize_owned` attaches the back lease and the
+call's measured actual (0 when unmeasured) to the primary's `PendingSettlement`
+before submitting it, and before any best-effort telemetry. The Settle work
+settles the back lease in the **same ledger critical section, as soon as the
+terminal observation is durably recorded** and before the primary receipt is
+attempted. A primary that then stays unresolved therefore never parks the back
+lease. Examples are an upstream error, missing or non-final usage, a failing
+receipt, or a crash before receipt recovery. Front-leg recovery from durable
+evidence never leaves the back leg undercounted. Settle is idempotent by lease
+id (ADR-0005 D2), so retained replays are no-ops.
+
+If the observation itself cannot be recorded (ledger busy, SQLite failure), the
+back lease stays with the retained primary and settles when a retry records
+it. If that RAM owner is lost first, the lease is left to TTL reclaim (D4).
+
+A refused Settle submission settles the back lease directly. If the refused
+primary was retained and the process then exits before its terminal evidence
+is durable, the front is TTL-reclaimed at 0 while the back keeps the actual.
+This is the narrow mirror image of D4 and is accepted.
+
+An earlier revision settled the back lease with a separate blocking ledger
+write in `finalize_owned`. Placed before submission, it stalled the receipt
+under SQLite contention. Detached after submission, it raced the primary's
+nonblocking `try_lock` and turned completed calls into
+`502 accounting unresolved`.
+
+On the legacy path, unfinalized calls (settle-on-drop) settle both leases
+through the existing drop path. In tracked mode the drop path does not settle
+once the owned accounting exists. A task that dies before `finalize_owned`
+leaves the back lease to TTL reclaim, like a crash.
 
 ## D4. Crash semantics — TTL reclaim, no spend recorded
 

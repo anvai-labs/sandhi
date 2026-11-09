@@ -285,7 +285,12 @@ def test_inflight_sse_finishes_but_queued_request_cannot_dispatch_after_sigterm(
                 assert_draining(result["response"])
         assert process.wait(timeout=6) == 0
         assert len(gated_provider.requests) == 1
-        assert evidence_counts(database) == (1, 1)
+        # One usage event; one front (group:) and one back (upstream:) lease per
+        # call, ADR-0015 D5.
+        assert evidence_counts(database) == (1, 2)
+        with sqlite3.connect(database, timeout=1) as connection:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM budget_reservation WHERE settled=0").fetchone() == (0,), "both legs settle"
 
 
 def test_body_started_before_cutoff_cannot_dispatch_when_completed_after_cutoff(
@@ -415,4 +420,10 @@ def test_tracked_binary_correlation_and_shutdown(
                 "SELECT charged_tokens FROM budget_settlement_outbox"
             ).fetchall()
             assert receipts == ([] if missing_usage else [(14,)])
+            # ADR-0015 back leg: settled once the terminal observation is durable, at the
+            # measured actual or 0 when unmeasured, even though a missing-usage primary never
+            # commits. It must not stay reserved against the provider cap until TTL.
+            assert connection.execute(
+                "SELECT actual, settled FROM budget_reservation WHERE scope LIKE 'upstream:%'"
+            ).fetchall() == [(0 if missing_usage else 14, 1)]
         assert len(gated_provider.requests) == 1
