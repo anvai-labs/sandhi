@@ -2693,8 +2693,9 @@ async fn handle_with_policy_receipt(
     accounting.input_len = input_len;
     accounting.operation = Some(operation);
     // ADR-0015: the back-leg lease moves into the per-call accounting, which settles it with the
-    // same actual at finalize (synchronously in `finalize_owned`, where the primary settles via
-    // the canonical jobs path). The now-empty hold drops without settling anything.
+    // same actual at finalize (on the legacy path under the same lock as the primary; in
+    // `finalize_owned` inside the primary's Settle work, right after the primary commits). The
+    // now-empty hold drops without settling anything.
     let upstream_reservation = upstream_hold.take();
     accounting.with_upstream_budget(upstream_scope, upstream_reservation);
     // TD-0021 P4 (D1): the METER records the LOGICAL call once — a repeat of a settled
@@ -3287,22 +3288,6 @@ fn blocking_section<T>(operation: impl FnOnce() -> T) -> T {
     }
 }
 
-/// Settle an ADR-0015 back-leg lease without blocking the caller's task. With a Tokio runtime the
-/// ledger write runs on the blocking pool; without one (sync callers, some tests) it runs inline.
-fn settle_back_leg_detached(state: Arc<ProxyState>, reservation: Reservation, actual: u64) {
-    let settle = move || {
-        if let Ok(mut ledger) = state.ledger.lock() {
-            ledger.settle(&reservation, actual);
-        }
-    };
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => {
-            handle.spawn_blocking(settle);
-        }
-        Err(_) => settle(),
-    }
-}
-
 /// Owns the reservation and guarantees one terminal usage observation even when an HTTP body is
 /// abandoned. Counts are always measured; an unavailable observation releases the reservation.
 struct RequestAccounting {
@@ -3665,29 +3650,44 @@ impl RequestAccounting {
         );
         // Retain immutable terminal evidence BEFORE invoking arbitrary best-effort
         // telemetry. A panicking sink must not erase a completed model's usage.
-        let pending = owned
-            .execution
-            .into_settlement(usage.clone())
-            .with_cache_read_weight(self.state.cache_read_weight_bp);
         let actual = if measured {
             sandhi_core::billable_weighted(&usage, self.state.cache_read_weight_bp)
         } else {
             0
         };
+        // ADR-0015: the back-leg lease settles with the same actual, inside the primary's Settle
+        // work and its ledger critical section, right after the primary commits. It is attached
+        // BEFORE submission and before any best-effort telemetry, so neither a contended ledger
+        // (the primary's nonblocking lock never races its own back leg) nor a panicking sink can
+        // strand it. `settle` is idempotent by lease id (ADR-0005 D2); a crash before commit
+        // leaves the lease to TTL reclaim, mirroring D2.
+        let pending = owned
+            .execution
+            .into_settlement(usage.clone())
+            .with_cache_read_weight(self.state.cache_read_weight_bp)
+            .with_back_leg(self.upstream_reservation.take(), actual);
         let submitted = owned
             .obligation
             .submit(settlement::jobs::Work::Settle(pending));
+        let ticket = match submitted {
+            Ok(ticket) => Some(ticket),
+            Err(mut rejected) => {
+                // The Settle work will never run, so no primary commit can contend: release the
+                // back leg here rather than leave it to TTL. The primary stays retained as before.
+                if let settlement::jobs::Work::Settle(pending) = &mut rejected.work {
+                    if let Some((back, back_actual)) = pending.take_back_leg() {
+                        blocking_section(|| {
+                            if let Ok(mut ledger) = self.state.ledger.lock() {
+                                ledger.settle(&back, back_actual);
+                            }
+                        });
+                    }
+                }
+                None
+            }
+        };
         self.emit_usage(&usage, actual, true);
-        // ADR-0015: the back-leg lease settles with the same actual. The jobs machinery carries
-        // only the primary scope, so the `upstream:{provider}` lease has no canonical async path
-        // of its own. It settles only AFTER the primary obligation is submitted and terminal
-        // usage is observed, and off this task: a contended ledger write must never delay the
-        // canonical receipt or terminal evidence. `settle` is idempotent by lease id (ADR-0005
-        // D2), and a crash before it runs leaves the lease to TTL reclaim, mirroring D2.
-        if let Some(reservation) = self.upstream_reservation.take() {
-            settle_back_leg_detached(Arc::clone(&self.state), reservation, actual);
-        }
-        let Ok(ticket) = submitted else {
+        let Some(ticket) = ticket else {
             return false;
         };
         if tokio::time::timeout(owned.wait, ticket.wait())

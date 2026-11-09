@@ -205,11 +205,12 @@ def back_leases(base, shards):
     return [row for row in leases(base, shards) if row[0].startswith(BACK_LEG_PREFIX)]
 
 
-def assert_denial_left_only_released_back_leg(after, admitted):
+def assert_denial_left_only_released_back_leg(after, admitted, denials=1):
     """Tracked admission reserves the ADR-0015 back leg before the jobs machinery decides the
     front scope, so a front-denied call leaves released back-leg rows. They must carry no
     spend, and every other durable fact must be untouched."""
     added = [row for row in after["budget_reservation"] if row not in admitted["budget_reservation"]]
+    assert len(added) == denials, added
     assert all(row[1].startswith(BACK_LEG_PREFIX) and row[3:5] == (0, 1) for row in added), added
     assert [row for row in after["budget_reservation"] if row not in added] == admitted["budget_reservation"]
     assert {table: rows for table, rows in after.items() if table != "budget_reservation"} == {
@@ -653,7 +654,7 @@ def test_tracked_terminal_observed_during_sqlite_contention(
                 for table in ("budget_execution_intent", "budget_request_correlation",
                               "budget_dispatch_fence"):
                     assert recovered[table] == admitted[table], table
-                # Front leg settled via the retained owner; back leg settled synchronously.
+                # The back leg commits in the same Settle work as the retained front receipt.
                 assert [row[3:5] for row in leases(source, 1)] == [(14, 1), (14, 1)]
                 assert observed_tokens(gateway.client, headers=gateway.admin_headers) == expected
                 gateway.stop()
@@ -792,10 +793,11 @@ def test_tracked_sigkill_after_terminal_persistence_recovers_one_receipt(
         held, = front_leases(source, 1)
         assert held[0] == SCOPES[0]
         assert held[1] == intent[1] and held[3:5] == (0, 0)
-        # Tracked mode settles the back leg synchronously (ADR-0015); only the
-        # front leg waits on the canonical receipt path exercised here.
+        # The back leg settles only after its primary receipt commits (same Settle work).
+        # The receipt is rejected here, so the back lease stays held; after the crash its RAM
+        # owner is gone and it is left to TTL reclaim (ADR-0015 D4), never settled twice.
         back, = back_leases(source, 1)
-        assert back[3:5] == (14, 1)
+        assert back[3:5] == (0, 0)
         wait_usage(gateway.client, 1, headers=gateway.admin_headers)
         subject = "recovery-member" if gateway.member_token is not None else "recovery-subject"
         with closing(sqlite3.connect(source)) as connection:

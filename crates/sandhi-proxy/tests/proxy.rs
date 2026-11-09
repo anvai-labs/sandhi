@@ -4468,10 +4468,10 @@ async fn owned_buffered_both_planes_correlate_and_settle_once() {
 }
 
 /// ADR-0015: in tracked (buffered) accounting the primary lease settles canonically through
-/// the jobs machinery — the back-leg lease has no canonical path there, so it settles
-/// synchronously at finalize with the same actual.
+/// the jobs machinery, and the back-leg lease settles with the same actual inside that same
+/// Settle work, right after the primary commits — so it is settled once the response returns.
 #[tokio::test]
-async fn owned_buffered_settles_the_upstream_scope_synchronously() {
+async fn owned_buffered_settles_the_upstream_scope_with_the_primary() {
     let upstream = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!(
@@ -4519,6 +4519,42 @@ async fn owned_buffered_settles_the_upstream_scope_synchronously() {
         "the back lease settled"
     );
     assert_eq!(ledger.reserved("group:platform"), 0);
+}
+
+/// Regression: a back-leg settle racing its own call's primary Settle for the proxy mutex made
+/// the primary's nonblocking lock fail (`LedgerBusy`), turning completed calls into 502
+/// "accounting unresolved". Sequential calls on a multi-thread runtime must all succeed with
+/// both legs settled by the time each response returns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn owned_buffered_back_leg_never_races_its_primary_settle() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!(
+            {"choices":[{"message":{"content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}
+        )))
+        .mount(&upstream)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("owned.db");
+    let sink = Arc::new(InMemorySink::new());
+    let state = owned_state(
+        upstream.uri(),
+        &path,
+        sink.clone(),
+        std::time::Duration::from_secs(2),
+    );
+    const CALLS: u64 = 200;
+    for call in 1..=CALLS {
+        let response = build_app(state.clone())
+            .oneshot(owned_request("/v1/chat/completions", owned_body()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "call {call}");
+        let ledger = state.ledger.lock().unwrap();
+        assert_eq!(ledger.reserved("upstream:openai"), 0, "call {call}: back lease held");
+        assert_eq!(ledger.spent("upstream:openai"), 12 * call, "call {call}");
+        assert_eq!(ledger.spent("group:platform"), 12 * call, "call {call}");
+    }
 }
 
 /// Regression (ADR-0015 review P1-1): the caller reserves the upstream lease BEFORE
@@ -4882,7 +4918,13 @@ async fn owned_http_sink_panic_cannot_erase_terminal_evidence() {
         sandhi_proxy::settlement::buffered::recover(state.clone())
             .await
             .unwrap();
-        assert_eq!(state.ledger.lock().unwrap().spent("group:platform"), 5);
+        let ledger = state.ledger.lock().unwrap();
+        assert_eq!(ledger.spent("group:platform"), 5);
+        // The back leg rides the primary's Settle work, attached before the panicking sink
+        // runs, so the panic can neither strand its lease nor lose its spend.
+        assert_eq!(ledger.spent("upstream:openai"), 5, "streaming={streaming}");
+        assert_eq!(ledger.reserved("upstream:openai"), 0, "streaming={streaming}");
+        drop(ledger);
         assert_eq!(sink.0.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

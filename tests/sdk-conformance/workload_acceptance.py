@@ -442,6 +442,10 @@ async def drive(base, lane, mode, tokens, run_id, config, pids):
     return result
 
 
+# ADR-0015 back-leg scope of the harness's single synthetic upstream (`gemini`).
+BACK_LEG_SCOPE = "upstream:gemini"
+
+
 def accounting(client, base, database, run_id, config, before_spend, deadline):
     expected = [(str(i), f"subject-{i % config.tenants}", f"tenant-{i % config.tenants}",
                  *components(i)) for i in range(config.requests)]
@@ -465,10 +469,10 @@ def accounting(client, base, database, run_id, config, before_spend, deadline):
     back_leg = {scope: value for scope, value in totals.items() if scope.startswith("upstream:")}
     front_leg = {scope: value for scope, value in totals.items() if scope not in back_leg}
     assert set(front_leg) <= set(expected_spend), "unexpected ledger scope"
-    assert back_leg, "every call must also settle an upstream: back-leg lease (ADR-0015 D5)"
-    # Both legs settle with the same measured actual, so back-leg spend across
-    # resolved upstreams equals front-leg spend across tenants.
-    assert sum(value - before_spend.get(scope, 0) for scope, value in back_leg.items()) == sum(
+    # Every call resolves the one synthetic upstream and settles its ADR-0015 back leg with the
+    # same measured actual, so that scope's spend delta equals front-leg spend across tenants.
+    assert set(back_leg) == {BACK_LEG_SCOPE}, f"unexpected back-leg scopes {sorted(back_leg)}"
+    assert back_leg[BACK_LEG_SCOPE] - before_spend.get(BACK_LEG_SCOPE, 0) == sum(
         expected_spend.values()), "back-leg spend diverged from front-leg spend"
     for scope, value in expected_spend.items():
         if time.monotonic() >= deadline:

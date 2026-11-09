@@ -67,6 +67,14 @@ same conservative ceiling (`reservation_ceiling`, unchanged):
    front-denial check, so a front denial short-circuits without ever taking a
    back lease.
 
+**Tracked/buffered mode differs (known gap).** There the primary lease is
+admitted inside the settlement-jobs machinery, so the back lease is reserved
+*before* hand-off and released on every pre-dispatch refusal. A front-denied
+tracked call therefore takes and releases a back lease: one extra durable write
+and transient back-cap capacity, with zero recorded spend (pinned by the SDK
+conformance recovery tests). Aligning tracked admission with the front-first
+order above is follow-up work.
+
 The back reserve runs while the front-scope `PendingAdmission` still owns its
 lease: a cancellation of the handler future at the back reserve's await point
 (client disconnect, drain) rolls the front lease back through
@@ -112,11 +120,23 @@ only**. Tracked/buffered mode fires no alerts for either scope (a pre-existing
 gap, unchanged by this ADR; the primary scope did not alert there either).
 
 In the tracked/buffered path the primary lease settles canonically through
-the settlement-jobs machinery, which carries only the primary scope; the back
-lease therefore settles **synchronously** in `finalize_owned` with the same
-actual (settle is idempotent by lease id, ADR-0005 D2). Unfinalized calls
-(settle-on-drop) settle both leases the same way through the existing drop
-path.
+the settlement-jobs machinery. `finalize_owned` attaches the back lease and its
+actual to the primary's `PendingSettlement` before submitting it (and before any
+best-effort telemetry); the Settle work settles the back lease in the **same
+ledger critical section, immediately after the primary commits** (settle is
+idempotent by lease id, ADR-0005 D2). An earlier revision settled it with a
+separate blocking ledger write in `finalize_owned`: placed before submission it
+stalled the receipt under SQLite contention, and detached after submission it
+raced the primary's nonblocking `try_lock` and turned completed calls into
+`502 accounting unresolved`. A primary that stays unresolved keeps the back
+lease with it through retained retries; if that RAM owner is lost (crash) the
+back lease is left to TTL reclaim (D4). A refused Settle submission settles the
+back lease directly, since no primary commit can then contend.
+
+On the legacy path unfinalized calls (settle-on-drop) settle both leases
+through the existing drop path. In tracked mode the drop path does not settle
+once the owned accounting exists; a task that dies before `finalize_owned`
+leaves the back lease to TTL reclaim, like a crash.
 
 ## D4. Crash semantics — TTL reclaim, no spend recorded
 

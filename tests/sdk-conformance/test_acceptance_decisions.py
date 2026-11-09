@@ -182,7 +182,7 @@ def verify_attribution(page, client, database, steps):
             "FROM usage_events ORDER BY step_id"
         ).fetchall() == [(7, 3, 0, 4)] * len(steps)
         assert connection.execute(
-            "SELECT scope,SUM(actual) FROM budget_reservation WHERE settled=1 GROUP BY scope"
+            "SELECT scope,SUM(actual) FROM budget_reservation WHERE settled=1 GROUP BY scope ORDER BY scope"
         ).fetchall() == sorted([(SCOPE, 14 * len(steps)), (UPSTREAM_SCOPE, 14 * len(steps))])
         assert connection.execute("SELECT COUNT(*) FROM budget_reservation WHERE settled=0").fetchone() == (0,)
     tree_response = client.get("/admin/usage/run/" + RUN)
