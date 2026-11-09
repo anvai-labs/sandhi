@@ -19,6 +19,15 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+## [0.16.1] — 2026-11-09
+
+### Fixed
+
+- **Security**: upgraded rusqlite 0.32→0.41 and Rust MSRV 1.95→1.99 to pull in
+  libsqlite3-sys 0.39.1 (SQLite 3.54.1), resolving RUSTSEC-2026-0459
+  (CVE-2026-119375). Adapted `u64`→`i64` casts in sandhi-store for rusqlite
+  0.41's removed direct `ToSql`/`FromSql` for `u64`.
+
 ## [0.16.0] — 2026-11-09
 
 ### Added
@@ -1625,7 +1634,8 @@ inline reverse-proxy, the durable store, and both language bindings.
   ([#9](https://github.com/anvai-labs/sandhi/pull/9),
   [#10](https://github.com/anvai-labs/sandhi/pull/10))
 
-[Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.16.1...HEAD
+[0.16.1]: https://github.com/anvai-labs/sandhi/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/anvai-labs/sandhi/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/anvai-labs/sandhi/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/anvai-labs/sandhi/compare/v0.14.0...v0.14.1
