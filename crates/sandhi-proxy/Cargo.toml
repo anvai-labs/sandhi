@@ -108,7 +108,7 @@ opentelemetry-otlp = { version = "0.32", optional = true, default-features = fal
 ] }
 
 [dev-dependencies]
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 tempfile = "3"
 p256 = { version = "0.13", features = ["ecdsa"] }
 base64 = "0.22"
