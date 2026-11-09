@@ -205,6 +205,17 @@ def back_leases(base, shards):
     return [row for row in leases(base, shards) if row[0].startswith(BACK_LEG_PREFIX)]
 
 
+def assert_denial_left_only_released_back_leg(after, admitted):
+    """Tracked admission reserves the ADR-0015 back leg before the jobs machinery decides the
+    front scope, so a front-denied call leaves released back-leg rows. They must carry no
+    spend, and every other durable fact must be untouched."""
+    added = [row for row in after["budget_reservation"] if row not in admitted["budget_reservation"]]
+    assert all(row[1].startswith(BACK_LEG_PREFIX) and row[3:5] == (0, 1) for row in added), added
+    assert [row for row in after["budget_reservation"] if row not in added] == admitted["budget_reservation"]
+    assert {table: rows for table, rows in after.items() if table != "budget_reservation"} == {
+        table: rows for table, rows in admitted.items() if table != "budget_reservation"}
+
+
 def get(client, path, *, headers=ADMIN):
     response = client.get(path, headers=headers)
     assert response.status_code == 200, response.text
@@ -671,7 +682,7 @@ def test_tracked_terminal_observed_during_sqlite_contention(
             assert changed.status_code == 200, changed.text
             assert call(restarted.client, key, step="held-capacity").status_code == 429
             restarted.stop(expected_status=124)
-            assert tracked_rows(source) == admitted
+            assert_denial_left_only_released_back_leg(tracked_rows(source), admitted)
         else:
             assert tracked_rows(source) == recovered
             budget, = get(restarted.client, "/dashboard/api/budgets", headers=restarted.admin_headers)["budgets"]
@@ -741,15 +752,7 @@ def test_tracked_sigkill_after_origin_acceptance_retains_unknown_liability(
         assert denied.status_code == 429, denied.text
         assert denied.json()["error"]["message"] == "budget exhausted"
         restarted.stop(expected_status=124)
-    after = tracked_rows(source)
-    # Tracked admission reserves the ADR-0015 back leg before the jobs machinery decides the
-    # front scope, so the denied held-capacity call leaves one released back-leg row. It must
-    # carry no spend, and every other durable fact must be untouched.
-    added = [row for row in after["budget_reservation"] if row not in admitted["budget_reservation"]]
-    assert all(row[1].startswith(BACK_LEG_PREFIX) and row[3:5] == (0, 1) for row in added), added
-    assert [row for row in after["budget_reservation"] if row not in added] == admitted["budget_reservation"]
-    assert {table: rows for table, rows in after.items() if table != "budget_reservation"} == {
-        table: rows for table, rows in admitted.items() if table != "budget_reservation"}
+    assert_denial_left_only_released_back_leg(tracked_rows(source), admitted)
     assert len(gated_provider.requests) == 1
 
 
