@@ -216,9 +216,9 @@ fn opaque_id() -> Result<String, EvidenceError> {
 fn receipt(row: &rusqlite::Row<'_>) -> rusqlite::Result<SettlementReceipt> {
     Ok(SettlementReceipt {
         receipt_id: row.get(0)?,
-        reservation_id: row.get(1)?,
+        reservation_id: row.get::<_, i64>(1)? as u64,
         scope: row.get(2)?,
-        charged_tokens: row.get(3)?,
+        charged_tokens: row.get::<_, i64>(3)? as u64,
         settled_at: row.get(4)?,
     })
 }
@@ -273,7 +273,7 @@ fn intent_binding(
     conn: &Connection,
     execution_id: &str,
 ) -> Result<Option<(u64, String, bool)>, EvidenceError> {
-    let binding: Option<(Option<u64>, Option<String>, Option<bool>)> = conn
+    let binding: Option<(Option<i64>, Option<String>, Option<bool>)> = conn
         .query_row(
             "SELECT r.id, r.scope, r.settled FROM budget_execution_intent i
          LEFT JOIN budget_reservation r ON r.id = i.reservation_id WHERE i.execution_id = ?1",
@@ -282,7 +282,7 @@ fn intent_binding(
         )
         .optional()?;
     match binding {
-        Some((Some(id), Some(scope), Some(settled))) => Ok(Some((id, scope, settled))),
+        Some((Some(id), Some(scope), Some(settled))) => Ok(Some((id as u64, scope, settled))),
         Some(_) => Err(EvidenceError::CorruptObservation),
         None => {
             let retained: bool = conn.query_row(
@@ -306,7 +306,7 @@ fn read_observation(
     scope: &str,
 ) -> Result<Option<TerminalObservation>, EvidenceError> {
     // Bound allocation even if a newer/foreign writer violated this version's contract.
-    let row: Option<(u32, Option<String>, Option<u64>, i64)> = conn.query_row(
+    let row: Option<(u32, Option<String>, Option<i64>, i64)> = conn.query_row(
         "SELECT version, CASE WHEN length(CAST(usage_json AS BLOB)) <= 16384 THEN usage_json END,
                 frozen_charge, observed_at FROM budget_terminal_observation WHERE execution_id = ?1",
         [execution_id],
@@ -330,7 +330,7 @@ fn read_observation(
             reservation_id,
             scope: scope.to_string(),
             usage,
-            frozen_charge,
+            frozen_charge: frozen_charge.map(|v| v as u64),
             observed_at,
         })
     })
@@ -361,7 +361,7 @@ fn checked_terminal_receipt(
     let (scope_matches, settled, actual, settled_at): (bool, i64, i64, Option<i64>) = conn
         .query_row(
             "SELECT scope = ?2, settled, actual, settled_at FROM budget_reservation WHERE id = ?1",
-            params![id, scope],
+            params![id as i64, scope],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )?;
     let stored = conn
@@ -369,7 +369,7 @@ fn checked_terminal_receipt(
             "SELECT CASE WHEN length(CAST(receipt_id AS BLOB)) = 64 THEN receipt_id END,
                 reservation_id, CASE WHEN scope = ?2 THEN ?2 END, charged_tokens, settled_at
          FROM budget_settlement_outbox WHERE reservation_id = ?1",
-            params![id, scope],
+            params![id as i64, scope],
             receipt,
         )
         .optional()?;
@@ -495,13 +495,13 @@ impl SqliteLedger {
             None => tx.query_row(
                 "SELECT COALESCE(MAX(reservation_id),0) FROM budget_execution_intent",
                 [],
-                |r| r.get(0),
+                |r| Ok(r.get::<_, i64>(0)? as u64),
             )?,
         };
         let after = cursor.map_or("", |c| c.after.as_str());
         let mut stmt = tx.prepare("SELECT DISTINCT r.scope FROM budget_execution_intent i LEFT JOIN budget_reservation r ON r.id=i.reservation_id WHERE i.reservation_id<=?1 AND (r.scope>?2 OR r.scope IS NULL) ORDER BY r.scope LIMIT ?3")?;
         let scopes = stmt
-            .query_map(params![through_id, after, limit as i64], |r| {
+            .query_map(params![through_id as i64, after, limit as i64], |r| {
                 r.get::<_, Option<String>>(0)
             })?
             .map(|r| {
@@ -630,7 +630,7 @@ impl SqliteLedger {
                     "SELECT COALESCE(MAX(i.reservation_id), 0) FROM budget_execution_intent i
                  JOIN budget_reservation r ON r.id = i.reservation_id WHERE r.scope = ?1",
                     [scope],
-                    |r| r.get::<_, u64>(0),
+                    |r| Ok(r.get::<_, i64>(0)? as u64),
                 )?,
             ),
         };
@@ -643,10 +643,15 @@ impl SqliteLedger {
                  WHERE r.scope = ?1 AND i.reservation_id > ?2 AND i.reservation_id <= ?3
                  ORDER BY i.reservation_id LIMIT ?4",
             )?;
-            let mapped = statement
-                .query_map(params![scope, after_id, through_id, limit + 1], |r| {
-                    Ok((r.get::<_, Option<String>>(0)?, r.get::<_, u64>(1)?))
-                })?;
+            let mapped = statement.query_map(
+                params![
+                    scope,
+                    after_id as i64,
+                    through_id as i64,
+                    (limit + 1) as i64
+                ],
+                |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)? as u64)),
+            )?;
             mapped.collect::<Result<Vec<_>, _>>()?
         };
         let has_more = rows.len() > limit;
@@ -893,7 +898,7 @@ impl SqliteLedger {
         };
         let inserted = tx.execute(
             "INSERT INTO budget_execution_intent (execution_id, reservation_id, created_at) VALUES (?1, ?2, ?3)",
-            params![execution_id, reservation.id, now.unix_timestamp()],
+            params![execution_id, reservation.id as i64, now.unix_timestamp()],
         )?;
         if inserted != 1 {
             return Err(EvidenceError::Storage(rusqlite::Error::QueryReturnedNoRows));
@@ -927,7 +932,7 @@ impl SqliteLedger {
         execution_id: &str,
     ) -> Result<Option<ExecutionIntent>, EvidenceError> {
         validate_execution_id(execution_id)?;
-        let row: Option<(u64, String, u64, i64)> = self
+        let row: Option<(i64, String, i64, i64)> = self
             .conn
             .query_row(
                 "SELECT r.id, r.scope, r.ceiling, r.expires_at FROM budget_execution_intent i
@@ -942,9 +947,9 @@ impl SqliteLedger {
             Ok(ExecutionIntent {
                 execution_id: execution_id.to_string(),
                 reservation: Reservation {
-                    id,
+                    id: id as u64,
                     scope,
-                    ceiling,
+                    ceiling: ceiling as u64,
                     expires_at,
                 },
             })

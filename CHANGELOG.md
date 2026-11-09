@@ -19,6 +19,63 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+## [0.16.1] — 2026-11-09
+
+### Fixed
+
+- **Security**: upgraded rusqlite 0.32→0.41 and Rust MSRV 1.95→1.99 to pull in
+  libsqlite3-sys 0.39.1 (SQLite 3.54.1), resolving RUSTSEC-2026-0459
+  (CVE-2026-119375). Adapted `u64`→`i64` casts in sandhi-store for rusqlite
+  0.41's removed direct `ToSql`/`FromSql` for `u64`.
+
+## [0.16.0] — 2026-11-09
+
+### Added
+
+- Upstream back-leg budget caps per provider
+  ([ADR-0015](docs/adr/0015-upstream-budgets-back-leg-caps.md)):
+  the budget chain now enforces **back-leg** scopes (`upstream:{vendor}`) in
+  addition to the front-leg `vk:{id}` / `group:{g}` scopes from ADR-0005.
+  Operators can cap per-vendor spend within a virtual key's overall budget —
+  a single key that routes to multiple upstreams can limit how much of its
+  allocation any one vendor consumes. The ledger reserves and settles
+  upstream-scoped units alongside the existing front-leg reservations;
+  rollback on cancellation releases both legs atomically.
+
+- Central gateway profiles with per-user profile endpoint
+  ([TD-0017](docs/td/TD-0017-transport-security-and-ingress-protocol-breadth.md)):
+  `GET /admin/profiles` serves the curated profile catalogue; authenticated
+  users can download their own resolved profile via `GET /profile`
+  (content-negotiated JSON). The proxy no longer requires operators to
+  distribute profile bundles out-of-band — the gateway is the single source
+  of truth. Profile download lifecycle is documented on the revoke surface.
+
+- Optional deployment topology file: `GET /admin/topology` returns the
+  declared deployment map (upstreams, regions, capabilities) and the
+  dashboard renders it as a topology card. The file is operator-managed;
+  the gateway serves it verbatim with no discovery of its own.
+
+- Dashboard UX: sidebar navigation, sticky table headers, pagination
+  controls, refresh status indicator, and adoption of the AnvaiOps family
+  design tokens for visual consistency across the operator surface.
+
+### Fixed
+
+- The admin CLI and webhook sender now refuse to follow HTTP redirects from
+  upstream targets. Model provider requests already refused redirects at the
+  typed seam; the operator-facing clients were missing the same guard, so a
+  misconfigured or compromised upstream could redirect admin traffic to an
+  unintended destination.
+
+- Dashboard topology card no longer leaks raw epoch seconds into the vkey
+  expiry display — timestamps are humanized (`in 3 days` rather than
+  `1731200000`). The card loader also handles the empty-topology case
+  without a stuck spinner.
+
+- Provider model requests refuse HTTP redirects at the typed seam: a 3xx
+  from an upstream is surfaced as an error rather than silently followed,
+  consistent with the admin CLI and webhook fix above.
+
 ## [0.15.0] — 2026-11-06
 
 ### Added
@@ -1577,7 +1634,10 @@ inline reverse-proxy, the durable store, and both language bindings.
   ([#9](https://github.com/anvai-labs/sandhi/pull/9),
   [#10](https://github.com/anvai-labs/sandhi/pull/10))
 
-[Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.16.1...HEAD
+[0.16.1]: https://github.com/anvai-labs/sandhi/compare/v0.16.0...v0.16.1
+[0.16.0]: https://github.com/anvai-labs/sandhi/compare/v0.15.0...v0.16.0
+[0.15.0]: https://github.com/anvai-labs/sandhi/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/anvai-labs/sandhi/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/anvai-labs/sandhi/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/anvai-labs/sandhi/compare/v0.12.0...v0.13.0
