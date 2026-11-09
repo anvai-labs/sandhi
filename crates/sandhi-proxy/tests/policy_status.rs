@@ -22,7 +22,15 @@ async fn policy_status_is_protected_redacted_and_reports_durable_capacity() {
         .unwrap(),
     )
     .unwrap();
-    let gate = Arc::new(PolicyGate::new(engine, audit));
+    // Deadline floor as in `proxy.rs::anthropic_policy_state`: this test
+    // asserts the verdict and the redacted status surface, not timing — a CI
+    // runner must not be able to flip the check into a fail-closed
+    // `Unavailable` by simply being slow.
+    let gate = Arc::new(PolicyGate::with_deadline_floor(
+        engine,
+        audit,
+        std::time::Duration::from_secs(30),
+    ));
     gate.check(
         bytes::Bytes::from_static(br#"{"model":"test","messages":[]}"#),
         Default::default(),

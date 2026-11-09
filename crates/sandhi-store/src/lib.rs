@@ -6,6 +6,7 @@
 pub mod alerts;
 pub mod diagnostics;
 pub mod ledger;
+pub mod profiles;
 pub mod sharded;
 pub use sharded::ShardedLedger;
 pub mod vault;
@@ -24,6 +25,7 @@ use sandhi_core::{
 
 pub use alerts::{AlertRuleRecord, AlertStore, CreateAlertRequest};
 pub use ledger::{BudgetRow, ReserveOutcome, SqliteLedger};
+pub use profiles::{ProfileRecord, ProfileStore};
 pub use vault::{
     hash_secret, CredentialScheme, InMemoryVault, KeyringVault, SentinelPassVault, Vault,
     VaultEntry, VaultError, VaultStore,

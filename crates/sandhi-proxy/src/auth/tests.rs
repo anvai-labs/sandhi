@@ -51,6 +51,27 @@ fn configuration_rejects_ambiguous_or_insecure_authority() {
 }
 
 #[test]
+fn configuration_rejects_an_upstream_prefixed_grant_budget_scope() {
+    // ADR-0015: `upstream:` is the gateway's reserved back-leg scope prefix. A config-authored
+    // grant scope flows into BOTH the live OIDC-derived key (`grant_groups`) and the durable
+    // subject-key mint (`MintRequest`), so a misconfigured grant must fail startup validation,
+    // not mint double-counting keys. (The subject-key re-delegation path derives
+    // `group:`/`vk:` for the live key, but the durable record still carries the config scope.)
+    let c = config();
+    assert!(c.validate().is_ok());
+    let mut data = serde_json::to_value(&c).unwrap();
+    data["subjects"]["agent-id"]["grants"]["local"]["budget_scope"] = json!("upstream:inferflux");
+    let error = serde_json::from_value::<Config>(data)
+        .unwrap()
+        .validate()
+        .expect_err("reserved prefix must fail at startup");
+    assert!(
+        error.contains("reserved 'upstream:' prefix"),
+        "error must name the reserved prefix: {error}"
+    );
+}
+
+#[test]
 fn roles_are_explicit_and_inference_does_not_imply_operator_access() {
     let c = config();
     for (subject, expected) in [

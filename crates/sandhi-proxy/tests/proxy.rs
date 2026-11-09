@@ -2263,6 +2263,92 @@ async fn exhausted_budget_is_429_before_calling_upstream() {
     assert_eq!(sink.len(), 0);
 }
 
+// ───────────── ADR-0015: back-leg (`upstream:{provider}`) budgets ─────────────
+
+#[tokio::test]
+async fn upstream_budget_settles_spend_into_the_provider_scope() {
+    let upstream = MockServer::start().await;
+    let resp = serde_json::json!({
+        "choices": [{ "message": { "content": "hi" } }],
+        "usage": { "prompt_tokens": 10, "completion_tokens": 5 }
+    });
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(resp))
+        .mount(&upstream)
+        .await;
+
+    let sink = Arc::new(InMemorySink::new());
+    let state = state_with(upstream.uri(), sink, ProxyLedger::in_memory());
+    // The back-leg cap lives on the resolved provider's slug ("up1" runs the openai
+    // compatible runtime, slug `openai`).
+    state
+        .ledger
+        .lock()
+        .unwrap()
+        .set_budget(
+            "upstream:openai",
+            Some(10_000),
+            Window::Total,
+            Policy::Block,
+        )
+        .unwrap();
+    let app = build_app(state.clone());
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("authorization", "Bearer vk_demo")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"model":"gpt-x","messages":[],"max_tokens":50}"#,
+        ))
+        .unwrap();
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let ledger = state.ledger.lock().unwrap();
+    assert_eq!(ledger.spent("upstream:openai"), 15, "10 in + 5 out");
+    assert_eq!(
+        ledger.spent("group:platform"),
+        15,
+        "the same actual, front leg"
+    );
+    assert_eq!(ledger.reserved("upstream:openai"), 0, "both leases settle");
+    assert_eq!(ledger.reserved("group:platform"), 0);
+}
+
+#[tokio::test]
+async fn exhausted_upstream_budget_is_429_before_calling_upstream() {
+    let upstream = MockServer::start().await;
+    let sink = Arc::new(InMemorySink::new());
+    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    // Tiny back-leg cap: the conservative ceiling of any real request cannot fit, so
+    // admission refuses before the front-leg lease survives or the upstream is reached.
+    state
+        .ledger
+        .lock()
+        .unwrap()
+        .set_budget("upstream:openai", Some(10), Window::Total, Policy::Block)
+        .unwrap();
+    let app = build_app(state.clone());
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("authorization", "Bearer vk_demo")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"model":"gpt-x","messages":[]}"#))
+        .unwrap();
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(sink.len(), 0);
+    assert_eq!(upstream.received_requests().await.unwrap().len(), 0);
+    let ledger = state.ledger.lock().unwrap();
+    assert_eq!(ledger.reserved("group:platform"), 0, "front lease released");
+    assert_eq!(ledger.reserved("upstream:openai"), 0);
+}
+
 #[tokio::test]
 async fn streaming_passes_through_and_emits_usage() {
     let upstream = MockServer::start().await;
@@ -4381,6 +4467,115 @@ async fn owned_buffered_both_planes_correlate_and_settle_once() {
     }
 }
 
+/// ADR-0015: in tracked (buffered) accounting the primary lease settles canonically through
+/// the jobs machinery — the back-leg lease has no canonical path there, so it settles
+/// synchronously at finalize with the same actual.
+#[tokio::test]
+async fn owned_buffered_settles_the_upstream_scope_synchronously() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!(
+            {"choices":[{"message":{"content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}
+        )))
+        .mount(&upstream)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("owned.db");
+    let sink = Arc::new(InMemorySink::new());
+    let state = owned_state(
+        upstream.uri(),
+        &path,
+        sink.clone(),
+        std::time::Duration::from_secs(2),
+    );
+    state
+        .ledger
+        .lock()
+        .unwrap()
+        .set_budget(
+            "upstream:openai",
+            Some(10_000),
+            Window::Total,
+            Policy::Block,
+        )
+        .unwrap();
+    let response = build_app(state.clone())
+        .oneshot(owned_request("/v1/chat/completions", owned_body()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(sink.events().len(), 1);
+
+    let ledger = state.ledger.lock().unwrap();
+    assert_eq!(ledger.spent("upstream:openai"), 12, "10 in + 2 out");
+    assert_eq!(
+        ledger.spent("group:platform"),
+        12,
+        "the same actual, front leg"
+    );
+    assert_eq!(
+        ledger.reserved("upstream:openai"),
+        0,
+        "the back lease settled"
+    );
+    assert_eq!(ledger.reserved("group:platform"), 0);
+}
+
+/// Regression (ADR-0015 review P1-1): the caller reserves the upstream lease BEFORE
+/// `buffered::handle`, so handle's own refusals — here the tracked-requirements 400 on a
+/// streaming request — must still release it. Without the hold covering those guards, the
+/// bare reservation dropped and held `reserved()` against a Block upstream cap until TTL
+/// reclaim: sustained ineligible traffic self-DoSed the back leg.
+#[tokio::test]
+async fn owned_buffered_ineligible_request_releases_the_upstream_lease() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!(
+            {"choices":[{"message":{"content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}
+        )))
+        .mount(&upstream)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("owned.db");
+    let sink = Arc::new(InMemorySink::new());
+    // owned_state without stream limits: a `stream:true` request fails the tracked
+    // requirements (streaming needs configured limits) and must refuse with 400.
+    let state = owned_state(
+        upstream.uri(),
+        &path,
+        sink.clone(),
+        std::time::Duration::from_secs(2),
+    );
+    state
+        .ledger
+        .lock()
+        .unwrap()
+        .set_budget(
+            "upstream:openai",
+            Some(10_000),
+            Window::Total,
+            Policy::Block,
+        )
+        .unwrap();
+    let mut body = owned_body();
+    body["stream"] = serde_json::Value::Bool(true);
+    let response = build_app(state.clone())
+        .oneshot(owned_request("/v1/chat/completions", body))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(sink.events().len(), 0);
+
+    let ledger = state.ledger.lock().unwrap();
+    assert_eq!(
+        ledger.reserved("upstream:openai"),
+        0,
+        "the refused request must not hold a back-leg lease"
+    );
+    assert_eq!(ledger.spent("upstream:openai"), 0);
+    assert_eq!(ledger.reserved("group:platform"), 0);
+}
+
 #[tokio::test]
 async fn owned_buffered_disconnect_retains_execution_and_accounting() {
     let upstream = MockServer::start().await;
@@ -5094,10 +5289,19 @@ async fn anthropic_policy_state(upstream: &MockServer, sink: Arc<InMemorySink>) 
     let store = sandhi_store::policy::PolicyAuditStore::open(&audit.path().join("audit.db"), 1024)
         .expect("audit store");
     let mut state = ProxyState::new(keys, ProxyLedger::in_memory(), sink, providers, None);
-    state.policy = Some(Arc::new(sandhi_proxy::policy::PolicyGate::new(
-        engine,
-        Arc::new(store),
-    )));
+    // Generous deadline floor: these tests assert the gate's verdict (forward /
+    // block / fail-closed), not its timing. The 200 ms document deadline is
+    // wall-clock and a loaded CI runner can miss it on spawn_blocking
+    // scheduling or the audit fsync alone, which would flip the expected
+    // 200/403 into a fail-closed 503. Deadline enforcement itself is covered
+    // by `policy.rs::saturated_gate_and_late_extension_cannot_admit`.
+    state.policy = Some(Arc::new(
+        sandhi_proxy::policy::PolicyGate::with_deadline_floor(
+            engine,
+            Arc::new(store),
+            std::time::Duration::from_secs(30),
+        ),
+    ));
     Arc::new(state)
 }
 

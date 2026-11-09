@@ -471,6 +471,9 @@ fn fill_secret_from_stdin(mut command: Command) -> Command {
 
 fn execute(req: &AdminRequest, token: &str) -> Result<Value, String> {
     let client = reqwest::blocking::Client::builder()
+        // Redirects must not forward the admin bearer token to an unrelated host
+        // (same policy as execute_diagnostic below).
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| format!("http client: {e}"))?;
     let mut builder = client

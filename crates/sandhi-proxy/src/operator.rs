@@ -5,6 +5,9 @@
 //!   credential vault (metadata in SQLite, secret in the active [`Vault`] backend).
 //! - `POST /admin/keys/share` / `GET /admin/keys/virtual` / `DELETE /admin/vkeys/{id}` — mint /
 //!   list / revoke scoped virtual keys (secret printed once, hash stored).
+//! - `POST /admin/profile-tokens` / `POST /admin/profile-tokens/revoke` — mint / revoke the
+//!   `skp_…` profile-download tokens that authenticate `GET /auth/profile` (shown once, hash
+//!   stored — gateway-profiles Phase 5).
 //! - `POST /admin/budget` / `GET /admin/budget` / `GET /admin/budget/usage?scope=` — neutral-token
 //!   budgets (P2: window + policy + optional alert thresholds) over the [`BudgetLedger`].
 //! - `GET /admin/alerts` / `POST /admin/alerts` / `POST /admin/alerts/{id}/ack` /
@@ -77,6 +80,25 @@ pub mod admin {
         pub budget_scope: Option<String>,
         pub expires_at: Option<String>,
         pub rate_limit_per_min: Option<u32>,
+    }
+
+    /// `POST /admin/profile-tokens` — mint a profile-download token (skp_…) for a subject.
+    #[derive(Debug, Clone, Deserialize)]
+    pub struct ProfileTokenRequest {
+        pub subject: String,
+        pub group: String,
+        /// Accepted for forward compatibility only: v1 profile tokens have NO server-side
+        /// expiry — retire one with `POST /admin/profile-tokens/revoke`. Persisting an expiry
+        /// would also change the `profile_tokens` schema; that lands with the OIDC seam.
+        #[serde(default)]
+        pub ttl_seconds: Option<u64>,
+    }
+
+    /// `POST /admin/profile-tokens/revoke` — revoke every active token for (subject, group).
+    #[derive(Debug, Clone, Deserialize)]
+    pub struct RevokeProfileTokensRequest {
+        pub subject: String,
+        pub group: String,
     }
 
     /// `POST /admin/budget` — set a neutral-token budget on a scope.
@@ -157,6 +179,26 @@ pub struct BudgetSpec {
 
 /// Admin auth. Returns `Ok(())` when the presented bearer matches the configured admin token.
 /// `403` when no admin token is configured; `401` when missing/wrong.
+#[allow(clippy::result_large_err)] // axum::Response is intentionally large; this is the idiomatic shape.
+/// `GET /admin/topology` — the optional deployment-topology projection
+/// (`SANDHI_TOPOLOGY_FILE`, crates/sandhi-proxy/src/topology.rs). Secret-free
+/// by construction; 404 when the feature is off, Read-gated like every other
+/// operator read.
+pub(crate) async fn topology(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -> Response {
+    if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Read, false).await {
+        return r;
+    }
+    let Some(file) = state.topology.clone() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": {"code": "topology_unconfigured",
+                "message": "topology not configured (set SANDHI_TOPOLOGY_FILE)"}})),
+        )
+            .into_response();
+    };
+    Json(crate::topology::topology_response(&file)).into_response()
+}
+
 #[allow(clippy::result_large_err)] // axum::Response is intentionally large; this is the idiomatic shape.
 /// Protected policy metadata, never prompt text, patterns, selectors or matched values.
 pub(crate) async fn policy_status(
@@ -741,6 +783,23 @@ pub(crate) async fn share_key(
             "virtual-key store not configured (set SANDHI_STORE)",
         );
     };
+    // ADR-0015: `upstream:` is the gateway's own back-leg scope prefix. A virtual key pointing
+    // its budget scope there would hold TWO leases on the same scope per call and settle the
+    // same actual into it twice — exhausting the cap at half its configured limit. Rejected at
+    // minting; the declarative vkeys section never carries a budget scope at all.
+    if let Some(scope) = req
+        .budget_scope
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| s.starts_with("upstream:"))
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "budget_scope '{scope}' uses the reserved 'upstream:' prefix: back-leg per-provider caps are gateway-managed, not per-key (ADR-0015)"
+            ),
+        );
+    }
     // The upstream credential must resolve (provider handle registered or vault entry active).
     let upstream = req.upstream.clone();
     if !state
@@ -856,6 +915,94 @@ pub(crate) async fn revoke_virtual_key(
         state.keys.revoke(&rec.secret_hash);
     }
     Json(json!({ "revoked": revoked })).into_response()
+}
+
+/// `POST /admin/profile-tokens` — mint a profile-download token (`skp_…`) for
+/// `(subject, group)`. The plaintext token is shown **once** in the response; the store keeps
+/// only its SHA-256 hash (same scheme as virtual keys), so it can never be recovered later.
+/// A holder of this token can download the group's assembled profile and — in gateway mode —
+/// receive a fresh virtual key, so minting is an Admin mutation like key sharing.
+pub(crate) async fn mint_profile_token(
+    State(state): State<Arc<ProxyState>>,
+    headers: HeaderMap,
+    Json(req): Json<admin::ProfileTokenRequest>,
+) -> Response {
+    if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Admin, true).await {
+        return r;
+    }
+    let _operation = match admit_mutation(&state.lifecycle) {
+        Ok(operation) => operation,
+        Err(response) => return response,
+    };
+    let Some(store) = state.profiles.clone() else {
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "profile store not configured (set SANDHI_STORE)",
+        );
+    };
+    if req.subject.trim().is_empty() || req.group.trim().is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "profile tokens require a nonempty subject and group",
+        );
+    }
+    let token = match store.mint_profile_token(req.subject.trim(), req.group.trim()) {
+        Ok(t) => t,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("profile-token mint failed: {e}"),
+            )
+        }
+    };
+    Json(json!({
+        "token": token,   // shown exactly once
+        "subject": req.subject,
+        "group": req.group,
+        "auth": "Authorization: Bearer <profile_token> on GET /auth/profile",
+    }))
+    .into_response()
+}
+
+/// `POST /admin/profile-tokens/revoke` — revoke every active token for `(subject, group)`
+/// (offboarding / rotation). Revoked tokens stop resolving on `GET /auth/profile` immediately.
+pub(crate) async fn revoke_profile_tokens(
+    State(state): State<Arc<ProxyState>>,
+    headers: HeaderMap,
+    Json(req): Json<admin::RevokeProfileTokensRequest>,
+) -> Response {
+    if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Admin, true).await {
+        return r;
+    }
+    let _operation = match admit_mutation(&state.lifecycle) {
+        Ok(operation) => operation,
+        Err(response) => return response,
+    };
+    let Some(store) = state.profiles.clone() else {
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "profile store not configured (set SANDHI_STORE)",
+        );
+    };
+    let revoked = match store.revoke_profile_tokens(&req.subject, &req.group) {
+        Ok(n) => n,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("profile-token revoke failed: {e}"),
+            )
+        }
+    };
+    // Lifecycle note: revocation stops FUTURE profile downloads only — virtual keys already
+    // minted by those downloads stay active and must be revoked via the /admin/vkeys surface
+    // (profiles.rs module docs carry the full two-step offboarding contract).
+    Json(json!({
+        "revoked": revoked,
+        "subject": req.subject,
+        "group": req.group,
+        "note": "revocation stops future profile downloads; already-minted virtual keys must be revoked separately via /admin/vkeys",
+    }))
+    .into_response()
 }
 
 /// `POST /admin/budget` — set a neutral-token budget on a scope (P2: window + policy + alerts).
@@ -1399,6 +1546,10 @@ impl TokioWebhookSender {
     pub(crate) fn new() -> Option<Self> {
         let handle = tokio::runtime::Handle::try_current().ok()?;
         let client = reqwest::Client::builder()
+            // Never follow redirects: the alert payload would be re-POSTed to
+            // whatever host the 30x Location names (best-effort delivery means
+            // a redirect failure is dropped, not retried elsewhere).
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(10))
             .build()
             .ok()?;
@@ -1486,6 +1637,14 @@ pub fn rehydrate_alerts(store: &AlertStore) -> AlertRegistry {
     registry
 }
 
+/// RFC-3339 UTC timestamp for durable `updated_at` columns (same convention the stores use).
+fn now_rfc3339() -> String {
+    use time::format_description::well_known::Rfc3339;
+    time::OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_default()
+}
+
 /// Read + parse the config file at `state.config_path`. Shared by the preview and apply routes
 /// so both ever see exactly the same parsed shape.
 #[allow(clippy::result_large_err)] // axum::Response is intentionally large; idiomatic shape.
@@ -1551,6 +1710,11 @@ pub(crate) async fn config_preview(
         .as_ref()
         .and_then(|s| s.list().ok())
         .unwrap_or_default();
+    let existing_profiles = state
+        .profiles
+        .as_ref()
+        .and_then(|s| s.list_profiles().ok())
+        .unwrap_or_default();
 
     let providers_plan: Vec<Value> = cfg
         .providers
@@ -1602,12 +1766,28 @@ pub(crate) async fn config_preview(
             json!({ "upstream": v.upstream, "subject": v.subject, "group": v.group, "action": action })
         })
         .collect();
+    // Profiles are a single upsert-able row per group, so the verb distinguishes all three
+    // states (create / satisfied / update) — see `config::profile_matches`.
+    let profiles_plan: Vec<Value> = cfg
+        .profiles
+        .iter()
+        .map(|p| {
+            let existing = existing_profiles.iter().find(|r| r.group == p.group);
+            let action = match existing {
+                None => "create",
+                Some(row) if crate::config::profile_matches(row, p) => "satisfied",
+                Some(_) => "update",
+            };
+            json!({ "group": p.group, "mode": p.effective_mode(), "action": action })
+        })
+        .collect();
     let mut payload = json!({
         "path": state.config_path.as_ref().map(|p| p.display().to_string()),
         "providers": providers_plan,
         "budgets": budgets_plan,
         "alerts": alerts_plan,
         "vkeys": vkeys_plan,
+        "profiles": profiles_plan,
         // Listener TLS is a startup-only section (see `config` module docs): desired-state
         // apply cannot activate it, so it is reported as `restart required` — never silently
         // ignored. Live replacement is TD-0017 P2.
@@ -1680,6 +1860,16 @@ pub(crate) async fn config_apply(
         return err(
             StatusCode::BAD_REQUEST,
             "alerts require a nonempty scope and threshold between 0 and 100",
+        );
+    }
+    if cfg
+        .profiles
+        .iter()
+        .any(|p| p.group.trim().is_empty() || !matches!(p.effective_mode(), "gateway" | "local"))
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "profiles require a nonempty group and a mode of 'gateway' or 'local'",
         );
     }
     let mut failures = Vec::new();
@@ -1814,6 +2004,48 @@ pub(crate) async fn config_apply(
         }
     }
 
+    // Profiles apply as direct durable-table upserts (additive-only): no secrets are involved,
+    // so unlike vkeys there is no mint step to delegate to an internal handler.
+    let mut profiles_applied = Vec::new();
+    let mut profiles_skipped = Vec::new();
+    for p in &cfg.profiles {
+        let Some(store) = state.profiles.clone() else {
+            failures.push(json!({"component": "profile", "group": p.group,
+                "error": "profile store not configured (set SANDHI_STORE)"}));
+            continue;
+        };
+        let record = sandhi_store::ProfileRecord {
+            group: p.group.clone(),
+            mode: p.effective_mode().to_string(),
+            upstream_ref: p.upstream.clone(),
+            models: p.models.clone(),
+            timeout_seconds: p.defaults.timeout_seconds,
+            max_tokens: p.defaults.max_tokens,
+            updated_at: now_rfc3339(),
+        };
+        match store.profile_for_group(&p.group) {
+            Ok(Some(ref existing)) if crate::config::profile_matches(existing, p) => {
+                profiles_skipped.push(json!({ "group": p.group }));
+                continue;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::error!(%error, "config profile lookup failed");
+                failures.push(json!({"component": "profile", "group": p.group,
+                    "error": "profile lookup unavailable; not applied"}));
+                continue;
+            }
+        }
+        match store.upsert_profile(&record) {
+            Ok(()) => profiles_applied.push(json!({ "group": p.group, "mode": record.mode })),
+            Err(error) => {
+                tracing::error!(%error, "config profile apply failed");
+                failures.push(json!({"component": "profile", "group": p.group,
+                    "error": "profile commit failed"}));
+            }
+        }
+    }
+
     let complete = failures.is_empty();
     let draining = failures
         .iter()
@@ -1825,6 +2057,7 @@ pub(crate) async fn config_apply(
         "budgets": { "applied": budgets_applied },
         "alerts": { "created": alerts_created, "skipped": alerts_skipped },
         "vkeys": { "minted": vkeys_minted, "skipped": vkeys_skipped },
+        "profiles": { "applied": profiles_applied, "skipped": profiles_skipped },
         // Same acknowledgement as preview: the `tls` section parsed but was NOT applied —
         // listener TLS activates only at process bootstrap (TD-0017 P1), never mid-flight.
         "tls": if cfg.tls.is_some() { "restart required" } else { "not configured" },
@@ -1972,7 +2205,7 @@ mod mutation_lifecycle_tests {
             .unwrap();
         let before_vkeys = state.vkeys.as_ref().unwrap().list().unwrap();
         state.lifecycle.begin_quiesce(Duration::from_secs(1));
-        for operation in 0..10 {
+        for operation in 0..12 {
             // Invoke handlers directly: an outer router rejection must not hide a missing gate.
             let response = match operation {
                 0 => {
@@ -2058,7 +2291,34 @@ mod mutation_lifecycle_tests {
                 }
                 7 => ack_alert(State(state.clone()), headers(), Path(rule.id.clone())).await,
                 8 => delete_alert(State(state.clone()), headers(), Path(rule.id.clone())).await,
-                _ => config_apply(State(state.clone()), headers()).await,
+                9 => config_apply(State(state.clone()), headers()).await,
+                // Gateway-profiles token minting/revoke are Admin mutations like key sharing.
+                10 => {
+                    mint_profile_token(
+                        State(state.clone()),
+                        headers(),
+                        Json(
+                            serde_json::from_value(json!({
+                                "subject": "alice", "group": "platform"
+                            }))
+                            .unwrap(),
+                        ),
+                    )
+                    .await
+                }
+                _ => {
+                    revoke_profile_tokens(
+                        State(state.clone()),
+                        headers(),
+                        Json(
+                            serde_json::from_value(json!({
+                                "subject": "alice", "group": "platform"
+                            }))
+                            .unwrap(),
+                        ),
+                    )
+                    .await
+                }
             };
             assert_eq!(
                 response.status(),
