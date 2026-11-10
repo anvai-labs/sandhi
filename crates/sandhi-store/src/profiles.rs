@@ -106,7 +106,7 @@ impl ProfileStore {
                 record.mode,
                 record.upstream_ref,
                 serde_json::to_string(&record.models).expect("Vec<String> always serializes"),
-                record.timeout_seconds,
+                record.timeout_seconds.map(|v| v as i64),
                 record.max_tokens,
                 record.updated_at,
             ],
@@ -188,7 +188,7 @@ fn record_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProfileRecord> {
         mode: r.get(1)?,
         upstream_ref: r.get(2)?,
         models: serde_json::from_str(&models_json).unwrap_or_default(),
-        timeout_seconds: r.get(4)?,
+        timeout_seconds: r.get::<_, Option<i64>>(4)?.map(|v| v as u64),
         max_tokens: r.get::<_, Option<i64>>(5)?.map(|v| v as u32),
         updated_at: r.get(6)?,
     })

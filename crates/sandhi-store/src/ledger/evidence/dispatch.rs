@@ -68,7 +68,7 @@ pub(super) fn checked_fence(
     let (matches, settled, actual, settled_at): (bool, i64, i64, Option<i64>) = conn
         .query_row(
             "SELECT scope=?2, settled, actual, settled_at FROM budget_reservation WHERE id=?1",
-            params![reservation_id, scope],
+            params![reservation_id as i64, scope],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?
@@ -79,7 +79,7 @@ pub(super) fn checked_fence(
     let observed = read_observation(conn, execution_id, reservation_id, scope)?;
     let has_receipt: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM budget_settlement_outbox WHERE reservation_id=?1)",
-        [reservation_id],
+        [reservation_id as i64],
         |r| r.get(0),
     )?;
     match (phase, transitioned_at) {
@@ -167,7 +167,7 @@ pub(super) fn transition(
     if authorize {
         let expires_at: i64 = tx.query_row(
             "SELECT expires_at FROM budget_reservation WHERE id=?1",
-            [reservation_id],
+            [reservation_id as i64],
             |r| r.get(0),
         )?;
         if OffsetDateTime::from_unix_timestamp(expires_at).is_err() {
@@ -184,7 +184,7 @@ pub(super) fn transition(
     if authorize {
         return Ok((Fence::Authorized, true));
     }
-    let changed = tx.execute("UPDATE budget_reservation SET settled=1, actual=0, settled_at=?2 WHERE id=?1 AND settled=0", params![reservation_id,now])?;
+    let changed = tx.execute("UPDATE budget_reservation SET settled=1, actual=0, settled_at=?2 WHERE id=?1 AND settled=0", params![reservation_id as i64,now])?;
     if changed != 1 {
         return Err(EvidenceError::InconsistentDispatch);
     }

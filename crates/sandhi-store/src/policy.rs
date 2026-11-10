@@ -32,7 +32,9 @@ impl PolicyAuditStore {
             .try_lock()
             .map_err(|_| rusqlite::Error::InvalidQuery)?;
         let used: u64 =
-            connection.query_row("SELECT count(*) FROM policy_receipts", [], |row| row.get(0))?;
+            connection.query_row("SELECT count(*) FROM policy_receipts", [], |row| {
+                Ok(row.get::<_, i64>(0)? as u64)
+            })?;
         Ok(serde_json::json!({"used": used, "capacity": self.max_rows,
             "remaining": self.max_rows.saturating_sub(used), "full": used >= self.max_rows}))
     }
@@ -56,7 +58,9 @@ impl PolicyAuditStore {
             .try_lock()
             .map_err(|_| rusqlite::Error::InvalidQuery)?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let count: u64 = tx.query_row("SELECT count(*) FROM policy_receipts", [], |r| r.get(0))?;
+        let count: u64 = tx.query_row("SELECT count(*) FROM policy_receipts", [], |r| {
+            Ok(r.get::<_, i64>(0)? as u64)
+        })?;
         if count >= self.max_rows {
             return Err(rusqlite::Error::InvalidQuery);
         }
