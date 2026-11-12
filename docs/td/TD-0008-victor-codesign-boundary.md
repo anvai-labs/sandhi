@@ -23,11 +23,14 @@ state, and tracks the hardening plan.
 **Sandhi owns** (high cohesion around the wire): provider transport (HTTP/SSE, retries,
 circuit breaker, timeouts), the neutral versioned chat contract (`ChatRequestV1` /
 `ChatResponseV1` / `ChatStreamEventV1` / `ProviderErrorV1` / `UsageV2`), usage measurement at
-the point of the call, transport facts in the catalog (slug, aliases, endpoint routing —
-no models, no pricing), and credential *use* (never storage).
+the point of the call, transport facts and release-versioned model descriptors in
+the catalog (slug, aliases, endpoint routing, context/output limits and wire
+capabilities — no pricing), and server-side credential storage/use through its
+operator vault.
 
 **Victor owns** (high cohesion around the agent): prompt/message construction, tool policy,
-model policy and user-facing discovery, credential resolution (keyring/OAuth), retry
+model exposure/selection policy and user-facing discovery, client credential
+resolution (keyring/OAuth), retry
 *ownership* semantics (never replay a billed call), pricing, and everything above the
 neutral contract.
 
@@ -39,6 +42,33 @@ neutral contract.
   fallbacks (catalog → SDK/static lists) instead of crashing.
 - JSON-schema'd wire types with schema-sha256-pinned binding facades — the contract is data,
   not shared code; Node/Python/future consumers stay independent.
+
+### Release and deployment alignment
+
+The boundary above reflects the released 0.16.2 operator/binding surfaces; the
+dated scorecard below remains historical evidence. A newer local source tree is
+not a published or deployed upgrade. Verify the consumer's exact binding pin,
+the installed wheel version and the running proxy's `/version` separately.
+Victor and Sandhi release numbers are independent and need not match.
+
+For a consumer rollout, use Victor's
+[protected promotion and deployment procedure](https://github.com/anvai-labs/victor/blob/develop/docs/development/releasing/publishing.md).
+Preserve established service roles and credentials: updating Victor does not
+require restarting an already-current proxy or reactivating a migrated gateway.
+Retain executable/configuration identities and rollback before activation.
+
+Central profile delivery (`GET /auth/profile`) supplies operator defaults, not
+consumer selection policy. Victor's `profiles.yaml` overrides its pulled
+`profiles.d/sandhi.yaml` key by key. Back up the private drop-in before a profile
+refresh and check effective endpoint, provider/model, authentication and limits
+afterward. Keep bootstrap tokens and returned virtual keys out of logs; do not
+copy one user's credentials to a different host or identity.
+
+Qualify the installed consumer with bounded complete, streaming and tool calls
+through each intended route. Verify actual tool artifacts and persisted usage.
+TLS/readiness, model availability and attribution are live acceptance checks;
+passing an SDK test or a different hosted route does not qualify an unavailable
+inference backend. Record source merge, publication and live acceptance separately.
 
 ## Scorecard (2026-07-25)
 
