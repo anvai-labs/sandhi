@@ -1631,8 +1631,8 @@ additional reliability observation, not proof of the earlier local failures' cau
 
 The corrected `e728102` code checkpoint passes the final full current-SDK suite:
 549 passed, three optional skips, including real dashboard and CI-pinned CPU
-origin. All six gateway fixture copies share the frozen binary hash recorded in
-ADR 0035. Independent exact-tip re-review cleared the three findings and passed
+origin. Five distinct gateway fixture copies and their current alias share the
+frozen binary hash recorded in ADR 0035. Independent exact-tip re-review cleared the three findings and passed
 five parser units, three encoder units and 22 provider HTTP cases. All nine proxy
 stream tests and ten focused SDK accumulation/refusal cases pass; the new Chat
 proxy matrix covers 88 calls. The earlier workspace snapshot passed 1,178 tests

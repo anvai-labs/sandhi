@@ -101,8 +101,8 @@ contradictory output while retaining physical source usage evidence.
 
 The frozen corrected code checkpoint `e728102` passes the full current-SDK suite:
 **549 passed, three optional skips**, in 590.06 seconds. It includes real Playwright
-dashboard and the CI-pinned CPU origin. All six copied gateway fixtures match the
-active binary SHA-256
+dashboard and the CI-pinned CPU origin. Five distinct gateway fixture copies,
+their current alias and the active binary share SHA-256
 `204452d976f8a860bd5fd062ca59a5d635467e0b75cf58bf4fd6261b8132d7dd`.
 Independent exact-commit re-review cleared all three findings and passed five
 Chat parser units, three Responses encoder units and 22 provider HTTP cases.
