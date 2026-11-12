@@ -250,8 +250,9 @@ pub(crate) async fn handle(
         let Ok(ticket) = obligation.admit(prepared) else {
             return accounting_error(dialect, &task_id);
         };
+        let wait_started = std::time::Instant::now();
         if tokio::time::timeout(wait, ticket.wait()).await.is_err() {
-            tracing::warn!(request_id = %task_id, reason = "wait_timeout", "tracked admission unresolved");
+            ticket.warn_timeout(&task_id, wait, wait_started);
             return accounting_error(dialect, &task_id);
         }
         let pending = match ticket.take() {
@@ -275,16 +276,20 @@ pub(crate) async fn handle(
                 // Only a scheduling refusal before authorization can prove no send.
                 if let Work::Authorize(pending) = rejected.work {
                     if let Ok(ticket) = obligation.submit(Work::Close(pending)) {
+                        let wait_started = std::time::Instant::now();
                         if tokio::time::timeout(wait, ticket.wait()).await.is_ok() {
                             let _ = ticket.take();
+                        } else {
+                            ticket.warn_timeout(&task_id, "pre_dispatch_close", wait, wait_started);
                         }
                     }
                 }
                 return accounting_error(dialect, &task_id);
             }
         };
+        let wait_started = std::time::Instant::now();
         if tokio::time::timeout(wait, ticket.wait()).await.is_err() {
-            tracing::warn!(request_id = %task_id, reason = "wait_timeout", "tracked dispatch authorization unresolved");
+            ticket.warn_timeout(&task_id, "dispatch_authorization", wait, wait_started);
             return accounting_error(dialect, &task_id);
         }
         let execution = match ticket.take() {

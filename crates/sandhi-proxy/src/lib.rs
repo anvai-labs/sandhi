@@ -3778,11 +3778,17 @@ impl RequestAccounting {
         let Some(ticket) = ticket else {
             return false;
         };
+        let wait_started = std::time::Instant::now();
         if tokio::time::timeout(owned.wait, ticket.wait())
             .await
             .is_err()
         {
-            tracing::warn!(request_id = %self.request_id, reason = "wait_timeout", "tracked terminal settlement unresolved");
+            ticket.warn_timeout(
+                &self.request_id,
+                "terminal_settlement",
+                owned.wait,
+                wait_started,
+            );
             return false;
         }
         match ticket.take() {

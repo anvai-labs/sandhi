@@ -77,6 +77,7 @@ nav:
       - Identity and access: operator/oidc-sso.md
       - Identity groups: operator/identity-groups.md
       - Buffered accounting: operator/buffered-accounting.md
+      - Accounting wait diagnostics: operator/accounting-wait-diagnostics.md
       - Buffered deadlines: operator/buffered-deadlines.md
       - Streaming deadlines: operator/streaming-deadlines.md
       - Stream body ownership: operator/stream-body-lifetime.md

@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use tokio::sync::watch;
+mod timing;
 
 // Only LedgerBusy proves that the outer lock was never acquired and no SQL ran.
 // Retry that accounting work within one existing wait budget; never retry storage
@@ -341,18 +342,23 @@ struct Worker {
     id: u64,
     finished: bool,
     epoch: u64,
+    timing: Arc<timing::Timing>,
     _operation: Arc<OperationGuard>,
 }
 impl Worker {
     fn finish(mut self, outcome: ResultValue) {
+        self.timing.returned();
         self.inner.finish(self.id, self.epoch, Some(outcome));
+        self.timing.published();
         self.finished = true;
     }
 }
 impl Drop for Worker {
     fn drop(&mut self) {
         if !self.finished {
+            self.timing.interrupted();
             self.inner.finish(self.id, self.epoch, None);
+            self.timing.published();
         }
     }
 }
@@ -385,6 +391,7 @@ pub struct Ticket {
     inner: Arc<Inner>,
     id: u64,
     epoch: u64,
+    timing: Arc<timing::Timing>,
     #[cfg(test)]
     abort: tokio::task::AbortHandle,
 }
@@ -543,11 +550,13 @@ impl Obligation {
         slot.epoch = epoch;
         slot.consumed = false;
         slot.running = true;
+        let timing = Arc::new(timing::Timing::new());
         let worker = Worker {
             inner: self.inner.clone(),
             id: self.id,
             finished: false,
             epoch,
+            timing: timing.clone(),
             _operation: self.operation.clone(),
         };
         drop(state);
@@ -555,6 +564,7 @@ impl Obligation {
         let lifecycle = self.inner.lifecycle.clone();
         let until = self.retry_wait.map(|wait| std::time::Instant::now() + wait);
         let _task = runtime.spawn_blocking(move || {
+            worker.timing.start();
             if let Ok(outcome) = catch_unwind(AssertUnwindSafe(|| {
                 run_owned(input, &lifecycle, until, |input| {
                     ledger
@@ -574,6 +584,7 @@ impl Obligation {
             inner: self.inner.clone(),
             id: self.id,
             epoch,
+            timing,
             #[cfg(test)]
             abort: _task.abort_handle(),
         })
@@ -596,6 +607,15 @@ impl Drop for Obligation {
     }
 }
 impl AdmissionTicket {
+    pub(crate) fn warn_timeout(
+        &self,
+        request_id: &str,
+        wait: std::time::Duration,
+        started: std::time::Instant,
+    ) {
+        self.ticket
+            .warn_timeout(request_id, "admission", wait, started);
+    }
     pub async fn wait(&self) {
         self.ticket.wait().await;
     }
@@ -892,17 +912,20 @@ impl Jobs {
                 phase: Phase::Empty,
             },
         );
+        let timing = Arc::new(timing::Timing::new());
         let worker = Worker {
             inner: self.inner.clone(),
             id,
             finished: false,
             epoch: 0,
+            timing: timing.clone(),
             _operation: Arc::new(operation),
         };
         drop(state);
         // The closure owns both completion publication and lifecycle progress. Its
         // JoinHandle is not the result owner and dropping it cannot discard a result.
         let _task = runtime.spawn_blocking(move || {
+            worker.timing.start();
             if let Ok(outcome) = catch_unwind(AssertUnwindSafe(|| run(input))) {
                 worker.finish(outcome);
             }
@@ -911,6 +934,7 @@ impl Jobs {
             inner: self.inner.clone(),
             id,
             epoch: 0,
+            timing,
             #[cfg(test)]
             abort: _task.abort_handle(),
         })
@@ -970,6 +994,44 @@ impl Jobs {
     }
 }
 impl Ticket {
+    // A nonblocking diagnostic read. Even an unavailable registry lock is useful
+    // evidence; logging a timeout must not wait on the lock being diagnosed.
+    fn readiness(&self) -> &'static str {
+        match self.inner.state.try_lock() {
+            Ok(state) => match state.slots.get(&self.id) {
+                Some(slot) if slot.epoch == self.epoch && !slot.consumed => {
+                    if slot.outcome.is_some() {
+                        "available"
+                    } else {
+                        "pending"
+                    }
+                }
+                _ => "stale_or_collected",
+            },
+            Err(std::sync::TryLockError::WouldBlock) => "registry_busy",
+            Err(std::sync::TryLockError::Poisoned(_)) => "registry_poisoned",
+        }
+    }
+    pub(crate) fn warn_timeout(
+        &self,
+        request_id: &str,
+        transition: &'static str,
+        wait: std::time::Duration,
+        started: std::time::Instant,
+    ) {
+        let timing = self.timing.snapshot();
+        tracing::warn!(
+            request_id, transition, reason = "wait_timeout",
+            wait_ms = wait.as_millis().min(u128::from(u64::MAX)) as u64,
+            wait_started_us = ?self.timing.offset(started),
+            wait_elapsed_us = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
+            job_stage = timing.stage, elapsed_us = timing.elapsed_us,
+            queue_us = timing.queue_us, run_us = ?timing.run_us,
+            publication_us = ?timing.publication_us, published_at_us = ?timing.published_at_us,
+            interrupted = timing.interrupted,
+            readiness = self.readiness(), "tracked accounting wait unresolved"
+        );
+    }
     /// Level-triggered readiness only. Cancellation cannot consume a result.
     /// Returns also when another trusted consumer has already taken the result.
     pub async fn wait(&self) {
@@ -1004,6 +1066,165 @@ mod tests {
     use sandhi_store::ledger::evidence::ExecutionIntent;
     use std::time::Duration;
     use time::OffsetDateTime;
+
+    #[test]
+    fn diagnostics_distinguish_pool_queue_from_execution_without_consuming_admission() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocker = runtime.spawn_blocking(move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let lifecycle = Arc::new(Lifecycle::new());
+            let ledger = Arc::new(Mutex::new(
+                ProxyLedger::durable(dir.path().join("queue.db").to_str().unwrap(), 1).unwrap(),
+            ));
+            let jobs = Jobs::new(ledger, lifecycle.clone(), 1);
+            let ticket = jobs.submit_admission(admission()).unwrap();
+            let queued = ticket.ticket.timing.snapshot();
+            assert_eq!(queued.stage, "queued");
+            assert!(queued.run_us.is_none() && queued.publication_us.is_none());
+            assert_eq!(ticket.ticket.readiness(), "pending");
+            assert!(tokio::time::timeout(Duration::ZERO, ticket.wait())
+                .await
+                .is_err());
+            assert!(ticket.take().is_none());
+            assert_eq!(jobs.retained(), 1);
+            release_tx.send(()).unwrap();
+            blocker.await.unwrap();
+            tokio::time::timeout(Duration::from_secs(2), lifecycle.wait_idle())
+                .await
+                .unwrap();
+            let completed = ticket.ticket.timing.snapshot();
+            assert_eq!(completed.stage, "published");
+            assert!(!completed.interrupted);
+            assert!(completed.run_us.is_some() && completed.publication_us.is_some());
+            assert_eq!(ticket.ticket.readiness(), "available");
+            assert!(matches!(ticket.take(), Some(AdmissionOutcome::Prepared(_))));
+            assert!(ticket.take().is_none());
+            assert_eq!(ticket.ticket.readiness(), "stale_or_collected");
+            let connection = rusqlite::Connection::open(dir.path().join("queue.db")).unwrap();
+            assert_eq!(
+                connection
+                    .query_row("SELECT count(*) FROM budget_execution_intent", [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+        });
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // Hold the registry only to observe blocked publication.
+    async fn diagnostics_distinguish_running_work_from_blocked_publication() {
+        #[derive(Clone)]
+        struct Captured(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Captured {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+            type Writer = Self;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let lifecycle = Arc::new(Lifecycle::new());
+        let ledger = Arc::new(Mutex::new(
+            ProxyLedger::durable(dir.path().join("running.db").to_str().unwrap(), 1).unwrap(),
+        ));
+        let jobs = Jobs::new(ledger.clone(), lifecycle.clone(), 1);
+        let (committed_tx, committed_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker_lifecycle = lifecycle.clone();
+        let ticket = jobs
+            .submit_admission_with(admission(), move |input| {
+                let outcome = input.run(&ledger, &worker_lifecycle);
+                assert!(matches!(outcome, AdmissionOutcome::Prepared(_)));
+                committed_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                outcome
+            })
+            .unwrap();
+        committed_rx.await.unwrap();
+        let running = ticket.ticket.timing.snapshot();
+        assert_eq!(running.stage, "running");
+        assert!(running.run_us.is_some() && running.publication_us.is_none());
+        assert!(ticket.take().is_none());
+        let registry = jobs.inner.lock();
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while ticket.ticket.timing.snapshot().stage != "publishing" {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let publishing = ticket.ticket.timing.snapshot();
+        assert!(publishing.run_us.is_some() && publishing.publication_us.is_some());
+        assert_eq!(ticket.ticket.readiness(), "registry_busy");
+        // Timeout diagnostics must not wait on the registry they diagnose.
+        let captured = Captured(Arc::new(Mutex::new(vec![])));
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(captured.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            ticket.warn_timeout(
+                "diagnostic-request",
+                Duration::ZERO,
+                std::time::Instant::now(),
+            )
+        });
+        let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(log.lines().count(), 1);
+        for expected in [
+            "request_id=",
+            "diagnostic-request",
+            "transition=",
+            "admission",
+            "reason=",
+            "wait_timeout",
+            "job_stage=",
+            "publishing",
+            "queue_us=",
+            "run_us=",
+            "publication_us=",
+            "published_at_us=",
+            "wait_started_us=",
+            "wait_elapsed_us=",
+            "readiness=",
+            "registry_busy",
+        ] {
+            assert!(log.contains(expected), "missing {expected}: {log}");
+        }
+        drop(registry);
+        tokio::time::timeout(Duration::from_secs(2), lifecycle.wait_idle())
+            .await
+            .unwrap();
+        let completed = ticket.ticket.timing.snapshot();
+        assert_eq!(completed.stage, "published");
+        assert!(matches!(ticket.take(), Some(AdmissionOutcome::Prepared(_))));
+        assert!(
+            completed.queue_us + completed.run_us.unwrap() + completed.publication_us.unwrap()
+                <= completed.elapsed_us
+        );
+    }
 
     #[tokio::test]
     async fn http_obligation_keeps_cleanup_capacity_across_cutoff() {
@@ -1757,6 +1978,11 @@ mod tests {
                 tokio::time::timeout(Duration::from_secs(2), lifecycle.wait_idle())
                     .await
                     .unwrap();
+                let timing = ticket.timing.snapshot();
+                assert_eq!(timing.stage, "published");
+                assert!(timing.interrupted);
+                assert!(timing.run_us.is_none());
+                assert!(timing.publication_us.is_some());
                 let kind = if admission_kind {
                     Kind::Admission
                 } else {

@@ -1645,3 +1645,29 @@ classified as CSS hashes, intentional TLS test keys and documented auth examples
 No provider credential leak was identified; no suppressions or history rewrite
 were used. Broader Responses-source interim state and accounting-wait diagnostics
 remain the next work.
+
+### Request-correlated accounting wait diagnostics
+
+The retained local and public failures lack queue/run/publication timing evidence.
+Each existing accounting transition now carries one bounded process-local timing
+record through its worker and ticket. Admission, authorization, pre-dispatch close
+and terminal wait warnings include request ID, stage, queue/run/publication wall
+time, publication offset, configured wait and actual wait start/age. A nonblocking
+registry probe reports pending/available/stale/busy/poisoned state. No data enters
+authorization, durable evidence, retry, deadline or liability decisions.
+
+The [operator guide](../operator/accounting-wait-diagnostics.md) explains the phase
+diagram, units and evidence limits. Controlled tests distinguish queued work from
+running durable work and blocked result publication, check warning fields and
+single-result transfer, and retain unstarted cancellation uncertainty. The prior
+watch subscription precedes readiness checking; a simple lost-notification
+explanation remains unsupported. Running time includes scheduling, ledger work
+and known-busy backoff; a failed trace is still needed to separate those causes.
+
+This diagnostic increment passes 207 proxy unit tests (19 job tests), all nine
+qualified proxy stream tests under both default and SentinelPass features, and
+eight stock-SDK recovery/preflight cases. Default workspace/all-target Clippy and
+proxy all-target Clippy with ONNX plus SentinelPass pass, as do formatting,
+bindings and strict docs. No accounting wait timed out in these runs. They do not
+identify or resolve the retained failure; independent review and new public CI
+remain publication gates.
