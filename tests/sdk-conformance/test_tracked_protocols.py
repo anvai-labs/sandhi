@@ -103,8 +103,12 @@ def qualified_origin():
             if streaming and family == FAMILIES[0]:
                 events = [{"id": "chat_fixture", "object": "chat.completion.chunk", "created": 1, "model": "fixture",
                     "choices": [{"index": 0, "delta": {"content": "reply"}, "finish_reason": "length" if control["mode"] == "incomplete" else "stop"}]}]
+                if "chat_deltas" in control:
+                    events = [{"id": "chat_fixture", "object": "chat.completion.chunk", "created": 1, "model": "fixture",
+                        "choices": [{"index": 0, "delta": delta, "finish_reason": None}]} for delta in control["chat_deltas"]]
+                    events[-1]["choices"][0]["finish_reason"] = control.get("chat_finish", "stop")
                 if control.get("terminal_chunk_usage") and "usage" in response:
-                    events[0]["usage"] = response["usage"]
+                    events[-1]["usage"] = response["usage"]
                 elif "usage" in response:
                     events.append({"id": "chat_fixture", "object": "chat.completion.chunk", "created": 1,
                         "model": "fixture", "choices": [], "usage": response["usage"]})
@@ -796,6 +800,66 @@ def test_tracked_stream_real_sdks_translate_and_settle_source_counts(
         with sqlite3.connect(instance.database) as connection:
             assert connection.execute("SELECT charged_tokens FROM budget_settlement_outbox").fetchall() == [(charged,)]
             assert connection.execute("SELECT settled,actual FROM budget_reservation").fetchall() == [(1, charged)] * 2
+
+
+@pytest.mark.parametrize("profile", ["standard", "openai_terminal_chunk_usage"])
+@pytest.mark.parametrize("scenario", ["reasoning", "refusal", "fragmented_tools"])
+def test_chat_projection_responses_sdk_accumulates_typed_items_and_source_receipt(
+    tmp_path, backend_binaries, qualified_origin, profile, scenario,
+):
+    from openai.types.responses import ResponseStreamEvent
+    from pydantic import TypeAdapter
+
+    origin, calls, control = qualified_origin
+    control["terminal_chunk_usage"] = profile == "openai_terminal_chunk_usage"
+    if scenario == "reasoning":
+        control["chat_deltas"] = [{"reasoning_content": "materialized"}, {"content": "reply"}]
+    elif scenario == "refusal":
+        control["chat_deltas"] = [{"refusal": "declined"}]
+    else:
+        control["chat_deltas"] = [{"content": "before"},
+            {"tool_calls": [{"index": 0, "id": "call_", "type": "function", "function": {"name": "look", "arguments": "{"}}]},
+            {"tool_calls": [{"index": 0, "id": "xyz", "function": {"name": "up", "arguments": "}"}}]}]
+        control["chat_finish"] = "tool_calls"
+    with tracked_gateway(tmp_path, backend_binaries, origin, FAMILIES[0], endpoint_profile=profile,
+                         streaming=True) as (instance, token):
+        with openai.OpenAI(base_url=instance.base + "/v1", api_key=token) as client:
+            with client.responses.stream(model="agent", input="hello", max_output_tokens=64) as stream:
+                events = list(stream)
+                final = stream.get_final_response()
+        validator = TypeAdapter(ResponseStreamEvent)
+        for event in events:
+            # The accumulator wraps response items in Parsed* subclasses. Dump
+            # their runtime fields rather than the SDK's generic union slots.
+            validator.validate_python(event.model_dump(serialize_as_any=True))
+        assert [event.sequence_number for event in events] == list(range(len(events)))
+        if scenario == "reasoning":
+            assert [item.type for item in final.output] == ["reasoning", "message"]
+            assert final.output[0].summary[0].text == "materialized"
+            assert final.output[1].content[0].text == "reply"
+        elif scenario == "refusal":
+            assert final.output[0].content[0].type == "refusal"
+            assert final.output[0].content[0].refusal == "declined"
+        else:
+            assert [item.type for item in final.output] == ["message", "function_call"]
+            assert final.output[0].content[0].text == "before"
+            assert (final.output[1].call_id, final.output[1].name, final.output[1].arguments) == ("call_xyz", "lookup", "{}")
+        assert (final.usage.input_tokens, final.usage.output_tokens) == (5, 2)
+        deadline = time.monotonic() + 5
+        while True:
+            with sqlite3.connect(instance.database) as connection:
+                rows = connection.execute("SELECT charged_tokens FROM budget_settlement_outbox").fetchall()
+            if rows:
+                break
+            assert time.monotonic() < deadline
+            time.sleep(.02)
+        assert len(calls) == 1 and rows == [(5,)]
+        _, context, usage, charge = evidence(instance.database)
+        assert context["plane"] == "translation" and usage["completeness"] == "final"
+        assert (usage["tokens_in"], usage["cache_read_tokens"], usage["cache_creation_tokens"],
+                usage["tokens_out"], usage["reasoning_tokens"], charge) == (2, 2, 1, 2, 1, 5)
+        with sqlite3.connect(instance.database) as connection:
+            assert connection.execute("SELECT settled,actual FROM budget_reservation").fetchall() == [(1, 5)] * 2
 
 
 def test_terminal_chat_profile_survives_restart_and_profile_change_fences_pin(

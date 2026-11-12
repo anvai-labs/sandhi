@@ -1167,6 +1167,102 @@ async fn gemini_tool_projection_refuses_invalid_arguments_without_losing_final_a
 }
 
 #[tokio::test]
+async fn chat_native_output_or_portable_projection_keeps_source_counts_and_both_receipts() {
+    for profile in ["chat", "terminal_chat"] {
+        for scenario in [
+            "text",
+            "reasoning",
+            "audio",
+            "opaque",
+            "multiple",
+            "fragments",
+            "invalid_args",
+            "duplicate_ids",
+            "after_tool",
+        ] {
+            let mut delta = json!({"role":"assistant","content":"reply"});
+            match scenario {
+                "reasoning" => delta["reasoning_content"] = "materialized".into(),
+                "audio" => delta["audio"] = json!({"id":"opaque-audio"}),
+                "opaque" => delta["vendor_state"] = json!({"signature":"opaque-state"}),
+                _ => {}
+            }
+            let mut values = vec![
+                json!({"id":"chat-fixture","object":"chat.completion.chunk","model":"gpt-4o-mini",
+                "choices":[{"index":0,"delta":delta,"finish_reason":null}]}),
+            ];
+            let tools = matches!(
+                scenario,
+                "fragments" | "invalid_args" | "duplicate_ids" | "after_tool"
+            );
+            if tools {
+                values[0]["choices"][0]["delta"] = json!({"tool_calls":[{"index":0,"id":"call_","type":"function","function":{"name":"in","arguments":"{"}}]});
+                values.push(json!({"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[
+                    {"index":0,"id":"xyz","function":{"name":"spect","arguments":"}"}}]},"finish_reason":null}]}));
+                if scenario == "invalid_args" {
+                    values[0]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"] =
+                        "[".into();
+                    values[1]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"] =
+                        "]".into();
+                }
+                if scenario == "duplicate_ids" {
+                    values[1]["choices"][0]["delta"]["tool_calls"].as_array_mut().unwrap().push(json!({"index":1,"id":"call_xyz","function":{"name":"other","arguments":"{}"}}));
+                }
+            }
+            if scenario == "multiple" {
+                values[0]["choices"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"index":1,"delta":{"content":"other"},"finish_reason":"stop"}));
+            }
+            if scenario == "after_tool" {
+                values.push(json!({"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"late prose"},"finish_reason":null}]}));
+            }
+            let counts = json!({"prompt_tokens":10,"completion_tokens":4,"prompt_tokens_details":{"cached_tokens":6,"cache_write_tokens":2},"completion_tokens_details":{"reasoning_tokens":0}});
+            let mut terminal = json!({"object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":if tools {"tool_calls"} else {"stop"}}]});
+            if profile == "terminal_chat" {
+                terminal["usage"] = counts.clone();
+            }
+            values.push(terminal);
+            if profile == "chat" {
+                values.push(json!({"object":"chat.completion.chunk","choices":[],"usage":counts}));
+            }
+            let frames = values
+                .iter()
+                .map(|value| format!("data: {value}\n\n"))
+                .collect::<String>()
+                + "data: [DONE]\n\n";
+            for flavor in ["chat", "messages", "responses", "gemini"] {
+                let (clean, output) = source_delivery(profile, flavor, frames.clone()).await;
+                assert_eq!(
+                    clean,
+                    flavor == "chat" || matches!(scenario, "text" | "reasoning" | "fragments"),
+                    "{profile}/{scenario}/{flavor}: {output}"
+                );
+                if flavor == "chat" {
+                    for value in &values {
+                        assert!(
+                            output.contains(&value.to_string()),
+                            "native changed: {scenario}"
+                        );
+                    }
+                } else if scenario == "fragments" {
+                    assert!(
+                        output.contains("call_xyz") && output.contains("inspect"),
+                        "{profile}/{flavor}: {output}"
+                    );
+                } else if scenario == "reasoning" {
+                    assert!(
+                        output.contains("materialized"),
+                        "{profile}/{flavor}: {output}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn translated_tool_terminals_preserve_output_limit_and_filter_reasons() {
     for profile in [
         "chat",
@@ -1179,11 +1275,21 @@ async fn translated_tool_terminals_preserve_output_limit_and_filter_reasons() {
     ] {
         for flavor in ["chat", "messages", "responses", "gemini"] {
             for reason in ["tool_calls", "length", "content_filter"] {
-                // Anthropic has no direct content_filter stop-reason value;
-                // this test does not claim that separate semantic mapping.
-                if (flavor == "messages" || profile.starts_with("messages"))
+                // Messages cannot represent this filter terminal. Refuse after
+                // source completion rather than relabel it as end_turn.
+                if flavor == "messages"
+                    && !profile.starts_with("messages")
                     && reason == "content_filter"
                 {
+                    let (clean, _) =
+                        tool_delivery(profile, flavor, reason, r#"{"target":"a"}"#).await;
+                    assert!(
+                        !clean,
+                        "filter silently became a completed Messages turn: {profile}"
+                    );
+                    continue;
+                }
+                if profile.starts_with("messages") && reason == "content_filter" {
                     continue;
                 }
                 let (clean, wire) =

@@ -29,6 +29,7 @@ pub mod attempt;
 mod buffered_fidelity;
 mod cache_policy;
 mod cache_read;
+mod chat_projection;
 pub use cache_policy::contains_native_cache_controls;
 pub mod catalog;
 pub mod cohere;

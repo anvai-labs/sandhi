@@ -1317,16 +1317,15 @@ impl ChatProvider for TypedOpenAiCompat {
                 crate::QualifiedStreamDelivery::Streaming,
             )
             .await?;
-        Ok(crate::qualified_stream::decode(
-            decode_openai_stream_delivery(
-                source.stream,
-                request.model,
-                request.include_native_stream,
-                true,
-            ),
-            source.observation,
-        ))
+        let decoded = if request.include_native_stream {
+            // Keep the established canonical view plus original native frames.
+            decode_openai_stream_delivery(source.stream, request.model, true, true)
+        } else {
+            crate::chat_projection::decode(source.stream, request.model)
+        };
+        Ok(crate::qualified_stream::decode(decoded, source.observation))
     }
+
     fn preflight_request(&self, request: &ChatRequestV1) -> Result<(), ProviderError> {
         encode_openai_request(request).map(|_| ())
     }
@@ -1786,7 +1785,7 @@ fn decode_tool_call(value: &Value) -> Option<ToolCallV1> {
     })
 }
 
-fn decode_finish_reason(reason: &str) -> FinishReasonV1 {
+pub(crate) fn decode_finish_reason(reason: &str) -> FinishReasonV1 {
     match reason {
         "stop" => FinishReasonV1::Stop,
         "length" => FinishReasonV1::Length,

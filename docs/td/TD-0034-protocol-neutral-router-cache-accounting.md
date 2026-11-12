@@ -1591,3 +1591,23 @@ and CI-pinned CPU-origin qualification. Independent review cleared `f7cd6bf`
 against `4443ed8` and passed 17 archived-source gateway cases, including mixed
 credential/header precedence. Public CI for the refreshed checkpoint remains
 required before merge; broader streaming and accounting-wait gates stay open.
+
+### Portable Chat stream fidelity and Responses terminal presentation
+
+[ADR 0035](../adr/0035-portable-chat-stream-output.md) records a strict portable
+decoder over the existing bounded qualified Chat source. Compatible native and
+legacy decoders retain their established behavior. Tool fragments are assembled
+within explicit byte/cardinality/identity limits, while opaque output, invalid
+tools, multiple choices and unrepresentable ordering refuse explicitly. The same
+source drains after source-projection refusal so authoritative counters survive;
+the existing availability wrapper and final source authority remain in place.
+
+Responses egress now keeps reasoning/refusal types and ordered items in its
+terminal output, with proper added/delta/done lifecycles and bounded retention.
+Gemini receives plain reasoning as `thought:true`; filtering/refusal combinations
+with no faithful client representation fail explicitly. Early encoder refusal
+does not guarantee later counters were observed, and held liabilities remain safe.
+Focused current-SDK stream accumulation and strict schema checks pass six cases
+after adding the missing Responses usage total. Full frozen-source checks,
+independent review and public CI remain checkpoint gates. Opaque interim
+Responses-source validation and the retained accounting-wait failures stay open.

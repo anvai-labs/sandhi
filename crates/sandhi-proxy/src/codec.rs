@@ -14,6 +14,7 @@ use sandhi_core::{
 };
 use serde_json::{json, Map, Value};
 mod fidelity;
+mod responses_stream;
 
 /// Lift the OpenAI-compat / ZAI `thinking` object (`{type, budget_tokens}`)
 /// into the neutral `ThinkingV1` at ingress (W3d/G7), so a promoted param
@@ -798,7 +799,7 @@ fn gemini_usage(usage: &UsageV2) -> Value {
 ///
 /// Gemini has no per-event envelope: every chunk is a whole `GenerateContentResponse` carrying a
 /// delta, so a text delta and a finish become separate chunks of the same shape. Events with no
-/// Gemini representation (reasoning/refusal deltas, tool-call scaffolding) emit nothing rather
+/// Gemini representation (tool-call scaffolding) emit nothing rather
 /// than inventing a frame the client would mis-parse.
 fn encode_gemini_stream_event(
     event: &ChatStreamEventV1,
@@ -808,6 +809,10 @@ fn encode_gemini_stream_event(
         ChatStreamEventV1::TextDelta { delta } => vec![(
             None,
             json!({"candidates":[{"content":{"role":"model","parts":[{"text":delta}]},"index":0}]}),
+        )],
+        ChatStreamEventV1::ReasoningDelta { delta } => vec![(
+            None,
+            json!({"candidates":[{"content":{"role":"model","parts":[{"text":delta,"thought":true}]},"index":0}]}),
         )],
         // Gemini SSE surfaces failures as an `{"error": ...}` data frame, not a
         // dropped stream — previously this fell into the silent catch-all.
@@ -1939,9 +1944,15 @@ fn responses_status(reason: Option<FinishReasonV1>) -> &'static str {
 }
 
 fn responses_usage(usage: &UsageV2) -> Value {
+    let input = usage
+        .tokens_in
+        .saturating_add(usage.cache_read_tokens)
+        .saturating_add(usage.cache_creation_tokens);
+    let output = output_including_reasoning(usage);
     json!({
-        "input_tokens":usage.tokens_in.saturating_add(usage.cache_read_tokens).saturating_add(usage.cache_creation_tokens),
-        "output_tokens":output_including_reasoning(usage),
+        "input_tokens":input,
+        "output_tokens":output,
+        "total_tokens":input.saturating_add(output),
         "input_tokens_details":openai_input_details(usage),
         "output_tokens_details":{
             "reasoning_tokens":usage.reasoning_tokens.unwrap_or(0)
@@ -1958,8 +1969,8 @@ fn responses_usage(usage: &UsageV2) -> Value {
 /// tolerate loosely but the spec does not. Gemini has the opposite constraint:
 /// a function call is ONE complete part per chunk (no partial frame exists), so
 /// tool calls must be buffered from start/argument-deltas and emitted complete
-/// at `ToolCallEnd`. Both live here; the OpenAI-family dialects stay stateless
-/// and delegate unchanged.
+/// at `ToolCallEnd`. Responses retains bounded, ordered output for its terminal
+/// fold. Chat Completions delegates to its stateless chunk encoder.
 pub(crate) struct StreamEventEncoder {
     dialect: IngressDialect,
     /// Next Anthropic content-block index (one space shared by prose + tools).
@@ -1970,24 +1981,12 @@ pub(crate) struct StreamEventEncoder {
     open_tools: BTreeMap<u32, usize>,
     /// Gemini buffered calls: canonical tool-call index → (id, name, args JSON).
     gemini_calls: BTreeMap<u32, (String, String, String)>,
-    /// Responses assembled output: streamed text plus buffered function calls,
-    /// in FIRST-OPEN ORDER (the `output_index` space of the final frame), folded
-    /// into the terminal `response.completed`.
-    responses_text: String,
-    responses_calls: BTreeMap<u32, (String, String, String)>,
-    responses_order: Vec<ResponsesOutputItem>,
+    responses: responses_stream::Encoder,
     /// OpenAI chunk identity (id/model from ResponseStart), stamped on every
     /// subsequent chunk — the spec requires them on all frames, and a client
     /// strict enough to require `created` requires these too.
     openai_id: Option<String>,
     openai_model: Option<String>,
-}
-
-/// One item slot in the Responses output-index space (assigned at first open,
-/// matching the terminal frame's `output` ordering).
-enum ResponsesOutputItem {
-    Text,
-    Call(u32),
 }
 
 impl StreamEventEncoder {
@@ -1998,9 +1997,7 @@ impl StreamEventEncoder {
             open_prose: None,
             open_tools: BTreeMap::new(),
             gemini_calls: BTreeMap::new(),
-            responses_text: String::new(),
-            responses_calls: BTreeMap::new(),
-            responses_order: Vec::new(),
+            responses: responses_stream::Encoder::new(),
             openai_id: None,
             openai_model: None,
         }
@@ -2011,10 +2008,27 @@ impl StreamEventEncoder {
         event: &ChatStreamEventV1,
         last_usage: Option<&UsageV2>,
     ) -> Result<Vec<(Option<&'static str>, Value)>, &'static str> {
+        if matches!(
+            self.dialect,
+            IngressDialect::Anthropic | IngressDialect::Gemini
+        ) && matches!(event, ChatStreamEventV1::RefusalDelta{delta} if !delta.is_empty())
+        {
+            return Err("streamed refusal semantics require a compatible client protocol");
+        }
+        if self.dialect == IngressDialect::Anthropic
+            && matches!(
+                event,
+                ChatStreamEventV1::Finish {
+                    reason: FinishReasonV1::ContentFilter
+                }
+            )
+        {
+            return Err("streamed filtering semantics require a compatible client protocol");
+        }
         match self.dialect {
             IngressDialect::Anthropic => Ok(self.encode_anthropic(event, last_usage)),
             IngressDialect::Gemini => self.encode_gemini(event, last_usage),
-            IngressDialect::Responses => Ok(self.encode_responses(event, last_usage)),
+            IngressDialect::Responses => self.responses.encode(event, last_usage),
             _ => Ok(self.encode_openai(event, last_usage)),
         }
     }
@@ -2176,151 +2190,6 @@ impl StreamEventEncoder {
         }
     }
 
-    /// Responses: accumulate the streamed output so the terminal
-    /// `response.completed` carries the FULL `output` items (the spec shape, and
-    /// what Codex-style clients re-read from the final frame) instead of an empty
-    /// list. `output_item.done` likewise carries the complete item.
-    fn encode_responses(
-        &mut self,
-        event: &ChatStreamEventV1,
-        last_usage: Option<&UsageV2>,
-    ) -> Vec<(Option<&'static str>, Value)> {
-        // The `output_index` space is assigned at first open (text lazily on its
-        // first delta, each call at its ToolCallStart) so added/delta/done
-        // frames and the terminal fold share one coherent ordering.
-        match event {
-            ChatStreamEventV1::TextDelta { delta } => {
-                let output_index = self.responses_open_text();
-                self.responses_text.push_str(delta);
-                return vec![(
-                    Some("response.output_text.delta"),
-                    json!({"type":"response.output_text.delta",
-                           "output_index":output_index,"content_index":0,"delta":delta}),
-                )];
-            }
-            ChatStreamEventV1::RefusalDelta { delta } => {
-                let output_index = self.responses_open_text();
-                self.responses_text.push_str(delta);
-                return vec![(
-                    Some("response.refusal.delta"),
-                    json!({"type":"response.refusal.delta",
-                           "output_index":output_index,"delta":delta}),
-                )];
-            }
-            ChatStreamEventV1::ToolCallStart { index, id, name } => {
-                let output_index = self.responses_open_call(*index);
-                self.responses_calls
-                    .insert(*index, (id.clone(), name.clone(), String::new()));
-                return vec![(
-                    Some("response.output_item.added"),
-                    json!({"type":"response.output_item.added","output_index":output_index,
-                           "item":{"type":"function_call","id":id,"call_id":id,
-                                   "name":name,"arguments":"","status":"in_progress"}}),
-                )];
-            }
-            ChatStreamEventV1::ToolCallArgumentsDelta { index, delta } => {
-                if let Some(call) = self.responses_calls.get_mut(index) {
-                    call.2.push_str(delta);
-                }
-                let output_index = self.responses_index_of_call(*index);
-                return vec![(
-                    Some("response.function_call_arguments.delta"),
-                    json!({"type":"response.function_call_arguments.delta",
-                           "output_index":output_index,"delta":delta}),
-                )];
-            }
-            ChatStreamEventV1::ToolCallEnd { index } => {
-                let output_index = self.responses_index_of_call(*index);
-                if let Some((id, name, args)) = self.responses_calls.get(index) {
-                    return vec![(
-                        Some("response.output_item.done"),
-                        json!({"type":"response.output_item.done","output_index":output_index,
-                               "item":{"type":"function_call","id":id,"call_id":id,
-                                       "name":name,"arguments":args,"status":"completed"}}),
-                    )];
-                }
-            }
-            ChatStreamEventV1::Finish { reason } => {
-                let usage = last_usage
-                    .map(responses_usage)
-                    .unwrap_or_else(|| responses_usage(&UsageV2::default()));
-                // Fold in the SAME order the indices were assigned in.
-                let mut output = Vec::new();
-                for item in &self.responses_order {
-                    match item {
-                        ResponsesOutputItem::Text => {
-                            if !self.responses_text.is_empty() {
-                                output.push(json!({"type":"message","role":"assistant","content":[
-                                    {"type":"output_text","text":self.responses_text}
-                                ]}));
-                            }
-                        }
-                        ResponsesOutputItem::Call(index) => {
-                            if let Some((id, name, args)) = self.responses_calls.get(index) {
-                                output.push(json!({
-                                    "type":"function_call","id":id,"call_id":id,
-                                    "name":name,"arguments":args,"status":"completed"
-                                }));
-                            }
-                        }
-                    }
-                }
-                self.responses_order.clear();
-                let status = responses_status(Some(*reason));
-                let terminal = if status == "incomplete" {
-                    "response.incomplete"
-                } else {
-                    "response.completed"
-                };
-                let mut response = json!({
-                    "object":"response","status":status,"output":output,"usage":usage
-                });
-                if matches!(reason, FinishReasonV1::Length) {
-                    response["incomplete_details"] = json!({"reason":"max_output_tokens"});
-                } else if matches!(reason, FinishReasonV1::ContentFilter) {
-                    response["incomplete_details"] = json!({"reason":"content_filter"});
-                }
-                return vec![(Some(terminal), json!({"type":terminal,"response":response}))];
-            }
-            _ => {}
-        }
-        encode_responses_stream_event(event, last_usage)
-    }
-
-    /// Open (or find) the text item's slot in the output-index space.
-    fn responses_open_text(&mut self) -> usize {
-        if let Some(position) = self
-            .responses_order
-            .iter()
-            .position(|item| matches!(item, ResponsesOutputItem::Text))
-        {
-            return position;
-        }
-        self.responses_order.push(ResponsesOutputItem::Text);
-        self.responses_order.len() - 1
-    }
-
-    /// Open (or find) a call item's slot in the output-index space.
-    fn responses_open_call(&mut self, canonical: u32) -> usize {
-        if let Some(position) = self.responses_order.iter().position(
-            |item| matches!(item, ResponsesOutputItem::Call(index) if *index == canonical),
-        ) {
-            return position;
-        }
-        self.responses_order
-            .push(ResponsesOutputItem::Call(canonical));
-        self.responses_order.len() - 1
-    }
-
-    fn responses_index_of_call(&self, canonical: u32) -> usize {
-        self.responses_order
-            .iter()
-            .position(
-                |item| matches!(item, ResponsesOutputItem::Call(index) if *index == canonical),
-            )
-            .unwrap_or(canonical as usize)
-    }
-
     /// OpenAI: identical frames to the stateless encoder, plus the chunk
     /// identity (id/model captured at ResponseStart) on every subsequent
     /// chunk — the spec puts them on all frames, not only the first.
@@ -2441,84 +2310,6 @@ fn unix_now() -> i64 {
 
 fn openai_delta(delta: Value) -> Value {
     json!({"object":"chat.completion.chunk","created":unix_now(),"choices":[{"index":0,"delta":delta,"finish_reason":Value::Null}]})
-}
-
-/// Encode the canonical stream as OpenAI Responses SSE events — the inverse of
-/// `openai_responses_typed::decode_responses_stream`. Each event mirrors a Responses event kind
-/// the typed decoder consumes; the terminal `response.completed` folds in the last-seen usage.
-fn encode_responses_stream_event(
-    event: &ChatStreamEventV1,
-    last_usage: Option<&UsageV2>,
-) -> Vec<(Option<&'static str>, Value)> {
-    match event {
-        ChatStreamEventV1::NativeFrame { .. } => Vec::new(),
-        ChatStreamEventV1::ResponseStart { id, model } => vec![(
-            Some("response.created"),
-            json!({
-                "type":"response.created",
-                "response":{
-                    "id":id,"object":"response","status":"in_progress","model":model,"output":[]
-                }
-            }),
-        )],
-        ChatStreamEventV1::TextDelta { delta } => vec![(
-            Some("response.output_text.delta"),
-            json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":delta}),
-        )],
-        ChatStreamEventV1::ReasoningDelta { delta } => vec![(
-            Some("response.reasoning_summary_text.delta"),
-            json!({"type":"response.reasoning_summary_text.delta","delta":delta}),
-        )],
-        ChatStreamEventV1::RefusalDelta { delta } => vec![(
-            Some("response.refusal.delta"),
-            json!({"type":"response.refusal.delta","delta":delta}),
-        )],
-        ChatStreamEventV1::ToolCallStart { index, id, name } => vec![(
-            Some("response.output_item.added"),
-            json!({
-                "type":"response.output_item.added","output_index":index,
-                "item":{
-                    "type":"function_call","id":id,"call_id":id,"name":name,
-                    "arguments":"","status":"in_progress"
-                }
-            }),
-        )],
-        ChatStreamEventV1::ToolCallArgumentsDelta { index, delta } => vec![(
-            Some("response.function_call_arguments.delta"),
-            json!({"type":"response.function_call_arguments.delta","output_index":index,"delta":delta}),
-        )],
-        ChatStreamEventV1::ToolCallEnd { index } => vec![(
-            Some("response.output_item.done"),
-            json!({"type":"response.output_item.done","output_index":index,
-                   "item":{"type":"function_call","status":"completed"}}),
-        )],
-        // Usage folds into the terminal `response.completed` emitted on Finish; nothing to stream.
-        ChatStreamEventV1::Usage { .. } => Vec::new(),
-        ChatStreamEventV1::Finish { reason } => {
-            let usage = last_usage
-                .map(responses_usage)
-                .unwrap_or_else(|| responses_usage(&UsageV2::default()));
-            let terminal = if responses_status(Some(*reason)) == "incomplete" {
-                "response.incomplete"
-            } else {
-                "response.completed"
-            };
-            vec![(
-                Some(terminal),
-                json!({
-                    "type":terminal,
-                    "response":{
-                        "object":"response","status":responses_status(Some(*reason)),
-                        "output":[],"usage":usage
-                    }
-                }),
-            )]
-        }
-        ChatStreamEventV1::Error { error } => vec![(
-            Some("error"),
-            json!({"type":"error","error":{"code":error.code,"message":error.message}}),
-        )],
-    }
 }
 
 fn output_including_reasoning(usage: &UsageV2) -> u64 {
@@ -2941,7 +2732,10 @@ mod tests {
         }
         let added = frames
             .iter()
-            .find(|(name, _)| *name == Some("response.output_item.added"))
+            .find(|(name, value)| {
+                *name == Some("response.output_item.added")
+                    && value["item"]["type"] == "function_call"
+            })
             .map(|(_, value)| value.clone())
             .expect("output_item.added frame");
         // Text opened first (index 0), so the call lives at output_index 1 —
@@ -2949,7 +2743,10 @@ mod tests {
         assert_eq!(added["output_index"], 1);
         let done_item = frames
             .iter()
-            .find(|(name, _)| *name == Some("response.output_item.done"))
+            .find(|(name, value)| {
+                *name == Some("response.output_item.done")
+                    && value["item"]["type"] == "function_call"
+            })
             .map(|(_, value)| value.clone())
             .expect("output_item.done frame");
         assert_eq!(done_item["output_index"], added["output_index"]);
@@ -3602,75 +3399,83 @@ mod tests {
 
     #[test]
     fn responses_stream_events_fold_terminal_usage_into_completed() {
-        // Start → created; deltas → named delta events; usage folds into the completed frame.
-        let start = encode_responses_stream_event(
-            &ChatStreamEventV1::ResponseStart {
-                id: Some("resp_1".into()),
-                model: "gpt-test".into(),
-            },
-            None,
-        );
+        let mut encoder = StreamEventEncoder::new(IngressDialect::Responses);
+        let start = encoder
+            .encode(
+                &ChatStreamEventV1::ResponseStart {
+                    id: Some("resp_1".into()),
+                    model: "gpt-test".into(),
+                },
+                None,
+            )
+            .unwrap();
         assert_eq!(start[0].0, Some("response.created"));
         assert_eq!(start[0].1["response"]["model"], "gpt-test");
-
-        let delta = encode_responses_stream_event(
-            &ChatStreamEventV1::TextDelta { delta: "hi".into() },
-            None,
-        );
-        assert_eq!(delta[0].0, Some("response.output_text.delta"));
-        assert_eq!(delta[0].1["delta"], "hi");
-
+        let delta = encoder
+            .encode(&ChatStreamEventV1::TextDelta { delta: "hi".into() }, None)
+            .unwrap();
+        assert!(delta
+            .iter()
+            .any(|(kind, value)| *kind == Some("response.output_text.delta")
+                && value["delta"] == "hi"));
         let usage = UsageV2 {
             tokens_in: 5,
             tokens_out: 2,
             ..UsageV2::default()
         };
-        // Usage itself emits nothing; the terminal completed carries it.
-        assert!(encode_responses_stream_event(
-            &ChatStreamEventV1::Usage {
-                usage: usage.clone()
-            },
-            None,
-        )
-        .is_empty());
-
-        let finish = encode_responses_stream_event(
-            &ChatStreamEventV1::Finish {
-                reason: FinishReasonV1::Stop,
-            },
-            Some(&usage),
-        );
-        assert_eq!(finish[0].0, Some("response.completed"));
-        assert_eq!(finish[0].1["response"]["status"], "completed");
-        assert_eq!(finish[0].1["response"]["usage"]["input_tokens"], 5);
-        assert_eq!(finish[0].1["response"]["usage"]["output_tokens"], 2);
+        assert!(encoder
+            .encode(
+                &ChatStreamEventV1::Usage {
+                    usage: usage.clone()
+                },
+                None
+            )
+            .unwrap()
+            .is_empty());
+        let finish = encoder
+            .encode(
+                &ChatStreamEventV1::Finish {
+                    reason: FinishReasonV1::Stop,
+                },
+                Some(&usage),
+            )
+            .unwrap();
+        let (kind, terminal) = finish.last().unwrap();
+        assert_eq!(*kind, Some("response.completed"));
+        assert_eq!(terminal["response"]["status"], "completed");
+        assert_eq!(terminal["response"]["usage"]["input_tokens"], 5);
+        assert_eq!(terminal["response"]["usage"]["output_tokens"], 2);
+        assert_eq!(terminal["response"]["usage"]["total_tokens"], 7);
     }
 
     #[test]
-    fn responses_stream_events_shape_tool_call_lifecycle() {
-        let start = encode_responses_stream_event(
-            &ChatStreamEventV1::ToolCallStart {
-                index: 0,
-                id: "call_1".into(),
-                name: "weather".into(),
-            },
-            None,
-        );
-        assert_eq!(start[0].0, Some("response.output_item.added"));
-        assert_eq!(start[0].1["item"]["type"], "function_call");
-        assert_eq!(start[0].1["item"]["call_id"], "call_1");
-
-        let args = encode_responses_stream_event(
-            &ChatStreamEventV1::ToolCallArgumentsDelta {
-                index: 0,
-                delta: "{\"x\":".into(),
-            },
-            None,
-        );
-        assert_eq!(args[0].0, Some("response.function_call_arguments.delta"));
-
-        let end = encode_responses_stream_event(&ChatStreamEventV1::ToolCallEnd { index: 0 }, None);
-        assert_eq!(end[0].0, Some("response.output_item.done"));
+    fn streamed_refusal_and_filter_semantics_are_preserved_or_explicitly_refused() {
+        for dialect in [
+            IngressDialect::OpenAi,
+            IngressDialect::Responses,
+            IngressDialect::Anthropic,
+            IngressDialect::Gemini,
+        ] {
+            let mut encoder = StreamEventEncoder::new(dialect);
+            let refusal = encoder.encode(
+                &ChatStreamEventV1::RefusalDelta {
+                    delta: "declined".into(),
+                },
+                None,
+            );
+            assert_eq!(
+                refusal.is_ok(),
+                matches!(dialect, IngressDialect::OpenAi | IngressDialect::Responses)
+            );
+            let mut encoder = StreamEventEncoder::new(dialect);
+            let terminal = encoder.encode(
+                &ChatStreamEventV1::Finish {
+                    reason: FinishReasonV1::ContentFilter,
+                },
+                None,
+            );
+            assert_eq!(terminal.is_ok(), dialect != IngressDialect::Anthropic);
+        }
     }
 }
 

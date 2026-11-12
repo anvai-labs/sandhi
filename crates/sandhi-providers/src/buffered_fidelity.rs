@@ -18,7 +18,7 @@ fn empty(v: &Value) -> bool {
         || v.as_array().is_some_and(Vec::is_empty)
         || v.as_object().is_some_and(serde_json::Map::is_empty)
 }
-fn fields(value: &Value, allowed: &[&str]) -> Result<(), ProviderError> {
+pub(crate) fn fields(value: &Value, allowed: &[&str]) -> Result<(), ProviderError> {
     let object = value.as_object().ok_or_else(invalid)?;
     if object
         .iter()
@@ -28,10 +28,10 @@ fn fields(value: &Value, allowed: &[&str]) -> Result<(), ProviderError> {
     }
     Ok(())
 }
-fn text<'a>(value: &'a Value, key: &str) -> Result<&'a str, ProviderError> {
+pub(crate) fn text<'a>(value: &'a Value, key: &str) -> Result<&'a str, ProviderError> {
     value.get(key).and_then(Value::as_str).ok_or_else(invalid)
 }
-fn id<'a>(value: &'a Value, key: &str) -> Result<&'a str, ProviderError> {
+pub(crate) fn id<'a>(value: &'a Value, key: &str) -> Result<&'a str, ProviderError> {
     text(value, key).and_then(|v| {
         if v.is_empty() || v.len() > 256 || v.chars().any(char::is_control) {
             Err(invalid())
@@ -40,7 +40,7 @@ fn id<'a>(value: &'a Value, key: &str) -> Result<&'a str, ProviderError> {
         }
     })
 }
-fn array<'a>(value: &'a Value, key: &str) -> Result<&'a Vec<Value>, ProviderError> {
+pub(crate) fn array<'a>(value: &'a Value, key: &str) -> Result<&'a Vec<Value>, ProviderError> {
     value
         .get(key)
         .and_then(Value::as_array)
@@ -54,19 +54,19 @@ fn object_args(value: &Value) -> Result<(), ProviderError> {
         Err(invalid())
     }
 }
-fn string_args(value: &Value) -> Result<(), ProviderError> {
+pub(crate) fn string_args(value: &Value) -> Result<(), ProviderError> {
     let value = value.as_str().ok_or_else(invalid)?;
     let parsed = sandhi_core::policy::strict_json(value.as_bytes()).map_err(|_| invalid())?;
     object_args(&parsed)
 }
-fn optional_text(value: &Value, key: &str) -> Result<Option<String>, ProviderError> {
+pub(crate) fn optional_text(value: &Value, key: &str) -> Result<Option<String>, ProviderError> {
     match value.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(s)) => Ok(Some(s.clone())),
         _ => Err(invalid()),
     }
 }
-fn optional_role(value: &Value, key: &str, expected: &str) -> Result<(), ProviderError> {
+pub(crate) fn optional_role(value: &Value, key: &str, expected: &str) -> Result<(), ProviderError> {
     if value
         .get(key)
         .is_some_and(|v| !v.is_null() && v.as_str() != Some(expected))
