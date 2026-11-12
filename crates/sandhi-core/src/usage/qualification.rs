@@ -170,6 +170,87 @@ pub fn qualify_responses_progress_usage(response: &Value) -> Result<Option<Usage
     }))
 }
 
+/// Validate the counters present in one cumulative Messages progress update.
+/// Missing categories remain unknown. Cache-write TTL subsets and thinking can
+/// establish lower bounds, but this result is always partial and cannot settle.
+pub fn qualify_anthropic_progress_usage(
+    response: &Value,
+    profile: AnthropicUsageProfile,
+) -> Result<Option<UsageV2>, Error> {
+    if !response.is_object() {
+        return Err(Error::InvalidResponse);
+    }
+    match response.get("usage") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(value) if value.is_object() => {}
+        _ => return Err(Error::InvalidField("usage")),
+    }
+    let counters = &response["usage"];
+    let input = optional(counters, "input_tokens", "input_tokens")?;
+    let output = optional(counters, "output_tokens", "output_tokens")?;
+    let cached = optional(
+        counters,
+        "cache_read_input_tokens",
+        "cache_read_input_tokens",
+    )?;
+    let written = optional(
+        counters,
+        "cache_creation_input_tokens",
+        "cache_creation_input_tokens",
+    )?;
+    let reasoning = detail(
+        counters,
+        "output_tokens_details",
+        "thinking_tokens",
+        "output_tokens_details.thinking_tokens",
+    )?;
+    let short = detail(
+        counters,
+        "cache_creation",
+        "ephemeral_5m_input_tokens",
+        "cache_creation.ephemeral_5m_input_tokens",
+    )?;
+    let long = detail(
+        counters,
+        "cache_creation",
+        "ephemeral_1h_input_tokens",
+        "cache_creation.ephemeral_1h_input_tokens",
+    )?;
+    let split = short.unwrap_or(0) + long.unwrap_or(0);
+    if written.is_some_and(|n| split > n)
+        || written
+            .zip(short)
+            .zip(long)
+            .is_some_and(|((n, a), b)| n != a + b)
+        || output.zip(reasoning).is_some_and(|(n, r)| r > n)
+        || (profile == AnthropicUsageProfile::ImplicitCache
+            && (written.unwrap_or(0) != 0 || split != 0))
+    {
+        return Err(Error::InconsistentUsage);
+    }
+    if [input, output, cached, written, reasoning, short, long]
+        .iter()
+        .all(Option::is_none)
+    {
+        return Ok(None);
+    }
+    Ok(Some(UsageV2 {
+        tokens_in: input.unwrap_or(0),
+        tokens_out: output.unwrap_or(reasoning.unwrap_or(0)),
+        cache_read_tokens: cached.unwrap_or(0),
+        cache_creation_tokens: written.unwrap_or(split),
+        cache_read_observation: Some(crate::observe_cache_read(
+            crate::CacheReadFamily::Anthropic,
+            response,
+        )),
+        reasoning_tokens: reasoning,
+        reasoning_included: Some(true),
+        completeness: crate::UsageCompleteness::Partial,
+        attempts: 1,
+        ..Default::default()
+    }))
+}
+
 fn anthropic(response: &Value, profile: AnthropicUsageProfile) -> Result<(), Error> {
     let usage = usage(response, "usage")?;
     required(usage, "input_tokens", "input_tokens")?;
@@ -312,6 +393,140 @@ pub fn qualify_buffered_usage_with_profile(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn anthropic_progress_preserves_unknown_zero_and_exclusive_cache_categories() {
+        for response in [json!({}), json!({"usage":null}), json!({"usage":{}})] {
+            assert_eq!(
+                qualify_anthropic_progress_usage(&response, Default::default()).unwrap(),
+                None
+            );
+        }
+        let usage = qualify_anthropic_progress_usage(
+            &json!({"usage":{
+                "input_tokens":3,"cache_read_input_tokens":8,"cache_creation_input_tokens":2,
+                "output_tokens":4,"output_tokens_details":{"thinking_tokens":0}
+            }}),
+            Default::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            (
+                usage.tokens_in,
+                usage.cache_read_tokens,
+                usage.cache_creation_tokens,
+                usage.tokens_out
+            ),
+            (3, 8, 2, 4)
+        );
+        assert_eq!(usage.reasoning_tokens, Some(0));
+        assert_eq!(usage.reasoning_included, Some(true));
+        assert_eq!(usage.completeness, crate::UsageCompleteness::Partial);
+        assert_eq!(
+            usage.cache_read_observation.unwrap().status,
+            crate::CacheReadStatus::Reported
+        );
+        let zero = qualify_anthropic_progress_usage(
+            &json!({"usage":{"output_tokens":0}}),
+            Default::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(zero.reasoning_tokens, None);
+        assert_eq!(
+            zero.cache_read_observation.unwrap().status,
+            crate::CacheReadStatus::Absent
+        );
+        assert_eq!(zero.completeness, crate::UsageCompleteness::Partial);
+    }
+
+    #[test]
+    fn anthropic_progress_subsets_establish_only_partial_lower_bounds() {
+        let usage = qualify_anthropic_progress_usage(
+            &json!({"usage":{
+                "cache_creation":{"ephemeral_5m_input_tokens":2,"ephemeral_1h_input_tokens":3},
+                "output_tokens_details":{"thinking_tokens":4}
+            }}),
+            Default::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            (
+                usage.tokens_in,
+                usage.cache_creation_tokens,
+                usage.tokens_out
+            ),
+            (0, 5, 4)
+        );
+        assert_eq!(usage.reasoning_tokens, Some(4));
+        assert_eq!(usage.completeness, crate::UsageCompleteness::Partial);
+        for counters in [
+            json!({"output_tokens":3,"output_tokens_details":{"thinking_tokens":4}}),
+            json!({"cache_creation_input_tokens":1,"cache_creation":{"ephemeral_5m_input_tokens":2}}),
+            json!({"cache_creation_input_tokens":4,"cache_creation":{"ephemeral_5m_input_tokens":2,"ephemeral_1h_input_tokens":1}}),
+        ] {
+            assert!(qualify_anthropic_progress_usage(
+                &json!({"usage":counters}),
+                Default::default()
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn anthropic_progress_refuses_malformed_known_counters_and_wrong_implicit_writes() {
+        for path in [
+            "input_tokens",
+            "output_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+        ] {
+            for invalid in [
+                Value::Null,
+                json!(-1),
+                json!(1.5),
+                json!("1"),
+                json!(50_000_000_001_u64),
+            ] {
+                assert!(qualify_anthropic_progress_usage(
+                    &json!({"usage":{path:invalid}}),
+                    Default::default()
+                )
+                .is_err());
+            }
+        }
+        for counters in [
+            json!({"cache_creation":[]}),
+            json!({"output_tokens_details":false}),
+            json!({"cache_creation":{"ephemeral_1h_input_tokens":null}}),
+            json!({"output_tokens_details":{"thinking_tokens":"1"}}),
+        ] {
+            assert!(qualify_anthropic_progress_usage(
+                &json!({"usage":counters}),
+                Default::default()
+            )
+            .is_err());
+        }
+        for counts in [
+            json!({"cache_creation_input_tokens":1}),
+            json!({"cache_creation":{"ephemeral_5m_input_tokens":1}}),
+        ] {
+            assert!(qualify_anthropic_progress_usage(
+                &json!({"usage":counts}),
+                AnthropicUsageProfile::ImplicitCache
+            )
+            .is_err());
+        }
+        let zero = qualify_anthropic_progress_usage(
+            &json!({"usage":{"cache_creation_input_tokens":0}}),
+            AnthropicUsageProfile::ImplicitCache,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(zero.completeness, crate::UsageCompleteness::Partial);
+    }
 
     #[test]
     fn responses_progress_is_partial_and_preserves_unknown_and_zero() {

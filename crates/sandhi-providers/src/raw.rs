@@ -1682,6 +1682,18 @@ data: [DONE]\n\n";
         let (context, receiver) = crate::AttemptContext::channel("not-dispatched", 4).unwrap();
         for (family, path, body) in [
             (ProviderFamily::Anthropic, "/v1/chat/completions", "{}"),
+            // A library observer prerequisite does not activate a source family
+            // before its raw/typed ownership and HTTP acceptance are qualified.
+            (
+                ProviderFamily::Anthropic,
+                "/v1/messages",
+                "{\"stream\":true}",
+            ),
+            (
+                ProviderFamily::Gemini,
+                "/v1beta/models/fixture:streamGenerateContent?alt=sse",
+                "{}",
+            ),
             (ProviderFamily::OpenAiCompat, "/v1/responses", "{}"),
             (
                 ProviderFamily::OpenAiResponses,

@@ -93,6 +93,7 @@ nav:
       - Qualified translated streams: adr/0028-qualified-translated-stream-accounting.md
       - Live tracked stream matrix: reviews/zai-router-tracked-translated-streams-2026-11-11.md
       - Terminal Chat usage profile: adr/0029-explicit-terminal-chat-usage-profile.md
+      - Messages stream qualification prerequisite: adr/0030-messages-stream-usage-qualification.md
       - Cache reporting: adr/0010-cache-read-reporting-availability.md
   - Project:
       - Version 0.14.0: releases/v0.14.0.md

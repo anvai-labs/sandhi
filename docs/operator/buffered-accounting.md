@@ -20,7 +20,10 @@ candidate; the 0.12.0 release's narrower activation remains historical evidence.
 Constrained [Codex buffered aggregation](../adr/0027-qualified-codex-buffered-accounting.md)
 also qualifies through its typed SSE owner. [Translated and Codex tracked streams](../adr/0028-qualified-translated-stream-accounting.md)
 reuse that source evidence and the bounded response owner. Messages/Gemini upstream
-stream accounting remains gated. See
+stream accounting remains gated. The
+[Messages usage observer prerequisite](../adr/0030-messages-stream-usage-qualification.md)
+qualifies cumulative evidence in the library; it does not enable either source
+family in tracked dispatch. See
 [qualified Responses streaming](../adr/0026-qualified-responses-stream-accounting.md)
 for partial/final usage and protocol-terminal semantics.
 

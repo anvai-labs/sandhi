@@ -1166,3 +1166,47 @@ and binding facade checks remained clean. These successful reruns do not close
 the earlier admission-timeout cause or broaden the live text/cache report into
 live tool/subscription qualification. Fresh independent review applies to the
 combined feature and fix range.
+
+### M5h Messages source-evidence prerequisite
+
+[ADR-0030](../adr/0030-messages-stream-usage-qualification.md) adds a bounded
+complete-event Messages reducer to the library observer. It keeps cumulative
+progress partial, preserves explicit reasoning zero and disjoint fresh/read/write
+categories, and requires a stopping delta's explicit output plus `message_stop`
+before final qualification. Missing required cache categories are never inferred.
+Separate-write and implicit-cache conventions are explicit and family-scoped;
+positive implicit writes, malformed/regressing counters and contradictory TTL or
+thinking relationships fail qualification while retaining prior observations.
+
+Seven numeric fields and one bounded message ID are retained, without content or
+credentials. Same-frame TTL relationships are validated before merging; across
+updates, reported TTL subsets remain lower bounds for a newer aggregate. Derived
+partial parents never become actual final counter observations. Provider errors,
+identity/order violations, duplicate JSON keys, truncation and post-terminal data
+are sticky qualification errors. Unknown events cannot inject usage. Explicit
+model-fallback blocks remain conservatively unqualified.
+
+Three core tests and ten Messages observer tests cover the new contract, including
+every byte split for both profiles and CR/LF/CRLF. Existing standard Chat/Responses
+observer cases pass. Raw dispatch tests additionally pin the activation boundary:
+native Messages and Gemini streaming operations are still refused before physical
+send/attempt creation. This prerequisite does not yet activate typed or raw tracked
+Messages routing, establish live-provider behavior or close the reliability gate.
+Next work is profile plumbing and strict typed decoder draining followed by the
+four-client source/lifecycle/settlement matrix. Gemini remains a separate source
+qualifier and owner acceptance increment.
+
+The public hosted [CI run for reviewed checkpoint `3442b52`](https://github.com/anvai-labs/sandhi/actions/runs/43159606117)
+passed every job, including coverage, SDK conformance, ONNX/default Rust checks and
+binding packaging. Job records show only GitHub Actions runners with literal
+`ubuntu-24.04` or `ubuntu-24.04-arm` labels. Repository private CI routing remains
+disabled. That run predates this M5h library increment; each new tip still needs
+its own review and public hosted checks.
+
+The final M5h default workspace passed 1,127 tests (six opt-in ignored), including
+the existing translated-stream HTTP and admission-stress fixtures. Warnings-denied
+core/provider all-target Clippy and ONNX-feature workspace/all-target Clippy passed.
+Formatting, strict MkDocs and generated binding-facade checks passed. These checks
+qualify this library increment; they do not enable the gated families or explain
+the earlier intermittent accounting wait. Secret scans and exact-commit independent
+review remain publication requirements for the resulting tip.

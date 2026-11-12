@@ -7,11 +7,15 @@
 
 use crate::{linesplit::LineSplitter, ParsedUsage, MAX_STREAM_LINE_BYTES};
 use sandhi_core::usage::{
-    qualify_openai_stream_usage_for_profile, OpenAiStreamUsageProfile, StreamUsageError,
+    qualify_openai_stream_usage_for_profile, AnthropicUsageProfile, OpenAiStreamUsageProfile,
+    StreamUsageError,
 };
 use sandhi_core::{EndpointFamilyV1, UsageCompleteness, UsageV2};
 use serde_json::Value;
 
+mod anthropic;
+#[cfg(test)]
+mod anthropic_tests;
 #[cfg(test)]
 mod chat_profile_tests;
 mod responses;
@@ -45,11 +49,12 @@ pub enum StreamObservationError {
 
 /// Response-scoped measurement, independent of delivery success or settlement.
 ///
-/// Usage is accepted at a complete empty-choices usage event, before `[DONE]`.
-/// Identical observations are idempotent; conflicts and malformed/truncated later
-/// events preserve the first observation and set a sticky error. Inspect both
-/// [`usage`](Self::usage) and [`error`](Self::error); neither erases the other.
-/// Complete post-DONE data events fail explicitly and cannot change usage.
+/// Chat totals follow the declared placement profile. Responses terminal objects
+/// and cumulative Messages updates use their family qualifiers. Messages progress
+/// becomes final only at a qualified `message_stop`. Canonical evidence preserves
+/// partial completeness; legacy [`usage`](Self::usage) exposes final measurements
+/// only. Malformed/conflicting later events retain prior observations and set a
+/// sticky [`error`](Self::error). Complete post-terminal data events fail explicitly.
 ///
 /// SSE lines and events each have the existing 8 MiB ceiling, including comments
 /// and ignored fields. Incoming chunks are inspected in bounded slices. CR/LF/CRLF,
@@ -66,6 +71,8 @@ pub struct OpenAiStreamUsageObserver {
     event_name: Option<String>,
     endpoint: EndpointFamilyV1,
     openai_usage_profile: OpenAiStreamUsageProfile,
+    anthropic_usage_profile: AnthropicUsageProfile,
+    anthropic: anthropic::AnthropicUsage,
     responses: responses::ResponsesUsage,
     usage: Option<ParsedUsage>,
     canonical_usage: Option<UsageV2>,
@@ -99,20 +106,35 @@ impl OpenAiStreamUsageObserver {
         endpoint: EndpointFamilyV1,
         profile: OpenAiStreamUsageProfile,
     ) -> Result<Self, StreamObservationError> {
-        if profile != OpenAiStreamUsageProfile::Standard
-            && endpoint != EndpointFamilyV1::OpenaiChatCompletions
+        Self::for_endpoint_with_usage_profiles(endpoint, profile, AnthropicUsageProfile::default())
+    }
+
+    /// Endpoint conventions are explicit and family-scoped. This constructor
+    /// observes evidence only; it does not enable tracked routing for a family.
+    pub fn for_endpoint_with_usage_profiles(
+        endpoint: EndpointFamilyV1,
+        openai_profile: OpenAiStreamUsageProfile,
+        anthropic_profile: AnthropicUsageProfile,
+    ) -> Result<Self, StreamObservationError> {
+        if (openai_profile != OpenAiStreamUsageProfile::Standard
+            && endpoint != EndpointFamilyV1::OpenaiChatCompletions)
+            || (anthropic_profile != AnthropicUsageProfile::SeparateCacheWrites
+                && endpoint != EndpointFamilyV1::AnthropicMessages)
         {
             return Err(StreamObservationError::UnsupportedEndpoint);
         }
         if !matches!(
             endpoint,
-            EndpointFamilyV1::OpenaiChatCompletions | EndpointFamilyV1::OpenaiResponses
+            EndpointFamilyV1::OpenaiChatCompletions
+                | EndpointFamilyV1::OpenaiResponses
+                | EndpointFamilyV1::AnthropicMessages
         ) {
             return Err(StreamObservationError::UnsupportedEndpoint);
         }
         let mut observer = Self::new();
         observer.endpoint = endpoint;
-        observer.openai_usage_profile = profile;
+        observer.openai_usage_profile = openai_profile;
+        observer.anthropic_usage_profile = anthropic_profile;
         Ok(observer)
     }
 
@@ -128,6 +150,8 @@ impl OpenAiStreamUsageObserver {
             event_name: None,
             endpoint: EndpointFamilyV1::OpenaiChatCompletions,
             openai_usage_profile: OpenAiStreamUsageProfile::Standard,
+            anthropic_usage_profile: AnthropicUsageProfile::SeparateCacheWrites,
+            anthropic: Default::default(),
             responses: Default::default(),
             usage: None,
             canonical_usage: None,
@@ -155,7 +179,7 @@ impl OpenAiStreamUsageObserver {
     }
 
     pub fn provider_failed(&self) -> bool {
-        self.responses.provider_failed
+        self.responses.provider_failed || self.anthropic.provider_failed
     }
 
     pub fn error(&self) -> Option<StreamObservationError> {
@@ -279,6 +303,27 @@ impl OpenAiStreamUsageObserver {
 
     fn event(&mut self) -> Result<(), StreamObservationError> {
         if !self.has_data {
+            return Ok(());
+        }
+        if self.endpoint == EndpointFamilyV1::AnthropicMessages {
+            if self.done {
+                return Err(StreamObservationError::DataAfterTerminator);
+            }
+            let event = sandhi_core::policy::strict_json(&self.data)
+                .map_err(|_| StreamObservationError::InvalidJson)?;
+            let update = self.anthropic.event(
+                &event,
+                self.message_event,
+                self.event_name.as_deref(),
+                self.anthropic_usage_profile,
+            );
+            self.done = self.anthropic.done;
+            if let Some(update) = update? {
+                if update.completeness == UsageCompleteness::Final {
+                    self.usage = Some((&update).into());
+                }
+                self.canonical_usage = Some(update);
+            }
             return Ok(());
         }
         if self.endpoint == EndpointFamilyV1::OpenaiResponses {
