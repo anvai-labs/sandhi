@@ -153,3 +153,33 @@ Unknown dimension → `ValueError`.
 
 Apache-2.0. See the [main README](https://github.com/anvai-labs/sandhi) and
 [ADR-0001](https://github.com/anvai-labs/sandhi/blob/main/docs/adr/0001-sandhi-architecture-and-wire-contract.md).
+
+
+### Connect the binding to a Sandhi gateway
+
+Set `peer_role="sandhi_gateway_v1"` and choose the **client** protocol explicitly.
+The gateway selects and authorizes its backend separately; do not copy a backend
+`endpoint_profile` or Codex credential/account configuration onto this handle.
+
+```python
+provider = runtime.provider(
+    "agent-client", "logical-model", virtual_key,
+    base_url="https://gateway.example/v1",
+    protocol="chat_completions",
+    peer_role="sandhi_gateway_v1",
+    max_retries=0,
+)
+```
+
+Use the root base for Messages, `/v1` for Chat/Responses and `/v1beta` for Gemini.
+The gateway requires HTTPS or loopback HTTP and Bearer authentication. Typed
+`cache_intent` is forwarded for one server-side policy compilation; the client
+needs no selected-backend capability configuration. Unsupported server policy
+still refuses before dispatch. Native/portable fidelity checks remain active.
+
+The explicit peer validates the server's counts-convention header before decoding;
+metadata cannot activate Codex transport or grant backend authority. Its observed
+wire counts can differ from original source categories after translation, notably
+Gemini cache writes and inclusive reasoning output. Consult gateway source evidence
+and receipts for accounting. See the [gateway peer contract](../../docs/adr/0041-explicit-gateway-peer-contract.md)
+for protocol bases, conventions, boundaries and synthetic qualification.

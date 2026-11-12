@@ -1925,8 +1925,11 @@ Two exact-old-helper reproductions fail; the corrected complete provenance
 selection passes eleven tests, and an existing real HTTP/TLS shutdown case passes
 with the same nested-checkout layout. The
 [retained failure and correction evidence](../reviews/artifacts/nested-checkout-provenance-2026-11-12.json)
-does not substitute for a corrected full public run or diagnose the earlier
-shutdown timing occurrence. No runtime accounting or inference semantics changed.
+retains the original failure. The corrected source `397d537` subsequently passed
+all fourteen public-hosted CI jobs, including 575 SDK cases with three skips
+(677.39 seconds). This source-specific pass does not diagnose the earlier shutdown
+timing occurrence or qualify later increments. No runtime accounting or inference
+semantics changed.
 
 ### M5x — Cohesive operator console and cache/token documentation
 
@@ -1943,3 +1946,36 @@ passed after review-only wording correction. AgentBrowser and independent mobile
 keyboard/history/auth checks preserve source-asset and synthetic screenshot
 evidence. These are UI/documentation checks, not live-provider, release or open
 router/default/cache/state/reliability-gate acceptance.
+
+### M5y — Explicit gateway peer and coordinated consumer accounting
+
+[ADR-0041](../adr/0041-explicit-gateway-peer-contract.md) separates the immediate
+client peer from selected source profiles and credentials. Gateway-facing bindings
+select one of four client dialects, consume only bounded server-generated wire
+conventions and forward cache intent without compiling backend markers locally.
+HTTP/SSE error recovery stays terminal when another inference is not authorized.
+The wire convention follows actual native versus rendered output; it never grants
+source credential, capability or receipt authority.
+
+The [integrated checkpoint](../reviews/explicit-gateway-peer-2026-11-12.md) passed
+1,241 Rust, 323 Python and 88 Node tests plus both all-target Clippy configurations.
+Six actual HTTP tests include 112 persistent-client switch cells, source/context/
+attempt/receipt joins, one cache compiler and unknown usage retaining liability.
+The full SDK/browser/CPU-origin suite passed **590 cases with three skips** after
+correcting stale-target executable fixtures and two old browser label expectations.
+Those failed runs remain retained. Cargo-selected snapshots cover all owned binary
+fixtures, including native features, CLI and example executables.
+
+Victor's local `a3f2b77` checkpoint has independent scoped-clean review, 2,265
+expanded passes and complete collection of 40,283 tests. Client protocol, virtual
+credentials and logical aliases remain independent of direct provider setup;
+cache compilation has one owner. Gateway prices remain unavailable through actual
+consumer owners, including mixed native/typed turns and absent numeric/task-report
+metadata. Consumer push/merge/release stays gated on dependency qualification and
+publication.
+
+Mandatory durable accounting and safe immutable upstream namespace migration are
+separate in-progress increments. Native Cohere/Ollama source qualification must
+preserve prior HTTP behavior through that cutover. Broader cache/state/media/agent/
+subscription, retained reliability and supported packaging gates remain open;
+these passing synthetic checks do not complete M3–M6 or the overall goal.

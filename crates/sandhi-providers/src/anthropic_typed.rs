@@ -35,7 +35,7 @@ impl TypedAnthropic {
         attempt_context: Option<crate::AttemptContext>,
     ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
         request.validate().map_err(ProviderError::InvalidRequest)?;
-        let body = encode_anthropic_request(&request)?;
+        let body = encode_anthropic_request_for_peer(&request, self.raw.peer_role())?;
         let response = self
             .raw
             .complete(provider_request_observed(
@@ -44,11 +44,12 @@ impl TypedAnthropic {
                 call_headers,
                 attempt_context,
             ))
-            .await?;
-        let qualified = sandhi_core::usage::qualify_buffered_usage_with_profile(
+            .await
+            .map_err(|error| crate::peer::terminal_error(self.raw.peer_role(), error))?;
+        let qualified = crate::buffered_completion::qualify(
+            &response,
             sandhi_core::EndpointFamilyV1::AnthropicMessages,
             self.usage_profile,
-            &response.body,
         );
         if !request.include_native_response {
             crate::buffered_fidelity::validate(
@@ -80,13 +81,14 @@ impl TypedAnthropic {
             .stream_qualified(
                 provider_request_observed(
                     &request,
-                    encode_anthropic_request(&request)?,
+                    encode_anthropic_request_for_peer(&request, self.raw.peer_role())?,
                     call_headers,
                     attempt_context,
                 ),
                 crate::QualifiedStreamDelivery::Streaming,
             )
-            .await?;
+            .await
+            .map_err(|error| crate::peer::terminal_error(self.raw.peer_role(), error))?;
         Ok(crate::qualified_stream::decode(
             qualified::decode(source.stream, request.model, request.include_native_stream),
             source.observation,
@@ -108,7 +110,7 @@ impl ChatProvider for TypedAnthropic {
         self.stream_inner(request, headers, Some(context)).await
     }
     fn preflight_request(&self, request: &ChatRequestV1) -> Result<(), ProviderError> {
-        encode_anthropic_request(request).map(|_| ())
+        encode_anthropic_request_for_peer(request, self.raw.peer_role()).map(|_| ())
     }
     fn allows_cache_synthesis(&self) -> bool {
         true
@@ -179,13 +181,18 @@ impl ChatProvider for TypedAnthropic {
 }
 
 pub fn encode_anthropic_request(request: &ChatRequestV1) -> Result<Value, ProviderError> {
-    let mut body = encode_anthropic_request_base(request)?;
-    crate::cache_policy::apply(
+    encode_anthropic_request_for_peer(request, sandhi_core::PeerRoleV1::Provider)
+}
+fn encode_anthropic_request_for_peer(
+    request: &ChatRequestV1,
+    role: sandhi_core::PeerRoleV1,
+) -> Result<Value, ProviderError> {
+    crate::cache_policy::encode_for_peer(
         request,
         sandhi_core::EndpointFamilyV1::AnthropicMessages,
-        &mut body,
-    )?;
-    Ok(body)
+        role,
+        encode_anthropic_request_base,
+    )
 }
 
 pub(crate) fn encode_anthropic_request_base(

@@ -48,6 +48,8 @@ pub mod openai;
 pub mod openai_responses;
 mod openai_responses_typed;
 pub mod openai_roles;
+mod peer;
+pub use peer::GatewayFailure;
 pub mod raw;
 pub mod resilience;
 pub mod token_estimate;
@@ -252,6 +254,8 @@ pub fn merge_call_headers(base: &http::HeaderMap, call: &http::HeaderMap) -> htt
 /// A completed (non-streaming) response plus the usage measured **at the source**.
 #[derive(Debug, Clone)]
 pub struct ProviderResponse {
+    /// Resolved only for an explicitly configured gateway peer.
+    pub usage_convention: Option<sandhi_core::UsageConventionV1>,
     pub status: u16,
     pub body: serde_json::Value,
     pub usage: ParsedUsage,
@@ -375,6 +379,8 @@ pub enum ProviderError {
     OutputProjection(String),
     /// 401 / 403 — bad or missing credential.
     Auth,
+    /// An explicit gateway peer failed without authorizing inference replay.
+    GatewayFailure(GatewayFailure),
     /// 429 — provider rate limit.
     RateLimited,
     /// Any other non-success status, with a bounded snippet of the upstream
@@ -401,6 +407,13 @@ impl std::fmt::Display for ProviderError {
             ProviderError::InvalidRequest(e) => write!(f, "invalid request: {e}"),
             ProviderError::OutputProjection(e) => write!(f, "output projection refused: {e}"),
             ProviderError::Auth => write!(f, "auth failed (401/403)"),
+            ProviderError::GatewayFailure(failure) => {
+                write!(f, "gateway request failed ({})", failure.code)?;
+                if let Some(message) = &failure.message {
+                    write!(f, ": {message}")?;
+                }
+                Ok(())
+            }
             ProviderError::RateLimited => write!(f, "rate limited (429)"),
             ProviderError::Upstream {
                 status,
@@ -532,6 +545,9 @@ pub(crate) fn provider_request_id(
 /// wrap this so accounting + circuit-breaker + retry apply uniformly (a later milestone).
 #[async_trait]
 pub trait Provider: Send + Sync {
+    fn peer_role(&self) -> sandhi_core::PeerRoleV1 {
+        sandhi_core::PeerRoleV1::Provider
+    }
     /// Neutral provider slug (e.g. `anthropic`, `openai`).
     fn slug(&self) -> &str;
 

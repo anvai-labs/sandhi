@@ -115,7 +115,7 @@ impl PyProviderRuntime {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (provider, model, api_key, base_url=None, timeout_secs=None, stream_idle_timeout_secs=None, max_retries=None, headers_json=None, auth_scheme=None, protocol=None, stream_setup_timeout_secs=None, endpoint_profile=None))]
+    #[pyo3(signature = (provider, model, api_key, base_url=None, timeout_secs=None, stream_idle_timeout_secs=None, max_retries=None, headers_json=None, auth_scheme=None, protocol=None, stream_setup_timeout_secs=None, endpoint_profile=None, peer_role=None))]
     fn provider(
         &self,
         provider: String,
@@ -132,6 +132,7 @@ impl PyProviderRuntime {
         // timeout slots would silently rebind positional callers' args.
         stream_setup_timeout_secs: Option<f64>,
         endpoint_profile: Option<String>,
+        peer_role: Option<String>,
     ) -> PyResult<TypedProvider> {
         let handle = self
             .inner
@@ -148,6 +149,7 @@ impl PyProviderRuntime {
                 auth_scheme,
                 protocol,
                 endpoint_profile,
+                peer_role,
             })
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
         Ok(TypedProvider {

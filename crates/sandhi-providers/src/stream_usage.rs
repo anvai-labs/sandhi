@@ -66,6 +66,8 @@ pub enum StreamObservationError {
 /// one initial BOM, multiline data and ordinary message events are supported. EOF
 /// never dispatches a partial event. This is not an EventSource/reconnection client.
 pub struct OpenAiStreamUsageObserver {
+    gateway_peer: bool,
+    gateway_failure: Option<crate::GatewayFailure>,
     splitter: LineSplitter,
     limit: usize,
     first_line: bool,
@@ -148,6 +150,8 @@ impl OpenAiStreamUsageObserver {
 
     fn with_limit(limit: usize) -> Self {
         Self {
+            gateway_peer: false,
+            gateway_failure: None,
             splitter: LineSplitter::new_sse(limit),
             limit,
             first_line: true,
@@ -170,6 +174,29 @@ impl OpenAiStreamUsageObserver {
             closed: false,
             #[cfg(test)]
             peak_buffered: 0,
+        }
+    }
+
+    pub(crate) fn with_gateway_peer(mut self) -> Self {
+        self.gateway_peer = true;
+        self
+    }
+    pub(crate) fn gateway_peer(&self) -> bool {
+        self.gateway_peer
+    }
+    pub(crate) fn gateway_failure(&self) -> Option<crate::GatewayFailure> {
+        self.gateway_failure.clone()
+    }
+    fn observe_gateway_failure(&mut self, event: &Value) {
+        if self.gateway_peer && self.gateway_failure.is_none() {
+            if let Some(error) = event
+                .get("error")
+                .or_else(|| event.pointer("/response/error"))
+                .filter(|error| !error.is_null())
+            {
+                self.gateway_failure =
+                    Some(crate::peer::failure_from_value(Some(error), None, None));
+            }
         }
     }
 
@@ -211,7 +238,8 @@ impl OpenAiStreamUsageObserver {
     }
 
     pub fn provider_failed(&self) -> bool {
-        self.responses.provider_failed
+        self.gateway_failure.is_some()
+            || self.responses.provider_failed
             || self.anthropic.provider_failed
             || self.gemini.provider_failed
     }
@@ -354,6 +382,7 @@ impl OpenAiStreamUsageObserver {
         if self.endpoint == EndpointFamilyV1::GeminiGenerateContent {
             let event = sandhi_core::policy::strict_json(&self.data)
                 .map_err(|_| StreamObservationError::InvalidJson)?;
+            self.observe_gateway_failure(&event);
             self.observe_cache(&event);
             if let Some(update) = self.gemini.event(&event, self.message_event)? {
                 self.canonical_usage = Some(update);
@@ -366,6 +395,7 @@ impl OpenAiStreamUsageObserver {
             }
             let event = sandhi_core::policy::strict_json(&self.data)
                 .map_err(|_| StreamObservationError::InvalidJson)?;
+            self.observe_gateway_failure(&event);
             self.observe_cache(&event);
             let update = self.anthropic.event(
                 &event,
@@ -394,6 +424,7 @@ impl OpenAiStreamUsageObserver {
             }
             let event = sandhi_core::policy::strict_json(&self.data)
                 .map_err(|_| StreamObservationError::InvalidJson)?;
+            self.observe_gateway_failure(&event);
             self.observe_cache(&event);
             let update =
                 self.responses
@@ -420,6 +451,7 @@ impl OpenAiStreamUsageObserver {
         }
         let event = sandhi_core::policy::strict_json(&self.data)
             .map_err(|_| StreamObservationError::InvalidJson)?;
+        self.observe_gateway_failure(&event);
         self.observe_cache(&event);
         if let Some(next) =
             qualify_openai_stream_usage_for_profile(&event, self.openai_usage_profile)

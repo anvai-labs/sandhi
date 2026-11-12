@@ -133,3 +133,28 @@ preserve evidence for consumers that stop reading after content; transparent and
 translated provider wire responses are unchanged.
 
 Apache-2.0. The transport surface links `sandhi-providers` (async HTTP stack) into the addon.
+
+
+### Connect the binding to a Sandhi gateway
+
+Append `peerRole="sandhi_gateway_v1"` to `ProviderRuntime.provider` and select the
+client protocol independently of the backend. The positional options remain
+`baseUrl, headersJson, maxRetries, timeoutSecs, streamIdleTimeoutSecs, authScheme,
+protocol, streamSetupTimeoutSecs, endpointProfile, peerRole`.
+
+```js
+const provider = runtime.provider(
+  "agent-client", "logical-model", virtualKey, "https://gateway.example/v1",
+  undefined, 0, 60, 30, "bearer", "chat_completions", 10,
+  undefined, "sandhi_gateway_v1",
+);
+```
+
+Use the root base for Messages, `/v1` for Chat/Responses and `/v1beta` for Gemini.
+HTTPS or loopback HTTP, explicit client protocol and zero retries are required;
+backend endpoint profiles and Codex account/protocol options refuse on this peer.
+Typed `cache_intent` is forwarded for one server policy compilation without local
+cache markers or invented backend capabilities. Native/portable fidelity remains
+explicit. Counts metadata describes the immediate wire convention, not upstream
+provenance or committed spend; consult source evidence/receipts after translation.
+See the [gateway peer contract](../../docs/adr/0041-explicit-gateway-peer-contract.md).

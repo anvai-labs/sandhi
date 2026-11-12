@@ -12,7 +12,7 @@ pub(crate) fn decode(
         let mut finish=None;
         let mut last_progress=None;
         while let Some(event)=inner.next().await {
-            let mut event=Some(event);
+            let mut event=Some(event.map_err(|error|crate::peer::stream_error(error,&observation)));
             if matches!(event.as_ref(),Some(Ok(ChatStreamEventV1::ResponseStart{..}))) {
                 yield event.take().expect("response start")?;
             }
@@ -38,6 +38,7 @@ pub(crate) fn decode(
         }
         drop(inner);
         let evidence=observation.evidence();
+        if let Some(failure)=evidence.gateway_failure {Err(failure.into_error())?;}
         if evidence.snapshot.qualification_error.is_some()
             || !evidence.snapshot.protocol_done
             || evidence.snapshot.outcome!=Some(AttemptOutcome::Success)

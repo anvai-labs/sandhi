@@ -85,6 +85,7 @@ impl Provider for Cohere {
                     crate::buffered_usage(sandhi_core::CacheReadFamily::Cohere, &body);
                 Ok((
                     ProviderResponse {
+                        usage_convention: None,
                         status,
                         body,
                         usage: response_usage,

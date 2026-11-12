@@ -356,7 +356,10 @@ pub(crate) struct AttemptGuard {
 }
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct AttemptResponseFacts(Arc<OnceLock<ResponseFactValues>>);
+pub(crate) struct AttemptResponseFacts(
+    Arc<OnceLock<ResponseFactValues>>,
+    Arc<OnceLock<sandhi_core::UsageConventionV1>>,
+);
 
 #[derive(Debug, Clone, Default)]
 struct ResponseFactValues {
@@ -365,15 +368,38 @@ struct ResponseFactValues {
 }
 
 impl AttemptResponseFacts {
+    pub(crate) fn record_usage_convention(&self, value: Option<sandhi_core::UsageConventionV1>) {
+        if let Some(value) = value {
+            let _ = self.1.set(value);
+        }
+    }
     pub(crate) fn record_headers(
         &self,
         status: u16,
         headers: &http::HeaderMap,
         vendor_request_id_header: Option<&str>,
     ) {
+        self.record_peer_headers(
+            sandhi_core::PeerRoleV1::Provider,
+            status,
+            headers,
+            vendor_request_id_header,
+        );
+    }
+    pub(crate) fn record_peer_headers(
+        &self,
+        role: sandhi_core::PeerRoleV1,
+        status: u16,
+        headers: &http::HeaderMap,
+        vendor_request_id_header: Option<&str>,
+    ) {
         let _ = self.0.set(ResponseFactValues {
             provider_status: Some(status),
-            provider_request_id: crate::provider_request_id(headers, vendor_request_id_header),
+            provider_request_id: crate::peer::response_request_id(
+                role,
+                headers,
+                vendor_request_id_header,
+            ),
         });
     }
 
@@ -459,6 +485,11 @@ impl AttemptGuard {
         let (outcome, status, request_id) = match error {
             ProviderError::Auth => (AttemptOutcome::ProviderRejected, None, None),
             ProviderError::RateLimited => (AttemptOutcome::ProviderRejected, Some(429), None),
+            ProviderError::GatewayFailure(failure) => (
+                AttemptOutcome::ProviderRejected,
+                failure.http_status,
+                failure.request_id.clone(),
+            ),
             ProviderError::Upstream {
                 status, request_id, ..
             } => (
@@ -647,7 +678,9 @@ where
                 } else {
                     sandhi_core::usage::qualify_buffered_usage_with_profile(
                         endpoint,
-                        profile,
+                        response
+                            .usage_convention
+                            .map_or(profile, |value| value.anthropic_profile()),
                         &response.body,
                     )
                 }
@@ -744,7 +777,7 @@ where
     if let Some(guard) = &mut guard {
         guard.set_response_facts(&facts);
     }
-    let (raw, request_id) = match make_future(facts).await {
+    let (raw, request_id) = match make_future(facts.clone()).await {
         Ok(response) => response,
         Err(error) => {
             if let Some(guard) = &mut guard {
@@ -752,6 +785,17 @@ where
             }
             return Err(error);
         }
+    };
+    let observer = if let Some(convention) = facts.1.get() {
+        crate::stream_usage::ProtocolStreamUsageObserver::for_endpoint_with_usage_profiles(
+            endpoint,
+            convention.chat_profile(),
+            convention.anthropic_profile(),
+        )
+        .map_err(|_| ProviderError::OutputProjection("invalid gateway usage convention".into()))?
+        .with_gateway_peer()
+    } else {
+        observer
     };
     let (raw, observation) =
         crate::raw::qualified_stream::observe_response(raw, guard, observer, request_id);
@@ -926,6 +970,7 @@ mod tests {
             ..ParsedUsage::default()
         };
         let response = ProviderResponse {
+            usage_convention: None,
             status: 200,
             body: serde_json::json!({}),
             usage,
@@ -1298,6 +1343,7 @@ mod tests {
                     #[allow(unreachable_code)]
                     Ok((
                         ProviderResponse {
+                            usage_convention: None,
                             status: 200,
                             body: serde_json::json!({}),
                             usage: Default::default(),
@@ -1325,7 +1371,7 @@ mod tests {
             observe_complete_qualified(Some(context.clone()),"fixture",Some("fixture"),E::OpenaiChatCompletions,Default::default(),
                 |facts|async move {
                     if headers {facts.record_headers(200,&Default::default(),None);}
-                    Ok((ProviderResponse{status:200,body:serde_json::json!({"usage":{"prompt_tokens":8,"completion_tokens":4,
+                    Ok((ProviderResponse{usage_convention:None,status:200,body:serde_json::json!({"usage":{"prompt_tokens":8,"completion_tokens":4,
                         "prompt_tokens_details":{"cached_tokens":6},"completion_tokens_details":{"reasoning_tokens":0}}}),
                         usage:Default::default(),attempts:1},None))
                 }).await.unwrap();

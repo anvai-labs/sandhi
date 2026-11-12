@@ -1752,10 +1752,18 @@ fn responses_response_format(format: &Value) -> Result<Value, String> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn encode_response(
     dialect: IngressDialect,
     response: &ChatResponseV1,
 ) -> Result<Value, &'static str> {
+    encode_response_with_emission(dialect, response).map(|(body, _)| body)
+}
+
+pub(crate) fn encode_response_with_emission(
+    dialect: IngressDialect,
+    response: &ChatResponseV1,
+) -> Result<(Value, bool), &'static str> {
     // These bodies are decoder-owned provider responses, not request extras.
     // Compatible buffered egress must preserve signed/opaque state and unknown
     // native output parts when admission required typed request execution.
@@ -1772,7 +1780,7 @@ pub(crate) fn encode_response(
             .get(bucket)
             .filter(|value| value.get(field).is_some_and(Value::is_array))
     }) {
-        return Ok(native.clone());
+        return Ok((native.clone(), true));
     }
     if response.output.content.as_ref().is_some_and(|content|matches!(content,
         MessageContent::Parts(parts) if parts.iter().any(|part|!matches!(part,ContentPart::Text{..})))) {
@@ -1792,14 +1800,15 @@ pub(crate) fn encode_response(
     {
         return Err("buffered refusal semantics require a compatible client protocol");
     }
-    match dialect {
+    let body = match dialect {
         IngressDialect::OpenAi | IngressDialect::Embeddings | IngressDialect::Completions => {
             Ok(encode_openai_response(response))
         }
         IngressDialect::Anthropic => encode_anthropic_response(response),
         IngressDialect::Responses => Ok(encode_responses_response(response)),
         IngressDialect::Gemini => encode_gemini_response(response),
-    }
+    };
+    body.map(|body| (body, false))
 }
 
 fn encode_openai_response(response: &ChatResponseV1) -> Value {
@@ -2111,10 +2120,21 @@ impl StreamEventEncoder {
                     json!({"type":"content_block_stop","index":block}),
                 ));
             }
-            ChatStreamEventV1::Usage { usage } => frames.push((
-                Some("message_delta"),
-                json!({"type":"message_delta","delta":{},"usage":anthropic_usage(usage)}),
-            )),
+            ChatStreamEventV1::Usage { usage } => {
+                // Final usage arrives after source EOF. Messages deltas follow all
+                // block stops; leaving text open here breaks strict gateway clients.
+                self.close_prose_block(&mut frames);
+                for (_, block) in std::mem::take(&mut self.open_tools) {
+                    frames.push((
+                        Some("content_block_stop"),
+                        json!({"type":"content_block_stop","index":block}),
+                    ));
+                }
+                frames.push((
+                    Some("message_delta"),
+                    json!({"type":"message_delta","delta":{},"usage":anthropic_usage(usage)}),
+                ));
+            }
             ChatStreamEventV1::Finish { reason } => {
                 self.close_prose_block(&mut frames);
                 let open: Vec<usize> = self.open_tools.values().copied().collect();
@@ -2330,7 +2350,31 @@ fn openai_input_details(usage: &UsageV2) -> Value {
     if usage.cache_creation_tokens > 0 {
         details["cache_write_tokens"] = json!(usage.cache_creation_tokens);
     }
+    if let Some(audio) = usage.audio_input_tokens {
+        details["audio_tokens"] = json!(audio);
+    }
     details
+}
+
+fn openai_output_details(usage: &UsageV2) -> Value {
+    let mut details = Map::new();
+    for (name, value) in [
+        ("reasoning_tokens", usage.reasoning_tokens),
+        ("audio_tokens", usage.audio_output_tokens),
+        (
+            "accepted_prediction_tokens",
+            usage.accepted_prediction_tokens,
+        ),
+        (
+            "rejected_prediction_tokens",
+            usage.rejected_prediction_tokens,
+        ),
+    ] {
+        if let Some(value) = value {
+            details.insert(name.into(), json!(value));
+        }
+    }
+    Value::Object(details)
 }
 
 fn openai_usage(usage: &UsageV2) -> Value {
@@ -2344,12 +2388,7 @@ fn openai_usage(usage: &UsageV2) -> Value {
         "completion_tokens":output,
         "total_tokens":prompt_tokens.saturating_add(output),
         "prompt_tokens_details":openai_input_details(usage),
-        "completion_tokens_details":{
-            "reasoning_tokens":usage.reasoning_tokens,
-            "audio_tokens":usage.audio_output_tokens,
-            "accepted_prediction_tokens":usage.accepted_prediction_tokens,
-            "rejected_prediction_tokens":usage.rejected_prediction_tokens,
-        }
+        "completion_tokens_details":openai_output_details(usage)
     })
 }
 

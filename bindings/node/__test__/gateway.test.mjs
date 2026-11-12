@@ -87,6 +87,7 @@ function localServer(responses) {
         response.writeHead(item.status ?? 200, {
           "content-type": item.contentType,
           "content-length": Buffer.byteLength(item.body),
+          ...(item.headers ?? {}),
         });
         response.end(item.body);
       });
@@ -1196,4 +1197,69 @@ for (const [protocol, body] of [
       await server.close();
     }
   });
+}
+
+for (const native of [false, true]) {
+  test(`explicit gateway peer forwards cache intent and keeps usage qualified (native=${native})`, async () => {
+    const body = { id: "r", model: "fixture", choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 4, prompt_tokens_details: { cached_tokens: 6, cache_write_tokens: 2 } } };
+    const server = await localServer([{ contentType: "application/json", body: JSON.stringify(body), headers: { "x-sandhi-usage-convention": "v1-chat-standard" } }]);
+    try {
+      const provider = new ProviderRuntime().provider("neutral-agent", "fixture", "virtual", server.baseUrl, undefined, 0, 5, 2, "bearer", "chat_completions", 2, undefined, "sandhi_gateway_v1");
+      const intent = { mode: "auto_stable_prefix", lifetime: "5m" };
+      const response = JSON.parse(await provider.completeJson(JSON.stringify({ model: "fixture", max_output_tokens: 16, include_native_response: native, messages: [{ role: "user", content: "hello" }], cache_intent: intent }), JSON.stringify({ "Idempotency-Key": "obsolete", "ChatGPT-Account-ID": "upstream-only" })));
+      assert.deepEqual([response.usage.tokens_in, response.usage.cache_read_tokens, response.usage.cache_creation_tokens, response.usage.tokens_out, response.usage.attempts], [2, 6, 2, 4, 1]);
+      assert.equal(provider.provider, "neutral-agent");
+      assert.deepEqual(server.lastBody().sandhi_cache, intent);
+      assert.equal(server.lastBody().prompt_cache_key, undefined);
+      assert.equal(server.lastHeaders()["idempotency-key"], undefined);
+      assert.equal(server.lastHeaders()["chatgpt-account-id"], undefined);
+      assert.equal(server.calls(), 1);
+    } finally { await server.close(); }
+  });
+}
+
+test("explicit gateway peer rejects metadata that could be mistaken for backend authority", async () => {
+  const server = await localServer([{ contentType: "application/json", body: "{}", headers: { "x-sandhi-usage-convention": "chatgpt_codex" } }]);
+  try {
+    const provider = new ProviderRuntime().provider("neutral-agent", "fixture", "virtual", server.baseUrl, undefined, 0, 5, 2, "bearer", "chat_completions", 2, undefined, "sandhi_gateway_v1");
+    await assert.rejects(() => provider.completeJson(JSON.stringify({ model: "fixture", messages: [{ role: "user", content: "hello" }] })), error => error.code === "output_projection_error" && error.retryable === false);
+    assert.equal(server.calls(), 1);
+  } finally { await server.close(); }
+});
+
+for (const [protocol, convention] of [
+  ["chat_completions", "v1-chat-standard"],
+  ["anthropic_messages", "v1-messages-standard"],
+  ["responses", "v1-responses-standard"],
+  ["gemini_generate_content", "v1-gemini-standard"],
+]) {
+  for (const streaming of [false, true]) {
+    test(`explicit gateway peer keeps HTTP502 terminal: ${protocol}/${streaming}`, async () => {
+      const server = await localServer([{ status: 502, contentType: "application/json", body: JSON.stringify({ error: { code: "output_projection_error", retryable: false, http_status: 502 } }), headers: { "x-should-retry": "false", "x-sandhi-request-id": "gateway-id" } }]);
+      try {
+        const provider = new ProviderRuntime().provider("neutral-agent", "fixture", "virtual", server.origin, undefined, 0, 5, 2, "bearer", protocol, 2, undefined, "sandhi_gateway_v1");
+        const request = JSON.stringify({ model: "fixture", max_output_tokens: 16, messages: [{ role: "user", content: "hello" }] });
+        await assert.rejects(async () => {
+          if (streaming) { for await (const _ of provider.streamJson(request)) {} }
+          else { await provider.completeJson(request); }
+        }, error => error.code === "output_projection_error" && error.retryable === false && error.httpStatus === 502 && error.requestId === "gateway-id");
+        assert.equal(server.calls(), 1);
+      } finally { await server.close(); }
+    });
+  }
+  for (const native of [false, true]) {
+    test(`explicit gateway peer keeps SSE error terminal: ${protocol}/${native}`, async () => {
+      const frame = { type: "error", error: { code: "output_projection_error", retryable: false, http_status: 502 } };
+      const server = await localServer([{ contentType: "text/event-stream", body: `data: ${JSON.stringify(frame)}\n\n`, headers: { "x-sandhi-usage-convention": convention, "x-sandhi-request-id": "gateway-id" } }]);
+      try {
+        const provider = new ProviderRuntime().provider("neutral-agent", "fixture", "virtual", server.origin, undefined, 0, 5, 2, "bearer", protocol, 2, undefined, "sandhi_gateway_v1");
+        const events = [];
+        await assert.rejects(async () => {
+          for await (const value of provider.streamJson(JSON.stringify({ model: "fixture", max_output_tokens: 16, include_native_stream: native, messages: [{ role: "user", content: "hello" }] }))) events.push(JSON.parse(value));
+        }, error => error.code === "output_projection_error" && error.retryable === false && error.requestId === "gateway-id");
+        assert.equal(events.some(event => event.event === "finish" || event.event === "usage" && event.usage.completeness === "final"), false);
+        assert.equal(server.calls(), 1);
+      } finally { await server.close(); }
+    });
+  }
 }

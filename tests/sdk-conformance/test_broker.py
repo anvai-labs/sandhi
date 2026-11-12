@@ -4,7 +4,6 @@ import json
 import os
 import select
 import sqlite3
-import shutil
 import struct
 import subprocess
 import threading
@@ -15,6 +14,7 @@ import httpx
 import pytest
 
 from conftest import REPO_ROOT, _free_port
+from source_provenance import freeze_cargo_build
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="Unix fake-daemon transport")
 ADMIN = {"Authorization": "Bearer broker-test-admin"}
@@ -139,25 +139,37 @@ class FakeBroker:
 
 @pytest.fixture(scope="module")
 def broker_binary(tmp_path_factory):
-    subprocess.run(["cargo", "build", "-p", "sandhi-proxy", "--bins",
-                    "--features", "sentinelpass-ipc", "--locked"], cwd=REPO_ROOT, check=True)
-    subprocess.run(["cargo", "build", "-p", "sandhi-store", "--example",
-                    "sdk_broker_transport", "--features", "sentinelpass-ipc", "--locked"],
-                   cwd=REPO_ROOT, check=True)
-    # Keep each feature build immutable even when another fixture rebuilds the normal target.
-    target = tmp_path_factory.mktemp("native-broker-bin") / "sandhi-proxy"
-    shutil.copy2(REPO_ROOT / "target/debug/sandhi-proxy", target)
-    shutil.copy2(REPO_ROOT / "target/debug/examples/sdk_broker_transport",
-                 target.with_name("sdk_broker_transport"))
-    return target
+    directory = tmp_path_factory.mktemp("native-broker-bin")
+    snapshots = freeze_cargo_build(
+        REPO_ROOT,
+        ["cargo", "build", "-p", "sandhi-proxy", "--bins",
+         "--features", "sentinelpass-ipc", "--locked"],
+        [("sandhi-proxy", "bin"), ("sandhi", "bin")],
+        directory,
+        manifest_name="proxy-build-provenance.json",
+        required_features=("sentinelpass-ipc",),
+    )
+    freeze_cargo_build(
+        REPO_ROOT,
+        ["cargo", "build", "-p", "sandhi-store", "--example",
+         "sdk_broker_transport", "--features", "sentinelpass-ipc", "--locked"],
+        [("sdk_broker_transport", "example")],
+        directory,
+        manifest_name="example-build-provenance.json",
+        required_features=("sentinelpass-ipc",),
+    )
+    return snapshots["sandhi-proxy"]
 
 
 @pytest.fixture(scope="module")
 def broker_plain_binary(tmp_path_factory):
-    subprocess.run(["cargo", "build", "-p", "sandhi-proxy", "--bin", "sandhi-proxy"], cwd=REPO_ROOT, check=True)
-    target = tmp_path_factory.mktemp("plain-broker-bin") / "sandhi-proxy"
-    shutil.copy2(REPO_ROOT / "target/debug/sandhi-proxy", target)
-    return target
+    snapshots = freeze_cargo_build(
+        REPO_ROOT,
+        ["cargo", "build", "--locked", "-p", "sandhi-proxy", "--bin", "sandhi-proxy"],
+        [("sandhi-proxy", "bin")],
+        tmp_path_factory.mktemp("plain-broker-bin"),
+    )
+    return snapshots["sandhi-proxy"]
 
 
 @pytest.fixture
@@ -318,11 +330,11 @@ def test_inventory_failure_is_not_an_empty_success(broker):
 
 
 @pytest.mark.parametrize("broker", [{"token": "read-token"}], indirect=True)
-def test_cli_reference_does_not_consume_or_forward_stdin(broker):
+def test_cli_reference_does_not_consume_or_forward_stdin(broker, broker_binary):
     client, daemon = broker
     env = {**os.environ, "SANDHI_ADMIN_TOKEN": "broker-test-admin",
            "SANDHI_ADMIN_URL": str(client.base_url)}
-    result = subprocess.run([str(REPO_ROOT / "target/debug/sandhi"), "keys", "reference", "openai", "default",
+    result = subprocess.run([str(broker_binary.with_name("sandhi")), "keys", "reference", "openai", "default",
                              "--scheme", "api-key"],
                             env=env, input=SECRET, capture_output=True, text=True, timeout=5)
     assert result.returncode == 0, result.stderr

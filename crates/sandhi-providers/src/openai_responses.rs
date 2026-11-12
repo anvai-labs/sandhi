@@ -4,8 +4,8 @@
 //! protocol at `/responses`, not the Chat Completions message/chunk protocol.
 
 use crate::{
-    error_for_response, metered_passthrough, parse_openai_responses_usage, sse_data_json,
-    ByteStream, ParsedUsage, Provider, ProviderError, ProviderRequest, ProviderResponse,
+    metered_passthrough, parse_openai_responses_usage, sse_data_json, ByteStream, ParsedUsage,
+    Provider, ProviderError, ProviderRequest, ProviderResponse,
 };
 use async_trait::async_trait;
 use http::header::HeaderMap;
@@ -22,6 +22,7 @@ pub enum OpenAiResponsesProfile {
 
 pub struct OpenAiResponses {
     client: reqwest::Client,
+    peer_role: sandhi_core::PeerRoleV1,
     slug: String,
     base_url: String,
     bearer_token: String,
@@ -37,6 +38,7 @@ impl OpenAiResponses {
     ) -> Self {
         Self {
             client: crate::default_client(),
+            peer_role: Default::default(),
             slug: slug.into(),
             base_url: base_url.into(),
             bearer_token: bearer_token.into(),
@@ -55,6 +57,11 @@ impl OpenAiResponses {
     #[must_use]
     pub fn with_profile(mut self, profile: OpenAiResponsesProfile) -> Self {
         self.profile = profile;
+        self
+    }
+
+    pub(crate) fn with_peer_role(mut self, role: sandhi_core::PeerRoleV1) -> Self {
+        self.peer_role = role;
         self
     }
 
@@ -80,11 +87,16 @@ impl OpenAiResponses {
 
 #[async_trait]
 impl Provider for OpenAiResponses {
+    fn peer_role(&self) -> sandhi_core::PeerRoleV1 {
+        self.peer_role
+    }
+
     fn slug(&self) -> &str {
         &self.slug
     }
 
     async fn complete(&self, req: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        let request_headers = crate::peer::request_headers(self.peer_role, &self.headers, &req);
         if self.profile == OpenAiResponsesProfile::ChatGptCodex {
             return Err(ProviderError::InvalidRequest(
                 "ChatGPT Codex Responses is streaming-only; use the typed runtime which aggregates its stream"
@@ -99,7 +111,7 @@ impl Provider for OpenAiResponses {
         let mut request = self
             .client
             .post(self.responses_url())
-            .headers(crate::merge_call_headers(&self.headers, &req.extra_headers));
+            .headers(request_headers);
         if !self.bearer_token.is_empty() {
             // Keyless local upstreams get no Authorization header (ADR-0008 D1).
             request = request.bearer_auth(&self.bearer_token);
@@ -117,15 +129,24 @@ impl Provider for OpenAiResponses {
                     .await
                     .map_err(|error| ProviderError::Transport(error.to_string()))?;
                 let status = response.status().as_u16();
-                facts.record_headers(status, response.headers(), None);
+                facts.record_peer_headers(self.peer_role, status, response.headers(), None);
                 if !response.status().is_success() {
-                    return Err(error_for_response(response, None).await);
+                    return Err(
+                        crate::peer::error_for_response(self.peer_role, response, None).await,
+                    );
                 }
+                let usage_convention = crate::peer::resolve(
+                    self.peer_role,
+                    sandhi_core::EndpointFamilyV1::OpenaiResponses,
+                    response.headers(),
+                )?;
+                facts.record_usage_convention(usage_convention);
                 let body = crate::decode_response_json(response).await?;
                 let (response_usage, observed_usage) =
                     crate::buffered_usage(sandhi_core::CacheReadFamily::OpenAiResponses, &body);
                 Ok((
                     ProviderResponse {
+                        usage_convention,
                         status,
                         body,
                         usage: response_usage,
@@ -139,6 +160,7 @@ impl Provider for OpenAiResponses {
     }
 
     async fn stream(&self, req: ProviderRequest) -> Result<ByteStream, ProviderError> {
+        let request_headers = crate::peer::request_headers(self.peer_role, &self.headers, &req);
         Self::validate(&req.body)?;
         let attempt_context = req.attempt_context.clone();
         let model = req.model.clone();
@@ -147,7 +169,7 @@ impl Provider for OpenAiResponses {
         let mut request = self
             .client
             .post(self.responses_url())
-            .headers(crate::merge_call_headers(&self.headers, &req.extra_headers));
+            .headers(request_headers);
         if !self.bearer_token.is_empty() {
             // Keyless local upstreams get no Authorization header (ADR-0008 D1).
             request = request.bearer_auth(&self.bearer_token);
@@ -162,10 +184,23 @@ impl Provider for OpenAiResponses {
                     .send()
                     .await
                     .map_err(|error| ProviderError::Transport(error.to_string()))?;
-                facts.record_headers(response.status().as_u16(), response.headers(), None);
+                facts.record_peer_headers(
+                    self.peer_role,
+                    response.status().as_u16(),
+                    response.headers(),
+                    None,
+                );
                 if !response.status().is_success() {
-                    return Err(error_for_response(response, None).await);
+                    return Err(
+                        crate::peer::error_for_response(self.peer_role, response, None).await,
+                    );
                 }
+                let usage_convention = crate::peer::resolve(
+                    self.peer_role,
+                    sandhi_core::EndpointFamilyV1::OpenaiResponses,
+                    response.headers(),
+                )?;
+                facts.record_usage_convention(usage_convention);
                 Ok(metered_passthrough(
                     response.bytes_stream(),
                     sniff_responses_usage_line,
@@ -180,6 +215,7 @@ impl Provider for OpenAiResponses {
         req: ProviderRequest,
         _delivery: crate::QualifiedStreamDelivery,
     ) -> Result<crate::QualifiedProviderStream, ProviderError> {
+        let request_headers = crate::peer::request_headers(self.peer_role, &self.headers, &req);
         Self::validate(&req.body)?;
         if req
             .body
@@ -197,7 +233,7 @@ impl Provider for OpenAiResponses {
         let mut request = self
             .client
             .post(self.responses_url())
-            .headers(crate::merge_call_headers(&self.headers, &req.extra_headers));
+            .headers(request_headers);
         if !self.bearer_token.is_empty() {
             request = request.bearer_auth(&self.bearer_token);
         }
@@ -214,11 +250,25 @@ impl Provider for OpenAiResponses {
                     .send()
                     .await
                     .map_err(|error| ProviderError::Transport(error.to_string()))?;
-                facts.record_headers(response.status().as_u16(), response.headers(), None);
+                facts.record_peer_headers(
+                    self.peer_role,
+                    response.status().as_u16(),
+                    response.headers(),
+                    None,
+                );
                 if !response.status().is_success() {
-                    return Err(error_for_response(response, None).await);
+                    return Err(
+                        crate::peer::error_for_response(self.peer_role, response, None).await,
+                    );
                 }
-                let request_id = crate::provider_request_id(response.headers(), None);
+                let usage_convention = crate::peer::resolve(
+                    self.peer_role,
+                    sandhi_core::EndpointFamilyV1::OpenaiResponses,
+                    response.headers(),
+                )?;
+                facts.record_usage_convention(usage_convention);
+                let request_id =
+                    crate::peer::response_request_id(self.peer_role, response.headers(), None);
                 use futures_util::StreamExt;
                 let raw: crate::raw::RawChunkStream =
                     Box::pin(response.bytes_stream().map(|chunk| {

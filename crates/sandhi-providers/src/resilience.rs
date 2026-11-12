@@ -283,6 +283,7 @@ fn is_retryable(e: &ProviderError) -> bool {
         ProviderError::Upstream { status, .. } => *status >= 500,
         ProviderError::InvalidRequest(_)
         | ProviderError::OutputProjection(_)
+        | ProviderError::GatewayFailure(_)
         | ProviderError::Auth
         | ProviderError::CircuitOpen => false,
     }
@@ -295,6 +296,9 @@ fn backoff(base: Duration, attempt: u32) -> Duration {
 
 #[async_trait]
 impl Provider for ResilientProvider {
+    fn peer_role(&self) -> sandhi_core::PeerRoleV1 {
+        self.inner.peer_role()
+    }
     fn slug(&self) -> &str {
         self.inner.slug()
     }
@@ -477,6 +481,7 @@ mod tests {
 
     fn ok_resp() -> ProviderResponse {
         ProviderResponse {
+            usage_convention: None,
             status: 200,
             body: serde_json::json!({}),
             usage: ParsedUsage::default(),

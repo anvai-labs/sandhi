@@ -3,8 +3,8 @@
 //! OpenRouter, vLLM, LM Studio, Ollama, Cerebras…). One adapter, many providers.
 
 use crate::{
-    error_for_response, metered_openai_passthrough as metered_passthrough, sse_data_json,
-    ByteStream, ParsedUsage, Provider, ProviderError, ProviderRequest, ProviderResponse,
+    metered_openai_passthrough as metered_passthrough, sse_data_json, ByteStream, ParsedUsage,
+    Provider, ProviderError, ProviderRequest, ProviderResponse,
 };
 use crate::{parse_openai_usage, validate_openai_chat_messages};
 use async_trait::async_trait;
@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 /// the adapter POSTs to `{base_url}/chat/completions` with `Authorization: Bearer <key>`.
 pub struct OpenAiCompat {
     client: reqwest::Client,
+    peer_role: sandhi_core::PeerRoleV1,
     slug: String,
     base_url: String,
     api_key: String,
@@ -38,6 +39,7 @@ impl OpenAiCompat {
         let spec = crate::resolve_openai_compat_provider(&slug);
         Self {
             client: crate::default_client(),
+            peer_role: Default::default(),
             slug,
             base_url: base_url.into(),
             api_key: api_key.into(),
@@ -72,6 +74,11 @@ impl OpenAiCompat {
         self
     }
 
+    pub(crate) fn with_peer_role(mut self, role: sandhi_core::PeerRoleV1) -> Self {
+        self.peer_role = role;
+        self
+    }
+
     fn chat_url(&self) -> String {
         format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
     }
@@ -85,7 +92,10 @@ impl OpenAiCompat {
     /// or body. `try_from`, not `from_static`: catalog names are `&'static str` data, and a
     /// future entry with invalid casing must be skipped, not panic the hot path.
     fn request_headers(&self, req: &ProviderRequest) -> HeaderMap {
-        let mut out = crate::merge_call_headers(&self.headers, &req.extra_headers);
+        let mut out = crate::peer::request_headers(self.peer_role, &self.headers, req);
+        if self.peer_role == sandhi_core::PeerRoleV1::SandhiGatewayV1 {
+            return out;
+        }
         let Some(name) = self.session_header else {
             return out;
         };
@@ -110,6 +120,10 @@ impl OpenAiCompat {
 
 #[async_trait]
 impl Provider for OpenAiCompat {
+    fn peer_role(&self) -> sandhi_core::PeerRoleV1 {
+        self.peer_role
+    }
+
     fn slug(&self) -> &str {
         &self.slug
     }
@@ -140,15 +154,32 @@ impl Provider for OpenAiCompat {
                     .await
                     .map_err(|e| ProviderError::Transport(e.to_string()))?;
                 let status = resp.status().as_u16();
-                facts.record_headers(status, resp.headers(), self.request_id_header);
+                facts.record_peer_headers(
+                    self.peer_role,
+                    status,
+                    resp.headers(),
+                    self.request_id_header,
+                );
                 if !resp.status().is_success() {
-                    return Err(error_for_response(resp, self.request_id_header).await);
+                    return Err(crate::peer::error_for_response(
+                        self.peer_role,
+                        resp,
+                        self.request_id_header,
+                    )
+                    .await);
                 }
+                let usage_convention = crate::peer::resolve(
+                    self.peer_role,
+                    sandhi_core::EndpointFamilyV1::OpenaiChatCompletions,
+                    resp.headers(),
+                )?;
+                facts.record_usage_convention(usage_convention);
                 let body = crate::decode_response_json(resp).await?;
                 let (response_usage, observed_usage) =
                     crate::buffered_usage(sandhi_core::CacheReadFamily::OpenAi, &body);
                 Ok((
                     ProviderResponse {
+                        usage_convention,
                         status,
                         body,
                         usage: response_usage,
@@ -195,14 +226,26 @@ impl Provider for OpenAiCompat {
                     .send()
                     .await
                     .map_err(|e| ProviderError::Transport(e.to_string()))?;
-                facts.record_headers(
+                facts.record_peer_headers(
+                    self.peer_role,
                     resp.status().as_u16(),
                     resp.headers(),
                     self.request_id_header,
                 );
                 if !resp.status().is_success() {
-                    return Err(error_for_response(resp, self.request_id_header).await);
+                    return Err(crate::peer::error_for_response(
+                        self.peer_role,
+                        resp,
+                        self.request_id_header,
+                    )
+                    .await);
                 }
+                let usage_convention = crate::peer::resolve(
+                    self.peer_role,
+                    sandhi_core::EndpointFamilyV1::OpenaiChatCompletions,
+                    resp.headers(),
+                )?;
+                facts.record_usage_convention(usage_convention);
                 // Forward every upstream chunk verbatim (O(1) pass-through) while sniffing each complete
                 // line for the terminal usage object; `metered_passthrough` is the shared streaming
                 // primitive (the chunk-boundary property test exercises this exact path).
@@ -244,16 +287,31 @@ impl Provider for OpenAiCompat {
                     .send()
                     .await
                     .map_err(|error| ProviderError::Transport(error.to_string()))?;
-                facts.record_headers(
+                facts.record_peer_headers(
+                    self.peer_role,
                     response.status().as_u16(),
                     response.headers(),
                     self.request_id_header,
                 );
                 if !response.status().is_success() {
-                    return Err(error_for_response(response, self.request_id_header).await);
+                    return Err(crate::peer::error_for_response(
+                        self.peer_role,
+                        response,
+                        self.request_id_header,
+                    )
+                    .await);
                 }
-                let request_id =
-                    crate::provider_request_id(response.headers(), self.request_id_header);
+                let usage_convention = crate::peer::resolve(
+                    self.peer_role,
+                    sandhi_core::EndpointFamilyV1::OpenaiChatCompletions,
+                    response.headers(),
+                )?;
+                facts.record_usage_convention(usage_convention);
+                let request_id = crate::peer::response_request_id(
+                    self.peer_role,
+                    response.headers(),
+                    self.request_id_header,
+                );
                 use futures_util::StreamExt;
                 let raw: crate::raw::RawChunkStream =
                     Box::pin(response.bytes_stream().map(|chunk| {

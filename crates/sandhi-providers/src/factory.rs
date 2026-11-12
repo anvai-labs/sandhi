@@ -23,6 +23,7 @@ pub struct ProviderOptions {
     pub auth_scheme: Option<String>,
     pub protocol: Option<String>,
     pub endpoint_profile: Option<String>,
+    pub peer_role: Option<String>,
 }
 
 /// Provider identity for the binding, separate from the protocol implementation.
@@ -96,6 +97,50 @@ impl ProviderRuntime {
         }
         let mut slug = options.provider.trim().to_ascii_lowercase();
         let (family, default_profile) = protocol(&slug, options.protocol.as_deref())?;
+        let role = options
+            .peer_role
+            .as_deref()
+            .unwrap_or("provider")
+            .parse::<sandhi_core::PeerRoleV1>()
+            .map_err(invalid)?;
+        if role == sandhi_core::PeerRoleV1::SandhiGatewayV1 {
+            if options
+                .protocol
+                .as_deref()
+                .is_none_or(|protocol| protocol.trim().is_empty())
+                || default_profile != Profile::Standard
+                || options.endpoint_profile.is_some()
+                || options
+                    .base_url
+                    .as_deref()
+                    .is_none_or(|base| !crate::peer::valid_gateway_base(base))
+                || options.api_key.is_empty()
+                || options.max_retries.unwrap_or(0) != 0
+                || options
+                    .auth_scheme
+                    .as_deref()
+                    .is_some_and(|auth| auth != "bearer")
+                || options.headers.contains_key("chatgpt-account-id")
+                || sandhi_core::UsageConventionV1::standard(family.endpoint_family()).is_err()
+            {
+                return Err(invalid("gateway peer requires explicit client protocol and base_url, bearer auth, zero retries and no backend endpoint profile or account header"));
+            }
+            let mut config = crate::ProviderTransportConfig::new(
+                family,
+                slug.clone(),
+                options.base_url.expect("validated base"),
+                options.api_key,
+            );
+            config.headers = options.headers;
+            config.max_retries = Some(0);
+            config.timeout_secs = options.timeout_secs;
+            config.stream_setup_timeout_secs = options.stream_setup_timeout_secs;
+            config.stream_idle_timeout_secs = options.stream_idle_timeout_secs;
+            return Ok(ConfiguredProvider {
+                provider: slug,
+                handle: self.gateway_peer(config),
+            });
+        }
         let profile = options
             .endpoint_profile
             .as_deref()
@@ -255,6 +300,7 @@ mod tests {
             auth_scheme: None,
             protocol: Some(protocol.into()),
             endpoint_profile: Some(profile.into()),
+            peer_role: None,
         }
     }
     #[test]
@@ -342,6 +388,81 @@ mod tests {
                 ProviderRuntime::new().configured_provider(input),
                 Err(ProviderError::InvalidRequest(_))
             ));
+        }
+    }
+    #[test]
+    fn gateway_peer_requires_client_dialect_and_rejects_backend_authority() {
+        for protocol in [
+            "chat_completions",
+            "anthropic_messages",
+            "responses",
+            "gemini_generate_content",
+        ] {
+            let mut input = options(protocol, "standard");
+            input.endpoint_profile = None;
+            input.peer_role = Some("sandhi_gateway_v1".into());
+            let configured = ProviderRuntime::new().configured_provider(input).unwrap();
+            assert!(configured.handle.raw_forwarder().is_none());
+            assert!(!configured.handle.supports_owned_buffered());
+            assert!(!configured.handle.supports_owned_streaming());
+            let request = serde_json::from_value(serde_json::json!({"model":"fixture","messages":[{"role":"user","content":"hello"}]})).unwrap();
+            assert!(configured.handle.compile_cache_plan(&request).is_err());
+            assert!(configured
+                .handle
+                .apply_cache_plan(&request, &mut serde_json::json!({}))
+                .is_err());
+        }
+        for bad in [
+            "profile", "codex", "retry", "auth", "protocol", "origin", "account", "key",
+        ] {
+            let mut input = options("chat_completions", "standard");
+            input.endpoint_profile = None;
+            input.peer_role = Some("sandhi_gateway_v1".into());
+            match bad {
+                "profile" => input.endpoint_profile = Some("standard".into()),
+                "codex" => input.protocol = Some("chatgpt_responses".into()),
+                "retry" => input.max_retries = Some(1),
+                "auth" => input.auth_scheme = Some("api_key".into()),
+                "protocol" => input.protocol = None,
+                "origin" => input.base_url = Some("http://public.example/v1".into()),
+                "account" => {
+                    input
+                        .headers
+                        .insert("chatgpt-account-id", "synthetic-account".parse().unwrap());
+                }
+                _ => input.api_key.clear(),
+            }
+            assert!(
+                matches!(
+                    ProviderRuntime::new().configured_provider(input),
+                    Err(ProviderError::InvalidRequest(_))
+                ),
+                "{bad}"
+            );
+        }
+    }
+    #[test]
+    fn source_conventions_survive_disabling_raw_forwarding_for_credential_fences() {
+        for (protocol, profile, expected) in [
+            (
+                "chat_completions",
+                "openai_terminal_chunk_usage",
+                sandhi_core::UsageConventionV1::ChatTerminal,
+            ),
+            (
+                "anthropic_messages",
+                "anthropic_implicit_cache",
+                sandhi_core::UsageConventionV1::MessagesImplicitCache,
+            ),
+        ] {
+            let handle = ProviderRuntime::new()
+                .configured_provider(options(protocol, profile))
+                .unwrap()
+                .handle;
+            assert_eq!(handle.source_usage_convention().unwrap(), expected);
+            let fenced = handle.with_credential_expiry(4_000_000_000);
+            assert!(fenced.raw_forwarder().is_none());
+            assert_eq!(fenced.source_usage_convention().unwrap(), expected);
         }
     }
 }

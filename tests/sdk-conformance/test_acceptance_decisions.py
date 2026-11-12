@@ -201,7 +201,7 @@ def verify_attribution(page, client, database, steps):
     page.get_by_role("button", name="Look up", exact=True).click()
     expect(page.locator("#run-tree")).to_have_attribute("data-state", "ready")
     expect(page.locator("#run-tree")).to_be_visible()
-    expect(page.locator("#run-tree")).to_contain_text(f"Total: {14 * len(steps)} billable tokens across {len(steps)} calls")
+    expect(page.locator("#run-tree")).to_contain_text(f"Total: {14 * len(steps)} observed token units across {len(steps)} calls")
     for step in steps:
         rendered = page.locator("#run-tree .step").filter(has_text=step)
         expect(rendered).to_have_count(1)

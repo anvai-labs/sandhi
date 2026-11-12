@@ -80,7 +80,7 @@ use sandhi_providers::{
 };
 use sandhi_store::{hash_secret, AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
 
-use codec::{encode_response, IngressDialect, StreamEventEncoder};
+use codec::{encode_response_with_emission, IngressDialect, StreamEventEncoder};
 pub use operator::BudgetSpec;
 
 /// Default output maximum for a Block-budgeted scope when the client omits `max_output_tokens`.
@@ -2910,6 +2910,33 @@ struct GeminiRoute {
     stream: bool,
 }
 
+/// Counts describe the actual emitted wire view, never credential/backend authority.
+/// Upstream headers are filtered before this server-owned value is inserted.
+pub(crate) fn stamp_usage_convention(
+    mut response: Response,
+    provider: &ProviderHandle,
+    dialect: IngressDialect,
+    native: bool,
+) -> Response {
+    response
+        .headers_mut()
+        .remove(sandhi_core::USAGE_CONVENTION_HEADER);
+    if response.status().is_success() {
+        let convention = if native {
+            provider.source_usage_convention()
+        } else {
+            sandhi_core::UsageConventionV1::standard(ingress_family(dialect).endpoint_family())
+        };
+        if let Ok(convention) = convention {
+            response.headers_mut().insert(
+                sandhi_core::USAGE_CONVENTION_HEADER,
+                axum::http::HeaderValue::from_static(convention.wire_value()),
+            );
+        }
+    }
+    response
+}
+
 /// Rebuild an axum response from a raw upstream response: status + the curated header allowlist +
 /// body bytes, forwarded verbatim (the transparent plane never re-serializes the response body).
 ///
@@ -3013,7 +3040,7 @@ async fn transparent_complete_response(
             if !accounting.finalize_owned().await {
                 return settlement::buffered::accounting_error(dialect, &accounting.request_id);
             }
-            raw_response_to_axum(raw, dialect)
+            stamp_usage_convention(raw_response_to_axum(raw, dialect), &provider, dialect, true)
         }
         Err(err) => {
             accounting.set_outcome("error");
@@ -3159,7 +3186,12 @@ async fn transparent_stream_response(
     if !headers.contains_key("content-type") {
         builder = builder.header("content-type", "text/event-stream");
     }
-    builder.body(body_stream).expect("valid streaming response")
+    stamp_usage_convention(
+        builder.body(body_stream).expect("valid streaming response"),
+        &provider,
+        dialect,
+        true,
+    )
 }
 
 /// The enforcement policy configured for a scope (from the operator budgets map). Drives D6
@@ -3859,7 +3891,7 @@ async fn complete_response(
             if qualified {
                 response.usage.completeness = UsageCompleteness::Final;
             }
-            let encoded = encode_response(dialect, &response);
+            let encoded = encode_response_with_emission(dialect, &response);
             if encoded.is_err() {
                 response.usage.outcome = Some("error".into());
             } else {
@@ -3875,7 +3907,9 @@ async fn complete_response(
                 return settlement::buffered::accounting_error(dialect, &accounting.request_id);
             }
             match encoded {
-                Ok(body) => Json(body).into_response(),
+                Ok((body, native)) => {
+                    stamp_usage_convention(Json(body).into_response(), &provider, dialect, native)
+                }
                 Err(message) => provider_error(
                     &ProviderError::OutputProjection(message.into()),
                     dialect,
@@ -3942,6 +3976,7 @@ async fn stream_response(
 
     let tail = (dialect == IngressDialect::OpenAi && !native_stream)
         .then(|| Bytes::from_static(b"data: [DONE]\n\n"));
+    let response_provider = provider.clone();
     let body = streaming::body(accounting, permit, tail, move |accounting| {
         Box::pin(async_stream::try_stream! {
             let mut last_usage: Option<UsageV2> = None;
@@ -4107,11 +4142,16 @@ async fn stream_response(
         })
     });
 
-    Response::builder()
-        .status(StatusCode::OK)
-        .header("content-type", "text/event-stream")
-        .body(body)
-        .expect("valid streaming response")
+    stamp_usage_convention(
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/event-stream")
+            .body(body)
+            .expect("valid streaming response"),
+        &response_provider,
+        dialect,
+        native_stream,
+    )
 }
 
 /// Cold-start input-token estimate: bytes of the ingress request body / 4. This replaces a full

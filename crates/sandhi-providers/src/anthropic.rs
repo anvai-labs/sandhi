@@ -2,8 +2,8 @@
 //! (`cache_creation_input_tokens` / `cache_read_input_tokens`) the meter depends on.
 
 use crate::{
-    error_for_response, metered_passthrough, ByteStream, ParsedUsage, Provider, ProviderError,
-    ProviderRequest, ProviderResponse,
+    metered_passthrough, ByteStream, ParsedUsage, Provider, ProviderError, ProviderRequest,
+    ProviderResponse,
 };
 use async_trait::async_trait;
 use sandhi_core::usage::u64_at;
@@ -23,6 +23,7 @@ pub enum AnthropicAuthScheme {
 /// together.
 pub struct Anthropic {
     client: reqwest::Client,
+    peer_role: sandhi_core::PeerRoleV1,
     base_url: String,
     api_key: String,
     version: String,
@@ -35,6 +36,7 @@ impl Anthropic {
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
         Self {
             client: crate::default_client(),
+            peer_role: Default::default(),
             base_url: base_url.into(),
             api_key: api_key.into(),
             version: ANTHROPIC_VERSION.to_string(),
@@ -74,6 +76,11 @@ impl Anthropic {
         self
     }
 
+    pub(crate) fn with_peer_role(mut self, role: sandhi_core::PeerRoleV1) -> Self {
+        self.peer_role = role;
+        self
+    }
+
     fn messages_url(&self) -> String {
         format!("{}/v1/messages", self.base_url.trim_end_matches('/'))
     }
@@ -88,11 +95,16 @@ impl Anthropic {
 
 #[async_trait]
 impl Provider for Anthropic {
+    fn peer_role(&self) -> sandhi_core::PeerRoleV1 {
+        self.peer_role
+    }
+
     fn slug(&self) -> &str {
         "anthropic"
     }
 
     async fn complete(&self, req: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        let request_headers = crate::peer::request_headers(self.peer_role, &self.headers, &req);
         let attempt_context = req.attempt_context.clone();
         let model = req.model.clone();
         let mut body = req.body;
@@ -103,7 +115,7 @@ impl Provider for Anthropic {
             .client
             .post(self.messages_url())
             .header("anthropic-version", &self.version)
-            .headers(crate::merge_call_headers(&self.headers, &req.extra_headers))
+            .headers(request_headers)
             .json(&body);
         crate::attempt::observe_complete_qualified(
             attempt_context,
@@ -118,15 +130,32 @@ impl Provider for Anthropic {
                     .await
                     .map_err(|e| ProviderError::Transport(e.to_string()))?;
                 let status = resp.status().as_u16();
-                facts.record_headers(status, resp.headers(), Some("anthropic-request-id"));
+                facts.record_peer_headers(
+                    self.peer_role,
+                    status,
+                    resp.headers(),
+                    Some("anthropic-request-id"),
+                );
                 if !resp.status().is_success() {
-                    return Err(error_for_response(resp, Some("anthropic-request-id")).await);
+                    return Err(crate::peer::error_for_response(
+                        self.peer_role,
+                        resp,
+                        Some("anthropic-request-id"),
+                    )
+                    .await);
                 }
+                let usage_convention = crate::peer::resolve(
+                    self.peer_role,
+                    sandhi_core::EndpointFamilyV1::AnthropicMessages,
+                    resp.headers(),
+                )?;
+                facts.record_usage_convention(usage_convention);
                 let body = crate::decode_response_json(resp).await?;
                 let (response_usage, observed_usage) =
                     crate::buffered_usage(sandhi_core::CacheReadFamily::Anthropic, &body);
                 Ok((
                     ProviderResponse {
+                        usage_convention,
                         status,
                         body,
                         usage: response_usage,
@@ -144,6 +173,7 @@ impl Provider for Anthropic {
         req: ProviderRequest,
         _delivery: crate::QualifiedStreamDelivery,
     ) -> Result<crate::QualifiedProviderStream, ProviderError> {
+        let request_headers = crate::peer::request_headers(self.peer_role, &self.headers, &req);
         let context = req.attempt_context.clone();
         let model = req.model.clone();
         let mut body = req.body;
@@ -156,7 +186,7 @@ impl Provider for Anthropic {
             .client
             .post(self.messages_url())
             .header("anthropic-version", &self.version)
-            .headers(crate::merge_call_headers(&self.headers, &req.extra_headers))
+            .headers(request_headers)
             .json(&body);
         crate::attempt::observe_qualified_stream(
             context,
@@ -171,16 +201,31 @@ impl Provider for Anthropic {
                     .send()
                     .await
                     .map_err(|error| ProviderError::Transport(error.to_string()))?;
-                facts.record_headers(
+                facts.record_peer_headers(
+                    self.peer_role,
                     response.status().as_u16(),
                     response.headers(),
                     Some("anthropic-request-id"),
                 );
                 if !response.status().is_success() {
-                    return Err(error_for_response(response, Some("anthropic-request-id")).await);
+                    return Err(crate::peer::error_for_response(
+                        self.peer_role,
+                        response,
+                        Some("anthropic-request-id"),
+                    )
+                    .await);
                 }
-                let request_id =
-                    crate::provider_request_id(response.headers(), Some("anthropic-request-id"));
+                let usage_convention = crate::peer::resolve(
+                    self.peer_role,
+                    sandhi_core::EndpointFamilyV1::AnthropicMessages,
+                    response.headers(),
+                )?;
+                facts.record_usage_convention(usage_convention);
+                let request_id = crate::peer::response_request_id(
+                    self.peer_role,
+                    response.headers(),
+                    Some("anthropic-request-id"),
+                );
                 use futures_util::StreamExt;
                 let raw: crate::raw::RawChunkStream =
                     Box::pin(response.bytes_stream().map(|chunk| {
@@ -193,6 +238,7 @@ impl Provider for Anthropic {
     }
 
     async fn stream(&self, req: ProviderRequest) -> Result<ByteStream, ProviderError> {
+        let request_headers = crate::peer::request_headers(self.peer_role, &self.headers, &req);
         let attempt_context = req.attempt_context.clone();
         let model = req.model.clone();
         let mut body = req.body;
@@ -203,7 +249,7 @@ impl Provider for Anthropic {
             .client
             .post(self.messages_url())
             .header("anthropic-version", &self.version)
-            .headers(crate::merge_call_headers(&self.headers, &req.extra_headers))
+            .headers(request_headers)
             .json(&body);
         crate::attempt::observe_stream(
             attempt_context,
@@ -215,14 +261,26 @@ impl Provider for Anthropic {
                     .send()
                     .await
                     .map_err(|e| ProviderError::Transport(e.to_string()))?;
-                facts.record_headers(
+                facts.record_peer_headers(
+                    self.peer_role,
                     resp.status().as_u16(),
                     resp.headers(),
                     Some("anthropic-request-id"),
                 );
                 if !resp.status().is_success() {
-                    return Err(error_for_response(resp, Some("anthropic-request-id")).await);
+                    return Err(crate::peer::error_for_response(
+                        self.peer_role,
+                        resp,
+                        Some("anthropic-request-id"),
+                    )
+                    .await);
                 }
+                let usage_convention = crate::peer::resolve(
+                    self.peer_role,
+                    sandhi_core::EndpointFamilyV1::AnthropicMessages,
+                    resp.headers(),
+                )?;
+                facts.record_usage_convention(usage_convention);
                 // Forward every upstream chunk verbatim (O(1) memory, ADR-0047 D9) while sniffing each
                 // complete line for usage. `metered_passthrough` is the single shared streaming
                 // primitive — the chunk-boundary property test exercises this exact path.

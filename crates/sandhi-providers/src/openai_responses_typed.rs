@@ -33,7 +33,16 @@ impl TypedOpenAiResponses {
     }
 
     fn qualified_request(&self, request: &ChatRequestV1) -> Result<Value, ProviderError> {
-        let body = encode_responses_request_for_profile(request, self.profile)?;
+        let body = if self.raw.peer_role() == sandhi_core::PeerRoleV1::SandhiGatewayV1 {
+            crate::cache_policy::encode_for_peer(
+                request,
+                sandhi_core::EndpointFamilyV1::OpenaiResponses,
+                self.raw.peer_role(),
+                |request| encode_responses_request_base(request, OpenAiResponsesProfile::Standard),
+            )?
+        } else {
+            encode_responses_request_for_profile(request, self.profile)?
+        };
         if body
             .get("background")
             .is_some_and(|v| v != &Value::Bool(false))
@@ -63,10 +72,12 @@ impl TypedOpenAiResponses {
                 call_headers,
                 attempt_context,
             ))
-            .await?;
-        let qualified = sandhi_core::usage::qualify_buffered_usage(
+            .await
+            .map_err(|error| crate::peer::terminal_error(self.raw.peer_role(), error))?;
+        let qualified = crate::buffered_completion::qualify(
+            &response,
             sandhi_core::EndpointFamilyV1::OpenaiResponses,
-            &response.body,
+            Default::default(),
         );
         let reasoning = if request.include_native_response {
             None
@@ -106,7 +117,8 @@ impl TypedOpenAiResponses {
                 provider_request_observed(&request, body, call_headers, attempt_context),
                 crate::QualifiedStreamDelivery::Streaming,
             )
-            .await?;
+            .await
+            .map_err(|error| crate::peer::terminal_error(self.raw.peer_role(), error))?;
         let decoded = if request.include_native_stream {
             decode_responses_stream_delivery(source.stream, request.model, true, true)
         } else {

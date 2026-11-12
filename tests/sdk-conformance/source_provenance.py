@@ -195,8 +195,12 @@ def inventory_digest(state: dict) -> str:
     ).hexdigest()
 
 
-def binary_artifact(output: str, name: str) -> dict:
+def binary_artifact(output: str, name: str, *, kind: str = "bin") -> dict:
     """Select the executable Cargo actually built, including configured target layouts."""
+    assert kind in {
+        "bin",
+        "example",
+    }, "only binary and example executable targets are supported"
     matches = []
     for line in output.splitlines():
         if not line.startswith("{"):
@@ -211,7 +215,7 @@ def binary_artifact(output: str, name: str) -> dict:
         if (
             message.get("reason") == "compiler-artifact"
             and target.get("name") == name
-            and target.get("kind") == ["bin"]
+            and target.get("kind") == [kind]
             and isinstance(message.get("executable"), str)
         ):
             path = Path(message["executable"])
@@ -220,6 +224,8 @@ def binary_artifact(output: str, name: str) -> dict:
             matches.append(
                 {
                     "executable": str(path),
+                    "target_name": name,
+                    "target_kind": kind,
                     "features": message.get("features", []),
                     "fresh": message.get("fresh"),
                     "profile": {
@@ -236,3 +242,98 @@ def binary_artifact(output: str, name: str) -> dict:
             )
     assert len(matches) == 1, "Cargo must report exactly one matching binary executable"
     return matches[0]
+
+
+def freeze_cargo_build(
+    repo: Path,
+    command: list[str],
+    targets: list[tuple[str, str]],
+    directory: Path,
+    *,
+    manifest_name: str = "provenance.json",
+    required_features: tuple[str, ...] = (),
+) -> dict[str, Path]:
+    """Freeze this build's named executables; never guess a Cargo target directory.
+
+    Each feature/example build gets a separate source/build manifest. Callers can
+    share the destination directory for sibling proxy/CLI/bridge executables, but
+    an existing snapshot or manifest is never overwritten.
+    """
+    assert targets and len({name for name, _kind in targets}) == len(
+        targets
+    ), "target names must be unique"
+    command = list(command)
+    formats = [value for value in command if value.startswith("--message-format")]
+    if not formats:
+        command.append("--message-format=json-render-diagnostics")
+    else:
+        assert formats == [
+            "--message-format=json-render-diagnostics"
+        ], "Cargo JSON artifact output is required"
+    before = source_state(repo)
+    build = build_metadata(repo, command)
+    result = subprocess.run(
+        command, cwd=repo, check=True, capture_output=True, text=True
+    )
+    assert_unchanged(before, source_state(repo))
+    assert build == build_metadata(
+        repo, command
+    ), "build configuration changed during binary build"
+    selected = {
+        name: binary_artifact(result.stdout, name, kind=kind) for name, kind in targets
+    }
+    for artifact in selected.values():
+        assert Path(
+            artifact["executable"]
+        ).is_file(), "Cargo-reported executable does not exist"
+        assert set(required_features).issubset(
+            artifact["features"]
+        ), "Cargo artifact is missing required features"
+    directory.mkdir(parents=True, exist_ok=True)
+    manifest = directory / manifest_name
+    inventory = directory / (
+        "source-inventory.json"
+        if manifest_name == "provenance.json"
+        else manifest.stem + "-source-inventory.json"
+    )
+    assert (
+        not manifest.exists() and not inventory.exists()
+    ), "build provenance must not be overwritten"
+    records = {}
+    snapshots = {}
+    for name, artifact in selected.items():
+        candidate = Path(artifact["executable"])
+        snapshot = directory / candidate.name
+        assert (
+            not snapshot.exists()
+        ), "immutable executable snapshot must not be overwritten"
+        source_hash = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        shutil.copy2(candidate, snapshot)
+        binary_hash = hashlib.sha256(snapshot.read_bytes()).hexdigest()
+        assert (
+            source_hash
+            == binary_hash
+            == hashlib.sha256(candidate.read_bytes()).hexdigest()
+        ), "executable changed while freezing"
+        snapshot.chmod(0o555)
+        records[name] = {
+            "binary_source": str(candidate),
+            "binary_snapshot": str(snapshot),
+            "binary_sha256": binary_hash,
+            "cargo_artifact": artifact,
+        }
+        snapshots[name] = snapshot
+    provenance = {
+        "base_commit": before["head"],
+        "tracked_diff_sha256": before["head_diff_sha256"],
+        "source_inventory_sha256": inventory_digest(before),
+        "source_inventory_file": str(inventory),
+        "build": build,
+        "artifacts": records,
+    }
+    if len(records) == 1:
+        # Preserve the shipped shutdown fixture's single-binary provenance fields.
+        provenance.update(next(iter(records.values())))
+    manifest.write_text(json.dumps(provenance, indent=2) + "\n")
+    inventory.write_text(json.dumps(before, indent=2) + "\n")
+    return snapshots

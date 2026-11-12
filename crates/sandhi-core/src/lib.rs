@@ -19,6 +19,8 @@ pub use cache_policy::*;
 pub mod native_input;
 pub use native_input::{NativeInputFeatureV1, NativeInputV1};
 pub mod conformance;
+pub mod peer;
+pub use peer::{PeerRoleV1, UsageConventionV1, USAGE_CONVENTION_HEADER};
 pub mod endpoint;
 pub use endpoint::EndpointProfileV1;
 pub mod event;

@@ -101,6 +101,7 @@ impl Provider for Ollama {
                     crate::buffered_usage(sandhi_core::CacheReadFamily::Ollama, &body);
                 Ok((
                     ProviderResponse {
+                        usage_convention: None,
                         status,
                         body,
                         usage: response_usage,

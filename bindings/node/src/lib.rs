@@ -126,6 +126,7 @@ impl JsProviderRuntime {
         protocol: Option<String>,
         stream_setup_timeout_secs: Option<f64>,
         endpoint_profile: Option<String>,
+        peer_role: Option<String>,
     ) -> Result<TypedProvider> {
         let handle = self
             .inner
@@ -142,6 +143,7 @@ impl JsProviderRuntime {
                 auth_scheme,
                 protocol,
                 endpoint_profile,
+                peer_role,
             })
             .map_err(|error| typed_provider_error(error, &provider))?;
         Ok(TypedProvider {

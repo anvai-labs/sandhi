@@ -300,6 +300,7 @@ mod tests {
 
     fn ok_resp() -> ProviderResponse {
         ProviderResponse {
+            usage_convention: None,
             status: 200,
             body: serde_json::json!({}),
             usage: ParsedUsage {

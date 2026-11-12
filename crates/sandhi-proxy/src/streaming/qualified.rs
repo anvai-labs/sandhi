@@ -183,5 +183,10 @@ pub(crate) async fn qualified_response(
     if !headers.contains_key("content-type") {
         response = response.header("content-type", "text/event-stream");
     }
-    response.body(body).expect("valid streaming response")
+    crate::stamp_usage_convention(
+        response.body(body).expect("valid streaming response"),
+        &provider,
+        dialect,
+        true,
+    )
 }

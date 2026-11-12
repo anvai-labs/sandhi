@@ -28,6 +28,8 @@ pub struct QualifiedStreamSnapshot {
 /// Protocol completion and delivery success do not make partial usage final.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct QualifiedStreamEvidence {
+    pub gateway_peer: bool,
+    pub gateway_failure: Option<crate::GatewayFailure>,
     /// Field availability is metadata; it neither qualifies counts nor proves a hit.
     pub cache_read_observation: Option<sandhi_core::CacheReadObservation>,
     pub snapshot: QualifiedStreamSnapshot,
@@ -120,7 +122,15 @@ impl QualifiedStream {
             usage.attempts = 1;
             usage.upstream_request_id.clone_from(&self.request_id);
         }
+        let gateway_failure = self.observer.gateway_failure().map(|mut failure| {
+            if self.request_id.is_some() {
+                failure.request_id.clone_from(&self.request_id);
+            }
+            failure
+        });
         self.sender.send_replace(QualifiedStreamEvidence {
+            gateway_peer: self.observer.gateway_peer(),
+            gateway_failure,
             cache_read_observation: self.observer.cache_read_observation(),
             snapshot: QualifiedStreamSnapshot {
                 usage: self.observer.usage(),

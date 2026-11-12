@@ -80,6 +80,20 @@ impl QualifiedCompletion<ChatResponseV1> {
     }
 }
 
+pub(crate) fn qualify(
+    response: &crate::ProviderResponse,
+    family: sandhi_core::EndpointFamilyV1,
+    default: sandhi_core::usage::AnthropicUsageProfile,
+) -> Result<sandhi_core::UsageV2, sandhi_core::usage::BufferedUsageError> {
+    sandhi_core::usage::qualify_buffered_usage_with_profile(
+        family,
+        response
+            .usage_convention
+            .map_or(default, |value| value.anthropic_profile()),
+        &response.body,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

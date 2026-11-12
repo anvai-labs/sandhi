@@ -11,7 +11,7 @@ import httpx
 import pytest
 from playwright.sync_api import expect
 
-from conftest import REPO_ROOT, _free_port
+from conftest import _free_port
 from test_dashboard import ADMIN_TOKEN, browser, connect, dashboard, page  # noqa: F401
 
 
@@ -122,12 +122,10 @@ def test_inline_alert_failure_reports_committed_budget(dashboard):
         assert conn.execute("SELECT threshold_pct FROM alert_rules").fetchall() == [(50,)]
 
 
-def test_cli_reports_partial_budget_and_exits_nonzero(dashboard):
-    subprocess.run(["cargo", "build", "-p", "sandhi-proxy", "--bin", "sandhi"],
-                   cwd=REPO_ROOT, check=True, capture_output=True, timeout=120)
+def test_cli_reports_partial_budget_and_exits_nonzero(dashboard, cli_binary):
     fail_inserts(dashboard, "alert_rules")
     result = subprocess.run([
-        str(REPO_ROOT / "target/debug/sandhi"), "--admin-url", dashboard.base,
+        str(cli_binary), "--admin-url", dashboard.base,
         "--admin-token", ADMIN_TOKEN, "budget", "set", "group:dashboard", "200", "--alert", "90",
     ], capture_output=True, text=True, timeout=15)
     assert result.returncode == 1, result.stderr

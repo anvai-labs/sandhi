@@ -4,8 +4,8 @@
 //! credential headers are never sent together.
 
 use crate::{
-    error_for_response, metered_passthrough, sse_data_json, ByteStream, ParsedUsage, Provider,
-    ProviderError, ProviderRequest, ProviderResponse,
+    metered_passthrough, sse_data_json, ByteStream, ParsedUsage, Provider, ProviderError,
+    ProviderRequest, ProviderResponse,
 };
 use async_trait::async_trait;
 use sandhi_core::parse_gemini_usage;
@@ -23,6 +23,7 @@ pub enum GeminiAuthScheme {
 /// The Google Generative Language provider. POSTs to `{base_url}/models/{model}:{method}`.
 pub struct Gemini {
     client: reqwest::Client,
+    peer_role: sandhi_core::PeerRoleV1,
     base_url: String,
     api_key: String,
     auth_scheme: GeminiAuthScheme,
@@ -33,6 +34,7 @@ impl Gemini {
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
         Self {
             client: crate::default_client(),
+            peer_role: Default::default(),
             base_url: base_url.into(),
             api_key: api_key.into(),
             auth_scheme: GeminiAuthScheme::ApiKey,
@@ -59,6 +61,11 @@ impl Gemini {
         self
     }
 
+    pub(crate) fn with_peer_role(mut self, role: sandhi_core::PeerRoleV1) -> Self {
+        self.peer_role = role;
+        self
+    }
+
     fn url(&self, model: &str, method: &str) -> String {
         format!(
             "{}/models/{model}:{method}",
@@ -76,11 +83,16 @@ impl Gemini {
 
 #[async_trait]
 impl Provider for Gemini {
+    fn peer_role(&self) -> sandhi_core::PeerRoleV1 {
+        self.peer_role
+    }
+
     fn slug(&self) -> &str {
         "gemini"
     }
 
     async fn complete(&self, req: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        let request_headers = crate::peer::request_headers(self.peer_role, &self.headers, &req);
         if !req.body.is_object() || !sandhi_core::model_id_is_path_safe(&req.model) {
             return Err(ProviderError::InvalidRequest(
                 "Gemini requires an object and a path-safe generation model".into(),
@@ -91,7 +103,7 @@ impl Provider for Gemini {
         let request = self
             .client
             .post(self.url(&req.model, "generateContent"))
-            .headers(crate::merge_call_headers(&self.headers, &req.extra_headers))
+            .headers(request_headers)
             .json(&req.body);
         crate::attempt::observe_complete_qualified(
             attempt_context,
@@ -106,15 +118,22 @@ impl Provider for Gemini {
                     .await
                     .map_err(|e| ProviderError::Transport(e.to_string()))?;
                 let status = resp.status().as_u16();
-                facts.record_headers(status, resp.headers(), None);
+                facts.record_peer_headers(self.peer_role, status, resp.headers(), None);
                 if !resp.status().is_success() {
-                    return Err(error_for_response(resp, None).await);
+                    return Err(crate::peer::error_for_response(self.peer_role, resp, None).await);
                 }
+                let usage_convention = crate::peer::resolve(
+                    self.peer_role,
+                    sandhi_core::EndpointFamilyV1::GeminiGenerateContent,
+                    resp.headers(),
+                )?;
+                facts.record_usage_convention(usage_convention);
                 let body = crate::decode_response_json(resp).await?;
                 let (response_usage, observed_usage) =
                     crate::buffered_usage(sandhi_core::CacheReadFamily::Gemini, &body);
                 Ok((
                     ProviderResponse {
+                        usage_convention,
                         status,
                         body,
                         usage: response_usage,
@@ -128,6 +147,7 @@ impl Provider for Gemini {
     }
 
     async fn stream(&self, req: ProviderRequest) -> Result<ByteStream, ProviderError> {
+        let request_headers = crate::peer::request_headers(self.peer_role, &self.headers, &req);
         if !req.body.is_object() || !sandhi_core::model_id_is_path_safe(&req.model) {
             return Err(ProviderError::InvalidRequest(
                 "Gemini requires an object and a path-safe generation model".into(),
@@ -139,7 +159,7 @@ impl Provider for Gemini {
         let request = self
             .client
             .post(url)
-            .headers(crate::merge_call_headers(&self.headers, &req.extra_headers))
+            .headers(request_headers)
             .json(&req.body);
         crate::attempt::observe_stream(
             attempt_context,
@@ -151,10 +171,21 @@ impl Provider for Gemini {
                     .send()
                     .await
                     .map_err(|e| ProviderError::Transport(e.to_string()))?;
-                facts.record_headers(resp.status().as_u16(), resp.headers(), None);
+                facts.record_peer_headers(
+                    self.peer_role,
+                    resp.status().as_u16(),
+                    resp.headers(),
+                    None,
+                );
                 if !resp.status().is_success() {
-                    return Err(error_for_response(resp, None).await);
+                    return Err(crate::peer::error_for_response(self.peer_role, resp, None).await);
                 }
+                let usage_convention = crate::peer::resolve(
+                    self.peer_role,
+                    sandhi_core::EndpointFamilyV1::GeminiGenerateContent,
+                    resp.headers(),
+                )?;
+                facts.record_usage_convention(usage_convention);
                 Ok(metered_passthrough(resp.bytes_stream(), sniff_usage_line))
             },
         )
@@ -166,6 +197,7 @@ impl Provider for Gemini {
         req: ProviderRequest,
         _delivery: crate::QualifiedStreamDelivery,
     ) -> Result<crate::QualifiedProviderStream, ProviderError> {
+        let request_headers = crate::peer::request_headers(self.peer_role, &self.headers, &req);
         if !req.body.is_object() || !sandhi_core::model_id_is_path_safe(&req.model) {
             return Err(ProviderError::InvalidRequest(
                 "qualified Gemini requires an object and a path-safe generation model".into(),
@@ -178,7 +210,7 @@ impl Provider for Gemini {
                 "{}?alt=sse",
                 self.url(&model, "streamGenerateContent")
             ))
-            .headers(crate::merge_call_headers(&self.headers, &req.extra_headers))
+            .headers(request_headers)
             .json(&req.body);
         crate::attempt::observe_qualified_stream(
             req.attempt_context,
@@ -193,11 +225,24 @@ impl Provider for Gemini {
                     .send()
                     .await
                     .map_err(|error| ProviderError::Transport(error.to_string()))?;
-                facts.record_headers(response.status().as_u16(), response.headers(), None);
+                facts.record_peer_headers(
+                    self.peer_role,
+                    response.status().as_u16(),
+                    response.headers(),
+                    None,
+                );
                 if !response.status().is_success() {
-                    return Err(error_for_response(response, None).await);
+                    return Err(
+                        crate::peer::error_for_response(self.peer_role, response, None).await,
+                    );
                 }
-                let id = crate::provider_request_id(response.headers(), None);
+                let usage_convention = crate::peer::resolve(
+                    self.peer_role,
+                    sandhi_core::EndpointFamilyV1::GeminiGenerateContent,
+                    response.headers(),
+                )?;
+                facts.record_usage_convention(usage_convention);
+                let id = crate::peer::response_request_id(self.peer_role, response.headers(), None);
                 use futures_util::StreamExt;
                 let raw: crate::raw::RawChunkStream =
                     Box::pin(response.bytes_stream().map(|chunk| {

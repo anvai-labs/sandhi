@@ -159,6 +159,23 @@ impl RawForwarder {
         self.extra_headers = crate::strip_transport_owned(headers);
         self
     }
+    pub fn usage_convention(&self) -> Result<sandhi_core::UsageConventionV1, &'static str> {
+        use sandhi_core::UsageConventionV1 as C;
+        if self.family == ProviderFamily::Anthropic
+            && self.anthropic_usage_profile
+                == sandhi_core::usage::AnthropicUsageProfile::ImplicitCache
+        {
+            return Ok(C::MessagesImplicitCache);
+        }
+        if self.family == ProviderFamily::OpenAiCompat
+            && self.openai_stream_usage_profile
+                == sandhi_core::usage::OpenAiStreamUsageProfile::TerminalChunk
+        {
+            return Ok(C::ChatTerminal);
+        }
+        C::standard(self.family.endpoint_family())
+    }
+
     pub(crate) fn with_anthropic_usage_profile(
         mut self,
         profile: sandhi_core::usage::AnthropicUsageProfile,

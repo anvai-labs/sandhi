@@ -18,6 +18,9 @@ impl ProviderHandle {
         request: &ChatRequestV1,
         body: &mut Value,
     ) -> Result<(), ProviderError> {
+        if self.peer_role == sandhi_core::PeerRoleV1::SandhiGatewayV1 {
+            return Err(invalid("gateway cache plans belong to the server"));
+        }
         if let Some(plan) = &request.compiled_cache {
             if plan.binding_sha256 != self.cache_binding_sha256()? {
                 return Err(invalid(
@@ -51,6 +54,9 @@ impl ProviderHandle {
         &self,
         request: &ChatRequestV1,
     ) -> Result<Option<Plan>, ProviderError> {
+        if self.peer_role == sandhi_core::PeerRoleV1::SandhiGatewayV1 {
+            return Err(invalid("gateway cache plans belong to the server"));
+        }
         if let Some(plan) = &request.compiled_cache {
             if plan.binding_sha256 != self.cache_binding_sha256()? {
                 return Err(invalid(
@@ -262,6 +268,15 @@ impl ProviderHandle {
         &self,
         mut request: ChatRequestV1,
     ) -> Result<ChatRequestV1, ProviderError> {
+        if self.peer_role == sandhi_core::PeerRoleV1::SandhiGatewayV1 {
+            if request.compiled_cache.is_some() {
+                return Err(invalid(
+                    "gateway peer cannot accept a client-compiled cache plan",
+                ));
+            }
+            request.validate().map_err(invalid)?;
+            return Ok(request);
+        }
         request.compiled_cache = self.compile_cache_plan(&request)?;
         Ok(request)
     }
@@ -706,4 +721,47 @@ fn validate_native_controls(
         }
     }
     Ok(())
+}
+
+/// Gateway requests carry intent to the selected backend's compiler. No local plan,
+/// capability declaration, automatic marker or namespace crosses this hop.
+pub(crate) fn encode_for_peer(
+    request: &ChatRequestV1,
+    family: Family,
+    role: sandhi_core::PeerRoleV1,
+    base: impl FnOnce(&ChatRequestV1) -> Result<Value, ProviderError>,
+) -> Result<Value, ProviderError> {
+    if role == sandhi_core::PeerRoleV1::Provider {
+        let mut body = base(request)?;
+        apply(request, family, &mut body)?;
+        return Ok(body);
+    }
+    if request.compiled_cache.is_some() {
+        return Err(invalid(
+            "gateway peer cannot accept a client-compiled cache plan",
+        ));
+    }
+    let mut input = request.clone();
+    // Suppress the historical encoder's placement even when intent is omitted.
+    input.cache_intent = Some(CacheIntentV1 {
+        mode: Mode::SuppressGateway,
+        lifetime: None,
+    });
+    let mut body = base(&input)?;
+    let object = body
+        .as_object_mut()
+        .ok_or_else(|| invalid("gateway request requires an object"))?;
+    if object.contains_key("sandhi_cache") {
+        return Err(invalid(
+            "gateway cache intent must use the typed cache_intent field",
+        ));
+    }
+    if let Some(intent) = &request.cache_intent {
+        intent.validate().map_err(invalid)?;
+        object.insert(
+            "sandhi_cache".into(),
+            serde_json::to_value(intent).map_err(|_| invalid("invalid gateway cache intent"))?,
+        );
+    }
+    Ok(body)
 }

@@ -8,7 +8,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
-import shutil
 import sqlite3
 import subprocess
 import threading
@@ -19,6 +18,7 @@ import openai
 import pytest
 
 from conftest import REPO_ROOT, _free_port
+from source_provenance import freeze_cargo_build
 
 ADMIN = "backend-fixture-admin"
 
@@ -115,11 +115,13 @@ def test_gemini_sdk_uses_explicit_responses_backend(tmp_path, backend_binaries, 
 
 @pytest.fixture(scope="module")
 def backend_binaries(tmp_path_factory):
-    subprocess.run(["cargo", "build", "--locked", "-p", "sandhi-proxy", "--bins"],
-                   cwd=REPO_ROOT, check=True)
     directory = tmp_path_factory.mktemp("backend-binaries")
-    for name in ("sandhi", "sandhi-proxy"):
-        shutil.copy2(REPO_ROOT / "target/debug" / name, directory / name)
+    freeze_cargo_build(
+        REPO_ROOT,
+        ["cargo", "build", "--locked", "-p", "sandhi-proxy", "--bins"],
+        [("sandhi", "bin"), ("sandhi-proxy", "bin")],
+        directory,
+    )
     return directory
 
 
