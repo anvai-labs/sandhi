@@ -1288,3 +1288,39 @@ ignored. Workspace/all-target Clippy passed with and without ONNX; formatting,
 strict MkDocs and generated binding-facade checks passed. The earlier live binary
 hashes retain their report-specific scope. Exact-commit re-review and new-tip
 public hosted CI remain separate publication/merge requirements.
+
+### M5j — Gemini source-usage prerequisite
+
+[ADR-0032](../adr/0032-gemini-stream-usage-qualification.md) defines the conservative
+GenerateContent complete-event qualifier. Cached tokens remain an inclusive prompt
+subset; tool-result input and thoughts are separate. Cumulative counters replace
+rather than sum. All observed candidates must finish, and a self-contained final
+usage frame must report prompt, candidate and total counts at or after completion.
+Clean HTTP EOF is additionally required. Abort, truncation, missing parents,
+identity drift or regressing counters retain partial evidence, never final usage.
+
+This increment is an observation prerequisite. Tracked Gemini source routing and
+typed opt-in remain disabled. The reducer keeps only bounded identity/candidate
+state and numeric measurements. No native Gemini live-provider acceptance is
+claimed, and no additional live call or Google credential is used. Next gates are
+strict source/decoder ownership, native-state fidelity/refusal, exact-path admission,
+and four-client SDK/HTTP/lifecycle/paired-receipt coverage. The retained accounting
+admission-timeout reliability issue and broader full-goal acceptance remain open.
+
+The first M5j broad workspace run reproduced the accounting stress failure at call
+174, now in **dispatch authorization** (`wait_timeout`), with 173 origin calls.
+The last printed final event again belongs to the previous request. Its
+[sanitized evidence](../reviews/artifacts/accounting-dispatch-authorization-timeout-2026-11-12.json)
+proves no origin call for that failed request, not the timing cause or safe replay.
+This is distinct from the earlier admission-stage observation. No production
+deadline was increased; a subsequent pass cannot close the reliability gate.
+
+The final M5j workspace run completed all 47 suites with 1,147 tests passed and six
+opt-in cases ignored, including the 12 new core/observer/owner tests. Its pass does
+not resolve the preceding stress failure. Default and ONNX workspace/all-target
+Clippy, formatting, strict documentation and binding-facade checks passed. The
+previous reviewed checkpoint `aeb3ce7` separately completed
+[public CI](https://github.com/anvai-labs/sandhi/actions/runs/43174261838): all 14 jobs
+succeeded, runtime labels were only `ubuntu-24.04` / `ubuntu-24.04-arm`, and all
+runner names were GitHub Actions. Its docs run also passed. Exact-commit review and
+new-tip public CI remain separate gates for M5j.

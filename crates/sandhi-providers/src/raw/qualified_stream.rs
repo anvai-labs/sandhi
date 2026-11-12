@@ -219,6 +219,109 @@ mod tests {
     const DONE: &[u8] = b"data: [DONE]\n\n";
 
     #[tokio::test]
+    async fn gemini_response_owner_requires_eof_and_releases_once_on_every_path() {
+        let terminal = b"data: {\"candidates\":[{\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":11,\"cachedContentTokenCount\":8,\"candidatesTokenCount\":4,\"thoughtsTokenCount\":2,\"totalTokenCount\":17}}\n\n";
+        for mode in [
+            "unpolled",
+            "terminal_drop",
+            "timeout",
+            "transport",
+            "truncated",
+            "provider_error",
+            "eof",
+        ] {
+            let (context, receiver) =
+                AttemptContext::single_attempt("gemini-owner", "b".repeat(64)).unwrap();
+            let guard = context.begin_checked("fixture", Some("fixture")).unwrap();
+            let mut chunks = vec![Ok(Bytes::from_static(terminal))];
+            match mode {
+                "transport" => chunks.push(Err(ProviderError::Transport("lost".into()))),
+                "truncated" => chunks.push(Ok(Bytes::from_static(b"data: {"))),
+                "provider_error" => chunks.push(Ok(Bytes::from_static(
+                    b"data: {\"error\":{\"code\":503}}\n\n",
+                ))),
+                _ => {}
+            }
+            let drops = Arc::new(AtomicUsize::new(0));
+            let (mut stream, observation) = observe_endpoint(
+                Box::pin(DropObservedStream(
+                    Box::pin(stream::iter(chunks)),
+                    drops.clone(),
+                )),
+                guard,
+                EndpointFamilyV1::GeminiGenerateContent,
+            )
+            .unwrap();
+            if mode != "unpolled" {
+                assert_eq!(
+                    stream.next().await.unwrap().unwrap(),
+                    Bytes::from_static(terminal)
+                );
+                assert!(observation.snapshot().usage.is_none());
+                assert!(!observation.snapshot().protocol_done);
+                assert_eq!(
+                    observation.evidence().usage.unwrap().completeness,
+                    UsageCompleteness::Partial
+                );
+                if !matches!(mode, "terminal_drop" | "timeout") {
+                    while stream.next().await.is_some() {}
+                    assert_eq!(
+                        drops.load(Ordering::SeqCst),
+                        1,
+                        "release before wrapper drop: {mode}"
+                    );
+                }
+            }
+            if mode == "timeout" {
+                context.mark_timeout();
+            }
+            drop(stream);
+            assert_eq!(drops.load(Ordering::SeqCst), 1, "{mode}");
+            let outcome = match mode {
+                "eof" => AttemptOutcome::Success,
+                "timeout" => AttemptOutcome::Timeout,
+                "transport" => AttemptOutcome::TransportError,
+                "truncated" => AttemptOutcome::IncompleteStream,
+                "provider_error" => AttemptOutcome::ProviderRejected,
+                _ => AttemptOutcome::Cancelled,
+            };
+            let completeness = match mode {
+                "unpolled" => UsageCompleteness::Unavailable,
+                "eof" => UsageCompleteness::Final,
+                _ => UsageCompleteness::Partial,
+            };
+            let evidence = observation.evidence();
+            assert_eq!(evidence.snapshot.outcome, Some(outcome), "{mode}");
+            assert_eq!(evidence.snapshot.protocol_done, mode == "eof", "{mode}");
+            assert_eq!(evidence.snapshot.usage.is_some(), mode == "eof", "{mode}");
+            if let Some(usage) = &evidence.usage {
+                assert_eq!(usage.completeness, completeness, "{mode}");
+                assert_eq!(
+                    (usage.tokens_in, usage.cache_read_tokens, usage.tokens_out),
+                    (3, 8, 4)
+                );
+                assert_eq!(usage.reasoning_tokens, Some(2));
+            } else {
+                assert_eq!(mode, "unpolled");
+            }
+            let events = receiver.drain();
+            assert_eq!(
+                events.len(),
+                2,
+                "one attempt start and one terminal: {mode}"
+            );
+            assert_eq!(events[0].attempt_id, events[1].attempt_id);
+            assert!(
+                matches!(&events[1].phase, AttemptPhase::Terminal{
+                outcome:actual,usage,usage_completeness,..}
+                if *actual==outcome && *usage_completeness==completeness
+                && *usage==evidence.usage.as_ref().map(Into::into)),
+                "{mode}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn responses_stream_keeps_canonical_evidence_and_one_terminal_across_drop_paths() {
         let progress = b"data: {\"type\":\"response.in_progress\",\"response\":{\"id\":\"resp\",\"usage\":{\"input_tokens\":10,\"input_tokens_details\":{\"cached_tokens\":6},\"output_tokens\":2,\"output_tokens_details\":{\"reasoning_tokens\":0}}}}\n\n";
         for mode in [

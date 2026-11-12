@@ -1155,11 +1155,7 @@ mod tests {
                 O::TerminalChunk,
                 A::SeparateCacheWrites,
             ),
-            (
-                E::GeminiGenerateContent,
-                O::Standard,
-                A::SeparateCacheWrites,
-            ),
+            (E::CohereChat, O::Standard, A::SeparateCacheWrites),
         ] {
             let (context, receiver) =
                 AttemptContext::single_attempt("invalid-profile", "e".repeat(64)).unwrap();

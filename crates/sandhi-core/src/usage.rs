@@ -10,7 +10,7 @@ use serde_json::Value;
 mod qualification;
 pub use qualification::{
     qualify_anthropic_progress_usage, qualify_buffered_usage, qualify_buffered_usage_with_profile,
-    qualify_responses_progress_usage, AnthropicUsageProfile,
+    qualify_gemini_progress_usage, qualify_responses_progress_usage, AnthropicUsageProfile,
 };
 
 /// The token breakdown parsed from a provider response.

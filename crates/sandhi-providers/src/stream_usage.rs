@@ -18,6 +18,9 @@ mod anthropic;
 mod anthropic_tests;
 #[cfg(test)]
 mod chat_profile_tests;
+mod gemini;
+#[cfg(test)]
+mod gemini_tests;
 mod responses;
 #[cfg(test)]
 mod responses_tests;
@@ -50,8 +53,10 @@ pub enum StreamObservationError {
 /// Response-scoped measurement, independent of delivery success or settlement.
 ///
 /// Chat totals follow the declared placement profile. Responses terminal objects
-/// and cumulative Messages updates use their family qualifiers. Messages progress
-/// becomes final only at a qualified `message_stop`. Canonical evidence preserves
+/// and cumulative Messages/Gemini updates use their family qualifiers. Messages
+/// progress becomes final only at a qualified `message_stop`. Gemini additionally
+/// requires clean HTTP EOF after candidate completion and a complete final usage
+/// frame; abort never promotes Gemini progress. Canonical evidence preserves
 /// partial completeness; legacy [`usage`](Self::usage) exposes final measurements
 /// only. Malformed/conflicting later events retain prior observations and set a
 /// sticky [`error`](Self::error). Complete post-terminal data events fail explicitly.
@@ -74,6 +79,7 @@ pub struct OpenAiStreamUsageObserver {
     anthropic_usage_profile: AnthropicUsageProfile,
     anthropic: anthropic::AnthropicUsage,
     responses: responses::ResponsesUsage,
+    gemini: gemini::GeminiUsage,
     usage: Option<ParsedUsage>,
     canonical_usage: Option<UsageV2>,
     error: Option<StreamObservationError>,
@@ -128,6 +134,7 @@ impl OpenAiStreamUsageObserver {
             EndpointFamilyV1::OpenaiChatCompletions
                 | EndpointFamilyV1::OpenaiResponses
                 | EndpointFamilyV1::AnthropicMessages
+                | EndpointFamilyV1::GeminiGenerateContent
         ) {
             return Err(StreamObservationError::UnsupportedEndpoint);
         }
@@ -153,6 +160,7 @@ impl OpenAiStreamUsageObserver {
             anthropic_usage_profile: AnthropicUsageProfile::SeparateCacheWrites,
             anthropic: Default::default(),
             responses: Default::default(),
+            gemini: Default::default(),
             usage: None,
             canonical_usage: None,
             error: None,
@@ -179,7 +187,9 @@ impl OpenAiStreamUsageObserver {
     }
 
     pub fn provider_failed(&self) -> bool {
-        self.responses.provider_failed || self.anthropic.provider_failed
+        self.responses.provider_failed
+            || self.anthropic.provider_failed
+            || self.gemini.provider_failed
     }
 
     pub fn error(&self) -> Option<StreamObservationError> {
@@ -221,12 +231,24 @@ impl OpenAiStreamUsageObserver {
     /// Record EOF without manufacturing a blank line or measurement. Idempotent.
     /// Cancellation/transport failure remains the caller's separate outcome fact.
     pub fn finish(&mut self) -> Result<(), StreamObservationError> {
-        self.closed = true;
         if let Some(error) = self.error {
             return Err(error);
         }
+        if self.closed && !self.done && self.endpoint == EndpointFamilyV1::GeminiGenerateContent {
+            return self.fail(StreamObservationError::Closed);
+        }
+        self.closed = true;
         if !self.splitter.remainder().is_empty() || self.event_bytes != 0 {
             return self.fail(StreamObservationError::TruncatedEvent);
+        }
+        if self.endpoint == EndpointFamilyV1::GeminiGenerateContent && !self.done {
+            let usage = match self.gemini.finish() {
+                Ok(usage) => usage,
+                Err(error) => return self.fail(error),
+            };
+            self.usage = Some((&usage).into());
+            self.canonical_usage = Some(usage);
+            self.done = true;
         }
         if !self.done {
             return self.fail(StreamObservationError::MissingTerminator);
@@ -303,6 +325,14 @@ impl OpenAiStreamUsageObserver {
 
     fn event(&mut self) -> Result<(), StreamObservationError> {
         if !self.has_data {
+            return Ok(());
+        }
+        if self.endpoint == EndpointFamilyV1::GeminiGenerateContent {
+            let event = sandhi_core::policy::strict_json(&self.data)
+                .map_err(|_| StreamObservationError::InvalidJson)?;
+            if let Some(update) = self.gemini.event(&event, self.message_event)? {
+                self.canonical_usage = Some(update);
+            }
             return Ok(());
         }
         if self.endpoint == EndpointFamilyV1::AnthropicMessages {

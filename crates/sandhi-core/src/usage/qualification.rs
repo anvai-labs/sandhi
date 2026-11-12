@@ -326,6 +326,67 @@ fn gemini(response: &Value) -> Result<(), Error> {
     )
 }
 
+/// Qualify only the Gemini counters actually reported so far. Cached input is a
+/// subset of prompt input; tool-result input and thoughts are separate counts.
+/// Neither a complete usage object nor HTTP EOF alone proves generation ended.
+pub fn qualify_gemini_progress_usage(response: &Value) -> Result<Option<UsageV2>, Error> {
+    if !response.is_object() {
+        return Err(Error::InvalidResponse);
+    }
+    let counters = match response.get("usageMetadata") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(value) if value.is_object() => value,
+        _ => return Err(Error::InvalidField("usageMetadata")),
+    };
+    let prompt = optional(counters, "promptTokenCount", "promptTokenCount")?;
+    let output = optional(counters, "candidatesTokenCount", "candidatesTokenCount")?;
+    let cached = optional(
+        counters,
+        "cachedContentTokenCount",
+        "cachedContentTokenCount",
+    )?;
+    let reasoning = optional(counters, "thoughtsTokenCount", "thoughtsTokenCount")?;
+    let tools = optional(
+        counters,
+        "toolUsePromptTokenCount",
+        "toolUsePromptTokenCount",
+    )?;
+    let total = optional(counters, "totalTokenCount", "totalTokenCount")?;
+    let inclusive_prompt = prompt.unwrap_or(cached.unwrap_or(0));
+    let known_total =
+        inclusive_prompt + tools.unwrap_or(0) + output.unwrap_or(0) + reasoning.unwrap_or(0);
+    if cached.is_some_and(|n| n > inclusive_prompt)
+        || inclusive_prompt + tools.unwrap_or(0) > MAX_PLAUSIBLE_TOKENS
+        || total.is_some_and(|n| n < known_total)
+        || total
+            .zip(prompt)
+            .zip(output)
+            .is_some_and(|((n, _), _)| n != known_total)
+    {
+        return Err(Error::InconsistentUsage);
+    }
+    if [prompt, output, cached, reasoning, tools]
+        .iter()
+        .all(Option::is_none)
+    {
+        return Ok(None);
+    }
+    Ok(Some(UsageV2 {
+        tokens_in: inclusive_prompt - cached.unwrap_or(0) + tools.unwrap_or(0),
+        tokens_out: output.unwrap_or(0),
+        cache_read_tokens: cached.unwrap_or(0),
+        cache_read_observation: Some(crate::observe_cache_read(
+            crate::CacheReadFamily::Gemini,
+            response,
+        )),
+        reasoning_tokens: reasoning,
+        reasoning_included: Some(false),
+        completeness: crate::UsageCompleteness::Partial,
+        attempts: 1,
+        ..Default::default()
+    }))
+}
+
 /// Qualify provider-reported buffered usage for the selected wire protocol.
 /// Keeps the existing parser's count derivation, preserves reported reasoning zero,
 /// and refuses missing/malformed/inconsistent required evidence. Optional inclusive
@@ -393,6 +454,100 @@ pub fn qualify_buffered_usage_with_profile(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn gemini_progress_keeps_exclusive_thoughts_and_tool_input_and_cache_subset() {
+        for response in [
+            json!({}),
+            json!({"usageMetadata":null}),
+            json!({"usageMetadata":{}}),
+            json!({"usageMetadata":{"totalTokenCount":20}}),
+        ] {
+            assert_eq!(qualify_gemini_progress_usage(&response).unwrap(), None);
+        }
+        let usage = qualify_gemini_progress_usage(&json!({"usageMetadata":{
+            "promptTokenCount":11,"cachedContentTokenCount":8,"toolUsePromptTokenCount":1,
+            "candidatesTokenCount":4,"thoughtsTokenCount":2,"totalTokenCount":18
+        }}))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            (usage.tokens_in, usage.cache_read_tokens, usage.tokens_out),
+            (4, 8, 4)
+        );
+        assert_eq!(usage.reasoning_tokens, Some(2));
+        assert_eq!(usage.reasoning_included, Some(false));
+        assert_eq!(usage.completeness, crate::UsageCompleteness::Partial);
+        let subset = qualify_gemini_progress_usage(&json!({"usageMetadata":{
+            "cachedContentTokenCount":8,"thoughtsTokenCount":5
+        }}))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            (
+                subset.tokens_in,
+                subset.cache_read_tokens,
+                subset.tokens_out
+            ),
+            (0, 8, 0)
+        );
+        assert_eq!(
+            subset.reasoning_tokens,
+            Some(5),
+            "thoughts need no output parent"
+        );
+        for reasoning in [None, Some(0)] {
+            let mut value =
+                json!({"usageMetadata":{"promptTokenCount":0,"candidatesTokenCount":0}});
+            if let Some(n) = reasoning {
+                value["usageMetadata"]["thoughtsTokenCount"] = n.into();
+            }
+            assert_eq!(
+                qualify_gemini_progress_usage(&value)
+                    .unwrap()
+                    .unwrap()
+                    .reasoning_tokens,
+                reasoning
+            );
+        }
+    }
+
+    #[test]
+    fn gemini_progress_rejects_bad_counters_and_contradictory_totals() {
+        for key in [
+            "promptTokenCount",
+            "candidatesTokenCount",
+            "cachedContentTokenCount",
+            "thoughtsTokenCount",
+            "toolUsePromptTokenCount",
+            "totalTokenCount",
+        ] {
+            for bad in [
+                Value::Null,
+                json!(-1),
+                json!(1.5),
+                json!("1"),
+                json!(50_000_000_001_u64),
+            ] {
+                assert!(
+                    qualify_gemini_progress_usage(&json!({"usageMetadata":{key:bad}})).is_err()
+                );
+            }
+        }
+        for value in [
+            json!([]),
+            json!({"usageMetadata":[]}),
+            json!({"usageMetadata":{
+                "promptTokenCount":3,"cachedContentTokenCount":4
+            }}),
+            json!({"usageMetadata":{"thoughtsTokenCount":5,"totalTokenCount":4}}),
+            json!({"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":4,
+            "thoughtsTokenCount":2,"toolUsePromptTokenCount":1,"totalTokenCount":9}}),
+            json!({"usageMetadata":{"promptTokenCount":50_000_000_000_u64,"toolUsePromptTokenCount":1}}),
+        ] {
+            assert!(qualify_gemini_progress_usage(&value).is_err(), "{value}");
+        }
+    }
 
     #[test]
     fn anthropic_progress_preserves_unknown_zero_and_exclusive_cache_categories() {

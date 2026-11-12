@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "evidenceKind": "synthetic-local-regression-failure",
+  "baseCommit": "aeb3ce78970b2afe3f871c1725e3e81a5508ea13",
+  "workingChanges": "Gemini library observer prerequisite; tracked Gemini routing remains disabled",
+  "command": "cargo test --workspace",
+  "test": "owned_buffered_back_leg_never_races_its_primary_settle",
+  "failedCall": 174,
+  "failedRequestId": "req_1794468930018_293",
+  "httpStatus": 502,
+  "accountingWarning": {
+    "stage": "tracked dispatch authorization unresolved",
+    "reason": "wait_timeout",
+    "timestamp": "2026-11-12T07:35:32.031181Z"
+  },
+  "originCalls": 173,
+  "retained": 1,
+  "lastUsageEvent": {
+    "requestId": "req_1794468929993_292",
+    "completeness": "final",
+    "freshInput": 10,
+    "output": 2
+  },
+  "supportedConclusion": "This failed call reached no origin request. The last final usage event belongs to the previous request. The observed wait is in dispatch authorization, whereas the earlier retained failure was in admission.",
+  "notEstablished": [
+    "root timing cause",
+    "lost provider usage",
+    "safe automatic inference replay",
+    "resolution from any subsequent passing run"
+  ],
+  "productionDeadlineChanged": false,
+  "containsCredentialsOrProviderContent": false
+}

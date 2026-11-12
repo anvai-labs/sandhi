@@ -233,7 +233,5 @@ fn responses_content_and_tools_are_not_usage_authority() {
     observed.push(terminal("completed").as_bytes()).unwrap();
     observed.finish().unwrap();
     assert_eq!(observed.usage().unwrap().tokens_out, 4);
-    assert!(
-        ProtocolStreamUsageObserver::for_endpoint(EndpointFamilyV1::GeminiGenerateContent).is_err()
-    );
+    assert!(ProtocolStreamUsageObserver::for_endpoint(EndpointFamilyV1::CohereChat).is_err());
 }
