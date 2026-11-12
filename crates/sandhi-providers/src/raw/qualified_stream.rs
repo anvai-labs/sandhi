@@ -28,6 +28,8 @@ pub struct QualifiedStreamSnapshot {
 /// Protocol completion and delivery success do not make partial usage final.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct QualifiedStreamEvidence {
+    /// Field availability is metadata; it neither qualifies counts nor proves a hit.
+    pub cache_read_observation: Option<sandhi_core::CacheReadObservation>,
     pub snapshot: QualifiedStreamSnapshot,
     pub usage: Option<UsageV2>,
 }
@@ -43,6 +45,11 @@ impl QualifiedStreamObservation {
     #[must_use]
     pub fn snapshot(&self) -> QualifiedStreamSnapshot {
         self.0.borrow().snapshot
+    }
+
+    #[must_use]
+    pub fn cache_read_observation(&self) -> Option<sandhi_core::CacheReadObservation> {
+        self.0.borrow().cache_read_observation
     }
 
     #[must_use]
@@ -110,6 +117,7 @@ impl QualifiedStream {
             usage.upstream_request_id.clone_from(&self.request_id);
         }
         self.sender.send_replace(QualifiedStreamEvidence {
+            cache_read_observation: self.observer.cache_read_observation(),
             snapshot: QualifiedStreamSnapshot {
                 usage: self.observer.usage(),
                 protocol_done: self.observer.is_done(),
@@ -181,10 +189,18 @@ impl Stream for QualifiedStream {
 
 impl Drop for QualifiedStream {
     fn drop(&mut self) {
-        self.finish(self.guard.as_ref().map_or(
-            AttemptOutcome::Cancelled,
-            AttemptGuard::cancellation_outcome,
-        ));
+        // An already observed provider error is a known rejection even when
+        // the consumer stops after surfacing it. It is not an ambiguous local
+        // cancellation, and it cannot promote partial counters to final ones.
+        let outcome = if self.observer.provider_failed() {
+            AttemptOutcome::ProviderRejected
+        } else {
+            self.guard.as_ref().map_or(
+                AttemptOutcome::Cancelled,
+                AttemptGuard::cancellation_outcome,
+            )
+        };
+        self.finish(outcome);
     }
 }
 

@@ -141,18 +141,27 @@ test("native stream opt-in preserves wire state without duplicate usage", async 
       prompt_tokens_details: { cached_tokens: 60, cache_write_tokens: 30 },
     } },
   ];
-  const body = frames.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join("") + "data: [DONE]\n\n";
+  const chunks=frames.flatMap(original=>{
+    const {usage,...frame}=original;
+    frame.object="chat.completion.chunk";
+    frame.choices=frame.choices.map((choice,index)=>({index,...choice}));
+    return usage ? [frame,{object:"chat.completion.chunk",choices:[],usage}] : [frame];
+  });
+  const body = chunks.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join("") + "data: [DONE]\n\n";
   const item = { contentType: "text/event-stream", body };
   const server = await localServer([item, item]);
   try {
     const provider = new ProviderRuntime().openaiCompat("fixture", server.baseUrl, "fixture-key", undefined, 0);
-    for (const native of [false, true]) {
+    await assert.rejects(async()=>{
+      for await (const _ of provider.streamJson(JSON.stringify({model:"fixture",messages:[{role:"user",content:"hi"}]}))) {}
+    }, error=>error.code==="output_projection_error" && error.retryable===false);
+    for (const native of [true]) {
       const request = { model: "fixture", messages: [{ role: "user", content: "hi" }] };
       if (native) request.include_native_stream = true;
       const events = [];
       for await (const value of provider.streamJson(JSON.stringify(request))) events.push(JSON.parse(value));
       const attachments = events.filter(event => event.event === "native_frame").map(event => event.frame);
-      assert.equal(attachments.length, native ? 3 : 0);
+      assert.equal(attachments.length, 4);
       if (native) {
         assert.ok(attachments.every(frame => frame.endpoint_family === "openai_chat_completions"));
         assert.ok(attachments[0].sse.includes('"provider_state":"opaque"'));
@@ -220,8 +229,8 @@ test("streamJson per-call wire headers ride and cannot override the credential (
     {
       contentType: "text/event-stream",
       body:
-        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{"content":"he"},"finish_reason":null}]}\n\n' +
-        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":3}}\n\n' +
+        "data: {\"id\":\"r2\",\"model\":\"gpt-test\",\"choices\":[{\"delta\":{\"content\":\"he\"},\"finish_reason\":null,\"index\":0}],\"object\":\"chat.completion.chunk\"}\n\n" +
+        "data: {\"id\":\"r2\",\"model\":\"gpt-test\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0}],\"object\":\"chat.completion.chunk\"}\n\ndata: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":3}}\n\n" +
         "data: [DONE]\n\n",
     },
   ]);
@@ -340,8 +349,8 @@ test("persistent typed provider completes and streams neutral documents", async 
     {
       contentType: "text/event-stream",
       body:
-        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{"content":"he"},"finish_reason":null}]}\n\n' +
-        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":4}}}\n\n' +
+        "data: {\"id\":\"r2\",\"model\":\"gpt-test\",\"choices\":[{\"delta\":{\"content\":\"he\"},\"finish_reason\":null,\"index\":0}],\"object\":\"chat.completion.chunk\"}\n\n" +
+        "data: {\"id\":\"r2\",\"model\":\"gpt-test\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0}],\"object\":\"chat.completion.chunk\"}\n\ndata: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":3,\"prompt_tokens_details\":{\"cached_tokens\":4}}}\n\n" +
         "data: [DONE]\n\n",
     },
   ]);
@@ -510,7 +519,7 @@ test("ChatGPT Responses profile aggregates its required upstream stream", async 
       body:
         'data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-test"}}\n\n' +
         'data: {"type":"response.output_text.delta","delta":"ok"}\n\n' +
-        'data: {"type":"response.completed","response":{"status":"completed","output":[],"usage":{"input_tokens":4,"output_tokens":1}}}\n\n',
+        'data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-test","status":"completed","output":[],"usage":{"input_tokens":4,"output_tokens":1}}}\n\n',
     },
   ]);
   try {
@@ -796,8 +805,8 @@ test("TypedEventStream.read() drains a healthy stream to exhaustion", async () =
     {
       contentType: "text/event-stream",
       body:
-        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{"content":"he"},"finish_reason":null}]}\n\n' +
-        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}\n\n' +
+        "data: {\"id\":\"r2\",\"model\":\"gpt-test\",\"choices\":[{\"delta\":{\"content\":\"he\"},\"finish_reason\":null,\"index\":0}],\"object\":\"chat.completion.chunk\"}\n\n" +
+        "data: {\"id\":\"r2\",\"model\":\"gpt-test\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0}],\"object\":\"chat.completion.chunk\"}\n\ndata: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}\n\n" +
         "data: [DONE]\n\n",
     },
   ]);

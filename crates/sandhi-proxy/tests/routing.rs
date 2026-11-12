@@ -317,10 +317,10 @@ fn reply(target: Family, stream: bool) -> ResponseTemplate {
             json!({"id":"msg","type":"message","role":"assistant","model":"physical","content":[{"type":"text","text":"reply"}],"stop_reason":"end_turn","usage":usage})
         }
         Family::OpenaiResponses => {
-            json!({"id":"resp","model":"physical","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"reply"}]}],"usage":{"input_tokens":100,"output_tokens":20,"input_tokens_details":{"cached_tokens":60,"cache_write_tokens":30}}})
+            json!({"id":"resp","model":"physical","status":"completed","output":[{"type":"message","id":"msg_output","role":"assistant","content":[{"type":"output_text","text":"reply"}]}],"usage":{"input_tokens":100,"output_tokens":20,"input_tokens_details":{"cached_tokens":60,"cache_write_tokens":30}}})
         }
         Family::GeminiGenerateContent => {
-            json!({"candidates":[{"content":{"role":"model","parts":[{"text":"reply"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":20,"cachedContentTokenCount":60}})
+            json!({"candidates":[{"content":{"role":"model","parts":[{"text":"reply"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":20,"cachedContentTokenCount":60,"totalTokenCount":120}})
         }
         _ => unreachable!(),
     };
@@ -333,13 +333,14 @@ fn reply(target: Family, stream: bool) -> ResponseTemplate {
             json!({"object":"chat.completion.chunk","choices":[],"usage":completed["usage"]}),
         ],
         Family::AnthropicMessages => vec![
-            json!({"type":"message_start","message":{"id":"msg","model":"physical","usage":usage}}),
-            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"reply"}}),
+            json!({"type":"message_start","message":{"type":"message","role":"assistant","content":[],"id":"msg","model":"physical","usage":usage}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":"reply"}}),
+            json!({"type":"content_block_stop","index":0}),
             json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":20}}),
             json!({"type":"message_stop"}),
         ],
         Family::OpenaiResponses => vec![
-            json!({"type":"response.output_text.delta","delta":"reply"}),
+            json!({"type":"response.created","response":{"id":"resp","model":"physical","status":"in_progress","output":[]}}),
             json!({"type":"response.completed","response":completed}),
         ],
         Family::GeminiGenerateContent => vec![completed],

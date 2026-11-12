@@ -92,6 +92,21 @@ def _start_server(handler_cls):
     return server
 
 
+def _standard_chat_sse(frames):
+    """Build complete standard Chat chunks with a distinct totals event."""
+    events=[]
+    for original in frames:
+        frame={**original, "object":"chat.completion.chunk"}
+        choices=[{"index":index, **choice} for index,choice in enumerate(frame.get("choices",[]))]
+        frame["choices"]=choices
+        usage=frame.pop("usage",None)
+        if choices or usage is None:
+            events.append(frame)
+        if usage is not None:
+            events.append({"object":"chat.completion.chunk","choices":[],"usage":usage})
+    return ("".join(f"data: {json.dumps(event)}\n\n" for event in events)+"data: [DONE]\n\n").encode()
+
+
 def test_cache_observation_precedes_consumer_stopping_at_first_content():
     frame = {"id": "r", "model": "gpt-test",
              "choices": [{"delta": {"content": "he"}, "finish_reason": None}],
@@ -148,7 +163,7 @@ def test_native_stream_opt_in_preserves_wire_state_without_duplicate_usage():
             "prompt_tokens": 100, "completion_tokens": 2,
             "prompt_tokens_details": {"cached_tokens": 60, "cache_write_tokens": 30}}},
     ]
-    body = ("".join(f"data: {json.dumps(frame)}\n\n" for frame in frames) + "data: [DONE]\n\n").encode()
+    body = _standard_chat_sse(frames)
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
@@ -173,10 +188,14 @@ def test_native_stream_opt_in_preserves_wire_state_without_duplicate_usage():
                 request["include_native_stream"] = True
             return [json.loads(value) async for value in provider.stream_json(json.dumps(request))]
 
-        for native in (False, True):
+        with pytest.raises(sg.SandhiProviderError) as refused:
+            asyncio.run(consume(False))
+        assert json.loads(str(refused.value))["code"] == "output_projection_error"
+        assert json.loads(str(refused.value))["retryable"] is False
+        for native in (True,):
             events = asyncio.run(consume(native))
             attachments = [event["frame"] for event in events if event["event"] == "native_frame"]
-            assert len(attachments) == (3 if native else 0)
+            assert len(attachments) == 4
             if native:
                 assert all(frame["endpoint_family"] == "openai_chat_completions" for frame in attachments)
                 assert '"provider_state": "opaque"' in attachments[0]["sse"]
@@ -322,12 +341,15 @@ def test_persistent_typed_provider_complete_and_stream():
             },
         }
     ).encode()
-    stream_body = (
-        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{"content":"he"},"finish_reason":null}]}\n\n'
-        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{},"finish_reason":"stop"}],'
-        '"usage":{"prompt_tokens":10,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":4}}}\n\n'
-        "data: [DONE]\n\n"
-    ).encode()
+    stream_body = _standard_chat_sse([{'choices': [{'delta': {'content': 'he'}, 'finish_reason': None}],
+  'id': 'r2',
+  'model': 'gpt-test'},
+ {'choices': [{'delta': {}, 'finish_reason': 'stop'}],
+  'id': 'r2',
+  'model': 'gpt-test',
+  'usage': {'completion_tokens': 3,
+            'prompt_tokens': 10,
+            'prompt_tokens_details': {'cached_tokens': 4}}}])
 
     class Handler(BaseHTTPRequestHandler):
         calls = 0
@@ -397,12 +419,13 @@ def test_per_call_wire_headers_ride_and_cannot_override_the_credential():
             "usage": {"prompt_tokens": 10, "completion_tokens": 3},
         }
     ).encode()
-    stream_body = (
-        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{"content":"he"},"finish_reason":null}]}\n\n'
-        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{},"finish_reason":"stop"}],'
-        '"usage":{"prompt_tokens":10,"completion_tokens":3}}\n\n'
-        "data: [DONE]\n\n"
-    ).encode()
+    stream_body = _standard_chat_sse([{'choices': [{'delta': {'content': 'he'}, 'finish_reason': None}],
+  'id': 'r2',
+  'model': 'gpt-test'},
+ {'choices': [{'delta': {}, 'finish_reason': 'stop'}],
+  'id': 'r2',
+  'model': 'gpt-test',
+  'usage': {'completion_tokens': 3, 'prompt_tokens': 10}}])
 
     class Handler(BaseHTTPRequestHandler):
         calls = 0
@@ -748,7 +771,7 @@ def test_chatgpt_responses_profile_aggregates_required_upstream_stream():
     stream_body = (
         'data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-test"}}\n\n'
         'data: {"type":"response.output_text.delta","delta":"ok"}\n\n'
-        'data: {"type":"response.completed","response":{"status":"completed","output":[],"usage":{"input_tokens":4,"output_tokens":1}}}\n\n'
+        'data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-test","status":"completed","output":[],"usage":{"input_tokens":4,"output_tokens":1}}}\n\n'
     ).encode()
 
     class Handler(BaseHTTPRequestHandler):
@@ -1356,12 +1379,11 @@ def test_stream_setup_timeout_kwarg_bounds_time_to_first_byte():
     class SlowHeaders(BaseHTTPRequestHandler):
         def do_POST(self):  # noqa: N802
             time.sleep(0.6)
-            body = (
-                'data: {"id":"r1","model":"gpt-test","choices":[{"delta":{"content":"he"},'
-                '"finish_reason":null}]}\n\n'
-                'data: {"id":"r1","model":"gpt-test","choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
-                "data: [DONE]\n\n"
-            ).encode()
+            body = _standard_chat_sse([{'choices': [{'delta': {'content': 'he'}, 'finish_reason': None}],
+  'id': 'r1',
+  'model': 'gpt-test'},
+ {'choices': [{'delta': {}, 'finish_reason': 'stop'}], 'id': 'r1', 'model': 'gpt-test'},
+ {'choices': [], 'usage': {'completion_tokens': 1, 'prompt_tokens': 2}}])
             self.send_response(200)
             self.send_header("content-type", "text/event-stream")
             self.send_header("content-length", str(len(body)))

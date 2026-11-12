@@ -58,9 +58,14 @@ as live-verified. A missing external prerequisite does not stop independent work
 1. **Reuse the foundations.** Keep the two forwarding planes, layered crates,
    virtual keys, existing provider transports, neutral contract and ledger.
    No replacement gateway or parallel allowance/accounting implementation.
-2. **Preserve compatibility.** Existing configs and fixed `upstream_ref` keys keep
-   their meaning. New behavior is opt-in or accompanied by a documented migration.
-   Fix confirmed silent content loss rather than preserving it as compatibility.
+2. **Coordinate the consumer migration.** On 2026-11-12 the user identified Victor
+   as the only client and authorized moving both projects together. Do not retain
+   a permissive legacy execution/decoder mode solely for backward compatibility.
+   Migrate Victor's in-process binding and gateway integration with Sandhi, with
+   an explicit contract/version gate and paired acceptance evidence. Keep the
+   supported client dialects and native/portable delivery contracts; these are
+   product capabilities, not legacy modes. Existing key/config authority must
+   remain intact or have an explicit migration; never reset budgets or secrets.
 3. **Authority precedes dispatch.** Keys/groups/grants authorize the requested alias
    and resolved backend/model. Request headers and native extensions cannot change
    authenticated attribution, select another account or loosen policy.
@@ -148,6 +153,17 @@ model/profile's controls; do not invent one-to-one mappings between differing TT
 and breakpoint semantics. Preserve ADR-0013's existing opt-out during migration.
 
 ## Milestones and completion gates
+
+The coordinated retirement decision and its migration gates are recorded in
+[ADR-0038](../adr/0038-coordinated-victor-contract-migration.md). This supersedes
+earlier increments' promises to retain permissive legacy decoders indefinitely;
+their historical validation remains evidence for those commits only.
+
+The [paired source checkpoint](../reviews/coordinated-victor-contract-2026-11-12.md)
+prepares Sandhi 0.17.0 and Victor 0.29.0, shares the four admitted typed streaming
+pipelines, and records review regressions and qualification limits. Buffered
+unification and the gateway accounting-default migration remain open; the version
+bump does not imply that either repository has been released or deployed.
 
 | Milestone | Status | Required result |
 | --- | --- | --- |

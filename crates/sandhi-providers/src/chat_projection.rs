@@ -27,7 +27,7 @@ fn decode_inner(mut raw: ByteStream, model: String) -> ChatEventStream {
         let mut failure = None;
         let mut started = false;
         while let Some(chunk) = raw.next().await {
-            let chunk = chunk?;
+            let chunk = match chunk {Ok(chunk)=>chunk,Err(error)=>Err(failure.take().unwrap_or(error))?,};
             // Keep polling the SAME bounded source after projection refusal. The
             // source observer must see real terminal counters and HTTP closure.
             if failure.is_some() {continue;}

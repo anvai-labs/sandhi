@@ -30,14 +30,15 @@ pub(super) async fn stream(
         .map(AttemptContext::fresh_call);
     let context = request.attempt_context.clone();
     let policy = crate::StreamingDeadline::current();
-    let whole = (delivery == QualifiedStreamDelivery::Buffered).then(|| {
-        BufferedDeadline::current()
-            .unwrap_or_else(|| BufferedDeadline::new(provider.timeouts.complete))
-    });
+    // The same physical operation owns a total deadline in both delivery
+    // contracts. Heartbeats cannot keep an embedded projection-refusal drain
+    // alive indefinitely after its client has stopped receiving content.
+    let whole = BufferedDeadline::current()
+        .unwrap_or_else(|| BufferedDeadline::new(provider.timeouts.complete));
     let mut setup = policy
         .map(|policy| policy.setup)
         .unwrap_or_else(|| BufferedDeadline::new(provider.timeouts.stream_setup));
-    if let Some(whole) = whole.filter(|whole| whole.at < setup.at) {
+    if whole.at < setup.at {
         setup = whole;
     }
     match bounded_until(
@@ -53,14 +54,12 @@ pub(super) async fn stream(
             if let Some(idle) = policy.map(|policy| policy.idle).or(provider.timeouts.idle) {
                 result.stream = Box::pin(IdleTimeout::new(result.stream, idle, context.clone()));
             }
-            if let Some(deadline) = whole {
-                result.stream = Box::pin(AbsoluteTimeout {
-                    inner: Some(result.stream),
-                    deadline,
-                    sleep: Box::pin(tokio::time::sleep_until(deadline.at)),
-                    context,
-                });
-            }
+            result.stream = Box::pin(AbsoluteTimeout {
+                inner: Some(result.stream),
+                deadline: whole,
+                sleep: Box::pin(tokio::time::sleep_until(whole.at)),
+                context,
+            });
             Ok(result)
         }
         Err(error) => {
@@ -70,7 +69,7 @@ pub(super) async fn stream(
     }
 }
 
-/// The complete buffered operation shares its original bound, including draining
+/// The complete physical operation shares its original bound, including draining
 /// bytes after a protocol terminal. Heartbeats cannot extend or reset it.
 struct AbsoluteTimeout {
     inner: Option<ByteStream>,
@@ -156,75 +155,81 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn qualified_buffered_deadline_includes_setup_and_cannot_be_reset_by_heartbeats() {
-        for final_usage in [false, true] {
-            for scoped in [false, true] {
-                let sends = Arc::new(AtomicUsize::new(0));
-                let provider =
-                    ResilientProvider::new(Arc::new(Heartbeats(sends.clone(), final_usage)))
-                        .with_timeouts(TimeoutConfig {
-                            complete: Duration::from_millis(20),
-                            stream_setup: Duration::from_millis(100),
-                            idle: Some(Duration::from_millis(50)),
-                        });
-                let (context, receiver) =
-                    AttemptContext::single_attempt("execution", "c".repeat(64)).unwrap();
-                let started = tokio::time::Instant::now();
-                let deadline = BufferedDeadline::new(Duration::from_millis(12));
-                let run = async {
-                    let mut response = provider
-                        .stream_qualified(
-                            ProviderRequest::new("fixture", serde_json::json!({}))
-                                .with_attempt_context(context.clone()),
-                            QualifiedStreamDelivery::Buffered,
-                        )
-                        .await
-                        .unwrap();
-                    let mut observed = 0;
-                    while let Some(item) = response.stream.next().await {
-                        match item {
-                            Ok(_) => observed += 1,
-                            Err(error) => {
-                                assert!(
-                                    matches!(error,ProviderError::Timeout(bound) if bound==Duration::from_millis(if scoped {12}else{20}))
-                                );
-                                break;
+    async fn qualified_deadline_includes_setup_and_cannot_be_reset_by_heartbeats_in_either_delivery(
+    ) {
+        for delivery in [
+            QualifiedStreamDelivery::Buffered,
+            QualifiedStreamDelivery::Streaming,
+        ] {
+            for final_usage in [false, true] {
+                for scoped in [false, true] {
+                    let sends = Arc::new(AtomicUsize::new(0));
+                    let provider =
+                        ResilientProvider::new(Arc::new(Heartbeats(sends.clone(), final_usage)))
+                            .with_timeouts(TimeoutConfig {
+                                complete: Duration::from_millis(20),
+                                stream_setup: Duration::from_millis(100),
+                                idle: Some(Duration::from_millis(50)),
+                            });
+                    let (context, receiver) =
+                        AttemptContext::single_attempt("execution", "c".repeat(64)).unwrap();
+                    let started = tokio::time::Instant::now();
+                    let deadline = BufferedDeadline::new(Duration::from_millis(12));
+                    let run = async {
+                        let mut response = provider
+                            .stream_qualified(
+                                ProviderRequest::new("fixture", serde_json::json!({}))
+                                    .with_attempt_context(context.clone()),
+                                delivery,
+                            )
+                            .await
+                            .unwrap();
+                        let mut observed = 0;
+                        while let Some(item) = response.stream.next().await {
+                            match item {
+                                Ok(_) => observed += 1,
+                                Err(error) => {
+                                    assert!(
+                                        matches!(error,ProviderError::Timeout(bound) if bound==Duration::from_millis(if scoped {12}else{20}))
+                                    );
+                                    break;
+                                }
                             }
                         }
-                    }
-                    assert!(observed >= 2, "heartbeats flowed after usage");
-                    assert!(response.stream.next().await.is_none());
-                };
-                if scoped {
-                    deadline.scope(run).await;
-                } else {
-                    run.await;
-                }
-                assert_eq!(
-                    tokio::time::Instant::now() - started,
-                    Duration::from_millis(if scoped { 12 } else { 20 })
-                );
-                assert_eq!(sends.load(Ordering::SeqCst), 1);
-                let evidence = context.qualified_stream_evidence().unwrap();
-                assert_eq!(evidence.snapshot.outcome, Some(AttemptOutcome::Timeout));
-                assert_eq!(
-                    evidence.usage.unwrap().completeness,
-                    if final_usage {
-                        sandhi_core::UsageCompleteness::Final
+                        assert!(observed >= 2, "heartbeats flowed after usage");
+                        assert!(response.stream.next().await.is_none());
+                    };
+                    if scoped {
+                        deadline.scope(run).await;
                     } else {
-                        sandhi_core::UsageCompleteness::Partial
+                        run.await;
                     }
-                );
-                let events = receiver.drain();
-                assert_eq!(events.len(), 2);
-                assert!(matches!(
-                    events[1].phase,
-                    AttemptPhase::Terminal {
-                        outcome: AttemptOutcome::Timeout,
-                        provider_status: Some(200),
-                        ..
-                    }
-                ));
+                    assert_eq!(
+                        tokio::time::Instant::now() - started,
+                        Duration::from_millis(if scoped { 12 } else { 20 })
+                    );
+                    assert_eq!(sends.load(Ordering::SeqCst), 1);
+                    let evidence = context.qualified_stream_evidence().unwrap();
+                    assert_eq!(evidence.snapshot.outcome, Some(AttemptOutcome::Timeout));
+                    assert_eq!(
+                        evidence.usage.unwrap().completeness,
+                        if final_usage {
+                            sandhi_core::UsageCompleteness::Final
+                        } else {
+                            sandhi_core::UsageCompleteness::Partial
+                        }
+                    );
+                    let events = receiver.drain();
+                    assert_eq!(events.len(), 2);
+                    assert!(matches!(
+                        events[1].phase,
+                        AttemptPhase::Terminal {
+                            outcome: AttemptOutcome::Timeout,
+                            provider_status: Some(200),
+                            ..
+                        }
+                    ));
+                }
             }
         }
     }

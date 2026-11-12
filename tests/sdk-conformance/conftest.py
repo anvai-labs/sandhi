@@ -120,6 +120,13 @@ def _openai_chat_body(streaming: bool) -> str:
             "created": 1,
             "model": "gpt-mock",
             "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        },
+        {
+            "id": "chatcmpl-mock",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "gpt-mock",
+            "choices": [],
             "usage": {"prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14},
         },
     ]

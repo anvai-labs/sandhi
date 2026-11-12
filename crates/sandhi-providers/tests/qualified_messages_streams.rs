@@ -27,10 +27,10 @@ fn wire(implicit: bool, mode: &str) -> String {
         json!({"type":"message_start","message":{"id":"msg_fixture","type":"message","role":"assistant","model":"fixture","content":[],"usage":usage}}),
     );
     out += &frame(
-        json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":"re"}}),
+        json!({"type":"content_block_start","index":0,"content_block":if mode=="opaque" {json!({"type":"thinking","thinking":"re","signature":"opaque"})} else {json!({"type":"text","text":"re"})}}),
     );
     out += &frame(
-        json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ply"}}),
+        json!({"type":"content_block_delta","index":0,"delta":if mode=="opaque" {json!({"type":"thinking_delta","thinking":"ply"})} else {json!({"type":"text_delta","text":"ply"})}}),
     );
     out += &frame(json!({"type":"content_block_stop","index":0}));
     if mode == "provider_error" {
@@ -172,7 +172,9 @@ async fn messages_profiles_share_one_attempt_on_both_streaming_planes() {
                     Some(if mode == "final" {
                         AttemptOutcome::Success
                     } else if mode == "provider_error" {
-                        AttemptOutcome::Cancelled
+                        // The source already reported a rejection before the
+                        // native projector returned; dropping is not cancellation.
+                        AttemptOutcome::ProviderRejected
                     } else {
                         AttemptOutcome::IncompleteStream
                     })
@@ -218,5 +220,61 @@ async fn messages_profiles_share_one_attempt_on_both_streaming_planes() {
                 assert_eq!(server.received_requests().await.unwrap().len(), 2);
             }
         }
+    }
+}
+
+#[tokio::test]
+async fn portable_refusal_drains_same_messages_source_and_preserves_final_counts() {
+    for native in [false, true] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(wire(false, "opaque"), "text/event-stream"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let provider = ProviderRuntime::new().anthropic(
+            server.uri(),
+            "synthetic",
+            Default::default(),
+            Default::default(),
+            Some(0),
+            None,
+            None,
+            None,
+        );
+        let request=serde_json::from_value(json!({"model":"fixture","max_output_tokens":64,"include_native_stream":native,"messages":[{"role":"user","content":"hello"}]})).unwrap();
+        let (context, receiver) =
+            AttemptContext::single_attempt("messages-refusal", "f".repeat(64)).unwrap();
+        let events = provider
+            .stream_with_qualified_usage_and_attempts(request, Default::default(), context.clone())
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(events.iter().any(Result::is_err), !native);
+        assert_eq!(
+            events
+                .iter()
+                .any(|event| matches!(event, Ok(Event::Finish { .. }))),
+            native
+        );
+        let evidence = context.qualified_stream_evidence().unwrap();
+        assert_eq!(evidence.snapshot.outcome, Some(AttemptOutcome::Success));
+        assert!(evidence.snapshot.qualification_error.is_none());
+        let usage = evidence.usage.unwrap();
+        assert_eq!(usage.completeness, UsageCompleteness::Final);
+        assert_eq!(
+            (
+                usage.tokens_in,
+                usage.cache_read_tokens,
+                usage.cache_creation_tokens,
+                usage.tokens_out
+            ),
+            (2, 6, 2, 4)
+        );
+        assert_eq!(context.dispatch_count(), 1);
+        assert_eq!(receiver.drain().len(), 2);
     }
 }

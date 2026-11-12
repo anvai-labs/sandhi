@@ -1,5 +1,5 @@
-//! Strict Messages projection for the qualified source API. Legacy decoding is
-//! unchanged. Counts come only from the shared response-owned source observer.
+//! Messages projection shared by embedded and accounted calls. Counts come
+//! only from the shared response-owned source observer.
 use super::{
     decode_stop_reason, ByteStream, ChatEventStream, ChatStreamEventV1 as Event, ProviderError,
 };
@@ -8,30 +8,54 @@ use sandhi_core::{EndpointFamilyV1, FinishReasonV1};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-pub(super) fn decode(mut raw: ByteStream, model: String, native: bool) -> ChatEventStream {
+pub(crate) fn decode(raw: ByteStream, model: String, native: bool) -> ChatEventStream {
+    crate::cache_read::decode_with_observation_policy(
+        raw,
+        model,
+        move |raw, model| decode_inner(raw, model, native),
+        native,
+    )
+}
+
+fn decode_inner(mut raw: ByteStream, model: String, native: bool) -> ChatEventStream {
     Box::pin(async_stream::try_stream! {
         let mut decoder=crate::native_stream::SseDecoder::new(Some(EndpointFamilyV1::AnthropicMessages));
         let mut projection=Projection::default();
+        let mut failure=None;
         while let Some(chunk)=raw.next().await {
-            let chunk=chunk?;
+            let chunk=match chunk {Ok(chunk)=>chunk,Err(error)=>Err(failure.take().unwrap_or(error))?,};
+            if failure.is_some() {continue;}
             decoder.push(&chunk.data);
-            while let Some((line,mut frame))=decoder.next_line()? {
+            loop {
+                let (line,mut frame)=match decoder.next_line() {
+                    Ok(Some(event))=>event,
+                    Ok(None)=>break,
+                    Err(error)=>{failure=Some(error);break;},
+                };
                 // Continue polling the source through EOF after message_stop.
                 // The independent observer detects any later data and framing.
                 if projection.stopped { continue; }
                 if let Some(data)=line.strip_prefix(b"data:") {
-                    let value=sandhi_core::policy::strict_json(data)
-                        .map_err(|_|invalid("invalid Messages event JSON"))?;
+                    let value=match sandhi_core::policy::strict_json(data) {
+                        Ok(value)=>value,
+                        Err(_)=>{failure=Some(invalid("invalid Messages event JSON"));break;},
+                    };
                     if let Some(error)=crate::native_stream::upstream_error(&value) {
                         if native { if let Some(frame)=frame.take() { yield Event::NativeFrame{frame}; } }
                         Err(error)?;
                     }
-                    for event in projection.event(&value,&model,native)? { yield event; }
+                    match projection.event(&value,&model,native) {
+                        Ok(events)=>for event in events {yield event;},
+                        Err(error)=>{failure=Some(error);break;},
+                    }
                 }
                 if native { if let Some(frame)=frame { yield Event::NativeFrame{frame}; } }
             }
-            if decoder.over_budget() { Err(invalid("Messages SSE frame exceeds the stream limit"))?; }
+            if decoder.over_budget() {failure.get_or_insert_with(||invalid("Messages SSE frame exceeds the stream limit"));}
         }
+        // Refusal is a delivery failure, not cancellation of the same bounded
+        // source. Preserve its final actual measurement before surfacing refusal.
+        if let Some(error)=failure {Err(error)?;}
         // No flush at EOF: an unfinished SSE event cannot become content or a
         // protocol terminal. The outer qualifier publishes final usage/finish.
         if !projection.stopped { Err(invalid("Messages stream ended before message_stop"))?; }
@@ -338,7 +362,7 @@ fn portable_fields(value: &Value, allowed: &[&str]) -> Result<(), ProviderError>
     Ok(())
 }
 fn invalid(message: &'static str) -> ProviderError {
-    ProviderError::Transport(message.into())
+    ProviderError::OutputProjection(message.into())
 }
 
 #[cfg(test)]

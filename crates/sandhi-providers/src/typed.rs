@@ -1299,31 +1299,11 @@ impl ChatProvider for TypedOpenAiCompat {
     }
     async fn stream_qualified_observed(
         &self,
-        mut request: ChatRequestV1,
+        request: ChatRequestV1,
         headers: http::HeaderMap,
         context: crate::AttemptContext,
     ) -> Result<ChatEventStream, ProviderError> {
-        self.apply_constraints(&mut request)?;
-        request.validate().map_err(ProviderError::InvalidRequest)?;
-        let source = self
-            .raw
-            .stream_qualified(
-                provider_request_observed(
-                    &request,
-                    encode_openai_request(&request)?,
-                    headers,
-                    Some(context),
-                ),
-                crate::QualifiedStreamDelivery::Streaming,
-            )
-            .await?;
-        let decoded = if request.include_native_stream {
-            // Keep the established canonical view plus original native frames.
-            decode_openai_stream_delivery(source.stream, request.model, true, true)
-        } else {
-            crate::chat_projection::decode(source.stream, request.model)
-        };
-        Ok(crate::qualified_stream::decode(decoded, source.observation))
+        self.stream_inner(request, headers, Some(context)).await
     }
 
     fn preflight_request(&self, request: &ChatRequestV1) -> Result<(), ProviderError> {
@@ -1460,18 +1440,25 @@ impl TypedOpenAiCompat {
     ) -> Result<ChatEventStream, ProviderError> {
         self.apply_constraints(&mut request)?;
         request.validate().map_err(ProviderError::InvalidRequest)?;
-        let req = provider_request_observed(
-            &request,
-            encode_openai_request(&request)?,
-            call_headers,
-            attempt_context,
-        );
-        let raw = self.raw.stream(req).await?;
-        Ok(decode_openai_stream_mode(
-            raw,
-            request.model,
-            request.include_native_stream,
-        ))
+        let source = self
+            .raw
+            .stream_qualified(
+                provider_request_observed(
+                    &request,
+                    encode_openai_request(&request)?,
+                    call_headers,
+                    attempt_context,
+                ),
+                crate::QualifiedStreamDelivery::Streaming,
+            )
+            .await?;
+        let decoded = if request.include_native_stream {
+            // Keep the established canonical view plus original native frames.
+            decode_openai_stream_delivery(source.stream, request.model, true, true)
+        } else {
+            crate::chat_projection::decode(source.stream, request.model)
+        };
+        Ok(crate::qualified_stream::decode(decoded, source.observation))
     }
 
     fn apply_constraints(&self, request: &mut ChatRequestV1) -> Result<(), ProviderError> {
@@ -1828,6 +1815,7 @@ fn decode_openai_stream(raw: ByteStream, requested_model: String) -> ChatEventSt
     decode_openai_stream_mode(raw, requested_model, false)
 }
 
+#[cfg(test)]
 pub(crate) fn decode_openai_stream_mode(
     raw: ByteStream,
     requested_model: String,
@@ -1836,7 +1824,7 @@ pub(crate) fn decode_openai_stream_mode(
     decode_openai_stream_delivery(raw, requested_model, native, false)
 }
 
-fn decode_openai_stream_delivery(
+pub(crate) fn decode_openai_stream_delivery(
     raw: ByteStream,
     requested_model: String,
     native: bool,

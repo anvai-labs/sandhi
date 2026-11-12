@@ -124,21 +124,20 @@ impl TypedOpenAiResponses {
         call_headers: http::HeaderMap,
         attempt_context: Option<crate::AttemptContext>,
     ) -> Result<ChatEventStream, ProviderError> {
-        let body = encode_responses_request_for_profile(&request, self.profile)?;
-        let stream = self
+        let body = self.qualified_request(&request)?;
+        let source = self
             .raw
-            .stream(provider_request_observed(
-                &request,
-                body,
-                call_headers,
-                attempt_context,
-            ))
+            .stream_qualified(
+                provider_request_observed(&request, body, call_headers, attempt_context),
+                crate::QualifiedStreamDelivery::Streaming,
+            )
             .await?;
-        Ok(decode_responses_stream_mode(
-            stream,
-            request.model,
-            request.include_native_stream,
-        ))
+        let decoded = if request.include_native_stream {
+            decode_responses_stream_delivery(source.stream, request.model, true, true)
+        } else {
+            crate::responses_projection::decode(source.stream, request.model, false)
+        };
+        Ok(crate::qualified_stream::decode(decoded, source.observation))
     }
 }
 
@@ -153,20 +152,7 @@ impl ChatProvider for TypedOpenAiResponses {
         headers: http::HeaderMap,
         context: crate::AttemptContext,
     ) -> Result<ChatEventStream, ProviderError> {
-        let body = self.qualified_request(&request)?;
-        let source = self
-            .raw
-            .stream_qualified(
-                provider_request_observed(&request, body, headers, Some(context)),
-                crate::QualifiedStreamDelivery::Streaming,
-            )
-            .await?;
-        let decoded = if request.include_native_stream {
-            decode_responses_stream_delivery(source.stream, request.model, true, true)
-        } else {
-            crate::responses_projection::decode(source.stream, request.model, false)
-        };
-        Ok(crate::qualified_stream::decode(decoded, source.observation))
+        self.stream_inner(request, headers, Some(context)).await
     }
     fn qualified_buffered_without_raw(&self) -> bool {
         self.profile == OpenAiResponsesProfile::ChatGptCodex
@@ -858,6 +844,7 @@ fn decode_responses_stream(raw: ByteStream, requested_model: String) -> ChatEven
     decode_responses_stream_mode(raw, requested_model, false)
 }
 
+#[cfg(test)]
 pub(crate) fn decode_responses_stream_mode(
     raw: ByteStream,
     requested_model: String,
@@ -866,7 +853,7 @@ pub(crate) fn decode_responses_stream_mode(
     decode_responses_stream_delivery(raw, requested_model, native, false)
 }
 
-fn decode_responses_stream_delivery(
+pub(crate) fn decode_responses_stream_delivery(
     raw: ByteStream,
     requested_model: String,
     native: bool,
@@ -1654,7 +1641,7 @@ mod tests {
         let sse = concat!(
             "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-test\"}}\n\n",
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n",
-            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}}\n\n"
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-test\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}}\n\n"
         );
         Mock::given(method("POST"))
             .and(path("/responses"))

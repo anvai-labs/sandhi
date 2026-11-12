@@ -21,7 +21,7 @@ fn decode_inner(mut raw: ByteStream, model: String, capture: bool) -> ChatEventS
         let mut started=false;
         let mut failure=None;
         while let Some(chunk)=raw.next().await {
-            let chunk=chunk?;
+            let chunk=match chunk {Ok(chunk)=>chunk,Err(error)=>Err(failure.take().unwrap_or(error))?,};
             // Projection has no transport owner. Drain the SAME bounded source
             // on refusal so actual counters and transport EOF remain observable.
             if failure.is_some() {continue;}

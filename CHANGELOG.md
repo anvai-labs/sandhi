@@ -19,6 +19,18 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+Prepared package version: **0.17.0**. This version is not yet released.
+
+### Migration
+
+- Coordinate the stricter execution contract with Victor **0.29.0**, pinned to
+  `sandhi-gateway==0.17.0`. The four admitted ordinary typed stream families use the same source observer
+  and portable/native fidelity rules as accounted streams. Physical handles
+  must disable retries; meaningful state that cannot be projected is refused.
+  A validated terminal protocol and source counters replace permissive EOF
+  completion. See [ADR-0038](docs/adr/0038-coordinated-victor-contract-migration.md)
+  for remaining migration and qualification gates. Wire schema v1 is unchanged.
+
 ### Added
 
 - Explicit `openai_terminal_chunk_usage` backend profile for compatible Chat

@@ -6,13 +6,12 @@ use async_trait::async_trait;
 use sandhi_core::{
     AssistantOutputV1, ChatMessageV1, ChatRequestV1, ChatResponseV1, ChatStreamEventV1,
     ContentPart, FinishReasonV1, MessageContent, ToolCallV1, ToolChoiceMode, ToolChoiceV1,
-    UsageCompleteness, UsageV2,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-mod qualified;
+pub(crate) mod qualified;
 
 /// Correlate omitted wire IDs without reusing an identity in a later response or
 /// after a process restart. Native supplied IDs remain untouched.
@@ -101,20 +100,21 @@ impl TypedGemini {
         attempt_context: Option<crate::AttemptContext>,
     ) -> Result<ChatEventStream, ProviderError> {
         request.validate().map_err(ProviderError::InvalidRequest)?;
-        let body = encode_gemini_request(&request)?;
-        let raw = self
+        let source = self
             .raw
-            .stream(provider_request_observed(
-                &request,
-                body,
-                call_headers,
-                attempt_context,
-            ))
+            .stream_qualified(
+                provider_request_observed(
+                    &request,
+                    encode_gemini_request(&request)?,
+                    call_headers,
+                    attempt_context,
+                ),
+                crate::QualifiedStreamDelivery::Streaming,
+            )
             .await?;
-        Ok(decode_gemini_stream_mode(
-            raw,
-            request.model,
-            request.include_native_stream,
+        Ok(crate::qualified_stream::decode(
+            qualified::decode(source.stream, request.model, request.include_native_stream),
+            source.observation,
         ))
     }
 }
@@ -130,23 +130,7 @@ impl ChatProvider for TypedGemini {
         headers: http::HeaderMap,
         context: crate::AttemptContext,
     ) -> Result<ChatEventStream, ProviderError> {
-        request.validate().map_err(ProviderError::InvalidRequest)?;
-        let source = self
-            .raw
-            .stream_qualified(
-                provider_request_observed(
-                    &request,
-                    encode_gemini_request(&request)?,
-                    headers,
-                    Some(context),
-                ),
-                crate::QualifiedStreamDelivery::Streaming,
-            )
-            .await?;
-        Ok(crate::qualified_stream::decode(
-            qualified::decode(source.stream, request.model, request.include_native_stream),
-            source.observation,
-        ))
+        self.stream_inner(request, headers, Some(context)).await
     }
     fn preflight_request(&self, request: &ChatRequestV1) -> Result<(), ProviderError> {
         encode_gemini_request(request).map(|_| ())
@@ -505,185 +489,12 @@ fn decode_finish_reason(reason: &str) -> FinishReasonV1 {
 
 #[cfg(test)]
 fn decode_gemini_stream(raw: ByteStream, requested_model: String) -> ChatEventStream {
-    decode_gemini_stream_mode(raw, requested_model, false)
-}
-
-pub(crate) fn decode_gemini_stream_mode(
-    raw: ByteStream,
-    requested_model: String,
-    native: bool,
-) -> ChatEventStream {
-    crate::cache_read::decode_with_observation_policy(
+    crate::qualified_stream::fixture(
         raw,
         requested_model,
-        move |raw, model| decode_gemini_stream_inner(raw, model, native),
-        native,
+        sandhi_core::EndpointFamilyV1::GeminiGenerateContent,
+        false,
     )
-}
-
-fn decode_gemini_stream_inner(
-    mut raw: ByteStream,
-    requested_model: String,
-    native: bool,
-) -> ChatEventStream {
-    use futures_util::StreamExt;
-    let stream = async_stream::try_stream! {
-        // TD-0014 P1: the shared bounded splitter. One ceiling across both planes; only the
-        // over-budget POLICY differs, and it is applied below. See MAX_STREAM_LINE_BYTES.
-        let mut splitter = crate::native_stream::SseDecoder::new(native.then_some(sandhi_core::EndpointFamilyV1::GeminiGenerateContent));
-        let mut started = false;
-        let mut emitted_usage = false;
-        let mut native_usage = crate::native_stream::NativeUsage::default();
-        let mut protocol_done = false;
-        // A candidate finish can precede the metered stream's terminal usage-only chunk.
-        // Defer canonical completion until successful EOF so egress sees final usage first.
-        let mut pending_finish = None;
-        let mut generated_ids=GeneratedToolIds::default();
-        let mut next_tool_index=0u32;
-        // The last running total published, so progress is emitted on change rather than per chunk.
-        let mut last_running: Option<crate::ParsedUsage> = None;
-        // TD-0014 P2b: after the real chunks end, ONE synthetic empty chunk flushes any
-        // trailing remainder (a final frame without its newline — Ollama's `done` frame) through
-        // this same loop body, so per-chunk event ordering is preserved exactly and the body is
-        // not duplicated. `raw.next()` returning None terminates; a false flush breaks out.
-        let mut tail_pending = false;
-        let mut chunks_ended = false;
-        while !chunks_ended || tail_pending {
-            let chunk = if chunks_ended {
-                tail_pending = false;
-                crate::StreamChunk {
-                    cache_read_observation: None,
-                    data: bytes::Bytes::new(),
-                    usage: None,
-                    usage_running: None,
-                    attempts: 1,
-                    terminal: false,
-                }
-            } else {
-                match raw.next().await {
-                    Some(chunk) => chunk?,
-                    None => {
-                        chunks_ended = true;
-                        tail_pending = splitter.flush_newline();
-                        continue;
-                    }
-                }
-            };
-            let attempts = chunk.attempts;
-            // Unconditional: the synthetic tail chunk arrives with empty data and must still
-            // drain the flushed remainder; draining after no new bytes is a no-op scan.
-            // (The terminal usage-only chunk is likewise empty and previously skipped this.)
-            {
-                splitter.push(&chunk.data);
-                while let Some((line, mut native_frame)) = splitter.next_line()? {
-                    if native {
-                        if let Some(usage) = native_usage.observe(&line, attempts, crate::gemini::sniff_usage_line) {
-                            yield ChatStreamEventV1::Usage { usage };
-                        }
-                    }
-                    let Some(value) = crate::sse_data_json(&line) else {
-                        if let Some(frame) = native_frame.take() { yield ChatStreamEventV1::NativeFrame { frame }; }
-                        continue;
-                    };
-                    if let Some(error) = crate::native_stream::upstream_error(&value) {
-                        if let Some(frame) = native_frame.take() { yield ChatStreamEventV1::NativeFrame { frame }; }
-                        Err(error)?;
-                    }
-                    if !started {
-                        yield ChatStreamEventV1::ResponseStart {
-                            id: value.get("responseId").and_then(Value::as_str).map(str::to_owned),
-                            model: value.get("modelVersion").and_then(Value::as_str)
-                                .unwrap_or(&requested_model).into(),
-                        };
-                        started = true;
-                    }
-                    if let Some(parts) = value.pointer("/candidates/0/content/parts").and_then(Value::as_array) {
-                        for part in parts {
-                            if let Some(text) = part.get("text").and_then(Value::as_str) {
-                                if part.get("thought").and_then(Value::as_bool) == Some(true) {
-                                    yield ChatStreamEventV1::ReasoningDelta { delta: text.into() };
-                                } else {
-                                    yield ChatStreamEventV1::TextDelta { delta: text.into() };
-                                }
-                            }
-                            if let Some(call) = part.get("functionCall") {
-                                let stream_index = next_tool_index;
-                                next_tool_index=next_tool_index.checked_add(1).ok_or_else(||ProviderError::Transport("too many Gemini tool calls".into()))?;
-                                let id = match call.get("id").and_then(Value::as_str) {
-                                    Some(id)=>id.into(),None=>generated_ids.id(stream_index as usize)?,
-                                };
-                                let name = call.get("name").and_then(Value::as_str).unwrap_or("").to_owned();
-                                let arguments = serde_json::to_string(call.get("args").unwrap_or(&Value::Null))
-                                    .map_err(|error| ProviderError::Transport(error.to_string()))?;
-                                yield ChatStreamEventV1::ToolCallStart { index: stream_index, id, name };
-                                yield ChatStreamEventV1::ToolCallArgumentsDelta { index: stream_index, delta: arguments };
-                                yield ChatStreamEventV1::ToolCallEnd { index: stream_index };
-                            }
-                        }
-                    }
-                    if let Some(reason) = value.pointer("/candidates/0/finishReason").and_then(Value::as_str) {
-                        pending_finish = Some(if reason=="STOP" && next_tool_index>0 {FinishReasonV1::ToolCalls} else {decode_finish_reason(reason)});
-                    }
-                    if value.pointer("/promptFeedback/blockReason").and_then(Value::as_str).is_some() {
-                        pending_finish = Some(FinishReasonV1::ContentFilter);
-                    }
-                    if native && pending_finish.is_some() && value.get("usageMetadata").is_some() {
-                        if let Some(usage) = native_usage.finish(attempts) { yield ChatStreamEventV1::Usage { usage }; }
-                        emitted_usage = true; protocol_done = true;
-                    }
-                    if let Some(frame) = native_frame.take() { yield ChatStreamEventV1::NativeFrame { frame }; }
-                    if protocol_done { break; }
-                }
-                // TD-0014 P1 (gap G01): past MAX_STREAM_LINE_BYTES the upstream has sent no
-                // line boundary at all, which no real provider does. The raw plane drops the
-                // pending line and keeps streaming — its bytes were already forwarded, so
-                // only usage suffers. A typed decoder emits decoded CONTENT, so dropping
-                // silently would corrupt the response with no signal. Fail loudly instead;
-                // mid-stream errors are never retried.
-                if splitter.over_budget() {
-                    Err(ProviderError::Transport(format!(
-                        "upstream stream exceeded {} bytes with no line boundary",
-                        crate::MAX_STREAM_LINE_BYTES
-                    )))?;
-                }
-            }
-            if native {
-                if protocol_done { break; }
-                continue;
-            }
-            if let Some(usage) = chunk.usage {
-                if !emitted_usage {
-                    let mut usage: UsageV2 = usage.into();
-                    usage.completeness = UsageCompleteness::Final;
-                    usage.attempts = attempts;
-                    usage.outcome = Some("success".into());
-                    yield ChatStreamEventV1::Usage { usage };
-                    emitted_usage = true;
-                }
-            } else if chunk.usage_running.is_some() && chunk.usage_running != last_running {
-                // Gemini is an `Incremental` family (TD-0013 D1): `usageMetadata` rides on chunks,
-                // so a real cumulative count exists before the stream ends. Publishing it as a
-                // non-final `Usage` lets an interrupted stream settle that instead of a byte
-                // estimate; the proxy treats it as accounting-only (D7), so it never supersedes
-                // the terminal frame and never reaches the client.
-                last_running = chunk.usage_running;
-                let mut usage: UsageV2 = chunk.usage_running.unwrap_or_default().into();
-                usage.completeness = UsageCompleteness::Partial;
-                usage.attempts = attempts;
-                yield ChatStreamEventV1::Usage { usage };
-            }
-        }
-        if native && !emitted_usage {
-            if pending_finish.is_none() {
-                Err(ProviderError::Transport("native Gemini stream ended before a finish or block reason".into()))?;
-            }
-            if let Some(usage) = native_usage.finish_last() { yield ChatStreamEventV1::Usage { usage }; }
-        }
-        if let Some(reason) = pending_finish {
-            yield ChatStreamEventV1::Finish { reason };
-        }
-    };
-    Box::pin(stream)
 }
 
 #[cfg(test)]
@@ -695,7 +506,7 @@ mod tests {
             Ok(crate::StreamChunk {
                 cache_read_observation: None,
                 data: bytes::Bytes::from_static(
-                    b"data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n",
+                    b"data: {\"candidates\":[{\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":2,\"candidatesTokenCount\":3,\"totalTokenCount\":5}}\n\n",
                 ),
                 usage: None,
                 usage_running: None,
@@ -724,7 +535,8 @@ mod tests {
         // 200 KB in one terminated line: far past the old 64 KiB bound, far under the real one.
         let big = "x".repeat(200 * 1024);
         let wire = format!(
-            "data: {{\"candidates\":[{{\"content\":{{\"parts\":[{{\"text\":\"{big}\"}}]}}}}]}}\n\n"
+            "data: {}\n\n",
+            json!({"candidates":[{"content":{"parts":[{"text":big}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":3,"totalTokenCount":5}})
         );
         let chunks: Vec<_> = wire
             .as_bytes()
@@ -745,10 +557,12 @@ mod tests {
             .collect::<Vec<_>>()
             .await;
         assert!(
-            !results
+            results.iter().all(Result::is_ok),
+            "a 200 KB complete exchange must survive: {:?}",
+            results
                 .iter()
-                .any(|r| matches!(r, Err(crate::ProviderError::Transport(_)))),
-            "a 200 KB terminated frame is legitimate traffic and must survive"
+                .filter_map(|result| result.as_ref().err())
+                .collect::<Vec<_>>()
         );
         let text: usize = results
             .iter()
@@ -791,10 +605,8 @@ mod tests {
             .collect::<Vec<_>>()
             .await;
         assert!(
-            results
-                .iter()
-                .any(|item| matches!(item, Err(crate::ProviderError::Transport(_)))),
-            "a newline-free stream must terminate with a Transport error rather than \
+            results.iter().any(|item| item.is_err()),
+            "a newline-free stream must terminate with a projection error rather than \
              buffering without bound"
         );
     }
@@ -849,12 +661,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_gemini_stream_call_indices_and_generated_identities_span_chunks_and_turns() {
+    async fn gemini_stream_call_indices_and_generated_identities_span_chunks_and_turns() {
         use futures_util::StreamExt;
         let wire = concat!(
             "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"alpha\",\"args\":{}}}]}}]}\n\n",
             "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"beta\",\"args\":{}}}]}}]}\n\n",
-            "data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n");
+            "data: {\"candidates\":[{\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":2,\"candidatesTokenCount\":3,\"totalTokenCount\":5}}\n\n");
         let mut all = std::collections::BTreeSet::new();
         for _ in 0..2 {
             let raw: ByteStream = Box::pin(futures_util::stream::iter(
@@ -907,7 +719,7 @@ mod tests {
             "data: {\"responseId\":\"g1\",\"modelVersion\":\"gemini-test\",\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"he\"}]}}]}\n\n",
             "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"id\":\"t1\",\"name\":\"lookup\",\"args\":{}}}]}}]}\n\n",
             "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"llo\"}]}}]}\n\n",
-            "data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n",
+            "data: {\"candidates\":[{\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":2,\"candidatesTokenCount\":3,\"totalTokenCount\":5}}\n\n",
         ).as_bytes();
         for split in 0..=wire.len() {
             let raw: crate::ByteStream = Box::pin(futures_util::stream::iter(vec![

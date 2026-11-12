@@ -759,13 +759,14 @@ where
         context.attach_qualified_stream(observation.clone());
     }
     use futures_util::StreamExt;
+    let metadata = observation.clone();
     Ok(crate::QualifiedProviderStream {
-        stream: Box::pin(raw.map(|chunk| {
+        stream: Box::pin(raw.map(move |chunk| {
             chunk.map(|data| StreamChunk {
                 data,
                 usage: None,
                 usage_running: None,
-                cache_read_observation: None,
+                cache_read_observation: metadata.cache_read_observation(),
                 attempts: 1,
                 terminal: false,
             })

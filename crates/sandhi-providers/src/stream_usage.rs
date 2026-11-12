@@ -1,4 +1,4 @@
-//! Opt-in protocol usage observation from complete, bounded SSE events.
+//! Response-owned protocol usage observation from complete, bounded SSE events.
 //!
 //! Create one observer per upstream HTTP response and keep it with the existing
 //! request/attempt owner. SSE `id` never becomes Sandhi attribution. This observer
@@ -82,6 +82,7 @@ pub struct OpenAiStreamUsageObserver {
     gemini: gemini::GeminiUsage,
     usage: Option<ParsedUsage>,
     canonical_usage: Option<UsageV2>,
+    cache_read_observation: Option<sandhi_core::CacheReadObservation>,
     error: Option<StreamObservationError>,
     done: bool,
     closed: bool,
@@ -163,12 +164,35 @@ impl OpenAiStreamUsageObserver {
             gemini: Default::default(),
             usage: None,
             canonical_usage: None,
+            cache_read_observation: None,
             error: None,
             done: false,
             closed: false,
             #[cfg(test)]
             peak_buffered: 0,
         }
+    }
+
+    pub(crate) fn cache_read_observation(&self) -> Option<sandhi_core::CacheReadObservation> {
+        self.cache_read_observation
+    }
+
+    fn observe_cache(&mut self, event: &Value) {
+        use sandhi_core::{CacheReadFamily as C, EndpointFamilyV1 as F};
+        let family = match self.endpoint {
+            F::OpenaiChatCompletions => C::OpenAi,
+            F::OpenaiResponses => C::OpenAiResponses,
+            F::AnthropicMessages => C::Anthropic,
+            F::GeminiGenerateContent => C::Gemini,
+            _ => return,
+        };
+        sandhi_core::merge_cache_read_observation(
+            &mut self.cache_read_observation,
+            sandhi_core::observe_cache_read_stream(family, event),
+        );
+        self.cache_read_observation.get_or_insert_with(|| {
+            sandhi_core::CacheReadObservation::origin(sandhi_core::CacheReadStatus::Absent)
+        });
     }
 
     pub fn usage(&self) -> Option<ParsedUsage> {
@@ -330,6 +354,7 @@ impl OpenAiStreamUsageObserver {
         if self.endpoint == EndpointFamilyV1::GeminiGenerateContent {
             let event = sandhi_core::policy::strict_json(&self.data)
                 .map_err(|_| StreamObservationError::InvalidJson)?;
+            self.observe_cache(&event);
             if let Some(update) = self.gemini.event(&event, self.message_event)? {
                 self.canonical_usage = Some(update);
             }
@@ -341,6 +366,7 @@ impl OpenAiStreamUsageObserver {
             }
             let event = sandhi_core::policy::strict_json(&self.data)
                 .map_err(|_| StreamObservationError::InvalidJson)?;
+            self.observe_cache(&event);
             let update = self.anthropic.event(
                 &event,
                 self.message_event,
@@ -368,6 +394,7 @@ impl OpenAiStreamUsageObserver {
             }
             let event = sandhi_core::policy::strict_json(&self.data)
                 .map_err(|_| StreamObservationError::InvalidJson)?;
+            self.observe_cache(&event);
             let update =
                 self.responses
                     .event(&event, self.message_event, self.event_name.as_deref());
@@ -393,6 +420,7 @@ impl OpenAiStreamUsageObserver {
         }
         let event = sandhi_core::policy::strict_json(&self.data)
             .map_err(|_| StreamObservationError::InvalidJson)?;
+        self.observe_cache(&event);
         if let Some(next) =
             qualify_openai_stream_usage_for_profile(&event, self.openai_usage_profile)
                 .map_err(StreamObservationError::InvalidUsage)?

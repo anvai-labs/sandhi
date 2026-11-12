@@ -8,13 +8,22 @@ use sandhi_core::EndpointFamilyV1;
 use serde_json::Value;
 use std::collections::BTreeSet;
 
-pub(super) fn decode(mut raw: ByteStream, model: String, native: bool) -> ChatEventStream {
+pub(crate) fn decode(raw: ByteStream, model: String, native: bool) -> ChatEventStream {
+    crate::cache_read::decode_with_observation_policy(
+        raw,
+        model,
+        move |raw, model| decode_inner(raw, model, native),
+        native,
+    )
+}
+
+fn decode_inner(mut raw: ByteStream, model: String, native: bool) -> ChatEventStream {
     Box::pin(async_stream::try_stream! {
         let mut decoder = crate::native_stream::SseDecoder::new(Some(EndpointFamilyV1::GeminiGenerateContent));
         let mut projection = Projection::default();
         let mut failure = None;
         while let Some(chunk) = raw.next().await {
-            let chunk = chunk?;
+            let chunk = match chunk {Ok(chunk)=>chunk,Err(error)=>Err(failure.take().unwrap_or(error))?,};
             // A portable projection refusal does not cancel the physical source.
             // Drain it under the existing owner deadlines so clean source EOF
             // can still qualify actual counts independently of failed delivery.
@@ -33,7 +42,7 @@ pub(super) fn decode(mut raw: ByteStream, model: String, native: bool) -> ChatEv
                     };
                     if let Some(error) = crate::native_stream::upstream_error(&value) {
                         if native { if let Some(frame) = frame.take() {yield Event::NativeFrame{frame};} }
-                        failure=Some(error);break;
+                        Err(error)?;
                     }
                     if !projection.started {
                         projection.started = true;
@@ -241,7 +250,7 @@ fn string<'a>(value: &'a Value, key: &str) -> Result<&'a str, ProviderError> {
         .ok_or_else(|| invalid("invalid Gemini function identity"))
 }
 fn invalid(message: &str) -> ProviderError {
-    ProviderError::Transport(message.into())
+    ProviderError::OutputProjection(message.into())
 }
 
 #[cfg(test)]

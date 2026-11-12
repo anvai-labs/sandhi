@@ -219,7 +219,7 @@ fn reply(family: Family, stream: bool) -> ResponseTemplate {
             json!({"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":60,"cache_creation_input_tokens":30})
         }
         Family::GeminiGenerateContent => {
-            json!({"promptTokenCount":100,"candidatesTokenCount":20,"cachedContentTokenCount":60})
+            json!({"promptTokenCount":100,"candidatesTokenCount":20,"cachedContentTokenCount":60,"totalTokenCount":120})
         }
         _ => unreachable!(),
     };
@@ -228,7 +228,7 @@ fn reply(family: Family, stream: bool) -> ResponseTemplate {
             json!({"model":"fixture","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":usage})
         }
         Family::OpenaiResponses => {
-            json!({"id":"resp_fixture","model":"fixture","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}],"usage":usage})
+            json!({"id":"resp_fixture","model":"fixture","status":"completed","output":[{"type":"message","id":"msg_fixture","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":usage})
         }
         Family::AnthropicMessages => {
             json!({"id":"msg_fixture","type":"message","role":"assistant","model":"fixture","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":usage})
@@ -243,16 +243,18 @@ fn reply(family: Family, stream: bool) -> ResponseTemplate {
     }
     let frames = match family {
         Family::OpenaiChatCompletions => vec![
-            json!({"model":"fixture","choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}),
-            json!({"choices":[],"usage":usage}),
+            json!({"object":"chat.completion.chunk","id":"chat_fixture","model":"fixture","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}),
+            json!({"object":"chat.completion.chunk","choices":[],"usage":usage}),
         ],
         Family::OpenaiResponses => vec![
-            json!({"type":"response.output_text.delta","delta":"ok"}),
+            json!({"type":"response.created","response":{"id":"resp_fixture","model":"fixture","status":"in_progress","output":[]}}),
             json!({"type":"response.completed","response":completed}),
         ],
         Family::AnthropicMessages => vec![
-            json!({"type":"message_start","message":{"id":"msg_fixture","model":"fixture","usage":usage}}),
+            json!({"type":"message_start","message":{"type":"message","role":"assistant","content":[],"id":"msg_fixture","model":"fixture","usage":usage}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
             json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}),
+            json!({"type":"content_block_stop","index":0}),
             json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":20}}),
             json!({"type":"message_stop"}),
         ],
@@ -365,9 +367,11 @@ async fn anthropic_terminal_input_cache_updates_reach_all_ingress_and_both_budge
             let upstream = MockServer::start().await;
             let input_usage = json!({"input_tokens":10,"cache_creation_input_tokens":30,"cache_read_input_tokens":60});
             let frames = [
-                json!({"type":"message_start","message":{"id":"msg_fixture","model":"fixture",
+                json!({"type":"message_start","message":{"type":"message","role":"assistant","content":[],"id":"msg_fixture","model":"fixture",
                     "usage":if late { json!({"input_tokens":0,"output_tokens":0}) } else { input_usage.clone() }}}),
+                json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
                 json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}),
+                json!({"type":"content_block_stop","index":0}),
                 json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},
                     "usage":if late { json!({"input_tokens":10,"cache_creation_input_tokens":30,"cache_read_input_tokens":60,"output_tokens":20}) }
                             else { json!({"output_tokens":20}) }}),

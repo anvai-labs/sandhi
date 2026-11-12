@@ -1,5 +1,5 @@
-//! Bounded SSE attachments for opt-in native typed streams. The default path
-//! retains its existing per-line behavior. Native mode assembles complete events,
+//! Bounded SSE attachments for native typed streams. All admitted sources use
+//! complete-event validation. Native delivery assembles complete events,
 //! including multiline data and opaque/unknown fields, with normalized LF framing.
 
 #[cfg(test)]
@@ -13,9 +13,9 @@ mod fidelity_tests {
     fn frames(family: Family) -> Vec<Value> {
         match family {
             Family::OpenaiChatCompletions => vec![
-                json!({"choices":[{"delta":{"content":"ok","vendor_state":"opaque"},"finish_reason":null}]}),
-                json!({"choices":[{"delta":{},"finish_reason":"stop"}]}),
-                json!({"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":20,
+                json!({"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"ok","vendor_state":"opaque"},"finish_reason":null}]}),
+                json!({"object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}),
+                json!({"object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":20,
                     "prompt_tokens_details":{"cached_tokens":60,"cache_write_tokens":30}}}),
             ],
             Family::OpenaiResponses => vec![
@@ -25,16 +25,18 @@ mod fidelity_tests {
                     "usage":{"input_tokens":100,"output_tokens":20,"input_tokens_details":{"cached_tokens":60,"cache_write_tokens":30}}}}),
             ],
             Family::AnthropicMessages => vec![
-                json!({"type":"message_start","message":{"id":"msg_fixture","model":"fixture",
+                json!({"type":"message_start","message":{"type":"message","role":"assistant","id":"msg_fixture","model":"fixture",
                     "usage":{"input_tokens":10,"cache_read_input_tokens":60,"cache_creation_input_tokens":30}}}),
+                json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
                 json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}),
                 json!({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"opaque"}}),
+                json!({"type":"content_block_stop","index":0}),
                 json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":20}}),
                 json!({"type":"message_stop"}),
             ],
             Family::GeminiGenerateContent => vec![
                 json!({"candidates":[{"content":{"parts":[{"text":"ok","thoughtSignature":"opaque"}]},"finishReason":"STOP"}],
-                    "usageMetadata":{"promptTokenCount":100,"cachedContentTokenCount":60,"candidatesTokenCount":20}}),
+                    "usageMetadata":{"promptTokenCount":100,"cachedContentTokenCount":60,"candidatesTokenCount":20,"totalTokenCount":120}}),
             ],
             _ => unreachable!(),
         }
@@ -64,27 +66,11 @@ mod fidelity_tests {
     }
 
     fn decode(family: Family, raw: crate::ByteStream) -> crate::ChatEventStream {
-        match family {
-            Family::OpenaiChatCompletions => {
-                crate::typed::decode_openai_stream_mode(raw, "fixture".into(), true)
-            }
-            Family::OpenaiResponses => crate::openai_responses_typed::decode_responses_stream_mode(
-                raw,
-                "fixture".into(),
-                true,
-            ),
-            Family::AnthropicMessages => {
-                crate::anthropic_typed::decode_anthropic_stream_mode(raw, "fixture".into(), true)
-            }
-            Family::GeminiGenerateContent => {
-                crate::gemini_typed::decode_gemini_stream_mode(raw, "fixture".into(), true)
-            }
-            _ => unreachable!(),
-        }
+        crate::qualified_stream::fixture(raw, "fixture".into(), family, true)
     }
 
     #[tokio::test]
-    async fn native_state_and_usage_finish_before_http_eof_at_every_split() {
+    async fn native_state_and_usage_require_clean_http_eof_at_every_split() {
         for family in [
             Family::OpenaiChatCompletions,
             Family::OpenaiResponses,
@@ -100,8 +86,7 @@ mod fidelity_tests {
                                 &wire.as_bytes()[..split],
                             )),
                             Ok(bytes::Bytes::copy_from_slice(&wire.as_bytes()[split..])),
-                        ])
-                        .chain(futures_util::stream::pending());
+                        ]);
                         let raw = match family {
                             Family::OpenaiChatCompletions => crate::metered_openai_passthrough(
                                 incoming,
@@ -123,8 +108,13 @@ mod fidelity_tests {
                         };
                         let events: Vec<_> = tokio::time::timeout(std::time::Duration::from_secs(1),
                             decode(family,raw).collect()).await
-                            .unwrap_or_else(|_| panic!("protocol completion waited for HTTP EOF: {family:?}/{multiline}/{newline:?}/{split}"));
-                        let events: Vec<_> = events.into_iter().map(Result::unwrap).collect();
+                            .unwrap_or_else(|_| panic!("completed source did not finish: {family:?}/{multiline}/{newline:?}/{split}"));
+                        let events: Vec<_> = events
+                            .into_iter()
+                            .map(|event| {
+                                event.unwrap_or_else(|error| panic!("{family:?}: {error:?}"))
+                            })
+                            .collect();
                         assert!(events.iter().all(|event| !matches!(event,Event::Usage {usage}
                             if usage.cache_read_observation.is_some_and(|observation| observation.status==sandhi_core::CacheReadStatus::Malformed))),
                             "valid multiline cache metadata became malformed: {family:?}/{multiline}/{newline:?}/{split}");
@@ -224,39 +214,23 @@ mod fidelity_tests {
     }
 
     #[tokio::test]
-    async fn gemini_native_eof_accepts_a_finish_or_block_reason_without_inventing_usage() {
-        for (value, reason) in [
-            (
-                serde_json::json!({"candidates":[{"finishReason":"STOP","content":{"parts":[{"text":"ok"}]}}]}),
-                sandhi_core::FinishReasonV1::Stop,
-            ),
-            (
-                serde_json::json!({"promptFeedback":{"blockReason":"SAFETY"}}),
-                sandhi_core::FinishReasonV1::ContentFilter,
-            ),
+    async fn gemini_native_eof_without_counts_never_invents_measured_success() {
+        for value in [
+            json!({"candidates":[{"finishReason":"STOP","content":{"parts":[{"text":"ok"}]}}]}),
+            json!({"promptFeedback":{"blockReason":"SAFETY"}}),
         ] {
             let raw = Box::pin(futures_util::stream::iter(vec![Ok(crate::StreamChunk {
                 data: bytes::Bytes::from(format!("data: {value}\n\n")),
-                attempts: 2,
                 ..Default::default()
             })]));
-            let events: Vec<_> = decode(Family::GeminiGenerateContent, raw)
+            let events = decode(Family::GeminiGenerateContent, raw)
                 .collect::<Vec<_>>()
-                .await
-                .into_iter()
-                .map(Result::unwrap)
-                .collect();
-            assert!(
-                matches!(events.last(),Some(Event::Finish {reason: actual}) if *actual==reason)
-            );
-            assert!(events.iter().all(|event|!matches!(event,Event::Usage {usage} if usage.completeness!=Complete::Unavailable)));
-            assert!(events
+                .await;
+            assert!(events.last().is_some_and(Result::is_err));
+            assert!(!events
                 .iter()
-                .filter_map(|event| match event {
-                    Event::Usage { usage } => Some(usage),
-                    _ => None,
-                })
-                .all(|usage| usage.attempts == 2));
+                .any(|event| matches!(event, Ok(Event::Finish { .. }))));
+            assert!(!events.iter().any(|event|matches!(event,Ok(Event::Usage{usage}) if usage.completeness==Complete::Final)));
         }
     }
 
@@ -468,59 +442,8 @@ pub(crate) fn json(frame: &NativeStreamFrameV1) -> Option<serde_json::Value> {
     frame.json_data()
 }
 
-/// Native mode parses complete logical SSE data, so multiline usage has the same
-/// accounting as ordinary one-line events. Counts precede visible native content.
-#[derive(Default)]
-pub(crate) struct NativeUsage {
-    parsed: crate::ParsedUsage,
-    numeric: bool,
-    last: Option<sandhi_core::UsageV2>,
-    attempts: u32,
-}
-impl NativeUsage {
-    pub(crate) fn observe(
-        &mut self,
-        line: &[u8],
-        attempts: u32,
-        sniff: fn(&[u8], &mut crate::ParsedUsage) -> bool,
-    ) -> Option<sandhi_core::UsageV2> {
-        self.attempts = attempts;
-        self.numeric |= sniff(line, &mut self.parsed);
-        if self.parsed.cache_read_observation.is_none() && crate::sse_data_json(line).is_some() {
-            self.parsed.cache_read_observation = Some(sandhi_core::CacheReadObservation::origin(
-                sandhi_core::CacheReadStatus::Absent,
-            ));
-        }
-        self.publish(attempts, false)
-    }
-    pub(crate) fn finish(&mut self, attempts: u32) -> Option<sandhi_core::UsageV2> {
-        self.publish(attempts, true)
-    }
-    pub(crate) fn finish_last(&mut self) -> Option<sandhi_core::UsageV2> {
-        self.finish(self.attempts.max(1))
-    }
-    fn publish(&mut self, attempts: u32, terminal: bool) -> Option<sandhi_core::UsageV2> {
-        use sandhi_core::UsageCompleteness as C;
-        let usage = sandhi_core::UsageV2 {
-            attempts,
-            completeness: if self.numeric {
-                if terminal {
-                    C::Final
-                } else {
-                    C::Partial
-                }
-            } else {
-                C::Unavailable
-            },
-            ..self.parsed.into()
-        };
-        if self.last.as_ref() == Some(&usage) {
-            return None;
-        }
-        self.last = Some(usage.clone());
-        Some(usage)
-    }
-}
+// Framing invariants are independent of source counters and settlement.
+// The production source observer is exercised by the fidelity tests above.
 
 #[cfg(test)]
 mod tests {
