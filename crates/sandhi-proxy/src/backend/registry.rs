@@ -91,23 +91,26 @@ fn build_unbound(
 
 fn bind(handle: ProviderHandle, record: &BackendRecord, entry: &VaultEntry) -> ProviderHandle {
     let definition = &record.definition;
-    handle.with_backend_binding(BackendBinding {
-        id: definition.id.clone(),
-        revision: record.revision,
-        provider: definition.provider.clone(),
-        credential_ref: definition.credential_ref.clone(),
-        credential_generation: entry.generation,
-        endpoint_family: definition.endpoint.endpoint_family,
-        endpoint_profile: match definition.endpoint.endpoint_profile {
-            BackendProfile::Standard => "standard",
-            BackendProfile::ChatGptCodex => "chatgpt_codex",
-            BackendProfile::AnthropicImplicitCache => "anthropic_implicit_cache",
-            BackendProfile::OpenaiTerminalChunkUsage => "openai_terminal_chunk_usage",
-        }
-        .into(),
-        models: definition.models.clone(),
-        cache_policy: definition.cache_policy.clone(),
-    })
+    handle
+        .with_upstream_budget_scope(record.upstream_budget_scope.clone())
+        .expect("validated immutable backend budget namespace")
+        .with_backend_binding(BackendBinding {
+            id: definition.id.clone(),
+            revision: record.revision,
+            provider: definition.provider.clone(),
+            credential_ref: definition.credential_ref.clone(),
+            credential_generation: entry.generation,
+            endpoint_family: definition.endpoint.endpoint_family,
+            endpoint_profile: match definition.endpoint.endpoint_profile {
+                BackendProfile::Standard => "standard",
+                BackendProfile::ChatGptCodex => "chatgpt_codex",
+                BackendProfile::AnthropicImplicitCache => "anthropic_implicit_cache",
+                BackendProfile::OpenaiTerminalChunkUsage => "openai_terminal_chunk_usage",
+            }
+            .into(),
+            models: definition.models.clone(),
+            cache_policy: definition.cache_policy.clone(),
+        })
 }
 
 /// Reconstruct exact configured routes. Missing/locked/expired credentials stay

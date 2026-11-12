@@ -336,6 +336,7 @@ mod tests {
     }
     fn evidence(ledger: &SqliteLedger, intent: &ExecutionIntent) -> AttemptEvidence {
         AttemptEvidence {
+            observed_provider: None,
             version: 1,
             attempt_id: ledger
                 .physical_attempt_durable("team", &intent.execution_id)

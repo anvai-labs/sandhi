@@ -137,8 +137,10 @@ impl ProviderRuntime {
             config.stream_setup_timeout_secs = options.stream_setup_timeout_secs;
             config.stream_idle_timeout_secs = options.stream_idle_timeout_secs;
             return Ok(ConfiguredProvider {
-                provider: slug,
-                handle: self.gateway_peer(config),
+                provider: slug.clone(),
+                handle: self
+                    .gateway_peer(config)
+                    .with_provider_identity(slug.clone())?,
             });
         }
         let profile = options
@@ -279,6 +281,7 @@ impl ProviderRuntime {
                 self.ollama(base_url, options.api_key, h, retry, timeout, setup, idle)
             }
         };
+        let handle = handle.with_provider_identity(provider.clone())?;
         Ok(ConfiguredProvider { provider, handle })
     }
 }

@@ -615,6 +615,231 @@ mod tests {
     use axum::http;
     use sandhi_providers::{BackendBinding, ProviderRuntime};
 
+    #[tokio::test]
+    async fn legacy_sql_pin_and_cache_binding_survive_namespace_startup_migration() {
+        use sandhi_core::ChatMessageV1;
+        use sandhi_store::{
+            routes::{RouteDefinition, RouteStore},
+            BackendDefinition, BackendStore, CredentialScheme, VaultStore,
+        };
+        for (family, old_label) in [
+            (
+                sandhi_core::EndpointFamilyV1::OpenaiChatCompletions,
+                "fixture",
+            ),
+            (
+                sandhi_core::EndpointFamilyV1::AnthropicMessages,
+                "anthropic",
+            ),
+            (sandhi_core::EndpointFamilyV1::OpenaiResponses, "fixture"),
+            (
+                sandhi_core::EndpointFamilyV1::GeminiGenerateContent,
+                "gemini",
+            ),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let db = directory.path().join("legacy.db");
+            let vault = VaultStore::in_memory().unwrap();
+            vault
+                .set(
+                    "fixture",
+                    "default",
+                    CredentialScheme::ApiKey,
+                    Some("http://127.0.0.1:1"),
+                    None,
+                    "synthetic",
+                )
+                .unwrap();
+            let mut definition:BackendDefinition=serde_json::from_value(json!({"id":"primary","provider":"fixture","credential_ref":"fixture:default","endpoint":{"endpoint_family":family},"models":[{"id":"physical"}]})).unwrap();
+            if matches!(
+                family,
+                sandhi_core::EndpointFamilyV1::OpenaiChatCompletions
+                    | sandhi_core::EndpointFamilyV1::OpenaiResponses
+            ) {
+                definition.cache_policy=Some(serde_json::from_value(json!({"namespace":"scoped_key","models":{"physical":{"profile":if family==sandhi_core::EndpointFamilyV1::OpenaiChatCompletions {"openai_legacy"}else{"openai_explicit"},"lifetimes":if family==sandhi_core::EndpointFamilyV1::OpenaiChatCompletions {json!(["in_memory","24h"])}else{json!(["30m","12h"])},"max_breakpoints":if family==sandhi_core::EndpointFamilyV1::OpenaiResponses {json!(4)}else{serde_json::Value::Null}}}})).unwrap());
+            }
+            let legacy = rusqlite::Connection::open(&db).unwrap();
+            legacy.execute_batch("CREATE TABLE backends(id TEXT PRIMARY KEY,definition_json TEXT NOT NULL,revision INTEGER NOT NULL,status TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);").unwrap();
+            legacy
+                .execute(
+                    "INSERT INTO backends VALUES('primary',?1,1,'active','old','old')",
+                    [serde_json::to_string(&definition).unwrap()],
+                )
+                .unwrap();
+            let old_handle = crate::build_provider_handle_for_endpoint(
+                &ProviderRuntime::new(),
+                "fixture",
+                Some("http://127.0.0.1:1"),
+                "synthetic",
+                CredentialScheme::ApiKey,
+                None,
+                definition.endpoint,
+            )
+            .unwrap()
+            .with_backend_binding(BackendBinding {
+                id: "primary".into(),
+                revision: 1,
+                provider: "fixture".into(),
+                credential_ref: "fixture:default".into(),
+                credential_generation: 1,
+                endpoint_family: family,
+                endpoint_profile: "standard".into(),
+                models: definition.models.clone(),
+                cache_policy: definition.cache_policy.clone(),
+            });
+            let b = old_handle.backend_binding().unwrap();
+            // Exact pre-migration v1 formulas, independent of the migrated implementation.
+            let legacy_fingerprint = cache_digest(&(
+                "sandhi-route-binding-v1",
+                &b.id,
+                b.revision,
+                &b.provider,
+                &b.credential_ref,
+                Some(b.credential_generation),
+                b.endpoint_family,
+                &b.endpoint_profile,
+                "physical",
+                &b.cache_policy,
+                old_handle.routing_credential_fingerprint().unwrap(),
+            ))
+            .unwrap();
+            let legacy_cache_binding = cache_digest(&(
+                family,
+                old_label,
+                old_handle.routing_credential_fingerprint(),
+                Some((
+                    &b.id,
+                    b.revision,
+                    &b.credential_ref,
+                    b.credential_generation,
+                    &b.endpoint_profile,
+                    &b.cache_policy,
+                )),
+            ))
+            .unwrap();
+            let vk = VirtualKey {
+                id: "legacy-key".into(),
+                upstream_ref: "route/coding".into(),
+                models: Some(vec!["agent".into()]),
+                ..Default::default()
+            };
+            let request:ChatRequestV1=serde_json::from_value(json!({"model":"agent","max_output_tokens":16,"messages":[{"role":"user","content":"hello"}],"cache_intent":{"mode":"preserve_native"},"metadata":{"virtual_key_id":"legacy-key","session_id":"legacy-session"}})).unwrap();
+            let scope = cache_digest(&(
+                "sandhi-route-session-v1",
+                &vk.id,
+                &vk.subject_id,
+                &vk.group_id,
+                &vk.upstream_ref,
+                "agent",
+                Some("legacy-session"),
+                Option::<&ChatMessageV1>::None,
+            ))
+            .unwrap();
+            let routes = RouteStore::open(db.to_str().unwrap()).unwrap();
+            let route:RouteDefinition=serde_json::from_value(json!({"id":"coding","models":[{"id":"agent","targets":[{"backend":"primary","model":"physical"}]}]})).unwrap();
+            routes.put(&route, None).unwrap();
+            let expires = now() + 3600;
+            legacy
+                .execute(
+                    "INSERT INTO route_affinity VALUES(?1,'coding','primary','physical',?2,?3)",
+                    rusqlite::params![scope, legacy_fingerprint, expires],
+                )
+                .unwrap();
+            drop(legacy);
+            drop(routes);
+            let store = BackendStore::open(db.to_str().unwrap()).unwrap();
+            let record = store.get("primary").unwrap().unwrap();
+            assert_eq!(
+                record.upstream_budget_scope,
+                format!("upstream:{old_label}")
+            );
+            let mut providers = std::collections::HashMap::new();
+            crate::backend::rehydrate_backends(
+                &vault,
+                &store,
+                &ProviderRuntime::new(),
+                &mut providers,
+            )
+            .unwrap();
+            let migrated = &providers["backend/primary"];
+            assert_eq!(
+                fingerprint(migrated, "physical").unwrap(),
+                legacy_fingerprint
+            );
+            let mut cache_request = request.clone();
+            cache_request.model = "physical".into();
+            let plan = migrated
+                .compile_cache_plan(&cache_request)
+                .unwrap()
+                .unwrap();
+            assert_eq!(plan.binding_sha256, legacy_cache_binding);
+            if definition.cache_policy.is_some() {
+                let expected_key = format!(
+                    "sandhi:{}",
+                    cache_digest(&(
+                        "cache-namespace-v2",
+                        old_handle.routing_credential_fingerprint(),
+                        "legacy-key",
+                        &cache_request.metadata.subject_id,
+                        &cache_request.metadata.group_id,
+                        &b.id,
+                        b.revision,
+                        &b.credential_ref,
+                        b.credential_generation,
+                        "physical",
+                        &b.endpoint_profile,
+                        &b.cache_policy,
+                        "legacy-session"
+                    ))
+                    .unwrap()
+                );
+                assert_eq!(plan.scoped_key, Some(expected_key));
+            }
+
+            let mut state = ProxyState::new(
+                sandhi_core::KeyStore::new(),
+                crate::ProxyLedger::in_memory(),
+                std::sync::Arc::new(sandhi_core::InMemorySink::new()),
+                providers,
+                None,
+            );
+            state.routes = Some(std::sync::Arc::new(
+                RouteStore::open(db.to_str().unwrap()).unwrap(),
+            ));
+            let mut continuation = request.clone();
+            let selected = select(&state, &vk, &mut continuation, None).await.unwrap();
+            assert_eq!(selected.plan.backend_id, "primary");
+            assert_eq!(
+                state
+                    .routes
+                    .as_ref()
+                    .unwrap()
+                    .pin(&scope, "coding", now())
+                    .unwrap()
+                    .unwrap()
+                    .fingerprint,
+                legacy_fingerprint
+            );
+            let mut changed = definition.clone();
+            changed.provider = "new-label".into();
+            store.put(&changed, Some(1)).unwrap();
+            crate::backend::rehydrate_backends(
+                &vault,
+                &store,
+                &ProviderRuntime::new(),
+                &mut state.providers.lock().unwrap(),
+            )
+            .unwrap();
+            let mut continuation = request;
+            assert!(select(&state, &vk, &mut continuation, None).await.is_err());
+            // Store binding remains immutable even though genuine definition revisions fence old pins.
+            assert_eq!(
+                store.get("primary").unwrap().unwrap().upstream_budget_scope,
+                format!("upstream:{old_label}")
+            );
+        }
+    }
+
     fn lease(account: &str, token: &str, generation: u64) -> ProviderHandle {
         let mut headers = http::HeaderMap::new();
         headers.insert(

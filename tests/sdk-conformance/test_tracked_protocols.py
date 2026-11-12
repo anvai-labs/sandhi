@@ -539,14 +539,23 @@ def test_tracked_async_responses_refuses_before_admission(tmp_path, backend_bina
                 assert connection.execute(f"SELECT count(*) FROM {table}").fetchone() == (0,)
 
 
-def test_tracked_route_selects_accounting_eligible_target_before_pinning(tmp_path, backend_binaries, qualified_origin):
+def test_route_selects_current_eligible_target_without_probing_revoked_credentials(tmp_path, backend_binaries, qualified_origin):
     origin, calls, _ = qualified_origin
     with tracked_gateway(tmp_path, backend_binaries, origin, "openai_responses") as (instance, token):
-        instance.cli("set", "unqualified", "--provider", "other-models", "--credential-ref", "openai:default",
+        # Native families are now qualified; use an actually ineligible credential
+        # rather than preserving an obsolete family-wide exclusion.
+        credential = instance.credentials / "openai__other"
+        credential.write_text("synthetic-retired-credential")
+        credential.chmod(0o600)
+        registered = instance.admin("POST", "/admin/keys/reference", json={
+            "provider": "openai", "label": "other", "base_url": origin})
+        assert registered.status_code == 201, registered.text
+        instance.cli("set", "retired", "--provider", "other-models", "--credential-ref", "openai:other",
                      "--endpoint-family", "cohere_chat", "--model", "fixture")
         definition = {"id": "protocols", "models": [{"id": "agent", "targets": [
-            {"backend": "unqualified", "model": "fixture"}, {"backend": "primary", "model": "fixture"}]}]}
+            {"backend": "retired", "model": "fixture"}, {"backend": "primary", "model": "fixture"}]}]}
         assert instance.admin("POST", "/admin/routes", json={"definition": definition, "expected_revision": 1}).status_code == 201
+        assert instance.admin("DELETE", "/admin/keys/openai/other").status_code == 200
         assert sdk_call(instance, token, FAMILIES[0]) == "reply"
         assert len(calls) == 1 and calls[0][0] == "/responses"
         assert evidence(instance.database)[1]["backend"]["id"] == "primary"
@@ -607,32 +616,29 @@ def test_tracked_async_route_refuses_without_creating_a_pin_or_lease(tmp_path, b
                 assert connection.execute(f"SELECT count(*) FROM {table}").fetchone() == (0,)
 
 
-def test_existing_unqualified_pin_refuses_after_accounting_mode_change_without_switching(tmp_path, backend_binaries, qualified_origin):
+def test_historical_pin_to_a_retired_binding_refuses_without_switching(tmp_path, backend_binaries, qualified_origin):
     origin, calls, _ = qualified_origin
     with tracked_gateway(tmp_path, backend_binaries, origin, "openai_responses") as (instance, token):
-        instance.cli("set", "unqualified", "--provider", "other-models", "--credential-ref", "openai:default",
-                     "--endpoint-family", "cohere_chat", "--model", "fixture")
-        definition = {"id": "protocols", "models": [{"id": "agent", "targets": [
-            {"backend": "unqualified", "model": "fixture"}, {"backend": "primary", "model": "fixture"}]}]}
-        assert instance.admin("POST", "/admin/routes", json={"definition": definition, "expected_revision": 1}).status_code == 201
-        instance.stop()
-        instance.start()  # Older/default accounting can use the Cohere target.
+        # Establish the real authenticated session namespace, then seed an old
+        # persisted pin whose target is no longer present in the current route.
         assert sdk_call(instance, token, FAMILIES[0]) == "reply"
-        assert len(calls) == 1 and calls[0][0] == "/v2/chat"
+        assert len(calls) == 1
         instance.stop()
         with sqlite3.connect(instance.database) as connection:
+            assert connection.execute("SELECT count(*) FROM route_affinity").fetchone() == (1,)
+            connection.execute("UPDATE route_affinity SET backend='retired-source'")
             pin = connection.execute("SELECT * FROM route_affinity").fetchall()
             leases = connection.execute("SELECT * FROM budget_reservation ORDER BY rowid").fetchall()
-            assert len(pin) == 1
-        instance.start(SANDHI_BUFFERED_ACCOUNTING="tracked")
+            intents = connection.execute("SELECT * FROM budget_execution_intent").fetchall()
+        instance.start()
         with pytest.raises(openai.APIStatusError) as refused:
             sdk_call(instance, token, FAMILIES[0])
         assert refused.value.status_code == 409
-        assert len(calls) == 1, "an existing session must not switch to a different backend"
+        assert len(calls) == 1, "a historical session cannot silently switch to another backend"
         with sqlite3.connect(instance.database) as connection:
             assert connection.execute("SELECT * FROM route_affinity").fetchall() == pin
             assert connection.execute("SELECT * FROM budget_reservation ORDER BY rowid").fetchall() == leases
-            assert connection.execute("SELECT count(*) FROM budget_execution_intent").fetchone() == (0,)
+            assert connection.execute("SELECT * FROM budget_execution_intent").fetchall() == intents
 
 
 @pytest.mark.parametrize("family", FAMILIES[:3])
@@ -663,6 +669,25 @@ def test_live_report_verifier_checks_actual_sql_join_and_detects_corrupted_evide
             "usage_events": events, "executions": executions, "accounting_inventory": inventory}
         assert harness.verify_report(report)["errors"] == []
         assert harness.verify_report(report)["tracked_evidence_matches"] == 1
+        assert executions[0]["attempt"]["version"] == 2
+        # Existing v1 records remain valid; bounded v2 labels do not set charge authority.
+        legacy = copy.deepcopy(report)
+        legacy["executions"][0]["attempt"]["version"] = 1
+        legacy["executions"][0]["attempt"].pop("observed_provider", None)
+        assert harness.verify_report(legacy)["errors"] == []
+        diagnostic = copy.deepcopy(report)
+        diagnostic["executions"][0]["attempt"]["observed_provider"] = {"provider": "another-label", "model": "diagnostic-model"}
+        assert harness.verify_report(diagnostic)["errors"] == []
+        for attempt in (None, [], 1, "v2"):
+            broken = copy.deepcopy(report)
+            broken["executions"][0]["attempt"] = attempt
+            assert harness.verify_report(broken)["errors"], attempt
+        for version, observed in [(3, None), (True, None), ("2", None),
+                                  (1, {"provider": "label"}), (2, {"provider": "bad\nlabel"}),
+                                  (2, {"provider": "x" * 129}), (2, {"model": "missing-provider"})]:
+            broken = copy.deepcopy(report)
+            broken["executions"][0]["attempt"].update(version=version, observed_provider=observed)
+            assert harness.verify_report(broken)["errors"], (version, observed)
         assert executions[0]["context"].get("transport_binding_sha256") is None
         assert "credential_ref" not in executions[0]["context"]["backend"]
         for field, value in [("charged_tokens", 99), ("upstream_actual", 0), ("upstream_settled", 0),

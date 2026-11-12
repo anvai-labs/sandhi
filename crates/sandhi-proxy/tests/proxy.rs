@@ -4886,7 +4886,7 @@ async fn owned_buffered_unsupported_shapes_refuse_before_admission() {
         "unbounded",
         "dedup",
         "retry",
-        "stream_unqualified_family",
+        "stream_native_retries",
         "stream_retry",
     ] {
         let upstream = MockServer::start().await;
@@ -4922,14 +4922,14 @@ async fn owned_buffered_unsupported_shapes_refuse_before_admission() {
                 ),
             );
         }
-        if case == "stream_unqualified_family" {
+        if case == "stream_native_retries" {
             state.providers.lock().unwrap().insert(
                 "up1".into(),
                 ProviderRuntime::new().cohere(
                     upstream.uri(),
                     "synthetic",
                     Default::default(),
-                    Some(0),
+                    Some(1),
                     None,
                     None,
                     None,

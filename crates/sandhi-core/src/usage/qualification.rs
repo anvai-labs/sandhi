@@ -414,6 +414,12 @@ pub fn qualify_buffered_usage_with_profile(
     {
         return Err(Error::UnsupportedEndpoint);
     }
+    if matches!(
+        endpoint,
+        EndpointFamilyV1::CohereChat | EndpointFamilyV1::OllamaChat
+    ) {
+        return qualify_native_chat_usage(endpoint, response);
+    }
     let (parsed, reasoning_path) = match endpoint {
         EndpointFamilyV1::OpenaiChatCompletions => {
             super::validate_openai_buffered_usage(response)?;
@@ -464,6 +470,64 @@ pub fn qualify_buffered_usage_with_profile(
             .and_then(Value::as_u64);
     }
     Ok(usage)
+}
+
+/// Require actual native input/output counters, independently of vendor billing.
+/// Ollama may report an inclusive cache-read subset; absent optional read counts
+/// remain absent coverage. Wrong numeric types and missing totals are not zero.
+fn qualify_native_chat_usage(
+    endpoint: EndpointFamilyV1,
+    response: &Value,
+) -> Result<UsageV2, Error> {
+    let (input, output, family) = match endpoint {
+        EndpointFamilyV1::CohereChat => {
+            let usage = usage(response, "usage")?;
+            // Billed units omit some model/server tokens. They are pricing
+            // data, not the actual source-token basis; never fall back to them.
+            let units = usage
+                .get("tokens")
+                .filter(|v| v.is_object())
+                .ok_or(Error::MissingUsage)?;
+            let (input, output) = (
+                required(units, "input_tokens", "input_tokens")?,
+                required(units, "output_tokens", "output_tokens")?,
+            );
+            (input, output, crate::CacheReadFamily::Cohere)
+        }
+        EndpointFamilyV1::OllamaChat => {
+            if response.get("done").and_then(Value::as_bool) != Some(true) {
+                return Err(Error::InvalidResponse);
+            }
+            (
+                required(response, "prompt_eval_count", "prompt_eval_count")?,
+                required(response, "eval_count", "eval_count")?,
+                crate::CacheReadFamily::Ollama,
+            )
+        }
+        _ => return Err(Error::UnsupportedEndpoint),
+    };
+    let read = if endpoint == EndpointFamilyV1::OllamaChat {
+        optional(
+            response,
+            "prompt_eval_cached_count",
+            "prompt_eval_cached_count",
+        )?
+        .unwrap_or(0)
+    } else {
+        0
+    };
+    if read > input {
+        return Err(Error::InconsistentUsage);
+    }
+    Ok(UsageV2 {
+        tokens_in: input - read,
+        cache_read_tokens: read,
+        tokens_out: output,
+        completeness: crate::UsageCompleteness::Final,
+        cache_read_observation: Some(crate::observe_cache_read(family, response)),
+        reasoning_included: Some(true),
+        ..Default::default()
+    })
 }
 
 #[cfg(test)]

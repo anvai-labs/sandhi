@@ -6,7 +6,9 @@
 
 mod attempts;
 pub mod context;
-pub use attempts::{AttemptEvidence, PhysicalAttempt, TransportOutcome, TransportTerminal};
+pub use attempts::{
+    AttemptEvidence, ObservedProvider, PhysicalAttempt, TransportOutcome, TransportTerminal,
+};
 mod dispatch;
 mod paired;
 mod progress;

@@ -25,6 +25,25 @@ pub struct TransportTerminal {
     pub provider_request_id: Option<String>,
 }
 
+/// Configured diagnostic identity observed at dispatch. These labels never
+/// authorize a backend, choose a budget, prove billing or qualify source usage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservedProvider {
+    pub provider: String,
+    pub model: Option<String>,
+}
+
+impl ObservedProvider {
+    pub fn from_labels(provider: String, model: Option<String>) -> Option<Self> {
+        let valid = |value: &str, cap: usize| {
+            !value.is_empty() && value.len() <= cap && !value.chars().any(char::is_control)
+        };
+        (valid(&provider, 128) && model.as_ref().is_none_or(|value| valid(value, 512)))
+            .then_some(Self { provider, model })
+    }
+}
+
 /// Transport facts only. Qualified usage is joined through the execution's
 /// immutable terminal observation; diagnostic usage is never promoted to authority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +56,8 @@ pub struct AttemptEvidence {
     pub terminal: Option<TransportTerminal>,
     pub dropped_observations: u64,
     pub invalid: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_provider: Option<ObservedProvider>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,7 +72,18 @@ impl AttemptEvidence {
     fn encode(&self) -> Result<String, EvidenceError> {
         validate_execution_id(&self.attempt_id)?;
         let valid_ms = |at: i64| at >= 0 && OffsetDateTime::from_unix_timestamp(at / 1000).is_ok();
-        if self.version != 1
+        let diagnostic_label = |value: &str, cap: usize| {
+            !value.is_empty() && value.len() <= cap && !value.chars().any(char::is_control)
+        };
+        if !matches!(self.version, 1 | 2)
+            || (self.version == 1 && self.observed_provider.is_some())
+            || self.observed_provider.as_ref().is_some_and(|observed| {
+                !diagnostic_label(&observed.provider, 128)
+                    || observed
+                        .model
+                        .as_ref()
+                        .is_some_and(|model| !diagnostic_label(model, 512))
+            })
             || self.attempt_ordinal != 1
             || self.dropped_observations > 2
             || self.dispatch_observed_at_ms.is_some_and(|at| !valid_ms(at))
@@ -248,5 +280,39 @@ impl SqliteLedger {
         let attempt = read(&tx, execution_id)?;
         tx.commit()?;
         Ok(attempt)
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_version_tests {
+    use super::*;
+    #[test]
+    fn old_v1_stays_byte_identical_and_v2_labels_do_not_change_transport_completeness() {
+        let old = format!("{{\"version\":1,\"attempt_id\":\"{}\",\"attempt_ordinal\":1,\"dispatch_observed_at_ms\":1,\"terminal\":{{\"observed_at_ms\":2,\"outcome\":\"success\",\"provider_status\":200,\"provider_request_id\":null}},\"dropped_observations\":0,\"invalid\":false}}","a".repeat(64));
+        let mut evidence: AttemptEvidence = serde_json::from_str(&old).unwrap();
+        assert_eq!(evidence.encode().unwrap(), old);
+        assert!(evidence.complete());
+        evidence.version = 2;
+        evidence.observed_provider = Some(ObservedProvider {
+            provider: "configured-vendor".into(),
+            model: Some("physical-model".into()),
+        });
+        let encoded = evidence.encode().unwrap();
+        let reread: AttemptEvidence = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(reread, evidence);
+        assert!(evidence.complete());
+        evidence.observed_provider =
+            ObservedProvider::from_labels(String::new(), Some("model".into()));
+        assert!(evidence.observed_provider.is_none());
+        assert!(evidence.encode().is_ok());
+        assert!(evidence.complete());
+        evidence.terminal = None;
+        assert!(!evidence.complete());
+        evidence.version = 1;
+        evidence.observed_provider = Some(ObservedProvider {
+            provider: "vendor".into(),
+            model: None,
+        });
+        assert!(evidence.encode().is_err());
     }
 }

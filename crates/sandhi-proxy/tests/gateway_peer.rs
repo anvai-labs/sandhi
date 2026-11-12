@@ -386,6 +386,12 @@ async fn persistent_gateway_clients_switch_profiles_and_join_source_receipts() {
                     );
                     assert_eq!(source["reasoning_included"], profile != "gemini");
                     assert_eq!(attempt["attempt_ordinal"], 1);
+                    assert_eq!(attempt["version"], 2);
+                    assert_eq!(
+                        attempt["observed_provider"]["provider"],
+                        format!("vendor-{profile}")
+                    );
+                    assert_eq!(attempt["observed_provider"]["model"], "gpt-4o-mini");
                     assert_eq!(receipt, charge(profile) as i64);
                     let (context,primary,back,primary_scope,back_scope,attempt_id):(String,i64,i64,String,String,String)=conn.query_row(
                         "SELECT c.context_json,i.reservation_id,b.reservation_id,p.scope,q.scope,a.attempt_id FROM budget_request_correlation r JOIN budget_execution_context c USING(execution_id) JOIN budget_execution_intent i USING(execution_id) JOIN budget_execution_back_leg b USING(execution_id) JOIN budget_physical_attempt a USING(execution_id) JOIN budget_reservation p ON p.id=i.reservation_id JOIN budget_reservation q ON q.id=b.reservation_id WHERE r.request_id=?1",[id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?))).unwrap();
@@ -701,6 +707,100 @@ async fn real_gateway_unknown_source_usage_never_authorizes_peer_retry_or_zero_s
     let conn = rusqlite::Connection::open(&database).unwrap();
     let counts:(i64,i64,i64)=conn.query_row("SELECT (SELECT count(*) FROM budget_execution_intent),(SELECT count(*) FROM budget_settlement_outbox),(SELECT count(*) FROM budget_reservation WHERE settled=0)",[],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
     assert_eq!(counts, (8, 0, 16));
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn old_only_upstream_cap_blocks_changed_vendor_and_family_before_dispatch() {
+    use sandhi_core::{Policy, Window};
+    use sandhi_store::{BackendDefinition, BackendStore};
+    let dir = TestDirectory::new();
+    let database = dir.path().join("namespace.db");
+    let store = BackendStore::open(database.to_str().unwrap()).unwrap();
+    let mut definition:BackendDefinition=serde_json::from_value(json!({"id":"pinned","provider":"first-vendor","credential_ref":"vendor:fixture","endpoint":{"endpoint_family":"anthropic_messages"},"models":[{"id":"gpt-4o-mini"}]})).unwrap();
+    let before = store.put(&definition, None).unwrap();
+    assert_eq!(before.upstream_budget_scope, "upstream:anthropic");
+    definition.provider = "second-vendor".into();
+    definition.endpoint.endpoint_family = sandhi_core::EndpointFamilyV1::GeminiGenerateContent;
+    store.put(&definition, Some(1)).unwrap();
+    drop(store);
+    let store = BackendStore::open(database.to_str().unwrap()).unwrap();
+    let record = store.get("pinned").unwrap().unwrap();
+    let origin = MockServer::start().await;
+    let handle = ProviderRuntime::new()
+        .configured_provider(ProviderOptions {
+            provider: definition.provider.clone(),
+            model: "gpt-4o-mini".into(),
+            api_key: "synthetic".into(),
+            base_url: Some(origin.uri()),
+            headers: Default::default(),
+            max_retries: Some(0),
+            timeout_secs: None,
+            stream_setup_timeout_secs: None,
+            stream_idle_timeout_secs: None,
+            auth_scheme: None,
+            protocol: Some("gemini_generate_content".into()),
+            endpoint_profile: None,
+            peer_role: None,
+        })
+        .unwrap()
+        .handle
+        .with_upstream_budget_scope(record.upstream_budget_scope.clone())
+        .unwrap()
+        .with_backend_binding(sandhi_providers::BackendBinding {
+            id: definition.id,
+            revision: record.revision,
+            provider: definition.provider,
+            credential_ref: definition.credential_ref,
+            credential_generation: 1,
+            endpoint_family: definition.endpoint.endpoint_family,
+            endpoint_profile: "standard".into(),
+            models: definition.models,
+            cache_policy: None,
+        });
+    assert_eq!(handle.slug(), "second-vendor");
+    assert_eq!(handle.upstream_budget_scope(), "upstream:anthropic");
+    let sink = Arc::new(InMemorySink::new());
+    let (state, url, server) = gateway(handle, &database, sink.clone()).await;
+    state
+        .ledger
+        .lock()
+        .unwrap()
+        .set_budget("upstream:anthropic", Some(0), Window::Total, Policy::Block)
+        .unwrap();
+    for dialect in [
+        "chat_completions",
+        "anthropic_messages",
+        "responses",
+        "gemini_generate_content",
+    ] {
+        let client = client(&url, dialect);
+        assert!(client.complete(request(false)).await.is_err());
+        let failed = match client.stream(request(false)).await {
+            Err(_) => true,
+            Ok(stream) => stream.collect::<Vec<_>>().await.iter().any(Result::is_err),
+        };
+        assert!(failed);
+    }
+    assert!(origin.received_requests().await.unwrap().is_empty());
+    assert!(sink.events().is_empty());
+    let conn = rusqlite::Connection::open(database).unwrap();
+    let n: i64 = conn
+        .query_row("SELECT count(*) FROM budget_reservation", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(n, 0);
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM budget_limit WHERE scope='upstream:second-vendor'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
     server.abort();
     let _ = server.await;
 }

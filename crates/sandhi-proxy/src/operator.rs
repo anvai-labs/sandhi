@@ -456,7 +456,7 @@ fn build_provider_handle_with_endpoint(
     let base = base_url
         .map(str::to_string)
         .unwrap_or_else(|| default_base_url(provider, family));
-    match family {
+    let handle = match family {
         ProviderFamily::Anthropic => {
             let auth = match scheme {
                 CredentialScheme::Bearer => AnthropicAuthScheme::Bearer,
@@ -522,7 +522,8 @@ fn build_provider_handle_with_endpoint(
             None,
             None,
         )),
-    }
+    }?;
+    handle.with_provider_identity(provider).ok()
 }
 
 fn default_base_url(provider: &str, family: ProviderFamily) -> String {

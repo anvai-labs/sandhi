@@ -1,15 +1,14 @@
 //! Canonical chat v1 ↔ Cohere v2 Chat codec.
 
 use crate::typed::{provider_request_observed, ChatEventStream, ChatProvider};
-use crate::{ByteStream, ParsedUsage, Provider, ProviderError};
+use crate::{ParsedUsage, Provider, ProviderError};
 use async_trait::async_trait;
 use sandhi_core::{
-    AssistantOutputV1, ChatMessageV1, ChatRequestV1, ChatResponseV1, ChatStreamEventV1,
-    ContentPart, FinishReasonV1, MessageContent, ToolCallV1, ToolChoiceMode, ToolChoiceV1,
-    UsageCompleteness, UsageV2,
+    AssistantOutputV1, ChatMessageV1, ChatRequestV1, ChatResponseV1, ContentPart, FinishReasonV1,
+    MessageContent, ToolCallV1, ToolChoiceMode, ToolChoiceV1,
 };
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 pub(crate) struct TypedCohere {
@@ -26,7 +25,7 @@ impl TypedCohere {
         request: ChatRequestV1,
         call_headers: http::HeaderMap,
         attempt_context: Option<crate::AttemptContext>,
-    ) -> Result<ChatResponseV1, ProviderError> {
+    ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
         request.validate().map_err(ProviderError::InvalidRequest)?;
         let body = encode_cohere_request(&request)?;
         let response = self
@@ -38,13 +37,28 @@ impl TypedCohere {
                 attempt_context,
             ))
             .await?;
-        let mut decoded = decode_cohere_response(response.body, response.usage, &request.model)?;
+        let qualified = crate::buffered_completion::qualify(
+            &response,
+            sandhi_core::EndpointFamilyV1::CohereChat,
+            Default::default(),
+        );
+        if !request.include_native_response {
+            crate::native_chat::validate_buffered(
+                sandhi_core::EndpointFamilyV1::CohereChat,
+                &response.body,
+            )?;
+        }
+        let mut decoded = decode_cohere_response(response.body, response.usage, &request.model)
+            .map_err(crate::buffered_completion::decode_error)?;
+        crate::native_chat::repair_tool_ids(&mut decoded)?;
         if !request.include_native_response {
             decoded.extensions.remove("cohere");
         }
-        decoded.usage.attempts = response.attempts;
-        decoded.usage.outcome = Some("success".into());
-        Ok(decoded)
+        Ok(crate::buffered_completion::observed(
+            decoded,
+            qualified,
+            response.attempts,
+        ))
     }
 
     async fn stream_inner(
@@ -55,21 +69,52 @@ impl TypedCohere {
     ) -> Result<ChatEventStream, ProviderError> {
         request.validate().map_err(ProviderError::InvalidRequest)?;
         let body = encode_cohere_request(&request)?;
-        let raw = self
+        let source = self
             .raw
-            .stream(provider_request_observed(
-                &request,
-                body,
-                call_headers,
-                attempt_context,
-            ))
+            .stream_qualified(
+                provider_request_observed(&request, body, call_headers, attempt_context),
+                crate::QualifiedStreamDelivery::Streaming,
+            )
             .await?;
-        Ok(decode_cohere_stream(raw, request.model))
+        Ok(crate::qualified_stream::decode(
+            crate::native_chat::decode(
+                source.stream,
+                request.model,
+                sandhi_core::EndpointFamilyV1::CohereChat,
+            ),
+            source.observation,
+        ))
     }
 }
 
 #[async_trait]
 impl ChatProvider for TypedCohere {
+    fn supports_qualified_streaming(&self) -> bool {
+        true
+    }
+    async fn stream_qualified_observed(
+        &self,
+        request: ChatRequestV1,
+        headers: http::HeaderMap,
+        context: crate::AttemptContext,
+    ) -> Result<ChatEventStream, ProviderError> {
+        self.stream_inner(request, headers, Some(context)).await
+    }
+    async fn complete_qualified(
+        &self,
+        request: ChatRequestV1,
+        headers: http::HeaderMap,
+    ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
+        self.complete_inner(request, headers, None).await
+    }
+    async fn complete_qualified_observed(
+        &self,
+        request: ChatRequestV1,
+        headers: http::HeaderMap,
+        context: crate::AttemptContext,
+    ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
+        self.complete_inner(request, headers, Some(context)).await
+    }
     fn preflight_request(&self, request: &ChatRequestV1) -> Result<(), ProviderError> {
         encode_cohere_request(request).map(|_| ())
     }
@@ -82,7 +127,9 @@ impl ChatProvider for TypedCohere {
         request: ChatRequestV1,
         call_headers: http::HeaderMap,
     ) -> Result<ChatResponseV1, ProviderError> {
-        self.complete_inner(request, call_headers, None).await
+        self.complete_inner(request, call_headers, None)
+            .await
+            .and_then(crate::QualifiedCompletion::into_response)
     }
 
     async fn stream(
@@ -101,6 +148,7 @@ impl ChatProvider for TypedCohere {
     ) -> Result<ChatResponseV1, ProviderError> {
         self.complete_inner(request, call_headers, Some(attempt_context))
             .await
+            .and_then(crate::QualifiedCompletion::into_response)
     }
 
     async fn stream_observed(
@@ -119,6 +167,7 @@ pub fn encode_cohere_request(request: &ChatRequestV1) -> Result<Value, ProviderE
         .native_input_for(sandhi_core::EndpointFamilyV1::CohereChat)
         .map_err(ProviderError::InvalidRequest)?;
     request.validate().map_err(ProviderError::InvalidRequest)?;
+    crate::native_chat::validate_history(request)?;
     let mut body = request
         .extensions
         .get("cohere")
@@ -274,13 +323,16 @@ pub fn decode_cohere_response(
     let message = body
         .get("message")
         .ok_or_else(|| ProviderError::Transport("Cohere response has no message".into()))?;
-    let text = message
+    let mut text = message
         .get("content")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(|part| part.get("text").and_then(Value::as_str))
         .collect::<String>();
+    if let Some(plan) = message.get("tool_plan").and_then(Value::as_str) {
+        text = format!("{plan}{text}");
+    }
     let tool_calls = decode_tool_calls(message.get("tool_calls"));
     Ok(ChatResponseV1 {
         schema_version: sandhi_core::CHAT_SCHEMA_VERSION_V1.into(),
@@ -325,328 +377,9 @@ fn decode_finish_reason(reason: &str) -> FinishReasonV1 {
     }
 }
 
-fn decode_cohere_stream(raw: ByteStream, requested_model: String) -> ChatEventStream {
-    crate::cache_read::decode_with_observation(raw, requested_model, decode_cohere_stream_inner)
-}
-
-fn decode_cohere_stream_inner(mut raw: ByteStream, requested_model: String) -> ChatEventStream {
-    use futures_util::StreamExt;
-    let stream = async_stream::try_stream! {
-        // TD-0014 P1: the shared bounded splitter. One ceiling across both planes; only the
-        // over-budget POLICY differs, and it is applied below. See MAX_STREAM_LINE_BYTES.
-        let mut splitter = crate::linesplit::LineSplitter::new(crate::MAX_STREAM_LINE_BYTES);
-        let mut started = false;
-        let mut open_tools = BTreeSet::<u32>::new();
-        let mut emitted_usage = false;
-        // TD-0014 P2b: after the real chunks end, ONE synthetic empty chunk flushes any
-        // trailing remainder (a final frame without its newline — Ollama's `done` frame) through
-        // this same loop body, so per-chunk event ordering is preserved exactly and the body is
-        // not duplicated. `raw.next()` returning None terminates; a false flush breaks out.
-        let mut tail_pending = false;
-        let mut chunks_ended = false;
-        while !chunks_ended || tail_pending {
-            let chunk = if chunks_ended {
-                tail_pending = false;
-                crate::StreamChunk {
-                    cache_read_observation: None,
-                    data: bytes::Bytes::new(),
-                    usage: None,
-                    usage_running: None,
-                    attempts: 1,
-                    terminal: false,
-                }
-            } else {
-                match raw.next().await {
-                    Some(chunk) => chunk?,
-                    None => {
-                        chunks_ended = true;
-                        tail_pending = splitter.flush_newline();
-                        continue;
-                    }
-                }
-            };
-            let attempts = chunk.attempts;
-            // Unconditional: the synthetic tail chunk arrives with empty data and must still
-            // drain the flushed remainder; draining after no new bytes is a no-op scan.
-            // (The terminal usage-only chunk is likewise empty and previously skipped this.)
-            {
-                splitter.push(&chunk.data);
-                while let Some(line) = splitter.next_line() {
-                    let Some(value) = crate::sse_data_json(&line) else { continue; };
-                    let kind = value.get("type").and_then(Value::as_str);
-                    if kind == Some("message-start") && !started {
-                        yield ChatStreamEventV1::ResponseStart {
-                            id: value.get("id").and_then(Value::as_str).map(str::to_owned),
-                            model: requested_model.clone(),
-                        };
-                        started = true;
-                    }
-                    if kind == Some("content-delta") {
-                        if let Some(text) = value.pointer("/delta/message/content/text").and_then(Value::as_str) {
-                            yield ChatStreamEventV1::TextDelta { delta: text.into() };
-                        }
-                    }
-                    if kind == Some("tool-call-start") {
-                        let index = value.get("index").and_then(Value::as_u64).unwrap_or(0) as u32;
-                        let call = value.pointer("/delta/message/tool_calls").unwrap_or(&Value::Null);
-                        open_tools.insert(index);
-                        yield ChatStreamEventV1::ToolCallStart {
-                            index,
-                            id: call.get("id").and_then(Value::as_str).unwrap_or("").into(),
-                            name: call.pointer("/function/name").and_then(Value::as_str).unwrap_or("").into(),
-                        };
-                    }
-                    if kind == Some("tool-call-delta") {
-                        let index = value.get("index").and_then(Value::as_u64).unwrap_or(0) as u32;
-                        let delta = value.pointer("/delta/message/tool_calls/function/arguments")
-                            .and_then(Value::as_str).unwrap_or("");
-                        if !delta.is_empty() {
-                            yield ChatStreamEventV1::ToolCallArgumentsDelta { index, delta: delta.into() };
-                        }
-                    }
-                    if kind == Some("tool-call-end") {
-                        let index = value.get("index").and_then(Value::as_u64).unwrap_or(0) as u32;
-                        if open_tools.remove(&index) {
-                            yield ChatStreamEventV1::ToolCallEnd { index };
-                        }
-                    }
-                    if kind == Some("message-end") {
-                        if let Some(reason) = value.pointer("/delta/finish_reason").and_then(Value::as_str) {
-                            yield ChatStreamEventV1::Finish { reason: decode_finish_reason(reason) };
-                        }
-                    }
-                }
-                // TD-0014 P1 (gap G01): past MAX_STREAM_LINE_BYTES the upstream has sent no
-                // line boundary at all, which no real provider does. The raw plane drops the
-                // pending line and keeps streaming — its bytes were already forwarded, so
-                // only usage suffers. A typed decoder emits decoded CONTENT, so dropping
-                // silently would corrupt the response with no signal. Fail loudly instead;
-                // mid-stream errors are never retried.
-                if splitter.over_budget() {
-                    Err(ProviderError::Transport(format!(
-                        "upstream stream exceeded {} bytes with no line boundary",
-                        crate::MAX_STREAM_LINE_BYTES
-                    )))?;
-                }
-            }
-            if let Some(usage) = chunk.usage {
-                if !emitted_usage {
-                    let mut usage: UsageV2 = usage.into();
-                    usage.completeness = UsageCompleteness::Final;
-                    usage.attempts = attempts;
-                    usage.outcome = Some("success".into());
-                    yield ChatStreamEventV1::Usage { usage };
-                    emitted_usage = true;
-                }
-            }
-        }
-    };
-    Box::pin(stream)
-}
-
 #[cfg(test)]
 mod tests {
-
-    /// TD-0014 P1, the opposing guard. The six `..._is_bounded_and_errors_...` tests pin the
-    /// ceiling from BELOW; on their own they would all still pass with the bound set to 1 KiB,
-    /// which would break every legitimate large frame. Adversarial review found five of six
-    /// decoders had no test in this direction — the same one-sidedness that let the original
-    /// 64 KiB ceiling ship. This pins it from above.
-    #[tokio::test]
-    async fn a_large_but_legitimate_frame_is_not_killed_by_the_line_bound() {
-        use futures_util::StreamExt;
-        // 200 KB in one terminated line: far past the old 64 KiB bound, far under the real one.
-        let big = "x".repeat(200 * 1024);
-        let wire = format!("data: {{\"type\":\"content-delta\",\"delta\":{{\"message\":{{\"content\":{{\"text\":\"{big}\"}}}}}}}}\n\n");
-        let chunks: Vec<_> = wire
-            .as_bytes()
-            .chunks(16 * 1024)
-            .map(|c| {
-                Ok(crate::StreamChunk {
-                    cache_read_observation: None,
-                    data: bytes::Bytes::copy_from_slice(c),
-                    usage: None,
-                    usage_running: None,
-                    attempts: 1,
-                    terminal: false,
-                })
-            })
-            .collect();
-        let raw: crate::ByteStream = Box::pin(futures_util::stream::iter(chunks));
-        let results: Vec<_> = super::decode_cohere_stream(raw, "m".into())
-            .collect::<Vec<_>>()
-            .await;
-        assert!(
-            !results
-                .iter()
-                .any(|r| matches!(r, Err(crate::ProviderError::Transport(_)))),
-            "a 200 KB terminated frame is legitimate traffic and must survive"
-        );
-        let text: usize = results
-            .iter()
-            .flatten()
-            .filter_map(|e| match e {
-                sandhi_core::ChatStreamEventV1::TextDelta { delta } => Some(delta.len()),
-                _ => None,
-            })
-            .sum();
-        assert_eq!(text, big.len(), "the whole delta must arrive intact");
-    }
-
-    /// TD-0014 P1 (gap G01): a newline-free upstream stream must stay BOUNDED and fail loudly.
-    ///
-    /// The raw plane may drop an over-budget line and keep going — its bytes were already
-    /// forwarded verbatim, so only *usage* is lost. A typed decoder drops decoded **content**,
-    /// so dropping silently would corrupt the response with no signal at all. It errors instead.
-    /// Mid-stream errors are never retried (`resilience.rs`), so this cannot loop.
-    #[tokio::test]
-    async fn a_newline_free_stream_is_bounded_and_errors_rather_than_growing() {
-        use futures_util::StreamExt;
-        // 16 MiB with no line boundary anywhere — past MAX_STREAM_LINE_BYTES (8 MiB). The bound
-        // exists to stop unbounded growth, so the test input has to be genuinely pathological;
-        // a merely LARGE frame is legitimate and is covered by the regression test above.
-        let filler = bytes::Bytes::from(vec![b'x'; 64 * 1024]);
-        let chunks: Vec<_> = (0..256)
-            .map(|_| {
-                Ok(crate::StreamChunk {
-                    cache_read_observation: None,
-                    data: filler.clone(),
-                    usage: None,
-                    usage_running: None,
-                    attempts: 1,
-                    terminal: false,
-                })
-            })
-            .collect();
-        let raw: crate::ByteStream = Box::pin(futures_util::stream::iter(chunks));
-        let results: Vec<_> = super::decode_cohere_stream(raw, "m".into())
-            .collect::<Vec<_>>()
-            .await;
-        assert!(
-            results
-                .iter()
-                .any(|item| matches!(item, Err(crate::ProviderError::Transport(_)))),
-            "a newline-free stream must terminate with a Transport error rather than \
-             buffering without bound"
-        );
-    }
     use super::*;
-
-    /// TD-0014 P1 characterisation net (gap G01). The decoder must yield identical events no
-    /// matter where the transport splits the byte stream. Written BEFORE the `LineSplitter`
-    /// refactor precisely so it can prove the refactor changed nothing: `cohere_typed` is one of the
-    /// three typed decoders that had no boundary-invariance test at all, so the refactor would
-    /// otherwise have had no net beneath it. Mirrors `anthropic_typed`'s equivalent.
-    #[tokio::test]
-    async fn stream_codec_is_invariant_across_arbitrary_byte_boundaries() {
-        use futures_util::StreamExt;
-        let wire = concat!(
-            "data: {\"type\":\"message-start\",\"id\":\"c1\"}\n\n",
-            "data: {\"type\":\"content-delta\",\"delta\":{\"message\":{\"content\":{\"text\":\"he\"}}}}\n\n",
-            "data: {\"type\":\"tool-call-start\",\"index\":0,\"delta\":{\"message\":{\"tool_calls\":{\"id\":\"t1\",\"function\":{\"name\":\"lookup\"}}}}}\n\n",
-            "data: {\"type\":\"tool-call-delta\",\"index\":0,\"delta\":{\"message\":{\"tool_calls\":{\"function\":{\"arguments\":\"{}\"}}}}}\n\n",
-            "data: {\"type\":\"tool-call-end\",\"index\":0}\n\n",
-            "data: {\"type\":\"content-delta\",\"delta\":{\"message\":{\"content\":{\"text\":\"llo\"}}}}\n\n",
-            "data: {\"type\":\"message-end\",\"delta\":{\"finish_reason\":\"COMPLETE\"}}\n\n",
-        ).as_bytes();
-        for split in 0..=wire.len() {
-            let raw: crate::ByteStream = Box::pin(futures_util::stream::iter(vec![
-                Ok(crate::StreamChunk {
-                    cache_read_observation: None,
-                    data: bytes::Bytes::copy_from_slice(&wire[..split]),
-                    usage: None,
-                    usage_running: None,
-                    attempts: 1,
-                    terminal: false,
-                }),
-                Ok(crate::StreamChunk {
-                    cache_read_observation: None,
-                    data: bytes::Bytes::copy_from_slice(&wire[split..]),
-                    usage: None,
-                    usage_running: None,
-                    attempts: 1,
-                    terminal: false,
-                }),
-                Ok(crate::StreamChunk {
-                    cache_read_observation: None,
-                    data: bytes::Bytes::new(),
-                    usage: Some(crate::ParsedUsage {
-                        cache_read_observation: None,
-                        reasoning_included: Some(true),
-                        tokens_in: 2,
-                        tokens_out: 3,
-                        cache_creation_tokens: 0,
-                        cache_read_tokens: 0,
-                        reasoning_tokens: 0,
-                        duration_ms: None,
-                        time_to_first_token_ms: None,
-                    }),
-                    usage_running: None,
-                    attempts: 1,
-                    terminal: true,
-                }),
-            ]));
-            let events = decode_cohere_stream(raw, "command-r".into())
-                .collect::<Vec<_>>()
-                .await
-                .into_iter()
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap();
-
-            assert!(
-                matches!(
-                    events.first(),
-                    Some(sandhi_core::ChatStreamEventV1::ResponseStart { .. })
-                ),
-                "split {split}: first event must be ResponseStart"
-            );
-            // The load-bearing assertion for a line splitter: mis-split lines drop or duplicate
-            // text deltas, and concatenating them is what catches that.
-            let text: String = events
-                .iter()
-                .filter_map(|event| match event {
-                    sandhi_core::ChatStreamEventV1::TextDelta { delta } => Some(delta.as_str()),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(
-                text, "hello",
-                "split {split}: text deltas must reassemble exactly"
-            );
-            assert!(
-                events
-                    .iter()
-                    .any(|event| matches!(event, sandhi_core::ChatStreamEventV1::Finish { .. })),
-                "split {split}: Finish must survive any split"
-            );
-            assert_eq!(
-                events
-                    .iter()
-                    .filter(|event| matches!(
-                        event,
-                        sandhi_core::ChatStreamEventV1::Usage { usage }
-                            if usage.completeness == sandhi_core::UsageCompleteness::Final
-                    ))
-                    .count(),
-                1,
-                "split {split}: exactly one Final usage frame"
-            );
-            assert!(
-                events.iter().any(|event| matches!(
-                    event,
-                    sandhi_core::ChatStreamEventV1::ToolCallStart { id, .. } if id == "t1"
-                )),
-                "split {split}: ToolCallStart must survive any split"
-            );
-            assert!(
-                events.iter().any(|event| matches!(
-                    event,
-                    sandhi_core::ChatStreamEventV1::ToolCallEnd { index: 0 }
-                )),
-                "split {split}: ToolCallEnd must survive any split"
-            );
-        }
-    }
 
     #[test]
     fn w3d_fields_are_ignored_no_leak() {

@@ -34,7 +34,7 @@ impl ProviderHandle {
         let binding = self.backend_binding();
         cache_digest(&(
             self.family().endpoint_family(),
-            self.slug(),
+            self.transport_slug(),
             self.routing_credential_fingerprint(),
             binding.map(|b| {
                 (

@@ -127,7 +127,8 @@ fn state(provider: ProviderHandle) -> (Arc<ProxyState>, Arc<InMemorySink>, Strin
             ..Default::default()
         });
     }
-    let upstream_scope = format!("upstream:{}", provider.slug());
+    // Diagnostic identity is not enforcement authority.
+    let upstream_scope = provider.upstream_budget_scope().to_owned();
     let mut ledger = ProxyLedger::in_memory();
     for scope in ["vk:vk_fixture", "vk:vk_second", &upstream_scope] {
         ledger

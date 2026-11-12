@@ -24,6 +24,9 @@ impl Selection {
         surface: Surface,
         upstream_scope: &str,
     ) -> Result<ExecutionContext, &'static str> {
+        if upstream_scope != provider.upstream_budget_scope() {
+            return Err("execution scope does not match the configured budget namespace");
+        }
         let binding = provider.backend_binding();
         if let Some(plan) = &self.routing {
             if !binding.is_some_and(|b| {
@@ -118,5 +121,60 @@ impl Selection {
         };
         value.validate().map_err(|_| "invalid execution context")?;
         Ok(value)
+    }
+}
+
+#[cfg(test)]
+mod namespace_tests {
+    use super::*;
+    #[test]
+    fn diagnostic_identity_cannot_select_a_different_context_budget() {
+        let provider = sandhi_providers::ProviderRuntime::new()
+            .openai_compat(
+                "original",
+                "http://127.0.0.1:1",
+                "synthetic",
+                Default::default(),
+                Some(0),
+                None,
+                None,
+                None,
+            )
+            .with_provider_identity("vendor-label")
+            .unwrap();
+        let state = ProxyState::new(
+            sandhi_core::KeyStore::new(),
+            crate::ProxyLedger::in_memory(),
+            std::sync::Arc::new(sandhi_core::InMemorySink::new()),
+            Default::default(),
+            None,
+        );
+        let selection = Selection {
+            upstream_ref: "source".into(),
+            routing: None,
+        };
+        let request = serde_json::from_value(
+            serde_json::json!({"model":"fixture","messages":[{"role":"user","content":"hello"}]}),
+        )
+        .unwrap();
+        let surface = || Surface {
+            dialect: IngressDialect::OpenAi,
+            streaming: false,
+            transparent: true,
+        };
+        assert!(selection
+            .freeze(
+                &state,
+                &provider,
+                &request,
+                surface(),
+                "upstream:vendor-label"
+            )
+            .is_err());
+        let context = selection
+            .freeze(&state, &provider, &request, surface(), "upstream:original")
+            .unwrap();
+        assert_eq!(context.provider, "vendor-label");
+        assert_eq!(context.upstream_budget_scope, "upstream:original");
     }
 }

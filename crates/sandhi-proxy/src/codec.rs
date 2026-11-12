@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 
 use axum::http::{HeaderMap, StatusCode};
+use base64::Engine as _;
 use sandhi_core::chat::ThinkingV1;
 use sandhi_core::{
     ChatMessageV1, ChatRequestV1, ChatResponseV1, ChatStreamEventV1, ContentPart, FinishReasonV1,
@@ -443,7 +444,7 @@ fn decode_gemini_request(
                 continue;
             };
             if start < index {
-                messages.push(decode_gemini_segment(content, &parts[start..index]));
+                messages.push(decode_gemini_segment(content, &parts[start..index])?);
             }
             let tool_call_id = fr
                 .get("id")
@@ -472,7 +473,7 @@ fn decode_gemini_request(
             start = index + 1;
         }
         if start < parts.len() || parts.is_empty() {
-            messages.push(decode_gemini_segment(content, &parts[start..]));
+            messages.push(decode_gemini_segment(content, &parts[start..])?);
         }
     }
 
@@ -615,45 +616,71 @@ fn decode_gemini_request(
     Ok((request, false))
 }
 
-fn decode_gemini_segment(content: &Value, parts: &[Value]) -> ChatMessageV1 {
-    let decoded = gemini_content(parts);
-    if content.get("role").and_then(Value::as_str) == Some("model") {
-        ChatMessageV1::Assistant {
-            content: decoded,
-            name: None,
-            tool_calls: parts
-                .iter()
-                .filter_map(|part| part.get("functionCall"))
-                .map(|call| {
-                    let name = call.get("name").and_then(Value::as_str).unwrap_or_default();
-                    ToolCallV1 {
-                        id: call
-                            .get("id")
-                            .and_then(Value::as_str)
-                            .unwrap_or(name)
-                            .into(),
-                        name: name.into(),
-                        arguments: call
-                            .get("args")
-                            .map(ToString::to_string)
-                            .unwrap_or_else(|| "{}".into()),
-                        extensions: BTreeMap::new(),
-                    }
-                })
-                .collect(),
-            refusal: None,
-        }
-    } else {
-        ChatMessageV1::User {
-            content: decoded.unwrap_or_else(|| MessageContent::Text(String::new())),
-            name: None,
-        }
+fn decode_gemini_segment(content: &Value, parts: &[Value]) -> Result<ChatMessageV1, String> {
+    let decoded = gemini_content(parts)?;
+    Ok(
+        if content.get("role").and_then(Value::as_str) == Some("model") {
+            ChatMessageV1::Assistant {
+                content: decoded,
+                name: None,
+                tool_calls: parts
+                    .iter()
+                    .filter_map(|part| part.get("functionCall"))
+                    .map(|call| {
+                        let name = call.get("name").and_then(Value::as_str).unwrap_or_default();
+                        ToolCallV1 {
+                            id: call
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .unwrap_or(name)
+                                .into(),
+                            name: name.into(),
+                            arguments: call
+                                .get("args")
+                                .map(ToString::to_string)
+                                .unwrap_or_else(|| "{}".into()),
+                            extensions: BTreeMap::new(),
+                        }
+                    })
+                    .collect(),
+                refusal: None,
+            }
+        } else {
+            ChatMessageV1::User {
+                content: decoded.unwrap_or_else(|| MessageContent::Text(String::new())),
+                name: None,
+            }
+        },
+    )
+}
+
+/// ProtoJSON accepts the JSON and proto field names. Both consumers use one
+/// decision so a valid SDK image cannot be classified as unsupported media.
+fn gemini_inline_mime(inline: &Value) -> Result<&str, String> {
+    let camel = inline.get("mimeType");
+    let snake = inline.get("mime_type");
+    if camel.is_some() && snake.is_some() && camel != snake {
+        return Err("Gemini inlineData contains conflicting MIME aliases".into());
     }
+    camel
+        .or(snake)
+        .and_then(Value::as_str)
+        .filter(|mime| {
+            let token = |value: &str| {
+                !value.is_empty()
+                    && value.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
+                    })
+            };
+            mime.split_once('/')
+                .is_some_and(|(kind, subtype)| token(kind) && token(subtype))
+        })
+        .ok_or_else(|| "Gemini inlineData requires a valid MIME type".into())
 }
 
 /// Gemini `parts[]` → neutral content. Text-only collapses to `Text`; anything richer keeps its
 /// parts, with `inlineData` rendered as the data URI the neutral contract carries images in.
-fn gemini_content(parts: &[Value]) -> Option<MessageContent> {
+fn gemini_content(parts: &[Value]) -> Result<Option<MessageContent>, String> {
     let mut collected: Vec<ContentPart> = Vec::new();
     for part in parts {
         if let Some(text) = part.get("text").and_then(Value::as_str) {
@@ -661,21 +688,33 @@ fn gemini_content(parts: &[Value]) -> Option<MessageContent> {
                 text: text.to_string(),
             });
         } else if let Some(inline) = part.get("inlineData") {
-            let mime = inline
-                .get("mimeType")
-                .and_then(Value::as_str)
-                .unwrap_or("application/octet-stream");
+            let mime = gemini_inline_mime(inline)?.to_ascii_lowercase();
             let data = inline
                 .get("data")
                 .and_then(Value::as_str)
-                .unwrap_or_default();
+                .filter(|data| !data.is_empty())
+                .ok_or_else(|| "Gemini inlineData requires base64 bytes".to_string())?;
+            use base64::engine::general_purpose::{
+                STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD,
+            };
+            let urlsafe = data.bytes().any(|byte| matches!(byte, b'-' | b'_'));
+            let engine = match (urlsafe, data.len() % 4 == 0) {
+                (false, true) => &STANDARD,
+                (false, false) => &STANDARD_NO_PAD,
+                (true, true) => &URL_SAFE,
+                (true, false) => &URL_SAFE_NO_PAD,
+            };
+            let bytes = engine
+                .decode(data)
+                .map_err(|_| "Gemini inlineData has invalid base64 bytes".to_string())?;
+            let data = STANDARD.encode(bytes);
             collected.push(ContentPart::ImageUrl {
                 image_url: format!("data:{mime};base64,{data}"),
                 detail: None,
             });
         }
     }
-    match collected.len() {
+    Ok(match collected.len() {
         0 => None,
         _ if collected
             .iter()
@@ -692,7 +731,7 @@ fn gemini_content(parts: &[Value]) -> Option<MessageContent> {
             Some(MessageContent::Text(text))
         }
         _ => Some(MessageContent::Parts(collected)),
-    }
+    })
 }
 
 /// Concatenate the `text` parts of a Gemini `parts[]` array.
@@ -3630,6 +3669,40 @@ mod gemini_codec_tests {
         match &request.messages[2] {
             ChatMessageV1::Tool { tool_call_id, .. } => assert_eq!(tool_call_id, "call_1"),
             other => panic!("expected a tool result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gemini_inline_sdk_mime_alias_and_urlsafe_bytes_are_portable() {
+        let body = json!({"contents":[{"role":"user","parts":[
+            {"inlineData":{"mime_type":"image/png","data":"-_8"}}
+        ]}]});
+        let (request, _) = decode_gemini_request(body, metadata()).unwrap();
+        let ChatMessageV1::User {
+            content: MessageContent::Parts(parts),
+            ..
+        } = &request.messages[0]
+        else {
+            panic!("inline image must retain its content part");
+        };
+        assert!(matches!(&parts[0], ContentPart::ImageUrl { image_url, .. }
+            if image_url == "data:image/png;base64,+/8="));
+        assert!(request
+            .native_input_for(sandhi_core::EndpointFamilyV1::OpenaiChatCompletions)
+            .is_ok());
+    }
+
+    #[test]
+    fn gemini_inline_conflicting_mime_and_invalid_bytes_refuse() {
+        for inline in [
+            json!({"mimeType":"image/png","mime_type":"audio/wav","data":"AA=="}),
+            json!({"mimeType":4,"data":"AA=="}),
+            json!({"mimeType":"image/png","data":"invalid?"}),
+            json!({"mimeType":"image/png","data":4}),
+            json!({"mime_type":"image//png","data":"AA=="}),
+        ] {
+            let body = json!({"contents":[{"role":"user","parts":[{"inlineData":inline}]}]});
+            assert!(decode_gemini_request(body, metadata()).is_err(), "{inline}");
         }
     }
 

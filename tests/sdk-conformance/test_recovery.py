@@ -472,7 +472,9 @@ def assert_physical_attempt(rows, *, terminal):
         assert encoded is None, "authorization alone must leave send status unknown"
         return
     evidence = json.loads(encoded)
-    assert evidence["version"] == 1 and evidence["attempt_id"] == identity
+    assert evidence["version"] == 2 and evidence["attempt_id"] == identity
+    context = json.loads(rows["budget_execution_context"][0][2])
+    assert evidence["observed_provider"] == {"provider": context["provider"], "model": context["actual_model"]}
     assert evidence["attempt_ordinal"] == 1
     assert evidence["dispatch_observed_at_ms"] is not None
     assert evidence["terminal"] is not None

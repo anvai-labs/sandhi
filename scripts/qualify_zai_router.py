@@ -351,6 +351,27 @@ def tracked_evidence(connection):
     return records, inventory
 
 
+def valid_attempt_version(attempt):
+    """Accept stored evidence versions without promoting diagnostic labels to authority."""
+    if not isinstance(attempt, dict):
+        return False
+    version = attempt.get("version")
+    observed = attempt.get("observed_provider")
+    if type(version) is not int or version not in (1, 2):
+        return False
+    if observed is None:
+        return True
+    if version != 2 or not isinstance(observed, dict) or set(observed) - {"provider", "model"}:
+        return False
+
+    def label(value, limit):
+        return (isinstance(value, str) and 0 < len(value.encode("utf-8")) <= limit
+                and not any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in value))
+
+    return (label(observed.get("provider"), 128)
+            and (observed.get("model") is None or label(observed["model"], 512)))
+
+
 def verify_tracked(report, by_step):
     errors, matched = [], 0
     records = report.get("executions", [])
@@ -396,7 +417,7 @@ def verify_tracked(report, by_step):
                     or context["route"]["id"] != "qualify-" + cell["backend"]
                     or context["backend"]["id"] != "zai-" + cell["backend"]):
                 raise ValueError("logical route/backend attribution mismatch")
-            if (attempt["version"] != 1 or attempt["attempt_id"] != identity or attempt["attempt_ordinal"] != 1
+            if (not valid_attempt_version(attempt) or attempt["attempt_id"] != identity or attempt["attempt_ordinal"] != 1
                     or attempt["dispatch_observed_at_ms"] is None or attempt["terminal"] is None
                     or attempt["invalid"] or attempt["dropped_observations"] != 0):
                 raise ValueError("incomplete physical-attempt evidence")

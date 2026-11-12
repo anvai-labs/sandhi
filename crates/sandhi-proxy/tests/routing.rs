@@ -229,7 +229,7 @@ fn state(
     for (_, handle) in &handles {
         ledger
             .set_budget(
-                &format!("upstream:{}", handle.slug()),
+                handle.upstream_budget_scope(),
                 Some(100_000),
                 Window::Total,
                 Policy::Block,
@@ -394,10 +394,9 @@ async fn aliases_rewrite_real_models_on_all_ingress_backend_pairs_and_modes() {
                 assert_eq!(events.len(), 1);
                 assert_eq!(events[0].model, "physical");
                 assert_eq!(events[0].cache_read_tokens, 60);
-                let upstream_scope = format!(
-                    "upstream:{}",
-                    state.providers.lock().unwrap()["backend/primary"].slug()
-                );
+                let upstream_scope = state.providers.lock().unwrap()["backend/primary"]
+                    .upstream_budget_scope()
+                    .to_owned();
                 for scope in ["vk:vk_one", upstream_scope.as_str()] {
                     let ledger = state.ledger.lock().unwrap();
                     assert_eq!(ledger.spent(scope), 120);

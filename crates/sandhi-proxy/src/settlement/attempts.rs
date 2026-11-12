@@ -1,6 +1,8 @@
 //! Bounded transport observer owned by the request until immutable settlement capture.
 use sandhi_providers::{AttemptContext, AttemptOutcome, AttemptPhase, AttemptReceiver};
-use sandhi_store::ledger::evidence::{AttemptEvidence, TransportOutcome, TransportTerminal};
+use sandhi_store::ledger::evidence::{
+    AttemptEvidence, ObservedProvider, TransportOutcome, TransportTerminal,
+};
 
 pub(crate) struct Observer {
     pub context: AttemptContext,
@@ -30,7 +32,8 @@ impl Observer {
     /// events stay unresolved; diagnostic labels and parsed usage are not authority.
     pub fn finish(self) -> AttemptEvidence {
         let mut evidence = AttemptEvidence {
-            version: 1,
+            version: 2,
+            observed_provider: None,
             attempt_id: self.attempt_id,
             attempt_ordinal: 1,
             dispatch_observed_at_ms: None,
@@ -53,6 +56,8 @@ impl Observer {
                         evidence.invalid = true;
                     } else {
                         evidence.dispatch_observed_at_ms = Some(event.observed_at_unix_ms);
+                        evidence.observed_provider =
+                            ObservedProvider::from_labels(event.provider, event.model);
                     }
                 }
                 AttemptPhase::Terminal {

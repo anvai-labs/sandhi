@@ -508,9 +508,11 @@ def test_static_headers_json_reaches_all_four_families():
             "candidates": [{"content": {"parts": [{"text": "ok"}]}}],
             "usageMetadata": {"promptTokenCount": 2, "candidatesTokenCount": 1}},
         "/v2/chat": {"id": "r1", "message": {"content": [{"type": "text", "text": "ok"}]},
-                     "usage": {"billed_units": {"input_tokens": 2, "output_tokens": 1}}},
+                     "finish_reason": "COMPLETE",
+                     "usage": {"tokens": {"input_tokens": 2, "output_tokens": 1},
+                               "billed_units": {"input_tokens": 1, "output_tokens": 0}}},
         "/api/chat": {"message": {"role": "assistant", "content": "ok"}, "done": True,
-                      "prompt_eval_count": 2, "eval_count": 1},
+                      "done_reason": "stop", "prompt_eval_count": 2, "eval_count": 1},
     }
 
     class Handler(BaseHTTPRequestHandler):

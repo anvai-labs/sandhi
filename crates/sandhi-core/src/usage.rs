@@ -587,21 +587,23 @@ pub fn parse_cohere_usage(response: &Value) -> Option<ParsedUsage> {
 }
 
 /// Parse an Ollama native `/api/chat` (or `/api/generate`) response. `prompt_eval_count` is the
-/// input tokens, `eval_count` the output. No cache split. Returns `None` if neither field is
+/// inclusive input tokens, `prompt_eval_cached_count` its optional cache-read subset,
+/// and `eval_count` the output. Returns `None` if neither total field is
 /// present. (vLLM and other OpenAI-compatible local servers use [`parse_openai_usage`] instead.)
 pub fn parse_ollama_usage(response: &Value) -> Option<ParsedUsage> {
     if response.get("prompt_eval_count").is_none() && response.get("eval_count").is_none() {
         return None;
     }
     Some(ParsedUsage {
-        tokens_in: u64_at(response, "prompt_eval_count"),
+        tokens_in: u64_at(response, "prompt_eval_count")
+            .saturating_sub(u64_at(response, "prompt_eval_cached_count")),
         cache_read_observation: Some(crate::observe_cache_read(
             crate::CacheReadFamily::Ollama,
             response,
         )),
         tokens_out: u64_at(response, "eval_count"),
         cache_creation_tokens: 0,
-        cache_read_tokens: 0,
+        cache_read_tokens: u64_at(response, "prompt_eval_cached_count"),
         reasoning_tokens: 0,
         reasoning_included: Some(true),
         duration_ms: None,

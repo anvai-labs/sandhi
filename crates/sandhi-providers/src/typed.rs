@@ -369,6 +369,8 @@ pub struct BackendBinding {
 
 #[derive(Clone)]
 pub struct ProviderHandle {
+    provider_identity: Option<Arc<str>>,
+    upstream_budget_scope: Arc<str>,
     pub(crate) peer_role: sandhi_core::PeerRoleV1,
     source_convention: Option<sandhi_core::UsageConventionV1>,
     inner: Arc<dyn ChatProvider>,
@@ -407,6 +409,8 @@ impl ProviderHandle {
     #[must_use]
     pub fn new(inner: Arc<dyn ChatProvider>) -> Self {
         Self {
+            upstream_budget_scope: format!("upstream:{}", inner.slug()).into(),
+            provider_identity: None,
             inner,
             family: ProviderFamily::OpenAiCompat,
             source_convention: None,
@@ -524,12 +528,80 @@ impl ProviderHandle {
         self.inner.allows_cache_synthesis()
     }
 
+    fn observed_context(&self, context: crate::AttemptContext) -> crate::AttemptContext {
+        match self.provider_identity.as_deref() {
+            Some(identity) => context.with_configured_provider(identity),
+            None => context,
+        }
+    }
+
+    /// Configured provider identity for diagnostics; never a budget namespace.
     pub fn slug(&self) -> &str {
+        self.provider_identity
+            .as_deref()
+            .unwrap_or_else(|| self.inner.slug())
+    }
+
+    /// Original implementation label retained only for existing cache addressing.
+    /// Configured identity and budget authority have independent owners.
+    pub(crate) fn transport_slug(&self) -> &str {
         self.inner.slug()
+    }
+
+    /// Canonical authority captured independently of diagnostic identity and wire family.
+    pub fn upstream_budget_scope(&self) -> &str {
+        &self.upstream_budget_scope
+    }
+
+    /// Trusted composition only. Request bodies and headers cannot choose this namespace.
+    /// Registry callers restore the immutable stored binding before attaching its revision.
+    pub fn with_upstream_budget_scope(
+        mut self,
+        scope: impl Into<String>,
+    ) -> Result<Self, ProviderError> {
+        let scope = scope.into();
+        let valid = scope.strip_prefix("upstream:").is_some_and(|name| {
+            !name.is_empty()
+                && !name.ends_with('.')
+                && name.len() <= 128
+                && name.bytes().all(|b| {
+                    b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-')
+                })
+        });
+        if !valid || self.backend_binding.is_some() {
+            return Err(ProviderError::InvalidRequest(
+                "invalid or already bound upstream budget namespace".into(),
+            ));
+        }
+        self.upstream_budget_scope = scope.into();
+        Ok(self)
+    }
+
+    /// Override configured diagnostic identity without moving any budget authority.
+    pub fn with_provider_identity(
+        mut self,
+        identity: impl Into<String>,
+    ) -> Result<Self, ProviderError> {
+        let identity = identity.into();
+        if self
+            .backend_binding
+            .as_ref()
+            .is_some_and(|binding| binding.provider != identity)
+            || identity.trim().is_empty()
+            || identity.len() > 128
+            || identity.chars().any(char::is_control)
+        {
+            return Err(ProviderError::InvalidRequest(
+                "invalid configured provider identity".into(),
+            ));
+        }
+        self.provider_identity = Some(identity.into());
+        Ok(self)
     }
 
     #[must_use]
     pub fn with_backend_binding(mut self, binding: BackendBinding) -> Self {
+        self.provider_identity = Some(Arc::from(binding.provider.as_str()));
         self.backend_binding = Some(Arc::new(binding));
         self
     }
@@ -644,7 +716,11 @@ impl ProviderHandle {
         let mut result = match context {
             Some(context) => {
                 self.inner
-                    .complete_qualified_observed(request, call_headers, context)
+                    .complete_qualified_observed(
+                        request,
+                        call_headers,
+                        self.observed_context(context),
+                    )
                     .await?
             }
             None => self.inner.complete_qualified(request, call_headers).await?,
@@ -689,7 +765,11 @@ impl ProviderHandle {
         let started = std::time::Instant::now();
         let mut response = self
             .inner
-            .complete_observed(request, call_headers, attempt_context)
+            .complete_observed(
+                request,
+                call_headers,
+                self.observed_context(attempt_context),
+            )
             .await?;
         reconcile_duration(&mut response.usage, elapsed_ms(started));
         Ok(response)
@@ -712,7 +792,11 @@ impl ProviderHandle {
         let started = std::time::Instant::now();
         let inner = self
             .inner
-            .stream_observed(request, call_headers, attempt_context)
+            .stream_observed(
+                request,
+                call_headers,
+                self.observed_context(attempt_context),
+            )
             .await?;
         Ok(stamp_stream_latency(inner, started))
     }
@@ -728,7 +812,7 @@ impl ProviderHandle {
         let started = std::time::Instant::now();
         let stream = self
             .inner
-            .stream_qualified_observed(request, headers, context)
+            .stream_qualified_observed(request, headers, self.observed_context(context))
             .await?;
         Ok(stamp_stream_latency(stream, started))
     }
@@ -1052,6 +1136,8 @@ impl ProviderRuntime {
         let credential_account_fenced = account_fenced_config(&config);
         let raw = self.transport_with_openai_stream_usage_profile(config, profile);
         ProviderHandle {
+            provider_identity: None,
+            upstream_budget_scope: format!("upstream:{slug}").into(),
             inner: Arc::new(TypedOpenAiCompat { slug, raw }),
             family: ProviderFamily::OpenAiCompat,
             source_convention: raw_forwarder
@@ -1099,6 +1185,8 @@ impl ProviderRuntime {
         let credential_account_fenced = account_fenced_config(&config);
         let raw = self.transport(config);
         ProviderHandle {
+            provider_identity: None,
+            upstream_budget_scope: format!("upstream:{slug}").into(),
             inner: Arc::new(crate::openai_responses_typed::TypedOpenAiResponses::new(
                 slug,
                 raw,
@@ -1152,6 +1240,8 @@ impl ProviderRuntime {
         let credential_account_fenced = account_fenced_config(&config);
         let raw = self.transport(config);
         ProviderHandle {
+            provider_identity: None,
+            upstream_budget_scope: format!("upstream:{slug}").into(),
             inner: Arc::new(crate::openai_responses_typed::TypedOpenAiResponses::new(
                 slug,
                 raw,
@@ -1224,6 +1314,8 @@ impl ProviderRuntime {
         let credential_account_fenced = account_fenced_config(&config);
         let raw = self.transport(config);
         ProviderHandle {
+            provider_identity: None,
+            upstream_budget_scope: Arc::from("upstream:anthropic"),
             inner: Arc::new(crate::anthropic_typed::TypedAnthropic::new(
                 raw,
                 usage_profile,
@@ -1266,6 +1358,8 @@ impl ProviderRuntime {
         let credential_account_fenced = account_fenced_config(&config);
         let raw = self.transport(config);
         ProviderHandle {
+            provider_identity: None,
+            upstream_budget_scope: Arc::from("upstream:ollama"),
             inner: Arc::new(crate::ollama_typed::TypedOllama::new(raw)),
             family: ProviderFamily::Ollama,
             source_convention: raw_forwarder
@@ -1278,7 +1372,7 @@ impl ProviderRuntime {
             credential_identity,
             credential_account_fenced,
             peer_role: Default::default(),
-            qualified_single_attempt: false,
+            qualified_single_attempt: max_retries.unwrap_or(0) == 0,
         }
     }
 
@@ -1307,6 +1401,8 @@ impl ProviderRuntime {
         let credential_account_fenced = account_fenced_config(&config);
         let raw = self.transport(config);
         ProviderHandle {
+            provider_identity: None,
+            upstream_budget_scope: Arc::from("upstream:gemini"),
             inner: Arc::new(crate::gemini_typed::TypedGemini::new(raw)),
             family: ProviderFamily::Gemini,
             source_convention: raw_forwarder
@@ -1346,6 +1442,8 @@ impl ProviderRuntime {
         let credential_account_fenced = account_fenced_config(&config);
         let raw = self.transport(config);
         ProviderHandle {
+            provider_identity: None,
+            upstream_budget_scope: Arc::from("upstream:cohere"),
             inner: Arc::new(crate::cohere_typed::TypedCohere::new(raw)),
             family: ProviderFamily::Cohere,
             source_convention: raw_forwarder
@@ -1358,7 +1456,7 @@ impl ProviderRuntime {
             credential_identity,
             credential_account_fenced,
             peer_role: Default::default(),
-            qualified_single_attempt: false,
+            qualified_single_attempt: max_retries.unwrap_or(0) == 0,
         }
     }
 
@@ -2967,7 +3065,7 @@ mod tests {
             .and(header("x-sandhi-run-id", "run-1"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id":"r1","message":{"content":[{"type":"text","text":"hi"}]},
-                "usage":{"billed_units":{"input_tokens":3,"output_tokens":1}}
+                "usage":{"tokens":{"input_tokens":3,"output_tokens":1},"billed_units":{"input_tokens":2,"output_tokens":1}}
             })))
             .mount(&server)
             .await;
@@ -3177,15 +3275,7 @@ mod tests {
         use wiremock::MockServer;
         let server = MockServer::start().await;
         let request: ChatRequestV1 = serde_json::from_value(json!({"schema_version":"1","model":"fixture","messages":[{"role":"user","content":"hi"}]})).unwrap();
-        let handle = ProviderRuntime::new().cohere(
-            server.uri(),
-            "key",
-            Default::default(),
-            Some(0),
-            None,
-            None,
-            None,
-        );
+        let handle = ProviderHandle::new(Arc::new(NoOpProvider));
         assert!(matches!(
             handle
                 .complete_with_qualified_usage(request, Default::default())
@@ -3385,6 +3475,20 @@ mod tests {
         // Neutral contract untouched.
         assert_eq!(out.output.content, Some(MessageContent::Text("hi".into())));
         assert_eq!(out.finish_reason, Some(FinishReasonV1::Stop));
+    }
+
+    #[test]
+    fn host_handle_namespace_does_not_follow_diagnostic_identity_or_declared_family() {
+        let handle = ProviderHandle::new(Arc::new(CannedChat));
+        assert_eq!(handle.upstream_budget_scope(), "upstream:canned");
+        let renamed = handle
+            .with_provider_identity("configured-vendor")
+            .unwrap()
+            .with_family(ProviderFamily::Gemini);
+        assert_eq!(renamed.slug(), "configured-vendor");
+        assert_eq!(renamed.upstream_budget_scope(), "upstream:canned");
+        assert!(!renamed.supports_owned_buffered());
+        assert!(!renamed.supports_owned_streaming());
     }
 
     /// Canned typed provider for the W3b latency-stamp tests.

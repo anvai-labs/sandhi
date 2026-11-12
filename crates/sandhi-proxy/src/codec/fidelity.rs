@@ -142,10 +142,10 @@ pub(super) fn capture(request: &mut ChatRequestV1, family: EndpointFamilyV1) -> 
                         mark(Feature::UnsupportedContent);
                     }
                     if let Some(inline) = part.get("inlineData") {
-                        if !inline
-                            .get("mimeType")
-                            .and_then(Value::as_str)
-                            .is_some_and(|mime| mime.starts_with("image/"))
+                        let mime = super::gemini_inline_mime(inline)?;
+                        if !mime
+                            .split_once('/')
+                            .is_some_and(|(kind, _)| kind.eq_ignore_ascii_case("image"))
                         {
                             mark(Feature::UnsupportedContent);
                         }

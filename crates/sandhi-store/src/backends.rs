@@ -167,6 +167,8 @@ impl BackendDefinition {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct BackendRecord {
+    /// Immutable enforcement namespace, separate from the descriptive provider and endpoint.
+    pub upstream_budget_scope: String,
     pub definition: BackendDefinition,
     pub revision: u64,
     pub status: String,
@@ -214,7 +216,7 @@ impl BackendStore {
     pub fn in_memory() -> Result<Self, BackendStoreError> {
         Self::from_connection(Connection::open_in_memory()?)
     }
-    fn from_connection(conn: Connection) -> Result<Self, BackendStoreError> {
+    fn from_connection(mut conn: Connection) -> Result<Self, BackendStoreError> {
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS backends (
@@ -225,6 +227,7 @@ impl BackendStore {
             created_at TEXT NOT NULL, updated_at TEXT NOT NULL
         );",
         )?;
+        migrate_budget_namespaces(&mut conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -239,7 +242,7 @@ impl BackendStore {
 
     pub fn list(&self) -> Result<Vec<BackendRecord>, BackendStoreError> {
         let conn = self.conn.lock().map_err(|_| BackendStoreError::Corrupt)?;
-        let mut stmt = conn.prepare("SELECT id, substr(definition_json,1,65537), revision, status, created_at, updated_at FROM backends ORDER BY id LIMIT 257")?;
+        let mut stmt = conn.prepare("SELECT id, substr(definition_json,1,65537), revision, status, created_at, updated_at, upstream_budget_scope FROM backends ORDER BY id LIMIT 257")?;
         let rows = stmt
             .query_map([], raw_record)?
             .collect::<Result<Vec<_>, _>>()?;
@@ -287,15 +290,20 @@ impl BackendStore {
         let now = time::OffsetDateTime::now_utc()
             .format(&time::format_description::well_known::Rfc3339)
             .map_err(|_| BackendStoreError::Corrupt)?;
+        let upstream_budget_scope = previous.as_ref().map_or_else(
+            || legacy_budget_scope(definition),
+            |record| Ok(record.upstream_budget_scope.clone()),
+        )?;
         let created_at = previous.map_or_else(|| now.clone(), |record| record.created_at);
         let json = serde_json::to_string(definition)
             .map_err(|_| BackendStoreError::Invalid("invalid backend definition"))?;
-        tx.execute("INSERT INTO backends (id,definition_json,revision,status,created_at,updated_at)
-            VALUES (?1,?2,?3,'active',?4,?5) ON CONFLICT(id) DO UPDATE SET
+        tx.execute("INSERT INTO backends (id,definition_json,revision,status,created_at,updated_at,upstream_budget_scope)
+            VALUES (?1,?2,?3,'active',?4,?5,?6) ON CONFLICT(id) DO UPDATE SET
             definition_json=excluded.definition_json,revision=excluded.revision,status='active',updated_at=excluded.updated_at",
-            params![definition.id,json,revision as i64,created_at,now])?;
+            params![definition.id,json,revision as i64,created_at,now,upstream_budget_scope])?;
         tx.commit()?;
         Ok(BackendRecord {
+            upstream_budget_scope,
             definition: definition.clone(),
             revision,
             status: "active".into(),
@@ -336,7 +344,79 @@ impl BackendStore {
     }
 }
 
-type RawRecord = (String, String, i64, String, String, String);
+/// Preserve the exact pre-migration effective scope. This is compatibility authority,
+/// not an assertion that a family name identifies the vendor. Never recompute on update.
+fn legacy_budget_scope(definition: &BackendDefinition) -> Result<String, BackendStoreError> {
+    let name = match definition.endpoint.endpoint_family {
+        EndpointFamilyV1::AnthropicMessages => "anthropic",
+        EndpointFamilyV1::GeminiGenerateContent => "gemini",
+        EndpointFamilyV1::CohereChat => "cohere",
+        EndpointFamilyV1::OllamaChat => "ollama",
+        EndpointFamilyV1::OpenaiChatCompletions | EndpointFamilyV1::OpenaiResponses => {
+            &definition.provider
+        }
+        _ => {
+            return Err(BackendStoreError::Invalid(
+                "backend has no legacy budget namespace",
+            ))
+        }
+    };
+    Ok(format!("upstream:{name}"))
+}
+fn valid_budget_scope(scope: &str) -> bool {
+    scope
+        .strip_prefix("upstream:")
+        .is_some_and(|name| crate::vault::validate_reference(name, "namespace").is_ok())
+}
+fn migrate_budget_namespaces(conn: &mut Connection) -> Result<(), BackendStoreError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('backends') WHERE name='upstream_budget_scope')", [], |row| row.get(0))?;
+    if !exists {
+        tx.execute(
+            "ALTER TABLE backends ADD COLUMN upstream_budget_scope TEXT",
+            [],
+        )?;
+        let rows = {
+            let mut stmt =
+                tx.prepare("SELECT id, substr(definition_json,1,65537) FROM backends LIMIT 257")?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        if rows.len() > MAX_BACKENDS {
+            return Err(BackendStoreError::Corrupt);
+        }
+        for (id, json) in rows {
+            let definition: BackendDefinition =
+                serde_json::from_str(&json).map_err(|_| BackendStoreError::Corrupt)?;
+            definition
+                .validate()
+                .map_err(|_| BackendStoreError::Corrupt)?;
+            if definition.id != id {
+                return Err(BackendStoreError::Corrupt);
+            }
+            let scope = legacy_budget_scope(&definition)?;
+            tx.execute(
+                "UPDATE backends SET upstream_budget_scope=?2 WHERE id=?1",
+                params![id, scope],
+            )?;
+        }
+    }
+    // An existing column with missing/corrupt bindings is not another legacy migration.
+    // Do not infer a replacement namespace from a possibly changed definition.
+    let bad: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM backends WHERE upstream_budget_scope IS NULL OR typeof(upstream_budget_scope)<>'text' OR length(CAST(upstream_budget_scope AS BLOB))>137)",[],|row|row.get(0))?;
+    if bad {
+        return Err(BackendStoreError::Corrupt);
+    }
+    tx.execute_batch("CREATE TRIGGER IF NOT EXISTS backend_budget_namespace_immutable BEFORE UPDATE OF upstream_budget_scope ON backends WHEN OLD.upstream_budget_scope IS NOT NEW.upstream_budget_scope BEGIN SELECT RAISE(ABORT,'backend budget namespace is immutable'); END;")?;
+    tx.commit()?;
+    Ok(())
+}
+
+type RawRecord = (String, String, i64, String, String, String, Option<String>);
 fn raw_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawRecord> {
     Ok((
         row.get(0)?,
@@ -345,10 +425,11 @@ fn raw_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawRecord> {
         row.get(3)?,
         row.get(4)?,
         row.get(5)?,
+        row.get(6)?,
     ))
 }
 fn decode_record(
-    (id, json, revision, status, created_at, updated_at): RawRecord,
+    (id, json, revision, status, created_at, updated_at, scope): RawRecord,
 ) -> Result<BackendRecord, BackendStoreError> {
     if json.len() > MAX_DEFINITION_BYTES
         || revision <= 0
@@ -364,7 +445,11 @@ fn decode_record(
     if definition.id != id {
         return Err(BackendStoreError::Corrupt);
     }
+    let upstream_budget_scope = scope
+        .filter(|scope| valid_budget_scope(scope))
+        .ok_or(BackendStoreError::Corrupt)?;
     Ok(BackendRecord {
+        upstream_budget_scope,
         definition,
         revision: revision as u64,
         status,
@@ -373,6 +458,289 @@ fn decode_record(
     })
 }
 fn get_record(conn: &Connection, id: &str) -> Result<Option<BackendRecord>, BackendStoreError> {
-    conn.query_row("SELECT id, substr(definition_json,1,65537), revision, status, created_at, updated_at FROM backends WHERE id=?1",
+    conn.query_row("SELECT id, substr(definition_json,1,65537), revision, status, created_at, updated_at, upstream_budget_scope FROM backends WHERE id=?1",
         [id], raw_record).optional()?.map(decode_record).transpose()
+}
+
+#[cfg(test)]
+mod namespace_tests {
+    use super::*;
+    fn definition(family: EndpointFamilyV1) -> BackendDefinition {
+        serde_json::from_value(serde_json::json!({"id":"source","provider":"vendor-one","credential_ref":"vendor:fixture","endpoint":{"endpoint_family":family},"models":[{"id":"fixture"}]})).unwrap()
+    }
+    fn legacy_connection(path: &str, definition: &BackendDefinition) -> Connection {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch("CREATE TABLE backends(id TEXT PRIMARY KEY,definition_json TEXT NOT NULL,revision INTEGER NOT NULL,status TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);").unwrap();
+        conn.execute(
+            "INSERT INTO backends VALUES('source',?1,1,'active','old','old')",
+            [serde_json::to_string(definition).unwrap()],
+        )
+        .unwrap();
+        conn
+    }
+    #[test]
+    fn legacy_namespace_survives_label_family_revision_and_restart() {
+        for (family, expected) in [
+            (EndpointFamilyV1::AnthropicMessages, "upstream:anthropic"),
+            (EndpointFamilyV1::GeminiGenerateContent, "upstream:gemini"),
+            (EndpointFamilyV1::CohereChat, "upstream:cohere"),
+            (EndpointFamilyV1::OllamaChat, "upstream:ollama"),
+            (EndpointFamilyV1::OpenaiResponses, "upstream:vendor-one"),
+            (
+                EndpointFamilyV1::OpenaiChatCompletions,
+                "upstream:vendor-one",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("old.db");
+            let path = path.to_str().unwrap();
+            let original = definition(family);
+            let store = BackendStore::from_connection(legacy_connection(path, &original)).unwrap();
+            assert_eq!(
+                store.get("source").unwrap().unwrap().upstream_budget_scope,
+                expected
+            );
+            let mut changed = definition(EndpointFamilyV1::GeminiGenerateContent);
+            changed.provider = "vendor-two".into();
+            let changed = store.put(&changed, Some(1)).unwrap();
+            assert_eq!(changed.upstream_budget_scope, expected);
+            assert!(matches!(
+                store.put(&original, Some(1)),
+                Err(BackendStoreError::Conflict)
+            ));
+            let conn = store.conn.lock().unwrap();
+            assert!(conn
+                .execute(
+                    "UPDATE backends SET upstream_budget_scope='upstream:vendor-two'",
+                    []
+                )
+                .is_err());
+            drop(conn);
+            drop(store);
+            let store = BackendStore::open(path).unwrap();
+            let read = store.get("source").unwrap().unwrap();
+            assert_eq!(read.upstream_budget_scope, expected);
+            assert_eq!(read.definition.provider, "vendor-two");
+            assert_eq!(read.revision, 2);
+        }
+    }
+    #[test]
+    fn missing_binding_in_already_migrated_database_is_not_reinferred() {
+        let conn = legacy_connection(":memory:", &definition(EndpointFamilyV1::AnthropicMessages));
+        conn.execute(
+            "ALTER TABLE backends ADD COLUMN upstream_budget_scope TEXT",
+            [],
+        )
+        .unwrap();
+        assert!(matches!(
+            BackendStore::from_connection(conn),
+            Err(BackendStoreError::Corrupt)
+        ));
+    }
+    #[test]
+    fn old_only_cap_spend_and_unknown_pair_remain_authoritative_after_backend_migration() {
+        use crate::ledger::{
+            evidence::{
+                context::ExecutionContext, AttemptEvidence, DispatchOutcome, EvidenceError,
+                IntentAdmission, TransportOutcome, TransportTerminal,
+            },
+            ReserveOutcome, SqliteLedger,
+        };
+        use sandhi_core::{Policy, UsageV2, Window};
+        use time::{Duration, OffsetDateTime};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("same.db");
+        let path = path.to_str().unwrap();
+        drop(legacy_connection(
+            path,
+            &definition(EndpointFamilyV1::AnthropicMessages),
+        ));
+        let mut ledger = SqliteLedger::open(path).unwrap();
+        let now = OffsetDateTime::now_utc();
+        ledger
+            .set_limit_durable("upstream:anthropic", Some(30), Window::Total, Policy::Block)
+            .unwrap();
+        let ReserveOutcome::Admitted(spend) = ledger
+            .reserve_durable("upstream:anthropic", 5, now, Duration::seconds(60))
+            .unwrap()
+        else {
+            panic!("initial spend")
+        };
+        ledger.settle_durable(spend.id, 5).unwrap();
+        let original:ExecutionContext=serde_json::from_value(serde_json::json!({"version":1,"ingress":"openai_chat_completions","delivery":"buffered","plane":"translation","upstream_ref":"backend/source","upstream_budget_scope":"upstream:anthropic","requested_model":"fixture","actual_model":"fixture","provider":"vendor-one","endpoint_family":"anthropic_messages","transport_binding_sha256":"a".repeat(64),"backend":{"id":"source","revision":1,"credential_ref":"vendor:fixture","credential_generation":1,"endpoint_profile":"standard"},"accounting_policy":{"version":1,"cache_read_weight":1000}})).unwrap();
+        let IntentAdmission::Admitted(intent) = ledger
+            .reserve_paired_contextual_durable(
+                "team",
+                20,
+                now,
+                Duration::seconds(60),
+                100,
+                "old-request",
+                &original,
+            )
+            .unwrap()
+        else {
+            panic!("old hold")
+        };
+        assert!(matches!(
+            ledger
+                .authorize_dispatch_durable("team", &intent.execution_id)
+                .unwrap(),
+            DispatchOutcome::Authorized(_)
+        ));
+        let id = ledger
+            .physical_attempt_durable("team", &intent.execution_id)
+            .unwrap()
+            .unwrap()
+            .attempt_id;
+        let evidence = AttemptEvidence {
+            version: 1,
+            attempt_id: id,
+            attempt_ordinal: 1,
+            dispatch_observed_at_ms: Some(1),
+            terminal: Some(TransportTerminal {
+                observed_at_ms: 2,
+                outcome: TransportOutcome::Success,
+                provider_status: Some(200),
+                provider_request_id: None,
+            }),
+            dropped_observations: 0,
+            invalid: false,
+            observed_provider: None,
+        };
+        ledger
+            .record_terminal_with_attempt_durable(
+                "team",
+                &intent.execution_id,
+                &UsageV2::default(),
+                1000,
+                &evidence,
+            )
+            .unwrap();
+        let IntentAdmission::Admitted(known) = ledger
+            .reserve_paired_contextual_durable(
+                "team",
+                5,
+                now,
+                Duration::seconds(60),
+                100,
+                "known-old-request",
+                &original,
+            )
+            .unwrap()
+        else {
+            panic!("old qualified hold")
+        };
+        assert!(matches!(
+            ledger
+                .authorize_dispatch_durable("team", &known.execution_id)
+                .unwrap(),
+            DispatchOutcome::Authorized(_)
+        ));
+        let mut known_evidence = evidence.clone();
+        known_evidence.attempt_id = ledger
+            .physical_attempt_durable("team", &known.execution_id)
+            .unwrap()
+            .unwrap()
+            .attempt_id;
+        let known_usage = UsageV2 {
+            tokens_in: 3,
+            tokens_out: 2,
+            completeness: sandhi_core::UsageCompleteness::Final,
+            ..Default::default()
+        };
+        ledger
+            .record_terminal_with_attempt_durable(
+                "team",
+                &known.execution_id,
+                &known_usage,
+                1000,
+                &known_evidence,
+            )
+            .unwrap();
+        let before = Connection::open(path)
+            .unwrap()
+            .query_row(
+                "SELECT evidence_json FROM budget_physical_attempt WHERE execution_id=?1",
+                [&intent.execution_id],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap();
+        drop(ledger);
+        let store = BackendStore::open(path).unwrap();
+        let mut next = definition(EndpointFamilyV1::GeminiGenerateContent);
+        next.provider = "vendor-two".into();
+        store.put(&next, Some(1)).unwrap();
+        drop(store);
+        let store = BackendStore::open(path).unwrap();
+        let updated = store.get("source").unwrap().unwrap();
+        assert_eq!(updated.upstream_budget_scope, "upstream:anthropic");
+        let mut ledger = SqliteLedger::open(path).unwrap();
+        assert_eq!(
+            ledger
+                .execution_context_durable("team", &intent.execution_id)
+                .unwrap(),
+            Some(original.clone())
+        );
+        let after = Connection::open(path)
+            .unwrap()
+            .query_row(
+                "SELECT evidence_json FROM budget_physical_attempt WHERE execution_id=?1",
+                [&intent.execution_id],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_eq!(after, before);
+        assert_eq!(
+            ledger
+                .reclaim_expired_durable(now + Duration::hours(1))
+                .unwrap(),
+            0
+        );
+        assert!(matches!(
+            ledger.settle_terminal_durable("team", &intent.execution_id),
+            Err(EvidenceError::UnresolvedObservation)
+        ));
+        // A genuinely qualified old-v1 execution recovers through its original
+        // namespace after the diagnostic identity/family update; no inference occurs.
+        ledger
+            .settle_terminal_durable("team", &known.execution_id)
+            .unwrap();
+        assert_eq!(
+            ledger
+                .execution_context_durable("team", &known.execution_id)
+                .unwrap(),
+            Some(original.clone())
+        );
+        let mut selected = original;
+        selected.provider = updated.definition.provider;
+        selected.endpoint_family = updated.definition.endpoint.endpoint_family;
+        selected.upstream_budget_scope = updated.upstream_budget_scope;
+        selected.backend.as_mut().unwrap().revision = 2;
+        assert!(matches!(
+            ledger
+                .reserve_paired_contextual_durable(
+                    "team",
+                    6,
+                    now,
+                    Duration::seconds(60),
+                    100,
+                    "new-request",
+                    &selected
+                )
+                .unwrap(),
+            IntentAdmission::Denied(_)
+        ));
+        assert_eq!(ledger.spent_durable("upstream:anthropic").unwrap(), 10);
+        assert_eq!(ledger.reserved_durable("upstream:anthropic").unwrap(), 20);
+        assert_eq!(ledger.reserved_durable("upstream:vendor-two").unwrap(), 0);
+        assert_eq!(
+            Connection::open(path)
+                .unwrap()
+                .query_row("SELECT count(*) FROM budget_reservation", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            5
+        );
+    }
 }

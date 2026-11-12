@@ -98,6 +98,7 @@ nav:
       - Embedded endpoint profiles: adr/0039-shared-embedded-endpoint-profiles.md
       - Shared buffered source qualification: adr/0040-shared-buffered-source-qualification.md
       - Explicit gateway peer contract: adr/0041-explicit-gateway-peer-contract.md
+      - "ADR-0042: Provider identity and budget namespaces": adr/0042-provider-identity-and-budget-namespace.md
       - Qualified Responses streams: adr/0026-qualified-responses-stream-accounting.md
       - Qualified Codex accounting: adr/0027-qualified-codex-buffered-accounting.md
       - Qualified translated streams: adr/0028-qualified-translated-stream-accounting.md

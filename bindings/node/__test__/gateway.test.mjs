@@ -287,11 +287,11 @@ test("static headersJson reaches all four non-OpenAI families (TD-0022 D3)", asy
       usageMetadata: { promptTokenCount: 2, candidatesTokenCount: 1 },
     }),
     "/v2/chat": JSON.stringify({
-      id: "r1", message: { content: [{ type: "text", text: "ok" }] },
-      usage: { billed_units: { input_tokens: 2, output_tokens: 1 } },
+      id: "r1", message: { content: [{ type: "text", text: "ok" }] }, finish_reason: "COMPLETE",
+      usage: { tokens: { input_tokens: 2, output_tokens: 1 }, billed_units: { input_tokens: 1, output_tokens: 0 } },
     }),
     "/api/chat": JSON.stringify({
-      message: { role: "assistant", content: "ok" }, done: true,
+      message: { role: "assistant", content: "ok" }, done: true, done_reason: "stop",
       prompt_eval_count: 2, eval_count: 1,
     }),
   };

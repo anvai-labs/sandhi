@@ -604,7 +604,7 @@ def test_backend_route_inventory_is_escaped_and_cleared_on_auth_change(page, das
                "models": [{"id": hostile}], "cache_policy": {"models": {hostile: {"profile": "native_only"}}}}
     route = {"id": "coding", "models": [{"id": hostile, "targets": [{"backend": "preview", "model": hostile}]}]}
     with sqlite3.connect(dashboard.database) as connection:
-        connection.execute("INSERT INTO backends VALUES (?,?,1,'active','fixture','fixture')", ("preview", json.dumps(backend)))
+        connection.execute("INSERT INTO backends (id,definition_json,revision,status,created_at,updated_at,upstream_budget_scope) VALUES (?,?,1,'active','fixture','fixture','upstream:fixture')", ("preview", json.dumps(backend)))
         connection.execute("INSERT INTO logical_routes VALUES (?,?,1,'active')", ("coding", json.dumps(route)))
     connect(page, dashboard)
     page.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name="Backends & routes", exact=True).click()

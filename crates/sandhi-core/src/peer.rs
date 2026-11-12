@@ -34,6 +34,8 @@ pub enum UsageConventionV1 {
     MessagesImplicitCache,
     ResponsesStandard,
     GeminiStandard,
+    CohereStandard,
+    OllamaStandard,
 }
 impl UsageConventionV1 {
     pub const fn wire_value(self) -> &'static str {
@@ -44,6 +46,8 @@ impl UsageConventionV1 {
             Self::MessagesImplicitCache => "v1-messages-implicit-cache",
             Self::ResponsesStandard => "v1-responses-standard",
             Self::GeminiStandard => "v1-gemini-standard",
+            Self::CohereStandard => "v1-cohere-standard",
+            Self::OllamaStandard => "v1-ollama-standard",
         }
     }
     pub const fn family(self) -> EndpointFamilyV1 {
@@ -54,6 +58,8 @@ impl UsageConventionV1 {
             }
             Self::ResponsesStandard => EndpointFamilyV1::OpenaiResponses,
             Self::GeminiStandard => EndpointFamilyV1::GeminiGenerateContent,
+            Self::CohereStandard => EndpointFamilyV1::CohereChat,
+            Self::OllamaStandard => EndpointFamilyV1::OllamaChat,
         }
     }
     pub fn standard(family: EndpointFamilyV1) -> Result<Self, &'static str> {
@@ -62,6 +68,8 @@ impl UsageConventionV1 {
             EndpointFamilyV1::AnthropicMessages => Ok(Self::MessagesStandard),
             EndpointFamilyV1::OpenaiResponses => Ok(Self::ResponsesStandard),
             EndpointFamilyV1::GeminiGenerateContent => Ok(Self::GeminiStandard),
+            EndpointFamilyV1::CohereChat => Ok(Self::CohereStandard),
+            EndpointFamilyV1::OllamaChat => Ok(Self::OllamaStandard),
             _ => Err("unsupported gateway client dialect"),
         }
     }
@@ -88,6 +96,8 @@ impl std::str::FromStr for UsageConventionV1 {
             "v1-messages-implicit-cache" => Ok(Self::MessagesImplicitCache),
             "v1-responses-standard" => Ok(Self::ResponsesStandard),
             "v1-gemini-standard" => Ok(Self::GeminiStandard),
+            "v1-cohere-standard" => Ok(Self::CohereStandard),
+            "v1-ollama-standard" => Ok(Self::OllamaStandard),
             _ => Err("unsupported gateway usage convention"),
         }
     }

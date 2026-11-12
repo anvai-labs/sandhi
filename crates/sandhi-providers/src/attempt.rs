@@ -23,8 +23,8 @@ use sandhi_core::UsageCompleteness;
 pub const ATTEMPT_OBSERVATION_VERSION: u8 = 1;
 
 const MAX_EXECUTION_ID_BYTES: usize = 192;
-const MAX_PROVIDER_BYTES: usize = 96;
-const MAX_MODEL_BYTES: usize = 256;
+const MAX_PROVIDER_BYTES: usize = 128;
+const MAX_MODEL_BYTES: usize = 512;
 const MAX_PROVIDER_REQUEST_ID_BYTES: usize = 256;
 const MAX_CHANNEL_CAPACITY: usize = 65_536;
 
@@ -126,6 +126,7 @@ struct AttemptCancellation {
 /// Per-execution context carried outside provider bodies and headers.
 #[derive(Clone)]
 pub struct AttemptContext {
+    configured_provider: Option<Arc<str>>,
     shared: Arc<SharedAttemptContext>,
     cancellation: Arc<AttemptCancellation>,
 }
@@ -158,6 +159,7 @@ impl AttemptContext {
         let (sender, receiver) = sync_channel(capacity);
         Ok((
             Self {
+                configured_provider: None,
                 shared: Arc::new(SharedAttemptContext {
                     execution_id,
                     nonce,
@@ -196,6 +198,12 @@ impl AttemptContext {
             .expect("new private context")
             .single_attempt_id = Some(attempt_id);
         Ok((context, receiver))
+    }
+
+    /// Factory/handle-owned diagnostic label, never caller wire metadata or dispatch authority.
+    pub(crate) fn with_configured_provider(mut self, provider: &str) -> Self {
+        self.configured_provider = Some(Arc::from(bounded_label(provider, MAX_PROVIDER_BYTES)));
+        self
     }
 
     pub(crate) fn begin_checked(
@@ -259,6 +267,7 @@ impl AttemptContext {
     /// identity and the shared monotonic attempt ordinal.
     pub(crate) fn fresh_call(&self) -> Self {
         Self {
+            configured_provider: self.configured_provider.clone(),
             shared: self.shared.clone(),
             cancellation: Arc::new(AttemptCancellation {
                 reason: AtomicU8::new(CANCELLED),
@@ -298,7 +307,10 @@ impl AttemptContext {
                 .ok()?
                 .saturating_add(1)
         };
-        let provider = bounded_label(provider, MAX_PROVIDER_BYTES);
+        let provider = bounded_label(
+            self.configured_provider.as_deref().unwrap_or(provider),
+            MAX_PROVIDER_BYTES,
+        );
         let model = model.map(|value| bounded_label(value, MAX_MODEL_BYTES));
         let attempt_id = self
             .shared
@@ -620,6 +632,7 @@ where
 }
 
 /// Provider-response specialization of [`observe_value`].
+#[cfg(test)]
 pub(crate) async fn observe_complete<Make, F>(
     context: Option<AttemptContext>,
     provider: &str,
@@ -654,6 +667,8 @@ where
             | E::OpenaiResponses
             | E::AnthropicMessages
             | E::GeminiGenerateContent
+            | E::CohereChat
+            | E::OllamaChat
     ) || (profile != A::SeparateCacheWrites && endpoint != E::AnthropicMessages)
     {
         return Err(ProviderError::InvalidRequest(
@@ -1296,7 +1311,7 @@ mod tests {
                 O::TerminalChunk,
                 A::SeparateCacheWrites,
             ),
-            (E::CohereChat, O::Standard, A::SeparateCacheWrites),
+            (E::BedrockConverse, O::Standard, A::SeparateCacheWrites),
         ] {
             let (context, receiver) =
                 AttemptContext::single_attempt("invalid-profile", "e".repeat(64)).unwrap();
@@ -1328,7 +1343,7 @@ mod tests {
         use sandhi_core::{usage::AnthropicUsageProfile as A, EndpointFamilyV1 as E};
         for (endpoint, profile) in [
             (E::OpenaiChatCompletions, A::ImplicitCache),
-            (E::CohereChat, A::SeparateCacheWrites),
+            (E::BedrockConverse, A::SeparateCacheWrites),
         ] {
             let (context, receiver) =
                 AttemptContext::single_attempt("invalid-buffer-profile", "a".repeat(64)).unwrap();

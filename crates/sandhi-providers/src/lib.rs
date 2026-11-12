@@ -73,6 +73,7 @@ pub use openai_responses::{OpenAiResponses, OpenAiResponsesProfile};
 pub use openai_roles::{validate_openai_chat_messages, OpenAiChatRole};
 mod linesplit;
 pub mod metering;
+mod native_chat;
 mod native_stream;
 mod qualified_stream;
 pub mod stream_usage;

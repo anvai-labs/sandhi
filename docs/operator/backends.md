@@ -87,9 +87,12 @@ default legacy path. Already supported tracked surfaces also persist a bounded
 selection/cache/policy context atomically with admission; see
 [ADR-0022](../adr/0022-durable-execution-context.md). This does not expand tracked
 protocol support or prove a physical send. Persisted legacy usage dimensions do
-not prove the logical route's physical backend/profile. Upstream budget scopes
-remain `upstream:<provider-slug>`, rather
-than independent backend IDs. Uniform durable dispatch evidence and recovery are
+not prove the logical route's physical backend/profile. Upstream budget authority is an immutable namespace stored separately from the
+provider label and endpoint family. Existing `upstream:<provider-slug>` scopes
+(including native family slugs) are preserved rather than replaced by backend IDs
+or new vendor labels. Inventory exposes `upstream_budget_scope` read-only. Ordinary
+backend updates and restart cannot change it; see the
+[identity and namespace migration](../reviews/provider-identity-and-budget-namespace-2026-11-12.md). Uniform durable dispatch evidence and recovery are
 M5 work; do not infer them from the route inventory or a successful SDK response.
 New supported tracked admissions also
 [link and settle both budget scopes atomically](../adr/0023-paired-budget-settlement.md),
@@ -119,6 +122,15 @@ tools refuse across protocols. Such a delivery error can still settle measured
 source usage. It must not trigger an inference replay to obtain another format.
 
 ## Usage qualification profiles
+
+Cohere v2 and Ollama are supported backend families behind the four client
+dialects. Buffered and bounded streaming delivery use qualified source counts:
+Cohere `usage.tokens` is distinct from `billed_units`; Ollama cache-read input,
+when reported, must be a valid subset of prompt evaluation input. Missing counts
+remain unavailable. Invalid or incomplete evidence retains both budget holds and
+does not trigger another inference. See the
+[integration evidence](../reviews/stable-namespaces-native-sources-and-gemini-images-2026-11-12.md)
+for the tested scope and remaining release gates.
 
 Chat-compatible endpoints that place request-total stream usage on their single
 final choice can explicitly declare `endpoint_profile: openai_terminal_chunk_usage`.

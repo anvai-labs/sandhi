@@ -2601,12 +2601,21 @@ async fn handle_with_policy_receipt(
     let estimated_input = state
         .token_estimator
         .lock()
-        .map(|estimator| estimator.estimate(provider.slug(), &request.model, input_len))
+        .map(|estimator| {
+            estimator.estimate(
+                provider
+                    .upstream_budget_scope()
+                    .strip_prefix("upstream:")
+                    .unwrap_or(provider.slug()),
+                &request.model,
+                input_len,
+            )
+        })
         .unwrap_or_else(|_| baseline_estimate(input_len));
     let (ceiling, effective_max) = reservation_ceiling(&request, estimated_input);
-    // Back-leg cap scope (ADR-0015): `upstream:{provider-slug}`, per resolved upstream only —
-    // never per-model, never hierarchical (owner-approved convention).
-    let upstream_scope = format!("upstream:{}", provider.slug());
+    // Preserve the canonical back-leg namespace independently of diagnostic identity.
+    // Registered bindings restore their immutable historical scope; no per-model hierarchy.
+    let upstream_scope = provider.upstream_budget_scope().to_owned();
     if let Some(owned) = state.buffered_accounting.get() {
         // The tracked owner atomically admits and links both budget legs in the
         // original ledger. No independently reclaimable upstream lease precedes it.
@@ -3735,7 +3744,13 @@ impl RequestAccounting {
             event.request_id.clone_from(&self.request_id);
         }
         if let Ok(mut estimator) = self.state.token_estimator.lock() {
-            estimator.observe(self.input_len, &event);
+            let mut calibrated = event.clone();
+            if let Some(namespace) = &self.upstream_scope {
+                if let Some(label) = namespace.strip_prefix("upstream:") {
+                    calibrated.provider = label.to_owned();
+                }
+            }
+            estimator.observe(self.input_len, &calibrated);
         }
         self.state.sink.emit(&event);
     }
@@ -4532,7 +4547,16 @@ async fn handle_count_tokens(
     let tokens = state
         .token_estimator
         .lock()
-        .map(|estimator| estimator.estimate(provider.slug(), &request.model, body.len()))
+        .map(|estimator| {
+            estimator.estimate(
+                provider
+                    .upstream_budget_scope()
+                    .strip_prefix("upstream:")
+                    .unwrap_or(provider.slug()),
+                &request.model,
+                body.len(),
+            )
+        })
         .unwrap_or_else(|_| sandhi_providers::token_estimate::baseline_estimate(body.len()));
     match dialect {
         IngressDialect::Gemini => Json(json!({"totalTokens": tokens})).into_response(),
@@ -5001,6 +5025,52 @@ mod token_calibration_wiring_tests {
         });
         accounting.set_outcome("success");
         accounting.finalize();
+    }
+
+    #[test]
+    fn renamed_diagnostics_keep_estimator_learning_on_the_original_namespace() {
+        let sink = Arc::new(InMemorySink::new());
+        let state = Arc::new(ProxyState::new(
+            KeyStore::new(),
+            ProxyLedger::in_memory(),
+            sink.clone(),
+            HashMap::new(),
+            None,
+        ));
+        for _ in 0..sandhi_providers::token_estimate::CALIBRATION_MIN_SAMPLES {
+            let request: ChatRequestV1 =
+                serde_json::from_str(r#"{"model":"qwen","messages":[]}"#).unwrap();
+            let mut accounting = RequestAccounting::new(
+                state.clone(),
+                "vk:test".into(),
+                None,
+                "vendor-label".into(),
+                &request,
+                "openai",
+                metrics::Plane::Transparent,
+            );
+            accounting.with_upstream_budget("upstream:inferflux".into(), None);
+            accounting.input_len = 300;
+            accounting.observe(&UsageV2 {
+                tokens_in: 100,
+                tokens_out: 10,
+                completeness: UsageCompleteness::Final,
+                ..Default::default()
+            });
+            accounting.finalize();
+        }
+        assert_eq!(
+            state
+                .token_estimator
+                .lock()
+                .unwrap()
+                .estimate("inferflux", "qwen", 300),
+            100
+        );
+        assert!(sink
+            .events()
+            .iter()
+            .all(|event| event.provider == "vendor-label"));
     }
 
     fn reservation(ceiling: u64) -> Reservation {

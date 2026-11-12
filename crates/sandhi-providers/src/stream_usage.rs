@@ -21,6 +21,7 @@ mod chat_profile_tests;
 mod gemini;
 #[cfg(test)]
 mod gemini_tests;
+mod native_chat;
 mod responses;
 #[cfg(test)]
 mod responses_tests;
@@ -82,6 +83,7 @@ pub struct OpenAiStreamUsageObserver {
     anthropic: anthropic::AnthropicUsage,
     responses: responses::ResponsesUsage,
     gemini: gemini::GeminiUsage,
+    native_chat: native_chat::NativeChatUsage,
     usage: Option<ParsedUsage>,
     canonical_usage: Option<UsageV2>,
     cache_read_observation: Option<sandhi_core::CacheReadObservation>,
@@ -138,10 +140,15 @@ impl OpenAiStreamUsageObserver {
                 | EndpointFamilyV1::OpenaiResponses
                 | EndpointFamilyV1::AnthropicMessages
                 | EndpointFamilyV1::GeminiGenerateContent
+                | EndpointFamilyV1::CohereChat
+                | EndpointFamilyV1::OllamaChat
         ) {
             return Err(StreamObservationError::UnsupportedEndpoint);
         }
         let mut observer = Self::new();
+        if endpoint == EndpointFamilyV1::OllamaChat {
+            observer.splitter = LineSplitter::new(MAX_STREAM_LINE_BYTES);
+        }
         observer.endpoint = endpoint;
         observer.openai_usage_profile = openai_profile;
         observer.anthropic_usage_profile = anthropic_profile;
@@ -166,6 +173,7 @@ impl OpenAiStreamUsageObserver {
             anthropic: Default::default(),
             responses: Default::default(),
             gemini: Default::default(),
+            native_chat: Default::default(),
             usage: None,
             canonical_usage: None,
             cache_read_observation: None,
@@ -211,6 +219,8 @@ impl OpenAiStreamUsageObserver {
             F::OpenaiResponses => C::OpenAiResponses,
             F::AnthropicMessages => C::Anthropic,
             F::GeminiGenerateContent => C::Gemini,
+            F::CohereChat => C::Cohere,
+            F::OllamaChat => C::Ollama,
             _ => return,
         };
         sandhi_core::merge_cache_read_observation(
@@ -242,6 +252,7 @@ impl OpenAiStreamUsageObserver {
             || self.responses.provider_failed
             || self.anthropic.provider_failed
             || self.gemini.provider_failed
+            || self.native_chat.provider_failed
     }
 
     pub fn error(&self) -> Option<StreamObservationError> {
@@ -290,6 +301,28 @@ impl OpenAiStreamUsageObserver {
             return self.fail(StreamObservationError::Closed);
         }
         self.closed = true;
+        // NDJSON permits a complete final object without a trailing newline.
+        if self.endpoint == EndpointFamilyV1::OllamaChat && !self.splitter.remainder().is_empty() {
+            let remainder = self.splitter.remainder().to_vec();
+            self.splitter.reset();
+            if let Err(error) = self.native_event(&remainder) {
+                return self.fail(error);
+            }
+        }
+        if matches!(
+            self.endpoint,
+            EndpointFamilyV1::CohereChat | EndpointFamilyV1::OllamaChat
+        ) && self.native_chat.done
+        {
+            let mut usage = self
+                .native_chat
+                .usage
+                .clone()
+                .expect("validated native terminal");
+            usage.completeness = UsageCompleteness::Final;
+            self.usage = Some((&usage).into());
+            self.canonical_usage = Some(usage);
+        }
         if !self.splitter.remainder().is_empty() || self.event_bytes != 0 {
             return self.fail(StreamObservationError::TruncatedEvent);
         }
@@ -333,6 +366,9 @@ impl OpenAiStreamUsageObserver {
         if line.len() > self.limit {
             return Err(StreamObservationError::LineTooLong);
         }
+        if self.endpoint == EndpointFamilyV1::OllamaChat {
+            return self.native_event(line);
+        }
         self.event_bytes += line.len();
         if self.event_bytes > self.limit {
             return Err(StreamObservationError::EventTooLong);
@@ -375,9 +411,31 @@ impl OpenAiStreamUsageObserver {
         Ok(())
     }
 
+    fn native_event(&mut self, data: &[u8]) -> Result<(), StreamObservationError> {
+        let event = sandhi_core::policy::strict_json(data)
+            .map_err(|_| StreamObservationError::InvalidJson)?;
+        if self.endpoint == EndpointFamilyV1::CohereChat
+            && self.event_name.as_deref().is_some_and(|name| {
+                name != "message" && Some(name) != event.get("type").and_then(Value::as_str)
+            })
+        {
+            return Err(StreamObservationError::UnexpectedEventType);
+        }
+        self.observe_cache(&event);
+        if let Some(update) = self.native_chat.event(self.endpoint, &event)? {
+            self.canonical_usage = Some(update);
+        }
+        self.done = self.native_chat.done;
+        Ok(())
+    }
+
     fn event(&mut self) -> Result<(), StreamObservationError> {
         if !self.has_data {
             return Ok(());
+        }
+        if self.endpoint == EndpointFamilyV1::CohereChat {
+            let data = self.data.clone();
+            return self.native_event(&data);
         }
         if self.endpoint == EndpointFamilyV1::GeminiGenerateContent {
             let event = sandhi_core::policy::strict_json(&self.data)
