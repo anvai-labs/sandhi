@@ -477,10 +477,10 @@ jobs:
             -DENABLE_SBOM=OFF
           cmake --build build-sandhi --target inferfluxd -j2
           ccache --show-stats
-      # The vendors' own clients decide how a request is shaped. Pinning majors keeps a vendor
-      # release from turning this gate red without a code change, while still tracking real SDKs.
+      # Local qualification and public CI share exact provider SDK releases.
+      # Qualify release upgrades against real client requests before changing the pins.
       - name: Install the vendor SDKs and browser test driver
-        run: python -m pip install --quiet 'openai>=2,<3' 'anthropic>=0.97,<1' 'google-genai>=1.73,<2' 'httpx>=0.27' pytest 'playwright==1.58.0' 'PyJWT[crypto]>=2.10,<3'
+        run: python -m pip install --quiet -r tests/sdk-conformance/requirements.txt
       - name: Install the dashboard test browser
         run: python -m playwright install --with-deps chromium
       - name: Drive the proxy with vendor SDKs and the served dashboard

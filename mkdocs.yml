@@ -88,6 +88,7 @@ nav:
       - Two processing planes: adr/0004-two-plane-proxy-and-enforcement-boundary.md
       - Budget guarantees: product/metering-and-budget-guarantees.md
       - Accounting and evidence: product/attempt-accounting-and-evidence.md
+      - Provider SDK baseline and API versions: reviews/provider-sdk-refresh-2026-11-12.md
       - Qualified Responses streams: adr/0026-qualified-responses-stream-accounting.md
       - Qualified Codex accounting: adr/0027-qualified-codex-buffered-accounting.md
       - Qualified translated streams: adr/0028-qualified-translated-stream-accounting.md

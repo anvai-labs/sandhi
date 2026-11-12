@@ -886,7 +886,7 @@ of provider-specific fields (prompt-cache breakpoints, vendor params).
 | Anthropic Messages
 | `x-api-key: vk_…` (native) *or* `Authorization: Bearer vk_…`
 
-| `POST /v1beta/models/{m}:generateContent`
+| `POST /v1/models/{m}:generateContent` (also `/v1beta`)
 | Gemini
 | `x-goog-api-key: vk_…` *or* `Authorization: Bearer vk_…` (the `?key=` query form is refused)
 |===
@@ -895,7 +895,7 @@ of provider-specific fields (prompt-cache breakpoints, vendor params).
 ====
 There is **no Cohere ingress** — it is reachable as an *upstream only*, always via the
 translation plane. Ollama likewise has no ingress dialect. (Gemini ingress **is** wired —
-TD-0010 P4, `POST /v1beta/models/{model}:generateContent`.)
+TD-0010 P4, `POST /v1/models/{model}:generateContent` and its `/v1beta` equivalent.)
 ====
 
 [NOTE]

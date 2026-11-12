@@ -91,8 +91,8 @@ Point the vendor's own SDK at Sandhi — change the `base_url` and the key, noth
 | client | ingress | drop-in | proven by |
 |---|---|---|---|
 | **OpenAI SDK** | `/v1/chat/completions`, `/v1/responses` | ✅ | `tests/sdk-conformance/` drives `openai-python` in CI |
-| **Anthropic SDK** | `/v1/messages` | ✅ | same suite drives `anthropic-python`, authenticating with `x-api-key` as the SDK does |
-| **Gemini SDK** | `/v1beta/models/{model}:generateContent` | ✅ *(header auth)* | same suite drives `google-genai`; the credential must be the `x-goog-api-key` **header** — the documented `?key=` query form is refused, since it would put a live virtual key in URLs and access logs |
+| **Anthropic SDK** | `/v1/messages` | ✅ | same suite drives pinned `anthropic-python`; both older `x-api-key` and current Bearer SDK presentations are supported |
+| **Gemini SDK** | `/v1/models/{model}:generateContent` and `/v1beta` | ✅ *(header auth)* | same suite drives pinned `google-genai`, including its current `/v1` default; the credential must be the `x-goog-api-key` **header** — the documented `?key=` query form is refused, since it would put a live virtual key in URLs and access logs |
 
 ```python
 client = anthropic.Anthropic(base_url="http://sandhi:8787", api_key="vk_…")   # unmodified

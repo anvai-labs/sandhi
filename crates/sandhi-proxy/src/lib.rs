@@ -697,7 +697,8 @@ fn ingress_routes(state: &Arc<ProxyState>) -> axum::Router<Arc<ProxyState>> {
         // Gemini's path carries the model AND the method, colon-separated
         // (`/v1beta/models/gemini-2.5-flash:generateContent`), so it matches as ONE segment and
         // is split below — axum has no pattern for a colon-suffixed verb.
-        .route("/v1beta/models/:model_method", post(handle_gemini));
+        .route("/v1beta/models/:model_method", post(handle_gemini))
+        .route("/v1/models/:model_method", post(handle_gemini));
     // Test-only observability probe: lets the wiring test confirm THIS
     // function's middleware chain actually inserts ClientAddr.
     #[cfg(test)]
@@ -760,9 +761,8 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         // TD-0011 D5: /metrics reveals traffic shape and model mix, so it reuses the dashboard's
         // gate rather than inventing a second policy.
         .route("/metrics", get(metrics_endpoint))
-        // TD-0010 D3 discovery. `/v1/models` is shared by the OpenAI and Anthropic SDKs, which
-        // is resolvable because they authenticate differently: an `x-api-key` request is an
-        // Anthropic client and gets Anthropic's envelope.
+        // SDKs share this discovery path. Native credential/client headers select
+        // the response envelope; the same virtual-key authorization gates each.
         .route("/v1/models", get(list_models))
         .route("/v1beta/models", get(list_models_gemini))
         // TD-0003 P1 operator (admin) API.
@@ -2185,15 +2185,23 @@ async fn metrics_endpoint(State(state): State<Arc<ProxyState>>, headers: HeaderM
         .into_response()
 }
 
-/// `GET /v1/models` — OpenAI and Anthropic discovery (TD-0010 D3).
+/// `GET /v1/models` — OpenAI, Anthropic and Gemini discovery (TD-0010 D3).
 ///
 /// The listing is the key's *permitted* models: the upstream catalog intersected with the virtual
 /// key's allowlist. A key that may call two models lists two, which makes the allowlist
 /// discoverable instead of a surprise 403 at call time, and is honest in a way a static catalog
 /// dump is not.
 async fn list_models(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -> Response {
-    // Same path, two vendors: the credential presentation identifies the client.
-    let dialect = if headers.contains_key("x-api-key") {
+    // This selects a wire envelope only. Gemini discovery uses the same
+    // credential/route authorization as its existing /v1beta surface.
+    let anthropic = headers.contains_key("x-api-key")
+        || (!headers.contains_key("x-goog-api-key") && headers.contains_key("anthropic-version"));
+    if !anthropic
+        && (headers.contains_key("x-goog-api-key") || headers.contains_key("x-goog-api-client"))
+    {
+        return list_models_gemini(State(state), headers).await;
+    }
+    let dialect = if anthropic {
         IngressDialect::Anthropic
     } else {
         IngressDialect::OpenAi
@@ -2230,7 +2238,7 @@ async fn list_models(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -
     Json(body).into_response()
 }
 
-/// `GET /v1beta/models` — Gemini discovery (TD-0010 D3).
+/// `GET /v1beta/models` and Google-shaped `/v1/models` — Gemini discovery.
 async fn list_models_gemini(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -> Response {
     let (vk, provider) = match resolve_for_discovery(&state, IngressDialect::Gemini, &headers).await
     {
@@ -2240,17 +2248,14 @@ async fn list_models_gemini(State(state): State<Arc<ProxyState>>, headers: Heade
     let models = match &provider {
         Some(provider) => permitted_provider_models(&vk, provider),
         None => match routing::discovery(&state, &vk).await {
-            Ok(models) => models
-                .into_iter()
-                .filter(|id| sandhi_core::model_id_is_path_safe(id))
-                .collect(),
+            Ok(models) => models,
             Err(message) => {
                 return ingress_error(IngressDialect::Gemini, StatusCode::BAD_GATEWAY, message)
             }
         },
     };
     Json(json!({
-        "models": models.iter().map(|id| json!({
+        "models": models.iter().filter(|id|sandhi_core::model_id_is_path_safe(id)).map(|id| json!({
             // Gemini names a model by its resource path, and its SDK strips the prefix back off.
             "name": format!("models/{id}"),
             "displayName": id,
@@ -2368,7 +2373,7 @@ fn permitted_models(vk: &VirtualKey, slug: &str) -> Vec<String> {
     }
 }
 
-/// `POST /v1beta/models/{model}:{generateContent|streamGenerateContent}` (TD-0010 D4a).
+/// `POST /{v1|v1beta}/models/{model}:{generateContent|streamGenerateContent}`.
 async fn handle_gemini(
     State(state): State<Arc<ProxyState>>,
     permit: Extension<Arc<AdmissionPermit>>,
@@ -2386,7 +2391,7 @@ async fn handle_gemini(
         return ingress_error(
             IngressDialect::Gemini,
             StatusCode::NOT_FOUND,
-            "expected /v1beta/models/{model}:generateContent",
+            "expected /v1/models/{model}:generateContent or its /v1beta equivalent",
         );
     };
     if model.is_empty() {

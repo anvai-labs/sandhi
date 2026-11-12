@@ -3,10 +3,12 @@
 The suite starts a real Sandhi binary with disposable stores and local synthetic upstreams.
 No provider account, real key, OS vault or external model request is needed.
 
-Install the SDK test dependencies from the `sdk-conformance` CI job and Python
-`playwright==1.58.0` and `PyJWT[crypto]>=2.10,<3`, then install its Chromium:
+Install the exact provider SDK baseline shared with the public CI job, then its
+test browser. The current baseline is OpenAI 3.49.0, Anthropic 2.8.0 and Google
+GenAI 3.2.0, selected from stable PyPI releases on 2026-11-12:
 
 ```sh
+python -m pip install -r tests/sdk-conformance/requirements.txt
 python -m playwright install chromium
 python -m pytest tests/sdk-conformance/ -q
 ```
@@ -23,6 +25,22 @@ python -m pytest tests/sdk-conformance/ -q --basetemp "$(mktemp -d /tmp/sandhi-s
 Pytest clears its base directory, so never point `--basetemp` at retained evidence
 or an existing service directory. These fixtures build source binaries; their
 results are not installed-release or live-provider acceptance.
+
+Google GenAI 3.x defaults to Gemini `/v1` paths. Sandhi also retains `/v1beta` for
+older clients. Generation, streaming and countTokens use the same admission and
+accounting handlers on both prefixes. The shared `/v1/models` discovery path uses
+Google's credential/client headers to choose its envelope; key authorization
+remains unchanged. Gemini discovery omits IDs that cannot be used in its URL path;
+a logical alias can name an OpenAI-compatible backend model containing `/`.
+Anthropic 2.x uses Bearer API-key authentication, so shared discovery recognizes
+its `anthropic-version` header as well as older `x-api-key` clients. Header hints
+select serialization, never a backend credential type, account or extra grant.
+
+For SDK refreshes, verify stable release metadata and Python requirements, update
+the three exact pins, and run the ordinary vendor-client, route/cache, tool-loop,
+cancellation/restart and dashboard suite. Keep source changes required by new SDK
+defaults covered by regressions; do not force a new SDK back to an older API
+version just to hide an interoperability gap.
 
 `test_dashboard.py` covers authentication, keyboard usage, public/disabled modes, mutation
 feedback, one-time key visibility, token clearing and stale replies, hostile metadata, failed
@@ -104,12 +122,12 @@ use reported read counts rather than latency. Explicit TTL expiration, separate
 accounts, Gemini cache resources, subscriptions and full tool loops are separate
 qualification gates. See the retained [live review](../../docs/reviews/zai-router-live-2026-11-11.md).
 
-Tracked buffered runs support the four-client/three-backend matrix. Tracked
-streaming currently requires an explicitly selected same-family Chat or standard
-Responses pair; other selections refuse before the harness starts or reads a
-credential. These runs configure bounded streaming deadlines and verify durable
-attempt/context/usage/paired-receipt joins against each cell's actual delivery mode.
-See the [Responses pair evidence](../../docs/reviews/zai-router-tracked-responses-stream-2026-11-11.md).
+Tracked buffered and streaming runs support the four-client/three-GLM-backend
+matrix, with explicit usage profiles and bounded streaming deadlines. These runs
+verify durable attempt/context/usage/paired-receipt joins against each cell's actual
+delivery mode. Portable-output controls matter: default signed thinking is not
+universally translatable. See the [current buffered qualification](../../docs/reviews/zai-buffered-fidelity-cache-pairs-2026-11-12.md)
+and [Messages stream controls/evidence](../../docs/reviews/zai-messages-tracked-streams-2026-11-12.md).
 
 `test_reasoning.py` checks separate reasoning below, equal to and above candidate output across
 transparent Gemini and translated Chat/Responses/Anthropic, both streamed and complete. Its 24

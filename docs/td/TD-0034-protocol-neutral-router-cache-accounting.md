@@ -1552,3 +1552,38 @@ those fields neither establish measured source reasoning nor drive settlement.
 This documents the existing boundary rather than claiming universal optional
 field fidelity on client wire projections. The broader streaming-state and
 accounting-wait reliability gates remain open.
+
+### Provider SDK refresh and baseline alignment
+
+The user requested current provider SDK pins and a fresh develop comparison.
+`origin/develop` remains `4443ed8544404d1fdd944e596141ac615f3f23d9`; the published
+`241e752` routing checkpoint includes it, with zero commits behind and fifteen
+ahead. Its public CI completed all 14 jobs, including full SDK/dashboard,
+coverage/packaging and Rust feature variants, and its documentation passed. All
+actual jobs used GitHub Actions runners on public Ubuntu images. A rebase would
+not incorporate any new baseline work, so no history rewrite was performed.
+
+The [SDK refresh report](../reviews/provider-sdk-refresh-2026-11-12.md) records
+exact stable pins verified from PyPI: OpenAI 3.49.0, Anthropic 2.8.0 and Google
+GenAI 3.2.0. A shared requirements file replaces the older-major ranges in public
+CI. The dependency worktree starts from the reviewed/published checkpoint and
+preserves the unfinished Chat streaming changes in the original worktree.
+
+The new SDKs expose two real gateway compatibility gaps: Google defaults to
+`/v1/models/...`, and Anthropic API-key clients now use Bearer authentication.
+Gemini `/v1` and `/v1beta` now share admission/accounting handlers. Shared discovery
+uses native credential headers or client/version hints for serialization only,
+retains key/route authorization, and omits path-unsafe IDs from Gemini listings.
+SDK tests cover default generation, streaming, counting, native discovery,
+invalid keys, query-key refusal and unsupported methods across both prefixes.
+
+Initial latest-SDK matrix: 12 passed, four Gemini 404s; corrected targeted run:
+30 passed. Initial router run: 205/208 passed, with three tests catching the older
+httpx failed-body exception while current SDKs use httpx2. The exact transport
+exception classes are now accepted without weakening source/count/one-send or
+restart assertions; all three focused cases pass. The older installed SDKs pass
+34 generation/discovery/matrix/recovery compatibility cases against the updated
+gateway. An initial full latest-SDK run passed 538 tests, skipped three opt-in
+integrations and retained the Anthropic discovery failure before its fix. Its
+corrected two-case current-SDK discovery rerun passes. Final frozen-source full
+qualification and exact-commit review remain required before publication.

@@ -102,7 +102,7 @@ OpenAI Platform's cache features.
 | OpenAI Chat Completions | `/v1/chat/completions` | Chat, Messages and Responses; buffered and streamed |
 | Anthropic Messages | `/v1/messages` | Chat, Messages and Responses; buffered and streamed |
 | OpenAI Responses | `/v1/responses` | Chat, Messages and Responses; buffered and streamed |
-| Gemini generateContent | `/v1beta/models/{model}:generateContent` or `:streamGenerateContent` | Chat, Messages and Responses; buffered and streamed |
+| Gemini generateContent | `/v1/models/{model}:generateContent` or `:streamGenerateContent`; `/v1beta` also supported | Chat, Messages and Responses; buffered and streamed |
 
 The [live report](../reviews/zai-router-live-2026-11-11.md) retains failed probes,
 the accounting defect they found, the fix and subsequent evidence. Z.AI's Responses

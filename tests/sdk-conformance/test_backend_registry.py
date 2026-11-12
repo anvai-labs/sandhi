@@ -376,3 +376,41 @@ def test_failed_credential_update_cannot_grant_through_existing_backend(tmp_path
         assert instance.cli("list")["backends"][0]["revision"] == 1
         assert instance.cli("list")["backends"][0]["ready"] is True
         assert received == [], "management failures must not trigger inference"
+
+
+def test_shared_v1_discovery_keeps_wire_shapes_authorized_and_gemini_models_callable(
+    tmp_path, backend_binaries, backend_origin,
+):
+    from google import genai
+    from google.genai import types
+
+    origin, received = backend_origin
+    with gateway(tmp_path, backend_binaries) as instance:
+        instance.provision(origin, "discovery-fixture-credential")
+        instance.cli("set", "shared-discovery", "--provider", "models", "--credential-ref", "openai:default",
+                     "--endpoint-family", "openai_chat_completions", "--model", "fixture", "--model", "org/model")
+        minted = instance.admin("POST", "/admin/keys/share", json={
+            "upstream": "backend/shared-discovery", "models": ["fixture", "org/model"]})
+        assert minted.status_code == 200, minted.text
+        token = minted.json()["virtual_key"]
+        with httpx.Client(base_url=instance.base) as client:
+            response = client.get("/v1/models", headers={"authorization": "Bearer " + token})
+            assert response.status_code == 200
+            assert {model["id"] for model in response.json()["data"]} == {"fixture", "org/model"}
+            assert response.json()["object"] == "list"
+            response = client.get("/v1/models", headers={"x-api-key": token})
+            assert response.status_code == 200 and response.json()["has_more"] is False
+            assert {model["id"] for model in response.json()["data"]} == {"fixture", "org/model"}
+            response = client.get("/v1/models", headers={"authorization": "Bearer " + token,
+                "anthropic-version": "2023-06-01"})
+            assert response.status_code == 200 and response.json()["has_more"] is False
+            assert all(model["type"] == "model" for model in response.json()["data"])
+            response = client.get("/v1/models", headers={"authorization": "Bearer " + token,
+                "x-goog-api-client": "sdk-discovery-fixture"})
+            assert response.status_code == 200
+            assert [model["name"] for model in response.json()["models"]] == ["models/fixture"]
+            denied = client.get("/v1/models", headers={"x-goog-api-key": "invalid-fixture"})
+            assert denied.status_code == 401 and denied.json()["error"]["code"] == 401
+        with genai.Client(api_key=token, http_options=types.HttpOptions(base_url=instance.base)) as client:
+            assert [model.name for model in client.models.list()] == ["models/fixture"]
+        assert not received, "discovery must not dispatch inference"

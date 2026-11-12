@@ -5,6 +5,7 @@ Real vendor SDKs and a copied gateway binary; no provider account or live cache 
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import importlib.util
 import sqlite3
 import threading
 import time
@@ -12,6 +13,13 @@ import time
 import httpx
 import openai
 import pytest
+
+# Current provider SDK majors use the separately named httpx2 transport; older
+# releases use httpx. Match the failed-body exception from either SDK runtime.
+HTTP_PROTOCOL_ERRORS = (httpx.RemoteProtocolError,)
+if importlib.util.find_spec("httpx2") is not None:
+    import httpx2
+    HTTP_PROTOCOL_ERRORS += (httpx2.RemoteProtocolError,)
 
 from test_backend_registry import Gateway, backend_binaries  # noqa: F401
 
@@ -872,7 +880,7 @@ def test_gemini_default_sdk_stream_refusal_has_no_type_error_or_inference_replay
     control["signed_output"] = True
     with tracked_gateway(tmp_path, backend_binaries, origin, FAMILIES[1], streaming=True) as (instance, token):
         with genai.Client(api_key=token, http_options=types.HttpOptions(base_url=instance.base)) as client:
-            with pytest.raises((errors.APIError, httpx.RemoteProtocolError)) as failed:
+            with pytest.raises((errors.APIError,) + HTTP_PROTOCOL_ERRORS) as failed:
                 list(client.models.generate_content_stream(model="agent", contents="hello",
                     config=types.GenerateContentConfig(max_output_tokens=64)))
         if isinstance(failed.value, errors.APIError):
@@ -891,7 +899,7 @@ def test_gemini_source_partial_usage_survives_restart_without_model_replay(
     with tracked_gateway(tmp_path, backend_binaries, origin, FAMILIES[3], streaming=True) as (instance, token):
         with genai.Client(api_key=token, http_options=types.HttpOptions(base_url=instance.base,
                 headers={"x-sandhi-session": "gemini-recovery-session"})) as client:
-            with pytest.raises((errors.APIError, httpx.RemoteProtocolError)):
+            with pytest.raises((errors.APIError,) + HTTP_PROTOCOL_ERRORS):
                 list(client.models.generate_content_stream(model="agent", contents="hello",
                     config=types.GenerateContentConfig(max_output_tokens=64)))
         assert len(calls) == 1
