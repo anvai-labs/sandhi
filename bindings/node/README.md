@@ -86,6 +86,26 @@ Chat, Messages, Responses and Gemini handles. Default is false; other families
 reject true. Render native frames or canonical content, and meter canonical usage
 once. Opaque provider state remains bound to its compatible backend/account.
 
+`runtime.provider()` accepts explicit `protocol` and the final optional
+`endpointProfile` argument independently of the provider label. Its existing
+positional arguments are preserved:
+
+```js
+const provider = runtime.provider(
+  "my-coding-backend", "my-model", API_KEY,
+  "https://api.z.ai/api/coding/paas/v4", // baseUrl
+  undefined, 0, 30, 10,               // headersJson, maxRetries, timeout, idle
+  "bearer", "chat_completions", 10,   // authScheme, protocol, setup timeout
+  "openai_terminal_chunk_usage",      // endpointProfile
+);
+```
+
+Profiles default to `standard`; `anthropic_implicit_cache` is an explicit Messages
+convention. `responses` and `gemini_generate_content` select those wire families.
+Profiles describe the immediate source, stay out of model request bodies and grant
+no credential authority. See [shared endpoint profiles](../../docs/adr/0039-shared-embedded-endpoint-profiles.md)
+for family constraints and the remaining gateway second-hop qualification gate.
+
 Minor 13 adds optional `cache_intent`, for example `{mode:"suppress_gateway"}`.
 Suppression preserves native controls and adds no gateway markers; it cannot turn
 off provider-internal caching. Direct unconfigured handles accept preserve/suppress

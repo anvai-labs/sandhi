@@ -1,0 +1,49 @@
+{
+  "evidence_kind": "local_unresolved_accounting_wait",
+  "source_parent": "a74a8f14a326ba93d745887a22007d9b9080682f",
+  "working_diff_sha256": "9c3709f4be02b90d37217007c1c040c6fd5242154c51139fdfe341d828fa256d",
+  "new_source_sha256": {
+    "crates/sandhi-core/src/endpoint.rs": "e055ca69734f0bdaa240140580b68d8ae37110feed5ab60900127ddab913836e",
+    "crates/sandhi-providers/src/factory.rs": "fa763a65fde4ed94dc01f29c32f8b6bca5f76a87d9ac1f5be55a0eaec8464ce4"
+  },
+  "command": "cargo test --workspace",
+  "concurrent_work": "Candidate Python wheel build; separate Cargo target. No live provider requests.",
+  "log_sha256": "d51bc07e981dc1f01b853c2308c7b26dc2af8ebf37125f8bdb75b765ef479c14",
+  "failure": {
+    "test": "owned_buffered_back_leg_never_races_its_primary_settle",
+    "request_id": "req_1794503158593_254",
+    "call_ordinal": 128,
+    "http_status": 502,
+    "retryable": false,
+    "retained_jobs": 1,
+    "observed_total_upstream_calls": 127,
+    "last_printed_usage_request_id": "req_1794503158374_253"
+  },
+  "wait_trace": {
+    "transition": "admission",
+    "wait_ms": 2000,
+    "wait_started_us": 23,
+    "wait_elapsed_us": 2001311,
+    "job_stage": "running",
+    "elapsed_us": 2001324,
+    "queue_us": 45,
+    "run_us": 2001279,
+    "publication_us": null,
+    "published_at_us": null,
+    "interrupted": false,
+    "ledger_stage": "reserve_call",
+    "ledger_stage_us": 2001279,
+    "ledger_calls": 1,
+    "ledger_busy_returns": 0,
+    "ledger_backoff_us": 0,
+    "readiness": "pending"
+  },
+  "evidence_limits": [
+    "Admission did not publish before the HTTP waiter stopped. No inference was authorized through this pending admission.",
+    "The 127 upstream requests and req253 observation belong to previous calls; neither is a usage/receipt join for req254.",
+    "reserve_call includes internal shard/SQLite acquisition, statements, commit I/O and descheduling; the trace does not distinguish them.",
+    "No later completion, reservation or receipt database join is exported.",
+    "The log contains separate controlled queued late-admission waits; those are not assigned to this request."
+  ],
+  "disposition": "Unresolved reliability/merge gate. Preserve this new admission occurrence separately from the earlier terminal-settlement stall. No deadline increase, replay or inferred zero."
+}

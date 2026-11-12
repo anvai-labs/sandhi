@@ -38,6 +38,7 @@ mod deadline;
 pub use deadline::{BufferedDeadline, StreamingDeadline};
 mod cohere_typed;
 pub mod escape_hatch;
+mod factory;
 pub mod gemini;
 mod gemini_typed;
 pub mod local;
@@ -61,6 +62,7 @@ pub use catalog::{
 };
 pub use cohere::Cohere;
 pub use escape_hatch::FnProvider;
+pub use factory::{ConfiguredProvider, ProviderOptions};
 pub use gemini::{Gemini, GeminiAuthScheme};
 pub use local::Ollama;
 pub use openai::OpenAiCompat;

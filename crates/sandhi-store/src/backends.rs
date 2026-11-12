@@ -2,22 +2,12 @@
 use std::{collections::HashSet, sync::Mutex, time::Duration};
 
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+pub use sandhi_core::EndpointProfileV1 as BackendProfile;
 use sandhi_core::{EndpointFamilyV1, ModelDescriptorV1};
 use serde::{Deserialize, Serialize};
 
 pub const MAX_BACKENDS: usize = 256;
 pub const MAX_DEFINITION_BYTES: usize = 65_536;
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BackendProfile {
-    #[default]
-    Standard,
-    #[serde(rename = "chatgpt_codex")]
-    ChatGptCodex,
-    AnthropicImplicitCache,
-    OpenaiTerminalChunkUsage,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -58,16 +48,9 @@ impl BackendDefinition {
     }
 
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.endpoint.endpoint_profile == BackendProfile::OpenaiTerminalChunkUsage
-            && self.endpoint.endpoint_family != EndpointFamilyV1::OpenaiChatCompletions
-        {
-            return Err("terminal Chat usage profile requires OpenAI Chat Completions");
-        }
-        if self.endpoint.endpoint_profile == BackendProfile::AnthropicImplicitCache
-            && self.endpoint.endpoint_family != EndpointFamilyV1::AnthropicMessages
-        {
-            return Err("implicit Messages usage profile requires Anthropic Messages");
-        }
+        self.endpoint
+            .endpoint_profile
+            .validate_family(self.endpoint.endpoint_family)?;
         crate::vault::validate_reference("backend", &self.id).map_err(|_| "invalid backend id")?;
         crate::vault::validate_reference(&self.provider, "default")
             .map_err(|_| "invalid provider label")?;

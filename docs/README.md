@@ -22,6 +22,7 @@ mistaken for shipped behavior.
 | What is needed for multi-backend routing and cache management? | [Active goal and delivery gates (TD-0034)](td/TD-0034-protocol-neutral-router-cache-accounting.md); [baseline inventory and first fixes](reviews/router-cache-inventory-2026-11-11.md); dynamic routing remains in progress |
 | How do I operate the dashboard? | [Operator console](operator/dashboard.md): navigable workspaces, routing inventory, token reuse and bounded usage evidence |
 | How do I configure backends and logical models? | [Backend operator guide](operator/backends.md); fixed and logical routes, compatible affinity, cache declarations and credential references |
+| How do embedded clients select compatible endpoint usage conventions? | [Shared endpoint profiles](adr/0039-shared-embedded-endpoint-profiles.md): explicit Python/Node configuration, coordinated Victor migration and the remaining gateway second-hop contract |
 | Does the routing goal include native Gemini clients? | Yes; [Gemini inventory and fidelity gaps](reviews/gemini-router-cache-inventory-2026-11-11.md) and the four-ingress matrix in TD-0034 |
 | What is the public data contract? | Rust types in `sandhi-core`; generated JSON Schemas in [`../schemas/`](../schemas/) |
 | What changed in a release? | [0.15.0 release evidence](releases/v0.15.0.md), [0.14.0 release and adoption gates](releases/v0.14.0.md), [0.13.0 release](releases/v0.13.0.md), [0.12.0 release evidence](releases/v0.12.0.md), [CHANGELOG](../CHANGELOG.md) and [release guide](../RELEASING.md) |
@@ -109,6 +110,7 @@ TD-0028 keeps its merge/deployment gates separate from the remaining diagnostic 
 | [0027](adr/0027-qualified-codex-buffered-accounting.md) | Workspace candidate: qualified buffered Codex delivery with constrained encoding, original deadlines and retained source evidence |
 | [0028](adr/0028-qualified-translated-stream-accounting.md) | Workspace candidate: four client dialects on qualified Chat/Responses/Codex streams, source-owned paired accounting and bounded typed projection |
 | [0029](adr/0029-explicit-terminal-chat-usage-profile.md) | Workspace candidate: explicitly configured terminal-choice Chat usage placement, preserving strict standard qualification and affinity |
+| [0039](adr/0039-shared-embedded-endpoint-profiles.md) | Source candidate: shared embedded endpoint factory and explicit profiles; gateway second-hop qualification remains open |
 | [0002](adr/0002-provider-transport-scope-and-modality-admission.md) | Chat-completion transport scope and the admission gate for new modalities |
 | [0003](adr/0003-provider-adapter-authoring-and-codegen.md) | Hand-written transports; generated models/oracles only where bounded |
 | [0004](adr/0004-two-plane-proxy-and-enforcement-boundary.md) | Transparent and translation planes; custody-based enforcement boundary |

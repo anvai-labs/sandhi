@@ -788,7 +788,7 @@ test("provider() rejects invalid dispatch inputs at the FFI seam", () => {
   // Responses protocol + unknown provider + no base_url.
   assert.throws(
     () => runtime.provider("acme", "m", "k", undefined, undefined, 0, undefined, undefined, undefined, "responses"),
-    /baseUrl/,
+    /base_url/,
   );
   // Unknown catalog provider without a base_url under chat_completions → typed provider error.
   assert.throws(() => runtime.provider("acme", "m", "k", undefined, undefined, 0), /unknown catalog provider|acme/);
@@ -1063,3 +1063,95 @@ test("parseUsage exercises every built-in provider parser", () => {
   // Invalid JSON throws.
   assert.throws(() => parseUsage("openai", "{nope"), /valid JSON/);
 });
+
+for (const [protocol, profile, label, scheme] of [
+  ["chat_completions", "openai_terminal_chunk_usage", "anthropic", "bearer"],
+  ["anthropic_messages", "anthropic_implicit_cache", "custom-messages", "api_key"],
+]) {
+  test(`explicit ${profile} is source configuration, independent of ${label}`, async () => {
+    const chat = protocol === "chat_completions";
+    const values = chat ? [
+      {
+        object: "chat.completion.chunk", id: "chat", model: "fixture",
+        choices: [{ index: 0, delta: { content: "ok" }, finish_reason: "stop" }],
+        usage: {
+          prompt_tokens: 11, completion_tokens: 3,
+          prompt_tokens_details: { cached_tokens: 4, cache_write_tokens: 1 },
+          completion_tokens_details: { reasoning_tokens: 0 },
+        },
+      },
+    ] : [
+      {
+        type: "message_start",
+        message: {
+          type: "message", id: "msg", model: "fixture", role: "assistant", content: [],
+          usage: { input_tokens: 6, output_tokens: 0, cache_read_input_tokens: 4 },
+        },
+      },
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "ok" } },
+      { type: "content_block_stop", index: 0 },
+      { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 3 } },
+      { type: "message_stop" },
+    ];
+    const body = values.map(value => `data: ${JSON.stringify(value)}\n\n`).join("")
+      + (chat ? "data: [DONE]\n\n" : "");
+    const response = { contentType: "text/event-stream", body };
+    const server = await localServer([response, response]);
+    try {
+      const runtime = new ProviderRuntime();
+      const make = selected => runtime.provider(
+        label, "fixture", "synthetic", server.origin,
+        undefined, 0, 5, 2, scheme, protocol, 2, selected,
+      );
+      const request = JSON.stringify({
+        model: "fixture", max_output_tokens: 64,
+        messages: [{ role: "user", content: "hello" }],
+      });
+      const collect = async handle => {
+        const events = [];
+        for await (const value of handle.streamJson(request)) events.push(JSON.parse(value));
+        return events;
+      };
+      const handle = make(profile);
+      assert.equal(handle.provider, label);
+      const events = await collect(handle);
+      assert.equal(events.filter(e => e.event === "text_delta").map(e => e.delta).join(""), "ok");
+      const finals = events.filter(e => e.event === "usage" && e.usage.completeness === "final");
+      assert.equal(finals.length, 1);
+      assert.deepEqual(
+        ["tokens_in", "cache_read_tokens", "cache_creation_tokens", "tokens_out"]
+          .map(key => finals[0].usage[key]),
+        [6, 4, Number(chat), 3],
+      );
+      assert.equal(events.at(-1).event, "finish");
+      assert.equal(server.calls(), 1);
+      assert.equal(server.lastBody().endpoint_profile, undefined);
+      assert.deepEqual(
+        [server.lastHeaders().authorization, server.lastHeaders()["x-api-key"]],
+        scheme === "bearer" ? ["Bearer synthetic", undefined] : [undefined, "synthetic"],
+      );
+      await assert.rejects(
+        () => collect(make("standard")),
+        error => error.code === "output_projection_error" && error.retryable === false,
+      );
+      assert.equal(server.calls(), 2);
+    } finally {
+      await server.close();
+    }
+  });
+}
+
+for (const [protocol, profile] of [
+  ["responses", "openai_terminal_chunk_usage"],
+  ["gemini_generate_content", "anthropic_implicit_cache"],
+  ["anthropic_messages", "chatgpt_codex"],
+  ["chatgpt_responses", "standard"],
+  ["chat_completions", "unsupported"],
+]) {
+  test(`incompatible ${protocol}/${profile} fails at construction`, () => {
+    assert.throws(() => new ProviderRuntime().provider(
+      "fixture", "fixture", "synthetic", "http://127.0.0.1:9",
+      undefined, 0, 5, 2, undefined, protocol, 2, profile,
+    ));
+  });
+}

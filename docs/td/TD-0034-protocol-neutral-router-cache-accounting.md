@@ -1794,3 +1794,33 @@ ownership and one original settlement each. The actual database joins are
 exported with explicit synthetic/unpaired scope; there is no provider inference
 in those fixtures. Existing 24 job tests pass. New markers are intended to narrow
 the next spontaneous failure, not declare the retained failures resolved.
+
+### M5t — Shared embedded configuration and explicit source profiles
+
+[ADR-0039](../adr/0039-shared-embedded-endpoint-profiles.md) records the next source
+candidate: one Rust factory for Python/Node, provider identity independent of wire
+protocol, a shared non-secret profile type and early family/authentication/timeout
+validation. Existing stored profile names and Codex transport fences are retained.
+Victor carries constructor profile selection into its handle identity and declares
+the direct Z.AI terminal Chat usage convention. Per-call profile overrides fail
+before transport; model bodies never receive this configuration.
+
+This is direct-source configuration, not completion of the gateway consumer
+migration. The native/translated second-hop counts contract and cache-intent
+compilation owner must be qualified before a client can switch arbitrary routed
+backends seamlessly. Do not blindly force standard or copy one selected backend's
+profile to every gateway client. Buffered unification, accounting-default retirement
+and the separately retained spontaneous accounting-wait defect remain open.
+
+The [M5t evidence report](../reviews/embedded-endpoint-profiles-2026-11-12.md)
+records 107 Python, 65 Node, 731 changed-crate Rust and 1,932 Victor test passes,
+plus two bounded live direct GLM stream checks. It also retains the failed full
+workspace run: the back-leg regression timed out inside admission's reserve call
+before dispatch. This does not diagnose the earlier terminal-settlement stalls.
+The reliability/merge gate remains open; no deadline was widened.
+
+The preceding streaming checkpoint `a74a8f1` completed all fourteen CI jobs on
+verified public GitHub-hosted runners. Its final SDK/dashboard/CPU-origin job passed
+564 cases with three skips. That green source-qualified run supersedes the earlier
+563-pass/one-failure result for release gating; the earlier fixture failure remains
+recorded as evidence. These results do not cover subsequent M5t edits.

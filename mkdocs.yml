@@ -95,6 +95,7 @@ nav:
       - Abandoned Prepared recovery: adr/0036-abandoned-prepared-recovery.md
       - Portable Responses source output: adr/0037-portable-responses-source-output.md
       - Coordinated Victor contract migration: adr/0038-coordinated-victor-contract-migration.md
+      - Embedded endpoint profiles: adr/0039-shared-embedded-endpoint-profiles.md
       - Qualified Responses streams: adr/0026-qualified-responses-stream-accounting.md
       - Qualified Codex accounting: adr/0027-qualified-codex-buffered-accounting.md
       - Qualified translated streams: adr/0028-qualified-translated-stream-accounting.md

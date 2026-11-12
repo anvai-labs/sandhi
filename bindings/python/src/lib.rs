@@ -22,51 +22,9 @@ use sandhi_core::{
     KeyStore, ParsedUsage, UsageAggregateV1, UsageAggregator, UsageEvent, VirtualKey,
 };
 use sandhi_providers::{
-    resolve_openai_compat_provider, AnthropicAuthScheme, GeminiAuthScheme, ProviderError,
-    ProviderFamily, ProviderHandle, ProviderRuntime as RustProviderRuntime,
+    resolve_openai_compat_provider, ProviderError, ProviderHandle, ProviderOptions,
+    ProviderRuntime as RustProviderRuntime,
 };
-
-fn parse_anthropic_auth_scheme(value: Option<&str>) -> PyResult<AnthropicAuthScheme> {
-    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
-        None | Some("") | Some("api_key") => Ok(AnthropicAuthScheme::ApiKey),
-        Some("bearer") => Ok(AnthropicAuthScheme::Bearer),
-        Some(other) => Err(PyValueError::new_err(format!(
-            "unsupported Anthropic auth_scheme {other:?}; expected 'api_key' or 'bearer'"
-        ))),
-    }
-}
-
-fn parse_gemini_auth_scheme(value: Option<&str>) -> PyResult<GeminiAuthScheme> {
-    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
-        None | Some("") | Some("api_key") => Ok(GeminiAuthScheme::ApiKey),
-        Some("bearer") => Ok(GeminiAuthScheme::Bearer),
-        Some(other) => Err(PyValueError::new_err(format!(
-            "unsupported Gemini auth_scheme {other:?}; expected 'api_key' or 'bearer'"
-        ))),
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum OpenAiProtocol {
-    ChatCompletions,
-    Responses,
-    ChatGptResponses,
-}
-
-fn parse_openai_protocol(value: Option<&str>) -> PyResult<OpenAiProtocol> {
-    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
-        None | Some("") | Some("chat_completions") | Some("openai_chat_completions") => {
-            Ok(OpenAiProtocol::ChatCompletions)
-        }
-        Some("responses") | Some("openai_responses") => Ok(OpenAiProtocol::Responses),
-        Some("chatgpt_responses") | Some("codex_responses") => {
-            Ok(OpenAiProtocol::ChatGptResponses)
-        }
-        Some(other) => Err(PyValueError::new_err(format!(
-            "unsupported protocol {other:?}; expected 'chat_completions', 'responses', or 'chatgpt_responses'"
-        ))),
-    }
-}
 
 pyo3::create_exception!(
     sandhi_gateway,
@@ -157,7 +115,7 @@ impl PyProviderRuntime {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (provider, model, api_key, base_url=None, timeout_secs=None, stream_idle_timeout_secs=None, max_retries=None, headers_json=None, auth_scheme=None, protocol=None, stream_setup_timeout_secs=None))]
+    #[pyo3(signature = (provider, model, api_key, base_url=None, timeout_secs=None, stream_idle_timeout_secs=None, max_retries=None, headers_json=None, auth_scheme=None, protocol=None, stream_setup_timeout_secs=None, endpoint_profile=None))]
     fn provider(
         &self,
         provider: String,
@@ -173,139 +131,28 @@ impl PyProviderRuntime {
         // Appended last (like the Node binding): inserting between the two
         // timeout slots would silently rebind positional callers' args.
         stream_setup_timeout_secs: Option<f64>,
+        endpoint_profile: Option<String>,
     ) -> PyResult<TypedProvider> {
-        let normalized = provider.trim().to_ascii_lowercase();
-        let protocol = parse_openai_protocol(protocol.as_deref())?;
-        // Contract principle (TD-0008): a request whose semantics are already
-        // satisfied is a NO-OP, not an error. Every non-Anthropic/Gemini family
-        // authenticates with `Authorization: Bearer`, so `auth_scheme="bearer"`
-        // is accepted family-agnostically — callers assembling gateway handles
-        // (victor TD-0003 P3) need not know which family they front. Only a
-        // genuinely contradictory scheme (`api_key` where no such scheme
-        // exists) is rejected.
-        if let Some(scheme) = auth_scheme
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            let scheme_families = matches!(
-                normalized.as_str(),
-                "anthropic" | "claude" | "gemini" | "google"
-            );
-            if !scheme_families && scheme != "bearer" {
-                return Err(PyValueError::new_err(format!(
-                    "auth_scheme {scheme:?} is only valid for the Anthropic or Gemini \
-protocol; other families always authenticate with 'Authorization: Bearer' \
-(auth_scheme=\"bearer\" is accepted there as a no-op)"
-                )));
-            }
-        }
-        let handle = if protocol != OpenAiProtocol::ChatCompletions {
-            let resolved_base_url = if let Some(base_url) = base_url {
-                base_url
-            } else {
-                resolve_openai_compat_provider(&provider)
-                    .map(|spec| spec.base_url_for_model(&model).to_owned())
-                    .ok_or_else(|| {
-                        PyValueError::new_err(
-                            "Responses protocol requires base_url for an unknown provider",
-                        )
-                    })?
-            };
-            let headers = parse_headers_json(headers_json)?;
-            if protocol == OpenAiProtocol::ChatGptResponses {
-                self.inner.chatgpt_responses(
-                    provider.clone(),
-                    resolved_base_url,
-                    api_key,
-                    headers,
-                    max_retries,
-                    timeout_secs,
-                    stream_setup_timeout_secs,
-                    stream_idle_timeout_secs,
-                )
-            } else {
-                self.inner.openai_responses(
-                    provider.clone(),
-                    resolved_base_url,
-                    api_key,
-                    headers,
-                    max_retries,
-                    timeout_secs,
-                    stream_setup_timeout_secs,
-                    stream_idle_timeout_secs,
-                )
-            }
-        } else if matches!(normalized.as_str(), "anthropic" | "claude") {
-            self.inner.anthropic(
-                base_url.unwrap_or_else(|| ProviderFamily::Anthropic.default_base_url().into()),
+        let handle = self
+            .inner
+            .configured_provider(ProviderOptions {
+                provider: provider.clone(),
+                model,
                 api_key,
-                parse_anthropic_auth_scheme(auth_scheme.as_deref())?,
-                parse_headers_json(headers_json)?,
-                max_retries,
-                timeout_secs,
-                stream_setup_timeout_secs,
-                stream_idle_timeout_secs,
-            )
-        } else if matches!(normalized.as_str(), "gemini" | "google") {
-            self.inner.gemini(
-                base_url.unwrap_or_else(|| ProviderFamily::Gemini.default_base_url().into()),
-                api_key,
-                parse_gemini_auth_scheme(auth_scheme.as_deref())?,
-                parse_headers_json(headers_json)?,
-                max_retries,
-                timeout_secs,
-                stream_setup_timeout_secs,
-                stream_idle_timeout_secs,
-            )
-        } else if normalized == "cohere" {
-            self.inner.cohere(
-                base_url.unwrap_or_else(|| ProviderFamily::Cohere.default_base_url().into()),
-                api_key,
-                parse_headers_json(headers_json)?,
-                max_retries,
-                timeout_secs,
-                stream_setup_timeout_secs,
-                stream_idle_timeout_secs,
-            )
-        } else if normalized == "ollama" {
-            self.inner.ollama(
-                base_url.unwrap_or_else(|| ProviderFamily::Ollama.default_base_url().into()),
-                api_key,
-                parse_headers_json(headers_json)?,
-                max_retries,
-                timeout_secs,
-                stream_setup_timeout_secs,
-                stream_idle_timeout_secs,
-            )
-        } else if let Some(base_url) = base_url {
-            self.inner.openai_compat(
-                provider.clone(),
                 base_url,
-                api_key,
-                parse_headers_json(headers_json)?,
+                headers: parse_headers_json(headers_json)?,
                 max_retries,
                 timeout_secs,
                 stream_setup_timeout_secs,
                 stream_idle_timeout_secs,
-            )
-        } else {
-            self.inner
-                .known_openai_compat(
-                    &provider,
-                    &model,
-                    api_key,
-                    parse_headers_json(headers_json)?,
-                    max_retries,
-                    timeout_secs,
-                    stream_setup_timeout_secs,
-                    stream_idle_timeout_secs,
-                )
-                .map_err(|error| PyValueError::new_err(error.to_string()))?
-        };
+                auth_scheme,
+                protocol,
+                endpoint_profile,
+            })
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
         Ok(TypedProvider {
-            provider: handle.slug().to_owned(),
-            handle,
+            provider: handle.provider,
+            handle: handle.handle,
         })
     }
 }

@@ -19,6 +19,8 @@ pub use cache_policy::*;
 pub mod native_input;
 pub use native_input::{NativeInputFeatureV1, NativeInputV1};
 pub mod conformance;
+pub mod endpoint;
+pub use endpoint::EndpointProfileV1;
 pub mod event;
 // Generated typify narrow models (ADR-0003 §2/§4 pilot) — regenerated, never hand-edited.
 mod generated;
