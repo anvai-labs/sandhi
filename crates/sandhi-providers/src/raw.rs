@@ -77,6 +77,7 @@ pub struct RawForwarder {
     api_key: String,
     anthropic_auth: AnthropicAuthScheme,
     anthropic_usage_profile: sandhi_core::usage::AnthropicUsageProfile,
+    openai_stream_usage_profile: sandhi_core::usage::OpenAiStreamUsageProfile,
     gemini_auth: GeminiAuthScheme,
     extra_headers: HeaderMap,
     /// Vendor session-affinity request header from the catalog spec (strategy-via-data):
@@ -123,6 +124,7 @@ impl RawForwarder {
             api_key: api_key.into(),
             anthropic_auth: AnthropicAuthScheme::ApiKey,
             anthropic_usage_profile: Default::default(),
+            openai_stream_usage_profile: Default::default(),
             gemini_auth: GeminiAuthScheme::ApiKey,
             extra_headers: HeaderMap::new(),
             session_header: None,
@@ -162,6 +164,14 @@ impl RawForwarder {
         profile: sandhi_core::usage::AnthropicUsageProfile,
     ) -> Self {
         self.anthropic_usage_profile = profile;
+        self
+    }
+
+    pub(crate) fn with_openai_stream_usage_profile(
+        mut self,
+        profile: sandhi_core::usage::OpenAiStreamUsageProfile,
+    ) -> Self {
+        self.openai_stream_usage_profile = profile;
         self
     }
 
@@ -596,9 +606,14 @@ impl RawForwarder {
                 .bytes_stream()
                 .map(|chunk| chunk.map_err(|error| ProviderError::Transport(error.to_string()))),
         );
-        let (stream, observation) =
-            qualified_stream::observe_endpoint(with_idle_timeout(raw, idle), guard, endpoint)
-                .expect("endpoint qualification was validated before dispatch");
+        let (stream, observation) = qualified_stream::observe_response(
+            with_idle_timeout(raw, idle),
+            guard,
+            endpoint,
+            None,
+            self.openai_stream_usage_profile,
+        )
+        .expect("endpoint qualification was validated before dispatch");
         Ok(RawQualifiedStreamResponse {
             status,
             headers,

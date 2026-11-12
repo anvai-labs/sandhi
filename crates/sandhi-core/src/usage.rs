@@ -275,6 +275,15 @@ pub enum StreamUsageError {
     InvalidUsage(BufferedUsageError),
 }
 
+/// Explicit Chat stream usage placement contract; never inferred from a vendor label.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OpenAiStreamUsageProfile {
+    #[default]
+    Standard,
+    /// One index-zero terminal choice may carry request-total usage.
+    TerminalChunk,
+}
+
 /// Qualify the request-total usage event from OpenAI Chat's `include_usage` stream.
 ///
 /// The caller must supply one complete decoded SSE event, not a data line or a
@@ -288,6 +297,13 @@ pub enum StreamUsageError {
 /// The caller owns immutable observation retention and conflicting-event detection.
 /// This pure, opt-in API proves neither stream completion nor durable settlement.
 pub fn qualify_openai_stream_usage(event: &Value) -> Result<Option<ParsedUsage>, StreamUsageError> {
+    qualify_openai_stream_usage_for_profile(event, OpenAiStreamUsageProfile::Standard)
+}
+
+pub fn qualify_openai_stream_usage_for_profile(
+    event: &Value,
+    profile: OpenAiStreamUsageProfile,
+) -> Result<Option<ParsedUsage>, StreamUsageError> {
     if event.get("object").and_then(Value::as_str) != Some("chat.completion.chunk")
         || event.get("error").is_some()
     {
@@ -300,7 +316,15 @@ pub fn qualify_openai_stream_usage(event: &Value) -> Result<Option<ParsedUsage>,
     if event.get("usage").is_none_or(Value::is_null) {
         return Ok(None);
     }
-    if !choices.is_empty() {
+    let terminal_choice = profile == OpenAiStreamUsageProfile::TerminalChunk
+        && choices.len() == 1
+        && choices[0].get("index").and_then(Value::as_u64) == Some(0)
+        && choices[0].get("delta").is_some_and(Value::is_object)
+        && matches!(
+            choices[0].get("finish_reason").and_then(Value::as_str),
+            Some("stop" | "length" | "tool_calls" | "function_call" | "content_filter")
+        );
+    if !choices.is_empty() && !terminal_choice {
         return Err(StreamUsageError::NonFinalUsage);
     }
     validate_openai_buffered_usage(event).map_err(StreamUsageError::InvalidUsage)?;
@@ -1309,6 +1333,79 @@ fn parser_reasoning_conventions_are_explicit() {
                 crate::Backend::External,
             ));
             assert_eq!(event.billable_tokens(), expected);
+        }
+    }
+}
+
+#[cfg(test)]
+mod terminal_chunk_profile_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn terminal(reason: &str) -> Value {
+        json!({"object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":reason}],
+            "usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14,
+                "prompt_tokens_details":{"cached_tokens":6,"cache_write_tokens":2},"completion_tokens_details":{"reasoning_tokens":0}}})
+    }
+    #[test]
+    fn terminal_totals_require_an_explicit_profile_and_known_single_choice_terminal() {
+        for reason in [
+            "stop",
+            "length",
+            "tool_calls",
+            "function_call",
+            "content_filter",
+        ] {
+            let event = terminal(reason);
+            assert_eq!(
+                qualify_openai_stream_usage(&event),
+                Err(StreamUsageError::NonFinalUsage)
+            );
+            let usage = qualify_openai_stream_usage_for_profile(
+                &event,
+                OpenAiStreamUsageProfile::TerminalChunk,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                (
+                    usage.tokens_in,
+                    usage.cache_read_tokens,
+                    usage.cache_creation_tokens,
+                    usage.tokens_out
+                ),
+                (2, 6, 2, 4)
+            );
+        }
+        for bad in ["unknown", "", "future_terminal"] {
+            assert_eq!(
+                qualify_openai_stream_usage_for_profile(
+                    &terminal(bad),
+                    OpenAiStreamUsageProfile::TerminalChunk
+                ),
+                Err(StreamUsageError::NonFinalUsage)
+            );
+        }
+        for fault in ["progress", "index", "delta", "multiple", "malformed_usage"] {
+            let mut event = terminal("stop");
+            match fault {
+                "progress" => event["choices"][0]["finish_reason"] = Value::Null,
+                "index" => event["choices"][0]["index"] = json!(1),
+                "delta" => event["choices"][0]["delta"] = Value::Null,
+                "multiple" => {
+                    let choice = event["choices"][0].clone();
+                    event["choices"].as_array_mut().unwrap().push(choice);
+                }
+                _ => event["usage"]["completion_tokens"] = json!("4"),
+            }
+            assert!(
+                qualify_openai_stream_usage_for_profile(
+                    &event,
+                    OpenAiStreamUsageProfile::TerminalChunk
+                )
+                .is_err(),
+                "{fault}"
+            );
         }
     }
 }

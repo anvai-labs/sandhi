@@ -111,10 +111,15 @@ impl ExecutionContext {
                     && b.credential_generation > 0
                     && matches!(
                         b.endpoint_profile.as_str(),
-                        "standard" | "chatgpt_codex" | "anthropic_implicit_cache"
+                        "standard"
+                            | "chatgpt_codex"
+                            | "anthropic_implicit_cache"
+                            | "openai_terminal_chunk_usage"
                     )
                     && (b.endpoint_profile != "anthropic_implicit_cache"
                         || self.endpoint_family == EndpointFamilyV1::AnthropicMessages)
+                    && (b.endpoint_profile != "openai_terminal_chunk_usage"
+                        || self.endpoint_family == EndpointFamilyV1::OpenaiChatCompletions)
                     && (b.endpoint_profile != "chatgpt_codex"
                         || self.endpoint_family == EndpointFamilyV1::OpenaiResponses)
             })
@@ -320,6 +325,36 @@ mod tests {
         )? {
             IntentAdmission::Admitted(intent) => Ok(intent),
             _ => panic!("unlimited admission"),
+        }
+    }
+    #[test]
+    fn terminal_chat_profile_persists_only_for_its_declared_endpoint_family() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ledger =
+            SqliteLedger::open(dir.path().join("ledger.db").to_str().unwrap()).unwrap();
+        let mut value = context();
+        value.upstream_ref = "backend/fixture".into();
+        value.backend = Some(BackendContext {
+            id: "fixture".into(),
+            revision: 1,
+            credential_ref: "openai:fixture".into(),
+            credential_generation: 1,
+            endpoint_profile: "openai_terminal_chunk_usage".into(),
+        });
+        let intent = admit(&mut ledger, &value).unwrap();
+        assert_eq!(
+            ledger
+                .execution_context_durable("team", &intent.execution_id)
+                .unwrap(),
+            Some(value.clone())
+        );
+        for family in [
+            EndpointFamilyV1::OpenaiResponses,
+            EndpointFamilyV1::AnthropicMessages,
+            EndpointFamilyV1::GeminiGenerateContent,
+        ] {
+            value.endpoint_family = family;
+            assert!(matches!(value.validate(), Err(EvidenceError::InvalidInput)));
         }
     }
     #[test]

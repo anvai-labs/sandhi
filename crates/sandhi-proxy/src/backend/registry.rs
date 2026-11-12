@@ -102,6 +102,7 @@ fn bind(handle: ProviderHandle, record: &BackendRecord, entry: &VaultEntry) -> P
             BackendProfile::Standard => "standard",
             BackendProfile::ChatGptCodex => "chatgpt_codex",
             BackendProfile::AnthropicImplicitCache => "anthropic_implicit_cache",
+            BackendProfile::OpenaiTerminalChunkUsage => "openai_terminal_chunk_usage",
         }
         .into(),
         models: definition.models.clone(),

@@ -8,7 +8,7 @@ use axum::{
     Json,
 };
 use sandhi_core::{cache_digest, ChatMessageV1, ChatRequestV1, NativeInputFeatureV1, VirtualKey};
-use sandhi_providers::{ProviderFamily, ProviderHandle};
+use sandhi_providers::ProviderHandle;
 use sandhi_store::routes::{Affinity, Error, Pin, RouteDefinition, RouteRecord, Selection, Target};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -116,7 +116,7 @@ fn available(provider: &ProviderHandle, target: &Target) -> bool {
 #[derive(Clone, Copy)]
 pub(crate) enum TrackedDelivery {
     Buffered,
-    Streaming(ProviderFamily),
+    Streaming,
 }
 
 pub(crate) async fn select(
@@ -204,15 +204,10 @@ pub(crate) async fn select(
         // declared family alone does not prove support for every request option.
         let compatible = match tracked {
             Some(TrackedDelivery::Buffered) => provider.preflight_owned_buffered(request).is_ok(),
-            Some(TrackedDelivery::Streaming(ingress)) => {
-                provider.family() == ingress
-                    && matches!(
-                        ingress,
-                        ProviderFamily::OpenAiCompat | ProviderFamily::OpenAiResponses
-                    )
-                    && state.streaming_deadlines.is_some()
+            Some(TrackedDelivery::Streaming) => {
+                state.streaming_deadlines.is_some()
                     && provider.supports_streaming_deadlines()
-                    && provider.preflight_owned_buffered(request).is_ok()
+                    && provider.preflight_owned_streaming(request).is_ok()
             }
             None => provider.preflight_request(request).is_ok(),
         };

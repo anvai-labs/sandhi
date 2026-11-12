@@ -7,7 +7,8 @@
     acceptance. Unset or `off` preserves the existing path. Any
     other value fails startup.
 
-The development source also admits **transparent OpenAI Chat and standard Responses streaming** when
+The development source also admits **Chat, Messages, Responses and Gemini clients
+streaming from qualified Chat, standard Responses or constrained Codex backends** when
 tracked accounting and a complete [streaming deadline policy](streaming-deadlines.md)
 are both configured. This extension is not in 0.12.0 and is not deployment acceptance.
 Streaming without that policy remains refused before admission.
@@ -17,8 +18,9 @@ Chat, Messages, Responses and Gemini clients can use any of those four standard
 backend protocols through the existing tracked owner. This is an unreleased source
 candidate; the 0.12.0 release's narrower activation remains historical evidence.
 Constrained [Codex buffered aggregation](../adr/0027-qualified-codex-buffered-accounting.md)
-also qualifies through its typed SSE owner. Codex streamed host delivery and
-additional streaming protocols remain gated. See
+also qualifies through its typed SSE owner. [Translated and Codex tracked streams](../adr/0028-qualified-translated-stream-accounting.md)
+reuse that source evidence and the bounded response owner. Messages/Gemini upstream
+stream accounting remains gated. See
 [qualified Responses streaming](../adr/0026-qualified-responses-stream-accounting.md)
 for partial/final usage and protocol-terminal semantics.
 
@@ -89,11 +91,18 @@ snapshot needed for accounting recovery.
 | Surface | Required in tracked mode | Refused before admission |
 |---|---|---|
 | Ledger | One file-backed ledger, fixed topology | Volatile or sharded ledgers fail startup |
-| Ingress | Buffered Chat, Messages, Responses or Gemini; bounded transparent Chat or standard Responses streaming | Other dialects; translated or unbounded streaming |
+| Ingress | Buffered Chat, Messages, Responses or Gemini; bounded streams from qualified Chat, Responses or Codex sources | Other dialects; unbounded streams or unqualified source families |
 | Buffered upstream | Built-in retry-free standard Chat, Messages, Responses or Gemini transport; constrained Codex SSE aggregation | Custom transports; other expiring handles without a qualified codec |
+| Streaming upstream | Qualified retry-free Chat, standard Responses or constrained Codex typed source | Messages/Gemini and custom sources without a strict qualifier |
 | Operations | Synchronous generation | Background/async Responses; logical routes preflight eligibility before pinning |
 | Policy | Explicit output limit and Block policy | Warn, fail-open, retry and logical-idempotency combinations |
-| Processing plane | Buffered transparent/translated; streaming transparent only | No silent downgrade to legacy accounting |
+| Processing plane | Buffered and streaming transparent/translated | No silent downgrade to legacy accounting |
+
+Standard Chat stream totals arrive on empty choices. The explicitly selected
+`openai_terminal_chunk_usage` profile also accepts validated request totals on one
+known terminal choice; progress, malformed and conflicting usage still fail. Both
+wire planes use the declared profile, never a provider-name guess. See
+[terminal Chat usage placement](../adr/0029-explicit-terminal-chat-usage-profile.md).
 
 Standard tracked Messages requires explicit fresh/output/cache-read/cache-write
 counters; omitted cache categories remain unqualified. The explicitly configured
@@ -154,6 +163,11 @@ Four synthetic default-retry SDK cases verify one model request for missing usag
 and receipt-write failure, including accounting-only recovery after restart.
 This header does not control clients that ignore it or transport failures for
 which no response arrives; callers still must not blindly repeat ambiguous work.
+
+Translated finish events wait for qualified source EOF, and Anthropic stop deltas
+include final usage for SDK accumulation. Tracked typed projections have an 8 MiB
+payload/event budget; exceeding it fails delivery without settling estimated counts.
+See [stream ownership and bounds](../adr/0028-qualified-translated-stream-accounting.md).
 
 For streams, headers and partial bytes can already have reached the client.
 A successful HTTP EOF waits for committed settlement; unresolved accounting ends

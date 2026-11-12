@@ -102,11 +102,27 @@ protocol-specific qualification. Tracked route selection checks this capability
 before pinning; an existing incompatible pin refuses. Bounded transparent standard
 [Responses streaming](../adr/0026-qualified-responses-stream-accounting.md) is now
 qualified alongside Chat. Constrained [Codex buffered aggregation](../adr/0027-qualified-codex-buffered-accounting.md)
-also qualifies through its typed owner. Codex streamed host delivery, translated
-streams and other streaming families remain gated. Tracked stream selection checks delivery compatibility and
+also qualifies through its typed owner. [Tracked translated streams](../adr/0028-qualified-translated-stream-accounting.md)
+now connect four client formats to qualified Chat/Responses/Codex sources.
+Messages/Gemini source stream accounting remains gated. Tracked stream selection checks delivery compatibility and
 deadline configuration before confirming a pin.
 
-## Cache declarations
+## Usage qualification profiles
+
+Chat-compatible endpoints that place request-total stream usage on their single
+final choice can explicitly declare `endpoint_profile: openai_terminal_chunk_usage`.
+Standard Chat retains its empty-choices usage contract. This profile accepts only
+known terminal reasons with validated totals; it does not accept progress usage,
+infer counts from a finish reason, alter cache policy or enable retries. It works
+on transparent and translated tracked streams and survives restart. Changing the
+profile invalidates an established route binding instead of switching it silently.
+See [the placement contract](../adr/0029-explicit-terminal-chat-usage-profile.md).
+
+```bash
+sandhi backends set coding-chat --provider coding-models --credential-ref coding:default \
+  --endpoint-family openai_chat_completions --endpoint-profile openai_terminal_chunk_usage \
+  --base-url https://api.z.ai/api/coding/paas/v4 --model glm-5.3
+```
 
 Compatible Messages endpoints can declare `endpoint_profile: anthropic_implicit_cache`
 when their input counter includes implicit cache construction and they meter no
@@ -124,6 +140,8 @@ separately through `--cache-policy`; `implicit_only` there does not grant this
 usage convention. Standard Messages accounting remains strict. Profiles are
 revisioned/pinned and survive restart; choose a new materialized session after a
 profile change. See [qualified usage semantics](../adr/0025-qualified-buffered-protocol-accounting.md#qualified-token-semantics).
+
+## Cache declarations
 
 Backend definitions accept `cache_policy`; CLI registration accepts
 `--cache-policy path/to/policy.json`. This is non-secret JSON, bounded to 64 KiB.

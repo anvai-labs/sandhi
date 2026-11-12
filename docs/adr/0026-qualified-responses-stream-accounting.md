@@ -5,6 +5,10 @@
 - **Extends:** [Qualified buffered protocols](0025-qualified-buffered-protocol-accounting.md)
   and [durable physical attempts](0024-durable-physical-attempt-evidence.md).
 
+[ADR-0028](0028-qualified-translated-stream-accounting.md) subsequently extends
+tracked activation to typed/translated Chat, Responses and Codex streams. The
+sections below record this increment's original scope and source semantics.
+
 ## Decision
 
 Extend the existing bounded, complete-event SSE observer to standard Responses.

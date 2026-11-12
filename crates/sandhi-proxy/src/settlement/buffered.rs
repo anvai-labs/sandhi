@@ -56,7 +56,8 @@ use super::{
 };
 use crate::{
     codec::IngressDialect, complete_response, dialect_label, ingress_error, metrics,
-    transparent_complete_response, transparent_stream_response, AdmissionPermit, RequestAccounting,
+    stream_response, transparent_complete_response, transparent_stream_response, AdmissionPermit,
+    RequestAccounting,
 };
 use axum::{body::Bytes, http::StatusCode, response::Response};
 use sandhi_core::{ChatRequestV1, Policy};
@@ -139,10 +140,7 @@ pub(crate) async fn handle(
 ) -> Response {
     // Both leases are admitted together after validation. A refusal here owns no
     // reservation, and no unknown dispatch can later be released by an RAII back leg.
-    if (wants_stream
-        && (streaming_limits.is_none()
-            || !transparent_eligible
-            || !matches!(dialect, IngressDialect::OpenAi | IngressDialect::Responses)))
+    if (wants_stream && (streaming_limits.is_none() || !provider.supports_owned_streaming()))
         || !matches!(
             dialect,
             IngressDialect::OpenAi
@@ -156,13 +154,18 @@ pub(crate) async fn handle(
         || request.max_output_tokens.is_none()
     {
         return ingress_error(dialect, StatusCode::BAD_REQUEST,
-            "tracked accounting requires buffered Chat, Messages, Responses or Gemini with a supported retry-free backend, or bounded transparent Chat/Responses streaming; Block policy, explicit output limit and no idempotency key are required");
+            "tracked accounting requires buffered Chat, Messages, Responses or Gemini with a supported retry-free backend, or bounded streaming from qualified Chat/Responses/Codex backends; Block policy, explicit output limit and no idempotency key are required");
     }
-    if provider.preflight_owned_buffered(&request).is_err() {
+    let preflight = if wants_stream {
+        provider.preflight_owned_streaming(&request)
+    } else {
+        provider.preflight_owned_buffered(&request)
+    };
+    if preflight.is_err() {
         return ingress_error(
             dialect,
             StatusCode::BAD_REQUEST,
-            "tracked buffered operation failed backend preflight",
+            "tracked operation failed backend preflight",
         );
     }
     let transport = if wants_stream {
@@ -330,7 +333,7 @@ pub(crate) async fn handle(
             }
         });
         let dispatch = async move {
-            if wants_stream {
+            if wants_stream && transparent {
                 transparent_stream_response(
                     provider,
                     body,
@@ -339,6 +342,16 @@ pub(crate) async fn handle(
                     accounting,
                     full_error_detail,
                     gemini,
+                    permit,
+                )
+                .await
+            } else if wants_stream {
+                stream_response(
+                    provider,
+                    request,
+                    dialect,
+                    accounting,
+                    full_error_detail,
                     permit,
                 )
                 .await

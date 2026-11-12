@@ -4,6 +4,10 @@
 - **Extends:** [Responses stream qualification](0026-qualified-responses-stream-accounting.md)
   and [constrained endpoint profiles](0016-explicit-backend-endpoint-binding.md).
 
+[ADR-0028](0028-qualified-translated-stream-accounting.md) subsequently extends
+tracked activation to typed/translated Chat, Responses and Codex streams. The
+sections below record this increment's original scope and source semantics.
+
 ## Decision
 
 Admit retry-free constrained Codex **buffered host delivery** to tracked accounting

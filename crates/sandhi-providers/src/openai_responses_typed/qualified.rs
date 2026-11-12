@@ -86,7 +86,7 @@ mod tests {
             _: QualifiedStreamDelivery,
         ) -> Result<QualifiedProviderStream, ProviderError> {
             crate::attempt::observe_qualified_stream(request.attempt_context,"fixture",Some(&request.model),
-                sandhi_core::EndpointFamilyV1::OpenaiResponses,|facts| async move {
+                sandhi_core::EndpointFamilyV1::OpenaiResponses,Default::default(),|facts| async move {
                     facts.record_headers(200,&http::HeaderMap::new(),None);
                     let prefix="data: {\"type\":\"response.in_progress\",\"response\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n\ndata: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{}\"}\n\n";
                     let terminal="data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"output_tokens_details\":{\"reasoning_tokens\":0}}}}\n\n";

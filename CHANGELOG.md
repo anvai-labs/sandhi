@@ -21,6 +21,19 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ### Added
 
+- Explicit `openai_terminal_chunk_usage` backend profile for compatible Chat
+  streams reporting totals on one terminal choice. Standard qualification stays
+  strict; both wire planes, persisted context, restart and route pins retain the
+  declared placement. See [ADR-0029](docs/adr/0029-explicit-terminal-chat-usage-profile.md).
+
+- Qualified tracked streaming from Chat, standard Responses and constrained Codex
+  backends to Chat, Messages, Responses and Gemini clients. Source evidence owns
+  paired settlement independently of typed delivery; translated finish events wait
+  for final usage, and Anthropic stop deltas work with SDK stream accumulators.
+  Projection state is bounded separately from token estimates. Messages/Gemini
+  source qualification and live subscription acceptance remain open. See
+  [ADR-0028](docs/adr/0028-qualified-translated-stream-accounting.md).
+
 - Qualified tracked buffered Codex delivery through its constrained typed codec,
   with one SSE response owner/attempt guard, EOF draining, original whole-call
   deadlines and retained source usage after decoder failure. Raw subscription

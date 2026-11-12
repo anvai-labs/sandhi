@@ -19,6 +19,7 @@ pub struct OpenAiCompat {
     base_url: String,
     api_key: String,
     headers: HeaderMap,
+    stream_usage_profile: sandhi_core::usage::OpenAiStreamUsageProfile,
     /// Vendor request-id header from the catalog spec (strategy-via-data): set for
     /// slugs whose id header deviates from the standard (e.g. moonshot).
     request_id_header: Option<&'static str>,
@@ -41,6 +42,7 @@ impl OpenAiCompat {
             base_url: base_url.into(),
             api_key: api_key.into(),
             headers: HeaderMap::new(),
+            stream_usage_profile: Default::default(),
             request_id_header: spec.and_then(|spec| spec.request_id_header),
             session_header: spec.and_then(|spec| spec.session_header),
         }
@@ -59,6 +61,14 @@ impl OpenAiCompat {
         // `Accept-Encoding: gzip`, which would corrupt byte metering (reqwest builds without
         // decompression) and family credential headers.
         self.headers = crate::strip_transport_owned(headers);
+        self
+    }
+
+    pub(crate) fn with_stream_usage_profile(
+        mut self,
+        profile: sandhi_core::usage::OpenAiStreamUsageProfile,
+    ) -> Self {
+        self.stream_usage_profile = profile;
         self
     }
 
@@ -224,6 +234,7 @@ impl Provider for OpenAiCompat {
             self.slug(),
             Some(&model),
             sandhi_core::EndpointFamilyV1::OpenaiChatCompletions,
+            self.stream_usage_profile,
             |facts| async move {
                 let response = request
                     .json(&body)

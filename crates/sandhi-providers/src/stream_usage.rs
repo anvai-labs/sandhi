@@ -6,10 +6,14 @@
 //! streaming. Legacy byte forwarding and metering are unchanged.
 
 use crate::{linesplit::LineSplitter, ParsedUsage, MAX_STREAM_LINE_BYTES};
-use sandhi_core::usage::{qualify_openai_stream_usage, StreamUsageError};
+use sandhi_core::usage::{
+    qualify_openai_stream_usage_for_profile, OpenAiStreamUsageProfile, StreamUsageError,
+};
 use sandhi_core::{EndpointFamilyV1, UsageCompleteness, UsageV2};
 use serde_json::Value;
 
+#[cfg(test)]
+mod chat_profile_tests;
 mod responses;
 #[cfg(test)]
 mod responses_tests;
@@ -61,6 +65,7 @@ pub struct OpenAiStreamUsageObserver {
     message_event: bool,
     event_name: Option<String>,
     endpoint: EndpointFamilyV1,
+    openai_usage_profile: OpenAiStreamUsageProfile,
     responses: responses::ResponsesUsage,
     usage: Option<ParsedUsage>,
     canonical_usage: Option<UsageV2>,
@@ -87,6 +92,18 @@ impl OpenAiStreamUsageObserver {
     }
 
     pub fn for_endpoint(endpoint: EndpointFamilyV1) -> Result<Self, StreamObservationError> {
+        Self::for_endpoint_with_openai_usage_profile(endpoint, OpenAiStreamUsageProfile::Standard)
+    }
+
+    pub fn for_endpoint_with_openai_usage_profile(
+        endpoint: EndpointFamilyV1,
+        profile: OpenAiStreamUsageProfile,
+    ) -> Result<Self, StreamObservationError> {
+        if profile != OpenAiStreamUsageProfile::Standard
+            && endpoint != EndpointFamilyV1::OpenaiChatCompletions
+        {
+            return Err(StreamObservationError::UnsupportedEndpoint);
+        }
         if !matches!(
             endpoint,
             EndpointFamilyV1::OpenaiChatCompletions | EndpointFamilyV1::OpenaiResponses
@@ -95,6 +112,7 @@ impl OpenAiStreamUsageObserver {
         }
         let mut observer = Self::new();
         observer.endpoint = endpoint;
+        observer.openai_usage_profile = profile;
         Ok(observer)
     }
 
@@ -109,6 +127,7 @@ impl OpenAiStreamUsageObserver {
             message_event: true,
             event_name: None,
             endpoint: EndpointFamilyV1::OpenaiChatCompletions,
+            openai_usage_profile: OpenAiStreamUsageProfile::Standard,
             responses: Default::default(),
             usage: None,
             canonical_usage: None,
@@ -300,7 +319,8 @@ impl OpenAiStreamUsageObserver {
         let event = sandhi_core::policy::strict_json(&self.data)
             .map_err(|_| StreamObservationError::InvalidJson)?;
         if let Some(next) =
-            qualify_openai_stream_usage(&event).map_err(StreamObservationError::InvalidUsage)?
+            qualify_openai_stream_usage_for_profile(&event, self.openai_usage_profile)
+                .map_err(StreamObservationError::InvalidUsage)?
         {
             match self.usage {
                 None => {
@@ -311,7 +331,17 @@ impl OpenAiStreamUsageObserver {
                     self.canonical_usage = Some(canonical);
                     self.usage = Some(next);
                 }
-                Some(first) if first == next => {}
+                Some(first) if first == next => {
+                    // A repeated identical total can add explicit optional zero
+                    // presence; absence in the first frame must not erase it.
+                    if let Some(canonical) = self.canonical_usage.as_mut() {
+                        if canonical.reasoning_tokens.is_none() {
+                            canonical.reasoning_tokens = event
+                                .pointer("/usage/completion_tokens_details/reasoning_tokens")
+                                .and_then(Value::as_u64);
+                        }
+                    }
+                }
                 Some(_) => return Err(StreamObservationError::ConflictingUsage),
             }
         }

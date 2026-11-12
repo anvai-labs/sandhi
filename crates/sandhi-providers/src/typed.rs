@@ -837,6 +837,14 @@ impl ProviderRuntime {
     /// bindings, and the proxy. Provider-native JSON does not cross a public binding boundary.
     #[must_use]
     pub fn transport(&self, config: ProviderTransportConfig) -> Arc<dyn Provider> {
+        self.transport_with_openai_stream_usage_profile(config, Default::default())
+    }
+
+    fn transport_with_openai_stream_usage_profile(
+        &self,
+        config: ProviderTransportConfig,
+        profile: sandhi_core::usage::OpenAiStreamUsageProfile,
+    ) -> Arc<dyn Provider> {
         let bare: Arc<dyn Provider> = match config.family {
             ProviderFamily::OpenAiCompat => Arc::new(
                 OpenAiCompat::new(
@@ -844,7 +852,8 @@ impl ProviderRuntime {
                     config.base_url.clone(),
                     config.api_key.clone(),
                 )
-                .with_headers(config.headers.clone()),
+                .with_headers(config.headers.clone())
+                .with_stream_usage_profile(profile),
             ),
             ProviderFamily::OpenAiResponses => Arc::new(
                 OpenAiResponses::new(
@@ -920,6 +929,33 @@ impl ProviderRuntime {
         stream_setup_timeout_secs: Option<f64>,
         stream_idle_timeout_secs: Option<f64>,
     ) -> ProviderHandle {
+        self.openai_compat_with_stream_usage_profile(
+            slug,
+            base_url,
+            api_key,
+            headers,
+            max_retries,
+            timeout_secs,
+            stream_setup_timeout_secs,
+            stream_idle_timeout_secs,
+            Default::default(),
+        )
+    }
+
+    /// Declare terminal-choice request-total usage without weakening standard Chat qualification.
+    #[allow(clippy::too_many_arguments)]
+    pub fn openai_compat_with_stream_usage_profile(
+        &self,
+        slug: impl Into<String>,
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        headers: http::HeaderMap,
+        max_retries: Option<u32>,
+        timeout_secs: Option<f64>,
+        stream_setup_timeout_secs: Option<f64>,
+        stream_idle_timeout_secs: Option<f64>,
+        profile: sandhi_core::usage::OpenAiStreamUsageProfile,
+    ) -> ProviderHandle {
         let slug = slug.into();
         let mut config = ProviderTransportConfig::new(
             ProviderFamily::OpenAiCompat,
@@ -932,10 +968,11 @@ impl ProviderRuntime {
         config.timeout_secs = timeout_secs;
         config.stream_setup_timeout_secs = stream_setup_timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
-        let raw_forwarder = Some(build_raw_forwarder(&config));
+        let raw_forwarder =
+            Some(build_raw_forwarder(&config).with_openai_stream_usage_profile(profile));
         let credential_identity = Some(private_credential_identity(&config));
         let credential_account_fenced = account_fenced_config(&config);
-        let raw = self.transport(config);
+        let raw = self.transport_with_openai_stream_usage_profile(config, profile);
         ProviderHandle {
             inner: Arc::new(TypedOpenAiCompat { slug, raw }),
             family: ProviderFamily::OpenAiCompat,

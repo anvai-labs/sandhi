@@ -107,6 +107,8 @@ TD-0028 keeps its merge/deployment gates separate from the remaining diagnostic 
 | [0025](adr/0025-qualified-buffered-protocol-accounting.md) | Workspace candidate: qualified buffered Chat/Messages/Responses/Gemini matrix and explicit compatible Messages usage profile |
 | [0026](adr/0026-qualified-responses-stream-accounting.md) | Workspace candidate: bounded transparent Responses streaming, partial progress and canonical token evidence |
 | [0027](adr/0027-qualified-codex-buffered-accounting.md) | Workspace candidate: qualified buffered Codex delivery with constrained encoding, original deadlines and retained source evidence |
+| [0028](adr/0028-qualified-translated-stream-accounting.md) | Workspace candidate: four client dialects on qualified Chat/Responses/Codex streams, source-owned paired accounting and bounded typed projection |
+| [0029](adr/0029-explicit-terminal-chat-usage-profile.md) | Workspace candidate: explicitly configured terminal-choice Chat usage placement, preserving strict standard qualification and affinity |
 | [0002](adr/0002-provider-transport-scope-and-modality-admission.md) | Chat-completion transport scope and the admission gate for new modalities |
 | [0003](adr/0003-provider-adapter-authoring-and-codegen.md) | Hand-written transports; generated models/oracles only where bounded |
 | [0004](adr/0004-two-plane-proxy-and-enforcement-boundary.md) | Transparent and translation planes; custody-based enforcement boundary |

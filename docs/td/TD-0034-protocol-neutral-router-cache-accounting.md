@@ -155,7 +155,7 @@ and breakpoint semantics. Preserve ADR-0013's existing opt-out during migration.
 | M2b: Backend registry and operator lifecycle | Implemented and source-validated | Config/admin/CLI persistence, restart reconstruction, credential rotation/revocation, declared model scoping and backward-compatible fixed routes. ADR-0017; targeted Rust and real-process evidence below. |
 | M3: Conversation and cache semantics | In progress | ADR-0018 implements codec-owned ordered input and classified refusal; ADR-0019 adds native streaming and Codex retention. ADR-0020 implements declared cache compilation, scoped keys and observed credential generations. Broader content/tool/media fidelity remains required. |
 | M4: Authorized routing and affinity | In progress | ADR-0021 candidate implements logical aliases, actual codec/profile preflight, deterministic priority/rendezvous selection, immutable in-memory plans, scoped discovery and durable compatible session pins. Issuer provenance and broader authorization/lifecycle qualification remain required. |
-| M5: Uniform execution accounting | In progress | ADR-0022 freezes context; ADR-0023 adds paired budget ownership; ADR-0024 persists single-attempt transport evidence; ADR-0025 qualifies four buffered protocols; ADR-0026 qualifies transparent standard Responses streaming; ADR-0027 qualifies constrained buffered Codex aggregation. Broader streaming ownership/qualification and the retained intermittent settlement failure remain open. |
+| M5: Uniform execution accounting | In progress | ADR-0022 freezes context; ADR-0023 adds paired budget ownership; ADR-0024 persists single-attempt transport evidence; ADR-0025 qualifies four buffered protocols; ADR-0026 qualifies transparent standard Responses streaming; ADR-0027 qualifies constrained buffered Codex aggregation; ADR-0028 connects four client dialects to qualified typed Chat/Responses/Codex streams. Messages/Gemini source qualification and the retained intermittent accounting-wait failure remain open. |
 | M6: End-to-end qualification | In progress | Z.AI live text/cache matrices and synthetic SDK/lifecycle evidence recorded below. Full agent-loop/interrupt/restart and subscription qualification remain required; unresolved cases clearly gated. |
 | M7: Operator console and visible efficiency semantics | Implemented and source-validated | Navigable workspaces, backend/route inventory, token-composition/coverage, attribution filtering and bounded usage diagnostics. AgentBrowser inspected a synthetic preview; affected browser/management/SSO and strict docs checks passed. This is a workspace candidate, not a deployed release. |
 
@@ -1019,3 +1019,111 @@ Ubuntu images and deletes the separate overflow-runner smoke workflow. Release
 macOS/Windows matrices remain hosted. CONTRIBUTING records the policy, and release
 checks reject private/dynamic/colliding runner labels, including hidden matrix
 entries. The aggregate gate and all existing test/coverage/release checks remain.
+
+
+## M5g: Qualified translated streaming, 2026-11-11
+
+[ADR-0028](../adr/0028-qualified-translated-stream-accounting.md) connects the
+qualified typed provider API to the existing HTTP response owner. All four client
+formats can stream from Chat, standard Responses and constrained Codex sources.
+Logical routing preflights that streaming capability before pin confirmation;
+compatible standard native routes remain transparent. Messages/Gemini upstream
+streams still refuse before admission until their source observers qualify.
+
+Canonical source evidence, captured after source drop, owns settlement regardless
+of typed decoder progress. A single persisted attempt and one receipt settle both
+reservations. Missing/truncated/contradictory evidence stays unresolved; a failed
+Responses model result may still settle independently qualified final usage.
+No route retries or switches after dispatch. Existing Codex codec, account/expiry,
+raw-bypass refusal and estimated admission/output-limit semantics remain intact.
+
+The final source matrix exercises 104 HTTP combinations across four profiles/four
+client formats and delivery/evidence outcomes, including explicit zero and failed
+model output. Sixteen translated disconnect/deadline/shutdown cases preserve final
+source measurements; an additional oversized projection case verifies the 8 MiB
+payload/event budget, body failure, one origin call and retained liabilities.
+The bulk matrix has its own integration-test executable and retains the full
+existing proxy suite. An earlier combined parallel run reproduced an accounting
+admission wait timeout in the existing Codex fixture; subsequent passing runs do
+not establish its cause. The retained reliability gate is still open.
+
+Actual SDK regressions uncovered a translated Anthropic stop delta without usage,
+which crashes its high-level stream accumulator. It now carries final usage.
+Translated finish events wait for source EOF because Chat can report its finish
+reason before the usage chunk. Responses terminal event names also match their
+completed/incomplete status. Twenty-four real SDK cases cover four clients, two
+standard source protocols/three placement profiles and both normal/output-limited completion with source
+cache/reasoning counts and paired receipts. Streaming route tests also verify
+selection and reuse of a compatible existing pin and refusal of unbounded calls.
+
+The complete default workspace passed 1,105 tests (six opt-in ignored), and the
+initial full tracked/backend SDK suite passed 74 cases before the additional eight
+output-limit cases. Final feature, SDK, live endpoint and independent-review evidence
+will be recorded before publication. Passing synthetic Codex cases do not qualify
+a live subscription. Remaining goal scope includes Messages/Gemini source streams,
+full agent tool/media/provenance journeys, subscription lifecycle, joined operator
+evidence and the retained accounting-wait reliability gate.
+
+
+### M5g live placement qualification and explicit Chat profile
+
+The first 16-call live GLM tracked stream matrix retained an important failure:
+eight Chat source calls had no qualified receipt because the endpoint reports
+usage on its single terminal choice, not an empty-choices usage chunk. All eight
+Responses joins passed. The native Chat SDK could complete despite unknown durable
+accounting, which is why client completion alone cannot qualify a route.
+
+[ADR-0029](../adr/0029-explicit-terminal-chat-usage-profile.md) declares
+`openai_terminal_chunk_usage` explicitly for Chat/static credentials. Standard
+qualification is unchanged; progress/multi-choice/unknown terminal shapes fail,
+required counter/conservation validation remains, and both transports receive the
+same declared placement. Backend metadata and frozen context persist it; restart
+and profile-change pin refusal are exercised through actual processes. Duplicate
+identical totals also retain a subsequently explicit reasoning zero.
+
+The corrected [live report and analysis](../reviews/zai-router-tracked-translated-streams-2026-11-11.md)
+passed 16/16 SDK calls and physical-attempt/usage/paired-receipt joins, including
+12 translated calls. Fifteen calls reported cache reads. Fresh/read/write/output
+counts were 3,856/56,640/0/763; 540 reasoning tokens were already included in output.
+The 93.63% measured input read share is not a price saving or subscription quota
+conversion. The gateway exited 0. The initial failure report remains alongside the
+corrected evidence; new test calls are not an automatic inference replay.
+
+Public hosted CI completed successfully for published checkpoint `110ca49`,
+including coverage and Python/Node/ARM packaging. It predates this M5g increment;
+current source still requires final regression/secret checks, exact-commit
+independent review and new hosted CI before publication/merge readiness.
+
+### Final M5g source checks before independent review
+
+The final ONNX-feature workspace passed 1,112 tests (11 opt-in ignored). The full
+default workspace passed 1,109 tests before the last optional-zero-presence case;
+that added case also passed independently on the default provider graph. The full
+tracked/backend SDK suite passed 91 cases. Warnings-denied workspace/all-target
+Clippy passed with and without ONNX, strict MkDocs passed, and generated binding
+facades remained synchronized. No neutral wire type/schema changed in this increment.
+
+The final matrix contains 104 HTTP source/dialect/evidence cases, 16 translated
+cancellation/deadline/shutdown cases and one projection-overflow case. Twenty-four
+real SDK stream cases cover normal/output-limited completion for four clients on
+Chat standard/terminal-choice and Responses standard profiles. A separate actual
+process restart/revision test preserves the declared terminal profile and refuses
+a changed existing pin. The live corrected GLM matrix passed all 16 joined calls;
+its negative predecessor is retained. These checks do not close live subscriptions,
+Messages/Gemini source streams, broader tool/media/provenance or reliability gates.
+
+
+### Latest default-workspace reliability result
+
+After the final Chat finish/usage ordering assertion, the default workspace again
+hit the retained 200-call stress failure. The improved diagnostics now join the
+failed response ID: call 93, `req_1794458455035_206`, timed out during **admission**,
+while the origin had received only 92 calls. The displayed final-usage event is
+from request 205, the preceding successful call. Thus this recurrence proves a
+pre-dispatch accounting wait failure, not lost usage for an executed model call.
+The [retained artifact](../reviews/artifacts/accounting-predispatch-timeout-2026-11-11.json)
+includes the warning, exact failure and log hash. Worker scheduling, SQLite/IO and
+contention causes remain unproven. No timeout was enlarged and no inference was
+replayed. The latest full default run is therefore **not green**; the preceding
+feature/default passes and current source/SDK evidence do not close this gate.
+The checkpoint remains draft and is not ready to merge.

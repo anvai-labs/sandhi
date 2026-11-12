@@ -58,12 +58,13 @@ pub(super) fn observe(
         .expect("Chat stream qualification is supported")
 }
 
+#[cfg(test)]
 pub(super) fn observe_endpoint(
     inner: RawChunkStream,
     guard: Option<AttemptGuard>,
     endpoint: EndpointFamilyV1,
 ) -> Result<(RawChunkStream, QualifiedStreamObservation), StreamObservationError> {
-    observe_response(inner, guard, endpoint, None)
+    observe_response(inner, guard, endpoint, None, Default::default())
 }
 
 pub(crate) fn observe_response(
@@ -71,8 +72,10 @@ pub(crate) fn observe_response(
     guard: Option<AttemptGuard>,
     endpoint: EndpointFamilyV1,
     request_id: Option<String>,
+    profile: sandhi_core::usage::OpenAiStreamUsageProfile,
 ) -> Result<(RawChunkStream, QualifiedStreamObservation), StreamObservationError> {
-    let observer = ProtocolStreamUsageObserver::for_endpoint(endpoint)?;
+    let observer =
+        ProtocolStreamUsageObserver::for_endpoint_with_openai_usage_profile(endpoint, profile)?;
     let (sender, receiver) = watch::channel(QualifiedStreamEvidence::default());
     Ok((
         Box::pin(QualifiedStream {

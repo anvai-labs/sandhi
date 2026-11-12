@@ -62,11 +62,9 @@ def main():
     if args.output is None:
         parser.error("--output is required for live evidence")
     if args.accounting == "tracked" and args.delivery != "buffered" and any(
-        (backend, client) not in (("chat", "chat"), ("responses", "responses"))
-        for backend in args.backend or ENDPOINTS
-        for client in args.client or ["chat", "messages", "gemini", "responses"]
+        backend not in ("chat", "responses") for backend in args.backend or ENDPOINTS
     ):
-        parser.error("tracked streaming currently requires same-family chat/chat or responses/responses selections")
+        parser.error("tracked streaming requires qualified chat/responses backend selections; all four clients are supported")
     if any(values and len(set(values)) != len(values) for values in (args.backend, args.client)):
         parser.error("duplicate backend/client selections would repeat inference cells")
     credential = json.loads(args.settings.read_text())["env"]["ANTHROPIC_AUTH_TOKEN"]
@@ -89,7 +87,7 @@ def main():
               "sdk_versions": {package: version(package) for package in ("openai", "anthropic", "google-genai")},
               "sdk_retries": 0,
               "accounting": args.accounting, "delivery": args.delivery, "logical_route": args.logical_route,
-              "endpoint_profiles": {backend: "anthropic_implicit_cache" if backend == "messages" else "standard"
+              "endpoint_profiles": {backend: "anthropic_implicit_cache" if backend == "messages" else "openai_terminal_chunk_usage" if backend == "chat" else "standard"
                                     for backend in args.backend or ENDPOINTS},
               "harness_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               "cache_pairs": args.cache_pairs, "cells": []}
@@ -159,7 +157,7 @@ def main():
                         cache_policy["default_intent"] = {"mode": "auto"}
                     admin("/admin/backends", {"definition": {"id": "zai-" + backend, "provider": "zai",
                         "credential_ref": "zai:live", "endpoint": {"endpoint_family": family,
-                            "endpoint_profile": "anthropic_implicit_cache" if backend == "messages" else "standard"},
+                            "endpoint_profile": "anthropic_implicit_cache" if backend == "messages" else "openai_terminal_chunk_usage" if backend == "chat" else "standard"},
                         "base_url": endpoint, "models": [{"id": args.model}],
                         "cache_policy": cache_policy}})
                     requested_model = args.model
@@ -384,6 +382,9 @@ def verify_tracked(report, by_step):
                        "responses": "openai_responses", "gemini": "gemini_generate_content"}[cell["client"]]
             if context["ingress"] != ingress or context["delivery"] != ("streaming" if cell.get("stream") else "buffered"):
                 raise ValueError("ingress/delivery mismatch")
+            expected_plane = "transparent" if ingress == ENDPOINTS[cell["backend"]][0] else "translation"
+            if context["plane"] != expected_plane:
+                raise ValueError("processing plane mismatch")
             if context["accounting_policy"]["version"] != 1:
                 raise ValueError("unsupported accounting policy")
             if context["cache"]["capability"] != report["cache_policy"].split(" /", 1)[0]:

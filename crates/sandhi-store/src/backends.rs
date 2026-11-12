@@ -16,6 +16,7 @@ pub enum BackendProfile {
     #[serde(rename = "chatgpt_codex")]
     ChatGptCodex,
     AnthropicImplicitCache,
+    OpenaiTerminalChunkUsage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,6 +58,11 @@ impl BackendDefinition {
     }
 
     pub fn validate(&self) -> Result<(), &'static str> {
+        if self.endpoint.endpoint_profile == BackendProfile::OpenaiTerminalChunkUsage
+            && self.endpoint.endpoint_family != EndpointFamilyV1::OpenaiChatCompletions
+        {
+            return Err("terminal Chat usage profile requires OpenAI Chat Completions");
+        }
         if self.endpoint.endpoint_profile == BackendProfile::AnthropicImplicitCache
             && self.endpoint.endpoint_family != EndpointFamilyV1::AnthropicMessages
         {

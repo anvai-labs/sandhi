@@ -497,7 +497,7 @@ fn build_provider_handle_with_endpoint(
         ProviderFamily::Ollama => {
             Some(runtime.ollama(base, secret, static_headers.clone(), None, None, None, None))
         }
-        ProviderFamily::OpenAiCompat => Some(runtime.openai_compat(
+        ProviderFamily::OpenAiCompat => Some(runtime.openai_compat_with_stream_usage_profile(
             provider,
             base,
             secret,
@@ -506,6 +506,11 @@ fn build_provider_handle_with_endpoint(
             None,
             None,
             None,
+            if endpoint.profile == crate::backend::BackendProfile::OpenaiTerminalChunkUsage {
+                sandhi_core::usage::OpenAiStreamUsageProfile::TerminalChunk
+            } else {
+                sandhi_core::usage::OpenAiStreamUsageProfile::Standard
+            },
         )),
         ProviderFamily::OpenAiResponses => Some(runtime.openai_responses(
             provider,

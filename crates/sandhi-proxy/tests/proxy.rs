@@ -4779,7 +4779,7 @@ async fn owned_buffered_unsupported_shapes_refuse_before_admission() {
         "unbounded",
         "dedup",
         "retry",
-        "stream_cross_family",
+        "stream_unqualified_family",
         "stream_retry",
     ] {
         let upstream = MockServer::start().await;
@@ -4815,14 +4815,22 @@ async fn owned_buffered_unsupported_shapes_refuse_before_admission() {
                 ),
             );
         }
-        let mut request = owned_request(
-            if case == "stream_cross_family" {
-                "/v1/messages"
-            } else {
-                "/v1/chat/completions"
-            },
-            body,
-        );
+        if case == "stream_unqualified_family" {
+            state.providers.lock().unwrap().insert(
+                "up1".into(),
+                ProviderRuntime::new().anthropic(
+                    upstream.uri(),
+                    "synthetic",
+                    sandhi_providers::AnthropicAuthScheme::ApiKey,
+                    Default::default(),
+                    Some(0),
+                    None,
+                    None,
+                    None,
+                ),
+            );
+        }
+        let mut request = owned_request("/v1/chat/completions", body);
         if case == "dedup" {
             request
                 .headers_mut()

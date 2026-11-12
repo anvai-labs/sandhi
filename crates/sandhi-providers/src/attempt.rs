@@ -620,6 +620,7 @@ pub(crate) async fn observe_qualified_stream<Make, F>(
     provider: &str,
     model: Option<&str>,
     endpoint: sandhi_core::EndpointFamilyV1,
+    profile: sandhi_core::usage::OpenAiStreamUsageProfile,
     make_future: Make,
 ) -> Result<crate::QualifiedProviderStream, ProviderError>
 where
@@ -647,7 +648,7 @@ where
         }
     };
     let (raw, observation) =
-        crate::raw::qualified_stream::observe_response(raw, guard, endpoint, request_id)
+        crate::raw::qualified_stream::observe_response(raw, guard, endpoint, request_id, profile)
             .expect("built-in qualified endpoint is supported");
     if let Some(context) = context {
         context.attach_qualified_stream(observation.clone());

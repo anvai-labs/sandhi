@@ -137,7 +137,7 @@ mod tests {
             _: QualifiedStreamDelivery,
         ) -> Result<QualifiedProviderStream, ProviderError> {
             crate::attempt::observe_qualified_stream(req.attempt_context,self.slug(),Some(&req.model),
-                sandhi_core::EndpointFamilyV1::OpenaiResponses, |facts| async move {
+                sandhi_core::EndpointFamilyV1::OpenaiResponses,Default::default(), |facts| async move {
                     self.0.fetch_add(1,Ordering::SeqCst);
                     tokio::time::sleep(Duration::from_millis(5)).await;
                     let mut headers=http::HeaderMap::new();

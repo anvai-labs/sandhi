@@ -76,8 +76,19 @@ def qualified_origin():
             if control["mode"] == "ambiguous":
                 key = "usageMetadata" if family == FAMILIES[3] else "usage"
                 encoded = encoded[:-1] + b',"' + key.encode() + b'":' + json.dumps(response[key]).encode() + b'}'
-            streaming = body.get("stream") is True and family == FAMILIES[2]
-            if streaming:
+            streaming = body.get("stream") is True and family in (FAMILIES[0], FAMILIES[2])
+            if streaming and family == FAMILIES[0]:
+                events = [{"id": "chat_fixture", "object": "chat.completion.chunk", "created": 1, "model": "fixture",
+                    "choices": [{"index": 0, "delta": {"content": "reply"}, "finish_reason": "length" if control["mode"] == "incomplete" else "stop"}]}]
+                if control.get("terminal_chunk_usage") and "usage" in response:
+                    events[0]["usage"] = response["usage"]
+                elif "usage" in response:
+                    events.append({"id": "chat_fixture", "object": "chat.completion.chunk", "created": 1,
+                        "model": "fixture", "choices": [], "usage": response["usage"]})
+                encoded = ("".join("data: " + json.dumps(e) + "\n\n" for e in events) + "data: [DONE]\n\n").encode()
+                if control["mode"] == "post_terminal":
+                    encoded += b'data: {}\n\n'
+            elif streaming:
                 progress = {"id": "resp_fixture", "status": "in_progress", "usage": {
                     "input_tokens": 5, "output_tokens": 1, "input_tokens_details": {"cached_tokens": 2}}}
                 events = [
@@ -89,6 +100,7 @@ def qualified_origin():
                     response["status"] = "failed"
                 elif control["mode"] == "incomplete":
                     response["status"] = "incomplete"
+                    response["incomplete_details"] = {"reason": "max_output_tokens"}
                 if control["mode"] != "progress_only":
                     events.append({"type": "response." + response["status"], "response": response})
                 encoded = "".join("event: " + e["type"] + "\ndata: " + json.dumps(e) + "\n\n" for e in events).encode()
@@ -454,7 +466,7 @@ def test_tracked_route_selects_accounting_eligible_target_before_pinning(tmp_pat
         assert evidence(instance.database)[1]["backend"]["id"] == "primary"
 
 
-@pytest.mark.parametrize("mode", ["skip_translation", "existing_pin", "unbounded"])
+@pytest.mark.parametrize("mode", ["select_translation", "existing_pin", "unbounded"])
 def test_tracked_responses_stream_preflights_delivery_before_pinning(
     tmp_path, backend_binaries, qualified_origin, mode,
 ):
@@ -475,16 +487,23 @@ def test_tracked_responses_stream_preflights_delivery_before_pinning(
             def submit():
                 return list(client.responses.create(model="agent", input="hello", max_output_tokens=64, stream=True,
                     extra_headers={"x-sandhi-session": "protocol-session"}))
-            if mode == "skip_translation":
+            if mode != "unbounded":
                 events = submit()
                 assert events[-1].type == "response.completed"
-                assert len(calls) == 1 and calls[0][0] == "/responses"
-                assert evidence(instance.database)[1]["backend"]["id"] == "primary"
+                assert len(calls) == (2 if mode == "existing_pin" else 1)
+                assert all(call[0] == "/chat/completions" for call in calls)
+                with sqlite3.connect(instance.database) as connection:
+                    contexts = [json.loads(row[0]) for row in connection.execute("SELECT context_json FROM budget_execution_context")]
+                    streamed = [context for context in contexts if context["delivery"] == "streaming"]
+                    assert len(streamed) == 1
+                    assert streamed[0]["backend"]["id"] == "chat"
+                    assert streamed[0]["plane"] == "translation"
+                    assert connection.execute("SELECT count(*) FROM budget_settlement_outbox").fetchone() == (len(calls),)
             else:
                 with pytest.raises(openai.APIStatusError) as refused:
                     submit()
                 assert refused.value.status_code == 409
-                assert len(calls) == (1 if mode == "existing_pin" else 0)
+                assert calls == []
                 with sqlite3.connect(instance.database) as connection:
                     assert connection.execute("SELECT * FROM route_affinity").fetchall() == pins
                     assert connection.execute("SELECT * FROM budget_reservation ORDER BY rowid").fetchall() == leases
@@ -566,6 +585,9 @@ def test_live_report_verifier_checks_actual_sql_join_and_detects_corrupted_evide
             broken["executions"][0][field] = value
             assert harness.verify_report(broken)["errors"], field
         broken = copy.deepcopy(report)
+        broken["executions"][0]["context"]["plane"] = "invalid-plane"
+        assert harness.verify_report(broken)["errors"]
+        broken = copy.deepcopy(report)
         broken["accounting_inventory"].pop("budget_physical_attempt")
         assert harness.verify_report(broken)["errors"]
 
@@ -607,6 +629,110 @@ def test_messages_usage_profile_survives_restart_and_revision_change_fences_the_
             "--endpoint-family", "anthropic_messages", "--endpoint-profile", "standard", "--model", "fixture", "--revision", "1")
         with pytest.raises(openai.APIStatusError) as refused:
             sdk_call(instance, token, FAMILIES[0])
+        assert refused.value.status_code == 409
+        assert len(calls) == 2
+        assert evidence(instance.database)[0] == first
+
+
+@pytest.mark.parametrize("mode", ["valid", "incomplete"])
+@pytest.mark.parametrize("family,profile", [(FAMILIES[0], "standard"), (FAMILIES[0], "openai_terminal_chunk_usage"), (FAMILIES[2], "standard")])
+@pytest.mark.parametrize("ingress", FAMILIES)
+def test_tracked_stream_real_sdks_translate_and_settle_source_counts(
+    tmp_path, backend_binaries, qualified_origin, family, profile, ingress, mode,
+):
+    origin, calls, control = qualified_origin
+    control["mode"] = mode
+    control["terminal_chunk_usage"] = profile == "openai_terminal_chunk_usage"
+    with tracked_gateway(tmp_path, backend_binaries, origin, family, endpoint_profile=profile, streaming=True) as (instance, token):
+        headers = {"x-sandhi-session": "stream-protocol-session"}
+        if ingress in (FAMILIES[0], FAMILIES[2]):
+            with openai.OpenAI(base_url=instance.base + "/v1", api_key=token, max_retries=0,
+                               default_headers=headers) as client:
+                if ingress == FAMILIES[0]:
+                    events = list(client.chat.completions.create(model="agent", max_tokens=64,
+                        messages=[{"role": "user", "content": "hello"}], stream=True))
+                    text = "".join(event.choices[0].delta.content or "" for event in events if event.choices)
+                    assert events[-1].usage is not None
+                    assert events[-1].usage.prompt_tokens == 5
+                    assert any(event.choices[0].finish_reason == ("length" if mode == "incomplete" else "stop") for event in events if event.choices)
+                else:
+                    events = list(client.responses.create(model="agent", max_output_tokens=64,
+                        input="hello", stream=True))
+                    text = "".join(event.delta for event in events if event.type == "response.output_text.delta")
+                    assert events[-1].type == ("response.incomplete" if mode == "incomplete" else "response.completed")
+                    assert events[-1].response.status == ("incomplete" if mode == "incomplete" else "completed")
+                    assert events[-1].response.usage.input_tokens == 5
+                    assert events[-1].response.usage.output_tokens == 2
+        elif ingress == FAMILIES[1]:
+            import anthropic
+            with anthropic.Anthropic(base_url=instance.base, api_key=token, max_retries=0,
+                                     default_headers=headers) as client:
+                with client.messages.stream(model="agent", max_tokens=64,
+                        messages=[{"role": "user", "content": "hello"}]) as stream:
+                    text = "".join(stream.text_stream)
+                    final = stream.get_final_message()
+                    assert final.stop_reason == ("max_tokens" if mode == "incomplete" else "end_turn")
+                    assert final.usage.output_tokens == 2
+                    assert final.usage.input_tokens == 2
+                    assert final.usage.cache_read_input_tokens == 2
+                    assert final.usage.cache_creation_input_tokens == 1
+        else:
+            from google import genai
+            from google.genai import types
+            with genai.Client(api_key=token, http_options=types.HttpOptions(base_url=instance.base,
+                    headers=headers, retry_options=types.HttpRetryOptions(attempts=1))) as client:
+                events = list(client.models.generate_content_stream(
+                    model="agent", contents="hello", config=types.GenerateContentConfig(max_output_tokens=64)))
+                text = "".join(event.text or "" for event in events)
+                assert events[-1].candidates[0].finish_reason == ("MAX_TOKENS" if mode == "incomplete" else "STOP")
+        assert text == "reply"
+        # Chat SDKs stop at [DONE], before the body owner's bounded settlement
+        # wait necessarily finishes. Join the actual receipt rather than racing it.
+        deadline = time.monotonic() + 5
+        while True:
+            with sqlite3.connect(instance.database) as connection:
+                receipts = connection.execute("SELECT count(*) FROM budget_settlement_outbox").fetchone()[0]
+            if receipts == 1:
+                break
+            assert time.monotonic() < deadline, "stream owner did not commit the paired receipt"
+            time.sleep(.02)
+        assert len(calls) == 1
+        _, context, usage, charge = evidence(instance.database)
+        assert context["ingress"] == ingress and context["endpoint_family"] == family
+        assert context["delivery"] == "streaming"
+        assert context["backend"]["endpoint_profile"] == profile
+        assert context["plane"] == ("transparent" if ingress == family else "translation")
+        assert usage["completeness"] == "final" and usage["reasoning_tokens"] == 1
+        assert (usage["tokens_in"], usage["cache_read_tokens"], usage["cache_creation_tokens"], usage["tokens_out"]) == (2, 2, 1, 2)
+        assert charge == 5
+        with sqlite3.connect(instance.database) as connection:
+            assert connection.execute("SELECT charged_tokens FROM budget_settlement_outbox").fetchall() == [(5,)]
+            assert connection.execute("SELECT settled,actual FROM budget_reservation").fetchall() == [(1, 5)] * 2
+
+
+def test_terminal_chat_profile_survives_restart_and_profile_change_fences_pin(
+    tmp_path, backend_binaries, qualified_origin,
+):
+    origin, calls, control = qualified_origin
+    control["terminal_chunk_usage"] = True
+    with tracked_gateway(tmp_path, backend_binaries, origin, FAMILIES[0],
+            endpoint_profile="openai_terminal_chunk_usage", streaming=True) as (instance, token):
+        def submit():
+            with instance.client(token) as client:
+                events = list(client.responses.create(model="agent", input="hello", max_output_tokens=64,
+                    stream=True, extra_headers={"x-sandhi-session": "terminal-profile-session"}))
+                assert events[-1].type == "response.completed"
+                assert events[-1].response.usage.input_tokens == 5
+                assert events[-1].response.usage.output_tokens == 2
+        submit()
+        first = evidence(instance.database)[0]
+        instance.stop()
+        instance.start(SANDHI_BUFFERED_ACCOUNTING="tracked", SANDHI_CACHE_READ_WEIGHT="1000")
+        submit()
+        instance.cli("set", "primary", "--provider", "models", "--credential-ref", "openai:default",
+            "--endpoint-family", FAMILIES[0], "--endpoint-profile", "standard", "--model", "fixture", "--revision", "1")
+        with pytest.raises(openai.APIStatusError) as refused:
+            submit()
         assert refused.value.status_code == 409
         assert len(calls) == 2
         assert evidence(instance.database)[0] == first

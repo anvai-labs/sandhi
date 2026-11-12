@@ -1935,12 +1935,12 @@ impl StreamEventEncoder {
         }
     }
 
-    /// Anthropic: maintain the block lifecycle. `last_usage` is unused here
-    /// (usage rides the terminal `message_delta`), matching the stateless arm.
+    /// Anthropic: maintain the block lifecycle. SDK stream accumulators read
+    /// usage on every message_delta, including the stop delta.
     fn encode_anthropic(
         &mut self,
         event: &ChatStreamEventV1,
-        _last_usage: Option<&UsageV2>,
+        last_usage: Option<&UsageV2>,
     ) -> Vec<(Option<&'static str>, Value)> {
         let mut frames: Vec<(Option<&'static str>, Value)> = Vec::new();
         match event {
@@ -2031,7 +2031,7 @@ impl StreamEventEncoder {
                     Some("message_delta"),
                     json!({"type":"message_delta","delta":{
                         "stop_reason":anthropic_finish(Some(*reason)),"stop_sequence":Value::Null
-                    }}),
+                    },"usage":last_usage.map(anthropic_usage).unwrap_or_else(||anthropic_usage(&UsageV2::default()))}),
                 ));
                 frames.push((Some("message_stop"), json!({"type":"message_stop"})));
             }
@@ -2183,6 +2183,11 @@ impl StreamEventEncoder {
                 }
                 self.responses_order.clear();
                 let status = responses_status(Some(*reason));
+                let terminal = if status == "incomplete" {
+                    "response.incomplete"
+                } else {
+                    "response.completed"
+                };
                 let mut response = json!({
                     "object":"response","status":status,"output":output,"usage":usage
                 });
@@ -2191,10 +2196,7 @@ impl StreamEventEncoder {
                 } else if matches!(reason, FinishReasonV1::ContentFilter) {
                     response["incomplete_details"] = json!({"reason":"content_filter"});
                 }
-                return vec![(
-                    Some("response.completed"),
-                    json!({"type":"response.completed","response":response}),
-                )];
+                return vec![(Some(terminal), json!({"type":terminal,"response":response}))];
             }
             _ => {}
         }
@@ -2400,10 +2402,15 @@ fn encode_responses_stream_event(
             let usage = last_usage
                 .map(responses_usage)
                 .unwrap_or_else(|| responses_usage(&UsageV2::default()));
+            let terminal = if responses_status(Some(*reason)) == "incomplete" {
+                "response.incomplete"
+            } else {
+                "response.completed"
+            };
             vec![(
-                Some("response.completed"),
+                Some(terminal),
                 json!({
-                    "type":"response.completed",
+                    "type":terminal,
                     "response":{
                         "object":"response","status":responses_status(Some(*reason)),
                         "output":[],"usage":usage

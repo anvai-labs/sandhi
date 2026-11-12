@@ -202,7 +202,7 @@ pub(super) async fn prepare(
                 &mut request,
                 (!context.count_only && context.state.buffered_accounting.get().is_some())
                     .then_some(if wants_stream {
-                        crate::routing::TrackedDelivery::Streaming(ingress_family(dialect))
+                        crate::routing::TrackedDelivery::Streaming
                     } else {
                         crate::routing::TrackedDelivery::Buffered
                     }),

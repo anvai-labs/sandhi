@@ -90,6 +90,9 @@ nav:
       - Accounting and evidence: product/attempt-accounting-and-evidence.md
       - Qualified Responses streams: adr/0026-qualified-responses-stream-accounting.md
       - Qualified Codex accounting: adr/0027-qualified-codex-buffered-accounting.md
+      - Qualified translated streams: adr/0028-qualified-translated-stream-accounting.md
+      - Live tracked stream matrix: reviews/zai-router-tracked-translated-streams-2026-11-11.md
+      - Terminal Chat usage profile: adr/0029-explicit-terminal-chat-usage-profile.md
       - Cache reporting: adr/0010-cache-read-reporting-availability.md
   - Project:
       - Version 0.14.0: releases/v0.14.0.md

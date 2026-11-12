@@ -3868,13 +3868,32 @@ async fn stream_response(
     permit: Arc<AdmissionPermit>,
 ) -> Response {
     let native_stream = request.include_native_stream;
+    let tracked_translation = accounting.owned.is_some() && !native_stream;
     let correlation = accounting.per_call_wire_headers();
-    let mut upstream = match provider.stream_with(request, correlation).await {
+    let upstream = if let Some(owned) = &accounting.owned {
+        provider
+            .stream_with_qualified_usage_and_attempts(
+                request,
+                correlation,
+                owned.attempts.context.clone(),
+            )
+            .await
+    } else {
+        provider.stream_with(request, correlation).await
+    };
+    let mut upstream = match upstream {
         Ok(s) => s,
         Err(error) => {
             accounting.set_outcome("error");
-            accounting.finalize();
-            return provider_error(&error, dialect, provider.slug(), full_error_detail);
+            let tracked = accounting.owned.is_some();
+            if !accounting.finalize_owned().await {
+                return settlement::buffered::accounting_error(dialect, &accounting.request_id);
+            }
+            let response = provider_error(&error, dialect, provider.slug(), full_error_detail);
+            if tracked {
+                return settlement::buffered::no_automatic_retry(response);
+            }
+            return response;
         }
     };
 
@@ -3896,9 +3915,32 @@ async fn stream_response(
             let mut accounting_only;
             let mut delta_out_bytes: u64 = 0;
             let mut native_error_sent = false;
+            let mut pending_finish = None;
+            let mut projection_bytes = 0usize;
             while let Some(item) = upstream.next().await {
                 match item {
                     Ok(event) => {
+                        if tracked_translation {
+                            // Responses retains text/tool output for its final
+                            // frame; Gemini retains incomplete tool arguments.
+                            // Bound that projection independently of wire queue
+                            // backpressure and heuristic token reservations.
+                            let payload = match &event {
+                                sandhi_core::ChatStreamEventV1::TextDelta{delta}
+                                | sandhi_core::ChatStreamEventV1::ReasoningDelta{delta}
+                                | sandhi_core::ChatStreamEventV1::RefusalDelta{delta}
+                                | sandhi_core::ChatStreamEventV1::ToolCallArgumentsDelta{delta,..} => delta.len(),
+                                sandhi_core::ChatStreamEventV1::ToolCallStart{id,name,..} => id.len().saturating_add(name.len()),
+                                sandhi_core::ChatStreamEventV1::ResponseStart{id,model} => id.as_ref().map_or(0,String::len).saturating_add(model.len()),
+                                _ => 0,
+                            };
+                            projection_bytes=projection_bytes.saturating_add(payload).saturating_add(128);
+                            if projection_bytes > sandhi_core::MAX_NATIVE_STREAM_FRAME_BYTES {
+                                accounting.set_outcome("error");
+                                yield Err(std::io::Error::other("translated stream projection limit exceeded"));
+                                return;
+                            }
+                        }
                         accounting_only = false;
                         match &event {
                             sandhi_core::ChatStreamEventV1::Usage { usage }
@@ -3948,6 +3990,23 @@ async fn stream_response(
                         if accounting_only {
                             continue;
                         }
+                        if !native_stream && dialect == IngressDialect::OpenAi
+                            && matches!(event,sandhi_core::ChatStreamEventV1::Usage{..})
+                        {
+                            // Chat's empty-choices total must remain the final
+                            // chunk before DONE, after the deferred finish reason.
+                            continue;
+                        }
+                        // Chat's finish reason can precede its final usage chunk.
+                        // Defer translated terminal frames until source EOF so
+                        // SDKs receive final counts before completion, and late
+                        // source qualification errors cannot look clean.
+                        if !native_stream {
+                            if let sandhi_core::ChatStreamEventV1::Finish { reason } = &event {
+                                pending_finish = Some(*reason);
+                                continue;
+                            }
+                        }
                         if let sandhi_core::ChatStreamEventV1::NativeFrame { frame } = &event {
                             if !native_stream || frame.endpoint_family != ingress_family(dialect).endpoint_family()
                                 || frame.sse.len() > sandhi_core::MAX_NATIVE_STREAM_FRAME_BYTES
@@ -3987,6 +4046,18 @@ async fn stream_response(
             }
             if accounting.outcome != "error" {
                 accounting.set_outcome("success");
+                if let Some(reason) = pending_finish {
+                    for (event_name,value) in stream_encoder.encode(&sandhi_core::ChatStreamEventV1::Finish{reason},last_usage.as_ref()) {
+                        yield Ok::<Bytes,std::io::Error>(Bytes::from(sse_frame(event_name,&value)));
+                    }
+                }
+                if !native_stream && dialect == IngressDialect::OpenAi {
+                    if let Some(usage) = &last_usage {
+                        for (event_name,value) in stream_encoder.encode(&sandhi_core::ChatStreamEventV1::Usage{usage:usage.clone()},Some(usage)) {
+                            yield Ok::<Bytes,std::io::Error>(Bytes::from(sse_frame(event_name,&value)));
+                        }
+                    }
+                }
             } else if accounting.stream_body_lifetime.is_some() {
                 // The owner must distinguish failed upstream EOF before scheduling a tail.
                 // Leave legacy pull-driven wire behavior unchanged when the policy is absent.

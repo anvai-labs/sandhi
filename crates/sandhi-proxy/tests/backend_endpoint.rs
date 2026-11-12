@@ -97,6 +97,21 @@ fn legacy_defaults_keep_supported_families_and_reject_unimplemented_oauth() {
 fn unsupported_family_and_profile_auth_combinations_are_rejected() {
     for (family, profile, scheme) in [
         (
+            EndpointFamilyV1::OpenaiResponses,
+            BackendProfile::OpenaiTerminalChunkUsage,
+            CredentialScheme::ApiKey,
+        ),
+        (
+            EndpointFamilyV1::AnthropicMessages,
+            BackendProfile::OpenaiTerminalChunkUsage,
+            CredentialScheme::ApiKey,
+        ),
+        (
+            EndpointFamilyV1::OpenaiChatCompletions,
+            BackendProfile::OpenaiTerminalChunkUsage,
+            CredentialScheme::Oauth,
+        ),
+        (
             EndpointFamilyV1::OpenaiChatCompletions,
             BackendProfile::AnthropicImplicitCache,
             CredentialScheme::ApiKey,

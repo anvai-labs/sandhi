@@ -22,12 +22,25 @@ The [tracked Responses streaming pair](../reviews/zai-router-tracked-responses-s
 also passed with final attempt/usage/receipt joins. Its repeated request reported
 3,776 cached input tokens, while progress counters remained partial until a valid
 terminal response. This is a narrow endpoint qualification; translated tracked
-streams and Codex subscription accounting remain active work.
+streams are covered by the subsequent source increment below; live Codex
+subscription acceptance remains active work.
 
 The subsequent [Codex source qualification](../reviews/codex-qualified-accounting-source-2026-11-11.md)
 adds tracked buffered host delivery through its constrained SSE codec. Source token
 evidence survives decoder failure and remains separate from client delivery. This
-uses synthetic origins; live subscription and streamed-host acceptance remain open.
+uses synthetic origins; live subscription acceptance remains open.
+
+[Qualified translated streaming](../adr/0028-qualified-translated-stream-accounting.md)
+now connects all four client protocols to tracked Chat, Responses and constrained
+Codex sources. The same source counters settle both budget scopes; SDK-visible
+output is not accounting evidence. Messages/Gemini upstream stream qualification
+and broader tool/media/subscription journeys remain explicit follow-ups.
+
+The [live tracked translation/cache matrix](../reviews/zai-router-tracked-translated-streams-2026-11-11.md)
+passed all 16 Chat/Responses streaming calls from four SDK formats, with complete
+paired accounting joins and 15 observed cache reads. It retains the initial Chat
+placement failure and its explicit-profile correction. Measured input read share
+was 93.63%; this is not a percentage price saving.
 
 ## Two reasons to put Sandhi in the call path
 
