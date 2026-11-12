@@ -33,6 +33,9 @@ fn ingress(flavor: &str) -> (&str, Value) {
 }
 
 fn wire(profile: &str, mode: &str) -> String {
+    if profile == "gemini" {
+        return gemini_wire(mode);
+    }
     if profile.starts_with("messages") {
         return messages_wire(profile, mode);
     }
@@ -91,14 +94,74 @@ fn wire(profile: &str, mode: &str) -> String {
 }
 
 fn written(profile: &str) -> u64 {
-    if profile == "messages_implicit" {
+    if matches!(profile, "messages_implicit" | "gemini") {
         0
     } else {
         2
     }
 }
 fn charge(profile: &str) -> u64 {
-    12 + written(profile)
+    12 + written(profile) + if profile == "gemini" { 2 } else { 0 }
+}
+fn gemini_wire(mode: &str) -> String {
+    let mut initial = json!({"promptTokenCount":7,"cachedContentTokenCount":6,"candidatesTokenCount":1,
+        "thoughtsTokenCount":1,"toolUsePromptTokenCount":1,"totalTokenCount":10});
+    let mut final_counts = json!({"promptTokenCount":7,"cachedContentTokenCount":6,"candidatesTokenCount":4,
+        "thoughtsTokenCount":2,"toolUsePromptTokenCount":1,"totalTokenCount":14});
+    if mode == "zero" {
+        for counts in [&mut initial, &mut final_counts] {
+            for value in counts.as_object_mut().unwrap().values_mut() {
+                *value = 0.into();
+            }
+        }
+    }
+    if mode == "missing" {
+        initial = Value::Null;
+        final_counts = Value::Null;
+    }
+    if mode == "missing_input" {
+        final_counts
+            .as_object_mut()
+            .unwrap()
+            .remove("promptTokenCount");
+    }
+    if mode == "missing_output" {
+        final_counts
+            .as_object_mut()
+            .unwrap()
+            .remove("candidatesTokenCount");
+    }
+    if mode == "malformed" {
+        final_counts["candidatesTokenCount"] = "4".into();
+    }
+    if mode == "cache_conflict" {
+        final_counts["cachedContentTokenCount"] = 5.into();
+    }
+    let mut wire = format!(
+        "data: {}\n\n",
+        json!({"responseId":"gemini_fixture","modelVersion":"gpt-4o-mini",
+        "candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"reply"}]}}],
+        "usageMetadata":initial})
+    );
+    if mode == "provider_error" {
+        return wire
+            + &format!(
+                "data: {}\n\n",
+                json!({"error":{"code":503,"message":"synthetic"}})
+            );
+    }
+    let mut end = json!({"candidates":[{"index":0}],"usageMetadata":final_counts});
+    if mode != "missing_terminal" {
+        end["candidates"][0]["finishReason"] = "STOP".into();
+    }
+    wire += &format!("data: {end}\n\n");
+    if mode == "post_terminal" {
+        wire+="data: {\"candidates\":[{\"index\":0,\"content\":{\"parts\":[{\"text\":\"late\"}]}}]}\n\n";
+    }
+    if mode == "truncated" {
+        wire += "data: {";
+    }
+    wire
 }
 fn message_frame(value: Value) -> String {
     format!(
@@ -166,6 +229,16 @@ fn provider(profile: &str, uri: String) -> ProviderHandle {
     let mut headers = axum::http::HeaderMap::new();
     headers.insert("chatgpt-account-id", "synthetic-account".parse().unwrap());
     let handle = match profile {
+        "gemini" => runtime.gemini(
+            uri,
+            "synthetic-access",
+            sandhi_providers::GeminiAuthScheme::ApiKey,
+            Default::default(),
+            Some(0),
+            None,
+            None,
+            None,
+        ),
         "messages" | "messages_implicit" => runtime.anthropic_with_usage_profile(
             uri,
             "synthetic-access",
@@ -229,6 +302,8 @@ fn provider(profile: &str, uri: String) -> ProviderHandle {
             sandhi_core::EndpointFamilyV1::OpenaiChatCompletions
         } else if profile.starts_with("messages") {
             sandhi_core::EndpointFamilyV1::AnthropicMessages
+        } else if profile == "gemini" {
+            sandhi_core::EndpointFamilyV1::GeminiGenerateContent
         } else {
             sandhi_core::EndpointFamilyV1::OpenaiResponses
         },
@@ -256,6 +331,7 @@ async fn tracked_typed_streams_join_all_ingress_formats_to_source_usage_and_pair
         "codex",
         "messages",
         "messages_implicit",
+        "gemini",
     ] {
         for flavor in ["chat", "messages", "responses", "gemini"] {
             for mode in [
@@ -274,9 +350,9 @@ async fn tracked_typed_streams_join_all_ingress_formats_to_source_usage_and_pair
             ] {
                 if (matches!(
                     profile,
-                    "chat" | "terminal_chat" | "messages" | "messages_implicit"
+                    "chat" | "terminal_chat" | "messages" | "messages_implicit" | "gemini"
                 ) && mode == "failed")
-                    || (!profile.starts_with("messages")
+                    || (!(profile.starts_with("messages") || profile == "gemini")
                         && matches!(
                             mode,
                             "missing_input"
@@ -348,6 +424,7 @@ async fn tracked_typed_streams_join_all_ingress_formats_to_source_usage_and_pair
                     if (flavor == "chat" && matches!(profile, "chat" | "terminal_chat"))
                         || (flavor == "responses" && profile == "responses")
                         || (flavor == "messages" && profile.starts_with("messages"))
+                        || (flavor == "gemini" && profile == "gemini")
                     {
                         "transparent"
                     } else {
@@ -370,7 +447,15 @@ async fn tracked_typed_streams_join_all_ingress_formats_to_source_usage_and_pair
                         if mode == "zero" { 0 } else { written(profile) }
                     );
                     assert_eq!(usage["tokens_out"], if mode == "zero" { 0 } else { 4 });
-                    assert_eq!(usage["reasoning_tokens"], 0);
+                    assert_eq!(
+                        usage["reasoning_tokens"],
+                        if profile == "gemini" && mode != "zero" {
+                            2
+                        } else {
+                            0
+                        }
+                    );
+                    assert_eq!(usage["reasoning_included"], profile != "gemini");
                 } else {
                     assert_ne!(usage["completeness"], "final");
                 }
@@ -410,7 +495,16 @@ async fn tracked_typed_streams_join_all_ingress_formats_to_source_usage_and_pair
                 let calls = upstream.received_requests().await.unwrap();
                 assert_eq!(calls.len(), 1);
                 let sent: Value = serde_json::from_slice(&calls[0].body).unwrap();
-                assert_eq!(sent["stream"], true);
+                if profile == "gemini" {
+                    assert!(sent.get("stream").is_none());
+                    assert!(calls[0]
+                        .url
+                        .path()
+                        .ends_with("/models/gpt-4o-mini:streamGenerateContent"));
+                    assert_eq!(calls[0].url.query(), Some("alt=sse"));
+                } else {
+                    assert_eq!(sent["stream"], true);
+                }
                 if matches!(profile, "chat" | "terminal_chat") {
                     assert_eq!(sent["stream_options"]["include_usage"], true);
                 }
@@ -436,6 +530,7 @@ async fn translated_stream_cancellation_keeps_source_final_counts_without_anothe
         "codex",
         "messages",
         "messages_implicit",
+        "gemini",
     ] {
         for case in ["disconnect", "deadline", "shutdown", "expired_shutdown"] {
             let calls = Arc::new(AtomicUsize::new(0));
@@ -521,7 +616,11 @@ async fn translated_stream_cancellation_keeps_source_final_counts_without_anothe
             assert_eq!(sink.events().len(), 1);
             assert_eq!(
                 sink.events()[0].usage_completeness,
-                sandhi_core::UsageCompleteness::Final,
+                if profile == "gemini" {
+                    sandhi_core::UsageCompleteness::Partial
+                } else {
+                    sandhi_core::UsageCompleteness::Final
+                },
                 "{profile}/{case}"
             );
             let conn = rusqlite::Connection::open(&database).unwrap();
@@ -532,12 +631,16 @@ async fn translated_stream_cancellation_keeps_source_final_counts_without_anothe
                 .unwrap();
             assert_eq!(
                 receipts,
-                if case == "expired_shutdown" { 0 } else { 1 },
+                if case == "expired_shutdown" || profile == "gemini" {
+                    0
+                } else {
+                    1
+                },
                 "{profile}/{case}"
             );
             assert_eq!(
                 state.ledger.lock().unwrap().spent("group:platform"),
-                if case == "expired_shutdown" {
+                if case == "expired_shutdown" || profile == "gemini" {
                     0
                 } else {
                     charge(profile)
@@ -671,6 +774,17 @@ async fn translated_stream_projection_is_bounded_and_cannot_settle_estimated_out
 }
 
 fn tool_wire(profile: &str, reason: &str, args: &str) -> String {
+    if profile == "gemini" {
+        return format!(
+            "data: {}\n\n",
+            json!({"responseId":"gemini_tool","modelVersion":"gpt-4o-mini",
+            "candidates":[{"index":0,"content":{"role":"model","parts":[{"functionCall":{
+                "id":"call1","name":"inspect","args":serde_json::from_str::<Value>(args).unwrap_or_else(|_|json!(args))}}]},
+                "finishReason":match reason {"length"=>"MAX_TOKENS","content_filter"=>"SAFETY",_=>"STOP"}}],
+            "usageMetadata":{"promptTokenCount":7,"cachedContentTokenCount":6,"toolUsePromptTokenCount":1,
+                "candidatesTokenCount":4,"thoughtsTokenCount":2,"totalTokenCount":14}})
+        );
+    }
     if profile.starts_with("messages") {
         let prefix = messages_wire(profile, "final");
         let start = prefix.split("event: content_block_start").next().unwrap();
@@ -885,6 +999,119 @@ async fn messages_native_output_is_preserved_or_refused_without_losing_source_ac
 }
 
 #[tokio::test]
+async fn gemini_native_output_and_tools_preserve_source_accounting_across_projection_refusals() {
+    for (scenario, portable) in [
+        ("signature", false),
+        ("media", false),
+        ("metadata", false),
+        ("multiple", false),
+        ("missing_args", false),
+        ("string_args", false),
+        ("null_args", false),
+        ("array_args", false),
+        ("partial_args", false),
+        ("duplicate_id", false),
+        ("empty_object", true),
+        ("two_calls", true),
+        ("continuation", false),
+    ] {
+        let mut candidate = json!({"index":0,"content":{"role":"model","parts":[{"functionCall":{
+            "name":"lookup","args":{}}}]}});
+        match scenario {
+            "signature" => {
+                candidate["content"]["parts"] =
+                    json!([{"text":"reply","thoughtSignature":"opaque-signature"}])
+            }
+            "media" => {
+                candidate["content"]["parts"] =
+                    json!([{"inlineData":{"mimeType":"image/png","data":"opaque-media"}}])
+            }
+            "metadata" => {
+                candidate["content"]["parts"] = json!([{"text":"reply"}]);
+                candidate["groundingMetadata"] = json!({"opaque":"provenance"});
+            }
+            "missing_args" => {
+                candidate["content"]["parts"][0]["functionCall"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("args");
+            }
+            "string_args" => candidate["content"]["parts"][0]["functionCall"]["args"] = "{}".into(),
+            "null_args" => candidate["content"]["parts"][0]["functionCall"]["args"] = Value::Null,
+            "array_args" => candidate["content"]["parts"][0]["functionCall"]["args"] = json!([]),
+            "partial_args" => {
+                candidate["content"]["parts"][0]["functionCall"]["partialArgs"] =
+                    json!([{"value":"fragment"}])
+            }
+            "duplicate_id" => {
+                candidate["content"]["parts"][0]["functionCall"]["id"] = "same-id".into()
+            }
+            _ => {}
+        }
+        let counts = json!({"promptTokenCount":7,"cachedContentTokenCount":6,"toolUsePromptTokenCount":1,
+            "candidatesTokenCount":4,"thoughtsTokenCount":2,"totalTokenCount":14});
+        let mut frames = format!(
+            "data: {}\n\n",
+            json!({"responseId":"gemini-native","modelVersion":"gpt-4o-mini","candidates":[candidate.clone()]})
+        );
+        if matches!(scenario, "two_calls" | "duplicate_id") {
+            let id = if scenario == "two_calls" {
+                "call-b"
+            } else {
+                "same-id"
+            };
+            frames += &format!(
+                "data: {}\n\n",
+                json!({"candidates":[{"index":0,"content":{"role":"model","parts":[
+                {"functionCall":{"name":"lookup","id":id,"args":{"target":"b"}}}]}}]})
+            );
+        }
+        let mut terminal =
+            json!({"candidates":[{"index":0,"finishReason":"STOP"}],"usageMetadata":counts});
+        if scenario == "continuation" {
+            terminal["candidates"][0]["finishReason"] = "CONTINUATION".into();
+            terminal["continuationToken"] = "opaque-continuation".into();
+        }
+        if scenario == "multiple" {
+            terminal["candidates"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"index":1,"finishReason":"STOP"}));
+        }
+        frames += &format!("data: {terminal}\n\n");
+        for flavor in ["chat", "messages", "responses", "gemini"] {
+            let (clean, output) = source_delivery("gemini", flavor, frames.clone()).await;
+            assert_eq!(
+                clean,
+                flavor == "gemini" || portable,
+                "{scenario}/{flavor}: {output}"
+            );
+            if flavor == "gemini" {
+                assert!(
+                    output.contains(&candidate.to_string()),
+                    "native candidate changed: {scenario}"
+                );
+                assert!(
+                    output.contains(&terminal.to_string()),
+                    "native terminal changed: {scenario}"
+                );
+            } else if scenario == "two_calls" {
+                assert!(
+                    output.contains("gemini_call_0") && output.contains("call-b"),
+                    "{flavor}: {output}"
+                );
+            } else if !portable {
+                assert!(
+                    !output.contains("opaque-signature")
+                        && !output.contains("opaque-media")
+                        && !output.contains("opaque-continuation")
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn gemini_tool_projection_refuses_invalid_arguments_without_losing_final_accounting() {
     for profile in [
         "chat",
@@ -942,6 +1169,7 @@ async fn translated_tool_terminals_preserve_output_limit_and_filter_reasons() {
         "codex",
         "messages",
         "messages_implicit",
+        "gemini",
     ] {
         for flavor in ["chat", "messages", "responses", "gemini"] {
             for reason in ["tool_calls", "length", "content_filter"] {

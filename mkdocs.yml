@@ -97,6 +97,7 @@ nav:
       - Qualified Messages streams and native-state limits: adr/0031-qualified-messages-stream-ownership.md
       - Live Messages cache and native-state evidence: reviews/zai-messages-tracked-streams-2026-11-12.md
       - Gemini stream qualification prerequisite: adr/0032-gemini-stream-usage-qualification.md
+      - Qualified Gemini streams and EOF accounting: adr/0033-qualified-gemini-stream-ownership.md
       - Cache reporting: adr/0010-cache-read-reporting-availability.md
   - Project:
       - Version 0.14.0: releases/v0.14.0.md

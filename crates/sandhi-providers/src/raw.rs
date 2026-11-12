@@ -577,6 +577,9 @@ impl RawForwarder {
             (ProviderFamily::Anthropic, "/v1/messages" | "/messages") => {
                 sandhi_core::EndpointFamilyV1::AnthropicMessages
             }
+            (ProviderFamily::Gemini, _) if qualified_gemini_stream_path(path) => {
+                sandhi_core::EndpointFamilyV1::GeminiGenerateContent
+            }
             _ => {
                 return Err(ProviderError::InvalidRequest(
                     "qualified streaming requires a supported generation operation".into(),
@@ -884,6 +887,42 @@ fn qualified_buffered_path(family: ProviderFamily, path: &str) -> bool {
             .and_then(|p| p.strip_suffix(":generateContent"))
             .is_some_and(sandhi_core::model_id_is_path_safe),
         _ => false,
+    }
+}
+
+fn qualified_gemini_stream_path(path: &str) -> bool {
+    let Some(path) = path.strip_suffix("?alt=sse") else {
+        return false;
+    };
+    path.strip_prefix("/v1beta/models/")
+        .or_else(|| path.strip_prefix("/models/"))
+        .and_then(|model| model.strip_suffix(":streamGenerateContent"))
+        .is_some_and(sandhi_core::model_id_is_path_safe)
+}
+
+#[cfg(test)]
+mod qualified_gemini_path_tests {
+    use super::qualified_gemini_stream_path;
+    #[test]
+    fn qualified_gemini_paths_require_exact_generation_model_and_sse_operation() {
+        for prefix in ["/models/", "/v1beta/models/"] {
+            assert!(qualified_gemini_stream_path(&format!(
+                "{prefix}fixture:streamGenerateContent?alt=sse"
+            )));
+        }
+        for path in [
+            "/models/fixture:streamGenerateContent",
+            "/models/fixture:streamGenerateContent?alt=json",
+            "/models/fixture:streamGenerateContent?alt=sse&key=synthetic",
+            "/models/:streamGenerateContent?alt=sse",
+            "/models/fixture:generateContent?alt=sse",
+            "/models/fixture:countTokens?alt=sse",
+            "/models/fixture:streamGenerateContent/other?alt=sse",
+            "/models/fixture%2fother:streamGenerateContent?alt=sse",
+            "/operations/fixture:streamGenerateContent?alt=sse",
+        ] {
+            assert!(!qualified_gemini_stream_path(path), "{path}");
+        }
     }
 }
 
@@ -1695,7 +1734,7 @@ data: [DONE]\n\n";
             ),
             (
                 ProviderFamily::Gemini,
-                "/v1beta/models/fixture:streamGenerateContent?alt=sse",
+                "/v1beta/models/fixture:generateContent?alt=sse",
                 "{}",
             ),
             (ProviderFamily::OpenAiCompat, "/v1/responses", "{}"),

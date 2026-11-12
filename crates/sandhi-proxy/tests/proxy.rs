@@ -4818,10 +4818,9 @@ async fn owned_buffered_unsupported_shapes_refuse_before_admission() {
         if case == "stream_unqualified_family" {
             state.providers.lock().unwrap().insert(
                 "up1".into(),
-                ProviderRuntime::new().gemini(
+                ProviderRuntime::new().cohere(
                     upstream.uri(),
                     "synthetic",
-                    sandhi_providers::GeminiAuthScheme::ApiKey,
                     Default::default(),
                     Some(0),
                     None,

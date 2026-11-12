@@ -170,6 +170,8 @@ fn gemini_truncation_abort_and_late_data_preserve_partial_evidence() {
 #[test]
 fn gemini_counter_regressions_and_identity_drift_are_sticky() {
     let mut invalid = vec![
+        frame(json!({})),
+        frame(json!({"future_event":{"text":"opaque"}})),
         frame(json!({"responseId":"other"})),
         frame(json!({"modelVersion":"other"})),
         frame(json!({"candidates":[{"index":64}]})),

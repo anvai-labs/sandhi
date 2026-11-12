@@ -12,6 +12,8 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+mod qualified;
+
 pub(crate) struct TypedGemini {
     raw: Arc<dyn Provider>,
 }
@@ -91,6 +93,33 @@ impl TypedGemini {
 
 #[async_trait]
 impl ChatProvider for TypedGemini {
+    fn supports_qualified_streaming(&self) -> bool {
+        true
+    }
+    async fn stream_qualified_observed(
+        &self,
+        request: ChatRequestV1,
+        headers: http::HeaderMap,
+        context: crate::AttemptContext,
+    ) -> Result<ChatEventStream, ProviderError> {
+        request.validate().map_err(ProviderError::InvalidRequest)?;
+        let source = self
+            .raw
+            .stream_qualified(
+                provider_request_observed(
+                    &request,
+                    encode_gemini_request(&request)?,
+                    headers,
+                    Some(context),
+                ),
+                crate::QualifiedStreamDelivery::Streaming,
+            )
+            .await?;
+        Ok(crate::qualified_stream::decode(
+            qualified::decode(source.stream, request.model, request.include_native_stream),
+            source.observation,
+        ))
+    }
     fn preflight_request(&self, request: &ChatRequestV1) -> Result<(), ProviderError> {
         encode_gemini_request(request).map(|_| ())
     }

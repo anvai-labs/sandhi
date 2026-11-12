@@ -155,7 +155,7 @@ and breakpoint semantics. Preserve ADR-0013's existing opt-out during migration.
 | M2b: Backend registry and operator lifecycle | Implemented and source-validated | Config/admin/CLI persistence, restart reconstruction, credential rotation/revocation, declared model scoping and backward-compatible fixed routes. ADR-0017; targeted Rust and real-process evidence below. |
 | M3: Conversation and cache semantics | In progress | ADR-0018 implements codec-owned ordered input and classified refusal; ADR-0019 adds native streaming and Codex retention. ADR-0020 implements declared cache compilation, scoped keys and observed credential generations. Broader content/tool/media fidelity remains required. |
 | M4: Authorized routing and affinity | In progress | ADR-0021 candidate implements logical aliases, actual codec/profile preflight, deterministic priority/rendezvous selection, immutable in-memory plans, scoped discovery and durable compatible session pins. Issuer provenance and broader authorization/lifecycle qualification remain required. |
-| M5: Uniform execution accounting | In progress | ADR-0022 freezes context; ADR-0023 adds paired budget ownership; ADR-0024 persists single-attempt transport evidence; ADR-0025 qualifies four buffered protocols; ADR-0026 qualifies transparent standard Responses streaming; ADR-0027 qualifies constrained buffered Codex aggregation; ADR-0028 connects four client dialects to qualified typed Chat/Responses/Codex streams; ADR-0031 connects Messages profiles with explicit native-state limits. Gemini source qualification and the retained intermittent accounting-wait failure remain open. |
+| M5: Uniform execution accounting | In progress | ADR-0022 freezes context; ADR-0023 adds paired budget ownership; ADR-0024 persists single-attempt transport evidence; ADR-0025 qualifies four buffered protocols; ADR-0026 qualifies transparent standard Responses streaming; ADR-0027 qualifies constrained buffered Codex aggregation; ADR-0028 connects four client dialects to qualified typed Chat/Responses/Codex streams; ADR-0031 connects Messages profiles; ADR-0032/0033 connect Gemini source qualification and EOF ownership with explicit native-state limits. The retained intermittent accounting-wait failure and broader accounting acceptance remain open. |
 | M6: End-to-end qualification | In progress | Z.AI live text/cache matrices and synthetic SDK/lifecycle evidence recorded below. Full agent-loop/interrupt/restart and subscription qualification remain required; unresolved cases clearly gated. |
 | M7: Operator console and visible efficiency semantics | Implemented and source-validated | Navigable workspaces, backend/route inventory, token-composition/coverage, attribution filtering and bounded usage diagnostics. AgentBrowser inspected a synthetic preview; affected browser/management/SSO and strict docs checks passed. This is a workspace candidate, not a deployed release. |
 
@@ -1324,3 +1324,76 @@ previous reviewed checkpoint `aeb3ce7` separately completed
 succeeded, runtime labels were only `ubuntu-24.04` / `ubuntu-24.04-arm`, and all
 runner names were GitHub Actions. Its docs run also passed. Exact-commit review and
 new-tip public CI remain separate gates for M5j.
+
+### M5k — Gemini source ownership and client accounting
+
+[ADR-0033](../adr/0033-qualified-gemini-stream-ownership.md) connects both Gemini
+transport planes to the existing tracked response owner. The transparent bridge
+now carries Gemini's validated path model and stream selection, including exact
+`?alt=sse` framing; the previous constant-path assumption produced a pre-send
+failure. API-key and Bearer forms remain exclusive. A separate complete-event typed
+decoder preserves native frames or refuses unsupported portable projections,
+including opaque signatures/media/provenance, multiple candidates, continuation
+state and non-object/missing/partial tool arguments. Portable call indices remain
+unique across chunks, and stop/limit/filter semantics remain explicit.
+
+Portable projection refusal drains the same bounded source before publishing its
+error. A clean HTTP EOF can therefore qualify actual final source counts and one
+paired settlement even when delivery fails. If EOF is missing, Gemini counts remain
+partial despite an explicit candidate finish. The four cancellation/deadline/shutdown
+cases assert that difference from independently terminated source families. Unknown
+standalone JSON shapes cannot inject a harmless-looking post-finish event.
+
+The synthetic HTTP matrix contains 596 calls across eight tests: 236 source/client/
+evidence cases, 28 lifecycle cases, one overflow, 36 streamed argument cases, 71
+tool-terminal cases, 24 buffered argument cases, 48 Messages native-state cases and
+52 Gemini native-state/tool cases. The provider Gemini matrix contains 96 physical
+raw/typed calls across both credential forms and attachment modes, including native
+preservation and portable refusal with final source evidence. Three complete-event
+decoder tests cover byte splits, multiline data, three newlines, stable indices,
+native payload equality, malformed tools and truncated EOF. Exact generation-path
+tests keep buffered/resource/non-SSE/extra-query shapes refused before setup.
+
+The real client SDK stream matrix now contains 48 cells: four ingress dialects,
+six source profiles and two terminal modes. Gemini's separate thoughts become
+inclusive output only at client projection; source accounting keeps its original
+disjoint categories. Two additional Gemini cases exercise default-SDK failure,
+partial counter persistence, both retained reservations and no inference replay
+across process restart. These are synthetic origins, not live native Google
+acceptance. No live request or external credential was used for this increment.
+
+Initial negative runs remain in local logs: one shared test assumed every source
+used body `stream:true`; another used a different synthetic tool name; and a forced
+missing-output-cap experiment was correctly rejected by tracked admission's
+explicit-limit requirement. The final tests retain URL-based streaming and explicit
+limits. Native typed preservation is tested through the provider/library seam;
+same-family gateway traffic uses its compatible transparent path. No production
+deadline, admission requirement or inference retry was relaxed for these fixtures.
+
+The new bare-adapter guard rejects non-object bodies and path-unsafe models before
+attempt authorization or HTTP setup. Its initial fixture incorrectly treated a
+colon-containing label as unsafe; the shared model-ID contract permits colons while
+the transport still appends the fixed generation operation. The corrected fixture
+uses actual query/fragment/path hazards and proves zero dispatch/observations. The
+first full SDK run passed 145 existing/expanded cases and exposed a second fixture
+assumption: partial evidence can have a frozen policy valuation for reconciliation.
+That value is not a committed debit. The corrected two-case restart test passes
+and asserts retained leases, no receipt, one persisted usage event and no replay.
+
+The previous checkpoint's private duration-only sync diagnostic completed three
+passing 82-case proxy suites. It observed no sync at or above 25 ms in those runs;
+that is not a failed-run timing trace and does not establish the accounting-wait
+cause. Admission and dispatch-authorization failures remain separately retained,
+and the full-goal reliability gate stays open.
+
+Final activation validation passed all 48 Rust workspace suites: 1,154 tests and
+six opt-in ignored. The complete real-client SDK/backend/reasoning regression
+passed 147 cases, including all 48 stream matrix cells and both new restart cases.
+Default and ONNX workspace/all-target Clippy, formatting, strict MkDocs and binding
+facade checks passed. Indexed actual-credential and encoded-form scanning and
+staged default-rule Gitleaks found no secrets. Exact-commit independent review and
+new-tip public CI remain publication/merge gates. The preceding reviewed `c098f45`
+[public run](https://github.com/anvai-labs/sandhi/actions/runs/43177467213) separately
+passed all 14 jobs, with only GitHub Actions runner names and `ubuntu-24.04` /
+`ubuntu-24.04-arm` labels; its documentation build passed. No private or overflow
+runner was used.

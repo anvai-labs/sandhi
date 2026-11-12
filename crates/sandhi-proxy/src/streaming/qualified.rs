@@ -104,6 +104,7 @@ pub(crate) async fn qualified_response(
     dialect: IngressDialect,
     mut accounting: RequestAccounting,
     full_error_detail: bool,
+    gemini: Option<crate::GeminiRoute>,
     permit: Arc<AdmissionPermit>,
 ) -> Response {
     let started = Instant::now();
@@ -125,7 +126,7 @@ pub(crate) async fn qualified_response(
     let headers = accounting.per_call_wire_headers();
     let raw = match forwarder
         .forward_stream_qualified_with_headers(
-            &upstream_path(provider.family(), None, dialect),
+            &upstream_path(provider.family(), gemini.as_ref(), dialect),
             request_body,
             session.as_deref(),
             Some(&accounting.request_id),

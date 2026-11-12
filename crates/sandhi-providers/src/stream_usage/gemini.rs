@@ -39,6 +39,19 @@ impl GeminiUsage {
             self.provider_failed = true;
             return Err(Error::ProviderEvent);
         }
+        if ![
+            "candidates",
+            "usageMetadata",
+            "responseId",
+            "modelVersion",
+            "promptFeedback",
+            "createTime",
+        ]
+        .iter()
+        .any(|key| event.get(key).is_some())
+        {
+            return Err(Error::InvalidEnvelope);
+        }
         identity(&mut self.id, event.get("responseId"))?;
         identity(&mut self.model, event.get("modelVersion"))?;
         let candidates = event

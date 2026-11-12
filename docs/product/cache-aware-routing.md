@@ -31,12 +31,14 @@ evidence survives decoder failure and remains separate from client delivery. Thi
 uses synthetic origins; live subscription acceptance remains open.
 
 [Qualified translated streaming](../adr/0028-qualified-translated-stream-accounting.md)
-now connects all four client protocols to tracked Chat, Messages, Responses and constrained
+now connects all four client protocols to tracked Chat, Messages, Responses, Gemini and constrained
 Codex sources. The same source counters settle both budget scopes; SDK-visible
 output is not accounting evidence. [Messages ownership](../adr/0031-qualified-messages-stream-ownership.md)
 supports portable output; signed/native state requires compatible native delivery
-or explicit refusal. Gemini upstream stream qualification and broader
-tool/media/subscription journeys remain explicit follow-ups.
+or explicit refusal. [Gemini source ownership](../adr/0033-qualified-gemini-stream-ownership.md)
+keeps cached input within prompt tokens and thought tokens separate from candidate
+output. Its source counts become final only after clean HTTP EOF. Broader
+tool/media/subscription and native Google cache-lifetime journeys remain follow-ups.
 
 The [live Messages cache matrix](../reviews/zai-messages-tracked-streams-2026-11-12.md)
 adds eight joined four-client calls with explicitly disabled thinking. Its 99.87%

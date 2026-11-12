@@ -23,7 +23,9 @@ reuse that source evidence and the bounded response owner.
 [Messages source ownership](../adr/0031-qualified-messages-stream-ownership.md) now
 connects both declared cache-usage profiles. Portable output translates across all
 four clients; nonportable signed/native state requires compatible native delivery
-or explicit refusal. Gemini upstream stream accounting remains gated. See
+or explicit refusal. [Gemini source streams](../adr/0033-qualified-gemini-stream-ownership.md)
+now use the same owner with a stricter EOF gate: candidate completion and a complete
+final usage frame remain partial until clean HTTP EOF. See
 [qualified Responses streaming](../adr/0026-qualified-responses-stream-accounting.md)
 for partial/final usage and protocol-terminal semantics.
 
@@ -94,9 +96,9 @@ snapshot needed for accounting recovery.
 | Surface | Required in tracked mode | Refused before admission |
 |---|---|---|
 | Ledger | One file-backed ledger, fixed topology | Volatile or sharded ledgers fail startup |
-| Ingress | Buffered Chat, Messages, Responses or Gemini; bounded streams from qualified Chat, Messages, Responses or Codex sources | Other dialects; unbounded streams or unqualified source families |
+| Ingress | Buffered Chat, Messages, Responses or Gemini; bounded streams from qualified Chat, Messages, Responses, Gemini or Codex sources | Other dialects; unbounded streams or unqualified source families |
 | Buffered upstream | Built-in retry-free standard Chat, Messages, Responses or Gemini transport; constrained Codex SSE aggregation | Custom transports; other expiring handles without a qualified codec |
-| Streaming upstream | Qualified retry-free Chat, Messages, standard Responses or constrained Codex typed source | Gemini and custom sources without a strict qualifier |
+| Streaming upstream | Qualified retry-free Chat, Messages, standard Responses, Gemini or constrained Codex typed source | Custom sources without a strict qualifier |
 | Operations | Synchronous generation | Background/async Responses; logical routes preflight eligibility before pinning |
 | Policy | Explicit output limit and Block policy | Warn, fail-open, retry and logical-idempotency combinations |
 | Processing plane | Buffered and streaming transparent/translated | No silent downgrade to legacy accounting |

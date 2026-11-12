@@ -148,6 +148,54 @@ impl Provider for Gemini {
         )
         .await
     }
+
+    async fn stream_qualified(
+        &self,
+        req: ProviderRequest,
+        _delivery: crate::QualifiedStreamDelivery,
+    ) -> Result<crate::QualifiedProviderStream, ProviderError> {
+        if !req.body.is_object() || !sandhi_core::model_id_is_path_safe(&req.model) {
+            return Err(ProviderError::InvalidRequest(
+                "qualified Gemini requires an object and a path-safe generation model".into(),
+            ));
+        }
+        let model = req.model.clone();
+        let request = self
+            .client
+            .post(format!(
+                "{}?alt=sse",
+                self.url(&model, "streamGenerateContent")
+            ))
+            .headers(crate::merge_call_headers(&self.headers, &req.extra_headers))
+            .json(&req.body);
+        crate::attempt::observe_qualified_stream(
+            req.attempt_context,
+            self.slug(),
+            Some(&model),
+            sandhi_core::EndpointFamilyV1::GeminiGenerateContent,
+            Default::default(),
+            Default::default(),
+            |facts| async move {
+                let response = self
+                    .authenticate(request)
+                    .send()
+                    .await
+                    .map_err(|error| ProviderError::Transport(error.to_string()))?;
+                facts.record_headers(response.status().as_u16(), response.headers(), None);
+                if !response.status().is_success() {
+                    return Err(error_for_response(response, None).await);
+                }
+                let id = crate::provider_request_id(response.headers(), None);
+                use futures_util::StreamExt;
+                let raw: crate::raw::RawChunkStream =
+                    Box::pin(response.bytes_stream().map(|chunk| {
+                        chunk.map_err(|error| ProviderError::Transport(error.to_string()))
+                    }));
+                Ok((raw, id))
+            },
+        )
+        .await
+    }
 }
 
 /// Accumulate usage from a Gemini `streamGenerateContent` SSE line: the chunk carrying

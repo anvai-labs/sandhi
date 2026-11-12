@@ -3043,6 +3043,7 @@ async fn transparent_stream_response(
             dialect,
             accounting,
             full_error_detail,
+            gemini,
             permit,
         )
         .await;

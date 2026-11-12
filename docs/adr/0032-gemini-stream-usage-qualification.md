@@ -1,7 +1,8 @@
 # ADR-0032: Qualify Gemini stream counts before backend activation
 
-- **Status:** Implemented library prerequisite, unreleased. Tracked Gemini source
-  routing remains refused; this is not a live Google backend qualification.
+- **Status:** Implemented library prerequisite, unreleased. Source ownership is
+  connected separately in [ADR-0033](0033-qualified-gemini-stream-ownership.md);
+  this is not a live Google backend qualification.
 - **Extends:** [Buffered qualification](0025-qualified-buffered-protocol-accounting.md)
   and [typed stream ownership](0028-qualified-translated-stream-accounting.md).
 
@@ -9,7 +10,8 @@
 
 Add a GenerateContent reducer to the bounded, complete-event protocol usage
 observer. It performs no dispatch, admission, persistence, replay or settlement.
-Gemini raw and typed adapters do not opt into tracked streaming in this increment.
+At prerequisite checkpoint `c098f45`, Gemini raw and typed adapters did not opt
+into tracked streaming. ADR-0033 records the subsequent activation boundary.
 Existing four-client ingress support and GLM evidence retain their earlier scope.
 
 Google's [GenerateContent response reference](https://docs.cloud.google.com/gemini-enterprise-agent-platform/reference/rest/v1/GenerateContentResponse)
