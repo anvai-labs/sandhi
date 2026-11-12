@@ -56,13 +56,26 @@ Dedicated partial-data/comment drop cases and the existing disconnect/deadline/
 shutdown drill verify this distinction; data framing remains conservative.
 
 That same run also returned an intermittent settlement 502 on call 138 of the
-existing 200-call stress test. It retained final 10-input/2-output observations and
-one process-local owner. No static accounting reason was captured in that run.
+existing 200-call stress test. Its panic printed the last sink observation (final
+10-input/2-output) and one process-local owner. That observation can belong to the
+previous successful call: the failed response's request ID was not captured, so
+the log does not establish usage or dispatch for the failed call. No static
+accounting reason was captured in that run.
 The [retained failure artifact](artifacts/codex-accounting-source-failures-2026-11-11.json)
 preserves both failures. A subsequent isolated 200-call run and the 15-case owned
 accounting group passed with logging enabled, as did a later full workspace run.
 Those passes do **not** establish the stress failure's cause or prove it resolved.
 The broader M5/M6 reliability gate remains open.
+
+A [later full-workspace recurrence](artifacts/accounting-authorization-timeout-2026-11-11.json)
+failed call 79 and recorded a dispatch-authorization wait timeout for the next
+request after the last successful observation. The response header was again
+absent from the panic, so this association remains qualified. Subsequent proxy
+and isolated 200-call runs passed. Owner timeout, task failure and terminal
+scheduling refusals now have distinct bounded diagnostics; the stress assertion
+captures the failed response ID and upstream request count separately from the
+last observation. These improve diagnosis without changing deadlines, authorizing
+another send or establishing the original cause.
 
 Full SDK regressions passed 62 cases across tracked protocols and backend registry
 tests. The [GLM tracked Responses pair](zai-router-tracked-responses-stream-2026-11-11.md)

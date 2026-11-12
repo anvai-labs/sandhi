@@ -4533,11 +4533,12 @@ async fn owned_buffered_settles_the_upstream_scope_with_the_primary() {
 /// both legs settled by the time each response returns.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn owned_buffered_back_leg_never_races_its_primary_settle() {
-    if std::env::var_os("RUST_LOG").is_some() {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-            .try_init();
-    }
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("sandhi_proxy=warn")),
+        )
+        .try_init();
     let upstream = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!(
@@ -4562,13 +4563,20 @@ async fn owned_buffered_back_leg_never_races_its_primary_settle() {
             .unwrap();
         if response.status() != StatusCode::OK {
             let status = response.status();
+            let failed_request_id = response
+                .headers()
+                .get("x-sandhi-request-id")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("missing")
+                .to_owned();
             let body = axum::body::to_bytes(response.into_body(), 100_000)
                 .await
                 .unwrap();
             panic!(
-                "call {call}: {status}, {}, retained={}, events={:?}",
+                "call {call}: {status}, failed_request_id={failed_request_id}, {}, retained={}, upstream_calls={}, last_successful_or_failed_observation={:?}",
                 String::from_utf8_lossy(&body),
                 sandhi_proxy::settlement::buffered::retained(&state),
+                upstream.received_requests().await.unwrap().len(),
                 sink.events().last()
             );
         }

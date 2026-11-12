@@ -381,7 +381,14 @@ pub(crate) async fn handle(
     });
     let mut response = match tokio::time::timeout(transport + wait * 3, task).await {
         Ok(Ok(response)) => response,
-        _ => accounting_error(dialect, &request_id),
+        Ok(Err(error)) => {
+            tracing::warn!(request_id = %request_id, reason = "owner_task_failed", cancelled = error.is_cancelled(), panicked = error.is_panic(), "tracked response owner unresolved");
+            accounting_error(dialect, &request_id)
+        }
+        Err(_) => {
+            tracing::warn!(request_id = %request_id, reason = "owner_wait_timeout", "tracked response owner unresolved");
+            accounting_error(dialect, &request_id)
+        }
     };
     response.headers_mut().insert(
         "x-sandhi-request-id",

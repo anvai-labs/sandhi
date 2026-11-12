@@ -990,3 +990,21 @@ well as images, files and future output shapes; ordinary string outputs remain
 portable. Regression cases cover both delivery modes, all four target families,
 resource affinity and the constrained Codex profile. These are explicit fidelity
 boundaries, not evidence of completed multimodal tool-result translation.
+
+### Published checkpoint and retained authorization-timeout diagnosis
+
+Draft PR #446 publishes independently reviewed commit `84e04c3`, aligned with
+`develop` at `4443ed8`. Its exact Git index contained no configured raw/encoded
+credential matches; Gitleaks found zero findings across the two new commits.
+Independent review passed the native/routing/Codex fixtures and four real SDK
+retry/recovery cases. The complete SDK/backend rerun passed 66 cases.
+
+The full workspace rerun again failed the 200-call stress test, this time on call
+79. Its last sink event is not joined to the failed HTTP response and cannot
+establish that call's usage or dispatch. A dispatch-authorization wait timeout for
+the next request after that event is recorded in the retained recurrence artifact.
+The later full proxy run (82 cases) and isolated stress test passed; cause remains
+open. A diagnostic follow-up distinguishes owner timeout, task failure and terminal
+scheduling refusal, and records the failed request ID/upstream count in the stress
+assertion. It changes no timeout/retry/settlement policy. CI and broader reliability
+acceptance remain required before merge and goal completion.

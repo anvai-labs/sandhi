@@ -3743,7 +3743,13 @@ impl RequestAccounting {
             .obligation
             .submit(settlement::jobs::Work::Settle(pending));
         // A refusal already retained the immutable snapshot in the obligation.
-        let ticket = submitted.ok();
+        let ticket = match submitted {
+            Ok(ticket) => Some(ticket),
+            Err(rejected) => {
+                tracing::warn!(request_id = %self.request_id, reason = ?rejected.reason, "tracked terminal scheduling refused");
+                None
+            }
+        };
         self.emit_usage(&usage, actual, true);
         let Some(ticket) = ticket else {
             return false;
