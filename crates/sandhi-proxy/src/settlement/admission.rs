@@ -90,7 +90,7 @@ impl PreparedAdmission {
             }
             mark(progress, Stage::ReserveCall);
             let admission = if let Some(context) = &evidence.context {
-                store.reserve_paired_contextual_durable(
+                store.reserve_paired_contextual_durable_observed(
                     &evidence.scope,
                     evidence.ceiling,
                     time::OffsetDateTime::now_utc(),
@@ -98,6 +98,7 @@ impl PreparedAdmission {
                     evidence.retained_limit,
                     &evidence.request_id,
                     context,
+                    progress.map(|progress| &progress.admission),
                 )
             } else {
                 store.reserve_prepared_durable(

@@ -1089,6 +1089,7 @@ impl Ticket {
     ) {
         let timing = self.timing.snapshot();
         let ledger = self.timing.progress.snapshot();
+        let store = self.timing.progress.admission.snapshot();
         tracing::warn!(
             request_id, transition, reason = "wait_timeout",
             wait_ms = wait.as_millis().min(u128::from(u64::MAX)) as u64,
@@ -1101,6 +1102,7 @@ impl Ticket {
             ledger_stage = ledger.stage, ledger_stage_us = ?ledger.stage_us,
             ledger_calls = ledger.calls, ledger_busy_returns = ledger.busy_returns,
             ledger_backoff_us = ledger.backoff_us,
+            store_admission_stage = store.stage, store_admission_stage_us = ?store.stage_us,
             readiness = self.readiness(), "tracked accounting wait unresolved"
         );
     }
@@ -1599,6 +1601,99 @@ mod tests {
             "upstream_ref":"openai:default","upstream_budget_scope":"upstream:models","requested_model":"model","actual_model":"model","provider":"models",
             "endpoint_family":"openai_chat_completions","transport_binding_sha256":"a".repeat(64),"accounting_policy":{"version":1,"cache_read_weight":1000}})).unwrap();
         admission().with_context(context).unwrap()
+    }
+
+    #[tokio::test]
+    async fn admission_timeout_log_carries_the_actual_store_stage_and_preserves_ownership() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("observed-admission.db");
+        let ledger = Arc::new(Mutex::new(
+            ProxyLedger::durable(path.to_str().unwrap(), 1).unwrap(),
+        ));
+        let jobs = Jobs::new(ledger, Arc::new(Lifecycle::new()), 1);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let mut obligation = jobs.obligation().unwrap();
+        let ticket = obligation.admit(paired_admission()).unwrap();
+        let entered = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if ticket.ticket.timing.progress.admission.snapshot().stage == "begin_transaction" {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .is_ok();
+        let pending = tokio::time::timeout(Duration::from_millis(10), ticket.wait())
+            .await
+            .is_err();
+        let captured = Captured(Arc::new(Mutex::new(Vec::new())));
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(captured.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            ticket.warn_timeout(
+                "admission",
+                Duration::from_millis(10),
+                std::time::Instant::now(),
+            );
+        });
+        let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        let no_early_reservations = connection
+            .query_row("SELECT count(*) FROM budget_reservation", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+            == 0;
+        connection.execute_batch("ROLLBACK").unwrap();
+        tokio::time::timeout(Duration::from_secs(2), ticket.wait())
+            .await
+            .unwrap();
+        assert!(entered && pending && no_early_reservations);
+        assert_eq!(
+            ticket.ticket.timing.progress.admission.snapshot().stage,
+            "unobserved",
+            "outer return must clear the previous admission stage"
+        );
+        assert_eq!(log.lines().count(), 1);
+        for expected in [
+            "store_admission_stage=\"begin_transaction\"",
+            "store_admission_stage_us=Some(",
+            "ledger_stage=\"reserve_call\"",
+            "ledger_busy_returns=0",
+            "readiness=\"pending\"",
+        ] {
+            assert!(log.contains(expected), "{expected}: {log}");
+        }
+        let Some(AdmissionOutcome::Prepared(pending)) = ticket.take() else {
+            panic!("original admission");
+        };
+        assert!(ticket.take().is_none());
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM budget_reservation", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM budget_settlement_outbox", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        let close = obligation.submit(Work::Close(pending)).unwrap();
+        close.wait().await;
+        assert!(matches!(
+            close.take(),
+            Some(Outcome::Dispatch(DispatchAttempt::Closed { .. }))
+        ));
+        assert_eq!(connection.query_row("SELECT COALESCE(sum(actual),0),COALESCE(sum(CASE WHEN settled=0 THEN ceiling ELSE 0 END),0) FROM budget_reservation", [], |row| Ok((row.get::<_, i64>(0)?,row.get::<_, i64>(1)?))).unwrap(), (0,0));
     }
 
     #[test]

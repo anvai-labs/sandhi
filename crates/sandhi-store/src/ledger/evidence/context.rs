@@ -206,6 +206,7 @@ impl SqliteLedger {
             request_id,
             context,
             false,
+            None,
         )
     }
     /// Atomically admit both client and upstream scopes with one selected context.
@@ -220,6 +221,31 @@ impl SqliteLedger {
         request_id: &str,
         context: &ExecutionContext,
     ) -> Result<IntentAdmission, EvidenceError> {
+        self.reserve_paired_contextual_durable_observed(
+            scope,
+            ceiling,
+            now,
+            ttl,
+            retained_limit,
+            request_id,
+            context,
+            None,
+        )
+    }
+
+    /// Same atomic admission, with optional process-local stage observations only.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reserve_paired_contextual_durable_observed(
+        &mut self,
+        scope: &str,
+        ceiling: u64,
+        now: OffsetDateTime,
+        ttl: Duration,
+        retained_limit: usize,
+        request_id: &str,
+        context: &ExecutionContext,
+        progress: Option<&super::AdmissionProgress>,
+    ) -> Result<IntentAdmission, EvidenceError> {
         self.reserve_contextual(
             scope,
             ceiling,
@@ -229,6 +255,7 @@ impl SqliteLedger {
             request_id,
             context,
             true,
+            progress,
         )
     }
     #[allow(clippy::too_many_arguments)]
@@ -242,7 +269,9 @@ impl SqliteLedger {
         request_id: &str,
         context: &ExecutionContext,
         paired: bool,
+        progress: Option<&super::AdmissionProgress>,
     ) -> Result<IntentAdmission, EvidenceError> {
+        super::mark_admission(progress, super::AdmissionStage::ValidateContext);
         if !self.is_file_backed() {
             return Err(EvidenceError::UnsupportedTrackedLedger);
         }
@@ -262,6 +291,7 @@ impl SqliteLedger {
                 json: &encoded,
                 paired_scope: paired.then_some(context.upstream_budget_scope.as_str()),
             }),
+            progress,
         )
     }
     pub fn execution_context_durable(

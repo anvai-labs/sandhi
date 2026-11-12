@@ -199,6 +199,141 @@ mod tests {
             ..Default::default()
         }
     }
+
+    #[test]
+    fn admission_progress_locates_a_real_writer_wait_without_early_reservations() {
+        use std::sync::{mpsc, Arc};
+        use std::time::{Duration as WallDuration, Instant};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("admission-progress.db");
+        let ledger = SqliteLedger::open(path.to_str().unwrap()).unwrap();
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let progress = Arc::new(AdmissionProgress::new(Instant::now()));
+        let observed = progress.clone();
+        let (result_tx, result_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut ledger = ledger;
+            let result = ledger.reserve_paired_contextual_durable_observed(
+                "team",
+                100,
+                OffsetDateTime::now_utc(),
+                Duration::seconds(60),
+                100,
+                "blocked-admission",
+                &context(),
+                Some(&observed),
+            );
+            result_tx.send(result).unwrap();
+            ledger
+        });
+        let until = Instant::now() + WallDuration::from_secs(2);
+        while progress.snapshot().stage != "begin_transaction" && Instant::now() < until {
+            std::thread::yield_now();
+        }
+        let at_wait = progress.snapshot();
+        let pending = matches!(
+            result_rx.recv_timeout(WallDuration::from_millis(10)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+        let held = connection
+            .query_row("SELECT count(*) FROM budget_reservation", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        // Release the controlled writer before assertions can unwind.
+        connection.execute_batch("ROLLBACK").unwrap();
+        let result = result_rx
+            .recv_timeout(WallDuration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        let ledger = worker.join().unwrap();
+        assert_eq!(at_wait.stage, "begin_transaction");
+        assert!(at_wait.stage_us.is_some());
+        assert!(pending);
+        assert_eq!(held, 0);
+        assert_eq!(progress.snapshot().stage, "returned");
+        let IntentAdmission::Admitted(intent) = result else {
+            panic!("admission");
+        };
+        assert_eq!(
+            ledger
+                .request_id_durable("team", &intent.execution_id)
+                .unwrap()
+                .as_deref(),
+            Some("blocked-admission")
+        );
+        assert_eq!(
+            ledger
+                .conn
+                .query_row("SELECT count(*) FROM budget_reservation", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            ledger
+                .conn
+                .query_row("SELECT count(*) FROM budget_settlement_outbox", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            ledger
+                .conn
+                .query_row(
+                    "SELECT phase FROM budget_dispatch_fence WHERE execution_id=?1",
+                    [&intent.execution_id],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        progress.reset();
+        let snapshot = progress.snapshot();
+        assert_eq!(snapshot.stage, "unobserved");
+        assert_eq!(snapshot.stage_us, None);
+    }
+
+    #[test]
+    fn observed_admission_keeps_context_failure_atomic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("admission-progress.db");
+        let mut ledger = SqliteLedger::open(path.to_str().unwrap()).unwrap();
+        ledger.conn.execute_batch("CREATE TRIGGER fail_context BEFORE INSERT ON budget_execution_context BEGIN SELECT RAISE(ABORT,'fixture'); END").unwrap();
+        let progress = AdmissionProgress::new(std::time::Instant::now());
+        assert!(ledger
+            .reserve_paired_contextual_durable_observed(
+                "team",
+                100,
+                OffsetDateTime::now_utc(),
+                Duration::seconds(60),
+                100,
+                "failed-admission",
+                &context(),
+                Some(&progress),
+            )
+            .is_err());
+        assert_eq!(progress.snapshot().stage, "write_context");
+        for table in [
+            "budget_reservation",
+            "budget_execution_intent",
+            "budget_dispatch_fence",
+            "budget_execution_context",
+            "budget_execution_back_leg",
+        ] {
+            assert_eq!(
+                ledger
+                    .conn
+                    .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+    }
     fn evidence(ledger: &SqliteLedger, intent: &ExecutionIntent) -> AttemptEvidence {
         AttemptEvidence {
             version: 1,

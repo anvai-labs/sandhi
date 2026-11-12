@@ -44,7 +44,7 @@ as live-verified. A missing external prerequisite does not stop independent work
 
 | ID | Objective | Observable acceptance |
 | --- | --- | --- |
-| O1 | Decouple client dialect, model alias, backend instance, endpoint protocol/profile and credential reference | A standard Responses endpoint and a custom Anthropic-compatible endpoint are configured explicitly; provider-name inference remains a legacy default. |
+| O1 | Decouple client dialect, model alias, backend instance, endpoint protocol/profile and credential reference | Standard Responses and custom Messages endpoints are configured explicitly; omitted protocol uses catalog defaults, and explicit protocol takes precedence. |
 | O2 | Authorize logical-model routing and backend selection | A key can reach only eligible model/backend mappings; denied routes do not reserve or dispatch; discovery agrees with callable routes. |
 | O3 | Preserve conversation and tool semantics | Text, tools, parallel calls/results and supported media survive multi-turn loops. Same-backend opaque state is preserved in order; nonportable state is pinned or explicitly rejected. |
 | O4 | Manage cache intent across dialects and backend profiles | Native controls and block boundaries survive; automatic/explicit/preserve/opt-out precedence is defined independently of unrelated native extras; unsupported required controls are rejected. |
@@ -1824,3 +1824,15 @@ verified public GitHub-hosted runners. Its final SDK/dashboard/CPU-origin job pa
 564 cases with three skips. That green source-qualified run supersedes the earlier
 563-pass/one-failure result for release gating; the earlier fixture failure remains
 recorded as evidence. These results do not cover subsequent M5t edits.
+
+### M5u — Admission store timing without accounting behavior changes
+
+The [diagnostic increment](../reviews/admission-store-diagnostics-2026-11-12.md)
+observes contextual paired admission from shard acquisition through SQLite commit.
+Real writer contention, rollback and owned-ticket tests verify no early row,
+dispatch, charge or loss of ownership, plus stage clearing after return. The full
+workspace passed 1,223 tests with six opt-in ignores; both all-target Clippy
+configurations, formatting and strict docs passed. This passing run did not
+reproduce the spontaneous stall and does not diagnose either retained occurrence.
+Unexpected future back-leg test failures retain only their synthetic database for
+a later exact request join. The reliability gate stays open.

@@ -237,7 +237,7 @@ impl ShardedLedger {
         request_id: &str,
         context: &crate::ledger::evidence::context::ExecutionContext,
     ) -> Result<IntentAdmission, EvidenceError> {
-        self.tracked_ledger()?.reserve_paired_contextual_durable(
+        self.reserve_paired_contextual_durable_observed(
             scope,
             ceiling,
             now,
@@ -245,7 +245,36 @@ impl ShardedLedger {
             retained_limit,
             request_id,
             context,
+            None,
         )
+    }
+    /// Optional diagnostics do not change tracked topology or atomic admission.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reserve_paired_contextual_durable_observed(
+        &self,
+        scope: &str,
+        ceiling: u64,
+        now: OffsetDateTime,
+        ttl: time::Duration,
+        retained_limit: usize,
+        request_id: &str,
+        context: &crate::ledger::evidence::context::ExecutionContext,
+        progress: Option<&crate::ledger::evidence::AdmissionProgress>,
+    ) -> Result<IntentAdmission, EvidenceError> {
+        if let Some(progress) = progress {
+            progress.mark(crate::ledger::evidence::AdmissionStage::ShardLock);
+        }
+        self.tracked_ledger()?
+            .reserve_paired_contextual_durable_observed(
+                scope,
+                ceiling,
+                now,
+                ttl,
+                retained_limit,
+                request_id,
+                context,
+                progress,
+            )
     }
     pub fn execution_back_leg_durable(
         &self,

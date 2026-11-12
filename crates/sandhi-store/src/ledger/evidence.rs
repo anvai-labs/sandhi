@@ -9,6 +9,10 @@ pub mod context;
 pub use attempts::{AttemptEvidence, PhysicalAttempt, TransportOutcome, TransportTerminal};
 mod dispatch;
 mod paired;
+mod progress;
+use progress::mark as mark_admission;
+pub(crate) use progress::AdmissionStage;
+pub use progress::{AdmissionProgress, AdmissionSnapshot};
 #[cfg(test)]
 mod tests;
 pub use dispatch::{ClosureOutcome, DispatchOutcome, DispatchPermit, PreDispatchClosure};
@@ -563,6 +567,7 @@ impl SqliteLedger {
             true,
             Some(request_id),
             None,
+            None,
         )
     }
     pub fn request_id_durable(
@@ -903,7 +908,17 @@ impl SqliteLedger {
         ttl: Duration,
         retained_limit: usize,
     ) -> Result<IntentAdmission, EvidenceError> {
-        self.reserve_intent(scope, ceiling, now, ttl, retained_limit, false, None, None)
+        self.reserve_intent(
+            scope,
+            ceiling,
+            now,
+            ttl,
+            retained_limit,
+            false,
+            None,
+            None,
+            None,
+        )
     }
 
     /// Opt-in storage prerequisite for dispatch fencing. Only file-backed ledgers.
@@ -920,7 +935,17 @@ impl SqliteLedger {
         if !self.is_file_backed() {
             return Err(EvidenceError::UnsupportedTrackedLedger);
         }
-        self.reserve_intent(scope, ceiling, now, ttl, retained_limit, true, None, None)
+        self.reserve_intent(
+            scope,
+            ceiling,
+            now,
+            ttl,
+            retained_limit,
+            true,
+            None,
+            None,
+            None,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -934,7 +959,9 @@ impl SqliteLedger {
         prepared: bool,
         request_id: Option<&str>,
         context: Option<context::PreparedContext<'_>>,
+        progress: Option<&AdmissionProgress>,
     ) -> Result<IntentAdmission, EvidenceError> {
+        mark_admission(progress, AdmissionStage::ValidateAdmission);
         if !(1..=100_000).contains(&retained_limit)
             || scope.is_empty()
             || scope.len() > 4096
@@ -944,16 +971,20 @@ impl SqliteLedger {
         {
             return Err(EvidenceError::InvalidInput);
         }
+        mark_admission(progress, AdmissionStage::GenerateIdentity);
         let execution_id = opaque_id()?;
+        mark_admission(progress, AdmissionStage::BeginTransaction);
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        mark_admission(progress, AdmissionStage::ReadCapacity);
         let count: i64 = tx.query_row("SELECT COUNT(*) FROM budget_execution_intent", [], |r| {
             r.get(0)
         })?;
         if count >= retained_limit as i64 {
             return Err(EvidenceError::IntentCapacity);
         }
+        mark_admission(progress, AdmissionStage::ReservePrimary);
         let reservation = match Self::reserve_in_transaction(&tx, scope, ceiling, now, ttl)? {
             ReserveOutcome::Admitted(reservation) => reservation,
             ReserveOutcome::Denied(denied) => return Ok(IntentAdmission::Denied(denied)),
@@ -962,6 +993,7 @@ impl SqliteLedger {
             if back_scope == scope {
                 return Err(EvidenceError::InvalidInput);
             }
+            mark_admission(progress, AdmissionStage::ReserveBackLeg);
             match Self::reserve_in_transaction(&tx, back_scope, ceiling, now, ttl)? {
                 ReserveOutcome::Admitted(back) => Some(back),
                 ReserveOutcome::Denied(denied) => return Ok(IntentAdmission::Denied(denied)),
@@ -969,6 +1001,7 @@ impl SqliteLedger {
         } else {
             None
         };
+        mark_admission(progress, AdmissionStage::WriteIntent);
         let inserted = tx.execute(
             "INSERT INTO budget_execution_intent (execution_id, reservation_id, created_at) VALUES (?1, ?2, ?3)",
             params![execution_id, reservation.id as i64, now.unix_timestamp()],
@@ -977,6 +1010,7 @@ impl SqliteLedger {
             return Err(EvidenceError::Storage(rusqlite::Error::QueryReturnedNoRows));
         }
         if prepared {
+            mark_admission(progress, AdmissionStage::WriteFence);
             let inserted = tx.execute(
                 "INSERT INTO budget_dispatch_fence (execution_id, phase) VALUES (?1, 0)",
                 [&execution_id],
@@ -986,12 +1020,14 @@ impl SqliteLedger {
             }
         }
         if let Some(request_id) = request_id {
+            mark_admission(progress, AdmissionStage::WriteCorrelation);
             tx.execute(
                 "INSERT INTO budget_request_correlation(execution_id, request_id) VALUES (?1, ?2)",
                 params![execution_id, request_id],
             )?;
         }
         if let Some(context) = context {
+            mark_admission(progress, AdmissionStage::WriteContext);
             tx.execute("INSERT INTO budget_execution_context(execution_id,version,context_json) VALUES (?1,1,?2)", params![execution_id,context.json])?;
             tx.execute(
                 "UPDATE budget_dispatch_fence SET context_version=1 WHERE execution_id=?1",
@@ -999,13 +1035,16 @@ impl SqliteLedger {
             )?;
         }
         if let Some(back) = back {
+            mark_admission(progress, AdmissionStage::WriteBackLeg);
             tx.execute("INSERT INTO budget_execution_back_leg(execution_id,version,reservation_id) VALUES (?1,1,?2)",params![execution_id,back.id as i64])?;
             tx.execute(
                 "UPDATE budget_dispatch_fence SET back_reservation_id=?2,attempt_version=1 WHERE execution_id=?1",
                 params![execution_id, back.id as i64],
             )?;
         }
+        mark_admission(progress, AdmissionStage::Commit);
         tx.commit()?;
+        mark_admission(progress, AdmissionStage::Returned);
         Ok(IntentAdmission::Admitted(ExecutionIntent {
             execution_id,
             reservation,

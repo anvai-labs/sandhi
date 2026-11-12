@@ -39,6 +39,7 @@ impl Stage {
     }
 }
 pub(super) struct Progress {
+    pub admission: sandhi_store::ledger::evidence::AdmissionProgress,
     origin: Instant,
     stage: AtomicU64,
     stage_at: AtomicU64,
@@ -62,6 +63,7 @@ fn increment(value: &AtomicU64, extra: u64) {
 impl Progress {
     pub(super) fn new(origin: Instant) -> Self {
         Self {
+            admission: sandhi_store::ledger::evidence::AdmissionProgress::new(origin),
             origin,
             stage: AtomicU64::new(0),
             stage_at: AtomicU64::new(0),
@@ -78,6 +80,7 @@ impl Progress {
             .min(u128::from(u64::MAX - 1)) as u64
     }
     pub(super) fn mark(&self, stage: Stage) {
+        self.admission.reset();
         self.stage_at.store(self.elapsed() + 1, Ordering::Release);
         self.stage.store(stage as u64, Ordering::Release);
     }

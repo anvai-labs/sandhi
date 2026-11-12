@@ -35,6 +35,8 @@ flowchart LR
 | `ledger_calls` | Invocations of the original owned accounting operation, including outer-lock refusals; not SQL statement counts or provider dispatches |
 | `ledger_busy_returns` | Observed `LedgerBusy` results from the nonblocking outer mutex, before any SQL; not SQLite busy-handler waits |
 | `ledger_backoff_us` | Wall time in the existing outer-lock retry sleeps, including an active sleep and scheduler delay; excludes SQLite's internal busy-handler waits |
+| `store_admission_stage` | Most recently entered contextual admission store boundary; `unobserved` outside that instrumented call |
+| `store_admission_stage_us` | Wall time since entering that store boundary; absent when unobserved |
 
 The timings use a monotonic clock with microsecond precision. They describe wall
 time, including scheduler delays. A record is local to its ticket and worker; no
@@ -69,6 +71,23 @@ entry to a nonblocking mutex operation; it does not mean that mutex blocks.
 `work_call`, `ledger_ready`, `work_returned` and `known_busy_backoff` describe the
 surrounding boundaries. Entry to a method is not proof that its transaction
 started, committed or rolled back.
+
+Contextual admissions additionally observe `shard_lock`, `validate_context`,
+`validate_admission`, `generate_identity`, `begin_transaction`, `read_capacity`,
+`reserve_primary`, `reserve_back_leg`, `write_intent`, `write_fence`,
+`write_correlation`, `write_context`, `write_back_leg`, `commit` and `returned`.
+For example, `begin_transaction` identifies entry to SQLite's immediate
+transaction call, while `commit` identifies entry to its commit call. Neither
+label proves a writer lock, fsync or successful durable commit. Time includes any
+I/O, error cleanup/rollback or scheduling within the call. These fields help separate an inner shard wait
+from admission statements and commit, without logging SQL text, parameters,
+credentials or model bodies.
+
+The store markers cover contextual paired admission only. Other calls keep
+`store_admission_stage=unobserved`; a zero or absent marker does not prove no SQL.
+Entering another owned-work boundary clears the previous admission marker so it
+cannot be attributed to a later authorization or settlement. The atomics remain
+best-effort observations, not a consistent transactional snapshot.
 
 The store's existing SQLite writer busy timeout is five seconds, while a typical
 HTTP accounting wait is two seconds. A writer can therefore leave the original

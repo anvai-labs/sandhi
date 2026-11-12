@@ -4674,12 +4674,17 @@ async fn owned_buffered_back_leg_never_races_its_primary_settle() {
             let body = axum::body::to_bytes(response.into_body(), 100_000)
                 .await
                 .unwrap();
+            // Synthetic ledger only. Preserve it after an unexpected failure so
+            // the failed request can be joined after its original worker returns.
+            // The previous last-event print is not a join for this request.
+            let retained_database = dir.keep().join("owned.db");
             panic!(
-                "call {call}: {status}, failed_request_id={failed_request_id}, {}, retained={}, upstream_calls={}, last_successful_or_failed_observation={:?}",
+                "call {call}: {status}, failed_request_id={failed_request_id}, {}, retained={}, upstream_calls={}, last_successful_or_failed_observation={:?}, retained_synthetic_database={}",
                 String::from_utf8_lossy(&body),
                 sandhi_proxy::settlement::buffered::retained(&state),
                 upstream.received_requests().await.unwrap().len(),
-                sink.events().last()
+                sink.events().last(),
+                retained_database.display()
             );
         }
         let ledger = state.ledger.lock().unwrap();
