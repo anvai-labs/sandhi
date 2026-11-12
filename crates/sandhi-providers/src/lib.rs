@@ -363,6 +363,9 @@ pub enum QualifiedStreamDelivery {
 pub enum ProviderError {
     /// The caller supplied a malformed provider-native request. Never retry.
     InvalidRequest(String),
+    /// Completed source output cannot be represented by the selected client.
+    /// Repeating inference is not a repair for this deterministic refusal.
+    OutputProjection(String),
     /// 401 / 403 — bad or missing credential.
     Auth,
     /// 429 — provider rate limit.
@@ -389,6 +392,7 @@ impl std::fmt::Display for ProviderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ProviderError::InvalidRequest(e) => write!(f, "invalid request: {e}"),
+            ProviderError::OutputProjection(e) => write!(f, "output projection refused: {e}"),
             ProviderError::Auth => write!(f, "auth failed (401/403)"),
             ProviderError::RateLimited => write!(f, "rate limited (429)"),
             ProviderError::Upstream {

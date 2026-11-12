@@ -792,7 +792,7 @@ fn project_buffered_aggregate(
 ) -> Result<(), ProviderError> {
     if !native {
         let body = response.extensions.get("openai_responses").ok_or_else(|| {
-            ProviderError::Transport("buffered Responses terminal is missing".into())
+            ProviderError::OutputProjection("buffered Responses terminal is missing".into())
         })?;
         let reasoning = crate::buffered_fidelity::validate(
             sandhi_core::EndpointFamilyV1::OpenaiResponses,

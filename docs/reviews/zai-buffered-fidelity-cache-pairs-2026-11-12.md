@@ -26,7 +26,9 @@ All 24 complete execution/context/attempt/usage/receipt joins passed the harness
 verifier, as did SDK-to-source token conservation. There were 24 physical attempts,
 24 receipts and 48 settled reservations, with clean gateway shutdown. Each receipt
 keeps the original accounting-policy valuation; reasoning already included in
-output is not charged again. Missing thinking counters were not changed into zero.
+output is not charged again. Canonical source accounting keeps missing thinking
+counters unknown. Some client-protocol fields use a compatibility default of zero;
+those projected fields do not establish measured source reasoning or settlement.
 This run used a cache-read weight of 10,000/10,000 and charged 91,359 neutral
 tokens in the allowance ledger. Those units do not represent currency savings.
 

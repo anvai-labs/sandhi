@@ -2025,6 +2025,7 @@ impl ProviderError {
         let mut request_id = None;
         let (code, retryable, http_status) = match self {
             Self::InvalidRequest(_) => ("invalid_request", false, Some(400)),
+            Self::OutputProjection(_) => ("output_projection_error", false, Some(502)),
             Self::Auth => ("authentication_error", false, Some(401)),
             Self::RateLimited => ("rate_limited", true, Some(429)),
             Self::Upstream {

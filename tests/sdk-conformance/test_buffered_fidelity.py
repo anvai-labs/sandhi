@@ -109,6 +109,26 @@ def test_buffered_sdk_fidelity_refusals_preserve_source_counts_and_both_settleme
             assert connection.execute("SELECT execution_id FROM budget_terminal_observation").fetchone() == (row[0],)
 
 
+@pytest.mark.parametrize("family,ingress", [
+    (family, ingress) for family in FAMILIES for ingress in FAMILIES[:3] if family != ingress
+])
+def test_legacy_deterministic_output_refusal_does_not_retry_sdk_inference(
+    tmp_path, backend_binaries, qualified_origin, family, ingress,
+):
+    origin, calls, control = qualified_origin
+    control["response_override"] = source_response(family, True)
+    with tracked_gateway(tmp_path, backend_binaries, origin, family, accounting="off") as (instance, token):
+        error_type = anthropic.APIStatusError if ingress == FAMILIES[1] else openai.APIStatusError
+        with pytest.raises(error_type) as caught:
+            call_with_reasoning(instance, token, ingress)
+        assert caught.value.status_code == 502
+        assert len(calls) == 1, "deterministic output refusal must not repeat paid inference"
+        assert caught.value.response.headers["x-should-retry"] == "false"
+        error = caught.value.response.json()["error"]
+        assert error["code"] == "output_projection_error"
+        assert error["retryable"] is False
+
+
 @pytest.mark.parametrize("family", FAMILIES)
 def test_refused_buffered_projection_recovers_original_receipt_without_inference_replay(
     tmp_path, backend_binaries, qualified_origin, family,

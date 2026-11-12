@@ -167,6 +167,10 @@ impl IngressError {
                 axum::http::StatusCode::BAD_REQUEST,
                 "invalid provider request",
             ),
+            sandhi_providers::ProviderError::OutputProjection(_) => (
+                axum::http::StatusCode::BAD_GATEWAY,
+                "upstream output cannot be represented by the selected client protocol",
+            ),
             sandhi_providers::ProviderError::Auth => {
                 (axum::http::StatusCode::BAD_GATEWAY, "upstream auth failed")
             }
@@ -229,7 +233,14 @@ impl IngressError {
             }}),
         };
         use axum::response::IntoResponse;
-        (self.status, axum::Json(body)).into_response()
+        let response = (self.status, axum::Json(body)).into_response();
+        // Status-based SDK defaults otherwise retry gateway 502s even when the
+        // typed body says this is a deterministic, nonretryable refusal.
+        if self.typed.as_ref().is_some_and(|error| !error.retryable) {
+            crate::settlement::buffered::no_automatic_retry(response)
+        } else {
+            response
+        }
     }
 
     /// The dialect-neutral typed payload: the full ProviderErrorV1 when present, else the
@@ -2649,6 +2660,44 @@ fn optional_string(object: &Map<String, Value>, key: &str) -> Result<Option<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn typed_nonretryable_errors_suppress_status_based_sdk_retries_in_every_dialect() {
+        for dialect in [
+            IngressDialect::OpenAi,
+            IngressDialect::Anthropic,
+            IngressDialect::Responses,
+            IngressDialect::Gemini,
+        ] {
+            for full in [false, true] {
+                for error in [
+                    sandhi_providers::ProviderError::OutputProjection(
+                        "synthetic opaque state".into(),
+                    ),
+                    sandhi_providers::ProviderError::Auth,
+                ] {
+                    let response =
+                        IngressError::from_provider_detail(&error, "fixture", full).render(dialect);
+                    assert_eq!(response.status(), axum::http::StatusCode::BAD_GATEWAY);
+                    assert_eq!(response.headers()["x-should-retry"], "false");
+                    let bytes = axum::body::to_bytes(response.into_body(), 10_000)
+                        .await
+                        .unwrap();
+                    if !full {
+                        assert!(!String::from_utf8_lossy(&bytes).contains("synthetic opaque state"));
+                    }
+                }
+            }
+            for error in [
+                sandhi_providers::ProviderError::Transport("transient".into()),
+                sandhi_providers::ProviderError::RateLimited,
+            ] {
+                let response =
+                    IngressError::from_provider_redacted(&error, "fixture").render(dialect);
+                assert!(!response.headers().contains_key("x-should-retry"));
+            }
+        }
+    }
     use sandhi_core::AssistantOutputV1;
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {

@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 
 const MAX_CALLS: usize = 1024;
 fn invalid() -> ProviderError {
-    ProviderError::Transport(
+    ProviderError::OutputProjection(
         "upstream output requires compatible native delivery or has invalid portable content"
             .into(),
     )

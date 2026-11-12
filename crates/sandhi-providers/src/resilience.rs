@@ -281,9 +281,10 @@ fn is_retryable(e: &ProviderError) -> bool {
             true
         }
         ProviderError::Upstream { status, .. } => *status >= 500,
-        ProviderError::InvalidRequest(_) | ProviderError::Auth | ProviderError::CircuitOpen => {
-            false
-        }
+        ProviderError::InvalidRequest(_)
+        | ProviderError::OutputProjection(_)
+        | ProviderError::Auth
+        | ProviderError::CircuitOpen => false,
     }
 }
 
@@ -537,6 +538,22 @@ mod tests {
         assert!(is_retryable(&ProviderError::Timeout(Duration::from_secs(
             30
         ))));
+    }
+
+    #[tokio::test]
+    async fn deterministic_output_refusal_never_replays_even_with_explicit_retries() {
+        let flaky = Flaky::new(vec![
+            Err(ProviderError::OutputProjection(
+                "requires native output".into(),
+            )),
+            Ok(ok_resp()),
+        ]);
+        let result = ResilientProvider::new(flaky.clone())
+            .with_retry(2, Duration::from_millis(1))
+            .complete(req())
+            .await;
+        assert!(matches!(result, Err(ProviderError::OutputProjection(_))));
+        assert_eq!(flaky.calls(), 1);
     }
 
     #[tokio::test]

@@ -3865,11 +3865,12 @@ async fn complete_response(
             }
             match encoded {
                 Ok(body) => Json(body).into_response(),
-                Err(message) => settlement::buffered::no_automatic_retry(ingress_error(
+                Err(message) => provider_error(
+                    &ProviderError::OutputProjection(message.into()),
                     dialect,
-                    StatusCode::BAD_GATEWAY,
-                    message,
-                )),
+                    provider.slug(),
+                    full_error_detail,
+                ),
             }
         }
         Err(error) => {

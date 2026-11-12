@@ -87,6 +87,26 @@ does not create a second charge. A reported all-zero usage record settles at
 zero; an absent or malformed record does not. Cache weights remain frozen policy,
 not currency prices or a subscription entitlement estimate.
 
+Client usage is a protocol projection, not the accounting source. Some compatible
+wire fields default an absent optional reasoning count to zero; canonical usage
+keeps it unknown. Settlement never qualifies usage by reading that projection.
+
+## Deterministic refusals and SDK retry defaults
+
+Portable buffered validation reports `output_projection_error` with HTTP 502 and
+`retryable:false`. It is distinct from a network failure. Transport resilience
+does not retry that category even when retries are explicitly configured. The
+central error renderer adds `x-should-retry:false` for typed nonretryable errors,
+including default redacted responses, because ordinary OpenAI/Anthropic SDKs
+otherwise retry a gateway 502 regardless of the body's retryable field.
+
+An actual legacy-accounting SDK reproduction initially made three Messages
+inferences for one opaque-output refusal. Nine cross-protocol OpenAI/Anthropic SDK
+cases now require one origin call with default SDK retry settings. Compatible
+native state remains deliverable. Egress-only refusals use the same error category.
+This adds no durable accounting to the legacy path and does not promise suppression
+of SDK connection retries before HTTP headers are delivered.
+
 ## Acceptance and limits
 
 The Rust HTTP matrix covers four sources, four clients and seven output/usage

@@ -1513,3 +1513,42 @@ price saving, cold-cache test or TTL proof. The source/harness hashes and all 24
 joins are retained without credentials. The disposable gateway shut down cleanly
 with 24 receipts and 48 settled leases; the existing dashboard remains available
 at the requested loopback URL and was not redeployed by this qualification.
+
+### M5m — Deterministic output refusal without SDK inference replay
+
+The published `4e4f19f` checkpoint passed all 199 final-source SDK cases and was
+independently cleared against fresh develop after the P2 fix. The reviewer passed
+338 provider units, the original two-call filtering reproduction and the 32-call
+filter matrix, and independently recomputed the live artifact joins and valuation.
+Its public CI is running; its strict documentation build passed. All thirteen
+allocated jobs used actual GitHub Actions runner names and public Ubuntu labels.
+The obsolete base-workflow mirror had zero jobs and was cancelled. No private or
+overflow runner was used.
+
+A subsequent actual-SDK check found deterministic output refusal on the legacy
+path was mislabeled retryable transport failure. The default OpenAI SDK sent three
+Messages inferences for one signed-thinking refusal. The
+[sanitized regression](../reviews/artifacts/buffered-refusal-sdk-retry-regression-2026-11-12.json)
+retains the three-call failure. The additive provider error category
+`OutputProjection` now renders `output_projection_error`, HTTP 502 and
+`retryable:false`; transport resilience will not retry it even with an explicit
+retry policy. The shared error renderer sends `x-should-retry:false` for typed
+nonretryable errors under both redaction modes. Egress-only refusals use the same
+category. Legacy durable accounting and pre-header connection retry behavior are
+not changed by this fix.
+
+All nine cross-protocol legacy SDK refusal cases pass with one origin request
+using normal OpenAI/Anthropic retry defaults. The first expanded run passed 42/45
+cases and failed three assertions because Anthropic's exception body retains an
+extra error envelope. Inspecting the actual response JSON fixes the assertion;
+no production behavior was changed for that fixture correction. The 339 provider
+units and 28 codec tests pass, including refusal under explicit transport retries
+and header/redaction behavior in all four client protocols. Broader fix-tree
+validation and independent exact-commit review remain checkpoint gates.
+
+The live GLM report now explicitly scopes unknown thinking counters to canonical
+source accounting. Some client-protocol fields use zero compatibility defaults;
+those fields neither establish measured source reasoning nor drive settlement.
+This documents the existing boundary rather than claiming universal optional
+field fidelity on client wire projections. The broader streaming-state and
+accounting-wait reliability gates remain open.

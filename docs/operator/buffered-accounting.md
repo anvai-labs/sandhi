@@ -41,6 +41,14 @@ Valid final source measurements still settle both budgets once, even after a
 Plain reasoning presentation does not make provider state portable for replay.
 See [buffered output fidelity and source evidence](../adr/0034-buffered-source-evidence-and-output-fidelity.md).
 
+Deterministic output refusals use `output_projection_error`, HTTP 502 and
+`x-should-retry:false`, including on the legacy accounting path. OpenAI/Anthropic
+SDK defaults then avoid repeating inference for an unsupported format. That header
+does not add source evidence or durable settlement to legacy accounting and cannot
+control connection retries before headers arrive. Canonical source measurements,
+rather than protocol compatibility defaults for absent reasoning counters, remain
+the accounting authority.
+
 The current workspace candidate additionally freezes a bounded execution-context
 record with the original admission: ingress/delivery/plane, optional logical-route
 and backend revisions, actual model, transport/cache-plan fingerprints and the

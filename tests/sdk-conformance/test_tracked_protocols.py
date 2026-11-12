@@ -196,13 +196,13 @@ def qualified_origin():
 
 
 @contextmanager
-def tracked_gateway(tmp_path, binaries, origin, family, *, endpoint_profile="standard", streaming=False):
+def tracked_gateway(tmp_path, binaries, origin, family, *, endpoint_profile="standard", streaming=False, accounting="tracked"):
     instance = Gateway(tmp_path, binaries)
     if streaming:
         instance.config.write_text(json.dumps({"streaming_deadlines": {"ceiling_ms": 10000,
             "default": {"setup_ms": 2000, "idle_ms": 2000, "body_ms": 5000}}}))
     try:
-        instance.start(SANDHI_BUFFERED_ACCOUNTING="tracked", SANDHI_CACHE_READ_WEIGHT="1000", SANDHI_SHUTDOWN_GRACE_SECS="1")
+        instance.start(SANDHI_BUFFERED_ACCOUNTING=accounting, SANDHI_CACHE_READ_WEIGHT="1000", SANDHI_SHUTDOWN_GRACE_SECS="1")
         instance.provision(origin, "synthetic-protocol-credential")
         policy = tmp_path / "cache.json"
         policy.write_text(json.dumps({"default_intent": {"mode": "auto"}, "models": {"fixture": {"profile": "implicit_only"}}}))
