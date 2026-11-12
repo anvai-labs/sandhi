@@ -2724,7 +2724,7 @@ async fn cross_family_ingress_routes_through_the_typed_translation_plane() {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "id":"msg_1","type":"message","role":"assistant","model":"claude-test",
             "content":[{"type":"text","text":"translated"}],"stop_reason":"end_turn",
-            "usage":{"input_tokens":9,"output_tokens":4}
+            "usage":{"input_tokens":9,"output_tokens":4,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}
         })))
         .mount(&upstream)
         .await;
@@ -5967,7 +5967,7 @@ async fn translated_openai_traffic_keeps_its_ingress_route_label() {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "id":"msg_1","type":"message","role":"assistant","model":"claude-test",
             "content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn",
-            "usage":{"input_tokens":3,"output_tokens":2}
+            "usage":{"input_tokens":3,"output_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}
         })))
         .mount(&upstream)
         .await;

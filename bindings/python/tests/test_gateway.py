@@ -213,7 +213,7 @@ def test_native_stream_opt_in_preserves_wire_state_without_duplicate_usage():
 def test_explicit_cache_suppression_and_undeclared_automatic_intent_cross_real_binding():
     seen = []
     encoded = json.dumps({"id": "fixture", "model": "fixture", "content": [{"type": "text", "text": "ok"}],
-                          "stop_reason": "end_turn", "usage": {"input_tokens": 2, "output_tokens": 1}}).encode()
+                          "stop_reason": "end_turn", "usage": {"input_tokens": 2, "output_tokens": 1, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}}).encode()
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
@@ -503,7 +503,7 @@ def test_static_headers_json_reaches_all_four_families():
     bodies = {
         "/v1/messages": {"id": "m1", "type": "message", "role": "assistant",
                          "content": [{"type": "text", "text": "ok"}],
-                         "usage": {"input_tokens": 2, "output_tokens": 1}},
+                         "usage": {"input_tokens": 2, "output_tokens": 1, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}},
         "/models/gemini-x:generateContent": {
             "candidates": [{"content": {"parts": [{"text": "ok"}]}}],
             "usageMetadata": {"promptTokenCount": 2, "candidatesTokenCount": 1}},
@@ -588,7 +588,7 @@ def test_anthropic_bearer_auth_crosses_typed_ffi_without_api_key_header():
             "model": "claude-test",
             "content": [{"type": "text", "text": "ok"}],
             "stop_reason": "end_turn",
-            "usage": {"input_tokens": 2, "output_tokens": 1},
+            "usage": {"input_tokens": 2, "output_tokens": 1, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
         }
     ).encode()
 
@@ -771,7 +771,7 @@ def test_chatgpt_responses_profile_aggregates_required_upstream_stream():
     stream_body = (
         'data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-test"}}\n\n'
         'data: {"type":"response.output_text.delta","delta":"ok"}\n\n'
-        'data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-test","status":"completed","output":[],"usage":{"input_tokens":4,"output_tokens":1}}}\n\n'
+        'data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-test","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":4,"output_tokens":1}}}\n\n'
     ).encode()
 
     class Handler(BaseHTTPRequestHandler):
@@ -818,6 +818,8 @@ def test_chatgpt_responses_profile_aggregates_required_upstream_stream():
 
         response = json.loads(asyncio.run(complete()))
         assert response["output"]["content"] == "ok"
+        assert response["usage"]["completeness"] == "final"
+        assert response["usage"]["attempts"] == 1
         assert Handler.request_body["instructions"] == "be precise"
         assert Handler.request_body["store"] is False
         assert Handler.request_body["stream"] is True

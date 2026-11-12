@@ -13,6 +13,7 @@ pub(super) async fn complete(
     context: Option<AttemptContext>,
 ) -> Result<QualifiedCompletion<ChatResponseV1>, ProviderError> {
     let body = provider.qualified_request(&request)?;
+    let requested_model = request.model.clone();
     let transport = provider
         .raw
         .stream_qualified(
@@ -26,8 +27,12 @@ pub(super) async fn complete(
         crate::responses_projection::decode(transport.stream, request.model, true)
     };
     let mut response =
-        aggregate_stream_for_delivery(decoded, !request.include_native_response, true).await?;
-    project_buffered_aggregate(&mut response, request.include_native_response)?;
+        aggregate_stream_for_delivery(decoded, !request.include_native_response).await?;
+    project_buffered_aggregate(
+        &mut response,
+        request.include_native_response,
+        &requested_model,
+    )?;
     let evidence = transport.observation.evidence();
     if evidence.snapshot.outcome == Some(crate::AttemptOutcome::ProviderRejected) {
         return Err(ProviderError::Transport(
@@ -47,10 +52,9 @@ pub(super) async fn complete(
             usage.outcome = Some("success".into());
             usage
         });
-    if let Ok(usage) = &usage {
-        response.usage = usage.clone();
-    }
-    Ok(QualifiedCompletion { response, usage })
+    // Qualified setup owns exactly one physical response, including when its
+    // final counters are absent. Decoder metadata is not attempt authority.
+    Ok(crate::buffered_completion::observed(response, usage, 1))
 }
 
 #[cfg(test)]
@@ -62,6 +66,75 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
+
+    #[tokio::test]
+    async fn incomplete_buffered_outcome_survives_both_views_and_invalid_usage() {
+        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+        for native in [false, true] {
+            for reason in ["max_output_tokens", "content_filter"] {
+                for valid in [false, true] {
+                    let server = MockServer::start().await;
+                    let mut body = serde_json::json!({"id":"resp_fixture","model":"fixture",
+                        "status":"incomplete","incomplete_details":{"reason":reason},"output":[],
+                        "usage":{"input_tokens":5,"output_tokens":2}});
+                    if !valid {
+                        body["usage"]["input_tokens_details"] =
+                            serde_json::json!({"cached_tokens":9});
+                    }
+                    let wire = format!(
+                        "data: {}\n\n",
+                        serde_json::json!({"type":"response.incomplete","response":body})
+                    );
+                    Mock::given(method("POST"))
+                        .respond_with(
+                            ResponseTemplate::new(200)
+                                .insert_header("content-type", "text/event-stream")
+                                .set_body_string(wire),
+                        )
+                        .mount(&server)
+                        .await;
+                    let provider = TypedOpenAiResponses::new(
+                        "fixture".into(),
+                        Arc::new(
+                            crate::OpenAiResponses::new("fixture", server.uri(), "synthetic")
+                                .with_profile(crate::OpenAiResponsesProfile::ChatGptCodex),
+                        ),
+                        crate::OpenAiResponsesProfile::ChatGptCodex,
+                    );
+                    let request: ChatRequestV1 = serde_json::from_value(serde_json::json!({
+                        "model":"fixture","include_native_response":native,
+                        "messages":[{"role":"developer","content":"Answer."},{"role":"user","content":"hello"}]
+                    })).unwrap();
+                    let result = complete(&provider, request, Default::default(), None)
+                        .await
+                        .unwrap();
+                    assert_eq!(result.response.usage.outcome.as_deref(), Some("incomplete"));
+                    assert_eq!(result.response.usage.attempts, 1);
+                    assert_eq!(
+                        result.response.finish_reason,
+                        Some(if reason == "content_filter" {
+                            sandhi_core::FinishReasonV1::ContentFilter
+                        } else {
+                            sandhi_core::FinishReasonV1::Length
+                        })
+                    );
+                    if valid {
+                        let usage = result.usage.unwrap();
+                        assert_eq!(usage.outcome.as_deref(), Some("incomplete"));
+                        assert_eq!((usage.tokens_in, usage.tokens_out), (5, 2));
+                        assert_eq!(usage.completeness, UsageCompleteness::Final);
+                    } else {
+                        assert!(result.usage.is_err());
+                        assert_eq!(
+                            result.response.usage.completeness,
+                            UsageCompleteness::Unavailable
+                        );
+                    }
+                    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+                }
+            }
+        }
+    }
 
     struct DecodeFailure {
         same_chunk: bool,

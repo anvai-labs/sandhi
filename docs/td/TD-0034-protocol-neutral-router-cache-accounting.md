@@ -1836,3 +1836,58 @@ configurations, formatting and strict docs passed. This passing run did not
 reproduce the spontaneous stall and does not diagnose either retained occurrence.
 Unexpected future back-leg test failures retain only their synthetic database for
 a later exact request join. The reliability gate stays open.
+
+### M5v — Shared buffered source qualification
+
+[ADR-0040](../adr/0040-shared-buffered-source-qualification.md) removes the ordinary
+buffered qualification bypass across Chat, Messages, Responses and Gemini. Codex
+uses its existing qualified SSE operation. Missing/invalid usage remains
+unavailable for accounted owners and refuses ordinary callers without retry;
+post-response decoder refusals cannot masquerade as retryable transport errors.
+Known function fields and duplicate identities are validated in native and
+portable views, preserving Gemini's optional unset fields. Detailed buffered Chat
+audio/prediction counters remain optional subsets of inclusive parents.
+
+The [checkpoint report](../reviews/shared-buffered-qualification-2026-11-12.md)
+records the final candidate's 1,228 Rust, 271 Python, 69 Node and 45 focused actual
+SDK passes. Both Clippy configurations passed. Earlier complete SDK and Python
+runs nevertheless captured a shutdown timeout and native signal exit. Those
+failures remain separate reliability/merge gates, with request-specific accounting
+evidence where available; passing follow-ups do not diagnose them.
+
+Buffered unification is implemented in this candidate. Gateway peer counts/cache
+ownership, accounting-default retirement, broader cache/media/agent and
+issuer/subscription qualification, and supported packaging remain unfinished.
+
+### Next increments identified by parallel investigation
+
+These are implementation prerequisites, not accepted capabilities:
+
+1. Give gateway-facing FFI handles an explicit peer role and client dialect.
+   Victor currently forwards direct backend protocol/profile configuration into
+   gateway mode and chooses its gateway path by provider label. Normalize those
+   independently; a Codex backend must not impose constrained Codex authentication
+   on the client-to-gateway hop.
+2. Resolve a bounded, server-owned counts convention once at the HTTP response
+   boundary and share it between source observation and typed decoding. Derive
+   the declaration from actual emitted native bytes versus rendered wire output;
+   typed execution can still return a native envelope. Strip upstream declarations
+   before generating the gateway's own metadata. This conveys parsing semantics,
+   never backend credential authority or settlement provenance.
+3. Forward validated cache intent through the gateway peer without local backend
+   compilation or implicit marker placement. The server compiles once after
+   authorized target selection, preserving existing credential, subject and backend
+   generation fences. Qualify the same persistent client while switching sources
+   with different cache/count conventions and join each execution to its receipts.
+4. Coordinate Victor's gateway headers and streaming bounds before mandatory
+   accounting. It currently emits an idempotency header refused by tracked
+   admission. Validate a durable single-file store and one-shard topology before
+   opening/migrating ledgers; preserve existing budget policies, rows and unknown
+   liabilities. Requiring the canonical owner in public library serving paths
+   must accompany the binary change. Warn is a soft-cap policy to qualify or
+   refuse explicitly, not an obsolete execution mode to silently rewrite.
+5. Validate emergency termination with blocked C exit handlers independently of
+   the retained shutdown occurrence. Capture future process failures with the
+   actual immutable launched binary and stable request-specific artifacts. Neither
+   this contract experiment nor passing probes diagnose the Python signal exit
+   or spontaneous accounting waits.

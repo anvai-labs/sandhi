@@ -279,7 +279,7 @@ async fn typed_and_raw_qualification_refuse_ambiguous_usage_without_replaying() 
         handle
             .complete_with_qualified_usage_and_attempts(request(), Default::default(), context)
             .await,
-        Err(ProviderError::Transport(_))
+        Err(ProviderError::OutputProjection(_))
     ));
     assert!(matches!(
         receiver.drain()[1].phase,

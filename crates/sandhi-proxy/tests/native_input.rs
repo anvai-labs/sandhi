@@ -353,8 +353,8 @@ fn upstream_path(family: Family, stream: bool) -> &'static str {
 fn reply(family: Family, stream: bool) -> ResponseTemplate {
     let usage = json!({"input_tokens":10,"output_tokens":2});
     let completed = json!({"id":"resp_fixture","model":"fixture","status":"completed",
-        "output":[{"type":"reasoning","encrypted_content":"output-opaque"},
-            {"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":usage});
+        "output":[{"type":"reasoning","id":"rs_fixture","encrypted_content":"output-opaque"},
+            {"type":"message","id":"msg_fixture","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":usage});
     let value = match family {
         Family::OpenaiChatCompletions => json!({"id":"chat_fixture","model":"fixture",
             "choices":[{"message":{"role":"assistant","content":"ok","reasoning_content":"native-out"},"finish_reason":"stop"}],
@@ -363,7 +363,8 @@ fn reply(family: Family, stream: bool) -> ResponseTemplate {
         Family::AnthropicMessages => {
             json!({"id":"msg_fixture","type":"message","role":"assistant","model":"fixture",
             "content":[{"type":"thinking","thinking":"native-out","signature":"output-signed"},
-                {"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":usage})
+                {"type":"text","text":"ok"}],"stop_reason":"end_turn",
+                "usage":{"input_tokens":10,"output_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}})
         }
         Family::GeminiGenerateContent => {
             json!({"candidates":[{"content":{"role":"model","parts":[{"text":"ok","thoughtSignature":"output-signed"}]},"finishReason":"STOP"}],
@@ -380,11 +381,11 @@ fn reply(family: Family, stream: bool) -> ResponseTemplate {
             "usage":{"prompt_tokens":10,"completion_tokens":2}}),
         ],
         Family::OpenaiResponses => vec![
-            json!({"type":"response.output_text.delta","delta":"ok"}),
+            json!({"type":"response.output_text.delta","output_index":1,"content_index":0,"item_id":"msg_fixture","delta":"ok"}),
             json!({"type":"response.completed","response":completed}),
         ],
         Family::AnthropicMessages => vec![
-            json!({"type":"message_start","message":{"id":"msg_fixture","model":"fixture","usage":{"input_tokens":10,"output_tokens":0}}}),
+            json!({"type":"message_start","message":{"id":"msg_fixture","model":"fixture","usage":{"input_tokens":10,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}),
             json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
             json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}),
             json!({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"output-signed"}}),

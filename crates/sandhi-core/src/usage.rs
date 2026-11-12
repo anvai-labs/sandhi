@@ -237,6 +237,26 @@ pub fn validate_openai_buffered_usage(response: &Value) -> Result<(), BufferedUs
         "reasoning_tokens",
         "completion_tokens_details.reasoning_tokens",
     )?;
+    let audio_in = details(
+        "prompt_tokens_details",
+        "audio_tokens",
+        "prompt_tokens_details.audio_tokens",
+    )?;
+    let audio_out = details(
+        "completion_tokens_details",
+        "audio_tokens",
+        "completion_tokens_details.audio_tokens",
+    )?;
+    let accepted = details(
+        "completion_tokens_details",
+        "accepted_prediction_tokens",
+        "completion_tokens_details.accepted_prediction_tokens",
+    )?;
+    let rejected = details(
+        "completion_tokens_details",
+        "rejected_prediction_tokens",
+        "completion_tokens_details.rejected_prediction_tokens",
+    )?;
     let hit = optional(usage, "prompt_cache_hit_tokens", "prompt_cache_hit_tokens")?;
     let miss = optional(
         usage,
@@ -251,6 +271,12 @@ pub fn validate_openai_buffered_usage(response: &Value) -> Result<(), BufferedUs
         .checked_add(written.unwrap_or(0))
         .is_none_or(|n| n > prompt)
         || reasoning.is_some_and(|n| n > completion)
+        || audio_in.is_some_and(|n| n > prompt)
+        || audio_out.is_some_and(|n| n > completion)
+        || accepted
+            .unwrap_or(0)
+            .checked_add(rejected.unwrap_or(0))
+            .is_none_or(|n| n > completion)
         || hit.is_some_and(|n| n > prompt)
         || miss.is_some_and(|n| hit.is_none_or(|hit| hit.checked_add(n) != Some(prompt)))
         || hit.zip(cached).is_some_and(|(a, b)| a != b)

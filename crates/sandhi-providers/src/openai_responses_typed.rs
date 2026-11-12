@@ -39,7 +39,7 @@ impl TypedOpenAiResponses {
             .is_some_and(|v| v != &Value::Bool(false))
         {
             return Err(ProviderError::InvalidRequest(
-                "tracked Responses requires synchronous generation".into(),
+                "Responses requires synchronous generation".into(),
             ));
         }
         Ok(body)
@@ -47,31 +47,14 @@ impl TypedOpenAiResponses {
 
     async fn complete_inner(
         &self,
-        mut request: ChatRequestV1,
+        request: ChatRequestV1,
         call_headers: http::HeaderMap,
         attempt_context: Option<crate::AttemptContext>,
-        qualify: bool,
     ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
         if self.profile == OpenAiResponsesProfile::ChatGptCodex {
-            if qualify {
-                return qualified::complete(self, request, call_headers, attempt_context).await;
-            }
-            let native = request.include_native_response;
-            request.include_native_stream = true;
-            let mut response = aggregate_stream(
-                self.stream_inner(request, call_headers, attempt_context)
-                    .await?,
-            )
-            .await?;
-            project_buffered_aggregate(&mut response, native)?;
-            let usage = Ok(response.usage.clone());
-            return Ok(crate::QualifiedCompletion { response, usage });
+            return qualified::complete(self, request, call_headers, attempt_context).await;
         }
-        let body = if qualify {
-            self.qualified_request(&request)?
-        } else {
-            encode_responses_request_for_profile(&request, self.profile)?
-        };
+        let body = self.qualified_request(&request)?;
         let response = self
             .raw
             .complete(provider_request_observed(
@@ -81,12 +64,10 @@ impl TypedOpenAiResponses {
                 attempt_context,
             ))
             .await?;
-        let qualified = qualify.then(|| {
-            sandhi_core::usage::qualify_buffered_usage(
-                sandhi_core::EndpointFamilyV1::OpenaiResponses,
-                &response.body,
-            )
-        });
+        let qualified = sandhi_core::usage::qualify_buffered_usage(
+            sandhi_core::EndpointFamilyV1::OpenaiResponses,
+            &response.body,
+        );
         let reasoning = if request.include_native_response {
             None
         } else {
@@ -95,7 +76,8 @@ impl TypedOpenAiResponses {
                 &response.body,
             )?
         };
-        let mut decoded = decode_responses_response(response.body, response.usage, &request.model)?;
+        let mut decoded = decode_responses_response(response.body, response.usage, &request.model)
+            .map_err(crate::buffered_completion::decode_error)?;
         if let Some(reasoning) = reasoning {
             decoded
                 .extensions
@@ -104,18 +86,11 @@ impl TypedOpenAiResponses {
         if !request.include_native_response {
             decoded.extensions.remove("openai_responses");
         }
-        decoded.usage.attempts = response.attempts;
-        let usage = qualified
-            .unwrap_or_else(|| Ok(decoded.usage.clone()))
-            .map(|mut usage| {
-                usage.attempts = response.attempts;
-                usage.outcome = Some("success".into());
-                usage
-            });
-        Ok(crate::QualifiedCompletion {
-            response: decoded,
-            usage,
-        })
+        Ok(crate::buffered_completion::observed(
+            decoded,
+            qualified,
+            response.attempts,
+        ))
     }
 
     async fn stream_inner(
@@ -178,9 +153,9 @@ impl ChatProvider for TypedOpenAiResponses {
         request: ChatRequestV1,
         call_headers: http::HeaderMap,
     ) -> Result<ChatResponseV1, ProviderError> {
-        self.complete_inner(request, call_headers, None, false)
+        self.complete_inner(request, call_headers, None)
             .await
-            .map(|r| r.response)
+            .and_then(crate::QualifiedCompletion::into_response)
     }
 
     async fn complete_qualified(
@@ -188,7 +163,7 @@ impl ChatProvider for TypedOpenAiResponses {
         request: ChatRequestV1,
         call_headers: http::HeaderMap,
     ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
-        self.complete_inner(request, call_headers, None, true).await
+        self.complete_inner(request, call_headers, None).await
     }
 
     async fn complete_qualified_observed(
@@ -197,7 +172,7 @@ impl ChatProvider for TypedOpenAiResponses {
         call_headers: http::HeaderMap,
         context: crate::AttemptContext,
     ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
-        self.complete_inner(request, call_headers, Some(context), true)
+        self.complete_inner(request, call_headers, Some(context))
             .await
     }
 
@@ -215,9 +190,9 @@ impl ChatProvider for TypedOpenAiResponses {
         call_headers: http::HeaderMap,
         attempt_context: crate::AttemptContext,
     ) -> Result<ChatResponseV1, ProviderError> {
-        self.complete_inner(request, call_headers, Some(attempt_context), false)
+        self.complete_inner(request, call_headers, Some(attempt_context))
             .await
-            .map(|r| r.response)
+            .and_then(crate::QualifiedCompletion::into_response)
     }
 
     async fn stream_observed(
@@ -587,25 +562,23 @@ pub(crate) fn decode_responses_response(
                 }
             }
             Some("function_call") => {
-                if let (Some(id), Some(name)) = (
-                    item.get("call_id").and_then(Value::as_str),
-                    item.get("name").and_then(Value::as_str),
-                ) {
-                    tool_calls.push(ToolCallV1 {
-                        id: id.into(),
-                        name: name.into(),
-                        arguments: item
-                            .get("arguments")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .into(),
-                        extensions: BTreeMap::from([("openai_responses".into(), item.clone())]),
-                    });
-                }
+                // Native delivery preserves opaque state, but known executable
+                // fields must keep their actual types and identity. Never drop
+                // a call or coerce malformed arguments to an empty string.
+                let id = crate::buffered_fidelity::id(item, "call_id")?;
+                let name = crate::buffered_fidelity::id(item, "name")?;
+                let arguments = crate::buffered_fidelity::text(item, "arguments")?;
+                tool_calls.push(ToolCallV1 {
+                    id: id.into(),
+                    name: name.into(),
+                    arguments: arguments.into(),
+                    extensions: BTreeMap::from([("openai_responses".into(), item.clone())]),
+                });
             }
             _ => {}
         }
     }
+    crate::buffered_completion::unique_calls(&tool_calls)?;
     let usage = usage_v2(&body, parsed_usage);
     let finish_reason = response_finish_reason(&body, !tool_calls.is_empty());
     Ok(ChatResponseV1 {
@@ -647,31 +620,34 @@ fn response_finish_reason(body: &Value, has_tools: bool) -> FinishReasonV1 {
     }
 }
 
-fn usage_v2(body: &Value, parsed: ParsedUsage) -> UsageV2 {
-    let outcome = match body.get("status").and_then(Value::as_str) {
+fn generation_outcome(body: &Value) -> &'static str {
+    match body.get("status").and_then(Value::as_str) {
         Some("completed") => "success",
         Some("incomplete") => "incomplete",
         Some("failed") => "error",
         _ => "unknown",
-    };
+    }
+}
+
+fn usage_v2(body: &Value, parsed: ParsedUsage) -> UsageV2 {
     UsageV2 {
         reasoning_tokens: body
             .pointer("/usage/output_tokens_details/reasoning_tokens")
             .and_then(Value::as_u64),
         completeness: UsageCompleteness::Final,
-        outcome: Some(outcome.into()),
+        outcome: Some(generation_outcome(body).into()),
         ..parsed.into()
     }
 }
 
+#[cfg(test)]
 async fn aggregate_stream(stream: ChatEventStream) -> Result<ChatResponseV1, ProviderError> {
-    aggregate_stream_for_delivery(stream, false, false).await
+    aggregate_stream_for_delivery(stream, false).await
 }
 
 async fn aggregate_stream_for_delivery(
     mut stream: ChatEventStream,
     portable: bool,
-    qualified: bool,
 ) -> Result<ChatResponseV1, ProviderError> {
     use futures_util::StreamExt;
     let mut id = None;
@@ -682,12 +658,15 @@ async fn aggregate_stream_for_delivery(
     let mut reasoning = String::new();
     let mut usage = UsageV2::default();
     let mut finish_reason = None;
-    let mut native = native_aggregate::NativeAggregate::for_delivery(portable || !qualified);
+    let mut native = native_aggregate::NativeAggregate::for_delivery(portable);
     let mut failure = None;
     let mut phase = 0_u8;
     let mut retained_bytes = 0_usize;
     while let Some(event) = stream.next().await {
-        let event = event?;
+        let event = match event {
+            Ok(event) => event,
+            Err(error) => return Err(failure.take().unwrap_or(error)),
+        };
         if failure.is_some() {
             continue;
         }
@@ -810,8 +789,35 @@ async fn aggregate_stream_for_delivery(
 fn project_buffered_aggregate(
     response: &mut ChatResponseV1,
     native: bool,
+    requested_model: &str,
 ) -> Result<(), ProviderError> {
-    if !native {
+    let outcome = response
+        .extensions
+        .get("openai_responses")
+        .map(generation_outcome)
+        .ok_or_else(|| {
+            ProviderError::OutputProjection("buffered Responses terminal is missing".into())
+        })?;
+    if native {
+        // The complete native envelope has already passed bounded aggregation
+        // and coverage checks. Its terminal-only content/tools must appear in
+        // the canonical view even when no delta events were sent. Keep the
+        // original envelope and any observed reasoning extension intact.
+        let body = response
+            .extensions
+            .get("openai_responses")
+            .cloned()
+            .ok_or_else(|| {
+                ProviderError::OutputProjection("buffered Responses terminal is missing".into())
+            })?;
+        let decoded =
+            decode_responses_response(body, ParsedUsage::from(&response.usage), requested_model)
+                .map_err(crate::buffered_completion::decode_error)?;
+        response.id = decoded.id;
+        response.model = decoded.model;
+        response.output = decoded.output;
+        response.finish_reason = decoded.finish_reason;
+    } else {
         let body = response.extensions.get("openai_responses").ok_or_else(|| {
             ProviderError::OutputProjection("buffered Responses terminal is missing".into())
         })?;
@@ -826,13 +832,16 @@ fn project_buffered_aggregate(
                 .insert("reasoning".into(), Value::String(reasoning));
         }
     }
+    // Retain only terminal outcome metadata in the portable view. Re-decoding
+    // its sparse terminal output would erase content aggregated from deltas.
+    response.usage.outcome = Some(outcome.into());
     Ok(())
 }
 
 fn retain_bytes(retained: &mut usize, additional: usize) -> Result<(), ProviderError> {
     *retained = retained.saturating_add(additional);
     if *retained > crate::MAX_STREAM_LINE_BYTES {
-        return Err(ProviderError::Transport(
+        return Err(ProviderError::OutputProjection(
             "Codex buffered aggregation exceeds the response limit".into(),
         ));
     }
@@ -1130,6 +1139,27 @@ fn decode_responses_stream_inner(
 #[cfg(test)]
 mod tests {
     #[tokio::test]
+    async fn buffered_projection_refusal_survives_a_later_drain_timeout() {
+        use sandhi_core::ChatStreamEventV1 as E;
+        let stream = futures_util::stream::iter([
+            Ok(E::TextDelta {
+                delta: "visible".into(),
+            }),
+            Ok(E::ReasoningDelta {
+                delta: "out of order".into(),
+            }),
+            Err(crate::ProviderError::Timeout(
+                std::time::Duration::from_millis(1),
+            )),
+        ]);
+        let result = super::aggregate_stream_for_delivery(Box::pin(stream), true).await;
+        assert!(matches!(
+            result,
+            Err(crate::ProviderError::OutputProjection(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn portable_buffered_order_refusal_keeps_polling_the_same_bounded_source() {
         use sandhi_core::ChatStreamEventV1 as E;
         use std::sync::{
@@ -1161,7 +1191,7 @@ mod tests {
             Ok(event)
         });
         assert!(matches!(
-            super::aggregate_stream_for_delivery(Box::pin(stream), true, true).await,
+            super::aggregate_stream_for_delivery(Box::pin(stream), true).await,
             Err(crate::ProviderError::OutputProjection(_))
         ));
         assert_eq!(polled.load(Ordering::SeqCst), 5);
@@ -1186,7 +1216,7 @@ mod tests {
         }));
         let result = super::aggregate_stream(Box::pin(events)).await;
         assert!(
-            matches!(result,Err(crate::ProviderError::Transport(ref message)) if message.contains("limit"))
+            matches!(result,Err(crate::ProviderError::OutputProjection(ref message)) if message.contains("limit"))
         );
     }
     #[tokio::test]
@@ -1641,7 +1671,7 @@ mod tests {
         let sse = concat!(
             "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-test\"}}\n\n",
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n",
-            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-test\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}}\n\n"
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-test\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}],\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}}\n\n"
         );
         Mock::given(method("POST"))
             .and(path("/responses"))

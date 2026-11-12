@@ -95,6 +95,13 @@ vault authority. See [shared endpoint profiles](../../docs/adr/0039-shared-embed
 for constraints and the remaining gateway second-hop qualification gate.
 `runtime.openai_compat()` remains a convenience for custom standard Chat endpoints.
 
+Prepared 0.17.0 buffered calls use the same strict source usage qualification as
+accounted calls for Chat, Messages, Responses and Gemini, including Codex's
+constrained SSE aggregation. Missing/invalid counts or malformed known tool fields
+raise nonretryable `output_projection_error`; they cannot become final zero usage
+or empty executable arguments. Native envelopes retain opaque state; portable
+delivery explicitly refuses unsupported projections. See [buffered qualification](../../docs/adr/0040-shared-buffered-source-qualification.md).
+
 Canonical streams may emit accounting-only `usage` events before content or after a
 numeric usage snapshot. When `usage.completeness` is `"unavailable"` and a valid
 `cache_read_observation` is present, merge that metadata without adding its counters or replacing the last

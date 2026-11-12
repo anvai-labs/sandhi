@@ -595,7 +595,7 @@ impl ProviderHandle {
         Ok(response)
     }
 
-    /// Return qualified usage separately from the legacy response using the same transport.
+    /// Return the response and separately qualified source usage from the same transport.
     /// Accounting failure does not imply the model failed or authorize another call.
     pub async fn complete_with_qualified_usage(
         &self,
@@ -1324,9 +1324,9 @@ impl ChatProvider for TypedOpenAiCompat {
         request: ChatRequestV1,
         call_headers: http::HeaderMap,
     ) -> Result<ChatResponseV1, ProviderError> {
-        self.complete_inner(request, call_headers, None, false)
+        self.complete_inner(request, call_headers, None)
             .await
-            .map(|r| r.response)
+            .and_then(crate::QualifiedCompletion::into_response)
     }
 
     async fn complete_qualified(
@@ -1334,7 +1334,7 @@ impl ChatProvider for TypedOpenAiCompat {
         request: ChatRequestV1,
         call_headers: http::HeaderMap,
     ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
-        self.complete_inner(request, call_headers, None, true).await
+        self.complete_inner(request, call_headers, None).await
     }
 
     async fn complete_qualified_observed(
@@ -1343,7 +1343,7 @@ impl ChatProvider for TypedOpenAiCompat {
         call_headers: http::HeaderMap,
         context: crate::AttemptContext,
     ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
-        self.complete_inner(request, call_headers, Some(context), true)
+        self.complete_inner(request, call_headers, Some(context))
             .await
     }
 
@@ -1361,9 +1361,9 @@ impl ChatProvider for TypedOpenAiCompat {
         call_headers: http::HeaderMap,
         attempt_context: crate::AttemptContext,
     ) -> Result<ChatResponseV1, ProviderError> {
-        self.complete_inner(request, call_headers, Some(attempt_context), false)
+        self.complete_inner(request, call_headers, Some(attempt_context))
             .await
-            .map(|r| r.response)
+            .and_then(crate::QualifiedCompletion::into_response)
     }
 
     async fn stream_observed(
@@ -1383,7 +1383,6 @@ impl TypedOpenAiCompat {
         mut request: ChatRequestV1,
         call_headers: http::HeaderMap,
         attempt_context: Option<crate::AttemptContext>,
-        qualify: bool,
     ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
         self.apply_constraints(&mut request)?;
         request.validate().map_err(ProviderError::InvalidRequest)?;
@@ -1394,12 +1393,10 @@ impl TypedOpenAiCompat {
             attempt_context,
         );
         let response = self.raw.complete(req).await?;
-        let qualification = qualify.then(|| {
-            sandhi_core::usage::qualify_buffered_usage(
-                sandhi_core::EndpointFamilyV1::OpenaiChatCompletions,
-                &response.body,
-            )
-        });
+        let qualification = sandhi_core::usage::qualify_buffered_usage(
+            sandhi_core::EndpointFamilyV1::OpenaiChatCompletions,
+            &response.body,
+        );
         let reasoning = if request.include_native_response {
             None
         } else {
@@ -1408,7 +1405,8 @@ impl TypedOpenAiCompat {
                 &response.body,
             )?
         };
-        let mut decoded = decode_openai_response(response.body, response.usage, &request.model)?;
+        let mut decoded = decode_openai_response(response.body, response.usage, &request.model)
+            .map_err(crate::buffered_completion::decode_error)?;
         if let Some(reasoning) = reasoning {
             decoded
                 .extensions
@@ -1417,19 +1415,11 @@ impl TypedOpenAiCompat {
         if !request.include_native_response {
             decoded.extensions.remove("openai");
         }
-        decoded.usage.attempts = response.attempts;
-        decoded.usage.outcome = Some("success".into());
-        let usage = qualification
-            .unwrap_or_else(|| Ok(decoded.usage.clone()))
-            .map(|mut usage| {
-                usage.attempts = response.attempts;
-                usage.outcome = Some("success".into());
-                usage
-            });
-        Ok(crate::QualifiedCompletion {
-            response: decoded,
-            usage,
-        })
+        Ok(crate::buffered_completion::observed(
+            decoded,
+            qualification,
+            response.attempts,
+        ))
     }
 
     async fn stream_inner(
@@ -1725,11 +1715,22 @@ pub fn decode_openai_response(
         .get("content")
         .and_then(Value::as_str)
         .map(|s| MessageContent::Text(s.into()));
-    let tool_calls = message
-        .get("tool_calls")
-        .and_then(Value::as_array)
-        .map(|calls| calls.iter().filter_map(decode_tool_call).collect())
-        .unwrap_or_default();
+    let tool_calls = match message.get("tool_calls") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(calls)) if calls.len() <= 1024 => calls
+            .iter()
+            .map(decode_tool_call)
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect(),
+        _ => {
+            return Err(ProviderError::OutputProjection(
+                "invalid upstream tool_calls array".into(),
+            ))
+        }
+    };
+    crate::buffered_completion::unique_calls(&tool_calls)?;
     let usage = usage_v2_from_openai(&body, parsed_usage, UsageCompleteness::Final);
     let extensions = BTreeMap::from([("openai".into(), body.clone())]);
     Ok(ChatResponseV1 {
@@ -1759,17 +1760,28 @@ pub fn decode_openai_response(
     })
 }
 
-fn decode_tool_call(value: &Value) -> Option<ToolCallV1> {
-    Some(ToolCallV1 {
-        id: value.get("id")?.as_str()?.into(),
-        name: value.pointer("/function/name")?.as_str()?.into(),
-        arguments: value
-            .pointer("/function/arguments")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .into(),
+fn decode_tool_call(value: &Value) -> Result<Option<ToolCallV1>, ProviderError> {
+    let kind = value
+        .get("type")
+        .and_then(Value::as_str)
+        .filter(|kind| !kind.is_empty())
+        .ok_or_else(|| {
+            ProviderError::OutputProjection("upstream tool call has invalid type".into())
+        })?;
+    if kind != "function" {
+        // Other named native tool kinds remain in the original envelope;
+        // do not manufacture a neutral function call from their fields.
+        return Ok(None);
+    }
+    let function = value.get("function").ok_or_else(|| {
+        ProviderError::OutputProjection("upstream tool call has no function".into())
+    })?;
+    Ok(Some(ToolCallV1 {
+        id: crate::buffered_fidelity::id(value, "id")?.into(),
+        name: crate::buffered_fidelity::id(function, "name")?.into(),
+        arguments: crate::buffered_fidelity::text(function, "arguments")?.into(),
         extensions: BTreeMap::new(),
-    })
+    }))
 }
 
 pub(crate) fn decode_finish_reason(reason: &str) -> FinishReasonV1 {
@@ -2044,6 +2056,36 @@ impl ProviderError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn buffered_tool_discriminators_cannot_invent_functions() {
+        use serde_json::json;
+        let mut call =
+            json!({"id":"call","type":"function","function":{"name":"inspect","arguments":"{}"}});
+        for kind in [
+            json!(7),
+            json!(null),
+            json!({}),
+            json!([]),
+            json!(true),
+            json!(""),
+        ] {
+            call["type"] = kind;
+            assert!(matches!(
+                super::decode_tool_call(&call),
+                Err(crate::ProviderError::OutputProjection(_))
+            ));
+        }
+        call["type"] = json!("custom");
+        assert!(super::decode_tool_call(&call).unwrap().is_none());
+        call["type"] = json!("function");
+        assert!(super::decode_tool_call(&call).unwrap().is_some());
+        call.as_object_mut().unwrap().remove("type");
+        assert!(matches!(
+            super::decode_tool_call(&call),
+            Err(crate::ProviderError::OutputProjection(_))
+        ));
+    }
+
     #[tokio::test]
     async fn chat_finish_follows_trailing_usage_without_waiting_for_http_eof() {
         use futures_util::StreamExt;
@@ -2654,7 +2696,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id":"m1","type":"message","role":"assistant",
                 "content":[{"type":"text","text":"hi"}],
-                "usage":{"input_tokens":3,"output_tokens":1}
+                "usage":{"input_tokens":3,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}
             })))
             .mount(&server)
             .await;
@@ -2967,26 +3009,31 @@ mod tests {
                 );
                 assert_eq!(typed_usage.completeness, UsageCompleteness::Final);
             }
-            let legacy = handle
-                .complete_with(request, Default::default())
-                .await
-                .unwrap();
-            let mut expected = serde_json::to_value(legacy).unwrap();
-            let mut actual = serde_json::to_value(&typed.response).unwrap();
-            for value in [&mut expected, &mut actual] {
-                value["usage"]
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("duration_ms");
-                value["usage"]
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("duration_source");
+            let ordinary = handle.complete_with(request, Default::default()).await;
+            if counts.is_some() {
+                let mut expected = serde_json::to_value(ordinary.unwrap()).unwrap();
+                let mut actual = serde_json::to_value(&typed.response).unwrap();
+                for value in [&mut expected, &mut actual] {
+                    value["usage"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("duration_ms");
+                    value["usage"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("duration_source");
+                }
+                assert_eq!(
+                    actual, expected,
+                    "both APIs project the same qualified counts"
+                );
+            } else {
+                assert!(matches!(ordinary, Err(ProviderError::OutputProjection(_))));
+                assert_eq!(
+                    typed.response.usage.completeness,
+                    UsageCompleteness::Unavailable
+                );
             }
-            assert_eq!(
-                actual, expected,
-                "qualified API preserves the legacy response"
-            );
             let requests = server.received_requests().await.unwrap();
             assert_eq!(
                 requests[0].body, requests[2].body,

@@ -33,7 +33,6 @@ impl TypedAnthropic {
         request: ChatRequestV1,
         call_headers: http::HeaderMap,
         attempt_context: Option<crate::AttemptContext>,
-        qualify: bool,
     ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
         request.validate().map_err(ProviderError::InvalidRequest)?;
         let body = encode_anthropic_request(&request)?;
@@ -46,36 +45,27 @@ impl TypedAnthropic {
                 attempt_context,
             ))
             .await?;
-        let qualified = qualify.then(|| {
-            sandhi_core::usage::qualify_buffered_usage_with_profile(
-                sandhi_core::EndpointFamilyV1::AnthropicMessages,
-                self.usage_profile,
-                &response.body,
-            )
-        });
+        let qualified = sandhi_core::usage::qualify_buffered_usage_with_profile(
+            sandhi_core::EndpointFamilyV1::AnthropicMessages,
+            self.usage_profile,
+            &response.body,
+        );
         if !request.include_native_response {
             crate::buffered_fidelity::validate(
                 sandhi_core::EndpointFamilyV1::AnthropicMessages,
                 &response.body,
             )?;
         }
-        let mut decoded = decode_anthropic_response(response.body, response.usage, &request.model)?;
+        let mut decoded = decode_anthropic_response(response.body, response.usage, &request.model)
+            .map_err(crate::buffered_completion::decode_error)?;
         if !request.include_native_response {
             decoded.extensions.remove("anthropic");
         }
-        decoded.usage.attempts = response.attempts;
-        decoded.usage.outcome = Some("success".into());
-        let usage = qualified
-            .unwrap_or_else(|| Ok(decoded.usage.clone()))
-            .map(|mut usage| {
-                usage.attempts = response.attempts;
-                usage.outcome = Some("success".into());
-                usage
-            });
-        Ok(crate::QualifiedCompletion {
-            response: decoded,
-            usage,
-        })
+        Ok(crate::buffered_completion::observed(
+            decoded,
+            qualified,
+            response.attempts,
+        ))
     }
 
     async fn stream_inner(
@@ -135,9 +125,9 @@ impl ChatProvider for TypedAnthropic {
         request: ChatRequestV1,
         call_headers: http::HeaderMap,
     ) -> Result<ChatResponseV1, ProviderError> {
-        self.complete_inner(request, call_headers, None, false)
+        self.complete_inner(request, call_headers, None)
             .await
-            .map(|r| r.response)
+            .and_then(crate::QualifiedCompletion::into_response)
     }
 
     async fn complete_qualified(
@@ -145,7 +135,7 @@ impl ChatProvider for TypedAnthropic {
         request: ChatRequestV1,
         call_headers: http::HeaderMap,
     ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
-        self.complete_inner(request, call_headers, None, true).await
+        self.complete_inner(request, call_headers, None).await
     }
 
     async fn complete_qualified_observed(
@@ -154,7 +144,7 @@ impl ChatProvider for TypedAnthropic {
         call_headers: http::HeaderMap,
         context: crate::AttemptContext,
     ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
-        self.complete_inner(request, call_headers, Some(context), true)
+        self.complete_inner(request, call_headers, Some(context))
             .await
     }
 
@@ -172,9 +162,9 @@ impl ChatProvider for TypedAnthropic {
         call_headers: http::HeaderMap,
         attempt_context: crate::AttemptContext,
     ) -> Result<ChatResponseV1, ProviderError> {
-        self.complete_inner(request, call_headers, Some(attempt_context), false)
+        self.complete_inner(request, call_headers, Some(attempt_context))
             .await
-            .map(|r| r.response)
+            .and_then(crate::QualifiedCompletion::into_response)
     }
 
     async fn stream_observed(
@@ -469,19 +459,15 @@ pub fn decode_anthropic_response(
                 reasoning.push_str(block.get("thinking").and_then(Value::as_str).unwrap_or(""))
             }
             Some("tool_use") => tool_calls.push(ToolCallV1 {
-                id: block.get("id").and_then(Value::as_str).unwrap_or("").into(),
-                name: block
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .into(),
-                arguments: serde_json::to_string(block.get("input").unwrap_or(&Value::Null))
-                    .map_err(|error| ProviderError::Transport(error.to_string()))?,
+                id: crate::buffered_fidelity::id(block, "id")?.into(),
+                name: crate::buffered_fidelity::id(block, "name")?.into(),
+                arguments: crate::buffered_completion::object_arguments(block.get("input"), false)?,
                 extensions: BTreeMap::new(),
             }),
             _ => {}
         }
     }
+    crate::buffered_completion::unique_calls(&tool_calls)?;
     let mut extensions = BTreeMap::from([("anthropic".into(), body.clone())]);
     if !reasoning.is_empty() {
         extensions.insert("reasoning".into(), Value::String(reasoning));

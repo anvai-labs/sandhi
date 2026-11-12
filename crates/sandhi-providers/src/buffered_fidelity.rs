@@ -387,11 +387,13 @@ fn gemini(body: &Value) -> Result<Option<String>, ProviderError> {
             (None, Some(call)) if part.get("thought").is_none_or(|v| v == &Value::Bool(false)) => {
                 ordered(&mut phase, 3)?;
                 fields(call, &["id", "name", "args"])?;
-                if call.get("id").is_some() {
+                if call.get("id").is_some_and(|value| !value.is_null()) {
                     unique(&mut ids, call, "id")?;
                 }
                 id(call, "name")?;
-                object_args(call.get("args").ok_or_else(invalid)?)?;
+                if let Some(args) = call.get("args").filter(|value| !value.is_null()) {
+                    object_args(args)?;
+                }
             }
             _ => return Err(invalid()),
         }
@@ -509,7 +511,7 @@ mod tests {
                 };
                 assert_eq!(
                     validate(family, &body).is_ok(),
-                    args.is_object(),
+                    args.is_object() || (family == Family::GeminiGenerateContent && args.is_null()),
                     "{family:?}/{args}"
                 );
             }

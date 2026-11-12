@@ -106,6 +106,13 @@ Profiles describe the immediate source, stay out of model request bodies and gra
 no credential authority. See [shared endpoint profiles](../../docs/adr/0039-shared-embedded-endpoint-profiles.md)
 for family constraints and the remaining gateway second-hop qualification gate.
 
+Prepared 0.17.0 buffered calls share strict source usage qualification with
+accounted calls for Chat, Messages, Responses and Gemini. Codex uses the qualified
+SSE aggregation path. Missing/invalid counters and malformed known tool fields
+produce nonretryable `output_projection_error`, preserving the distinction from
+actual network errors. See [buffered qualification](../../docs/adr/0040-shared-buffered-source-qualification.md)
+for native/portable behavior and remaining gates.
+
 Minor 13 adds optional `cache_intent`, for example `{mode:"suppress_gateway"}`.
 Suppression preserves native controls and adds no gateway markers; it cannot turn
 off provider-internal caching. Direct unconfigured handles accept preserve/suppress

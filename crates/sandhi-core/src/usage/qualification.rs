@@ -447,6 +447,22 @@ pub fn qualify_buffered_usage_with_profile(
     };
     let mut usage: UsageV2 = parsed.ok_or(Error::InvalidResponse)?.into();
     usage.reasoning_tokens = response.pointer(reasoning_path).and_then(Value::as_u64);
+    if endpoint == EndpointFamilyV1::OpenaiChatCompletions {
+        // These optional details were validated against their inclusive parents.
+        // Keep reported zero distinct from absence; they are subsets, not extra charges.
+        usage.audio_input_tokens = response
+            .pointer("/usage/prompt_tokens_details/audio_tokens")
+            .and_then(Value::as_u64);
+        usage.audio_output_tokens = response
+            .pointer("/usage/completion_tokens_details/audio_tokens")
+            .and_then(Value::as_u64);
+        usage.accepted_prediction_tokens = response
+            .pointer("/usage/completion_tokens_details/accepted_prediction_tokens")
+            .and_then(Value::as_u64);
+        usage.rejected_prediction_tokens = response
+            .pointer("/usage/completion_tokens_details/rejected_prediction_tokens")
+            .and_then(Value::as_u64);
+    }
     Ok(usage)
 }
 
@@ -454,6 +470,48 @@ pub fn qualify_buffered_usage_with_profile(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn chat_qualified_usage_preserves_optional_detail_subsets_and_reported_zero() {
+        let mut body = json!({"usage":{"prompt_tokens":11,"completion_tokens":7,
+            "prompt_tokens_details":{"cached_tokens":4,"cache_write_tokens":1,"audio_tokens":2},
+            "completion_tokens_details":{"reasoning_tokens":1,"audio_tokens":2,"accepted_prediction_tokens":1,"rejected_prediction_tokens":2}}});
+        let qualified =
+            |body: &Value| qualify_buffered_usage(EndpointFamilyV1::OpenaiChatCompletions, body);
+        let usage = qualified(&body).unwrap();
+        assert_eq!(
+            (
+                usage.tokens_in,
+                usage.cache_read_tokens,
+                usage.cache_creation_tokens,
+                usage.tokens_out
+            ),
+            (6, 4, 1, 7)
+        );
+        assert_eq!(
+            (
+                usage.audio_input_tokens,
+                usage.audio_output_tokens,
+                usage.accepted_prediction_tokens,
+                usage.rejected_prediction_tokens
+            ),
+            (Some(2), Some(2), Some(1), Some(2))
+        );
+        body["usage"]["completion_tokens_details"]["accepted_prediction_tokens"] = 6.into();
+        assert_eq!(qualified(&body), Err(Error::InconsistentUsage));
+        body["usage"]["completion_tokens_details"]["accepted_prediction_tokens"] = 0.into();
+        assert_eq!(
+            qualified(&body).unwrap().accepted_prediction_tokens,
+            Some(0)
+        );
+        body["usage"]["completion_tokens_details"]
+            .as_object_mut()
+            .unwrap()
+            .remove("accepted_prediction_tokens");
+        assert_eq!(qualified(&body).unwrap().accepted_prediction_tokens, None);
+        body["usage"]["prompt_tokens_details"]["audio_tokens"] = 12.into();
+        assert_eq!(qualified(&body), Err(Error::InconsistentUsage));
+    }
 
     #[test]
     fn gemini_progress_keeps_exclusive_thoughts_and_tool_input_and_cache_subset() {

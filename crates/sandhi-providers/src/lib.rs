@@ -26,6 +26,7 @@ pub use sandhi_core::usage::{
 pub mod anthropic;
 mod anthropic_typed;
 pub mod attempt;
+mod buffered_completion;
 mod buffered_fidelity;
 mod cache_policy;
 mod cache_read;
@@ -261,7 +262,8 @@ pub struct ProviderResponse {
 /// A completed response and separately qualified usage from that same call.
 /// `Err` usage means the response arrived but cannot authorize final settlement.
 /// Retain liability/reconcile; never retry inference to repair accounting. On the
-/// typed path, `response.usage` retains legacy semantics; only `usage` is qualified.
+/// admitted typed paths, `response.usage` contains the same qualified counters or
+/// an unavailable measurement; only `usage: Ok` can authorize final settlement.
 #[derive(Debug)]
 #[must_use]
 pub struct QualifiedCompletion<T> {
@@ -278,8 +280,9 @@ pub(crate) async fn decode_response_json(
         .bytes()
         .await
         .map_err(|e| ProviderError::Transport(e.to_string()))?;
-    sandhi_core::policy::strict_json(&bytes)
-        .map_err(|_| ProviderError::Transport("invalid or ambiguous upstream JSON response".into()))
+    sandhi_core::policy::strict_json(&bytes).map_err(|_| {
+        ProviderError::OutputProjection("invalid or ambiguous upstream JSON response".into())
+    })
 }
 
 fn buffered_usage(

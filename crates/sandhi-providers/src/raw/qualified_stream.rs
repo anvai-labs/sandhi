@@ -114,6 +114,10 @@ impl QualifiedStream {
     fn publish(&self) {
         let mut usage = self.observer.canonical_usage();
         if let Some(usage) = &mut usage {
+            // This response-scoped observer represents one physical HTTP
+            // stream. Qualified setup forbids inference retries; absence of
+            // canonical decoder events cannot turn that response into zero.
+            usage.attempts = 1;
             usage.upstream_request_id.clone_from(&self.request_id);
         }
         self.sender.send_replace(QualifiedStreamEvidence {
@@ -432,6 +436,7 @@ mod tests {
             };
             if let Some(usage) = &evidence.usage {
                 assert_eq!(usage.completeness, completeness, "{mode}");
+                assert_eq!(usage.attempts, 1, "one response even on {mode}");
                 assert_eq!(usage.reasoning_tokens, Some(0));
                 assert_eq!(usage.cache_read_tokens, 6);
                 assert_eq!(

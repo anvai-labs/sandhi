@@ -49,7 +49,6 @@ impl TypedGemini {
         request: ChatRequestV1,
         call_headers: http::HeaderMap,
         attempt_context: Option<crate::AttemptContext>,
-        qualify: bool,
     ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
         request.validate().map_err(ProviderError::InvalidRequest)?;
         let body = encode_gemini_request(&request)?;
@@ -62,35 +61,26 @@ impl TypedGemini {
                 attempt_context,
             ))
             .await?;
-        let qualified = qualify.then(|| {
-            sandhi_core::usage::qualify_buffered_usage(
-                sandhi_core::EndpointFamilyV1::GeminiGenerateContent,
-                &response.body,
-            )
-        });
+        let qualified = sandhi_core::usage::qualify_buffered_usage(
+            sandhi_core::EndpointFamilyV1::GeminiGenerateContent,
+            &response.body,
+        );
         if !request.include_native_response {
             crate::buffered_fidelity::validate(
                 sandhi_core::EndpointFamilyV1::GeminiGenerateContent,
                 &response.body,
             )?;
         }
-        let mut decoded = decode_gemini_response(response.body, response.usage, &request.model)?;
+        let mut decoded = decode_gemini_response(response.body, response.usage, &request.model)
+            .map_err(crate::buffered_completion::decode_error)?;
         if !request.include_native_response {
             decoded.extensions.remove("gemini");
         }
-        decoded.usage.attempts = response.attempts;
-        decoded.usage.outcome = Some("success".into());
-        let usage = qualified
-            .unwrap_or_else(|| Ok(decoded.usage.clone()))
-            .map(|mut usage| {
-                usage.attempts = response.attempts;
-                usage.outcome = Some("success".into());
-                usage
-            });
-        Ok(crate::QualifiedCompletion {
-            response: decoded,
-            usage,
-        })
+        Ok(crate::buffered_completion::observed(
+            decoded,
+            qualified,
+            response.attempts,
+        ))
     }
 
     async fn stream_inner(
@@ -150,9 +140,9 @@ impl ChatProvider for TypedGemini {
         request: ChatRequestV1,
         call_headers: http::HeaderMap,
     ) -> Result<ChatResponseV1, ProviderError> {
-        self.complete_inner(request, call_headers, None, false)
+        self.complete_inner(request, call_headers, None)
             .await
-            .map(|r| r.response)
+            .and_then(crate::QualifiedCompletion::into_response)
     }
 
     async fn complete_qualified(
@@ -160,7 +150,7 @@ impl ChatProvider for TypedGemini {
         request: ChatRequestV1,
         call_headers: http::HeaderMap,
     ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
-        self.complete_inner(request, call_headers, None, true).await
+        self.complete_inner(request, call_headers, None).await
     }
 
     async fn complete_qualified_observed(
@@ -169,7 +159,7 @@ impl ChatProvider for TypedGemini {
         call_headers: http::HeaderMap,
         context: crate::AttemptContext,
     ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
-        self.complete_inner(request, call_headers, Some(context), true)
+        self.complete_inner(request, call_headers, Some(context))
             .await
     }
 
@@ -187,9 +177,9 @@ impl ChatProvider for TypedGemini {
         call_headers: http::HeaderMap,
         attempt_context: crate::AttemptContext,
     ) -> Result<ChatResponseV1, ProviderError> {
-        self.complete_inner(request, call_headers, Some(attempt_context), false)
+        self.complete_inner(request, call_headers, Some(attempt_context))
             .await
-            .map(|r| r.response)
+            .and_then(crate::QualifiedCompletion::into_response)
     }
 
     async fn stream_observed(
@@ -425,21 +415,17 @@ pub fn decode_gemini_response(
         }
         if let Some(call) = part.get("functionCall") {
             tool_calls.push(ToolCallV1 {
-                id: match call.get("id").and_then(Value::as_str) {
-                    Some(id) => id.into(),
-                    None => generated_ids.id(index)?,
+                id: match call.get("id") {
+                    Some(Value::Null) | None => generated_ids.id(index)?,
+                    Some(_) => crate::buffered_fidelity::id(call, "id")?.into(),
                 },
-                name: call
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .into(),
-                arguments: serde_json::to_string(call.get("args").unwrap_or(&Value::Null))
-                    .map_err(|error| ProviderError::Transport(error.to_string()))?,
+                name: crate::buffered_fidelity::id(call, "name")?.into(),
+                arguments: crate::buffered_completion::object_arguments(call.get("args"), true)?,
                 extensions: BTreeMap::new(),
             });
         }
     }
+    crate::buffered_completion::unique_calls(&tool_calls)?;
     let mut extensions = BTreeMap::from([("gemini".into(), body.clone())]);
     if !reasoning.is_empty() {
         extensions.insert("reasoning".into(), Value::String(reasoning));

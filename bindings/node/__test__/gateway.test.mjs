@@ -279,7 +279,7 @@ test("static headersJson reaches all four non-OpenAI families (TD-0022 D3)", asy
     "/v1/messages": JSON.stringify({
       id: "m1", type: "message", role: "assistant",
       content: [{ type: "text", text: "ok" }],
-      usage: { input_tokens: 2, output_tokens: 1 },
+      usage: { input_tokens: 2, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
     }),
     "/models/gemini-x:generateContent": JSON.stringify({
       candidates: [{ content: { parts: [{ text: "ok" }] } }],
@@ -392,7 +392,7 @@ test("persistent typed provider completes and streams neutral documents", async 
 test("explicit cache suppression and undeclared automatic intent cross the real binding", async () => {
   const item = { contentType: "application/json", body: JSON.stringify({
     id: "fixture", model: "fixture", content: [{ type: "text", text: "ok" }],
-    stop_reason: "end_turn", usage: { input_tokens: 2, output_tokens: 1 },
+    stop_reason: "end_turn", usage: { input_tokens: 2, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
   }) };
   const server = await localServer([item, item]);
   try {
@@ -423,7 +423,7 @@ test("Anthropic bearer auth is explicit across the typed binding", async () => {
         model: "claude-test",
         content: [{ type: "text", text: "ok" }],
         stop_reason: "end_turn",
-        usage: { input_tokens: 2, output_tokens: 1 },
+        usage: { input_tokens: 2, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
       }),
     },
   ]);
@@ -519,7 +519,7 @@ test("ChatGPT Responses profile aggregates its required upstream stream", async 
       body:
         'data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-test"}}\n\n' +
         'data: {"type":"response.output_text.delta","delta":"ok"}\n\n' +
-        'data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-test","status":"completed","output":[],"usage":{"input_tokens":4,"output_tokens":1}}}\n\n',
+        'data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-test","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":4,"output_tokens":1}}}\n\n',
     },
   ]);
   try {
@@ -1153,5 +1153,47 @@ for (const [protocol, profile] of [
       "fixture", "fixture", "synthetic", "http://127.0.0.1:9",
       undefined, 0, 5, 2, undefined, protocol, 2, profile,
     ));
+  });
+}
+
+for (const [protocol, body] of [
+  ["chat_completions", {
+    id: "r", model: "fixture",
+    choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+    usage: { prompt_tokens: 5, completion_tokens: 2, prompt_tokens_details: { cached_tokens: 9 } },
+  }],
+  ["responses", {
+    id: "r", object: "response", model: "fixture", status: "completed",
+    output: [{ type: "message", id: "msg", role: "assistant", content: [{ type: "output_text", text: "ok" }] }],
+    usage: { input_tokens: 5, output_tokens: 2, input_tokens_details: { cached_tokens: 9 } },
+  }],
+  ["anthropic_messages", {
+    id: "r", type: "message", model: "fixture", role: "assistant",
+    content: [{ type: "text", text: "ok" }], stop_reason: "end_turn",
+    usage: { input_tokens: 5, output_tokens: 2, cache_read_input_tokens: 0, cache_creation_input_tokens: -1 },
+  }],
+  ["gemini_generate_content", {
+    candidates: [{ index: 0, content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+    usageMetadata: { promptTokenCount: 5, cachedContentTokenCount: 9, candidatesTokenCount: 2, thoughtsTokenCount: 0, totalTokenCount: 7 },
+  }],
+]) {
+  test(`${protocol} refuses invalid buffered counts without replay`, async () => {
+    const server = await localServer([{ contentType: "application/json", body: JSON.stringify(body) }]);
+    try {
+      const handle = new ProviderRuntime().provider(
+        "fixture", "fixture", "synthetic", server.origin,
+        undefined, 0, 5, 2, undefined, protocol,
+      );
+      await assert.rejects(
+        () => handle.completeJson(JSON.stringify({
+          model: "fixture", max_output_tokens: 16,
+          messages: [{ role: "user", content: "hello" }],
+        })),
+        error => error.code === "output_projection_error" && error.retryable === false,
+      );
+      assert.equal(server.calls(), 1);
+    } finally {
+      await server.close();
+    }
   });
 }

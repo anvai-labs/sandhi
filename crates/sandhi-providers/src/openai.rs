@@ -795,7 +795,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(error, ProviderError::Transport(_)));
+        assert!(matches!(error, ProviderError::OutputProjection(_)));
         let observations = receiver.drain();
         assert!(matches!(
             &observations[1].phase,

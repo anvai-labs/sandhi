@@ -241,7 +241,7 @@ async fn explicit_binding_dispatches_to_its_native_protocol_and_auth_scheme() {
         let gemini = family == EndpointFamilyV1::GeminiGenerateContent;
         let response = if anthropic {
             json!({"id":"msg_fixture","model":"fixture","content":[{"type":"text","text":"reply"}],
-                "stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":2}})
+                "stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}})
         } else if gemini {
             json!({"candidates":[{"content":{"parts":[{"text":"reply"}]},"finishReason":"STOP"}],
                 "usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2}})
