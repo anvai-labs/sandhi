@@ -79,7 +79,7 @@ retry; a storage error or ambiguous commit does not become retryable.
 An illustrative running-operation timeout could contain:
 
 ```text
-request_id=req_example transition=admission reason=wait_timeout
+request_id=req_example transition=terminal_settlement reason=wait_timeout
 wait_ms=2000 wait_started_us=Some(50) wait_elapsed_us=2005000
 job_stage=running elapsed_us=2005050 queue_us=60 run_us=Some(2004990)
 publication_us=None published_at_us=None interrupted=false readiness=pending
