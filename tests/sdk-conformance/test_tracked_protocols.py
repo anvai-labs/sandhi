@@ -214,15 +214,18 @@ def test_tracked_responses_stream_preserves_canonical_usage_and_paired_settlemen
                     with pytest.raises(httpx.RemoteProtocolError):
                         response.read()
         assert len(calls) == 1
+        qualified = mode in ("valid", "incomplete", "failed")
         deadline = time.monotonic() + 5
         while True:
             with sqlite3.connect(instance.database) as connection:
-                ready = connection.execute("SELECT count(*) FROM budget_terminal_observation").fetchone()[0]
+                # Failed delivery is published before accounting finishes. A
+                # durable observation alone is not a settlement receipt.
+                table = "budget_settlement_outbox" if qualified else "budget_terminal_observation"
+                ready = connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
             if ready:
                 break
             assert time.monotonic() < deadline
             time.sleep(.02)
-        qualified = mode in ("valid", "incomplete", "failed")
         expected_outcome = "provider_rejected" if mode == "failed" else "success" if qualified else "incomplete_stream"
         _, context, usage, charge = evidence(instance.database, outcome=expected_outcome)
         assert context["ingress"] == FAMILIES[2] and context["endpoint_family"] == FAMILIES[2]

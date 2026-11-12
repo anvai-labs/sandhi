@@ -688,7 +688,16 @@ fn gemini_parts_text(parts: Option<&Value>) -> Option<String> {
 /// Needed only on the CROSS-FAMILY path: a Gemini client talking to a Gemini upstream gets the
 /// upstream's own bytes back verbatim (D4a). When the upstream is another family, the client
 /// still expects Gemini's shape, so this is the mirror of the adapter's response parser.
-fn encode_gemini_response(response: &ChatResponseV1) -> Value {
+fn gemini_tool_arguments(arguments: &str) -> Result<Value, &'static str> {
+    let value = sandhi_core::policy::strict_json(arguments.as_bytes())
+        .map_err(|_| "invalid or incomplete tool arguments cannot be translated to Gemini")?;
+    if !value.is_object() {
+        return Err("non-object tool arguments cannot be translated to Gemini");
+    }
+    Ok(value)
+}
+
+fn encode_gemini_response(response: &ChatResponseV1) -> Result<Value, &'static str> {
     let mut parts: Vec<Value> = Vec::new();
     if let Some(content) = &response.output.content {
         match content {
@@ -708,7 +717,7 @@ fn encode_gemini_response(response: &ChatResponseV1) -> Value {
             "name": call.name,
             "id": call.id,
             // Gemini carries arguments as an OBJECT, not the JSON string the OpenAI family uses.
-            "args": serde_json::from_str::<Value>(&call.arguments).unwrap_or(Value::Null),
+            "args": gemini_tool_arguments(&call.arguments)?,
         }}));
     }
 
@@ -719,11 +728,11 @@ fn encode_gemini_response(response: &ChatResponseV1) -> Value {
     if let Some(reason) = response.finish_reason {
         candidate["finishReason"] = json!(gemini_finish_reason(reason));
     }
-    json!({
+    Ok(json!({
         "candidates": [candidate],
         "usageMetadata": gemini_usage(&response.usage),
         "modelVersion": response.model,
-    })
+    }))
 }
 
 /// Neutral finish reason → Gemini's enum name.
@@ -1703,7 +1712,10 @@ fn responses_response_format(format: &Value) -> Result<Value, String> {
     }
 }
 
-pub(crate) fn encode_response(dialect: IngressDialect, response: &ChatResponseV1) -> Value {
+pub(crate) fn encode_response(
+    dialect: IngressDialect,
+    response: &ChatResponseV1,
+) -> Result<Value, &'static str> {
     // These bodies are decoder-owned provider responses, not request extras.
     // Compatible buffered egress must preserve signed/opaque state and unknown
     // native output parts when admission required typed request execution.
@@ -1720,14 +1732,14 @@ pub(crate) fn encode_response(dialect: IngressDialect, response: &ChatResponseV1
             .get(bucket)
             .filter(|value| value.get(field).is_some_and(Value::is_array))
     }) {
-        return native.clone();
+        return Ok(native.clone());
     }
     match dialect {
         IngressDialect::OpenAi | IngressDialect::Embeddings | IngressDialect::Completions => {
-            encode_openai_response(response)
+            Ok(encode_openai_response(response))
         }
-        IngressDialect::Anthropic => encode_anthropic_response(response),
-        IngressDialect::Responses => encode_responses_response(response),
+        IngressDialect::Anthropic => Ok(encode_anthropic_response(response)),
+        IngressDialect::Responses => Ok(encode_responses_response(response)),
         IngressDialect::Gemini => encode_gemini_response(response),
     }
 }
@@ -1926,12 +1938,12 @@ impl StreamEventEncoder {
         &mut self,
         event: &ChatStreamEventV1,
         last_usage: Option<&UsageV2>,
-    ) -> Vec<(Option<&'static str>, Value)> {
+    ) -> Result<Vec<(Option<&'static str>, Value)>, &'static str> {
         match self.dialect {
-            IngressDialect::Anthropic => self.encode_anthropic(event, last_usage),
+            IngressDialect::Anthropic => Ok(self.encode_anthropic(event, last_usage)),
             IngressDialect::Gemini => self.encode_gemini(event, last_usage),
-            IngressDialect::Responses => self.encode_responses(event, last_usage),
-            _ => self.encode_openai(event, last_usage),
+            IngressDialect::Responses => Ok(self.encode_responses(event, last_usage)),
+            _ => Ok(self.encode_openai(event, last_usage)),
         }
     }
 
@@ -2269,9 +2281,12 @@ impl StreamEventEncoder {
         &mut self,
         event: &ChatStreamEventV1,
         last_usage: Option<&UsageV2>,
-    ) -> Vec<(Option<&'static str>, Value)> {
-        match event {
+    ) -> Result<Vec<(Option<&'static str>, Value)>, &'static str> {
+        let frames = match event {
             ChatStreamEventV1::ToolCallStart { index, id, name } => {
+                if self.gemini_calls.contains_key(index) {
+                    return Err("duplicate tool-call start cannot be translated to Gemini");
+                }
                 self.gemini_calls
                     .insert(*index, (id.clone(), name.clone(), String::new()));
                 Vec::new()
@@ -2279,12 +2294,16 @@ impl StreamEventEncoder {
             ChatStreamEventV1::ToolCallArgumentsDelta { index, delta } => {
                 if let Some(call) = self.gemini_calls.get_mut(index) {
                     call.2.push_str(delta);
+                } else {
+                    return Err(
+                        "tool arguments without a matching start cannot be translated to Gemini",
+                    );
                 }
                 Vec::new()
             }
             ChatStreamEventV1::ToolCallEnd { index } => match self.gemini_calls.remove(index) {
                 Some((id, name, args)) => {
-                    let args_value = serde_json::from_str(&args).unwrap_or(json!({}));
+                    let args_value = gemini_tool_arguments(&args)?;
                     vec![(
                         None,
                         json!({"candidates":[{
@@ -2295,10 +2314,15 @@ impl StreamEventEncoder {
                         }]}),
                     )]
                 }
-                None => Vec::new(),
+                None => {
+                    return Err(
+                        "tool-call end without a matching start cannot be translated to Gemini",
+                    )
+                }
             },
             other => encode_gemini_stream_event(other, last_usage),
-        }
+        };
+        Ok(frames)
     }
 }
 
@@ -2640,7 +2664,7 @@ mod tests {
             },
         ];
         for event in &events {
-            frames.extend(encoder.encode(event, None));
+            frames.extend(encoder.encode(event, None).unwrap());
         }
         let names: Vec<&str> = frames.iter().map(|(name, _)| name.unwrap()).collect();
         assert_eq!(
@@ -2724,7 +2748,13 @@ mod tests {
             },
             E::ToolCallEnd { index: 0 },
         ] {
-            out.extend(encoder.encode(&event, None).into_iter().map(|(_, v)| v));
+            out.extend(
+                encoder
+                    .encode(&event, None)
+                    .unwrap()
+                    .into_iter()
+                    .map(|(_, v)| v),
+            );
         }
         // Text passed through immediately; the call arrived as ONE complete part.
         assert_eq!(out.len(), 2);
@@ -2737,20 +2767,22 @@ mod tests {
         assert_eq!(call["id"], "call_1");
         assert_eq!(call["args"]["q"], 1);
 
-        let error_frames = encoder.encode(
-            &E::Error {
-                error: ProviderErrorV1 {
-                    code: "upstream".into(),
-                    message: "boom".into(),
-                    retryable: false,
-                    http_status: None,
-                    provider: None,
-                    request_id: None,
-                    details: BTreeMap::new(),
+        let error_frames = encoder
+            .encode(
+                &E::Error {
+                    error: ProviderErrorV1 {
+                        code: "upstream".into(),
+                        message: "boom".into(),
+                        retryable: false,
+                        http_status: None,
+                        provider: None,
+                        request_id: None,
+                        details: BTreeMap::new(),
+                    },
                 },
-            },
-            None,
-        );
+                None,
+            )
+            .unwrap();
         assert_eq!(error_frames.len(), 1, "errors must render, not vanish");
         assert!(error_frames[0].1.get("error").is_some());
     }
@@ -2793,7 +2825,7 @@ mod tests {
             },
         ];
         for event in &events {
-            frames.extend(encoder.encode(event, Some(&UsageV2::default())));
+            frames.extend(encoder.encode(event, Some(&UsageV2::default())).unwrap());
         }
         let added = frames
             .iter()
@@ -3212,11 +3244,11 @@ mod tests {
             extensions: BTreeMap::new(),
         };
         assert_eq!(
-            encode_response(IngressDialect::OpenAi, &response)["usage"]["prompt_tokens"],
+            encode_response(IngressDialect::OpenAi, &response).unwrap()["usage"]["prompt_tokens"],
             10
         );
         assert_eq!(
-            encode_response(IngressDialect::Anthropic, &response)["usage"]
+            encode_response(IngressDialect::Anthropic, &response).unwrap()["usage"]
                 ["cache_read_input_tokens"],
             4
         );
@@ -3384,7 +3416,7 @@ mod tests {
             },
             extensions: BTreeMap::new(),
         };
-        let body = encode_response(IngressDialect::Responses, &response);
+        let body = encode_response(IngressDialect::Responses, &response).unwrap();
         assert_eq!(body["object"], "response");
         assert_eq!(body["id"], "resp_1");
         assert_eq!(body["status"], "completed");
@@ -3419,7 +3451,7 @@ mod tests {
             usage: UsageV2::default(),
             extensions: BTreeMap::new(),
         };
-        let body = encode_response(IngressDialect::Responses, &response);
+        let body = encode_response(IngressDialect::Responses, &response).unwrap();
         assert_eq!(body["status"], "incomplete");
         assert_eq!(body["incomplete_details"]["reason"], "max_output_tokens");
     }
@@ -3691,7 +3723,7 @@ mod gemini_codec_tests {
             },
             extensions: BTreeMap::new(),
         };
-        let encoded = encode_response(IngressDialect::Gemini, &response);
+        let encoded = encode_response(IngressDialect::Gemini, &response).unwrap();
 
         assert_eq!(
             encoded["candidates"][0]["content"]["parts"][0]["text"],

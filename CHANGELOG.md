@@ -110,6 +110,12 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ### Fixed
 
+- Gemini tool projection refuses malformed, duplicate-key or non-object arguments
+  in buffered and streamed output instead of inventing an empty/null object.
+  Final qualified accounting remains independent of delivery failure; buffered
+  projection errors suppress automatic retry. Responses tool calls preserve
+  explicit output-limit/filter reasons before normal tool-call completion.
+
 - Public-repository CI now uses GitHub-hosted runners for all checks. Removed
   private/overflow routing and its smoke workflow; policy tests cover runner
   selections, release matrices and the ordinary read-only PR execution path.

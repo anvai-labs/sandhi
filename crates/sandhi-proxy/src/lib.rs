@@ -3829,17 +3829,29 @@ async fn complete_response(
             if qualified {
                 response.usage.completeness = UsageCompleteness::Final;
             }
-            response
-                .usage
-                .outcome
-                .get_or_insert_with(|| "success".into());
+            let encoded = encode_response(dialect, &response);
+            if encoded.is_err() {
+                response.usage.outcome = Some("error".into());
+            } else {
+                response
+                    .usage
+                    .outcome
+                    .get_or_insert_with(|| "success".into());
+            }
             accounting.observe(&response.usage);
             accounting.finish_reason = response.finish_reason;
-            accounting.set_outcome("success");
+            accounting.set_outcome(if encoded.is_ok() { "success" } else { "error" });
             if !accounting.finalize_owned().await {
                 return settlement::buffered::accounting_error(dialect, &accounting.request_id);
             }
-            Json(encode_response(dialect, &response)).into_response()
+            match encoded {
+                Ok(body) => Json(body).into_response(),
+                Err(message) => settlement::buffered::no_automatic_retry(ingress_error(
+                    dialect,
+                    StatusCode::BAD_GATEWAY,
+                    message,
+                )),
+            }
         }
         Err(error) => {
             accounting.set_outcome("error");
@@ -3900,7 +3912,7 @@ async fn stream_response(
     let tail = (dialect == IngressDialect::OpenAi && !native_stream)
         .then(|| Bytes::from_static(b"data: [DONE]\n\n"));
     let body = streaming::body(accounting, permit, tail, move |accounting| {
-        Box::pin(async_stream::stream! {
+        Box::pin(async_stream::try_stream! {
             let mut last_usage: Option<UsageV2> = None;
             // Stateful per-stream egress encoder: Anthropic's content-block
             // lifecycle and Gemini's whole-part tool calls need cross-event state.
@@ -3937,8 +3949,7 @@ async fn stream_response(
                             projection_bytes=projection_bytes.saturating_add(payload).saturating_add(128);
                             if projection_bytes > sandhi_core::MAX_NATIVE_STREAM_FRAME_BYTES {
                                 accounting.set_outcome("error");
-                                yield Err(std::io::Error::other("translated stream projection limit exceeded"));
-                                return;
+                                Err(std::io::Error::other("translated stream projection limit exceeded"))?;
                             }
                         }
                         accounting_only = false;
@@ -4012,21 +4023,20 @@ async fn stream_response(
                                 || frame.sse.len() > sandhi_core::MAX_NATIVE_STREAM_FRAME_BYTES
                             {
                                 accounting.set_outcome("error");
-                                yield Err(std::io::Error::other("incompatible or oversized native SSE attachment"));
-                                break;
+                                Err(std::io::Error::other("incompatible or oversized native SSE attachment"))?;
                             }
                             native_error_sent |= frame.json_data().is_some_and(|value|
                                 value.get("error").is_some_and(|error| !error.is_null()) || value.get("type").and_then(serde_json::Value::as_str) == Some("error"));
-                            yield Ok::<Bytes,std::io::Error>(Bytes::from(frame.sse.clone()));
+                            yield Bytes::from(frame.sse.clone());
                             continue;
                         }
                         if native_stream && (!matches!(event, sandhi_core::ChatStreamEventV1::Error { .. }) || native_error_sent) {
                             continue;
                         }
                         for (event_name, value) in
-                            stream_encoder.encode(&event, last_usage.as_ref())
+                            stream_encoder.encode(&event, last_usage.as_ref()).map_err(|message| { accounting.set_outcome("error"); std::io::Error::other(message) })?
                         {
-                            yield Ok::<Bytes, std::io::Error>(Bytes::from(sse_frame(event_name, &value)));
+                            yield Bytes::from(sse_frame(event_name, &value));
                         }
                     }
                     Err(error) => {
@@ -4036,9 +4046,9 @@ async fn stream_response(
                             error: error.as_typed(Some(provider.slug())),
                         };
                         for (event_name, value) in
-                            stream_encoder.encode(&typed, last_usage.as_ref())
+                            stream_encoder.encode(&typed, last_usage.as_ref()).map_err(|message| { accounting.set_outcome("error"); std::io::Error::other(message) })?
                         {
-                            yield Ok::<Bytes, std::io::Error>(Bytes::from(sse_frame(event_name, &value)));
+                            yield Bytes::from(sse_frame(event_name, &value));
                         }
                         break;
                     }
@@ -4047,21 +4057,21 @@ async fn stream_response(
             if accounting.outcome != "error" {
                 accounting.set_outcome("success");
                 if let Some(reason) = pending_finish {
-                    for (event_name,value) in stream_encoder.encode(&sandhi_core::ChatStreamEventV1::Finish{reason},last_usage.as_ref()) {
-                        yield Ok::<Bytes,std::io::Error>(Bytes::from(sse_frame(event_name,&value)));
+                    for (event_name,value) in stream_encoder.encode(&sandhi_core::ChatStreamEventV1::Finish{reason},last_usage.as_ref()).map_err(|message| { accounting.set_outcome("error"); std::io::Error::other(message) })? {
+                        yield Bytes::from(sse_frame(event_name,&value));
                     }
                 }
                 if !native_stream && dialect == IngressDialect::OpenAi {
                     if let Some(usage) = &last_usage {
-                        for (event_name,value) in stream_encoder.encode(&sandhi_core::ChatStreamEventV1::Usage{usage:usage.clone()},Some(usage)) {
-                            yield Ok::<Bytes,std::io::Error>(Bytes::from(sse_frame(event_name,&value)));
+                        for (event_name,value) in stream_encoder.encode(&sandhi_core::ChatStreamEventV1::Usage{usage:usage.clone()},Some(usage)).map_err(|message| { accounting.set_outcome("error"); std::io::Error::other(message) })? {
+                            yield Bytes::from(sse_frame(event_name,&value));
                         }
                     }
                 }
             } else if accounting.stream_body_lifetime.is_some() {
                 // The owner must distinguish failed upstream EOF before scheduling a tail.
                 // Leave legacy pull-driven wire behavior unchanged when the policy is absent.
-                yield Err(std::io::Error::other("upstream stream failed"));
+                Err(std::io::Error::other("upstream stream failed"))?;
             }
         })
     });

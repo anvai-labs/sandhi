@@ -631,7 +631,9 @@ pub(crate) fn decode_responses_response(
 }
 
 fn response_finish_reason(body: &Value, has_tools: bool) -> FinishReasonV1 {
-    if has_tools {
+    // An explicit incomplete result remains incomplete even if it includes a
+    // function call; tool presence is not proof the arguments/model finished.
+    if has_tools && body.get("status").and_then(Value::as_str) != Some("incomplete") {
         return FinishReasonV1::ToolCalls;
     }
     match body.get("status").and_then(Value::as_str) {
@@ -1397,6 +1399,22 @@ mod tests {
             body["tool_choice"],
             json!({"type":"function","name":"weather"})
         );
+    }
+
+    #[test]
+    fn buffered_incomplete_tools_keep_the_explicit_terminal_reason() {
+        for (reason, expected) in [
+            ("max_output_tokens", FinishReasonV1::Length),
+            ("content_filter", FinishReasonV1::ContentFilter),
+        ] {
+            let body = json!({"id":"resp","model":"fixture","status":"incomplete","incomplete_details":{"reason":reason},
+                "output":[{"type":"function_call","call_id":"call_1","name":"inspect","arguments":"{}"}],
+                "usage":{"input_tokens":10,"output_tokens":4}});
+            let parsed = parse_openai_responses_usage(&body).unwrap();
+            let response = decode_responses_response(body, parsed, "fixture").unwrap();
+            assert_eq!(response.finish_reason, Some(expected));
+            assert_eq!(response.output.tool_calls[0].arguments, "{}");
+        }
     }
 
     #[test]

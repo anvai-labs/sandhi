@@ -1127,3 +1127,42 @@ contention causes remain unproven. No timeout was enlarged and no inference was
 replayed. The latest full default run is therefore **not green**; the preceding
 feature/default passes and current source/SDK evidence do not close this gate.
 The checkpoint remains draft and is not ready to merge.
+
+
+### Independent M5g tool review follow-up
+
+The independent reviewer rejected `f21006d` after reproducing two text-matrix gaps.
+Truncated Chat tool arguments became an invented Gemini `{}`, and a Responses
+incomplete tool result became normal tool completion because tool presence was
+classified before status. The added regressions reproduced both before the fixes.
+Gemini projection now parses strict JSON objects and fails delivery for invalid,
+incomplete, duplicate-key and non-object arguments in both response modes. The
+shared stream encoder is fallible; lifecycle mismatches also refuse. Buffered
+projection failures emit a non-retryable 502 after original final usage settles,
+with the retry-suppression header. No replacement arguments or inference retries
+are introduced. Explicit incomplete/filter reasons now take priority over normal
+tool completion, including the shared buffered Responses decoder.
+
+The six-case dedicated integration fixture now exercises 213 HTTP calls: the
+original 121 source/lifecycle/bounds calls plus 24 streamed argument cases, 44 tool
+terminal cases and 24 buffered argument cases. All passed, joining final source
+usage to one original receipt and both leases even for failed projection. A
+separate provider unit case covers buffered incomplete/filter tool classification.
+Broader workspace/SDK checks and re-review apply to the resulting fix commit;
+the rejected checkpoint has no approval record and has not been pushed.
+
+Temporary fsync-only tracing of the existing proxy fixture found a 1.477-second
+sync in one passing run; a second run passed the admission stress but tripped a
+short route-deadline assertion. This instrumentation is outside Git and does not
+establish the admission-timeout cause. The reliability gate remains open.
+
+The resulting tool fixes passed the full default workspace: 1,114 tests, six
+opt-in ignored. All 91 tracked/backend SDK cases passed after the failed-delivery
+fixture was corrected to wait for a receipt rather than only an observation.
+The first broad SDK run also missed one gateway's readiness deadline before any
+request; the final run used the same startup/accounting limits. Warnings-denied
+workspace/all-target Clippy passed with and without ONNX, strict MkDocs passed,
+and binding facade checks remained clean. These successful reruns do not close
+the earlier admission-timeout cause or broaden the live text/cache report into
+live tool/subscription qualification. Fresh independent review applies to the
+combined feature and fix range.

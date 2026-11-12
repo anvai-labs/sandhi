@@ -75,6 +75,22 @@ settle. It is not a tokenizer limit, provider-side output cutoff or total proces
 memory guarantee. Existing bounded SSE framing, four-frame copied wire queue,
 setup/idle/body deadlines and shutdown accounting headroom remain in force.
 
+## Tool projection fidelity
+
+Gemini function arguments must be a complete unambiguous JSON object. Invalid,
+incomplete, duplicate-key and non-object arguments fail delivery explicitly in
+both buffered and streamed projection; they never become an invented `{}` or
+null argument object. Stream tool lifecycle mismatches also fail. Canonical source
+usage remains eligible for its original paired receipt even when projection fails.
+Buffered failures return a non-retryable 502 with the SDK retry-suppression header.
+An explicit incomplete Responses result retains its output-limit/filter finish
+reason even when it contains tool calls; tool presence does not prove completion.
+
+The expanded HTTP tool cases cover valid/truncated/non-object/duplicate arguments,
+normal and output-limited tools across four clients, and content-filter terminals
+for Chat/Responses/Gemini. Anthropic-specific filtering semantics remain a separate
+fidelity gate. These cases do not establish full agent tool-loop acceptance.
+
 ## Qualification and remaining work
 
 The synthetic HTTP matrix covers three source profiles, four client dialects,

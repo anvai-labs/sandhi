@@ -152,6 +152,13 @@ settlement an opportunity, not a guarantee against SQLite contention.
 | Explicit reported zero | May settle zero | Absence of usage is not reported zero |
 | Client disconnect | Client has no confirmed result | Gateway ownership continues; inspect evidence |
 
+Gemini tool projection rejects invalid/incomplete/duplicate-key or non-object
+arguments explicitly; it does not invent `{}` or null arguments. A projection
+failure can still have independently qualified final usage and a committed paired
+receipt. Buffered projection failures send a non-retryable 502 and
+`x-should-retry: false`; streamed failures terminate the body with an error.
+Explicit output-limit/filter reasons survive Responses tool-call translation.
+
 The client may not receive completed model output when accounting is unresolved.
 A 502 is not proof the model failed.
 

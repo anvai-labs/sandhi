@@ -530,3 +530,299 @@ async fn translated_stream_projection_is_bounded_and_cannot_settle_estimated_out
     );
     assert_eq!(state.ledger.lock().unwrap().spent("group:platform"), 0);
 }
+
+fn tool_wire(profile: &str, reason: &str, args: &str) -> String {
+    let chat = matches!(profile, "chat" | "terminal_chat");
+    let usage = if chat {
+        json!({"prompt_tokens":10,"completion_tokens":4,"prompt_tokens_details":{"cached_tokens":6,"cache_write_tokens":2},"completion_tokens_details":{"reasoning_tokens":0}})
+    } else {
+        json!({"input_tokens":10,"output_tokens":4,"input_tokens_details":{"cached_tokens":6,"cache_write_tokens":2},"output_tokens_details":{"reasoning_tokens":0}})
+    };
+    if chat {
+        let mut chunk = json!({"id":"chat_tool","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"inspect","arguments":args}}]},"finish_reason":reason}]});
+        let mut result = String::new();
+        if profile == "terminal_chat" {
+            chunk["usage"] = usage.clone();
+        }
+        result.push_str(&format!("data: {chunk}\n\n"));
+        if profile != "terminal_chat" {
+            result.push_str(&format!(
+                "data: {}\n\n",
+                json!({"object":"chat.completion.chunk","choices":[],"usage":usage})
+            ));
+        }
+        result.push_str("data: [DONE]\n\n");
+        result
+    } else {
+        let status = if reason == "tool_calls" {
+            "completed"
+        } else {
+            "incomplete"
+        };
+        let call = json!({"id":"fc_1","type":"function_call","call_id":"call_1","name":"inspect","arguments":args,"status":"completed"});
+        let mut response = json!({"id":"resp_tool","status":status,"model":"gpt-4o-mini","output":[call.clone()],"usage":usage});
+        if status == "incomplete" {
+            response["incomplete_details"] =
+                json!({"reason":if reason=="length" {"max_output_tokens"} else {"content_filter"}});
+        }
+        [json!({"type":"response.created","response":{"id":"resp_tool","status":"in_progress","model":"gpt-4o-mini","output":[],"usage":null}}),
+         json!({"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"inspect","arguments":""}}),
+         json!({"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_1","delta":args}),
+         json!({"type":"response.output_item.done","output_index":0,"item":call}),
+         json!({"type":format!("response.{status}"),"response":response})]
+        .into_iter().map(|event|format!("data: {event}\n\n")).collect()
+    }
+}
+
+async fn tool_delivery(profile: &str, flavor: &str, reason: &str, args: &str) -> (bool, String) {
+    use futures_util::StreamExt;
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(tool_wire(profile, reason, args), "text/event-stream"),
+        )
+        .expect(1)
+        .mount(&upstream)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("owned.db");
+    let sink = Arc::new(InMemorySink::new());
+    let state = state(
+        profile,
+        upstream.uri(),
+        &database,
+        sink.clone(),
+        json!({"setup_ms":2000,"idle_ms":2000,"body_ms":5000}),
+    );
+    let (route, request) = ingress(flavor);
+    let response = build_app(state.clone())
+        .oneshot(owned_request(route, request))
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{profile}/{flavor}/{reason}/{args}"
+    );
+    let mut stream = response.into_body().into_data_stream();
+    let mut bytes = Vec::new();
+    let mut clean = true;
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(chunk) => bytes.extend_from_slice(&chunk),
+            Err(_) => {
+                clean = false;
+                break;
+            }
+        }
+    }
+    drop(stream);
+    tokio::time::timeout(Duration::from_secs(3), state.lifecycle.wait_idle())
+        .await
+        .unwrap();
+    assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
+    assert_eq!(sink.events().len(), 1);
+    assert_eq!(
+        sink.events()[0].usage_completeness,
+        sandhi_core::UsageCompleteness::Final,
+        "{profile}/{flavor}/{reason}/{args}"
+    );
+    let conn = rusqlite::Connection::open(&database).unwrap();
+    assert_eq!(
+        conn.query_row(
+            "SELECT charged_tokens FROM budget_settlement_outbox",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        14
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM budget_reservation WHERE settled=1 AND actual=14",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        2
+    );
+    (clean, String::from_utf8(bytes).unwrap())
+}
+
+#[tokio::test]
+async fn gemini_tool_projection_refuses_invalid_arguments_without_losing_final_accounting() {
+    for profile in ["chat", "terminal_chat", "responses", "codex"] {
+        for args in [
+            r#"{"target":"a"}"#,
+            r#"{"target":""#,
+            "",
+            "[1]",
+            "null",
+            r#"{"target":1,"target":2}"#,
+        ] {
+            let (clean, wire) = tool_delivery(profile, "gemini", "length", args).await;
+            let valid = args == r#"{"target":"a"}"#;
+            assert_eq!(clean, valid, "{profile}/{args}: {wire}");
+            if valid {
+                assert!(
+                    wire.contains("inspect") && wire.contains("MAX_TOKENS"),
+                    "{profile}: {wire}"
+                );
+                let parts: Vec<Value> = wire
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("data: "))
+                    .map(|data| serde_json::from_str(data).unwrap())
+                    .collect();
+                assert!(parts.iter().any(|event| event
+                    .pointer("/candidates/0/content/parts/0/functionCall/args")
+                    == Some(&json!({"target":"a"}))));
+            } else {
+                assert!(
+                    !wire.contains("functionCall"),
+                    "invented tool: {profile}/{args}: {wire}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn translated_tool_terminals_preserve_output_limit_and_filter_reasons() {
+    for profile in ["chat", "terminal_chat", "responses", "codex"] {
+        for flavor in ["chat", "messages", "responses", "gemini"] {
+            for reason in ["tool_calls", "length", "content_filter"] {
+                // Anthropic has no direct content_filter stop-reason value;
+                // this test does not claim that separate semantic mapping.
+                if flavor == "messages" && reason == "content_filter" {
+                    continue;
+                }
+                let (clean, wire) =
+                    tool_delivery(profile, flavor, reason, r#"{"target":"a"}"#).await;
+                assert!(clean, "{profile}/{flavor}/{reason}: {wire}");
+                assert!(
+                    wire.contains("inspect"),
+                    "{profile}/{flavor}/{reason}: {wire}"
+                );
+                let expected = match (flavor, reason) {
+                    ("chat", "tool_calls") => "tool_calls",
+                    ("chat", other) => other,
+                    ("messages", "tool_calls") => "tool_use",
+                    ("messages", _) => "max_tokens",
+                    ("responses", "tool_calls") => "response.completed",
+                    ("responses", _) => "response.incomplete",
+                    (_, "length") => "MAX_TOKENS",
+                    (_, "content_filter") => "SAFETY",
+                    _ => "STOP",
+                };
+                assert!(
+                    wire.contains(expected),
+                    "{profile}/{flavor}/{reason}: {wire}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn buffered_gemini_tool_projection_has_the_same_strict_argument_boundary() {
+    for profile in ["chat", "terminal_chat", "responses", "codex"] {
+        for args in [
+            r#"{"target":"a"}"#,
+            r#"{"target":""#,
+            "",
+            "[1]",
+            "null",
+            r#"{"target":1,"target":2}"#,
+        ] {
+            let upstream = MockServer::start().await;
+            let template = if profile == "codex" {
+                ResponseTemplate::new(200)
+                    .set_body_raw(tool_wire(profile, "length", args), "text/event-stream")
+            } else {
+                let body = if matches!(profile, "chat" | "terminal_chat") {
+                    json!({"id":"chat_buffered_tool","object":"chat.completion","model":"gpt-4o-mini",
+                        "choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"inspect","arguments":args}}]},"finish_reason":"length"}],
+                        "usage":{"prompt_tokens":10,"completion_tokens":4,"prompt_tokens_details":{"cached_tokens":6,"cache_write_tokens":2},"completion_tokens_details":{"reasoning_tokens":0}}})
+                } else {
+                    json!({"id":"resp_buffered_tool","object":"response","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"model":"gpt-4o-mini",
+                        "output":[{"type":"function_call","call_id":"call_1","name":"inspect","arguments":args}],
+                        "usage":{"input_tokens":10,"output_tokens":4,"input_tokens_details":{"cached_tokens":6,"cache_write_tokens":2},"output_tokens_details":{"reasoning_tokens":0}}})
+                };
+                ResponseTemplate::new(200).set_body_json(body)
+            };
+            Mock::given(method("POST"))
+                .respond_with(template)
+                .expect(1)
+                .mount(&upstream)
+                .await;
+            let dir = tempfile::tempdir().unwrap();
+            let database = dir.path().join("owned.db");
+            let sink = Arc::new(InMemorySink::new());
+            let state = state(
+                profile,
+                upstream.uri(),
+                &database,
+                sink.clone(),
+                json!({"setup_ms":2000,"idle_ms":2000,"body_ms":5000}),
+            );
+            let (route, request) = ingress("gemini");
+            let route = route.replace(":streamGenerateContent", ":generateContent");
+            let response = build_app(state.clone())
+                .oneshot(owned_request(&route, request))
+                .await
+                .unwrap();
+            let valid = args == r#"{"target":"a"}"#;
+            assert_eq!(
+                response.status(),
+                if valid {
+                    StatusCode::OK
+                } else {
+                    StatusCode::BAD_GATEWAY
+                },
+                "{profile}/{args}"
+            );
+            if !valid {
+                assert_eq!(response.headers()["x-should-retry"], "false");
+            }
+            let body = axum::body::to_bytes(response.into_body(), 100_000)
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            if valid {
+                assert_eq!(
+                    body["candidates"][0]["content"]["parts"][0]["functionCall"]["args"],
+                    json!({"target":"a"})
+                );
+                assert_eq!(body["candidates"][0]["finishReason"], "MAX_TOKENS");
+            } else {
+                assert!(body.get("candidates").is_none());
+            }
+            assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
+            assert_eq!(sink.events().len(), 1);
+            assert_eq!(
+                sink.events()[0].usage_completeness,
+                sandhi_core::UsageCompleteness::Final
+            );
+            let conn = rusqlite::Connection::open(&database).unwrap();
+            assert_eq!(
+                conn.query_row(
+                    "SELECT charged_tokens FROM budget_settlement_outbox",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+                14
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT count(*) FROM budget_reservation WHERE settled=1 AND actual=14",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+                2
+            );
+        }
+    }
+}
