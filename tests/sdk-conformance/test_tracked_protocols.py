@@ -107,6 +107,8 @@ def qualified_origin():
                     events = [{"id": "chat_fixture", "object": "chat.completion.chunk", "created": 1, "model": "fixture",
                         "choices": [{"index": 0, "delta": delta, "finish_reason": None}]} for delta in control["chat_deltas"]]
                     events[-1]["choices"][0]["finish_reason"] = control.get("chat_finish", "stop")
+                    if "chat_drift" in control:
+                        events[-1][control["chat_drift"]] = "different"
                 if control.get("terminal_chunk_usage") and "usage" in response:
                     events[-1]["usage"] = response["usage"]
                 elif "usage" in response:
@@ -858,6 +860,37 @@ def test_chat_projection_responses_sdk_accumulates_typed_items_and_source_receip
         assert context["plane"] == "translation" and usage["completeness"] == "final"
         assert (usage["tokens_in"], usage["cache_read_tokens"], usage["cache_creation_tokens"],
                 usage["tokens_out"], usage["reasoning_tokens"], charge) == (2, 2, 1, 2, 1, 5)
+        with sqlite3.connect(instance.database) as connection:
+            assert connection.execute("SELECT settled,actual FROM budget_reservation").fetchall() == [(1, 5)] * 2
+
+
+@pytest.mark.parametrize("profile", ["standard", "openai_terminal_chunk_usage"])
+@pytest.mark.parametrize("field", ["id", "model"])
+def test_chat_identity_drift_refuses_default_sdk_without_losing_source_receipt(
+    tmp_path, backend_binaries, qualified_origin, profile, field,
+):
+    origin, calls, control = qualified_origin
+    control["terminal_chunk_usage"] = profile == "openai_terminal_chunk_usage"
+    control["chat_deltas"] = [{"content": "a"}, {"content": "b"}]
+    control["chat_drift"] = field
+    with tracked_gateway(tmp_path, backend_binaries, origin, FAMILIES[0], endpoint_profile=profile,
+                         streaming=True) as (instance, token):
+        with openai.OpenAI(base_url=instance.base + "/v1", api_key=token) as client:
+            with pytest.raises(openai.APIError):
+                list(client.responses.create(model="agent", input="hello", max_output_tokens=64, stream=True))
+        deadline = time.monotonic() + 5
+        while True:
+            with sqlite3.connect(instance.database) as connection:
+                receipts = connection.execute("SELECT charged_tokens FROM budget_settlement_outbox").fetchall()
+            if receipts:
+                break
+            assert time.monotonic() < deadline
+            time.sleep(.02)
+        assert len(calls) == 1 and receipts == [(5,)]
+        # Physical HTTP/source completion remains successful despite delivery
+        # refusal. The SDK exception above is the separate projection outcome.
+        _, _, usage, charge = evidence(instance.database)
+        assert usage["completeness"] == "final" and charge == 5
         with sqlite3.connect(instance.database) as connection:
             assert connection.execute("SELECT settled,actual FROM budget_reservation").fetchall() == [(1, 5)] * 2
 

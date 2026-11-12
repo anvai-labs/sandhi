@@ -53,15 +53,17 @@ fn decode_inner(mut raw: ByteStream, model: String) -> ChatEventStream {
                     if let Some(error) = crate::native_stream::upstream_error(&value) {
                         failure=Some(error);break;
                     }
-                    if !started {
-                        started=true;
-                        yield Event::ResponseStart {
-                            id:value.get("id").and_then(Value::as_str).map(str::to_owned),
-                            model:value.get("model").and_then(Value::as_str).unwrap_or(&model).into(),
-                        };
-                    }
                     match projection.event(&value) {
-                        Ok(events)=>for event in events {yield event;},
+                        Ok(events)=>{
+                            if !started {
+                                started=true;
+                                yield Event::ResponseStart {
+                                    id:value.get("id").and_then(Value::as_str).map(str::to_owned),
+                                    model:value.get("model").and_then(Value::as_str).unwrap_or(&model).into(),
+                                };
+                            }
+                            for event in events {yield event;}
+                        },
                         Err(error)=>{failure=Some(error);break;}
                     }
                 }
@@ -87,6 +89,8 @@ struct Projection {
     calls: BTreeMap<u32, Call>,
     order: Vec<u32>,
     retained: usize,
+    response_id: Option<String>,
+    model: Option<String>,
 }
 impl Projection {
     fn event(&mut self, value: &Value) -> Result<Vec<Event>, ProviderError> {
@@ -107,6 +111,23 @@ impl Projection {
                 "request_id",
             ],
         )?;
+        for (key, previous) in [("id", &mut self.response_id), ("model", &mut self.model)] {
+            if value.get(key).is_some_and(|v| !v.is_null()) {
+                let incoming = id(value, key)?;
+                if let Some(previous) = previous {
+                    if previous != incoming {
+                        return Err(invalid());
+                    }
+                } else {
+                    let retained = self.retained.saturating_add(incoming.len());
+                    if retained > crate::MAX_STREAM_LINE_BYTES {
+                        return Err(invalid());
+                    }
+                    *previous = Some(incoming.to_owned());
+                    self.retained = retained;
+                }
+            }
+        }
         let choices = array(value, "choices")?;
         if choices.is_empty() {
             return if value.get("usage").is_some_and(|usage| usage.is_object()) {
@@ -181,34 +202,52 @@ impl Projection {
                     .and_then(Value::as_u64)
                     .and_then(|i| u32::try_from(i).ok())
                     .ok_or_else(invalid)?;
-                if !self.calls.contains_key(&index) {
-                    if self.calls.len() >= 1024 {
-                        return Err(invalid());
-                    }
-                    self.order.push(index);
-                }
-                let target = self.calls.entry(index).or_default();
-                if let Some(id) = optional_text(call, "id")? {
-                    self.retained = self.retained.saturating_add(id.len());
-                    target.id.push_str(&id);
-                }
-                if let Some(function) = call.get("function").filter(|v| !v.is_null()) {
-                    fields(function, &["name", "arguments"])?;
-                    if let Some(name) = optional_text(function, "name")? {
-                        self.retained = self.retained.saturating_add(name.len());
-                        target.name.push_str(&name);
-                    }
-                    if let Some(args) = optional_text(function, "arguments")? {
-                        self.retained = self.retained.saturating_add(args.len());
-                        target.arguments.push_str(&args);
-                    }
-                }
-                if self.retained > crate::MAX_STREAM_LINE_BYTES
-                    || target.id.len() > 256
-                    || target.name.len() > 256
+                let id = optional_text(call, "id")?;
+                let (name, arguments) =
+                    if let Some(function) = call.get("function").filter(|v| !v.is_null()) {
+                        fields(function, &["name", "arguments"])?;
+                        (
+                            optional_text(function, "name")?,
+                            optional_text(function, "arguments")?,
+                        )
+                    } else {
+                        (None, None)
+                    };
+                let retained = self
+                    .retained
+                    .saturating_add(id.as_ref().map_or(0, String::len))
+                    .saturating_add(name.as_ref().map_or(0, String::len))
+                    .saturating_add(arguments.as_ref().map_or(0, String::len));
+                let previous = self.calls.get(&index);
+                if retained > crate::MAX_STREAM_LINE_BYTES
+                    || previous
+                        .map_or(0, |c| c.id.len())
+                        .saturating_add(id.as_ref().map_or(0, String::len))
+                        > 256
+                    || previous
+                        .map_or(0, |c| c.name.len())
+                        .saturating_add(name.as_ref().map_or(0, String::len))
+                        > 256
+                    || (previous.is_none() && self.calls.len() >= 1024)
                 {
                     return Err(invalid());
                 }
+                // Refuse BEFORE appending. The bounded assembly remains held
+                // while the same source drains after projection failure.
+                if previous.is_none() {
+                    self.order.push(index);
+                }
+                let target = self.calls.entry(index).or_default();
+                if let Some(id) = id {
+                    target.id.push_str(&id);
+                }
+                if let Some(name) = name {
+                    target.name.push_str(&name);
+                }
+                if let Some(arguments) = arguments {
+                    target.arguments.push_str(&arguments);
+                }
+                self.retained = retained;
             }
         }
         if choice.get("finish_reason").is_some_and(|v| !v.is_null()) {
@@ -359,6 +398,31 @@ mod tests {
             ..Projection::default()
         };
         assert!(state.event(&chunk(json!({"tool_calls":[{"index":0,"id":"c","function":{"name":"f","arguments":"{}"}}]}),Value::Null)).is_err());
+    }
+
+    #[test]
+    fn rejected_fragment_is_not_retained_while_source_drains() {
+        let mut state = Projection::default();
+        let args = "x".repeat(7 * 1024 * 1024);
+        state.event(&chunk(json!({"tool_calls":[{"index":0,"id":"c","function":{"name":"f","arguments":args}}]}),Value::Null)).unwrap();
+        let retained = state.retained;
+        assert!(state
+            .event(&chunk(
+                json!({"tool_calls":[{"index":0,"function":{"arguments":args}}]}),
+                Value::Null
+            ))
+            .is_err());
+        assert_eq!(state.retained, retained);
+        assert_eq!(state.calls[&0].arguments.len(), args.len());
+        let invalid_id = "x".repeat(257);
+        assert!(state
+            .event(&chunk(
+                json!({"tool_calls":[{"index":1,"id":invalid_id}]}),
+                Value::Null
+            ))
+            .is_err());
+        assert_eq!(state.calls.len(), 1);
+        assert_eq!(state.order, vec![0]);
     }
 
     #[tokio::test]

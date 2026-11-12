@@ -62,7 +62,10 @@ qualification. Independent review of `f7cd6bf` against `4443ed8` found no action
 issues and independently passed 17 archived-source gateway cases, including
 mixed-header/two-key precedence and zero-inference discovery. Formatting, strict
 documentation, generated bindings and six public-runner policy tests passed.
-The refreshed checkpoint still requires its own public CI before merge.
+The refreshed checkpoint's public SDK/dashboard, coverage, packaging and docs
+passed. Its Rust SentinelPass job reproduced an admission `wait_timeout`, so the
+aggregate merge gate failed. The [public failure report](public-ci-admission-timeout-2026-11-12.md)
+retains evidence and limits; no blind retry or deadline increase was used.
 
 The full suite uses the CI-pinned InferFlux source
 `bfdf32c00ccf40c7af73b86df2eedabc20a7ae85` and llama.cpp submodule

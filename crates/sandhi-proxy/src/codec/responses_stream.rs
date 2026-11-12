@@ -217,6 +217,11 @@ impl Encoder {
                 if self.started {
                     return Err("duplicate Responses stream start");
                 }
+                self.retain(
+                    id.as_ref()
+                        .map_or(0, String::len)
+                        .saturating_add(model.len()),
+                )?;
                 self.started = true;
                 if let Some(id) = id {
                     self.response_id = id.clone();
@@ -467,5 +472,24 @@ mod tests {
                 None
             )
             .is_err());
+    }
+
+    #[test]
+    fn start_metadata_shares_the_retained_budget_before_it_is_cloned() {
+        let mut encoder = Encoder::new();
+        encoder.retained = MAX_NATIVE_STREAM_FRAME_BYTES - 3;
+        let initial_id = encoder.response_id.clone();
+        assert!(encoder
+            .encode(
+                &Event::ResponseStart {
+                    id: Some("id".into()),
+                    model: "model".into()
+                },
+                None
+            )
+            .is_err());
+        assert!(!encoder.started);
+        assert_eq!(encoder.response_id, initial_id);
+        assert!(encoder.model.is_empty());
     }
 }

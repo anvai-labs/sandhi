@@ -1611,3 +1611,20 @@ Focused current-SDK stream accumulation and strict schema checks pass six cases
 after adding the missing Responses usage total. Full frozen-source checks,
 independent review and public CI remain checkpoint gates. Opaque interim
 Responses-source validation and the retained accounting-wait failures stay open.
+
+Independent review rejected `ddceb70` for three P2 findings: Chat identity/model
+drift merged successful output, a rejected fragment remained above its retention
+limit while draining, and Responses start metadata bypassed retention accounting.
+Fixes fence present identities and preflight storage before mutation. Additional
+actual HTTP and SDK refusal/receipt tests cover drift; direct retention tests
+verify rejected fragments and metadata are not stored. The rejected tip received
+no clean record; the resulting exact tip requires independent re-review.
+
+The SDK checkpoint's public SDK/dashboard, coverage, packaging and docs passed,
+but the SentinelPass Rust job reproduced an admission `wait_timeout` in
+`messages_implicit/gemini/malformed` (502 versus 200). Twelve jobs succeeded and
+the aggregate gate failed. All fourteen actual runner labels were public; no
+blind retry or deadline increase was used. The
+[public failure report](../reviews/public-ci-admission-timeout-2026-11-12.md)
+retains structural evidence without inventing origin/receipt joins. This is an
+additional reliability observation, not proof of the earlier local failures' cause.

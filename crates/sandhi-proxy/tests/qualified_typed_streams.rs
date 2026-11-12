@@ -1179,6 +1179,8 @@ async fn chat_native_output_or_portable_projection_keeps_source_counts_and_both_
             "invalid_args",
             "duplicate_ids",
             "after_tool",
+            "id_drift",
+            "model_drift",
         ] {
             let mut delta = json!({"role":"assistant","content":"reply"});
             match scenario {
@@ -1214,6 +1216,15 @@ async fn chat_native_output_or_portable_projection_keeps_source_counts_and_both_
                     .as_array_mut()
                     .unwrap()
                     .push(json!({"index":1,"delta":{"content":"other"},"finish_reason":"stop"}));
+            }
+            if matches!(scenario, "id_drift" | "model_drift") {
+                let mut next = json!({"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"other"},"finish_reason":null}]});
+                next[if scenario == "id_drift" {
+                    "id"
+                } else {
+                    "model"
+                }] = "different".into();
+                values.push(next);
             }
             if scenario == "after_tool" {
                 values.push(json!({"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"late prose"},"finish_reason":null}]}));

@@ -40,6 +40,12 @@ fn frames(mode: &str) -> Vec<Value> {
         }
         finish = "tool_calls";
     }
+    if matches!(mode, "id_drift" | "model_drift") {
+        let mut next =
+            json!({"choices":[{"index":0,"delta":{"content":"other"},"finish_reason":null}]});
+        next[if mode == "id_drift" { "id" } else { "model" }] = "different".into();
+        values.push(next);
+    }
     if mode == "after_tool" {
         values.push(
             json!({"choices":[{"index":0,"delta":{"content":"late prose"},"finish_reason":null}]}),
@@ -76,6 +82,8 @@ async fn chat_native_or_portable_projection_joins_one_http_attempt_and_final_sou
         "duplicate_ids",
         "multiple",
         "after_tool",
+        "id_drift",
+        "model_drift",
     ] {
         for native in [false, true] {
             let values = frames(mode);

@@ -32,7 +32,8 @@ flowchart LR
 | Known content-filter terminal | Preserve filtering in Chat/Responses/Gemini; explicitly refuse Messages |
 
 Tool assembly retains at most 1,024 calls and eight MiB, with 256-byte identity
-bounds. Invalid JSON, conflicting reasoning aliases, duplicate IDs, late deltas
+bounds. Present response IDs/models must stay consistent and fit the same
+256-byte identity bound. Invalid JSON, conflicting reasoning aliases, duplicate IDs, late deltas
 and unsupported finish reasons refuse explicitly. A projection failure drains the
 same source within its existing bounds and deadlines before returning the error.
 This permits final source counters to survive an output refusal. A transport or
@@ -87,3 +88,13 @@ presentation now includes the saturating sum of inclusive input and output.
 This does not qualify live Google, subscription credentials, media conversion or
 opaque interim Responses/Codex state. The two retained accounting-wait stress
 failures remain unresolved; passing these tests does not establish their cause.
+
+Independent review rejected `ddceb70` for three P2 findings: changing Chat IDs or
+models could merge into one successful output; tool fragments were appended
+before checking retention and remained oversized during draining; Responses
+start metadata was outside its retention counter. The fixes reject identity drift,
+check fragment bounds before mutation and count start metadata before cloning.
+Actual HTTP drift cases and committed-method retention regressions cover these
+findings. The rejected tip received no clean review record. The source observer's
+broader Chat identity policy is not changed; this portable decoder refuses the
+contradictory output while retaining physical source usage evidence.
