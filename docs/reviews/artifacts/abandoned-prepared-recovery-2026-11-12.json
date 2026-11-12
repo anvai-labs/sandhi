@@ -1,0 +1,227 @@
+{
+  "schema_version": 1,
+  "evidence_kind": "synthetic_controlled_http_and_sqlite_regression",
+  "baseline_runtime_commit": "09f1996c5bfec2e0c5f43e46062a381292e02ad9",
+  "baseline_test_changes": "New paired-admission regression only; production recovery unchanged.",
+  "before_fix": {
+    "test": "abandoned_prepared_owner_closes_original_pair_and_releases_job_capacity",
+    "boundary": "queued",
+    "retained_jobs": 1,
+    "held_reservations": 2,
+    "physical_attempts": 0,
+    "usage_observations": 0,
+    "provider_receipts": 0,
+    "log_sha256": "d945397076656b3fa6ad6a4c3c0f247a07e8cc7384952d9d4f70ce38d01339ea"
+  },
+  "passing_http": {
+    "command": "cargo test -p sandhi-proxy --test proxy late_admission_after_http_timeout_recovers_the_original_pair_without_inference -- --nocapture",
+    "test_file_sha256": "2cd2044843e7d5c735c24785f6f3c7cfb54bbf8577faf7ebea59ebcbca2dbe59",
+    "log_sha256": "0d176916b2d2bfc0ec2f0eb2822a4d98d1bf0f0613dd78f15c0d3bc448b995b7",
+    "accounting_wait_ms": 2000,
+    "controlled_cause": "The only blocking worker is occupied until the HTTP admission wait times out.",
+    "timing_stage": "queued",
+    "http_requests": 8,
+    "origin_inferences": 4,
+    "closed_pairs_without_usage": 4,
+    "measured_pairs": 4,
+    "provider_receipts": 4,
+    "charged_units_per_client_scope": 48,
+    "charged_units_per_upstream_scope": 48,
+    "cells": [
+      {
+        "failed_request_id": "req_1794486744270_0",
+        "fresh_request_id": "req_1794486746284_1",
+        "origin_calls": 1,
+        "route": "/v1/chat/completions",
+        "rows": [
+          {
+            "attempt_id": null,
+            "charged_tokens": null,
+            "execution_id": "0d236ce5dabb2dd310a48eb36e240ab8ef0eb4a93939ed4aeb294cb3ab9e8430",
+            "phase": 2,
+            "primary_actual": 0,
+            "primary_reservation": 1,
+            "primary_settled": 1,
+            "receipt_id": null,
+            "request_id": "req_1794486744270_0",
+            "upstream_actual": 0,
+            "upstream_reservation": 2,
+            "upstream_settled": 1
+          },
+          {
+            "attempt_id": "716cb3978e5903dc29427ae3dabeea15389e0ffb0a5c231fdca223343fe26a8b",
+            "charged_tokens": 12,
+            "execution_id": "bcbf967a73ebb0560cbae1f9349f9b9dd7d7a2c23ee7564f769405b68f2004a8",
+            "phase": 1,
+            "primary_actual": 12,
+            "primary_reservation": 3,
+            "primary_settled": 1,
+            "receipt_id": "eefc889425028b16dbff6dc3be53ff803ebee3e7fff995b2e63ab3e03dbea5fd",
+            "request_id": "req_1794486746284_1",
+            "upstream_actual": 12,
+            "upstream_reservation": 4,
+            "upstream_settled": 1
+          }
+        ],
+        "schema_version": 1,
+        "usage_event": {
+          "cache_read_observation": {
+            "source": "origin_usage",
+            "status": "absent"
+          },
+          "completeness": "final",
+          "request_id": "req_1794486746284_1",
+          "tokens_in": 10,
+          "tokens_out": 2
+        }
+      },
+      {
+        "failed_request_id": "req_1794486746456_2",
+        "fresh_request_id": "req_1794486748468_3",
+        "origin_calls": 1,
+        "route": "/v1/messages",
+        "rows": [
+          {
+            "attempt_id": null,
+            "charged_tokens": null,
+            "execution_id": "d2c81ac13b2518065e98608f06c15f6554aa8658f3b7f2b95bb13ae4626b337c",
+            "phase": 2,
+            "primary_actual": 0,
+            "primary_reservation": 1,
+            "primary_settled": 1,
+            "receipt_id": null,
+            "request_id": "req_1794486746456_2",
+            "upstream_actual": 0,
+            "upstream_reservation": 2,
+            "upstream_settled": 1
+          },
+          {
+            "attempt_id": "27f3c2b53ba9c67845b034518a2d28435a54102a593ea75c9119d7481d577b8e",
+            "charged_tokens": 12,
+            "execution_id": "6161953c455335e3bf9ae354004ff118d522759ce78c1d395a5e5d4fde43b32a",
+            "phase": 1,
+            "primary_actual": 12,
+            "primary_reservation": 3,
+            "primary_settled": 1,
+            "receipt_id": "51e8571d0704648e3c1fbc509eb8d6c55d5caa7833d70da151dc11009140a6a8",
+            "request_id": "req_1794486748468_3",
+            "upstream_actual": 12,
+            "upstream_reservation": 4,
+            "upstream_settled": 1
+          }
+        ],
+        "schema_version": 1,
+        "usage_event": {
+          "cache_read_observation": {
+            "source": "origin_usage",
+            "status": "absent"
+          },
+          "completeness": "final",
+          "request_id": "req_1794486748468_3",
+          "tokens_in": 10,
+          "tokens_out": 2
+        }
+      },
+      {
+        "failed_request_id": "req_1794486748633_4",
+        "fresh_request_id": "req_1794486750647_5",
+        "origin_calls": 1,
+        "route": "/v1/responses",
+        "rows": [
+          {
+            "attempt_id": null,
+            "charged_tokens": null,
+            "execution_id": "12f34908e56dff1820fa24b1c33bc654bb32703b17f8f45eecb658362b363b56",
+            "phase": 2,
+            "primary_actual": 0,
+            "primary_reservation": 1,
+            "primary_settled": 1,
+            "receipt_id": null,
+            "request_id": "req_1794486748633_4",
+            "upstream_actual": 0,
+            "upstream_reservation": 2,
+            "upstream_settled": 1
+          },
+          {
+            "attempt_id": "84d9cdb5b102690863ee18e419a9b5186b3a5ad7c39366d98331428227f899f2",
+            "charged_tokens": 12,
+            "execution_id": "ad17bfff5f58e6ea0f56c9d5a382efde0cfd1e799f748fa84a6465b2f21ceee0",
+            "phase": 1,
+            "primary_actual": 12,
+            "primary_reservation": 3,
+            "primary_settled": 1,
+            "receipt_id": "d383753f49f3f2fc3ba8785dffaefa73943497cce4a24d6548431d97795836e3",
+            "request_id": "req_1794486750647_5",
+            "upstream_actual": 12,
+            "upstream_reservation": 4,
+            "upstream_settled": 1
+          }
+        ],
+        "schema_version": 1,
+        "usage_event": {
+          "cache_read_observation": {
+            "source": "origin_usage",
+            "status": "absent"
+          },
+          "completeness": "final",
+          "request_id": "req_1794486750647_5",
+          "tokens_in": 10,
+          "tokens_out": 2
+        }
+      },
+      {
+        "failed_request_id": "req_1794486750817_6",
+        "fresh_request_id": "req_1794486752829_7",
+        "origin_calls": 1,
+        "route": "/v1/models/gpt-4o-mini:generateContent",
+        "rows": [
+          {
+            "attempt_id": null,
+            "charged_tokens": null,
+            "execution_id": "2a780e8eb576b95fdb3be810a14bd26387c4acfa047b75c4fa47f5b2ed656c54",
+            "phase": 2,
+            "primary_actual": 0,
+            "primary_reservation": 1,
+            "primary_settled": 1,
+            "receipt_id": null,
+            "request_id": "req_1794486750817_6",
+            "upstream_actual": 0,
+            "upstream_reservation": 2,
+            "upstream_settled": 1
+          },
+          {
+            "attempt_id": "e59a10072c68850a96d80da7e2606a9fa25a7a2a2918a321e0c79f7349b1b610",
+            "charged_tokens": 12,
+            "execution_id": "e4a5420d60a1ce91b66273d2c035b9010c977bfaf4770945dcdb09df52f4aea8",
+            "phase": 1,
+            "primary_actual": 12,
+            "primary_reservation": 3,
+            "primary_settled": 1,
+            "receipt_id": "ead8dd9dc5eee0a5d95259a36b4af0f61cd0a307afae4465fad13bf3d5d3564a",
+            "request_id": "req_1794486752829_7",
+            "upstream_actual": 12,
+            "upstream_reservation": 4,
+            "upstream_settled": 1
+          }
+        ],
+        "schema_version": 1,
+        "usage_event": {
+          "cache_read_observation": {
+            "source": "origin_usage",
+            "status": "absent"
+          },
+          "completeness": "final",
+          "request_id": "req_1794486752829_7",
+          "tokens_in": 10,
+          "tokens_out": 2
+        }
+      }
+    ]
+  },
+  "limits": [
+    "Controlled blocking-pool stall; does not identify the cause of retained spontaneous local/public timeouts.",
+    "In-process HTTP ingress and actual mock-origin HTTP; no provider account or live cache/subscription qualification.",
+    "Pre-dispatch closure is separate durable evidence; no provider-usage receipt is invented.",
+    "Unknown admission/authorization and MayHaveDispatched liability remain held."
+  ]
+}

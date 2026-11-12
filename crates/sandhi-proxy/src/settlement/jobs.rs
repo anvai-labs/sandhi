@@ -639,10 +639,11 @@ pub struct DrainReport {
     pub timed_out: bool,
 }
 impl Jobs {
-    /// Reconcile one abandoned terminal snapshot on the original ledger. The
-    /// registry slot remains owned until canonical settlement confirms completion.
+    /// Reconcile one abandoned terminal snapshot or known Prepared owner on its
+    /// original ledger. Only the store's pre-dispatch CAS can close Prepared;
+    /// uncertain authorization/admission never supplies a close owner here.
     /// Cursor advances past uncertainty; no authorization or inference is repeated.
-    pub(crate) fn retry_terminal(&self, after: &mut Option<u64>) {
+    pub(crate) fn retry_retained(&self, after: &mut Option<u64>) {
         let candidate = {
             let mut state = self.inner.lock();
             let candidate = state
@@ -665,7 +666,21 @@ impl Jobs {
             }
             let work = match slot.snapshot.as_ref() {
                 Some(Input::Work(Work::Settle(p))) => Some(Work::Settle(p.snapshot())),
+                Some(Input::Work(Work::Close(p))) => Some(Work::Close(PendingDispatch::new(
+                    p.request_id.clone(),
+                    p.intent.clone(),
+                ))),
                 _ => match slot.outcome.as_ref() {
+                    // A generic admission ticket has no HTTP Obligation and
+                    // stays Phase::Empty. Preserve its explicit collection API.
+                    Some(ResultValue::Admission(AdmissionOutcome::Prepared(p)))
+                        if matches!(slot.phase, Phase::Admitting | Phase::Prepared) =>
+                    {
+                        Some(Work::Close(PendingDispatch::new(
+                            p.request_id.clone(),
+                            p.intent.clone(),
+                        )))
+                    }
                     Some(ResultValue::Work(Outcome::Settlement(Attempt::Unresolved {
                         pending,
                         ..
@@ -673,6 +688,15 @@ impl Jobs {
                     Some(ResultValue::Work(Outcome::Interrupted(Work::Settle(p)))) => {
                         Some(Work::Settle(p.snapshot()))
                     }
+                    Some(ResultValue::Work(Outcome::Interrupted(Work::Close(p)))) => Some(
+                        Work::Close(PendingDispatch::new(p.request_id.clone(), p.intent.clone())),
+                    ),
+                    Some(ResultValue::Work(Outcome::Dispatch(DispatchAttempt::Unresolved {
+                        pending: p,
+                        ..
+                    }))) if slot.phase == Phase::Closing => Some(Work::Close(
+                        PendingDispatch::new(p.request_id.clone(), p.intent.clone()),
+                    )),
                     _ => None,
                 },
             };
@@ -683,6 +707,9 @@ impl Jobs {
                 return;
             };
             slot.epoch = epoch;
+            if matches!(&work, Work::Close(_)) {
+                slot.phase = Phase::Closing;
+            }
             slot.running = true;
             slot.snapshot = Some(Input::Work(work.snapshot()));
             slot.outcome = None;
@@ -1311,22 +1338,326 @@ mod tests {
         drop(obligation);
         assert_eq!(jobs.retained(), 1);
         let mut cursor = None;
-        jobs.retry_terminal(&mut cursor);
+        jobs.retry_retained(&mut cursor);
         assert_eq!(jobs.retained(), 0);
     }
 
     async fn prepared_obligation() -> (tempfile::TempDir, Jobs, Obligation, PendingDispatch) {
+        obligation_for(admission()).await
+    }
+    async fn obligation_for(
+        input: PreparedAdmission,
+    ) -> (tempfile::TempDir, Jobs, Obligation, PendingDispatch) {
         let dir = tempfile::tempdir().unwrap();
         let ledger =
             ProxyLedger::durable(dir.path().join("owned.db").to_str().unwrap(), 1).unwrap();
         let jobs = Jobs::new(Arc::new(Mutex::new(ledger)), Arc::new(Lifecycle::new()), 1);
         let mut obligation = jobs.obligation().unwrap();
-        let ticket = obligation.admit(admission()).unwrap();
+        let ticket = obligation.admit(input).unwrap();
         ticket.wait().await;
         let Some(AdmissionOutcome::Prepared(pending)) = ticket.take() else {
             panic!("durable admission")
         };
         (dir, jobs, obligation, pending)
+    }
+
+    fn paired_admission() -> PreparedAdmission {
+        let context=serde_json::from_value(serde_json::json!({"version":1,"ingress":"openai_chat_completions","delivery":"buffered","plane":"transparent",
+            "upstream_ref":"openai:default","upstream_budget_scope":"upstream:models","requested_model":"model","actual_model":"model","provider":"models",
+            "endpoint_family":"openai_chat_completions","transport_binding_sha256":"a".repeat(64),"accounting_policy":{"version":1,"cache_read_weight":1000}})).unwrap();
+        admission().with_context(context).unwrap()
+    }
+
+    #[test]
+    fn abandoned_prepared_owner_closes_original_pair_and_releases_job_capacity() {
+        for boundary in ["queued", "published", "taken"] {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .max_blocking_threads(1)
+                .enable_all()
+                .build()
+                .unwrap();
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let blocker = runtime.spawn_blocking(move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+            started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            runtime.block_on(async {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("abandoned.db");
+                let ledger = Arc::new(Mutex::new(
+                    ProxyLedger::durable(path.to_str().unwrap(), 1).unwrap(),
+                ));
+                let lifecycle = Arc::new(Lifecycle::new());
+                let jobs = Jobs::new(ledger.clone(), lifecycle.clone(), 1);
+                let mut owner = Some(jobs.obligation().unwrap());
+                let ticket = owner.as_mut().unwrap().admit(paired_admission()).unwrap();
+                if boundary == "queued" {
+                    assert!(tokio::time::timeout(Duration::ZERO, ticket.wait())
+                        .await
+                        .is_err());
+                    drop(owner.take());
+                }
+                release_tx.send(()).unwrap();
+                blocker.await.unwrap();
+                ticket.wait().await;
+                let original = {
+                    let registry = jobs.inner.lock();
+                    let Some(ResultValue::Admission(AdmissionOutcome::Prepared(pending))) =
+                        registry.slots[&ticket.ticket.id].outcome.as_ref()
+                    else {
+                        panic!("committed admission")
+                    };
+                    pending.intent.clone()
+                };
+                if boundary == "taken" {
+                    assert!(matches!(ticket.take(), Some(AdmissionOutcome::Prepared(_))));
+                }
+                drop(owner.take());
+                lifecycle.wait_idle().await;
+                assert_eq!(jobs.retained(), 1);
+                let connection = rusqlite::Connection::open(&path).unwrap();
+                assert_eq!(
+                    connection
+                        .query_row(
+                            "SELECT count(*) FROM budget_reservation WHERE settled=0",
+                            [],
+                            |r| r.get::<_, i64>(0)
+                        )
+                        .unwrap(),
+                    2
+                );
+                for table in ["budget_physical_attempt","budget_terminal_observation","budget_settlement_outbox"] {
+                    assert_eq!(connection.query_row(&format!("SELECT count(*) FROM {table}"),[],|r|r.get::<_,i64>(0)).unwrap(),0);
+                }
+                let mut cursor = None;
+                jobs.retry_retained(&mut cursor);
+                assert_eq!(jobs.retained(), 0, "abandoned boundary {boundary}; prior durable state: two held reservations, zero physical attempts, zero usage observations, zero receipts");
+                assert_eq!(
+                    connection
+                        .query_row(
+                            "SELECT count(*) FROM budget_reservation WHERE settled=1 AND actual=0",
+                            [],
+                            |r| r.get::<_, i64>(0)
+                        )
+                        .unwrap(),
+                    2
+                );
+                assert_eq!(
+                    connection
+                        .query_row("SELECT count(*) FROM budget_execution_intent", [], |r| r
+                            .get::<_, i64>(0))
+                        .unwrap(),
+                    1
+                );
+                for table in [
+                    "budget_physical_attempt",
+                    "budget_terminal_observation",
+                    "budget_settlement_outbox",
+                ] {
+                    assert_eq!(
+                        connection
+                            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r
+                                .get::<_, i64>(0))
+                            .unwrap(),
+                        0
+                    );
+                }
+                assert!(matches!(
+                    PendingDispatch::new("admission".into(), original).try_authorize(&ledger),
+                    DispatchAttempt::Closed { .. }
+                ));
+                assert!(ticket.take().is_none());
+                assert!(jobs.obligation().is_ok());
+            });
+        }
+    }
+
+    #[tokio::test]
+    async fn abandoned_prepared_close_retries_storage_failure_or_corruption_without_releasing_early(
+    ) {
+        for corrupt in [false, true] {
+            let (dir, jobs, owner, pending) = obligation_for(paired_admission()).await;
+            drop(pending);
+            drop(owner);
+            let connection = rusqlite::Connection::open(dir.path().join("owned.db")).unwrap();
+            let original_back: (String, i64) = connection
+                .query_row(
+                    "SELECT execution_id,reservation_id FROM budget_execution_back_leg",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            if corrupt {
+                connection
+                    .execute("DELETE FROM budget_execution_back_leg", [])
+                    .unwrap();
+            } else {
+                connection.execute_batch("CREATE TRIGGER fail_close BEFORE UPDATE ON budget_reservation BEGIN SELECT RAISE(ABORT,'fixture'); END").unwrap();
+            }
+            let mut cursor = None;
+            jobs.retry_retained(&mut cursor);
+            assert_eq!(jobs.retained(), 1);
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT count(*) FROM budget_reservation WHERE settled=0",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                2
+            );
+            if corrupt {
+                connection.execute("INSERT INTO budget_execution_back_leg(execution_id,version,reservation_id) VALUES (?1,1,?2)",rusqlite::params![original_back.0,original_back.1]).unwrap();
+            } else {
+                connection.execute_batch("DROP TRIGGER fail_close").unwrap();
+            }
+            for _ in 0..4 {
+                jobs.retry_retained(&mut cursor);
+            }
+            assert_eq!(jobs.retained(), 0);
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT count(*) FROM budget_reservation WHERE settled=1 AND actual=0",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                2
+            );
+            assert_eq!(
+                connection
+                    .query_row("SELECT count(*) FROM budget_settlement_outbox", [], |r| r
+                        .get::<_, i64>(
+                        0
+                    ))
+                    .unwrap(),
+                0
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn abandoned_authorization_or_competing_authorization_cannot_be_closed_as_prepared() {
+        for submitted in [false, true] {
+            let (dir, jobs, mut owner, pending) = obligation_for(paired_admission()).await;
+            let LedgerAccess::Shared(ledger) = &jobs.ledger else {
+                panic!("fixture")
+            };
+            if submitted {
+                let ticket = owner.submit(Work::Authorize(pending)).unwrap();
+                ticket.wait().await;
+                // The permit remains unclaimed; the durable fence is still
+                // MayHaveDispatched, even though this test performs no inference.
+                drop(ticket);
+            } else {
+                assert!(matches!(
+                    PendingDispatch::new(pending.request_id.clone(), pending.intent.clone())
+                        .try_authorize(ledger),
+                    DispatchAttempt::Authorized(_)
+                ));
+                drop(pending);
+            }
+            drop(owner);
+            jobs.inner.lifecycle.wait_idle().await;
+            let mut cursor = None;
+            for _ in 0..4 {
+                jobs.retry_retained(&mut cursor);
+            }
+            assert_eq!(jobs.retained(), 1);
+            let connection = rusqlite::Connection::open(dir.path().join("owned.db")).unwrap();
+            assert_eq!(
+                connection
+                    .query_row("SELECT phase FROM budget_dispatch_fence", [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT count(*) FROM budget_reservation WHERE settled=0",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                2
+            );
+            assert_eq!(
+                connection
+                    .query_row("SELECT count(*) FROM budget_physical_attempt", [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                connection
+                    .query_row("SELECT count(*) FROM budget_settlement_outbox", [], |r| r
+                        .get::<_, i64>(
+                        0
+                    ))
+                    .unwrap(),
+                0
+            );
+            assert!(matches!(jobs.obligation(), Err(Refusal::Full)));
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_preserves_generic_collection_and_unknown_admission_commit() {
+        for interrupted in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let jobs = Jobs::new(
+                Arc::new(Mutex::new(
+                    ProxyLedger::durable(dir.path().join("generic.db").to_str().unwrap(), 1)
+                        .unwrap(),
+                )),
+                Arc::new(Lifecycle::new()),
+                1,
+            );
+            let ticket = if interrupted {
+                jobs.after_admission_commit(paired_admission(), || {
+                    panic!("injected publication loss")
+                })
+                .unwrap()
+            } else {
+                jobs.submit_admission(paired_admission()).unwrap()
+            };
+            ticket.wait().await;
+            jobs.inner.lifecycle.wait_idle().await;
+            let mut cursor = None;
+            for _ in 0..4 {
+                jobs.retry_retained(&mut cursor);
+            }
+            assert_eq!(jobs.retained(), 1);
+            let connection = rusqlite::Connection::open(dir.path().join("generic.db")).unwrap();
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT count(*) FROM budget_reservation WHERE settled=0",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                2
+            );
+            assert_eq!(
+                connection
+                    .query_row("SELECT phase FROM budget_dispatch_fence", [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            let outcome = ticket.take();
+            if interrupted {
+                assert!(matches!(outcome, Some(AdmissionOutcome::Interrupted(_))));
+            } else {
+                assert!(matches!(outcome, Some(AdmissionOutcome::Prepared(_))));
+            }
+        }
     }
 
     #[allow(clippy::await_holding_lock)] // Synchronize after real lock contention, never by timing alone.

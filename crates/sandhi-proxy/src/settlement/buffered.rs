@@ -478,7 +478,7 @@ async fn recover_inner(state: Arc<ProxyState>, shutdown: bool) -> Result<usize, 
             {
                 break;
             }
-            owner.jobs.retry_terminal(&mut cursor.retained_after);
+            owner.jobs.retry_retained(&mut cursor.retained_after);
             let result = super::with_durable_ledger(&state.ledger, |ledger| {
                 if cursor.current.is_none() {
                     let inventory = ledger.recovery_scopes_durable(cursor.scopes.as_ref(), 1)?;

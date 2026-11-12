@@ -229,9 +229,10 @@ an absent origin ID does not invalidate the gateway/intent/receipt join.
 | Situation | Behavior |
 |---|---|
 | Process survives a storage failure | Retry the retained, immutable terminal snapshot |
+| HTTP admission finishes after its waiter/owner ends | Close an original retained Prepared result through the existing pre-dispatch transaction; both reservations release with separate close proof and no provider usage receipt |
 | Durable final usage survives a restart | Recover settlement through the original ledger |
 | Process dies before terminal persistence | Keep liability unresolved; RAM cannot establish durable evidence |
-| Recovery sweep | Once per second; at most eight batches, 32 execution records and one retained terminal retry per batch |
+| Recovery sweep | Once per second; at most eight batches, 32 execution records and one retained terminal/Prepared-owner recovery per batch |
 | Sweep progress | Advance scope/execution cursors, including unbudgeted and removed-key scopes |
 | Shutdown | Drain workers, then check fresh bounded durable inventory plus retained owners |
 | Unknown rows, incomplete inventory or timeout | Incomplete shutdown, exit 124 |
@@ -240,6 +241,10 @@ The one-second recovery check happens between batches. These are iteration/recor
 bounds, **not a hard SQLite latency bound**. Recovery settles only authoritative
 final usage; unavailable observations stay held. Shutdown keeps the original grace
 deadline and watchdog; a large backlog may need more recovery before shutdown.
+
+[Abandoned Prepared recovery](../adr/0036-abandoned-prepared-recovery.md) requires
+the original committed result or explicit Close work. Unknown commit status and
+`MayHaveDispatched` remain held; missing usage or timings do not authorize release.
 Do not restore older writers over a database containing tracked evidence.
 
 ## Accepted source evidence and remaining gates

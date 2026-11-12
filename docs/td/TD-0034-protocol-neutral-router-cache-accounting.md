@@ -1668,6 +1668,42 @@ This diagnostic increment passes 207 proxy unit tests (19 job tests), all nine
 qualified proxy stream tests under both default and SentinelPass features, and
 eight stock-SDK recovery/preflight cases. Default workspace/all-target Clippy and
 proxy all-target Clippy with ONNX plus SentinelPass pass, as do formatting,
-bindings and strict docs. No accounting wait timed out in these runs. They do not
-identify or resolve the retained failure; independent review and new public CI
-remain publication gates.
+bindings and strict docs. No spontaneous accounting wait timeout reproduced;
+controlled tests deliberately expire their test waiters. Independent exact-tip
+review cleared `09f1996`, and its
+[public CI](https://github.com/anvai-labs/sandhi/actions/runs/43216453342) passed all
+14 jobs with actual GitHub Actions runners on public Ubuntu images. Documentation
+passed. These results do not identify or resolve the retained spontaneous failure.
+
+### Abandoned Prepared-owner recovery
+
+A controlled regression against the published diagnostics checkpoint `09f1996`
+confirmed a separate recovery defect: after an HTTP admission times out and later
+commits, the retained Prepared result holds a job slot and both reservations
+indefinitely. The existing slice only retried terminal settlement. The red test
+observed two held leases and zero attempts, usage observations or receipts.
+
+[ADR 0036](../adr/0036-abandoned-prepared-recovery.md) extends that same bounded
+slice to the original abandoned Prepared result or explicit Close work. The
+existing durable pre-dispatch CAS validates the original intent/paired binding;
+no inferred zero, replacement owner, authorization or inference replay is added.
+Closing phase retains explicit work kind after a storage failure. Generic public
+admission collection, unknown admission and MayHaveDispatched remain conservative.
+
+Three abandonment boundaries, interrupted publication, generic collection,
+unclaimed/competing authorization, failed transaction and missing paired link
+have focused regressions. Four actual HTTP-shaped journeys retain the two-second
+wait, observe queued timing, close only the late original admission, then issue a
+fresh independent request. The sanitized artifact exports eight request/context
+joins, four closure pairs without usage, four origin inferences and four receipts;
+each measured pair settles at 12 neutral units. This repairs stranded capacity;
+the retained spontaneous waits' cause remains unproven. Broader qualification,
+independent review and public CI remain checkpoint gates.
+
+The corrected recovery increment passes the full Rust workspace: 1,187 tests,
+six opt-in ignored, across 50 suites. All 23 accounting job tests and all 128
+tracked-accounting SDK cases pass. Default workspace/all-target and proxy
+ONNX/SentinelPass all-target Clippy pass, along with formatting, generated
+bindings and strict docs. The controlled HTTP artifact retains real database
+joins; its test-source hash matches the compiled test file. Exact-tip independent
+review and this increment's own public CI remain required before merge.

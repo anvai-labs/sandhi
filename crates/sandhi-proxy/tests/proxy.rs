@@ -4402,6 +4402,108 @@ fn owned_state_with_stream_limits(
     state
 }
 
+#[test]
+fn late_admission_after_http_timeout_recovers_the_original_pair_without_inference() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("sandhi_proxy=warn")
+        .try_init();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let requests=[
+            ("/v1/chat/completions",owned_body()),
+            ("/v1/messages",owned_body()),
+            ("/v1/responses",serde_json::json!({"model":"gpt-4o-mini","input":"hi","max_output_tokens":10})),
+            ("/v1/models/gpt-4o-mini:generateContent",serde_json::json!({"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"maxOutputTokens":10}})),
+        ];
+        for (route,body) in requests {
+            let upstream=MockServer::start().await;
+            Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id":"late-fixture","object":"chat.completion","created":1,"model":"gpt-4o-mini",
+                "choices":[{"index":0,"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],
+                "usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}
+            }))).expect(1).mount(&upstream).await;
+            let dir=tempfile::tempdir().unwrap();
+            let path=dir.path().join("late.db");
+            let sink=Arc::new(InMemorySink::new());
+            let state=state_with(upstream.uri(),sink.clone(),ProxyLedger::durable(path.to_str().unwrap(),1).unwrap());
+            sandhi_proxy::settlement::buffered::enable(&state,sandhi_proxy::settlement::buffered::Config::new(1,std::time::Duration::from_secs(2),std::time::Duration::from_secs(2)).unwrap()).unwrap();
+            let (started_tx,started_rx)=tokio::sync::oneshot::channel();
+            let (release_tx,release_rx)=std::sync::mpsc::channel();
+            let blocker=tokio::task::spawn_blocking(move|| {
+                started_tx.send(()).unwrap();
+                let _=release_rx.recv();
+            });
+            started_rx.await.unwrap();
+            let response=tokio::time::timeout(std::time::Duration::from_secs(5),build_app(state.clone()).oneshot(owned_request(route,body.clone()))).await;
+            // Release the controlled stall before any assertion can unwind.
+            release_tx.send(()).unwrap();
+            blocker.await.unwrap();
+            let response=response.expect("bounded HTTP wait").unwrap();
+            assert_eq!(response.status(),StatusCode::BAD_GATEWAY,"{route}");
+            assert_eq!(response.headers()["x-should-retry"],"false");
+            let failed_request=response.headers()["x-sandhi-request-id"].to_str().unwrap().to_owned();
+            let error=axum::body::to_bytes(response.into_body(),100_000).await.unwrap();
+            assert!(String::from_utf8_lossy(&error).contains("accounting unresolved"));
+            assert!(upstream.received_requests().await.unwrap().is_empty());
+            assert!(sink.events().is_empty());
+            tokio::time::timeout(std::time::Duration::from_secs(5),async {
+                loop {
+                    sandhi_proxy::settlement::buffered::recover(state.clone()).await.unwrap();
+                    if sandhi_proxy::settlement::buffered::retained(&state)==0 {break;}
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("original Prepared owner recovers");
+            let connection=rusqlite::Connection::open(&path).unwrap();
+            assert_eq!(connection.query_row("SELECT count(*) FROM budget_execution_intent",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+            assert_eq!(connection.query_row("SELECT count(*) FROM budget_reservation WHERE settled=1 AND actual=0",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+            assert_eq!(connection.query_row("SELECT r.request_id FROM budget_request_correlation r JOIN budget_execution_context c USING(execution_id)",[],|r|r.get::<_,String>(0)).unwrap(),failed_request);
+            assert_eq!(connection.query_row("SELECT phase FROM budget_dispatch_fence",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+            for table in ["budget_physical_attempt","budget_terminal_observation","budget_settlement_outbox"] {
+                assert_eq!(connection.query_row(&format!("SELECT count(*) FROM {table}"),[],|r|r.get::<_,i64>(0)).unwrap(),0);
+            }
+            let response=build_app(state.clone()).oneshot(owned_request(route,body)).await.unwrap();
+            assert_eq!(response.status(),StatusCode::OK,"fresh independent request {route}");
+            let fresh_request=response.headers()["x-sandhi-request-id"].to_str().unwrap().to_owned();
+            let delivered=axum::body::to_bytes(response.into_body(),100_000).await.unwrap();
+            assert!(String::from_utf8_lossy(&delivered).contains("done"));
+            assert_eq!(upstream.received_requests().await.unwrap().len(),1);
+            assert_eq!(sink.events().len(),1);
+            assert_eq!(connection.query_row("SELECT count(*) FROM budget_reservation WHERE settled=1 AND actual=12",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+            assert_eq!(connection.query_row("SELECT charged_tokens FROM budget_settlement_outbox",[],|r|r.get::<_,i64>(0)).unwrap(),12);
+            let mut query=connection.prepare("SELECT i.execution_id,c.request_id,f.phase,i.reservation_id,b.reservation_id,p.actual,u.actual,p.settled,u.settled,o.receipt_id,o.charged_tokens,a.attempt_id
+                FROM budget_execution_intent i JOIN budget_request_correlation c USING(execution_id)
+                JOIN budget_dispatch_fence f USING(execution_id) JOIN budget_execution_back_leg b USING(execution_id)
+                JOIN budget_reservation p ON p.id=i.reservation_id JOIN budget_reservation u ON u.id=b.reservation_id
+                LEFT JOIN budget_settlement_outbox o ON o.reservation_id=i.reservation_id LEFT JOIN budget_physical_attempt a USING(execution_id)
+                ORDER BY i.reservation_id").unwrap();
+            let rows=query.query_map([],|r|Ok(serde_json::json!({
+                "execution_id":r.get::<_,String>(0)?,"request_id":r.get::<_,String>(1)?,"phase":r.get::<_,i64>(2)?,
+                "primary_reservation":r.get::<_,i64>(3)?,"upstream_reservation":r.get::<_,i64>(4)?,
+                "primary_actual":r.get::<_,i64>(5)?,"upstream_actual":r.get::<_,i64>(6)?,
+                "primary_settled":r.get::<_,i64>(7)?,"upstream_settled":r.get::<_,i64>(8)?,
+                "receipt_id":r.get::<_,Option<String>>(9)?,"charged_tokens":r.get::<_,Option<i64>>(10)?,"attempt_id":r.get::<_,Option<String>>(11)?
+            }))).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
+            assert_eq!(rows.len(),2);
+            assert_eq!(rows[0]["request_id"],failed_request);
+            assert_eq!(rows[0]["phase"],2);
+            assert!(rows[0]["receipt_id"].is_null() && rows[0]["attempt_id"].is_null());
+            assert_eq!(rows[1]["request_id"],fresh_request);
+            assert_eq!(rows[1]["charged_tokens"],12);
+            assert!(rows[1]["receipt_id"].is_string() && rows[1]["attempt_id"].is_string());
+            let event=&sink.events()[0];
+            assert_eq!(event.request_id,fresh_request);
+            println!("late_admission_evidence={}",serde_json::json!({"schema_version":1,"route":route,
+                "failed_request_id":failed_request,"fresh_request_id":fresh_request,"origin_calls":upstream.received_requests().await.unwrap().len(),
+                "usage_event":{"request_id":event.request_id,"tokens_in":event.tokens_in,"tokens_out":event.tokens_out,
+                "completeness":event.usage_completeness,"cache_read_observation":event.cache_read_observation},"rows":rows}));
+        }
+    });
+}
+
 #[tokio::test]
 async fn owned_buffered_both_planes_correlate_and_settle_once() {
     for (route, origin_id) in [
