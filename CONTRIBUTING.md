@@ -31,10 +31,12 @@ cargo test --workspace
   and an approving PR review before merge; do not use an administrator bypass. `main` is the
   release trunk. Live settings are authoritative: the 2026-09-05 checkpoint found
   `enforce_admins=false` on `develop`, contrary to older prose; this was not changed.
-- **CI execution:** normal Sandhi PR CI uses GitHub-hosted `ubuntu-latest` with repository
-  variable `OWNER_PRIVATE_CI_ENABLED=false` (2026-09-05 owner decision). The legacy private route
-  remains in the workflow but is disabled. Do not approve or re-enable it to unblock standard
-  checks. The separate overflow-runner diagnostic is not part of normal PR verification.
+- **CI execution:** this public repository uses GitHub-hosted runners only: pinned
+  `ubuntu-24.04` / `ubuntu-24.04-arm` Linux images and hosted macOS/Windows release
+  matrices. CI runs on `pull_request` and protected-trunk pushes with a read-only
+  token and checkout credentials disabled. There is no owner/private/overflow
+  routing path or approval environment for ordinary checks. Keep all workflow
+  runner selections on the hosted-image allowlist checked by `tests/release`.
 
 ## Community & release notes
 

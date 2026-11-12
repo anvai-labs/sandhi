@@ -97,6 +97,9 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ### Fixed
 
+- Public-repository CI now uses GitHub-hosted runners for all checks. Removed
+  private/overflow routing and its smoke workflow; policy tests cover runner
+  selections, release matrices and the ordinary read-only PR execution path.
 - Structured Chat file references now require compatible, established backend
   affinity. Constrained Codex refuses unresolved resources before admission.
   Non-text Responses tool outputs retain their native shape on Responses backends

@@ -1008,3 +1008,14 @@ open. A diagnostic follow-up distinguishes owner timeout, task failure and termi
 scheduling refusal, and records the failed request ID/upstream count in the stress
 assertion. It changes no timeout/retry/settlement policy. CI and broader reliability
 acceptance remain required before merge and goal completion.
+
+### Public GitHub-hosted CI correction
+
+The owner confirmed this public repository must use public GitHub-hosted runners.
+`OWNER_PRIVATE_CI_ENABLED` is now `false`, this PR's queued private-route runs were
+cancelled, and the ordinary PR run was restarted. The workflow follow-up removes
+`pull_request_target`/owner authorization routing, pins all Linux jobs to hosted
+Ubuntu images and deletes the separate overflow-runner smoke workflow. Release
+macOS/Windows matrices remain hosted. CONTRIBUTING records the policy, and release
+checks reject private/dynamic/colliding runner labels, including hidden matrix
+entries. The aggregate gate and all existing test/coverage/release checks remain.
