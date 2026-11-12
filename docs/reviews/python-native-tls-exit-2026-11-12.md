@@ -29,3 +29,22 @@ Further occurrence-specific shutdown/native stack evidence is needed. Do not
 ignore nonzero exits, introduce shutdown sleeps, or replace the expected TLS
 failure merely to make the acceptance check green. The native-process reliability
 gate remains open alongside the separately retained accounting waits.
+
+## Final-wheel bounded debugger follow-up
+
+A later independent investigation used the final buffered wheel, isolated module
+path and a minimal constructed child environment. All **100 bounded GDB probes**
+exited normally: 32 baseline, 32 Python debug-allocator, 32 glibc-perturbation and
+four explicit loaded-extension path/hash checks. Each observed the expected TLS
+rejection, return from `asyncio.run`, Python exit marker and native exit 0. No HTTP
+request crossed the invalid-hostname boundary. At most three children ran at once;
+no sleeps, forced collection, manual runtime shutdown or OS trust changes were
+introduced.
+
+The [sanitized probe artifact](artifacts/python-native-exit-debugger-probes-2026-11-12.json)
+pins wheel, extension, interpreter, harness and result hashes. Stable temporary
+native logs retain debugger events outside pytest rotation. No crash recurred, so
+there is no occurrence-specific crash stack or core. Debugger, markers, environment
+and module isolation alter timing relative to the failing full suite. These probes
+establish non-reproduction only; the original signal exit remains unexplained and
+does not receive a fix or reliability clearance from passing comparisons.

@@ -6,6 +6,7 @@ Every database, key and upstream in this suite is disposable synthetic test data
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import socket
@@ -154,9 +155,16 @@ def shutdown_gateway(proxy_binary, gated_provider, tmp_path):
         base = f"{'https' if tls else 'http'}://127.0.0.1:{port}"
         # A file avoids stderr pipe backpressure contaminating the deadline test.
         with (tmp_path / "shutdown.stderr").open("wb") as log:
+            provenance = json.loads((proxy_binary.parent / "provenance.json").read_text())
+            launch_hash = hashlib.sha256(proxy_binary.read_bytes()).hexdigest()
+            assert launch_hash == provenance["binary_sha256"], "session binary changed before launch"
             process = subprocess.Popen([str(proxy_binary)], env=env, cwd=REPO_ROOT,
                                        stdout=subprocess.DEVNULL, stderr=log)
             try:
+                (tmp_path / "launch-provenance.json").write_text(json.dumps({
+                    **provenance, "pid": process.pid, "launch_binary_sha256": launch_hash,
+                    "launched_at_ns": time.time_ns(),
+                }, indent=2) + "\n")
                 verify = ssl.create_default_context(cafile=config["tls"]["cert"]) if tls else True
                 with httpx.Client(base_url=base, verify=verify, timeout=2) as client:
                     deadline = time.monotonic() + 15

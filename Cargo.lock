@@ -2844,6 +2844,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "ipnet",
+ "libc",
  "openidconnect",
  "opentelemetry",
  "opentelemetry-otlp",
@@ -2868,6 +2869,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "windows-sys 0.61.2",
  "wiremock",
 ]
 

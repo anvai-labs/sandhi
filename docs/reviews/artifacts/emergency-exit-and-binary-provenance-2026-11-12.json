@@ -1,0 +1,524 @@
+{
+  "evidence_kind": "integrated_emergency_exit_and_binary_provenance",
+  "source_parent": "e02773ebf9e9583b0bcc1e8a4d2045aa3d9ee50d",
+  "host": "x86_64-unknown-linux-gnu",
+  "validation": {
+    "watchdog_tests": 4,
+    "provenance_tests": 9,
+    "synthetic_shutdown_cases": 16,
+    "combined_passed": 25,
+    "combined_seconds": 44.31,
+    "workspace_passed": 1230,
+    "workspace_ignored": 6,
+    "workspace_suites": 52,
+    "clippy": [
+      "workspace_all_targets_default",
+      "workspace_all_targets_policy_onnx_sentinelpass",
+      "binary_all_features"
+    ]
+  },
+  "launched_binary": {
+    "sha256": "21b1659ec28bae35d6c87c6653ba465d808926f7e75af7ba8c5b373c1a517657",
+    "verified_launches": 16,
+    "source_parent": "e02773ebf9e9583b0bcc1e8a4d2045aa3d9ee50d",
+    "build_time_diff_sha256": "caddc8421e00e0d824932dcd9ff043d934d2e9be88fa0324124dc6695b691db7",
+    "source_inventory_sha256": "e4721698287f01abb9b317060f4b67aad81487fa25c34a9c1434dfdce7947fec",
+    "cargo_reported_artifact": true,
+    "profile": {
+      "opt_level": "0",
+      "debuginfo": 0,
+      "debug_assertions": true,
+      "overflow_checks": true,
+      "test": false
+    },
+    "features": [
+      "default"
+    ],
+    "fresh": false,
+    "build_command": [
+      "cargo",
+      "build",
+      "--locked",
+      "-p",
+      "sandhi-proxy",
+      "--bin",
+      "sandhi-proxy",
+      "--message-format=json-render-diagnostics"
+    ],
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1",
+    "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+    "selected_flags": {
+      "CARGO_NET_OFFLINE": "true",
+      "CARGO_PROFILE_DEV_DEBUG": "0",
+      "CARGO_PROFILE_TEST_DEBUG": "0",
+      "CARGO_BUILD_JOBS": "4"
+    },
+    "config_content_hashes": [
+      "eab61b7a740afb48c626cc485ec302617000b1d9873848327b121ae3cd7d229c"
+    ]
+  },
+  "sha256": {
+    "watchdog": "08b7b4c04ae5bce6bca68483807143ce2438d94fa9434ed4ce866739c89ef9b2",
+    "provenance_only": "db0a95095d1bb8c193b53ba76639b787b936edf85d81be2e3194da0c47c89d10",
+    "combined_shutdown": "691ed95cfa8617d1cfe284cadfb7699bcb86851f31f921e59dcb4744881ad6c5",
+    "workspace": "8af040da3cf0c8586605d78e8135ad4d98eee42f7582488b21bade92c2fba452",
+    "workspace_clippy": "30ea5050ab31d3a4e4b993eda21a4f4a30774e37638ff5d1417e15d65392d127",
+    "workspace_features_clippy": "3ca2f11b70ad767373e48e5eb5ac18b948c61d9e0f881adc4f56f3dbf87bd427",
+    "binary_all_features_clippy": "9fe10bd73847c3b731be990ea53d8be65de59f1c9a853c3ed5fdfc47273f9540"
+  },
+  "archived_red_proof": {
+    "source_parent": "9bc7a3ef570e4e32d0159de604366b932effb29c",
+    "pre_change_main_equal_to_current_parent": true,
+    "pre_change_main_sha256": "b3fb3f2dcc843a6c32eb015a89d502edb2770f40ef068c66e97a3f8fe063b957",
+    "failed_tests": 2,
+    "parent_bound_seconds": 5,
+    "red_log_sha256": "6b873c95ac422314165cf3a3dafba5a99e864a1d0080160dc2f80deb276b76bf"
+  },
+  "tracked_shutdown_joins": [
+    {
+      "case": "test_tracked_binary_correlatio0",
+      "request_id": "req_1794512847152_0",
+      "execution_id": "46e5f8e56f7083a40f143d21be2a1aa5bc841cc7536d5ad37cb3d9e54b032565",
+      "usage": {
+        "tokens_in": 7,
+        "tokens_out": 3,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 4,
+        "cache_read_observation": {
+          "status": "reported",
+          "source": "origin_usage"
+        },
+        "reasoning_included": true,
+        "completeness": "final",
+        "basis": "provider_reported",
+        "attempts": 1,
+        "outcome": "success",
+        "duration_ms": 1,
+        "duration_source": "boundary"
+      },
+      "frozen_charge": 14,
+      "source_attempts": [
+        {
+          "version": 1,
+          "attempt_id": "f27267b6cb7c47b2ffe47c7816817b37d0523710c911519e136f4817e1fe0f47",
+          "attempt_ordinal": 1,
+          "dispatch_observed_at_ms": 1794512847159,
+          "terminal": {
+            "observed_at_ms": 1794512847161,
+            "outcome": "success",
+            "provider_status": 200,
+            "provider_request_id": null
+          },
+          "dropped_observations": 0,
+          "invalid": false
+        }
+      ],
+      "reservations": [
+        {
+          "scope": "group:demo",
+          "ceiling": 35,
+          "actual": 14,
+          "settled": 1
+        },
+        {
+          "scope": "upstream:openai",
+          "ceiling": 35,
+          "actual": 14,
+          "settled": 1
+        }
+      ],
+      "receipts_charged_units": [
+        14
+      ],
+      "usage_request_id_matches": true
+    },
+    {
+      "case": "test_tracked_binary_correlatio1",
+      "request_id": "req_1794512849007_0",
+      "execution_id": "0d28f81bd8637f52183f9a28dc8245305ad96bd3f0e4fa181af338dfe75deb15",
+      "usage": {
+        "tokens_in": 7,
+        "tokens_out": 3,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 4,
+        "cache_read_observation": {
+          "status": "reported",
+          "source": "origin_usage"
+        },
+        "reasoning_included": true,
+        "completeness": "final",
+        "basis": "provider_reported",
+        "attempts": 1,
+        "outcome": "success",
+        "duration_ms": 1,
+        "duration_source": "boundary"
+      },
+      "frozen_charge": 14,
+      "source_attempts": [
+        {
+          "version": 1,
+          "attempt_id": "b549712672fffdfba371b8aead51459c4bba6d3b3d7c64d091919743ceac1ebb",
+          "attempt_ordinal": 1,
+          "dispatch_observed_at_ms": 1794512849016,
+          "terminal": {
+            "observed_at_ms": 1794512849017,
+            "outcome": "success",
+            "provider_status": 200,
+            "provider_request_id": null
+          },
+          "dropped_observations": 0,
+          "invalid": false
+        }
+      ],
+      "reservations": [
+        {
+          "scope": "group:demo",
+          "ceiling": 35,
+          "actual": 14,
+          "settled": 1
+        },
+        {
+          "scope": "upstream:openai",
+          "ceiling": 35,
+          "actual": 14,
+          "settled": 1
+        }
+      ],
+      "receipts_charged_units": [
+        14
+      ],
+      "usage_request_id_matches": true
+    },
+    {
+      "case": "test_tracked_binary_correlatio2",
+      "request_id": "req_1794512850794_0",
+      "execution_id": "530984984125235a7c167511b8ca4a356da261c50109783b7d251262ff0383b0",
+      "usage": {
+        "tokens_in": 0,
+        "tokens_out": 0,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "completeness": "unavailable",
+        "basis": "provider_reported",
+        "attempts": 1,
+        "outcome": "buffered_qualification:MissingUsage",
+        "duration_ms": 1,
+        "duration_source": "boundary"
+      },
+      "frozen_charge": null,
+      "source_attempts": [
+        {
+          "version": 1,
+          "attempt_id": "ac4b0afb15391ce479fc8b68e03c98ae9f401ef7379b109d4d827b9cb7c7be47",
+          "attempt_ordinal": 1,
+          "dispatch_observed_at_ms": 1794512850802,
+          "terminal": {
+            "observed_at_ms": 1794512850804,
+            "outcome": "success",
+            "provider_status": 200,
+            "provider_request_id": null
+          },
+          "dropped_observations": 0,
+          "invalid": false
+        }
+      ],
+      "reservations": [
+        {
+          "scope": "group:demo",
+          "ceiling": 35,
+          "actual": 0,
+          "settled": 0
+        },
+        {
+          "scope": "upstream:openai",
+          "ceiling": 35,
+          "actual": 0,
+          "settled": 0
+        }
+      ],
+      "receipts_charged_units": [],
+      "usage_request_id_matches": true
+    },
+    {
+      "case": "test_tracked_binary_correlatio3",
+      "request_id": "req_1794512852603_0",
+      "execution_id": "53b5ab07f04d9555cd3f72d59118ee391644e2ab9bbc6a54fc4148af58c54b03",
+      "usage": {
+        "tokens_in": 0,
+        "tokens_out": 0,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "completeness": "unavailable",
+        "basis": "provider_reported",
+        "attempts": 1,
+        "outcome": "buffered_qualification:MissingUsage",
+        "duration_ms": 1,
+        "duration_source": "boundary"
+      },
+      "frozen_charge": null,
+      "source_attempts": [
+        {
+          "version": 1,
+          "attempt_id": "6b98d053226707db3ee8ec4b3e90004281854a50cb2f6c3374211f3f2902b00a",
+          "attempt_ordinal": 1,
+          "dispatch_observed_at_ms": 1794512852611,
+          "terminal": {
+            "observed_at_ms": 1794512852613,
+            "outcome": "success",
+            "provider_status": 200,
+            "provider_request_id": null
+          },
+          "dropped_observations": 0,
+          "invalid": false
+        }
+      ],
+      "reservations": [
+        {
+          "scope": "group:demo",
+          "ceiling": 35,
+          "actual": 0,
+          "settled": 0
+        },
+        {
+          "scope": "upstream:openai",
+          "ceiling": 35,
+          "actual": 0,
+          "settled": 0
+        }
+      ],
+      "receipts_charged_units": [],
+      "usage_request_id_matches": true
+    },
+    {
+      "case": "test_tracked_binary_correlatio4",
+      "request_id": "req_1794512854392_0",
+      "execution_id": "0b8f7e565166318d26f6f883e3b74bbb6e3f726794650d1a4404888d3de3c129",
+      "usage": {
+        "tokens_in": 7,
+        "tokens_out": 3,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 4,
+        "cache_read_observation": {
+          "status": "reported",
+          "source": "origin_usage"
+        },
+        "reasoning_included": true,
+        "completeness": "final",
+        "basis": "provider_reported",
+        "attempts": 1,
+        "outcome": "success",
+        "duration_ms": 1,
+        "duration_source": "boundary",
+        "time_to_first_token_ms": 1,
+        "time_to_first_token_source": "boundary"
+      },
+      "frozen_charge": 14,
+      "source_attempts": [
+        {
+          "version": 1,
+          "attempt_id": "5bc73e0be57c2fba8e4e4ad42100d7d8d58c32cfc67db8777a934ba73e6316d5",
+          "attempt_ordinal": 1,
+          "dispatch_observed_at_ms": 1794512854400,
+          "terminal": {
+            "observed_at_ms": 1794512854402,
+            "outcome": "success",
+            "provider_status": 200,
+            "provider_request_id": null
+          },
+          "dropped_observations": 0,
+          "invalid": false
+        }
+      ],
+      "reservations": [
+        {
+          "scope": "group:demo",
+          "ceiling": 34,
+          "actual": 14,
+          "settled": 1
+        },
+        {
+          "scope": "upstream:openai",
+          "ceiling": 34,
+          "actual": 14,
+          "settled": 1
+        }
+      ],
+      "receipts_charged_units": [
+        14
+      ],
+      "usage_request_id_matches": true
+    },
+    {
+      "case": "test_tracked_binary_correlatio5",
+      "request_id": "req_1794512856202_0",
+      "execution_id": "f61bad0c4dc3b995df2a7e73985b2c54f290ee87d35036b577c763b2342abaf1",
+      "usage": {
+        "tokens_in": 7,
+        "tokens_out": 3,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 4,
+        "cache_read_observation": {
+          "status": "reported",
+          "source": "origin_usage"
+        },
+        "reasoning_included": true,
+        "completeness": "final",
+        "basis": "provider_reported",
+        "attempts": 1,
+        "outcome": "success",
+        "duration_ms": 1,
+        "duration_source": "boundary",
+        "time_to_first_token_ms": 1,
+        "time_to_first_token_source": "boundary"
+      },
+      "frozen_charge": 14,
+      "source_attempts": [
+        {
+          "version": 1,
+          "attempt_id": "efc75a0b231561f392cf8611991eadd799312fdc662bc212360646eafde26fb8",
+          "attempt_ordinal": 1,
+          "dispatch_observed_at_ms": 1794512856210,
+          "terminal": {
+            "observed_at_ms": 1794512856212,
+            "outcome": "success",
+            "provider_status": 200,
+            "provider_request_id": null
+          },
+          "dropped_observations": 0,
+          "invalid": false
+        }
+      ],
+      "reservations": [
+        {
+          "scope": "group:demo",
+          "ceiling": 34,
+          "actual": 14,
+          "settled": 1
+        },
+        {
+          "scope": "upstream:openai",
+          "ceiling": 34,
+          "actual": 14,
+          "settled": 1
+        }
+      ],
+      "receipts_charged_units": [
+        14
+      ],
+      "usage_request_id_matches": true
+    },
+    {
+      "case": "test_tracked_binary_correlatio6",
+      "request_id": "req_1794512858013_0",
+      "execution_id": "e5a089c57e84044bc4a2660aa7f40af39715d75c959ee477b1f87ff56e7c3878",
+      "usage": {
+        "tokens_in": 0,
+        "tokens_out": 0,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "completeness": "unavailable",
+        "basis": "provider_reported",
+        "attempts": 1,
+        "outcome": "stream_usage_unavailable;delivery:success",
+        "duration_ms": 1,
+        "duration_source": "boundary",
+        "time_to_first_token_ms": 1,
+        "time_to_first_token_source": "boundary"
+      },
+      "frozen_charge": null,
+      "source_attempts": [
+        {
+          "version": 1,
+          "attempt_id": "1cf4432e5245cba5d3065b36fc0cabac1439a7b96d2da17f7034c3ceccd3f1f1",
+          "attempt_ordinal": 1,
+          "dispatch_observed_at_ms": 1794512858022,
+          "terminal": {
+            "observed_at_ms": 1794512858024,
+            "outcome": "success",
+            "provider_status": 200,
+            "provider_request_id": null
+          },
+          "dropped_observations": 0,
+          "invalid": false
+        }
+      ],
+      "reservations": [
+        {
+          "scope": "group:demo",
+          "ceiling": 34,
+          "actual": 0,
+          "settled": 0
+        },
+        {
+          "scope": "upstream:openai",
+          "ceiling": 34,
+          "actual": 0,
+          "settled": 0
+        }
+      ],
+      "receipts_charged_units": [],
+      "usage_request_id_matches": true
+    },
+    {
+      "case": "test_tracked_binary_correlatio7",
+      "request_id": "req_1794512859822_0",
+      "execution_id": "7850201d9be25a04739fa60f605364fb8cfdc62544ed170cad01791909e5b270",
+      "usage": {
+        "tokens_in": 0,
+        "tokens_out": 0,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "completeness": "unavailable",
+        "basis": "provider_reported",
+        "attempts": 1,
+        "outcome": "stream_usage_unavailable;delivery:success",
+        "duration_ms": 1,
+        "duration_source": "boundary",
+        "time_to_first_token_ms": 1,
+        "time_to_first_token_source": "boundary"
+      },
+      "frozen_charge": null,
+      "source_attempts": [
+        {
+          "version": 1,
+          "attempt_id": "a8cf28441a23065fdf83232396f82d6821185ab2c23b6b09b9ea60fd45c23572",
+          "attempt_ordinal": 1,
+          "dispatch_observed_at_ms": 1794512859831,
+          "terminal": {
+            "observed_at_ms": 1794512859832,
+            "outcome": "success",
+            "provider_status": 200,
+            "provider_request_id": null
+          },
+          "dropped_observations": 0,
+          "invalid": false
+        }
+      ],
+      "reservations": [
+        {
+          "scope": "group:demo",
+          "ceiling": 34,
+          "actual": 0,
+          "settled": 0
+        },
+        {
+          "scope": "upstream:openai",
+          "ceiling": 34,
+          "actual": 0,
+          "settled": 0
+        }
+      ],
+      "receipts_charged_units": [],
+      "usage_request_id_matches": true
+    }
+  ],
+  "limits": [
+    "Controlled synthetic source/process tests, not live subscription/cache-lifecycle acceptance.",
+    "Callback bypass does not diagnose the retained SDK timeout or bound arbitrary kernel I/O/scheduling.",
+    "Successful ordinary final C callbacks remain outside this emergency124 change; embedding processes are never terminated by library code.",
+    "Source/selected configuration inventories and Cargo-reported artifact are observations, not hermetic compilation, complete compiler read-set or proof against stale timestamp/cache reuse.",
+    "Native Linux execution only; macOS and Windows unqualified.",
+    "Unavailable actual0 placeholders and absent receipts retain liability, not measured zero or released holds.",
+    "Full vendor SDK suite and unrelated protocol/provider bindings are not requalified by this focused shutdown run."
+  ]
+}

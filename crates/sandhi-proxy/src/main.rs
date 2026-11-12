@@ -50,10 +50,38 @@ fn main() {
     shutdown.arm(Instant::now() + DEFAULT_SHUTDOWN_GRACE);
     runtime.shutdown_timeout(shutdown.remaining());
     if status == 124 || !shutdown.complete() {
-        std::process::exit(124);
+        force_exit(124);
     }
     std::process::exit(status);
 }
+
+/// Binary-only emergency termination after cleanup has failed or exhausted its deadline.
+/// This must bypass C exit handlers and Rust's ordinary exit serialization: either may be
+/// the cleanup operation which is already blocked. Never call this from an embedded library.
+#[cfg(unix)]
+fn force_exit(status: i32) -> ! {
+    // SAFETY: _exit terminates this process without running user callbacks. All successful
+    // cleanup belongs to the preceding explicit shutdown path, not this emergency fallback.
+    unsafe { libc::_exit(status) }
+}
+
+#[cfg(windows)]
+fn force_exit(status: i32) -> ! {
+    // SAFETY: GetCurrentProcess returns this process's pseudo-handle. TerminateProcess skips
+    // CRT exit callbacks and DLL detach notifications, preserving the emergency exit status.
+    unsafe {
+        windows_sys::Win32::System::Threading::TerminateProcess(
+            windows_sys::Win32::System::Threading::GetCurrentProcess(),
+            status as u32,
+        );
+    }
+    // Self-termination does not return on success. If the OS unexpectedly rejects it, abort
+    // rather than re-entering the potentially blocked ordinary exit path or hanging forever.
+    std::process::abort()
+}
+
+#[cfg(not(any(unix, windows)))]
+compile_error!("sandhi-proxy emergency termination requires a Unix or Windows OS backend");
 
 async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
     // TD-0011 D1: the BINARY installs the subscriber; the libraries only emit through the
@@ -910,7 +938,7 @@ impl ShutdownWatchdog {
                     }
                     _ => {}
                 }
-                std::process::exit(124);
+                force_exit(124);
             })
             .expect("create shutdown watchdog");
         Self {
@@ -923,7 +951,7 @@ impl ShutdownWatchdog {
         if self.deadline.set(deadline).is_ok()
             && self.tx.send(WatchdogMessage::Arm(deadline)).is_err()
         {
-            std::process::exit(124);
+            force_exit(124);
         }
     }
 
@@ -1224,6 +1252,31 @@ mod tests {
                 std::sync::Barrier::new(2).wait();
                 unreachable!("watchdog must terminate the process");
             }
+            "blocked_exit_handler" | "concurrent_exit_handler" => {
+                extern "C" fn blocked_exit_handler() {
+                    loop {
+                        std::thread::park();
+                    }
+                }
+                // SAFETY: the synthetic handler is a static C-ABI function which never
+                // unwinds. This branch exists only inside an isolated test subprocess.
+                assert_eq!(unsafe { libc::atexit(blocked_exit_handler) }, 0);
+                if mode == "concurrent_exit_handler" {
+                    // On Unix this also holds Rust's ordinary exit serialization while
+                    // its C callback is blocked. Windows uses the CRT path explicitly:
+                    // std::process::exit need not run CRT callbacks there.
+                    #[cfg(unix)]
+                    std::process::exit(0);
+                    #[cfg(windows)]
+                    unsafe {
+                        libc::exit(0);
+                    }
+                }
+                // In the old implementation the watchdog's ordinary exit itself enters
+                // the blocked callback. Emergency OS termination must bypass it instead.
+                std::sync::Barrier::new(2).wait();
+                unreachable!("watchdog must bypass blocked process-exit handlers");
+            }
             "blocked_runtime" => {
                 let runtime = tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(1)
@@ -1244,6 +1297,29 @@ mod tests {
         }
     }
 
+    fn assert_watchdog_scenario(mode: &str, expected: i32) {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::shutdown_watchdog_child", "--nocapture"])
+            .env("SANDHI_TEST_SHUTDOWN_WATCHDOG", mode)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        // Bound the test itself if the watchdog regresses; never hang the whole test suite.
+        let test_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert_eq!(status.code(), Some(expected), "scenario {mode}");
+                break;
+            }
+            if std::time::Instant::now() >= test_deadline {
+                child.kill().unwrap();
+                let _ = child.wait();
+                panic!("watchdog did not terminate {mode}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn watchdog_bounds_blocked_cleanup_and_runtime_without_extending_deadline() {
         for (mode, expected) in [
@@ -1251,27 +1327,18 @@ mod tests {
             ("blocked_cleanup", 124),
             ("blocked_runtime", 124),
         ] {
-            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "tests::shutdown_watchdog_child", "--nocapture"])
-                .env("SANDHI_TEST_SHUTDOWN_WATCHDOG", mode)
-                .stdout(std::process::Stdio::null())
-                .spawn()
-                .unwrap();
-            // Bound the test itself if the watchdog regresses; never hang the whole test suite.
-            let test_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            loop {
-                if let Some(status) = child.try_wait().unwrap() {
-                    assert_eq!(status.code(), Some(expected), "scenario {mode}");
-                    break;
-                }
-                if std::time::Instant::now() >= test_deadline {
-                    child.kill().unwrap();
-                    let _ = child.wait();
-                    panic!("watchdog did not terminate {mode}");
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
+            assert_watchdog_scenario(mode, expected);
         }
+    }
+
+    #[test]
+    fn watchdog_bypasses_blocked_exit_handler() {
+        assert_watchdog_scenario("blocked_exit_handler", 124);
+    }
+
+    #[test]
+    fn watchdog_bypasses_concurrent_exit_handler() {
+        assert_watchdog_scenario("concurrent_exit_handler", 124);
     }
 
     #[test]

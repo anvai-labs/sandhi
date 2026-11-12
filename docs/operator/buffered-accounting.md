@@ -242,6 +242,13 @@ bounds, **not a hard SQLite latency bound**. Recovery settles only authoritative
 final usage; unavailable observations stay held. Shutdown keeps the original grace
 deadline and watchdog; a large backlog may need more recovery before shutdown.
 
+Emergency exit 124 uses immediate OS termination so a blocked C exit callback
+cannot prevent the watchdog from stopping the standalone binary. Successful
+cleanup still uses ordinary exit; embedded libraries do not terminate their host.
+The [controlled tests and executable provenance](../reviews/emergency-exit-and-binary-provenance-2026-11-12.md)
+describe this guarantee and its limits. Passing them does not diagnose the retained
+shutdown timing occurrence or release unresolved accounting liability.
+
 [Abandoned Prepared recovery](../adr/0036-abandoned-prepared-recovery.md) requires
 the original committed result or explicit Close work. Unknown commit status and
 `MayHaveDispatched` remain held; missing usage or timings do not authorize release.

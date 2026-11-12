@@ -1891,3 +1891,26 @@ These are implementation prerequisites, not accepted capabilities:
    actual immutable launched binary and stable request-specific artifacts. Neither
    this contract experiment nor passing probes diagnose the Python signal exit
    or spontaneous accounting waits.
+
+### M5w — Emergency termination and occurrence-specific executable provenance
+
+The [emergency-exit checkpoint](../reviews/emergency-exit-and-binary-provenance-2026-11-12.md)
+replaces ordinary exit only at the standalone binary's emergency 124 sites. Two
+blocked C-exit-handler regressions fail on the old implementation and pass with
+immediate OS termination. The final focused run passed four watchdog tests; nine
+source/artifact provenance regressions and all sixteen existing synthetic HTTP/TLS
+shutdown cells also passed. Acceptance deadlines and physical-call assertions
+remain unchanged.
+The integrated workspace passed 1,230 tests with six opt-in ignores; default and
+ONNX/SentinelPass all-target Clippy plus binary all-feature Clippy passed.
+
+The SDK session now snapshots Cargo's reported executable, records bounded
+source/build observations and verifies the launched binary hash. This improves
+future occurrence evidence without claiming hermetic compilation or diagnosing
+the earlier SDK timeout. Successful final C callbacks, the original native Python
+exit and spontaneous accounting waits remain separately unproven. Neither a
+passing process run nor emergency termination authorizes unknown usage settlement.
+An independent final-wheel Python investigation also retained 100 bounded debugger
+probes without reproducing the signal exit. Its
+[source-pinned evidence](../reviews/python-native-tls-exit-2026-11-12.md#final-wheel-bounded-debugger-follow-up)
+is non-reproduction, not a fix or clearance of that separate native-process gate.

@@ -18,8 +18,10 @@ No network, no vendor credentials, no vendor account.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import shutil
 import socket
 import subprocess
 import threading
@@ -31,6 +33,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+
+from source_provenance import (
+    assert_unchanged,
+    binary_artifact,
+    build_metadata,
+    inventory_digest,
+    source_state,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -277,20 +287,35 @@ def upstream():
 
 
 @pytest.fixture(scope="session")
-def proxy_binary() -> Path:
-    """The real `sandhi-proxy` binary. Built here so a local run needs no separate step."""
-    subprocess.run(
-        ["cargo", "build", "-p", "sandhi-proxy", "--bin", "sandhi-proxy"],
-        cwd=REPO_ROOT,
-        check=True,
-    )
-    for candidate in (
-        REPO_ROOT / "target" / "debug" / "sandhi-proxy",
-        REPO_ROOT / "target" / "release" / "sandhi-proxy",
-    ):
-        if candidate.exists():
-            return candidate
-    raise AssertionError("sandhi-proxy binary not found after cargo build")
+def proxy_binary(tmp_path_factory) -> Path:
+    """Build once, then freeze the actual session binary and its exact-source provenance."""
+    before = source_state(REPO_ROOT)
+    command = ["cargo", "build", "--locked", "-p", "sandhi-proxy", "--bin", "sandhi-proxy",
+               "--message-format=json-render-diagnostics"]
+    build = build_metadata(REPO_ROOT, command)
+    result = subprocess.run(command, cwd=REPO_ROOT, check=True, capture_output=True, text=True)
+    assert_unchanged(before, source_state(REPO_ROOT))
+    assert build == build_metadata(REPO_ROOT, command), "build configuration changed during binary build"
+    artifact = binary_artifact(result.stdout, "sandhi-proxy")
+    candidate = Path(artifact["executable"])
+    assert candidate.is_file(), "Cargo-reported sandhi-proxy executable does not exist"
+    snapshot = tmp_path_factory.mktemp("proxy-binary") / candidate.name
+    shutil.copy2(candidate, snapshot)
+    binary_hash = hashlib.sha256(snapshot.read_bytes()).hexdigest()
+    assert binary_hash == hashlib.sha256(candidate.read_bytes()).hexdigest()
+    snapshot.chmod(0o555)
+    (snapshot.parent / "provenance.json").write_text(json.dumps({
+        "base_commit": before["head"],
+        "tracked_diff_sha256": before["head_diff_sha256"],
+        "source_inventory_sha256": inventory_digest(before),
+        "build": build,
+        "binary_source": str(candidate),
+        "binary_snapshot": str(snapshot),
+        "binary_sha256": binary_hash,
+        "cargo_artifact": artifact,
+    }, indent=2) + "\n")
+    (snapshot.parent / "source-inventory.json").write_text(json.dumps(before, indent=2) + "\n")
+    return snapshot
 
 
 @pytest.fixture(scope="session")
