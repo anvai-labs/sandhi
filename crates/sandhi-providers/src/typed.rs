@@ -62,6 +62,17 @@ pub struct FamilyFacts {
 }
 
 impl ProviderFamily {
+    pub const fn endpoint_family(self) -> sandhi_core::EndpointFamilyV1 {
+        use sandhi_core::EndpointFamilyV1 as E;
+        match self {
+            Self::OpenAiCompat => E::OpenaiChatCompletions,
+            Self::OpenAiResponses => E::OpenaiResponses,
+            Self::Anthropic => E::AnthropicMessages,
+            Self::Gemini => E::GeminiGenerateContent,
+            Self::Cohere => E::CohereChat,
+            Self::Ollama => E::OllamaChat,
+        }
+    }
     #[must_use]
     pub fn for_slug(slug: &str) -> Self {
         match slug {
@@ -131,6 +142,7 @@ pub struct ProviderTransportConfig {
     pub stream_setup_timeout_secs: Option<f64>,
     pub stream_idle_timeout_secs: Option<f64>,
     pub anthropic_auth_scheme: AnthropicAuthScheme,
+    pub anthropic_usage_profile: sandhi_core::usage::AnthropicUsageProfile,
     pub gemini_auth_scheme: GeminiAuthScheme,
     pub openai_responses_profile: OpenAiResponsesProfile,
     /// Per-endpoint User-Agent override. Rides the static headers to the wire,
@@ -162,6 +174,7 @@ impl ProviderTransportConfig {
             stream_setup_timeout_secs: None,
             stream_idle_timeout_secs: None,
             anthropic_auth_scheme: AnthropicAuthScheme::ApiKey,
+            anthropic_usage_profile: Default::default(),
             gemini_auth_scheme: GeminiAuthScheme::ApiKey,
             openai_responses_profile: OpenAiResponsesProfile::Standard,
             user_agent: None,
@@ -175,6 +188,34 @@ pub type ChatEventStream =
 
 #[async_trait]
 pub trait ChatProvider: Send + Sync {
+    /// Pure target-encoder admission. No transport or physical attempt is started.
+    /// Custom implementations opt in rather than claiming arbitrary family support.
+    fn preflight_request(&self, _request: &ChatRequestV1) -> Result<(), ProviderError> {
+        Err(ProviderError::InvalidRequest(
+            "request preflight is unsupported by this typed provider".into(),
+        ))
+    }
+    /// Additional synchronous-operation checks for tracked buffered admission.
+    /// Capability remains factory-owned; this default grants no tracked support.
+    fn preflight_qualified_buffered(&self, request: &ChatRequestV1) -> Result<(), ProviderError> {
+        self.preflight_request(request)
+    }
+    /// A built-in constrained SSE codec can qualify buffered delivery without
+    /// granting external raw forwarding. The handle's factory gate still applies.
+    fn qualified_buffered_without_raw(&self) -> bool {
+        false
+    }
+    fn supports_qualified_streaming(&self) -> bool {
+        false
+    }
+    /// Transport capability; a provider label cannot enable cache synthesis.
+    fn allows_cache_synthesis(&self) -> bool {
+        false
+    }
+    /// Opt-in native SSE attachments, independent of raw request forwarding.
+    fn supports_native_stream(&self) -> bool {
+        false
+    }
     fn slug(&self) -> &str;
     /// `call_headers` are per-call wire headers (TD-0022 D1): gateway-path metadata that
     /// changes per turn (`x-sandhi-run-id` / `-step-id`, vendor correlation ids). They ride
@@ -202,6 +243,30 @@ pub trait ChatProvider: Send + Sync {
     ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
         Err(ProviderError::InvalidRequest(
             "qualified buffered usage is unsupported by this typed provider".into(),
+        ))
+    }
+
+    /// Qualified usage and transport observations from the same invocation.
+    async fn complete_qualified_observed(
+        &self,
+        _request: ChatRequestV1,
+        _call_headers: http::HeaderMap,
+        _attempt_context: crate::AttemptContext,
+    ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
+        Err(ProviderError::InvalidRequest(
+            "qualified physical-attempt observation is unsupported by this typed provider".into(),
+        ))
+    }
+
+    /// Strict source observation from the same physical stream as typed events.
+    async fn stream_qualified_observed(
+        &self,
+        _request: ChatRequestV1,
+        _headers: http::HeaderMap,
+        _context: crate::AttemptContext,
+    ) -> Result<ChatEventStream, ProviderError> {
+        Err(ProviderError::InvalidRequest(
+            "qualified typed streaming is unsupported".into(),
         ))
     }
 
@@ -277,6 +342,7 @@ fn build_raw_forwarder(config: &ProviderTransportConfig) -> crate::raw::RawForwa
     ))
     .with_headers(static_headers)
     .with_anthropic_auth(config.anthropic_auth_scheme)
+    .with_anthropic_usage_profile(config.anthropic_usage_profile)
     .with_gemini_auth(config.gemini_auth_scheme)
     .with_timeouts(timeouts.complete, timeouts.stream_setup, timeouts.idle)
     .with_session_header(
@@ -284,6 +350,21 @@ fn build_raw_forwarder(config: &ProviderTransportConfig) -> crate::raw::RawForwa
     )
     .with_client_request_id_header(crate::client_request_id_header(&config.slug))
     .with_provider_request_id_header(response_request_id_header)
+}
+
+/// Immutable non-secret metadata for one configured backend revision. Model
+/// declarations travel with the transport across concurrent registry updates.
+#[derive(Debug, Clone)]
+pub struct BackendBinding {
+    pub id: String,
+    pub revision: u64,
+    pub provider: String,
+    pub credential_ref: String,
+    pub credential_generation: u64,
+    pub endpoint_family: sandhi_core::EndpointFamilyV1,
+    pub endpoint_profile: String,
+    pub models: Vec<sandhi_core::ModelDescriptorV1>,
+    pub cache_policy: Option<sandhi_core::BackendCachePolicyV1>,
 }
 
 #[derive(Clone)]
@@ -304,6 +385,11 @@ pub struct ProviderHandle {
     /// Built-in transport supports setup/idle deadlines independently of raw forwarding.
     streaming_deadline_capable: bool,
     credential_expires_at: Option<u64>,
+    // Private transport identity. Never serialize this standalone credential-derived
+    // digest, log it or expose it through inventory. Routing/cache hashes wrap it.
+    credential_identity: Option<String>,
+    credential_account_fenced: bool,
+    backend_binding: Option<Arc<BackendBinding>>,
     qualified_single_attempt: bool,
 }
 
@@ -324,6 +410,9 @@ impl ProviderHandle {
             raw: None,
             streaming_deadline_capable: false,
             credential_expires_at: None,
+            credential_identity: None,
+            credential_account_fenced: false,
+            backend_binding: None,
             qualified_single_attempt: false,
         }
     }
@@ -350,14 +439,32 @@ impl ProviderHandle {
         Ok(())
     }
 
-    /// The raw byte-forwarder for the same-family transparent plane, or `None` for escape-hatch
-    /// handles. Proxy plane-selection (TD-0006 Step 2) uses this: same-family → forward via this;
-    /// cross-family or `None` → the typed `ChatRequestV1` translation path.
+    /// Admission-time eligibility only; every physical dispatch rechecks expiry.
+    pub fn credential_is_current(&self) -> bool {
+        self.check_credential().is_ok()
+    }
+
+    /// Trusted gateway composition only. Inventory and wire contracts must never
+    /// expose this private credential-derived value directly.
+    pub fn routing_credential_fingerprint(&self) -> Option<&str> {
+        self.credential_identity.as_deref()
+    }
+
+    pub fn has_account_fenced_credential(&self) -> bool {
+        self.credential_account_fenced && self.credential_expires_at.is_some()
+    }
+
+    /// Factory-owned eligibility for tracked, retry-free buffered accounting.
+    /// Constrained SSE aggregation can qualify without enabling raw forwarding.
     #[must_use]
     pub fn supports_owned_buffered(&self) -> bool {
         self.qualified_single_attempt
-            && self.raw.is_some()
-            && self.family == ProviderFamily::OpenAiCompat
+            && (self.raw.is_some() || self.inner.qualified_buffered_without_raw())
+    }
+
+    #[must_use]
+    pub fn supports_owned_streaming(&self) -> bool {
+        self.qualified_single_attempt && self.inner.supports_qualified_streaming()
     }
 
     /// Whether the owned transport enforces gateway streaming setup/idle limits.
@@ -368,6 +475,8 @@ impl ProviderHandle {
         self.streaming_deadline_capable
     }
 
+    /// Same-family transparent transport; absent for custom/expiring profiles
+    /// that must use their constrained typed codec.
     pub fn raw_forwarder(&self) -> Option<&crate::raw::RawForwarder> {
         self.raw.as_ref()
     }
@@ -392,8 +501,73 @@ impl ProviderHandle {
         self.family
     }
 
+    pub fn supports_native_stream(&self) -> bool {
+        self.inner.supports_native_stream()
+    }
+    pub(crate) fn allows_cache_synthesis(&self) -> bool {
+        self.inner.allows_cache_synthesis()
+    }
+
     pub fn slug(&self) -> &str {
         self.inner.slug()
+    }
+
+    #[must_use]
+    pub fn with_backend_binding(mut self, binding: BackendBinding) -> Self {
+        self.backend_binding = Some(Arc::new(binding));
+        self
+    }
+
+    pub fn backend_binding(&self) -> Option<&BackendBinding> {
+        self.backend_binding.as_deref()
+    }
+
+    pub fn permits_model(&self, model: &str) -> bool {
+        self.backend_binding().is_none_or(|binding| {
+            binding
+                .models
+                .iter()
+                .any(|declared| declared.id.eq_ignore_ascii_case(model))
+        })
+    }
+
+    /// Validate using the actual codec/profile and compiled cache controls without
+    /// executing inference. Dispatch repeats validation and credential expiry checks.
+    pub fn preflight_request(&self, request: &ChatRequestV1) -> Result<(), ProviderError> {
+        self.check_credential()?;
+        if !self.permits_model(&request.model) {
+            return Err(ProviderError::InvalidRequest(
+                "model is not declared for this backend".into(),
+            ));
+        }
+        request.validate().map_err(ProviderError::InvalidRequest)?;
+        self.inner
+            .preflight_request(&self.prepare_cache_request(request.clone())?)
+    }
+
+    /// Validate a supported tracked buffered operation before taking either lease.
+    pub fn preflight_owned_buffered(&self, request: &ChatRequestV1) -> Result<(), ProviderError> {
+        if !self.supports_owned_buffered() || !self.permits_model(&request.model) {
+            return Err(ProviderError::InvalidRequest(
+                "tracked buffered operation is unsupported".into(),
+            ));
+        }
+        self.check_credential()?;
+        request.validate().map_err(ProviderError::InvalidRequest)?;
+        self.inner
+            .preflight_qualified_buffered(&self.prepare_cache_request(request.clone())?)
+    }
+
+    pub fn preflight_owned_streaming(&self, request: &ChatRequestV1) -> Result<(), ProviderError> {
+        if !self.supports_owned_streaming() || !self.permits_model(&request.model) {
+            return Err(ProviderError::InvalidRequest(
+                "tracked streaming operation is unsupported".into(),
+            ));
+        }
+        self.check_credential()?;
+        request.validate().map_err(ProviderError::InvalidRequest)?;
+        self.inner
+            .preflight_qualified_buffered(&self.prepare_cache_request(request.clone())?)
     }
 
     pub async fn complete(&self, request: ChatRequestV1) -> Result<ChatResponseV1, ProviderError> {
@@ -414,6 +588,7 @@ impl ProviderHandle {
         // Wire-truth latency, stamped once at the family-neutral typed
         // boundary (W3b) — the one seam every binding and the proxy call.
         self.check_credential()?;
+        let request = self.prepare_cache_request(request)?;
         let started = std::time::Instant::now();
         let mut response = self.inner.complete(request, call_headers).await?;
         reconcile_duration(&mut response.usage, elapsed_ms(started));
@@ -427,9 +602,37 @@ impl ProviderHandle {
         request: ChatRequestV1,
         call_headers: http::HeaderMap,
     ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
+        self.complete_qualified_inner(request, call_headers, None)
+            .await
+    }
+
+    pub async fn complete_with_qualified_usage_and_attempts(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+        context: crate::AttemptContext,
+    ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
+        self.complete_qualified_inner(request, call_headers, Some(context))
+            .await
+    }
+
+    async fn complete_qualified_inner(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+        context: Option<crate::AttemptContext>,
+    ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
         self.check_credential()?;
+        let request = self.prepare_cache_request(request)?;
         let started = std::time::Instant::now();
-        let mut result = self.inner.complete_qualified(request, call_headers).await?;
+        let mut result = match context {
+            Some(context) => {
+                self.inner
+                    .complete_qualified_observed(request, call_headers, context)
+                    .await?
+            }
+            None => self.inner.complete_qualified(request, call_headers).await?,
+        };
         let elapsed = elapsed_ms(started);
         reconcile_duration(&mut result.response.usage, elapsed);
         if let Ok(usage) = &mut result.usage {
@@ -444,7 +647,13 @@ impl ProviderHandle {
         request: ChatRequestV1,
         call_headers: http::HeaderMap,
     ) -> Result<ChatEventStream, ProviderError> {
+        if request.include_native_stream && !self.supports_native_stream() {
+            return Err(ProviderError::InvalidRequest(
+                "native SSE attachments are not supported by this provider".into(),
+            ));
+        }
         self.check_credential()?;
+        let request = self.prepare_cache_request(request)?;
         let started = std::time::Instant::now();
         let inner = self.inner.stream(request, call_headers).await?;
         Ok(stamp_stream_latency(inner, started))
@@ -460,6 +669,7 @@ impl ProviderHandle {
         attempt_context: crate::AttemptContext,
     ) -> Result<ChatResponseV1, ProviderError> {
         self.check_credential()?;
+        let request = self.prepare_cache_request(request)?;
         let started = std::time::Instant::now();
         let mut response = self
             .inner
@@ -476,13 +686,35 @@ impl ProviderHandle {
         call_headers: http::HeaderMap,
         attempt_context: crate::AttemptContext,
     ) -> Result<ChatEventStream, ProviderError> {
+        if request.include_native_stream && !self.supports_native_stream() {
+            return Err(ProviderError::InvalidRequest(
+                "native SSE attachments are not supported by this provider".into(),
+            ));
+        }
         self.check_credential()?;
+        let request = self.prepare_cache_request(request)?;
         let started = std::time::Instant::now();
         let inner = self
             .inner
             .stream_observed(request, call_headers, attempt_context)
             .await?;
         Ok(stamp_stream_latency(inner, started))
+    }
+
+    pub async fn stream_with_qualified_usage_and_attempts(
+        &self,
+        request: ChatRequestV1,
+        headers: http::HeaderMap,
+        context: crate::AttemptContext,
+    ) -> Result<ChatEventStream, ProviderError> {
+        self.preflight_owned_streaming(&request)?;
+        let request = self.prepare_cache_request(request)?;
+        let started = std::time::Instant::now();
+        let stream = self
+            .inner
+            .stream_qualified_observed(request, headers, context)
+            .await?;
+        Ok(stamp_stream_latency(stream, started))
     }
 }
 
@@ -541,6 +773,53 @@ fn stamp_stream_latency(inner: ChatEventStream, started: std::time::Instant) -> 
 /// HTTP connection pool, circuit breaker, and retry policy across all of its calls.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ProviderRuntime;
+
+fn private_credential_identity(config: &ProviderTransportConfig) -> String {
+    let headers: std::collections::BTreeMap<_, _> = config
+        .headers
+        .keys()
+        .map(|name| {
+            (
+                name.as_str(),
+                config
+                    .headers
+                    .get_all(name)
+                    .iter()
+                    .map(|value| value.as_bytes())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    // A constrained Codex lease has a verified account header; access-token renewal
+    // within that account need not masquerade as an account switch. Generic API
+    // credentials have no such proof, so their actual secret remains part of the hash.
+    let credential = if config.openai_responses_profile == OpenAiResponsesProfile::ChatGptCodex {
+        config
+            .headers
+            .get("chatgpt-account-id")
+            .filter(|value| value.to_str().is_ok_and(|value| !value.trim().is_empty()))
+            .map(|value| value.as_bytes())
+            .unwrap_or(config.api_key.as_bytes())
+    } else {
+        config.api_key.as_bytes()
+    };
+    sandhi_core::cache_digest(&(
+        "private-transport-credential-v1",
+        config.family.endpoint_family(),
+        &config.base_url,
+        credential,
+        headers,
+    ))
+    .expect("serializable transport identity")
+}
+
+fn account_fenced_config(config: &ProviderTransportConfig) -> bool {
+    config.openai_responses_profile == OpenAiResponsesProfile::ChatGptCodex
+        && config
+            .headers
+            .get("chatgpt-account-id")
+            .is_some_and(|value| value.to_str().is_ok_and(|value| !value.trim().is_empty()))
+}
 
 /// Re-export of the family encoder the proxy's translation-plane tests drive
 /// end to end (ingress decode → family encode), pinning the seam where
@@ -654,6 +933,8 @@ impl ProviderRuntime {
         config.stream_setup_timeout_secs = stream_setup_timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
         let raw_forwarder = Some(build_raw_forwarder(&config));
+        let credential_identity = Some(private_credential_identity(&config));
+        let credential_account_fenced = account_fenced_config(&config);
         let raw = self.transport(config);
         ProviderHandle {
             inner: Arc::new(TypedOpenAiCompat { slug, raw }),
@@ -661,6 +942,9 @@ impl ProviderRuntime {
             raw: raw_forwarder,
             streaming_deadline_capable: true,
             credential_expires_at: None,
+            backend_binding: None,
+            credential_identity,
+            credential_account_fenced,
             qualified_single_attempt: max_retries.unwrap_or(0) == 0,
         }
     }
@@ -692,6 +976,8 @@ impl ProviderRuntime {
         config.stream_setup_timeout_secs = stream_setup_timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
         let raw_forwarder = Some(build_raw_forwarder(&config));
+        let credential_identity = Some(private_credential_identity(&config));
+        let credential_account_fenced = account_fenced_config(&config);
         let raw = self.transport(config);
         ProviderHandle {
             inner: Arc::new(crate::openai_responses_typed::TypedOpenAiResponses::new(
@@ -703,7 +989,10 @@ impl ProviderRuntime {
             raw: raw_forwarder,
             streaming_deadline_capable: true,
             credential_expires_at: None,
-            qualified_single_attempt: false,
+            backend_binding: None,
+            credential_identity,
+            credential_account_fenced,
+            qualified_single_attempt: max_retries.unwrap_or(0) == 0,
         }
     }
 
@@ -736,6 +1025,8 @@ impl ProviderRuntime {
         config.openai_responses_profile = OpenAiResponsesProfile::ChatGptCodex;
         // Subscription payloads must always pass through the constrained codec.
         let raw_forwarder = None;
+        let credential_identity = Some(private_credential_identity(&config));
+        let credential_account_fenced = account_fenced_config(&config);
         let raw = self.transport(config);
         ProviderHandle {
             inner: Arc::new(crate::openai_responses_typed::TypedOpenAiResponses::new(
@@ -747,7 +1038,10 @@ impl ProviderRuntime {
             raw: raw_forwarder,
             streaming_deadline_capable: true,
             credential_expires_at: None,
-            qualified_single_attempt: false,
+            backend_binding: None,
+            credential_identity,
+            credential_account_fenced,
+            qualified_single_attempt: max_retries.unwrap_or(0) == 0,
         }
     }
 
@@ -763,23 +1057,58 @@ impl ProviderRuntime {
         stream_setup_timeout_secs: Option<f64>,
         stream_idle_timeout_secs: Option<f64>,
     ) -> ProviderHandle {
+        self.anthropic_with_usage_profile(
+            base_url,
+            api_key,
+            auth_scheme,
+            headers,
+            max_retries,
+            timeout_secs,
+            stream_setup_timeout_secs,
+            stream_idle_timeout_secs,
+            sandhi_core::usage::AnthropicUsageProfile::SeparateCacheWrites,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn anthropic_with_usage_profile(
+        &self,
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        auth_scheme: AnthropicAuthScheme,
+        headers: http::HeaderMap,
+        max_retries: Option<u32>,
+        timeout_secs: Option<f64>,
+        stream_setup_timeout_secs: Option<f64>,
+        stream_idle_timeout_secs: Option<f64>,
+        usage_profile: sandhi_core::usage::AnthropicUsageProfile,
+    ) -> ProviderHandle {
         let mut config =
             ProviderTransportConfig::new(ProviderFamily::Anthropic, "anthropic", base_url, api_key);
         config.anthropic_auth_scheme = auth_scheme;
+        config.anthropic_usage_profile = usage_profile;
         config.headers = headers;
         config.max_retries = max_retries;
         config.timeout_secs = timeout_secs;
         config.stream_setup_timeout_secs = stream_setup_timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
         let raw_forwarder = Some(build_raw_forwarder(&config));
+        let credential_identity = Some(private_credential_identity(&config));
+        let credential_account_fenced = account_fenced_config(&config);
         let raw = self.transport(config);
         ProviderHandle {
-            inner: Arc::new(crate::anthropic_typed::TypedAnthropic::new(raw)),
+            inner: Arc::new(crate::anthropic_typed::TypedAnthropic::new(
+                raw,
+                usage_profile,
+            )),
             family: ProviderFamily::Anthropic,
             raw: raw_forwarder,
             streaming_deadline_capable: true,
             credential_expires_at: None,
-            qualified_single_attempt: false,
+            backend_binding: None,
+            credential_identity,
+            credential_account_fenced,
+            qualified_single_attempt: max_retries.unwrap_or(0) == 0,
         }
     }
 
@@ -802,6 +1131,8 @@ impl ProviderRuntime {
         config.stream_setup_timeout_secs = stream_setup_timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
         let raw_forwarder = Some(build_raw_forwarder(&config));
+        let credential_identity = Some(private_credential_identity(&config));
+        let credential_account_fenced = account_fenced_config(&config);
         let raw = self.transport(config);
         ProviderHandle {
             inner: Arc::new(crate::ollama_typed::TypedOllama::new(raw)),
@@ -809,6 +1140,9 @@ impl ProviderRuntime {
             raw: raw_forwarder,
             streaming_deadline_capable: true,
             credential_expires_at: None,
+            backend_binding: None,
+            credential_identity,
+            credential_account_fenced,
             qualified_single_attempt: false,
         }
     }
@@ -834,6 +1168,8 @@ impl ProviderRuntime {
         config.stream_setup_timeout_secs = stream_setup_timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
         let raw_forwarder = Some(build_raw_forwarder(&config));
+        let credential_identity = Some(private_credential_identity(&config));
+        let credential_account_fenced = account_fenced_config(&config);
         let raw = self.transport(config);
         ProviderHandle {
             inner: Arc::new(crate::gemini_typed::TypedGemini::new(raw)),
@@ -841,7 +1177,10 @@ impl ProviderRuntime {
             raw: raw_forwarder,
             streaming_deadline_capable: true,
             credential_expires_at: None,
-            qualified_single_attempt: false,
+            backend_binding: None,
+            credential_identity,
+            credential_account_fenced,
+            qualified_single_attempt: max_retries.unwrap_or(0) == 0,
         }
     }
 
@@ -864,6 +1203,8 @@ impl ProviderRuntime {
         config.stream_setup_timeout_secs = stream_setup_timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
         let raw_forwarder = Some(build_raw_forwarder(&config));
+        let credential_identity = Some(private_credential_identity(&config));
+        let credential_account_fenced = account_fenced_config(&config);
         let raw = self.transport(config);
         ProviderHandle {
             inner: Arc::new(crate::cohere_typed::TypedCohere::new(raw)),
@@ -871,6 +1212,9 @@ impl ProviderRuntime {
             raw: raw_forwarder,
             streaming_deadline_capable: true,
             credential_expires_at: None,
+            backend_binding: None,
+            credential_identity,
+            credential_account_fenced,
             qualified_single_attempt: false,
         }
     }
@@ -912,6 +1256,48 @@ struct TypedOpenAiCompat {
 
 #[async_trait]
 impl ChatProvider for TypedOpenAiCompat {
+    fn supports_qualified_streaming(&self) -> bool {
+        true
+    }
+    async fn stream_qualified_observed(
+        &self,
+        mut request: ChatRequestV1,
+        headers: http::HeaderMap,
+        context: crate::AttemptContext,
+    ) -> Result<ChatEventStream, ProviderError> {
+        self.apply_constraints(&mut request)?;
+        request.validate().map_err(ProviderError::InvalidRequest)?;
+        let source = self
+            .raw
+            .stream_qualified(
+                provider_request_observed(
+                    &request,
+                    encode_openai_request(&request)?,
+                    headers,
+                    Some(context),
+                ),
+                crate::QualifiedStreamDelivery::Streaming,
+            )
+            .await?;
+        Ok(crate::qualified_stream::decode(
+            decode_openai_stream_delivery(
+                source.stream,
+                request.model,
+                request.include_native_stream,
+                true,
+            ),
+            source.observation,
+        ))
+    }
+    fn preflight_request(&self, request: &ChatRequestV1) -> Result<(), ProviderError> {
+        encode_openai_request(request).map(|_| ())
+    }
+    fn allows_cache_synthesis(&self) -> bool {
+        true
+    }
+    fn supports_native_stream(&self) -> bool {
+        true
+    }
     fn slug(&self) -> &str {
         &self.slug
     }
@@ -932,6 +1318,16 @@ impl ChatProvider for TypedOpenAiCompat {
         call_headers: http::HeaderMap,
     ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
         self.complete_inner(request, call_headers, None, true).await
+    }
+
+    async fn complete_qualified_observed(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+        context: crate::AttemptContext,
+    ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
+        self.complete_inner(request, call_headers, Some(context), true)
+            .await
     }
 
     async fn stream(
@@ -981,18 +1377,25 @@ impl TypedOpenAiCompat {
             attempt_context,
         );
         let response = self.raw.complete(req).await?;
-        let qualification = if qualify {
-            sandhi_core::usage::validate_openai_buffered_usage(&response.body)
-        } else {
-            Ok(())
-        };
+        let qualification = qualify.then(|| {
+            sandhi_core::usage::qualify_buffered_usage(
+                sandhi_core::EndpointFamilyV1::OpenaiChatCompletions,
+                &response.body,
+            )
+        });
         let mut decoded = decode_openai_response(response.body, response.usage, &request.model)?;
         if !request.include_native_response {
             decoded.extensions.remove("openai");
         }
         decoded.usage.attempts = response.attempts;
         decoded.usage.outcome = Some("success".into());
-        let usage = qualification.map(|_| decoded.usage.clone());
+        let usage = qualification
+            .unwrap_or_else(|| Ok(decoded.usage.clone()))
+            .map(|mut usage| {
+                usage.attempts = response.attempts;
+                usage.outcome = Some("success".into());
+                usage
+            });
         Ok(crate::QualifiedCompletion {
             response: decoded,
             usage,
@@ -1014,7 +1417,11 @@ impl TypedOpenAiCompat {
             attempt_context,
         );
         let raw = self.raw.stream(req).await?;
-        Ok(decode_openai_stream(raw, request.model))
+        Ok(decode_openai_stream_mode(
+            raw,
+            request.model,
+            request.include_native_stream,
+        ))
     }
 
     fn apply_constraints(&self, request: &mut ChatRequestV1) -> Result<(), ProviderError> {
@@ -1061,7 +1468,21 @@ pub(crate) fn provider_request_observed(
 }
 
 pub fn encode_openai_request(request: &ChatRequestV1) -> Result<Value, ProviderError> {
+    let mut body = encode_openai_request_base(request)?;
+    crate::cache_policy::apply(
+        request,
+        sandhi_core::EndpointFamilyV1::OpenaiChatCompletions,
+        &mut body,
+    )?;
+    Ok(body)
+}
+
+pub(crate) fn encode_openai_request_base(request: &ChatRequestV1) -> Result<Value, ProviderError> {
     request.validate().map_err(ProviderError::InvalidRequest)?;
+    let native = request
+        .native_input_for(sandhi_core::EndpointFamilyV1::OpenaiChatCompletions)
+        .map_err(ProviderError::InvalidRequest)?
+        .is_some();
     let mut body = request
         .extensions
         .get("openai")
@@ -1069,11 +1490,13 @@ pub fn encode_openai_request(request: &ChatRequestV1) -> Result<Value, ProviderE
         .cloned()
         .unwrap_or_default();
     body.insert("model".into(), Value::String(request.model.clone()));
-    body.insert(
-        "messages".into(),
-        Value::Array(request.messages.iter().map(encode_message).collect()),
-    );
-    if !request.tools.is_empty() {
+    if !native {
+        body.insert(
+            "messages".into(),
+            Value::Array(request.messages.iter().map(encode_message).collect()),
+        );
+    }
+    if !native && !request.tools.is_empty() {
         body.insert(
             "tools".into(),
             Value::Array(
@@ -1092,7 +1515,7 @@ pub fn encode_openai_request(request: &ChatRequestV1) -> Result<Value, ProviderE
             ),
         );
     }
-    if let Some(choice) = &request.tool_choice {
+    if let Some(choice) = request.tool_choice.as_ref().filter(|_| !native) {
         body.insert("tool_choice".into(), encode_tool_choice(choice));
     }
     insert_optional(&mut body, "temperature", request.temperature);
@@ -1350,19 +1773,51 @@ fn u64_opt(value: &Value, key: &str) -> Option<u64> {
 
 // Unavailable Usage updates emitted by the shared decorator carry only availability
 // corrections; reducers must not replace a previous numeric verdict with them.
+#[cfg(test)]
 fn decode_openai_stream(raw: ByteStream, requested_model: String) -> ChatEventStream {
-    crate::cache_read::decode_with_observation(raw, requested_model, decode_openai_stream_inner)
+    decode_openai_stream_mode(raw, requested_model, false)
 }
 
-fn decode_openai_stream_inner(mut raw: ByteStream, requested_model: String) -> ChatEventStream {
+pub(crate) fn decode_openai_stream_mode(
+    raw: ByteStream,
+    requested_model: String,
+    native: bool,
+) -> ChatEventStream {
+    decode_openai_stream_delivery(raw, requested_model, native, false)
+}
+
+fn decode_openai_stream_delivery(
+    raw: ByteStream,
+    requested_model: String,
+    native: bool,
+    drain_terminal: bool,
+) -> ChatEventStream {
+    crate::cache_read::decode_with_observation_policy(
+        raw,
+        requested_model,
+        move |raw, model| decode_openai_stream_inner(raw, model, native, drain_terminal),
+        native,
+    )
+}
+
+fn decode_openai_stream_inner(
+    mut raw: ByteStream,
+    requested_model: String,
+    native: bool,
+    drain_terminal: bool,
+) -> ChatEventStream {
     use futures_util::StreamExt;
     let stream = async_stream::try_stream! {
         // TD-0014 P1: the shared bounded splitter. One ceiling across both planes; only the
         // over-budget POLICY differs, and it is applied below. See MAX_STREAM_LINE_BYTES.
-        let mut splitter = crate::linesplit::LineSplitter::new(crate::MAX_STREAM_LINE_BYTES);
+        let mut splitter = crate::native_stream::SseDecoder::new((native || drain_terminal).then_some(sandhi_core::EndpointFamilyV1::OpenaiChatCompletions));
         let mut started = false;
         let mut open_tools = BTreeMap::<u32, ()>::new();
         let mut emitted_usage = false;
+        // Chat may send finish_reason before its request-total usage chunk.
+        // Native terminal envelopes in other dialects must see that usage first.
+        let mut pending_finish = None;
+        let mut protocol_done = false;
         // TD-0014 P2b: after the real chunks end, ONE synthetic empty chunk flushes any
         // trailing remainder (a final frame without its newline — Ollama's `done` frame) through
         // this same loop body, so per-chunk event ordering is preserved exactly and the body is
@@ -1396,8 +1851,24 @@ fn decode_openai_stream_inner(mut raw: ByteStream, requested_model: String) -> C
             // (The terminal usage-only chunk is likewise empty and previously skipped this.)
             {
                 splitter.push(&chunk.data);
-                while let Some(line) = splitter.next_line() {
-                    let Some(value) = crate::sse_data_json(&line) else { continue; };
+                if native && chunk.terminal { splitter.flush_newline(); }
+                while let Some((line, mut native_frame)) = splitter.next_line()? {
+                    if !native { native_frame=None; }
+                    if (chunk.terminal && crate::openai_done_line(&line))
+                        || ((native || drain_terminal) && line == b"data: [DONE]") {
+                        if let Some(frame) = native_frame.take() { yield ChatStreamEventV1::NativeFrame { frame }; }
+                        protocol_done = true;
+                        splitter.reset();
+                        break;
+                    }
+                    let Some(value) = crate::sse_data_json(&line) else {
+                        if let Some(frame) = native_frame.take() { yield ChatStreamEventV1::NativeFrame { frame }; }
+                        continue;
+                    };
+                    if let Some(error) = crate::native_stream::upstream_error(&value) {
+                        if let Some(frame) = native_frame.take() { yield ChatStreamEventV1::NativeFrame { frame }; }
+                        Err(error)?;
+                    }
                     if !started {
                         yield ChatStreamEventV1::ResponseStart {
                             id: value.get("id").and_then(Value::as_str).map(str::to_owned),
@@ -1452,8 +1923,9 @@ fn decode_openai_stream_inner(mut raw: ByteStream, requested_model: String) -> C
                             yield ChatStreamEventV1::ToolCallEnd { index };
                         }
                         open_tools.clear();
-                        yield ChatStreamEventV1::Finish { reason: decode_finish_reason(reason) };
+                        pending_finish = Some(decode_finish_reason(reason));
                     }
+                    if let Some(frame) = native_frame.take() { yield ChatStreamEventV1::NativeFrame { frame }; }
                 }
                 // TD-0014 P1 (gap G01): past MAX_STREAM_LINE_BYTES the upstream has sent no
                 // line boundary at all, which no real provider does. The raw plane drops the
@@ -1478,6 +1950,19 @@ fn decode_openai_stream_inner(mut raw: ByteStream, requested_model: String) -> C
                     emitted_usage = true;
                 }
             }
+            // A data-bearing terminal item is the protocol boundary ([DONE]),
+            // which can precede HTTP EOF. An empty terminal item instead marks
+            // EOF; let the existing tail-flush loop decode any final line first.
+            if protocol_done || (chunk.terminal && !chunk.data.is_empty()) {
+                if drain_terminal { while let Some(chunk)=raw.next().await {chunk?;} }
+                break;
+            }
+        }
+        if native && !protocol_done {
+            Err(ProviderError::Transport("native Chat stream ended before its protocol terminator".into()))?;
+        }
+        if let Some(reason) = pending_finish {
+            yield ChatStreamEventV1::Finish { reason };
         }
     };
     Box::pin(stream)
@@ -1520,6 +2005,94 @@ impl ProviderError {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn chat_finish_follows_trailing_usage_without_waiting_for_http_eof() {
+        use futures_util::StreamExt;
+        let wire = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":20,\"prompt_tokens_details\":{\"cached_tokens\":60,\"cache_write_tokens\":30}}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        for newline in ["\n", "\r\n"] {
+            let wire = wire.replace('\n', newline);
+            for split in 0..=wire.len() {
+                let upstream = futures_util::stream::iter(vec![
+                    Ok::<_, reqwest::Error>(bytes::Bytes::copy_from_slice(
+                        &wire.as_bytes()[..split],
+                    )),
+                    Ok(bytes::Bytes::copy_from_slice(&wire.as_bytes()[split..])),
+                ])
+                .chain(futures_util::stream::pending());
+                let raw =
+                    crate::metered_openai_passthrough(upstream, crate::openai::sniff_usage_line);
+                let events: Vec<_> = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    super::decode_openai_stream(raw, "fixture".into())
+                        .map(Result::unwrap)
+                        .collect(),
+                )
+                .await
+                .expect("[DONE] must complete the typed stream before HTTP EOF");
+                assert!(matches!(
+                    events.last(),
+                    Some(sandhi_core::ChatStreamEventV1::Finish {
+                        reason: sandhi_core::FinishReasonV1::Stop
+                    })
+                ));
+                let measurements: Vec<_> = events
+                    .iter()
+                    .filter_map(|event| match event {
+                        sandhi_core::ChatStreamEventV1::Usage { usage }
+                            if usage.completeness == sandhi_core::UsageCompleteness::Final =>
+                        {
+                            Some(usage)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(measurements.len(), 1);
+                assert_eq!(
+                    (
+                        measurements[0].tokens_in,
+                        measurements[0].cache_read_tokens,
+                        measurements[0].cache_creation_tokens
+                    ),
+                    (10, 60, 30)
+                );
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| matches!(
+                            event,
+                            sandhi_core::ChatStreamEventV1::Finish { .. }
+                        ))
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_failure_before_done_does_not_publish_a_successful_finish() {
+        use futures_util::StreamExt;
+        let raw = futures_util::stream::iter(vec![
+            Ok(crate::StreamChunk {
+                data:bytes::Bytes::from_static(b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n"),
+                usage:None, usage_running:None, cache_read_observation:None, attempts:1, terminal:false,
+            }),
+            Err(crate::ProviderError::Transport("synthetic failure before usage".into())),
+        ]);
+        let events: Vec<_> = super::decode_openai_stream(Box::pin(raw), "fixture".into())
+            .collect()
+            .await;
+        assert!(events.last().unwrap().is_err());
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, Ok(sandhi_core::ChatStreamEventV1::Finish { .. }))));
+    }
+
     #[tokio::test]
     async fn received_content_before_cancellation_exposes_cache_absence() {
         use futures_util::StreamExt;
@@ -2287,10 +2860,28 @@ mod tests {
                 None,
             );
             let request: ChatRequestV1 = serde_json::from_value(json!({"schema_version":"1","model":"fixture","messages":[{"role":"user","content":"hi"}],"include_native_response":false})).unwrap();
+            let (context, receiver) =
+                crate::AttemptContext::single_attempt("execution", "c".repeat(64)).unwrap();
             let typed = handle
-                .complete_with_qualified_usage(request.clone(), Default::default())
+                .complete_with_qualified_usage_and_attempts(
+                    request.clone(),
+                    Default::default(),
+                    context.clone(),
+                )
                 .await
                 .unwrap();
+            assert_eq!(receiver.drain().len(), 2);
+            assert!(matches!(
+                handle
+                    .complete_with_qualified_usage_and_attempts(
+                        request.clone(),
+                        Default::default(),
+                        context
+                    )
+                    .await,
+                Err(ProviderError::InvalidRequest(_))
+            ));
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
             assert_eq!(typed.usage.is_ok(), counts.is_some(), "typed: {body}");
             assert_eq!(
                 typed.response.output.content,
@@ -2376,12 +2967,11 @@ mod tests {
         use wiremock::MockServer;
         let server = MockServer::start().await;
         let request: ChatRequestV1 = serde_json::from_value(json!({"schema_version":"1","model":"fixture","messages":[{"role":"user","content":"hi"}]})).unwrap();
-        let handle = ProviderRuntime::new().anthropic(
+        let handle = ProviderRuntime::new().cohere(
             server.uri(),
             "key",
-            crate::AnthropicAuthScheme::ApiKey,
             Default::default(),
-            None,
+            Some(0),
             None,
             None,
             None,
@@ -2624,6 +3214,26 @@ mod tests {
             ];
             Ok(Box::pin(futures_util::stream::iter(events)))
         }
+    }
+
+    #[tokio::test]
+    async fn unsupported_native_stream_opt_in_refuses_before_custom_dispatch() {
+        let handle = ProviderHandle::new(Arc::new(CannedChat));
+        assert!(!handle.supports_native_stream());
+        let mut request: ChatRequestV1 = serde_json::from_value(json!({
+            "model":"fixture", "messages":[], "include_native_stream":true
+        }))
+        .unwrap();
+        let result = handle.stream(request.clone()).await;
+        assert!(
+            matches!(result,Err(ProviderError::InvalidRequest(ref message)) if message.contains("native"))
+        );
+        request.include_native_stream = false;
+        use futures_util::StreamExt;
+        let events: Vec<_> = handle.stream(request).await.unwrap().collect().await;
+        assert!(events
+            .iter()
+            .all(|event| !matches!(event, Ok(ChatStreamEventV1::NativeFrame { .. }))));
     }
 
     #[tokio::test]

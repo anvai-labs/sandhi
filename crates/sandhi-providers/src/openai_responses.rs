@@ -119,10 +119,7 @@ impl Provider for OpenAiResponses {
                 if !response.status().is_success() {
                     return Err(error_for_response(response, None).await);
                 }
-                let body: Value = response
-                    .json()
-                    .await
-                    .map_err(|error| ProviderError::Transport(error.to_string()))?;
+                let body = crate::decode_response_json(response).await?;
                 let (response_usage, observed_usage) =
                     crate::buffered_usage(sandhi_core::CacheReadFamily::OpenAiResponses, &body);
                 Ok((
@@ -171,6 +168,59 @@ impl Provider for OpenAiResponses {
                     response.bytes_stream(),
                     sniff_responses_usage_line,
                 ))
+            },
+        )
+        .await
+    }
+
+    async fn stream_qualified(
+        &self,
+        req: ProviderRequest,
+        _delivery: crate::QualifiedStreamDelivery,
+    ) -> Result<crate::QualifiedProviderStream, ProviderError> {
+        Self::validate(&req.body)?;
+        if req
+            .body
+            .get("background")
+            .is_some_and(|value| value != &Value::Bool(false))
+        {
+            return Err(ProviderError::InvalidRequest(
+                "qualified Responses requires synchronous generation".into(),
+            ));
+        }
+        let context = req.attempt_context.clone();
+        let model = req.model.clone();
+        let mut body = req.body;
+        body["stream"] = Value::Bool(true);
+        let mut request = self
+            .client
+            .post(self.responses_url())
+            .headers(crate::merge_call_headers(&self.headers, &req.extra_headers));
+        if !self.bearer_token.is_empty() {
+            request = request.bearer_auth(&self.bearer_token);
+        }
+        crate::attempt::observe_qualified_stream(
+            context,
+            self.slug(),
+            Some(&model),
+            sandhi_core::EndpointFamilyV1::OpenaiResponses,
+            |facts| async move {
+                let response = request
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|error| ProviderError::Transport(error.to_string()))?;
+                facts.record_headers(response.status().as_u16(), response.headers(), None);
+                if !response.status().is_success() {
+                    return Err(error_for_response(response, None).await);
+                }
+                let request_id = crate::provider_request_id(response.headers(), None);
+                use futures_util::StreamExt;
+                let raw: crate::raw::RawChunkStream =
+                    Box::pin(response.bytes_stream().map(|chunk| {
+                        chunk.map_err(|error| ProviderError::Transport(error.to_string()))
+                    }));
+                Ok((raw, request_id))
             },
         )
         .await

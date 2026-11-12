@@ -24,7 +24,9 @@ use sandhi_proxy::{
     DEFAULT_HEADER_READ_TIMEOUT_SECS, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_CONNECTIONS_PER_IP,
     DEFAULT_MAX_IN_FLIGHT_AI_REQUESTS, DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_SHUTDOWN_GRACE,
 };
-use sandhi_store::{AlertStore, ProfileStore, SqliteStore, VaultStore, VirtualKeyStore};
+use sandhi_store::{
+    AlertStore, BackendStore, ProfileStore, SqliteStore, VaultStore, VirtualKeyStore,
+};
 
 #[derive(clap::Parser)]
 #[command(name = "sandhi-proxy", version = sandhi_proxy::PACKAGE_VERSION,
@@ -266,6 +268,22 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
         rehydrate_providers_from_vault(&vault, &runtime, &mut providers);
         Arc::new(vault)
     });
+    let backends = store_path.as_deref().map(|path| {
+        let store = BackendStore::open(path).unwrap_or_else(|_| startup_store_fatal("backends"));
+        if let Some(vault) = vault.as_deref() {
+            sandhi_proxy::backend::rehydrate_backends(vault, &store, &runtime, &mut providers)
+                .unwrap_or_else(|_| startup_store_fatal("backends"));
+        }
+        Arc::new(store)
+    });
+    let routes = store_path.as_deref().map(|path| {
+        let routes = sandhi_store::routes::RouteStore::open(path)
+            .unwrap_or_else(|_| startup_store_fatal("routes"));
+        routes
+            .list()
+            .unwrap_or_else(|_| startup_store_fatal("routes"));
+        Arc::new(routes)
+    });
     let vkeys = store_path.as_deref().map(|p| {
         let vkeys = VirtualKeyStore::open(p).unwrap_or_else(|_| startup_store_fatal("vkeys"));
         sandhi_proxy::rehydrate_live_keys(&keys, &vkeys);
@@ -423,6 +441,8 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
         }
     }
     state.vault = vault;
+    state.backends = backends;
+    state.routes = routes;
     state.vkeys = vkeys;
     state.profiles = profiles;
     state.alert_store = alert_store;

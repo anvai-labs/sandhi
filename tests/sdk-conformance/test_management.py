@@ -137,6 +137,7 @@ def test_cli_reports_partial_budget_and_exits_nonzero(dashboard):
 
 def test_failed_budget_ui_does_not_retain_previous_success(page, dashboard):
     connect(page, dashboard)
+    page.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name='Budgets', exact=True).click()
     page.get_by_text("Set a budget", exact=True).click()
     page.get_by_label("Scope", exact=True).fill("group:dashboard")
     page.get_by_label("Limit (tokens)").fill("700")
@@ -210,6 +211,7 @@ def test_partial_config_ui_preserves_one_time_key_and_reports_failure(page, dash
     write_config(dashboard, {"vkeys": [{"upstream": "openai", "subject": "smoke"},
                                        {"upstream": "not-configured", "subject": "failed"}]})
     connect(page, dashboard)
+    page.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name='Configuration', exact=True).click()
     page.get_by_role("button", name="Apply config", exact=True).click()
     result = page.locator("#config-result")
     expect(result).to_contain_text("Incomplete")

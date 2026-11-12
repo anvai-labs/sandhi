@@ -13,9 +13,16 @@ mistaken for shipped behavior.
 | What can I run today? | The root [README](../README.md) and [proxy operator guide](operator/proxy-guide.adoc) |
 | How do users, groups and long-running clients authenticate? | [Identity and agent credentials](operator/identity-groups.md) (feature candidate; live migration pending) |
 | How is prompt egress inspected? | [Policy MVP](operator/policy-evaluation.md) (candidate); [evaluator backends and Python/MLflow](operator/python-ml-evaluators.md) (Python, optional ONNX and remote-service candidates); [resource-limited container profile](../templates/python-evaluator/DEPLOYMENT.md) |
+| How does Sandhi improve repeated-context efficiency? | [Visual cache routing and token guide](product/cache-aware-routing.md): marker placement, fresh/read/write accounting, cost boundaries and the complementary ONNX egress mechanism |
+| What has been tested with live provider caching? | [Z.AI qualification](reviews/zai-router-live-2026-11-11.md): 24 final protocol/mode cells and 48 cache calls; retained defects/timeouts and remaining gates |
+| Has tracked routing been tested with live caching? | [Tracked buffered Z.AI matrix](reviews/zai-router-tracked-buffered-2026-11-11.md): 24 successful logical-route calls joined to usage, attempt evidence and paired receipts; earlier failures retained |
 | How do I rehearse recovery safely? | [Isolated single-node recovery drill](operator/recovery-drill.md); no automatic production restore guarantee |
 | What is the supported architecture and scope? | Accepted records in [`adr/`](adr/) |
 | What is complete or still open? | This index and the status line at the top of each record in [`td/`](td/) |
+| What is needed for multi-backend routing and cache management? | [Active goal and delivery gates (TD-0034)](td/TD-0034-protocol-neutral-router-cache-accounting.md); [baseline inventory and first fixes](reviews/router-cache-inventory-2026-11-11.md); dynamic routing remains in progress |
+| How do I operate the dashboard? | [Operator console](operator/dashboard.md): navigable workspaces, routing inventory, token reuse and bounded usage evidence |
+| How do I configure backends and logical models? | [Backend operator guide](operator/backends.md); fixed and logical routes, compatible affinity, cache declarations and credential references |
+| Does the routing goal include native Gemini clients? | Yes; [Gemini inventory and fidelity gaps](reviews/gemini-router-cache-inventory-2026-11-11.md) and the four-ingress matrix in TD-0034 |
 | What is the public data contract? | Rust types in `sandhi-core`; generated JSON Schemas in [`../schemas/`](../schemas/) |
 | What changed in a release? | [0.15.0 release evidence](releases/v0.15.0.md), [0.14.0 release and adoption gates](releases/v0.14.0.md), [0.13.0 release](releases/v0.13.0.md), [0.12.0 release evidence](releases/v0.12.0.md), [CHANGELOG](../CHANGELOG.md) and [release guide](../RELEASING.md) |
 | How do sibling repositories integrate? | [`upstream/`](upstream/) snapshots; these are non-normative and may be historical |
@@ -88,6 +95,18 @@ TD-0028 keeps its merge/deployment gates separate from the remaining diagnostic 
 | ADR | Decision |
 |---|---|
 | [0001](adr/0001-sandhi-architecture-and-wire-contract.md) | Layered Rust core, bindings, proxy, and neutral wire contract |
+| [0016](adr/0016-explicit-backend-endpoint-binding.md) | Explicit endpoint family/profile factory seam |
+| [0017](adr/0017-backend-registry-lifecycle.md) | Non-secret backend registry, revision-conditional lifecycle and credential-dependent reconstruction |
+| [0018](adr/0018-ordered-native-input-and-projection.md) | Codec-owned ordered input, projection consistency and compatible buffered native output |
+| [0019](adr/0019-native-stream-attachments.md) | Default-off native SSE attachments and bounded Codex terminal-response aggregation; canonical accounting remains authoritative |
+| [0020](adr/0020-cache-intent-compilation.md) | Workspace candidate: explicit cache intent, backend/model capabilities, native controls and scoped keys; broader affinity/accounting qualification remains open |
+| [0021](adr/0021-logical-routing-and-compatible-affinity.md) | Workspace candidate: authorized logical models, deterministic selection, durable compatible affinity and remaining physical-dispatch evidence gates |
+| [0022](adr/0022-durable-execution-context.md) | Workspace candidate: atomic selected backend/cache/policy context and original-weight fencing within existing tracked admissions; physical-attempt persistence remains open |
+| [0023](adr/0023-paired-budget-settlement.md) | Workspace candidate: atomic paired budget admission/settlement and retained unknown liability across restart; existing tracked activation only |
+| [0024](adr/0024-durable-physical-attempt-evidence.md) | Workspace candidate: persisted single-attempt identities and atomic transport/usage evidence |
+| [0025](adr/0025-qualified-buffered-protocol-accounting.md) | Workspace candidate: qualified buffered Chat/Messages/Responses/Gemini matrix and explicit compatible Messages usage profile |
+| [0026](adr/0026-qualified-responses-stream-accounting.md) | Workspace candidate: bounded transparent Responses streaming, partial progress and canonical token evidence |
+| [0027](adr/0027-qualified-codex-buffered-accounting.md) | Workspace candidate: qualified buffered Codex delivery with constrained encoding, original deadlines and retained source evidence |
 | [0002](adr/0002-provider-transport-scope-and-modality-admission.md) | Chat-completion transport scope and the admission gate for new modalities |
 | [0003](adr/0003-provider-adapter-authoring-and-codegen.md) | Hand-written transports; generated models/oracles only where bounded |
 | [0004](adr/0004-two-plane-proxy-and-enforcement-boundary.md) | Transparent and translation planes; custody-based enforcement boundary |
@@ -112,6 +131,7 @@ perpetually open.
 
 | TD | State | Remaining scope |
 |---|---|---|
+| [0034](td/TD-0034-protocol-neutral-router-cache-accounting.md) | Active goal | Explicit backend/operator lifecycle, loss-aware conversation/cache handling, authorized routing/affinity and uniform execution accounting; source/live qualification tracked separately |
 | [0032](td/TD-0032-weighted-allowance-policy.md) | W01 released in 0.14.0 | Opt-in weighted allowance arithmetic; reporting provenance, admission-bound policy snapshots, durable enforcement and live acceptance pending |
 | [0001](td/TD-0001-provider-adapter-qa-and-codegen.md) | Complete | — |
 | [0002](td/TD-0002-typed-provider-runtime.md) | Complete | Consumer-repository cleanup is outside Sandhi's completion gate |

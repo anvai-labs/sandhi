@@ -1,10 +1,33 @@
-# Every model call, accounted for
+# Control egress. Reuse context. Account for every token.
 
 Sandhi routes AI requests, applies access policy and measures usage in **neutral
 units**. Use the standalone gateway for enforcement or the library for metering.
-Pricing and billing belong to downstream systems.
+Cache-aware routing helps agents reuse repeated context across supported API
+dialects; optional local ONNX evaluation supports content policy before provider
+dispatch. Pricing and billing belong to downstream systems.
 
 <div class="grid cards" markdown>
+
+- **Reuse context across agent APIs**
+
+    Compile declared cache intent for the selected backend. Preserve marker
+    boundaries and measure fresh, read and write tokens separately.
+
+    [Cache-aware routing and token efficiency →](product/cache-aware-routing.md)
+
+- **Control outgoing content locally**
+
+    Apply configured egress rules with optional embedded ONNX evaluation.
+    The shipped classifier audits; deterministic rules own its blocks.
+
+    [Local ONNX and egress policy →](operator/sensitive-policy.md)
+
+- **Verify the token benefit**
+
+    Live Z.AI probes reported 3,776 reused tokens out of 3,781 input tokens.
+    Read the evidence and its limits; cache-read share is not cost saved.
+
+    [See the measured split →](product/cache-aware-routing.md#measured-example-3776-reused-tokens-5-fresh-tokens)
 
 - **Connect with identity**
 
@@ -25,6 +48,12 @@ Pricing and billing belong to downstream systems.
     [Explore tracked accounting →](operator/buffered-accounting.md)
 
 </div>
+
+!!! info "Cache routing is a development candidate"
+    Explicit backend/cache policy is implemented in the workspace and live-tested
+    on Z.AI. Broader switching, affinity and durable attempt accounting remain in
+    [TD-0034](td/TD-0034-protocol-neutral-router-cache-accounting.md). A docs build
+    does not release or deploy these changes.
 
 ## One request, two responsibilities
 
@@ -74,6 +103,9 @@ contracts, design history and co-design snapshots.
 
 | Your task | Guide |
 |---|---|
+| Inspect usage, routing and management in one console | [Operator console](operator/dashboard.md) · open `/dashboard` on your gateway |
+| Reuse agent context and understand cache marker/token semantics | [Cache-aware routing](product/cache-aware-routing.md) · [backend configuration](operator/backends.md) |
+| Evaluate outgoing text locally before provider dispatch | [Embedded ONNX](operator/embedded-onnx.md) · [sensitive-text policy](operator/sensitive-policy.md) |
 | Let people sign in and assign roles | [OIDC setup](operator/oidc-sso.md) · [groups and delegated keys](operator/identity-groups.md) |
 | Set global, endpoint or model deadlines | [Buffered calls](operator/buffered-deadlines.md) · [streaming](operator/streaming-deadlines.md) |
 | Understand cache counts and missing measurements | [Cache reporting](adr/0010-cache-read-reporting-availability.md) |

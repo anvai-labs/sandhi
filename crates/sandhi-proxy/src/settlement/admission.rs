@@ -10,7 +10,6 @@ use std::sync::Mutex;
 #[derive(Debug)]
 pub struct PreparedAdmission {
     pub(super) evidence: AdmissionEvidence,
-    pub(super) correlated: bool,
 }
 
 /// Metadata for reconciliation against the supervisor's ORIGINAL ledger. It does
@@ -22,6 +21,7 @@ pub struct AdmissionEvidence {
     pub ceiling: u64,
     pub ttl: time::Duration,
     pub retained_limit: usize,
+    pub context: Option<Box<sandhi_store::ledger::evidence::context::ExecutionContext>>,
 }
 
 impl PreparedAdmission {
@@ -42,20 +42,24 @@ impl PreparedAdmission {
             return Err(EvidenceError::InvalidInput);
         }
         Ok(Self {
-            correlated: false,
             evidence: AdmissionEvidence {
                 request_id,
                 scope,
                 ceiling,
                 ttl,
                 retained_limit,
+                context: None,
             },
         })
     }
 
-    pub(crate) fn correlated(mut self) -> Self {
-        self.correlated = true;
-        self
+    pub(crate) fn with_context(
+        mut self,
+        context: sandhi_store::ledger::evidence::context::ExecutionContext,
+    ) -> Result<Self, EvidenceError> {
+        context.validate()?;
+        self.evidence.context = Some(Box::new(context));
+        Ok(self)
     }
 
     pub fn evidence(&self) -> &AdmissionEvidence {
@@ -75,14 +79,15 @@ impl PreparedAdmission {
             if !lifecycle.is_running() {
                 return Ok(None);
             }
-            let admission = if self.correlated {
-                store.reserve_correlated_durable(
+            let admission = if let Some(context) = &evidence.context {
+                store.reserve_paired_contextual_durable(
                     &evidence.scope,
                     evidence.ceiling,
                     time::OffsetDateTime::now_utc(),
                     evidence.ttl,
                     evidence.retained_limit,
                     &evidence.request_id,
+                    context,
                 )
             } else {
                 store.reserve_prepared_durable(

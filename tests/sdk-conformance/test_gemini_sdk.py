@@ -2,8 +2,9 @@
 
 Gemini is the first dialect whose **model and streaming choice live in the URL**
 (`/v1beta/models/{model}:generateContent`) rather than the body, and whose credential is
-`x-goog-api-key`. D4a admits it on the transparent plane only: a Gemini client must resolve to a
-Gemini upstream, where the body is forwarded byte-for-byte and metered in flight.
+`x-goog-api-key`. Same-family traffic uses the transparent plane; D4b also admits
+cross-family translation, including the OpenAI-backed SDK case below. Native
+feature fidelity beyond the existing cases remains part of TD-0034.
 
 The `?key=` query form Google also documents is deliberately NOT accepted — it would put a live
 virtual key into access logs and crash reports. That gap is stated in the README matrix rather
@@ -119,6 +120,12 @@ def test_count_tokens_answers_in_googles_shape(proxy: str):
     )
     assert response.status_code == 200
     assert response.json()["totalTokens"] > 0
+
+
+def test_count_tokens_works_unmodified(client):
+    # This is Sandhi's admission estimate, not the vendor's exact tokenizer.
+    response = client.models.count_tokens(model="gemini-mock", contents="ping")
+    assert response.total_tokens > 0
 
 
 def test_models_list_works_unmodified(client):

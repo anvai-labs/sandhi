@@ -42,7 +42,7 @@ pub fn enable(state: &Arc<ProxyState>, config: Config) -> Result<(), &'static st
     state
         .buffered_accounting
         .set(Arc::new(Buffered {
-            jobs: Jobs::for_proxy(state, config.capacity),
+            jobs: Jobs::for_proxy(state, config.capacity, config.accounting_wait),
             config,
             recovery: Mutex::new(Recovery::default()),
         }))
@@ -68,6 +68,8 @@ pub(crate) struct Accounting {
     pub obligation: Obligation,
     pub execution: AuthorizedExecution,
     pub wait: Duration,
+    pub cache_read_weight_bp: u32,
+    pub attempts: super::attempts::Observer,
 }
 #[derive(Default)]
 struct Recovery {
@@ -109,6 +111,7 @@ pub(crate) async fn handle(
     state: Arc<ProxyState>,
     owner: Arc<Buffered>,
     provider: ProviderHandle,
+    selection: super::Selection,
     request: ChatRequestV1,
     body: Bytes,
     dialect: IngressDialect,
@@ -121,29 +124,36 @@ pub(crate) async fn handle(
     _effective_max: u64,
     input_len: usize,
     upstream_scope: String,
-    upstream_reservation: Option<sandhi_core::Reservation>,
     configured_deadline: Option<Duration>,
     streaming_limits: Option<crate::deadlines::StreamLimits>,
 ) -> Response {
-    // ADR-0015: the back-leg lease arrives already admitted (reserved by the caller), so it
-    // must be held BEFORE any refusal below — including the tracked-requirements and
-    // transport-deadline guards — or ineligible traffic would leak `reserved()` against a
-    // Block upstream cap until TTL reclaim. The hold settles it to 0 on every early return
-    // and is emptied into the accounting once dispatch is guaranteed, so exactly one path
-    // ever settles it.
-    let mut upstream_hold = crate::UpstreamHold::new(state.clone(), upstream_reservation);
+    // Both leases are admitted together after validation. A refusal here owns no
+    // reservation, and no unknown dispatch can later be released by an RAII back leg.
     if (wants_stream
         && (streaming_limits.is_none()
             || !transparent_eligible
-            || !matches!(dialect, IngressDialect::OpenAi)))
-        || !matches!(dialect, IngressDialect::OpenAi | IngressDialect::Anthropic)
+            || !matches!(dialect, IngressDialect::OpenAi | IngressDialect::Responses)))
+        || !matches!(
+            dialect,
+            IngressDialect::OpenAi
+                | IngressDialect::Anthropic
+                | IngressDialect::Responses
+                | IngressDialect::Gemini
+        )
         || !provider.supports_owned_buffered()
         || policy != Policy::Block
         || request.metadata.idempotency_key.is_some()
         || request.max_output_tokens.is_none()
     {
         return ingress_error(dialect, StatusCode::BAD_REQUEST,
-            "tracked accounting requires buffered chat or transparent OpenAI Chat streaming with a configured streaming deadline, a retry-free built-in OpenAI-compatible provider, Block policy, explicit output limit and no idempotency key");
+            "tracked accounting requires buffered Chat, Messages, Responses or Gemini with a supported retry-free backend, or bounded transparent Chat/Responses streaming; Block policy, explicit output limit and no idempotency key are required");
+    }
+    if provider.preflight_owned_buffered(&request).is_err() {
+        return ingress_error(
+            dialect,
+            StatusCode::BAD_REQUEST,
+            "tracked buffered operation failed backend preflight",
+        );
     }
     let transport = if wants_stream {
         streaming_limits
@@ -160,6 +170,21 @@ pub(crate) async fn handle(
         );
     }
     let transparent = transparent_eligible;
+    let context = match selection.freeze(
+        &state,
+        &provider,
+        &request,
+        super::context::Surface {
+            dialect,
+            streaming: wants_stream,
+            transparent,
+        },
+        &upstream_scope,
+    ) {
+        Ok(context) => context,
+        Err(message) => return ingress_error(dialect, StatusCode::BAD_REQUEST, message),
+    };
+    let cache_read_weight_bp = context.accounting_policy.cache_read_weight.basis_points();
     let mut accounting = RequestAccounting::new(
         state.clone(),
         scope.clone(),
@@ -174,6 +199,7 @@ pub(crate) async fn handle(
         },
     );
     accounting.input_len = input_len;
+    accounting.routing = selection.routing;
     if wants_stream {
         accounting.stream_body_lifetime = Some(
             streaming_limits
@@ -206,19 +232,29 @@ pub(crate) async fn handle(
             100_000,
         )
         .expect("validated generated admission")
-        .correlated();
+        .with_context(context)
+        .expect("validated frozen execution context");
         let Ok(ticket) = obligation.admit(prepared) else {
             return accounting_error(dialect, &task_id);
         };
         if tokio::time::timeout(wait, ticket.wait()).await.is_err() {
+            tracing::warn!(request_id = %task_id, reason = "wait_timeout", "tracked admission unresolved");
             return accounting_error(dialect, &task_id);
         }
         let pending = match ticket.take() {
             Some(AdmissionOutcome::Prepared(pending)) => pending,
             Some(AdmissionOutcome::Denied { .. }) => {
-                return ingress_error(dialect, StatusCode::TOO_MANY_REQUESTS, "budget exhausted")
+                state.metrics.record_denied("block");
+                return ingress_error(dialect, StatusCode::TOO_MANY_REQUESTS, "budget exhausted");
             }
-            _ => return accounting_error(dialect, &task_id),
+            outcome => {
+                let reason = match outcome {
+                    Some(AdmissionOutcome::Failed { failure, .. }) => failure.diagnostic_code(),
+                    _ => "missing_or_interrupted_result",
+                };
+                tracing::warn!(request_id = %task_id, reason, "tracked admission unresolved");
+                return accounting_error(dialect, &task_id);
+            }
         };
         let ticket = match obligation.submit(Work::Authorize(pending)) {
             Ok(ticket) => ticket,
@@ -235,10 +271,21 @@ pub(crate) async fn handle(
             }
         };
         if tokio::time::timeout(wait, ticket.wait()).await.is_err() {
+            tracing::warn!(request_id = %task_id, reason = "wait_timeout", "tracked dispatch authorization unresolved");
             return accounting_error(dialect, &task_id);
         }
-        let Some(Outcome::Dispatch(DispatchAttempt::Authorized(execution))) = ticket.take() else {
-            return accounting_error(dialect, &task_id);
+        let execution = match ticket.take() {
+            Some(Outcome::Dispatch(DispatchAttempt::Authorized(execution))) => execution,
+            outcome => {
+                let reason = match outcome {
+                    Some(Outcome::Dispatch(DispatchAttempt::Unresolved { failure, .. })) => {
+                        failure.diagnostic_code()
+                    }
+                    _ => "missing_or_uncertain_authorization",
+                };
+                tracing::warn!(request_id = %task_id, reason, "tracked dispatch authorization unresolved");
+                return accounting_error(dialect, &task_id);
+            }
         };
         // Authorizing SQLite work can cross cutoff. Do not dispatch a late permit
         // or pretend the durable MayHaveDispatched fence can be rolled back.
@@ -246,19 +293,32 @@ pub(crate) async fn handle(
             return accounting_error(dialect, &task_id);
         };
         accounting.reservation = Some(execution.intent().reservation.clone());
-        // ADR-0015: dispatch is now guaranteed for this call — hand the back-leg lease to the
-        // accounting (it settles with the same actual inside the primary's Settle work, which
-        // `finalize_owned` submits).
-        // From here on every path reaches finalize, so the lease is never orphaned.
-        accounting.with_upstream_budget(upstream_scope, upstream_hold.take());
+        // The upstream reservation belongs to the durable execution linkage;
+        // canonical terminal settlement/recovery handles both in one transaction.
+        accounting.with_upstream_budget(upstream_scope, None);
         accounting.operation = Some(operation);
+        let attempts = match super::attempts::Observer::new(&execution) {
+            Ok(attempts) => attempts,
+            Err(reason) => {
+                tracing::warn!(request_id = %task_id, reason, "tracked attempt setup unresolved");
+                return accounting_error(dialect, &task_id);
+            }
+        };
         accounting.owned = Some(Accounting {
             obligation,
             execution,
             wait,
+            cache_read_weight_bp,
+            attempts,
         });
         accounting.finalized = false;
         let full_error_detail = state.error_detail_full;
+        let gemini = (provider.family() == sandhi_providers::ProviderFamily::Gemini).then(|| {
+            crate::GeminiRoute {
+                model: request.model.clone(),
+                stream: wants_stream,
+            }
+        });
         let dispatch = async move {
             if wants_stream {
                 transparent_stream_response(
@@ -268,7 +328,7 @@ pub(crate) async fn handle(
                     dialect,
                     accounting,
                     full_error_detail,
-                    None,
+                    gemini,
                     permit,
                 )
                 .await
@@ -280,7 +340,7 @@ pub(crate) async fn handle(
                     dialect,
                     accounting,
                     full_error_detail,
-                    None,
+                    gemini,
                     permit,
                 )
                 .await

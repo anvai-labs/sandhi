@@ -25,6 +25,8 @@ use serde_json::Value;
 use std::sync::Mutex;
 
 pub(super) struct PreparationContext<'a> {
+    state: &'a ProxyState,
+    count_only: bool,
     buffered_deadlines: Option<&'a BufferedDeadlines>,
     streaming_deadlines: Option<&'a StreamingDeadlines>,
     stream_body_lifetime: Option<StreamBodyLifetime>,
@@ -35,6 +37,8 @@ pub(super) struct PreparationContext<'a> {
 impl<'a> From<&'a ProxyState> for PreparationContext<'a> {
     fn from(state: &'a ProxyState) -> Self {
         Self {
+            state,
+            count_only: false,
             buffered_deadlines: state.buffered_deadlines.as_ref(),
             streaming_deadlines: state.streaming_deadlines.as_ref(),
             stream_body_lifetime: state.stream_body_lifetime,
@@ -45,9 +49,16 @@ impl<'a> From<&'a ProxyState> for PreparationContext<'a> {
     }
 }
 
+impl PreparationContext<'_> {
+    pub(super) fn for_counting(mut self) -> Self {
+        self.count_only = true;
+        self
+    }
+}
+
 pub(super) struct ResolvedRoute {
     pub vk: VirtualKey,
-    pub provider: ProviderHandle,
+    pub provider: Option<ProviderHandle>,
     pub rate_identity: String,
     pub policy_identity: sandhi_core::policy::Identity,
 }
@@ -63,6 +74,7 @@ pub(super) struct PreparedRequest {
     pub buffered_deadline: Option<EffectiveDeadline>,
     pub streaming_deadline: Option<StreamLimits>,
     pub body_lifetime: Option<StreamBodyLifetime>,
+    pub routing: Option<crate::routing::DispatchPlan>,
 }
 
 // Preserve the already-rendered dialect response, including policy headers.
@@ -87,20 +99,10 @@ pub(super) async fn prepare(
         dialect,
         IngressDialect::Embeddings | IngressDialect::Completions
     );
-    if raw_text_route
-        && (provider.family() != ProviderFamily::OpenAiCompat || provider.raw_forwarder().is_none())
-    {
-        return Err(ingress_error(
-            dialect,
-            StatusCode::BAD_REQUEST,
-            "text endpoints require a compatible raw upstream",
-        ));
-    }
-    let parsed = if raw_text_route {
-        sandhi_core::policy::strict_json(&body).map_err(|_| ())
-    } else {
-        serde_json::from_slice::<Value>(&body).map_err(|_| ())
-    };
+    // The same interpretation must authorize the request and reach the origin.
+    // Native forwarding preserves bytes, so duplicate keys (including escaped
+    // spellings) cannot be normalized away or left to an upstream parser.
+    let parsed = sandhi_core::policy::strict_json(&body).map_err(|_| ());
     let Ok(mut body_json) = parsed else {
         return Err(ingress_error(
             dialect,
@@ -185,6 +187,83 @@ pub(super) async fn prepare(
         ));
     }
 
+    let selected = if provider.is_none() {
+        if raw_text_route {
+            return Err(ingress_error(
+                dialect,
+                StatusCode::BAD_REQUEST,
+                "logical routes support chat generation endpoints",
+            ));
+        }
+        Some(
+            crate::routing::select(
+                context.state,
+                &vk,
+                &mut request,
+                (!context.count_only && context.state.buffered_accounting.get().is_some())
+                    .then_some(if wants_stream {
+                        crate::routing::TrackedDelivery::Streaming(ingress_family(dialect))
+                    } else {
+                        crate::routing::TrackedDelivery::Buffered
+                    }),
+            )
+            .await
+            .map_err(|message| ingress_error(dialect, StatusCode::CONFLICT, message))?,
+        )
+    } else {
+        None
+    };
+    let provider = match (&selected, provider) {
+        (Some(selected), _) => {
+            request.model = selected.plan.actual_model.clone();
+            selected.provider.clone()
+        }
+        (_, Some(provider)) => provider,
+        _ => unreachable!("selected logical or fixed backend"),
+    };
+    let effective_upstream = selected
+        .as_ref()
+        .map(|selected| format!("backend/{}", selected.plan.backend_id))
+        .unwrap_or_else(|| vk.upstream_ref.clone());
+    if raw_text_route
+        && (provider.family() != ProviderFamily::OpenAiCompat || provider.raw_forwarder().is_none())
+    {
+        return Err(ingress_error(
+            dialect,
+            StatusCode::BAD_REQUEST,
+            "text endpoints require a compatible raw upstream",
+        ));
+    }
+
+    if !provider.permits_model(&request.model) {
+        return Err(ingress_error(
+            dialect,
+            StatusCode::FORBIDDEN,
+            "model is not declared for this backend",
+        ));
+    }
+
+    request
+        .native_input_for(provider.family().endpoint_family())
+        .map_err(|message| ingress_error(dialect, StatusCode::BAD_REQUEST, &message))?;
+    request.include_native_stream = wants_stream
+        && ingress_family(dialect) == provider.family()
+        && provider.supports_native_stream();
+    if !raw_text_route {
+        request.compiled_cache = provider
+            .compile_cache_plan(&request)
+            .map_err(|error| ingress_error(dialect, StatusCode::BAD_REQUEST, &error.to_string()))?;
+    } else if provider
+        .backend_binding()
+        .is_some_and(|binding| binding.cache_policy.is_some())
+    {
+        return Err(ingress_error(
+            dialect,
+            StatusCode::BAD_REQUEST,
+            "chat cache policies are not supported on text endpoints",
+        ));
+    }
+
     // 4b. Attribution is key-authoritative (ADR-0004 D4): the usage event always carries the
     //     resolved key's subject/group (step 3 above), and `x-sandhi-subject-id` /
     //     `x-sandhi-group-id` are admitted only as an idempotent echo of that binding. A
@@ -211,7 +290,7 @@ pub(super) async fn prepare(
         context
             .buffered_deadlines
             .as_ref()
-            .map(|policy| policy.resolve(&vk.upstream_ref, &request.model))
+            .map(|policy| policy.resolve(&effective_upstream, &request.model))
     };
     if buffered_deadline.is_some() && provider.raw_forwarder().is_none() {
         return Err(ingress_error(
@@ -225,7 +304,7 @@ pub(super) async fn prepare(
         context
             .streaming_deadlines
             .as_ref()
-            .map(|policy| policy.resolve(&vk.upstream_ref, &request.model).0)
+            .map(|policy| policy.resolve(&effective_upstream, &request.model).0)
     } else {
         None
     };
@@ -290,7 +369,7 @@ pub(super) async fn prepare(
                 body.clone(),
                 policy_identity,
                 vk.id.clone(),
-                vk.upstream_ref.clone(),
+                effective_upstream,
                 request.model.clone(),
                 match dialect {
                     IngressDialect::OpenAi => Some(sandhi_core::policy::InputFormat::Chat),
@@ -354,8 +433,36 @@ pub(super) async fn prepare(
     // and only when the key is actually present, so ordinary traffic stays
     // byte-exact. The transparent plane and the raw text routes forward exactly
     // these cleaned bytes; the decoders strip their own body clones.
-    let body = codec::strip_reserved_passthrough(body);
+    let mut body = codec::strip_reserved_passthrough(body);
+    if selected.is_some() && dialect != IngressDialect::Gemini {
+        let mut native: Value = serde_json::from_slice(&body).expect("decoded request JSON");
+        native["model"] = serde_json::json!(request.model);
+        body = Bytes::from(serde_json::to_vec(&native).expect("selected model JSON"));
+    }
+    if let Some(plan) = request
+        .compiled_cache
+        .as_ref()
+        .filter(|plan| !plan.mutations.is_empty())
+    {
+        // The exact same frozen plan applies even when this call remains on the
+        // raw plane. Cross-family requests are encoded by their selected codec.
+        if ingress_family(dialect).endpoint_family() == plan.endpoint_family {
+            let mut native: Value = serde_json::from_slice(&body).expect("decoded request JSON");
+            provider
+                .apply_cache_plan(&request, &mut native)
+                .map_err(|error| {
+                    ingress_error(dialect, StatusCode::BAD_REQUEST, &error.to_string())
+                })?;
+            body = Bytes::from(serde_json::to_vec(&native).expect("patched JSON"));
+        }
+    }
 
+    if let Some(selected) = selected.as_ref().filter(|_| !context.count_only) {
+        selected
+            .confirm(context.state)
+            .await
+            .map_err(|message| ingress_error(dialect, StatusCode::CONFLICT, message))?;
+    }
     Ok(PreparedRequest {
         vk,
         provider,
@@ -367,5 +474,6 @@ pub(super) async fn prepare(
         buffered_deadline,
         streaming_deadline,
         body_lifetime,
+        routing: selected.map(|selected| selected.plan),
     })
 }

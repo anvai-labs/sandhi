@@ -58,6 +58,19 @@ async for event_json in provider.stream_json(json.dumps(request)):
     event = json.loads(event_json)  # response_start, text_delta, tool_call_*, usage, finish
 ```
 
+At contract minor 12, streaming requests can set `include_native_stream: true` for
+Chat, Messages, Responses and Gemini handles. Default is false; other families
+reject true. Opt-in adds `native_frame` events alongside canonical events. Render
+the native frames or the canonical content, and meter canonical usage once. Native
+frames preserve opaque provider state but do not make it portable across backends.
+
+Minor 13 adds optional `cache_intent`, for example `{"mode":"suppress_gateway"}`.
+Suppression preserves native controls and adds no gateway markers; it cannot turn
+off provider-internal caching. Direct unconfigured handles accept preserve/suppress
+and refuse undeclared automatic capabilities before HTTP. Registered gateway
+backends can declare exact model/lifetime support; the internal compiled plan is
+excluded from JSON and schema. See the [backend guide](../../docs/operator/backends.md).
+
 The JSON bridge carries typed v1 data, not provider-native JSON. The handle retains its HTTP pool,
 circuit breaker, retry policy, and timeouts. Invalid documents fail before network I/O; runtime
 failures raise `SandhiProviderError`, whose message contains a serialized `ProviderErrorV1`.

@@ -1,0 +1,1040 @@
+{
+  "started_at": "2026-11-11T21:18:12.202814+00:00",
+  "model": "glm-5.3",
+  "endpoints": {
+    "chat": "https://api.z.ai/api/coding/paas/v4",
+    "messages": "https://api.z.ai/api/anthropic",
+    "responses": "https://api.z.ai/api/v1"
+  },
+  "cache_policy": "native_only / preserve_native",
+  "sdk_retries": 0,
+  "cache_pairs": false,
+  "cells": [
+    {
+      "backend": "chat",
+      "client": "chat",
+      "stream": false,
+      "repeat": 0,
+      "status": "ok",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "The user wants a Python identity function named `identity`. An identity function returns its argument unchanged. They want only the code.",
+      "usage": [
+        {
+          "completion_tokens": 39,
+          "prompt_tokens": 25,
+          "total_tokens": 64,
+          "completion_tokens_details": {
+            "reasoning_tokens": 25
+          },
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      ],
+      "events": [
+        "stop"
+      ],
+      "elapsed_seconds": 3.008,
+      "usage_rows_observed": 1
+    },
+    {
+      "backend": "chat",
+      "client": "chat",
+      "stream": true,
+      "repeat": 0,
+      "status": "ok",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "The user wants a Python identity function named `identity`. An identity function returns its argument unchanged. They want only the code, no explanation.",
+      "usage": [
+        {
+          "completion_tokens": 42,
+          "prompt_tokens": 25,
+          "total_tokens": 67,
+          "completion_tokens_details": {
+            "reasoning_tokens": 28
+          },
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      ],
+      "events": [
+        "stop"
+      ],
+      "elapsed_seconds": 2.044,
+      "usage_rows_observed": 1
+    },
+    {
+      "backend": "chat",
+      "client": "messages",
+      "stream": false,
+      "repeat": 0,
+      "status": "ok",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "input_tokens": 25,
+          "output_tokens": 39
+        }
+      ],
+      "events": [
+        "end_turn"
+      ],
+      "elapsed_seconds": 1.654,
+      "usage_rows_observed": 3
+    },
+    {
+      "backend": "chat",
+      "client": "messages",
+      "stream": true,
+      "repeat": 0,
+      "status": "error",
+      "error_type": "AttributeError",
+      "error": "'NoneType' object has no attribute 'model_dump'",
+      "elapsed_seconds": 1.358,
+      "usage_rows_observed": 4
+    },
+    {
+      "backend": "chat",
+      "client": "gemini",
+      "stream": false,
+      "repeat": 0,
+      "status": "ok",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "candidates_token_count": 14,
+          "prompt_token_count": 25,
+          "thoughts_token_count": 28,
+          "total_token_count": 67
+        }
+      ],
+      "events": [
+        "FinishReason.STOP"
+      ],
+      "elapsed_seconds": 1.455,
+      "usage_rows_observed": 4
+    },
+    {
+      "backend": "chat",
+      "client": "gemini",
+      "stream": true,
+      "repeat": 0,
+      "status": "ok",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "candidates_token_count": 14,
+          "prompt_token_count": 25,
+          "thoughts_token_count": 29,
+          "total_token_count": 68
+        }
+      ],
+      "events": [
+        "FinishReason.STOP"
+      ],
+      "elapsed_seconds": 1.755,
+      "usage_rows_observed": 6
+    },
+    {
+      "backend": "chat",
+      "client": "responses",
+      "stream": false,
+      "repeat": 0,
+      "status": "ok",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "input_tokens": 25,
+          "input_tokens_details": {
+            "cached_tokens": 0
+          },
+          "output_tokens": 82,
+          "output_tokens_details": {
+            "reasoning_tokens": 68
+          }
+        }
+      ],
+      "events": [
+        "completed"
+      ],
+      "elapsed_seconds": 1.978,
+      "usage_rows_observed": 7
+    },
+    {
+      "backend": "chat",
+      "client": "responses",
+      "stream": true,
+      "repeat": 0,
+      "status": "ok",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "input_tokens": 25,
+          "input_tokens_details": {
+            "cached_tokens": 0
+          },
+          "output_tokens": 38,
+          "output_tokens_details": {
+            "reasoning_tokens": 24
+          }
+        }
+      ],
+      "events": [
+        "response.completed"
+      ],
+      "elapsed_seconds": 1.471,
+      "usage_rows_observed": 8
+    },
+    {
+      "backend": "messages",
+      "client": "chat",
+      "stream": false,
+      "repeat": 0,
+      "status": "ok",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "completion_tokens": 126,
+          "prompt_tokens": 25,
+          "total_tokens": 151,
+          "completion_tokens_details": {},
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      ],
+      "events": [
+        "stop"
+      ],
+      "elapsed_seconds": 2.683,
+      "usage_rows_observed": 9
+    },
+    {
+      "backend": "messages",
+      "client": "chat",
+      "stream": true,
+      "repeat": 0,
+      "status": "ok",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "The user wants a Python identity function named `identity`. An identity function returns its input unchanged. They want only the code.",
+      "usage": [
+        {
+          "completion_tokens": 39,
+          "prompt_tokens": 0,
+          "total_tokens": 39,
+          "completion_tokens_details": {},
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      ],
+      "events": [
+        "stop"
+      ],
+      "elapsed_seconds": 1.339,
+      "usage_rows_observed": 10
+    },
+    {
+      "backend": "messages",
+      "client": "messages",
+      "stream": false,
+      "repeat": 0,
+      "status": "ok",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "The user wants a Python identity function named `identity`. An identity function returns its argument unchanged. They asked to return only the code, so I should just output the code without explanation.\n\nThe simplest form:\n\n```python\ndef identity(x):\n    return x\n```\n\nThat's it. They said \"Return only the code\" so no explanation, no extra text. Just the code.",
+      "usage": [
+        {
+          "cache_read_input_tokens": 0,
+          "input_tokens": 25,
+          "output_tokens": 92,
+          "server_tool_use": {
+            "web_search_requests": 0
+          },
+          "service_tier": "standard"
+        }
+      ],
+      "events": [
+        "end_turn"
+      ],
+      "elapsed_seconds": 2.159,
+      "usage_rows_observed": 11
+    },
+    {
+      "backend": "messages",
+      "client": "messages",
+      "stream": true,
+      "repeat": 0,
+      "status": "ok",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "The user wants a Python identity function named `identity`. An identity function returns its argument unchanged. They want only the code, no explanation.\n\nThe simplest form:\n\n```python\ndef identity(x):\n    return x\n```\n\nCould also use type hints or `*args`, but the simplest is best. Return only the code as requested.",
+      "usage": [
+        {
+          "input_tokens": 0,
+          "output_tokens": 0
+        },
+        {
+          "cache_read_input_tokens": 0,
+          "input_tokens": 25,
+          "output_tokens": 82,
+          "server_tool_use": {
+            "web_search_requests": 0
+          },
+          "service_tier": "standard"
+        }
+      ],
+      "events": [
+        "end_turn"
+      ],
+      "elapsed_seconds": 2.121,
+      "usage_rows_observed": 12
+    },
+    {
+      "backend": "messages",
+      "client": "gemini",
+      "stream": false,
+      "repeat": 0,
+      "status": "ok",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "candidates_token_count": 49,
+          "prompt_token_count": 25,
+          "total_token_count": 74
+        }
+      ],
+      "events": [
+        "FinishReason.STOP"
+      ],
+      "elapsed_seconds": 1.544,
+      "usage_rows_observed": 13
+    },
+    {
+      "backend": "messages",
+      "client": "gemini",
+      "stream": true,
+      "repeat": 0,
+      "status": "ok",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "candidates_token_count": 101,
+          "prompt_token_count": 0,
+          "total_token_count": 101
+        }
+      ],
+      "events": [
+        "FinishReason.STOP"
+      ],
+      "elapsed_seconds": 2.003,
+      "usage_rows_observed": 14
+    },
+    {
+      "backend": "messages",
+      "client": "responses",
+      "stream": false,
+      "repeat": 0,
+      "status": "ok",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "input_tokens": 25,
+          "input_tokens_details": {
+            "cached_tokens": 0
+          },
+          "output_tokens": 74,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        }
+      ],
+      "events": [
+        "completed"
+      ],
+      "elapsed_seconds": 1.825,
+      "usage_rows_observed": 15
+    },
+    {
+      "backend": "messages",
+      "client": "responses",
+      "stream": true,
+      "repeat": 0,
+      "status": "ok",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "input_tokens": 0,
+          "input_tokens_details": {
+            "cached_tokens": 0
+          },
+          "output_tokens": 42,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        }
+      ],
+      "events": [
+        "response.completed"
+      ],
+      "elapsed_seconds": 1.662,
+      "usage_rows_observed": 16
+    },
+    {
+      "backend": "responses",
+      "client": "chat",
+      "stream": false,
+      "repeat": 0,
+      "status": "ok",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "completion_tokens": 39,
+          "prompt_tokens": 25,
+          "total_tokens": 64,
+          "completion_tokens_details": {
+            "reasoning_tokens": 25
+          },
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      ],
+      "events": [
+        "stop"
+      ],
+      "elapsed_seconds": 1.742,
+      "usage_rows_observed": 17
+    },
+    {
+      "backend": "responses",
+      "client": "chat",
+      "stream": true,
+      "repeat": 0,
+      "status": "ok",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "completion_tokens": 39,
+          "prompt_tokens": 25,
+          "total_tokens": 64,
+          "completion_tokens_details": {
+            "reasoning_tokens": 25
+          },
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      ],
+      "events": [
+        "stop"
+      ],
+      "elapsed_seconds": 2.434,
+      "usage_rows_observed": 18
+    },
+    {
+      "backend": "responses",
+      "client": "messages",
+      "stream": false,
+      "repeat": 0,
+      "status": "ok",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "input_tokens": 25,
+          "output_tokens": 41
+        }
+      ],
+      "events": [
+        "end_turn"
+      ],
+      "elapsed_seconds": 1.608,
+      "usage_rows_observed": 19
+    },
+    {
+      "backend": "responses",
+      "client": "messages",
+      "stream": true,
+      "repeat": 0,
+      "status": "error",
+      "error_type": "AttributeError",
+      "error": "'NoneType' object has no attribute 'model_dump'",
+      "elapsed_seconds": 1.34,
+      "usage_rows_observed": 19
+    },
+    {
+      "backend": "responses",
+      "client": "gemini",
+      "stream": false,
+      "repeat": 0,
+      "status": "ok",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "candidates_token_count": 14,
+          "prompt_token_count": 25,
+          "thoughts_token_count": 67,
+          "total_token_count": 106
+        }
+      ],
+      "events": [
+        "FinishReason.STOP"
+      ],
+      "elapsed_seconds": 1.85,
+      "usage_rows_observed": 21
+    },
+    {
+      "backend": "responses",
+      "client": "gemini",
+      "stream": true,
+      "repeat": 0,
+      "status": "ok",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "candidates_token_count": 14,
+          "prompt_token_count": 25,
+          "thoughts_token_count": 116,
+          "total_token_count": 155
+        }
+      ],
+      "events": [
+        "FinishReason.STOP"
+      ],
+      "elapsed_seconds": 2.364,
+      "usage_rows_observed": 22
+    },
+    {
+      "backend": "responses",
+      "client": "responses",
+      "stream": false,
+      "repeat": 0,
+      "status": "ok",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "input_tokens": 25,
+          "input_tokens_details": {
+            "cached_tokens": 0
+          },
+          "output_tokens": 39,
+          "output_tokens_details": {
+            "reasoning_tokens": 25
+          },
+          "total_tokens": 64
+        }
+      ],
+      "events": [
+        "completed"
+      ],
+      "elapsed_seconds": 1.565,
+      "usage_rows_observed": 23
+    },
+    {
+      "backend": "responses",
+      "client": "responses",
+      "stream": true,
+      "repeat": 0,
+      "status": "ok",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "input_tokens": 25,
+          "input_tokens_details": {
+            "cached_tokens": 0
+          },
+          "output_tokens": 107,
+          "output_tokens_details": {
+            "reasoning_tokens": 93
+          },
+          "total_tokens": 132
+        }
+      ],
+      "events": [
+        "response.completed"
+      ],
+      "elapsed_seconds": 2.16,
+      "usage_rows_observed": 24
+    }
+  ],
+  "usage_events": [
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 2889,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:18:15.512107342Z",
+      "provider": "zai",
+      "reasoning_included": 1,
+      "reasoning_tokens": 25,
+      "request_id": "req_1794431892612_0",
+      "time_to_first_token_ms": null,
+      "time_to_first_token_source": null,
+      "tokens_in": 25,
+      "tokens_out": 39
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 2029,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:18:17.572253107Z",
+      "provider": "zai",
+      "reasoning_included": 1,
+      "reasoning_tokens": 28,
+      "request_id": "req_1794431895530_1",
+      "time_to_first_token_ms": 1540,
+      "time_to_first_token_source": "boundary",
+      "tokens_in": 25,
+      "tokens_out": 42
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 1610,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:18:19.211695725Z",
+      "provider": "zai",
+      "reasoning_included": 1,
+      "reasoning_tokens": 25,
+      "request_id": "req_1794431897580_2",
+      "time_to_first_token_ms": null,
+      "time_to_first_token_source": null,
+      "tokens_in": 25,
+      "tokens_out": 39
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 1329,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:18:20.574177596Z",
+      "provider": "zai",
+      "reasoning_included": 1,
+      "reasoning_tokens": 26,
+      "request_id": "req_1794431899234_3",
+      "time_to_first_token_ms": 870,
+      "time_to_first_token_source": "boundary",
+      "tokens_in": 25,
+      "tokens_out": 40
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 1398,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:18:22.027545683Z",
+      "provider": "zai",
+      "reasoning_included": 1,
+      "reasoning_tokens": 28,
+      "request_id": "req_1794431900600_4",
+      "time_to_first_token_ms": null,
+      "time_to_first_token_source": null,
+      "tokens_in": 25,
+      "tokens_out": 42
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 1679,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:18:23.817846736Z",
+      "provider": "zai",
+      "reasoning_included": 1,
+      "reasoning_tokens": 29,
+      "request_id": "req_1794431902071_5",
+      "time_to_first_token_ms": 931,
+      "time_to_first_token_source": "boundary",
+      "tokens_in": 25,
+      "tokens_out": 43
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 1803,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:18:25.77509821Z",
+      "provider": "zai",
+      "reasoning_included": 1,
+      "reasoning_tokens": 68,
+      "request_id": "req_1794431903949_6",
+      "time_to_first_token_ms": null,
+      "time_to_first_token_source": null,
+      "tokens_in": 25,
+      "tokens_out": 82
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 1412,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:18:27.273582416Z",
+      "provider": "zai",
+      "reasoning_included": 1,
+      "reasoning_tokens": 24,
+      "request_id": "req_1794431905826_7",
+      "time_to_first_token_ms": 955,
+      "time_to_first_token_source": "boundary",
+      "tokens_in": 25,
+      "tokens_out": 38
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 2640,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:18:30.080676205Z",
+      "provider": "anthropic",
+      "reasoning_included": 1,
+      "reasoning_tokens": null,
+      "request_id": "req_1794431907428_8",
+      "time_to_first_token_ms": null,
+      "time_to_first_token_source": null,
+      "tokens_in": 25,
+      "tokens_out": 126
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 1314,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:18:31.42048289Z",
+      "provider": "anthropic",
+      "reasoning_included": 1,
+      "reasoning_tokens": null,
+      "request_id": "req_1794431910097_9",
+      "time_to_first_token_ms": 856,
+      "time_to_first_token_source": "boundary",
+      "tokens_in": 0,
+      "tokens_out": 39
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 2135,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:18:33.579302351Z",
+      "provider": "anthropic",
+      "reasoning_included": 1,
+      "reasoning_tokens": null,
+      "request_id": "req_1794431911434_10",
+      "time_to_first_token_ms": null,
+      "time_to_first_token_source": null,
+      "tokens_in": 25,
+      "tokens_out": 92
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 2099,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:18:35.702197994Z",
+      "provider": "anthropic",
+      "reasoning_included": 1,
+      "reasoning_tokens": null,
+      "request_id": "req_1794431913593_11",
+      "time_to_first_token_ms": 973,
+      "time_to_first_token_source": "boundary",
+      "tokens_in": 0,
+      "tokens_out": 82
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 1513,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:18:37.245688108Z",
+      "provider": "anthropic",
+      "reasoning_included": 1,
+      "reasoning_tokens": null,
+      "request_id": "req_1794431915722_12",
+      "time_to_first_token_ms": null,
+      "time_to_first_token_source": null,
+      "tokens_in": 25,
+      "tokens_out": 49
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 1973,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:18:39.249509736Z",
+      "provider": "anthropic",
+      "reasoning_included": 1,
+      "reasoning_tokens": null,
+      "request_id": "req_1794431917266_13",
+      "time_to_first_token_ms": 981,
+      "time_to_first_token_source": "boundary",
+      "tokens_in": 0,
+      "tokens_out": 101
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 1802,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:18:41.07597387Z",
+      "provider": "anthropic",
+      "reasoning_included": 1,
+      "reasoning_tokens": null,
+      "request_id": "req_1794431919266_14",
+      "time_to_first_token_ms": null,
+      "time_to_first_token_source": null,
+      "tokens_in": 25,
+      "tokens_out": 74
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 1639,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:18:42.739014029Z",
+      "provider": "anthropic",
+      "reasoning_included": 1,
+      "reasoning_tokens": null,
+      "request_id": "req_1794431921090_15",
+      "time_to_first_token_ms": 1193,
+      "time_to_first_token_source": "boundary",
+      "tokens_in": 0,
+      "tokens_out": 42
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 1719,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:18:44.560766634Z",
+      "provider": "zai",
+      "reasoning_included": 1,
+      "reasoning_tokens": 25,
+      "request_id": "req_1794431922832_16",
+      "time_to_first_token_ms": null,
+      "time_to_first_token_source": null,
+      "tokens_in": 25,
+      "tokens_out": 39
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 2411,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:18:46.996388352Z",
+      "provider": "zai",
+      "reasoning_included": 1,
+      "reasoning_tokens": 25,
+      "request_id": "req_1794431924575_17",
+      "time_to_first_token_ms": 1027,
+      "time_to_first_token_source": "boundary",
+      "tokens_in": 25,
+      "tokens_out": 39
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 1584,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:18:48.603910128Z",
+      "provider": "zai",
+      "reasoning_included": 1,
+      "reasoning_tokens": 27,
+      "request_id": "req_1794431927009_18",
+      "time_to_first_token_ms": null,
+      "time_to_first_token_source": null,
+      "tokens_in": 25,
+      "tokens_out": 41
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 1326,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:18:49.956052372Z",
+      "provider": "zai",
+      "reasoning_included": 1,
+      "reasoning_tokens": 32,
+      "request_id": "req_1794431928618_19",
+      "time_to_first_token_ms": 761,
+      "time_to_first_token_source": "boundary",
+      "tokens_in": 25,
+      "tokens_out": 46
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 1815,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:18:51.794777685Z",
+      "provider": "zai",
+      "reasoning_included": 1,
+      "reasoning_tokens": 67,
+      "request_id": "req_1794431929965_20",
+      "time_to_first_token_ms": null,
+      "time_to_first_token_source": null,
+      "tokens_in": 25,
+      "tokens_out": 81
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 2334,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:18:54.195371941Z",
+      "provider": "zai",
+      "reasoning_included": 1,
+      "reasoning_tokens": 116,
+      "request_id": "req_1794431931817_21",
+      "time_to_first_token_ms": 901,
+      "time_to_first_token_source": "boundary",
+      "tokens_in": 25,
+      "tokens_out": 130
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 1534,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:18:55.752112583Z",
+      "provider": "zai",
+      "reasoning_included": 1,
+      "reasoning_tokens": 25,
+      "request_id": "req_1794431934210_22",
+      "time_to_first_token_ms": null,
+      "time_to_first_token_source": null,
+      "tokens_in": 25,
+      "tokens_out": 39
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 2135,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:18:57.92366851Z",
+      "provider": "zai",
+      "reasoning_included": 1,
+      "reasoning_tokens": 93,
+      "request_id": "req_1794431935776_23",
+      "time_to_first_token_ms": 690,
+      "time_to_first_token_source": "boundary",
+      "tokens_in": 25,
+      "tokens_out": 107
+    }
+  ],
+  "gateway_exit_code": 0,
+  "finished_at": "2026-11-11T21:18:57.932937+00:00"
+}

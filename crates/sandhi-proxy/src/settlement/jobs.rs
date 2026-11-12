@@ -4,7 +4,7 @@
 //! queued, running and unclaimed results; this is a count bound, not a byte bound.
 //! Retained RAM evidence is not durable. HTTP wiring/recovery scheduling remain gated.
 use super::admission::{AdmissionOutcome, PreparedAdmission};
-use super::{Attempt, DispatchAttempt, PendingDispatch, PendingSettlement};
+use super::{Attempt, DispatchAttempt, Failure, PendingDispatch, PendingSettlement};
 use crate::{
     lifecycle::{Lifecycle, OperationGuard},
     ProxyLedger,
@@ -13,6 +13,79 @@ use std::collections::BTreeMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use tokio::sync::watch;
+
+// Only LedgerBusy proves that the outer lock was never acquired and no SQL ran.
+// Retry that accounting work within one existing wait budget; never retry storage
+// ambiguity, reconstruct a permit, change evidence, or execute inference here.
+fn run_owned(
+    mut input: Input,
+    lifecycle: &Lifecycle,
+    until: Option<std::time::Instant>,
+    mut run: impl FnMut(Input) -> ResultValue,
+) -> ResultValue {
+    let mut delay = std::time::Duration::from_millis(1);
+    loop {
+        let close = matches!(&input, Input::Work(Work::Close(_)));
+        let dispatching = matches!(
+            &input,
+            Input::Admission(_) | Input::Work(Work::Authorize(_))
+        );
+        let outcome = run(input);
+        let Some(until) = until else {
+            return outcome;
+        };
+        let now = std::time::Instant::now();
+        let remaining = until
+            .saturating_duration_since(now)
+            .min(lifecycle.remaining().unwrap_or(std::time::Duration::MAX));
+        if remaining.is_zero() || (dispatching && !lifecycle.is_running()) {
+            return outcome;
+        }
+        let busy = matches!(
+            &outcome,
+            ResultValue::Admission(AdmissionOutcome::Failed {
+                failure: Failure::LedgerBusy,
+                ..
+            }) | ResultValue::Work(Outcome::Settlement(Attempt::Unresolved {
+                failure: Failure::LedgerBusy,
+                ..
+            })) | ResultValue::Work(Outcome::Dispatch(DispatchAttempt::Unresolved {
+                failure: Failure::LedgerBusy,
+                ..
+            }))
+        );
+        if !busy {
+            return outcome;
+        }
+        std::thread::sleep(delay.min(remaining));
+        if std::time::Instant::now() >= until
+            || lifecycle.remaining().is_some_and(|left| left.is_zero())
+            || (dispatching && !lifecycle.is_running())
+        {
+            return outcome;
+        }
+        input = match outcome {
+            ResultValue::Admission(AdmissionOutcome::Failed {
+                evidence,
+                failure: Failure::LedgerBusy,
+            }) => Input::Admission(PreparedAdmission { evidence }),
+            ResultValue::Work(Outcome::Settlement(Attempt::Unresolved {
+                pending,
+                failure: Failure::LedgerBusy,
+            })) => Input::Work(Work::Settle(pending)),
+            ResultValue::Work(Outcome::Dispatch(DispatchAttempt::Unresolved {
+                pending,
+                failure: Failure::LedgerBusy,
+            })) => Input::Work(if close {
+                Work::Close(pending)
+            } else {
+                Work::Authorize(pending)
+            }),
+            other => return other,
+        };
+        delay = (delay * 2).min(std::time::Duration::from_millis(10));
+    }
+}
 
 /// Only accounting transitions. No inference callback or network dispatch authority.
 #[derive(Debug)]
@@ -81,7 +154,6 @@ impl Input {
             Self::Work(work) => Self::Work(work.snapshot()),
             Self::Admission(input) => Self::Admission(PreparedAdmission {
                 evidence: input.evidence.clone(),
-                correlated: input.correlated,
             }),
         }
     }
@@ -306,6 +378,7 @@ impl LedgerAccess {
 pub struct Jobs {
     inner: Arc<Inner>,
     ledger: LedgerAccess,
+    retry_wait: Option<std::time::Duration>,
 }
 /// A notification/explicit transfer handle. Dropping it does not remove the registry slot.
 pub struct Ticket {
@@ -332,6 +405,7 @@ pub(crate) struct Obligation {
     ledger: LedgerAccess,
     id: u64,
     operation: Arc<OperationGuard>,
+    retry_wait: Option<std::time::Duration>,
 }
 impl Obligation {
     pub(crate) fn submit(&mut self, work: Work) -> Result<Ticket, Rejected> {
@@ -479,16 +553,19 @@ impl Obligation {
         drop(state);
         let ledger = self.ledger.clone();
         let lifecycle = self.inner.lifecycle.clone();
+        let until = self.retry_wait.map(|wait| std::time::Instant::now() + wait);
         let _task = runtime.spawn_blocking(move || {
             if let Ok(outcome) = catch_unwind(AssertUnwindSafe(|| {
-                ledger
-                    .with(|ledger| match input {
-                        Input::Work(work) => ResultValue::Work(work.run(ledger)),
-                        Input::Admission(input) => {
-                            ResultValue::Admission(input.run(ledger, &lifecycle))
-                        }
-                    })
-                    .expect("owned proxy state")
+                run_owned(input, &lifecycle, until, |input| {
+                    ledger
+                        .with(|ledger| match input {
+                            Input::Work(work) => ResultValue::Work(work.run(ledger)),
+                            Input::Admission(input) => {
+                                ResultValue::Admission(input.run(ledger, &lifecycle))
+                            }
+                        })
+                        .expect("owned proxy state")
+                })
             })) {
                 worker.finish(outcome);
             }
@@ -648,6 +725,7 @@ impl Jobs {
             ledger: self.ledger.clone(),
             id,
             operation: Arc::new(operation),
+            retry_wait: self.retry_wait,
         })
     }
     pub fn submit_admission(
@@ -700,12 +778,18 @@ impl Jobs {
     ) -> Self {
         Self::with_access(LedgerAccess::Shared(ledger), lifecycle, capacity)
     }
-    pub(crate) fn for_proxy(state: &Arc<crate::ProxyState>, capacity: usize) -> Self {
-        Self::with_access(
+    pub(crate) fn for_proxy(
+        state: &Arc<crate::ProxyState>,
+        capacity: usize,
+        wait: std::time::Duration,
+    ) -> Self {
+        let mut jobs = Self::with_access(
             LedgerAccess::Proxy(Arc::downgrade(state)),
             state.lifecycle.clone(),
             capacity,
-        )
+        );
+        jobs.retry_wait = Some(wait);
+        jobs
     }
     fn with_access(ledger: LedgerAccess, lifecycle: Arc<Lifecycle>, capacity: usize) -> Self {
         Self {
@@ -720,6 +804,7 @@ impl Jobs {
                 lifecycle,
             }),
             ledger,
+            retry_wait: None,
         }
     }
     pub fn submit(&self, work: Work) -> Result<Ticket, Rejected> {
@@ -1021,6 +1106,266 @@ mod tests {
             panic!("durable admission")
         };
         (dir, jobs, obligation, pending)
+    }
+
+    #[allow(clippy::await_holding_lock)] // Synchronize after real lock contention, never by timing alone.
+    async fn run_contended(jobs: &Jobs, input: Input, cutoff: bool) -> ResultValue {
+        let LedgerAccess::Shared(ledger) = &jobs.ledger else {
+            panic!("fixture")
+        };
+        let guard = ledger.lock().unwrap();
+        let ledger = ledger.clone();
+        let lifecycle = jobs.inner.lifecycle.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let worker = tokio::task::spawn_blocking(move || {
+            let mut signal = Some(tx);
+            run_owned(
+                input,
+                &lifecycle,
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(1)),
+                |input| {
+                    let outcome = match input {
+                        Input::Work(work) => ResultValue::Work(work.run(&ledger)),
+                        Input::Admission(input) => {
+                            ResultValue::Admission(input.run(&ledger, &lifecycle))
+                        }
+                    };
+                    if let Some(signal) = signal.take() {
+                        let _ = signal.send(());
+                    }
+                    outcome
+                },
+            )
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), rx)
+            .await
+            .unwrap()
+            .unwrap();
+        if cutoff {
+            jobs.inner
+                .lifecycle
+                .begin_quiesce(std::time::Duration::from_secs(1));
+            let result = worker.await.unwrap();
+            drop(guard);
+            result
+        } else {
+            drop(guard);
+            worker.await.unwrap()
+        }
+    }
+
+    #[tokio::test]
+    async fn owned_accounting_busy_admission_and_dispatch_preserve_one_transition() {
+        for close in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let jobs = Jobs::new(
+                Arc::new(Mutex::new(
+                    ProxyLedger::durable(dir.path().join("owned.db").to_str().unwrap(), 1).unwrap(),
+                )),
+                Arc::new(Lifecycle::new()),
+                1,
+            );
+            let ResultValue::Admission(AdmissionOutcome::Prepared(pending)) =
+                run_contended(&jobs, Input::Admission(admission()), false).await
+            else {
+                panic!("one admission")
+            };
+            let original = pending.intent.clone();
+            let request = pending.request_id.clone();
+            let action = if close {
+                Work::Close(pending)
+            } else {
+                Work::Authorize(pending)
+            };
+            let result = run_contended(&jobs, Input::Work(action), false).await;
+            let LedgerAccess::Shared(ledger) = &jobs.ledger else {
+                panic!("fixture")
+            };
+            if close {
+                assert!(matches!(
+                    result,
+                    ResultValue::Work(Outcome::Dispatch(DispatchAttempt::Closed { .. }))
+                ));
+                assert!(matches!(
+                    PendingDispatch::new(request, original).try_authorize(ledger),
+                    DispatchAttempt::Closed { .. }
+                ));
+            } else {
+                assert!(matches!(
+                    result,
+                    ResultValue::Work(Outcome::Dispatch(DispatchAttempt::Authorized(_)))
+                ));
+                assert!(matches!(
+                    PendingDispatch::new(request, original).try_authorize(ledger),
+                    DispatchAttempt::MayHaveDispatched { .. }
+                ));
+            }
+            let connection = rusqlite::Connection::open(dir.path().join("owned.db")).unwrap();
+            assert_eq!(
+                connection
+                    .query_row("SELECT count(*) FROM budget_execution_intent", [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn owned_accounting_busy_dispatch_never_retries_across_cutoff() {
+        let (dir, jobs, _obligation, pending) = prepared_obligation().await;
+        let outcome = run_contended(&jobs, Input::Work(Work::Authorize(pending)), true).await;
+        assert!(matches!(
+            outcome,
+            ResultValue::Work(Outcome::Dispatch(DispatchAttempt::Unresolved {
+                failure: Failure::LedgerBusy,
+                ..
+            }))
+        ));
+        let connection = rusqlite::Connection::open(dir.path().join("owned.db")).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT phase FROM budget_dispatch_fence", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // Deliberately prove contention before releasing the ledger.
+    async fn owned_accounting_retries_only_known_busy_within_one_budget() {
+        for expire in [false, true] {
+            let (_dir, jobs, mut obligation, pending) = prepared_obligation().await;
+            let ticket = obligation.submit(Work::Authorize(pending)).unwrap();
+            ticket.wait().await;
+            let Some(Outcome::Dispatch(DispatchAttempt::Authorized(execution))) = ticket.take()
+            else {
+                panic!("permit")
+            };
+            let expected_id = execution.intent().reservation.id;
+            let pending = execution.into_settlement(UsageV2 {
+                tokens_in: 3,
+                completeness: UsageCompleteness::Final,
+                ..Default::default()
+            });
+            let LedgerAccess::Shared(ledger) = &jobs.ledger else {
+                panic!("fixture")
+            };
+            let guard = ledger.lock().unwrap();
+            let worker_ledger = ledger.clone();
+            let lifecycle = jobs.inner.lifecycle.clone();
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let worker = tokio::task::spawn_blocking(move || {
+                let mut signal = Some(tx);
+                let until = std::time::Instant::now()
+                    + std::time::Duration::from_millis(if expire { 20 } else { 1000 });
+                run_owned(
+                    Input::Work(Work::Settle(pending)),
+                    &lifecycle,
+                    Some(until),
+                    |input| {
+                        let Input::Work(work) = input else {
+                            panic!("settlement")
+                        };
+                        let result = ResultValue::Work(work.run(&worker_ledger));
+                        if matches!(
+                            &result,
+                            ResultValue::Work(Outcome::Settlement(Attempt::Unresolved {
+                                failure: Failure::LedgerBusy,
+                                ..
+                            }))
+                        ) {
+                            if let Some(signal) = signal.take() {
+                                let _ = signal.send(());
+                            }
+                        }
+                        result
+                    },
+                )
+            });
+            // This signal comes AFTER a real try_commit failed before acquiring
+            // the held mutex, so the success case cannot pass without a retry.
+            rx.await.unwrap();
+            if expire {
+                let ResultValue::Work(Outcome::Settlement(Attempt::Unresolved {
+                    pending,
+                    failure: Failure::LedgerBusy,
+                })) = worker.await.unwrap()
+                else {
+                    panic!("budget must expire")
+                };
+                assert_eq!(pending.reservation().unwrap().id, expected_id);
+                assert_eq!(pending.terminal_usage().unwrap().tokens_in, 3);
+                assert_eq!(pending.observation_recorded(), Some(false));
+                drop(guard);
+                assert!(matches!(
+                    pending.try_commit(ledger),
+                    Attempt::Committed { .. }
+                ));
+            } else {
+                drop(guard);
+                let ResultValue::Work(Outcome::Settlement(Attempt::Committed { outcome, .. })) =
+                    worker.await.unwrap()
+                else {
+                    panic!("unchanged accounting must commit after release")
+                };
+                let sandhi_store::ledger::evidence::SettlementOutcome::Committed(receipt) = outcome
+                else {
+                    panic!("first receipt")
+                };
+                assert_eq!(receipt.reservation_id, expected_id);
+                assert_eq!(receipt.charged_tokens, 3);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn owned_accounting_does_not_loop_storage_failure() {
+        let (dir, jobs, mut obligation, pending) = prepared_obligation().await;
+        let ticket = obligation.submit(Work::Authorize(pending)).unwrap();
+        ticket.wait().await;
+        let Some(Outcome::Dispatch(DispatchAttempt::Authorized(execution))) = ticket.take() else {
+            panic!("permit")
+        };
+        let connection = rusqlite::Connection::open(dir.path().join("owned.db")).unwrap();
+        connection.execute_batch("CREATE TRIGGER fail_receipt BEFORE INSERT ON budget_settlement_outbox BEGIN SELECT RAISE(ABORT,'fixture'); END").unwrap();
+        let pending = execution.into_settlement(UsageV2 {
+            tokens_in: 3,
+            completeness: UsageCompleteness::Final,
+            ..Default::default()
+        });
+        let mut calls = 0;
+        let outcome = run_owned(
+            Input::Work(Work::Settle(pending)),
+            &jobs.inner.lifecycle,
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(1)),
+            |input| {
+                calls += 1;
+                let Input::Work(work) = input else {
+                    panic!("settlement")
+                };
+                ResultValue::Work(jobs.ledger.with(|ledger| work.run(ledger)).unwrap())
+            },
+        );
+        assert_eq!(calls, 1);
+        let ResultValue::Work(Outcome::Settlement(Attempt::Unresolved {
+            pending,
+            failure: Failure::Evidence(_),
+        })) = outcome
+        else {
+            panic!("retain storage uncertainty")
+        };
+        assert_eq!(pending.observation_recorded(), Some(true));
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM budget_settlement_outbox", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+            0
+        );
     }
 
     #[tokio::test]

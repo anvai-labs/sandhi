@@ -7,23 +7,61 @@
     acceptance. Unset or `off` preserves the existing path. Any
     other value fails startup.
 
-The development source also admits **transparent OpenAI Chat streaming** when
+The development source also admits **transparent OpenAI Chat and standard Responses streaming** when
 tracked accounting and a complete [streaming deadline policy](streaming-deadlines.md)
 are both configured. This extension is not in 0.12.0 and is not deployment acceptance.
 Streaming without that policy remains refused before admission.
 
+The current workspace also adds [qualified buffered protocol accounting](../adr/0025-qualified-buffered-protocol-accounting.md):
+Chat, Messages, Responses and Gemini clients can use any of those four standard
+backend protocols through the existing tracked owner. This is an unreleased source
+candidate; the 0.12.0 release's narrower activation remains historical evidence.
+Constrained [Codex buffered aggregation](../adr/0027-qualified-codex-buffered-accounting.md)
+also qualifies through its typed SSE owner. Codex streamed host delivery and
+additional streaming protocols remain gated. See
+[qualified Responses streaming](../adr/0026-qualified-responses-stream-accounting.md)
+for partial/final usage and protocol-terminal semantics.
+
 Keep the existing authentication, TLS, credential and `SANDHI_STORE` configuration.
 This switch grants no permissions and changes no provider credentials.
+
+The current workspace candidate additionally freezes a bounded execution-context
+record with the original admission: ingress/delivery/plane, optional logical-route
+and backend revisions, actual model, transport/cache-plan fingerprints and the
+admitted accounting-policy version/cache-read weight. Context, both budget
+reservations and their linkage/intent/correlation/fence commit together. Missing or corrupt required
+context fails closed; older admissions retain absent context. Terminal recording
+cannot substitute a different weight, and restart recovery keeps the original
+frozen charge. This adds no new tracked protocol;
+see [ADR-0022](../adr/0022-durable-execution-context.md) for evidence and limits.
+
+New tracked admissions reserve the client and upstream budgets in one transaction.
+Either denial commits no accounting rows. Qualified final usage settles both with
+one original receipt/charge/timestamp; a settlement failure charges neither.
+Unknown or unqualified usage retains both liabilities through expiry and restart,
+which can deny further work when held capacity fills a budget. Absence of usage is
+never a measured zero. Only proven pre-dispatch closure releases both at zero
+without a provider-usage receipt. Older unpaired rows are not retroactively linked.
+See [paired budget settlement](../adr/0023-paired-budget-settlement.md).
+
+New dispatch authorization also persists one opaque attempt ID. The transport
+observer captures dispatch/terminal facts under that ID; its immutable snapshot
+commits atomically with qualified usage. Settlement requires both complete
+transport evidence and qualified final usage. Missing evidence after a crash
+means unknown send status, with both liabilities retained. A surviving owner
+retries accounting with the unchanged snapshot; it never repeats inference.
+Older rows gain no invented attempts. See
+[durable physical-attempt evidence](../adr/0024-durable-physical-attempt-evidence.md).
 
 ## Follow the evidence
 
 ```mermaid
 flowchart TD
     A[Authorized request] --> B[Persist intent and request ID]
-    B --> C[Authorize one provider dispatch]
-    C --> D[Observe qualified usage]
-    D --> E[Retain usage in process memory]
-    E --> F[Persist terminal observation]
+    B --> C[Authorize once and persist attempt ID]
+    C --> D[Observe transport facts and qualified usage]
+    D --> E[Freeze both snapshots in process memory]
+    E --> F[Persist transport evidence and terminal usage atomically]
     F --> G[Commit accounting receipt]
     E -. storage failure .-> H[Retry retained accounting work]
     H --> F
@@ -34,6 +72,8 @@ flowchart TD
 | Evidence | What it proves | What it does not prove |
 |---|---|---|
 | Request ID and prepared intent | One correlated admission is durable | The provider executed or charged |
+| Persistent attempt ID | One send slot was authorized | A send occurred or reached the provider |
+| Durable transport evidence | Instrumented dispatch/terminal facts survived storage | Independently qualified usage or provider billing |
 | Usage in memory or metrics | The gateway observed reported usage | Persistence or committed spend |
 | Durable terminal observation | The original usage snapshot survived storage | Settlement has committed |
 | Accounting receipt | The original ledger committed accounting | Atomic telemetry delivery or external billing |
@@ -49,10 +89,28 @@ snapshot needed for accounting recovery.
 | Surface | Required in tracked mode | Refused before admission |
 |---|---|---|
 | Ledger | One file-backed ledger, fixed topology | Volatile or sharded ledgers fail startup |
-| Ingress | Buffered OpenAI Chat or Anthropic Messages; bounded transparent OpenAI Chat streaming | Other dialects; translated or unbounded streaming |
-| Upstream | Built-in, retry-free OpenAI-compatible transport | Custom transports; expiring credential handles without raw transport |
+| Ingress | Buffered Chat, Messages, Responses or Gemini; bounded transparent Chat or standard Responses streaming | Other dialects; translated or unbounded streaming |
+| Buffered upstream | Built-in retry-free standard Chat, Messages, Responses or Gemini transport; constrained Codex SSE aggregation | Custom transports; other expiring handles without a qualified codec |
+| Operations | Synchronous generation | Background/async Responses; logical routes preflight eligibility before pinning |
 | Policy | Explicit output limit and Block policy | Warn, fail-open, retry and logical-idempotency combinations |
 | Processing plane | Buffered transparent/translated; streaming transparent only | No silent downgrade to legacy accounting |
+
+Standard tracked Messages requires explicit fresh/output/cache-read/cache-write
+counters; omitted cache categories remain unqualified. The explicitly configured
+`anthropic_implicit_cache` endpoint profile allows an omitted separate write
+counter when uncached input covers implicit cache construction; missing reads and
+contradictory nonzero writes still refuse. This is independent of request cache
+controls. Gemini tool-use prompt tokens are
+included in normalized fresh input, while thoughts remain separate from candidate
+output. Reported zero, absent counters and malformed values retain distinct meanings.
+See the [qualifier table and recovery limits](../adr/0025-qualified-buffered-protocol-accounting.md#qualified-token-semantics).
+
+Codex buffered requests still pass through its constrained codec, fixed-origin
+credential factory and expiry/account checks. The source owner drains SSE through
+HTTP EOF and keeps canonical usage if aggregation fails. Setup, idle and the
+original buffered whole-call deadline remain bounded. The codec omits the wire
+output limit; the client's limit contributes to gateway admission estimates and
+does not establish a hard upstream token cutoff. See [Codex bounds and evidence](../adr/0027-qualified-codex-buffered-accounting.md).
 
 ## Bounds and configuration
 
@@ -96,6 +154,7 @@ No retry is authorized by an interrupted response.
 
 | Stream evidence at source termination | Stored usage | Settlement |
 |---|---|---|
+| Responses progress without qualified terminal totals | Partial, preserving observed cache counts and reported-zero presence | Unresolved; never promoted to final totals |
 | Qualified counts; cancellation/timeout but no qualification error | Final counts and delivery outcome | May commit the measured charge |
 | Conflicting/malformed data, truncated event or missing terminator at EOF | First counts retained as Partial with bounded qualification reason | Unresolved; no receipt |
 | No qualified counts | Unavailable with explicit missing-usage reason | Unresolved; never an invented zero |

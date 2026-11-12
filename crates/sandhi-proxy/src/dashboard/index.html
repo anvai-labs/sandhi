@@ -9,8 +9,9 @@
 <a class="skip-link" href="#overview">Skip to overview</a>
 <header>
   <div class="brand">
+    <span class="brand-mark" aria-hidden="true">S</span>
     <h1>Sandhi</h1>
-    <span class="tagline">the metering layer for AI agents — neutral units, no pricing</span>
+    <span class="tagline">Operator console</span>
   </div>
   <div id="sso-box" hidden><a class="btn primary" id="sso-login" href="/auth/login">Sign in with SSO</a>
     <button class="btn" id="sso-logout" type="button" data-action="logout" hidden>Sign out</button></div>
@@ -28,26 +29,55 @@
 </header>
 <main class="wrap">
 <nav class="section-nav" aria-label="Dashboard sections">
-  <a href="#overview">Overview</a><a href="#configuration">Configuration</a><a href="#topology-section">Topology</a>
-  <a href="#access">Keys &amp; credentials</a><a href="#budget-section">Budgets</a>
-  <a href="#policy-section">Policy</a><a href="#alert-section">Alerts</a><a href="#run-section">Run lookup</a>
+  <span class="rail-label">Workspace</span>
+  <a href="#overview">Overview</a>
+  <a href="#routing-section">Backends &amp; routes</a>
+  <a href="#access">Keys &amp; credentials</a>
+  <a href="#budget-section">Budgets</a><a href="#alert-section">Alerts</a>
+  <a href="#run-section">Run explorer</a>
+  <a href="#evidence-section">Usage evidence</a>
+  <span class="rail-label">Gateway</span>
+  <a href="#policy-section">Content policy</a>
+  <a href="#configuration">Configuration</a><a href="#topology-section">Topology</a>
 </nav>
 <div class="content">
+<div class="workspace-context"><span>Workspace</span><span aria-hidden="true">/</span><strong id="current-view">Overview</strong><span id="workspace-role" class="badge">Checking access</span></div>
 
+<section class="workspace-view" data-view="overview" aria-labelledby="overview">
 <h2 id="overview" tabindex="-1">Overview</h2>
+<p class="view-description">Understand request volume, token reuse and the teams behind your model traffic.</p>
 <section class="panel" id="usage" aria-label="Usage overview"></section>
+</section>
 
+<section class="workspace-view" data-view="routing-section" aria-labelledby="routing-section" hidden>
+<h2 id="routing-section" tabindex="-1">Backends &amp; routes</h2>
+<p class="view-description">Inspect endpoint bindings, logical models and the cache capabilities declared for each deployment.</p>
+<div class="callout info">Routes select an authorized backend before inference. Session affinity keeps compatible turns together; a failed call is not automatically replayed elsewhere.</div>
+<h3>Backend inventory</h3><section class="panel" id="backends" aria-label="Backend inventory"></section>
+<h3>Logical model routes</h3><section class="panel" id="routes" aria-label="Logical model routes"></section>
+</section>
+
+<section class="workspace-view" data-view="configuration" aria-labelledby="configuration" hidden>
 <h2 id="configuration">Declarative config <span class="hint">providers, budgets, alerts &amp; vkeys declared in a committed JSON file</span></h2>
+<p class="view-description">Preview desired state before applying it. Existing entries omitted from the file remain unchanged.</p>
 <section class="panel" id="config"></section>
 <div id="config-result" data-sensitive role="status"></div>
+</section>
 
+<section class="workspace-view" data-view="topology-section" aria-labelledby="topology-section" hidden>
 <h2 id="topology-section">Deployment topology <span class="hint">where this gateway and its peers live (SANDHI_TOPOLOGY_FILE)</span></h2>
 <section class="panel" id="topology"></section>
+</section>
 
+<section class="workspace-view" data-view="policy-section" aria-labelledby="policy-section" hidden>
 <h2 id="policy-section">Content policy</h2>
+<p class="view-description">Review the active inspection rules, evaluator actions and audit capacity before allowing requests to leave the gateway.</p>
 <section class="panel" id="policy" aria-label="Content policy status"></section>
+</section>
 
+<section class="workspace-view" data-view="access" aria-labelledby="access" hidden>
 <h2 id="access">Virtual keys &amp; credentials <span class="hint">who has access, and where calls actually go</span></h2>
+<p class="view-description">Manage caller access separately from upstream credentials. New virtual-key secrets appear once.</p>
 <section class="panel"><div id="keys"></div>
 <details class="actions"><summary>Mint a virtual key</summary>
         <div class="form-row">
@@ -74,8 +104,11 @@
         <div id="c-result" data-sensitive role="status"></div>
       </details>
 </section>
+</section>
 
+<section class="workspace-view" data-view="budget-section" aria-labelledby="budget-section" hidden>
 <h2 id="budget-section">Budgets <span class="hint">neutral-token caps per scope</span></h2>
+<p class="view-description">Set allowance windows and review spent, reserved and remaining capacity.</p>
 <section class="panel">
   <div id="budgets"></div>
   <p class="callout info">Admission uses estimated reservations, not strict token bounds.
@@ -94,17 +127,37 @@
     <div id="b-result" data-sensitive role="status"></div>
   </details>
 </section>
+</section>
 
+<section class="workspace-view" data-view="alert-section" aria-labelledby="alert-section" hidden>
 <h2 id="alert-section">Alerts <span class="hint">threshold rules on budget scopes</span></h2>
 <section class="panel" id="alerts"></section>
+</section>
 
+<section class="workspace-view" data-view="run-section" aria-labelledby="run-section" hidden>
 <h2 id="run-section">Run cost tree <span class="hint">one agent run's spend, per step, own vs subtree</span></h2>
+<p class="view-description">Trace an agent run from individual steps to its total neutral-token usage.</p>
 <section class="panel">
   <div class="form-row" style="margin-top:0">
     <div class="field"><label for="run-id">Run ID</label><input id="run-id" placeholder="run_01HK..." style="width:16rem"></div>
     <button class="btn primary" data-needs-token data-action="lookupRun">Look up</button>
   </div>
   <div id="run-tree" style="margin-top:.75rem"></div>
+</section>
+</section>
+
+<section class="workspace-view" data-view="evidence-section" aria-labelledby="evidence-section" hidden>
+<h2 id="evidence-section">Usage evidence</h2>
+<p class="view-description">Inspect bounded persisted usage by request, session or run ID. Missing rows do not prove that no traffic occurred.</p>
+<p class="hint">This view requires diagnostics permission. Results contain correlation metadata, not raw prompts or credentials.</p>
+<section class="panel">
+  <div class="form-row">
+    <div class="field"><label for="evidence-kind">Look up by</label><select id="evidence-kind"><option value="request">Request ID</option><option value="session">Session ID</option><option value="run">Run ID</option></select></div>
+    <div class="field"><label for="evidence-value">Exact identifier</label><input id="evidence-value" maxlength="256" placeholder="Paste the correlation ID"></div>
+    <button class="btn primary" data-needs-token data-action="lookupEvidence">Inspect usage</button>
+  </div>
+  <div id="request-evidence" data-sensitive role="status"></div>
+</section>
 </section>
 
 <footer>

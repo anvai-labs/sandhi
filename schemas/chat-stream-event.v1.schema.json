@@ -3,6 +3,25 @@
   "title": "ChatStreamEventV1",
   "oneOf": [
     {
+      "description": "Opt-in native SSE attachment. Canonical events remain accounting authority; compatible renderers forward these frames instead of duplicating their projection.",
+      "type": "object",
+      "required": [
+        "event",
+        "frame"
+      ],
+      "properties": {
+        "event": {
+          "type": "string",
+          "enum": [
+            "native_frame"
+          ]
+        },
+        "frame": {
+          "$ref": "#/definitions/NativeStreamFrameV1"
+        }
+      }
+    },
+    {
       "type": "object",
       "required": [
         "event",
@@ -280,6 +299,19 @@
         "unsupported"
       ]
     },
+    "EndpointFamilyV1": {
+      "type": "string",
+      "enum": [
+        "openai_chat_completions",
+        "openai_responses",
+        "anthropic_messages",
+        "gemini_generate_content",
+        "cohere_chat",
+        "ollama_chat",
+        "bedrock_converse",
+        "host_callback"
+      ]
+    },
     "FinishReasonV1": {
       "type": "string",
       "enum": [
@@ -309,6 +341,23 @@
           ]
         }
       ]
+    },
+    "NativeStreamFrameV1": {
+      "type": "object",
+      "required": [
+        "endpoint_family",
+        "sse"
+      ],
+      "properties": {
+        "endpoint_family": {
+          "$ref": "#/definitions/EndpointFamilyV1"
+        },
+        "sse": {
+          "description": "One bounded SSE event, with line terminators normalized to LF.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
     },
     "ProviderErrorV1": {
       "type": "object",

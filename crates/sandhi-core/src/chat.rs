@@ -17,9 +17,14 @@ pub const CHAT_SCHEMA_VERSION_V1: &str = "1";
 /// 6 = `RunCostTreeV1` — the ADR-0005 D7 agent-run cost tree;
 /// 7 = explicit reasoning inclusion in output (TD-0026 W03), 8 = per-field latency provenance
 /// (TD-0027 S4); 9 = cache-read observation and same-population coverage (TD-0028 C2).
+/// 11 = codec-owned ordered native input
+/// with a portable-projection consistency fence (TD-0034 M3).
+/// 12 = opt-in native SSE attachments alongside canonical metering events.
+/// 13 = explicit cache intent; handle-compiled plans never enter the wire contract.
 /// Consumers feature-detect the binding export and treat an absent fn as
 /// minor 0.
-pub const CHAT_CONTRACT_MINOR: u32 = 10;
+pub const CHAT_CONTRACT_MINOR: u32 = 13;
+pub const MAX_NATIVE_STREAM_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 fn schema_v1() -> String {
     CHAT_SCHEMA_VERSION_V1.to_owned()
@@ -204,6 +209,19 @@ pub struct ChatRequestV1 {
     /// unaffected — it is decoded content, not a native body.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub include_native_response: bool,
+    /// Opt in to protocol-native SSE frame events alongside canonical metering
+    /// events. Default off so existing neutral stream consumers keep their event set.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub include_native_stream: bool,
+    /// Codec-owned native input and portable-projection consistency fence. The
+    /// original input remains in the matching extensions bucket, in wire order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_input: Option<crate::NativeInputV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_intent: Option<crate::CacheIntentV1>,
+    /// Handle-compiled execution data; never accepted from request JSON.
+    #[serde(skip)]
+    pub compiled_cache: Option<crate::CompiledCachePlanV1>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extensions: BTreeMap<String, Value>,
 }
@@ -223,6 +241,10 @@ fn default_true() -> bool {
     true
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_true(value: &bool) -> bool {
     *value
@@ -238,6 +260,12 @@ impl ChatRequestV1 {
         }
         if self.model.trim().is_empty() {
             return Err("model must not be empty".into());
+        }
+        if let Some(native) = &self.native_input {
+            self.native_input_for(native.endpoint_family)?;
+        }
+        if let Some(intent) = &self.cache_intent {
+            intent.validate().map_err(str::to_owned)?;
         }
         // NOTE: the neutral contract deliberately does NOT reject
         // `temperature` alongside `thinking.enabled`. That combination is
@@ -486,6 +514,11 @@ pub struct ProviderDescriptorV1 {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum ChatStreamEventV1 {
+    /// Opt-in native SSE attachment. Canonical events remain accounting authority;
+    /// compatible renderers forward these frames instead of duplicating their projection.
+    NativeFrame {
+        frame: NativeStreamFrameV1,
+    },
     ResponseStart {
         id: Option<String>,
         model: String,
@@ -520,6 +553,29 @@ pub enum ChatStreamEventV1 {
     Error {
         error: ProviderErrorV1,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NativeStreamFrameV1 {
+    pub endpoint_family: EndpointFamilyV1,
+    /// One bounded SSE event, with line terminators normalized to LF.
+    pub sse: String,
+}
+
+impl NativeStreamFrameV1 {
+    pub fn json_data(&self) -> Option<Value> {
+        let data = self
+            .sse
+            .lines()
+            .filter_map(|line| {
+                line.strip_prefix("data:")
+                    .map(|value| value.strip_prefix(' ').unwrap_or(value))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        serde_json::from_str(&data).ok()
+    }
 }
 
 /// Derive a `session_id` from standard signals when no explicit one is present (ADR-0005 D7).
@@ -661,6 +717,7 @@ pub fn model_id_is_path_safe(model: &str) -> bool {
 /// gaps form (reasoning_delta, refusal_delta).
 pub fn stream_event_variant_tag(event: &ChatStreamEventV1) -> &'static str {
     match event {
+        ChatStreamEventV1::NativeFrame { .. } => "native_frame",
         ChatStreamEventV1::ResponseStart { .. } => "response_start",
         ChatStreamEventV1::TextDelta { .. } => "text_delta",
         ChatStreamEventV1::ReasoningDelta { .. } => "reasoning_delta",
@@ -882,7 +939,7 @@ mod tests {
         let digest = fnv1a(concatenated.as_bytes());
         assert_eq!(
             (CHAT_CONTRACT_MINOR, digest),
-            (10, 0xbfac4906491040d9_u64),
+            (13, 0xf232aa30c05c9de1_u64),
             "contract schemas changed: bump CHAT_CONTRACT_MINOR and update this digest \
              (new digest = {digest:#x})"
         );
@@ -1078,6 +1135,7 @@ mod tests {
         // fails, a variant was added/renamed: update TD-0008's
         // consumer-decision table and the consumer suites in the same change.
         let expected = [
+            "native_frame",
             "response_start",
             "text_delta",
             "reasoning_delta",

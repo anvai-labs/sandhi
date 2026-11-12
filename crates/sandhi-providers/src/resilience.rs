@@ -20,6 +20,8 @@ use crate::{
     StreamChunk,
 };
 
+mod qualified;
+
 /// Retry policy for transient failures.
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
@@ -294,6 +296,14 @@ fn backoff(base: Duration, attempt: u32) -> Duration {
 impl Provider for ResilientProvider {
     fn slug(&self) -> &str {
         self.inner.slug()
+    }
+
+    async fn stream_qualified(
+        &self,
+        req: ProviderRequest,
+        delivery: crate::QualifiedStreamDelivery,
+    ) -> Result<crate::QualifiedProviderStream, ProviderError> {
+        qualified::stream(self, req, delivery).await
     }
 
     async fn complete(&self, req: ProviderRequest) -> Result<ProviderResponse, ProviderError> {

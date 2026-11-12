@@ -7,6 +7,12 @@ use crate::event::UsageEvent;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod qualification;
+pub use qualification::{
+    qualify_buffered_usage, qualify_buffered_usage_with_profile, qualify_responses_progress_usage,
+    AnthropicUsageProfile,
+};
+
 /// The token breakdown parsed from a provider response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ParsedUsage {
@@ -37,6 +43,24 @@ pub struct ParsedUsage {
     /// Origin-reported TTFT, when present in the provider usage object.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_to_first_token_ms: Option<u64>,
+}
+
+/// Numeric projection for transport diagnostics. Qualified consumers retain the
+/// original UsageV2 completeness and field presence instead of promoting this view.
+impl From<&crate::UsageV2> for ParsedUsage {
+    fn from(value: &crate::UsageV2) -> Self {
+        Self {
+            tokens_in: value.tokens_in,
+            tokens_out: value.tokens_out,
+            cache_creation_tokens: value.cache_creation_tokens,
+            cache_read_tokens: value.cache_read_tokens,
+            cache_read_observation: value.cache_read_observation,
+            reasoning_tokens: value.reasoning_tokens.unwrap_or(0),
+            reasoning_included: value.reasoning_included,
+            duration_ms: value.duration_ms,
+            time_to_first_token_ms: value.time_to_first_token_ms,
+        }
+    }
 }
 
 impl From<ParsedUsage> for crate::chat::UsageV2 {
@@ -138,19 +162,21 @@ fn millis_at(v: &Value, key: &str) -> Option<u64> {
     Some(value.round() as u64)
 }
 
-/// Split a total prompt token count into `(fresh_input, inconsistent)` given the cached portion.
-/// When `cached > prompt` (a malformed/inconsistent usage shape) fresh input saturates to `0` and
+/// Split inclusive input into disjoint fresh, cache-read and cache-write categories.
+/// When reads plus writes exceed input, fresh input saturates to `0` and
 /// `inconsistent` is `true` so the caller can surface it — a silent zero-fresh-input is exactly
 /// the failure mode that hides a broken cache split from the meter.
-fn split_prompt(prompt: u64, cached: u64) -> (u64, bool) {
-    if cached > prompt {
-        (0, true)
-    } else {
-        (prompt - cached, false)
+fn split_prompt(prompt: u64, cached: u64, written: u64) -> (u64, bool) {
+    match prompt
+        .checked_sub(cached)
+        .and_then(|fresh| fresh.checked_sub(written))
+    {
+        Some(fresh) => (fresh, false),
+        None => (0, true),
     }
 }
 
-/// Why a buffered OpenAI chat usage object cannot authorize final settlement.
+/// Why a buffered family usage object cannot authorize final settlement.
 /// Field names are static contract paths; errors never contain response content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BufferedUsageError {
@@ -158,6 +184,9 @@ pub enum BufferedUsageError {
     MissingUsage,
     InvalidField(&'static str),
     InconsistentUsage,
+    UnsupportedEndpoint,
+    /// An SSE-only completion arrived without qualified final stream evidence.
+    UnqualifiedStream,
 }
 
 /// Opt-in qualification; legacy extraction and serialization stay unchanged.
@@ -198,6 +227,11 @@ pub fn validate_openai_buffered_usage(response: &Value) -> Result<(), BufferedUs
         "cached_tokens",
         "prompt_tokens_details.cached_tokens",
     )?;
+    let written = details(
+        "prompt_tokens_details",
+        "cache_write_tokens",
+        "prompt_tokens_details.cache_write_tokens",
+    )?;
     let reasoning = details(
         "completion_tokens_details",
         "reasoning_tokens",
@@ -211,7 +245,11 @@ pub fn validate_openai_buffered_usage(response: &Value) -> Result<(), BufferedUs
     )?;
     // Validate the numeric inputs, then leave extraction/cache subtraction to the
     // existing parser. No alternate count derivation or clamping on this path.
-    if cached.is_some_and(|n| n > prompt)
+    if cached
+        .or(hit)
+        .unwrap_or(0)
+        .checked_add(written.unwrap_or(0))
+        .is_none_or(|n| n > prompt)
         || reasoning.is_some_and(|n| n > completion)
         || hit.is_some_and(|n| n > prompt)
         || miss.is_some_and(|n| hit.is_none_or(|hit| hit.checked_add(n) != Some(prompt)))
@@ -276,14 +314,19 @@ pub fn qualify_openai_stream_usage(event: &Value) -> Result<Option<ParsedUsage>,
 /// Parse an OpenAI (or OpenAI-compatible) Chat Completions response `usage` object.
 ///
 /// `prompt_tokens` is the *total* prompt including cache; `prompt_tokens_details.cached_tokens`
-/// is the cached portion — so fresh input = `prompt_tokens - cached_tokens`. OpenAI does not
-/// bill cache writes separately, so `cache_creation_tokens` is 0. Returns `None` if there is no
+/// is the cache-read portion; supported endpoints also report `cache_write_tokens` in those
+/// details. Fresh input subtracts reads and writes exactly once. Absent writes remain zero
+/// for older and compatible endpoints. Returns `None` if there is no
 /// `usage` object (e.g. an error body).
 pub fn parse_openai_usage(response: &Value) -> Option<ParsedUsage> {
     let usage = response.get("usage")?;
     let duration_ms = millis_at(usage, "duration_ms");
     let time_to_first_token_ms = millis_at(usage, "time_to_first_token_ms");
     let completion = u64_at(usage, "completion_tokens");
+    let written = usage
+        .get("prompt_tokens_details")
+        .map(|details| u64_at(details, "cache_write_tokens"))
+        .unwrap_or(0);
     let reasoning = usage
         .get("completion_tokens_details")
         .map(|d| u64_at(d, "reasoning_tokens"))
@@ -294,15 +337,23 @@ pub fn parse_openai_usage(response: &Value) -> Option<ParsedUsage> {
     // (catalog.rs declares `prompt_cache_usage: true` for these vendors — this honors it.)
     if usage.get("prompt_cache_hit_tokens").is_some() {
         let hit = u64_at(usage, "prompt_cache_hit_tokens");
-        let fresh = if usage.get("prompt_cache_miss_tokens").is_some() {
+        let uncached = if usage.get("prompt_cache_miss_tokens").is_some() {
             u64_at(usage, "prompt_cache_miss_tokens")
         } else {
             u64_at(usage, "prompt_tokens").saturating_sub(hit)
         };
+        let (fresh, inconsistent) = split_prompt(uncached, 0, written);
+        if inconsistent {
+            tracing::warn!(
+                target: "sandhi.usage.inconsistent_cache",
+                uncached, written,
+                "cache writes exceed uncached input; clamping fresh input to 0"
+            );
+        }
         return Some(ParsedUsage {
             tokens_in: fresh,
             tokens_out: completion,
-            cache_creation_tokens: 0,
+            cache_creation_tokens: written,
             cache_read_tokens: hit,
             cache_read_observation: Some(crate::observe_cache_read(
                 crate::CacheReadFamily::OpenAi,
@@ -319,18 +370,18 @@ pub fn parse_openai_usage(response: &Value) -> Option<ParsedUsage> {
         .get("prompt_tokens_details")
         .map(|d| u64_at(d, "cached_tokens"))
         .unwrap_or(0);
-    let (tokens_in, inconsistent) = split_prompt(prompt, cached);
+    let (tokens_in, inconsistent) = split_prompt(prompt, cached, written);
     if inconsistent {
         tracing::warn!(
             target: "sandhi.usage.inconsistent_cache",
-            prompt, cached,
-            "OpenAI usage reports cached_tokens > prompt_tokens; clamping fresh input to 0"
+            prompt, cached, written,
+            "OpenAI cache reads plus writes exceed prompt_tokens; clamping fresh input to 0"
         );
     }
     Some(ParsedUsage {
         tokens_in,
         tokens_out: completion,
-        cache_creation_tokens: 0,
+        cache_creation_tokens: written,
         cache_read_tokens: cached,
         reasoning_tokens: reasoning,
         reasoning_included: Some(true),
@@ -347,7 +398,8 @@ pub fn parse_openai_usage(response: &Value) -> Option<ParsedUsage> {
 ///
 /// Responses uses `input_tokens` / `output_tokens` rather than the Chat Completions
 /// `prompt_tokens` / `completion_tokens` names. `input_tokens` includes cached input, so the
-/// neutral fresh-input count subtracts `input_tokens_details.cached_tokens` exactly once.
+/// neutral fresh-input count subtracts `input_tokens_details.cached_tokens` and optional
+/// `cache_write_tokens` exactly once.
 pub fn parse_openai_responses_usage(response: &Value) -> Option<ParsedUsage> {
     let usage = response.get("usage")?;
     let input = u64_at(usage, "input_tokens");
@@ -356,12 +408,16 @@ pub fn parse_openai_responses_usage(response: &Value) -> Option<ParsedUsage> {
         .get("input_tokens_details")
         .map(|details| u64_at(details, "cached_tokens"))
         .unwrap_or(0);
-    let (tokens_in, inconsistent) = split_prompt(input, cached);
+    let written = usage
+        .get("input_tokens_details")
+        .map(|details| u64_at(details, "cache_write_tokens"))
+        .unwrap_or(0);
+    let (tokens_in, inconsistent) = split_prompt(input, cached, written);
     if inconsistent {
         tracing::warn!(
             target: "sandhi.usage.inconsistent_cache",
-            prompt = input, cached,
-            "Responses usage reports cached_tokens > input_tokens; clamping fresh input to 0"
+            prompt = input, cached, written,
+            "Responses cache reads plus writes exceed input_tokens; clamping fresh input to 0"
         );
     }
     let reasoning = usage
@@ -371,7 +427,7 @@ pub fn parse_openai_responses_usage(response: &Value) -> Option<ParsedUsage> {
     Some(ParsedUsage {
         tokens_in,
         tokens_out: output,
-        cache_creation_tokens: 0,
+        cache_creation_tokens: written,
         cache_read_tokens: cached,
         reasoning_tokens: reasoning,
         reasoning_included: Some(true),
@@ -407,7 +463,10 @@ pub fn parse_anthropic_usage(response: &Value) -> Option<ParsedUsage> {
             crate::CacheReadFamily::Anthropic,
             response,
         )),
-        reasoning_tokens: 0, // Anthropic folds thinking tokens into output_tokens
+        reasoning_tokens: usage
+            .get("output_tokens_details")
+            .map(|details| u64_at(details, "thinking_tokens"))
+            .unwrap_or(0), // A reported subset of the inclusive output, never added twice.
         reasoning_included: Some(true),
         duration_ms: None,
         time_to_first_token_ms: None,
@@ -421,7 +480,7 @@ pub fn parse_gemini_usage(response: &Value) -> Option<ParsedUsage> {
     let usage = response.get("usageMetadata")?;
     let prompt = u64_at(usage, "promptTokenCount");
     let cached = u64_at(usage, "cachedContentTokenCount");
-    let (tokens_in, inconsistent) = split_prompt(prompt, cached);
+    let (tokens_in, inconsistent) = split_prompt(prompt, cached, 0);
     if inconsistent {
         tracing::warn!(
             target: "sandhi.usage.inconsistent_cache",
@@ -430,7 +489,7 @@ pub fn parse_gemini_usage(response: &Value) -> Option<ParsedUsage> {
         );
     }
     Some(ParsedUsage {
-        tokens_in,
+        tokens_in: tokens_in.saturating_add(u64_at(usage, "toolUsePromptTokenCount")),
         tokens_out: u64_at(usage, "candidatesTokenCount"),
         cache_creation_tokens: 0,
         cache_read_tokens: cached,
@@ -860,6 +919,99 @@ mod tests {
     }
 
     #[test]
+    fn openai_cache_writes_are_disjoint_from_fresh_and_cached_input() {
+        for (read, write) in [(0, 0), (0, 30), (60, 30), (60, 40)] {
+            let chat = json!({"usage": {
+                "prompt_tokens":100, "completion_tokens":20, "total_tokens":120,
+                "prompt_tokens_details":{"cached_tokens":read,"cache_write_tokens":write}
+            }});
+            let responses = json!({"usage": {
+                "input_tokens":100, "output_tokens":20,
+                "input_tokens_details":{"cached_tokens":read,"cache_write_tokens":write}
+            }});
+            for usage in [
+                parse_openai_usage(&chat).unwrap(),
+                parse_openai_responses_usage(&responses).unwrap(),
+            ] {
+                assert_eq!(usage.tokens_in, 100 - read - write);
+                assert_eq!(usage.cache_read_tokens, read);
+                assert_eq!(usage.cache_creation_tokens, write);
+                assert_eq!(crate::billable(&usage.into()), 120);
+            }
+            assert_eq!(validate_openai_buffered_usage(&chat), Ok(()));
+            let event =
+                json!({"object":"chat.completion.chunk","choices":[],"usage":chat["usage"]});
+            assert_eq!(
+                qualify_openai_stream_usage(&event),
+                Ok(parse_openai_usage(&chat))
+            );
+            // Compatible hit/miss counters retain their precedence; a reported
+            // write is a subset of the non-read input, not another input total.
+            for with_miss in [false, true] {
+                let mut compatible = chat.clone();
+                compatible["usage"]["prompt_cache_hit_tokens"] = json!(read);
+                if with_miss {
+                    compatible["usage"]["prompt_cache_miss_tokens"] = json!(100 - read);
+                }
+                assert_eq!(validate_openai_buffered_usage(&compatible), Ok(()));
+                assert_eq!(parse_openai_usage(&compatible), parse_openai_usage(&chat));
+            }
+        }
+    }
+
+    #[test]
+    fn qualification_rejects_invalid_or_overlapping_cache_writes() {
+        for value in [
+            json!(null),
+            json!(-1),
+            json!(1.5),
+            json!("3"),
+            json!(MAX_PLAUSIBLE_TOKENS + 1),
+        ] {
+            let response = json!({"usage": {
+                "prompt_tokens":100,"completion_tokens":20,
+                "prompt_tokens_details":{"cached_tokens":60,"cache_write_tokens":value}
+            }});
+            assert_eq!(
+                validate_openai_buffered_usage(&response),
+                Err(BufferedUsageError::InvalidField(
+                    "prompt_tokens_details.cache_write_tokens"
+                ))
+            );
+            assert_eq!(
+                parse_openai_usage(&response).unwrap().cache_creation_tokens,
+                0
+            );
+        }
+        for extra in [
+            json!({"prompt_tokens_details":{"cached_tokens":60,"cache_write_tokens":41}}),
+            json!({"prompt_tokens_details":{"cache_write_tokens":101}}),
+            json!({"prompt_cache_hit_tokens":60,"prompt_cache_miss_tokens":40,
+                   "prompt_tokens_details":{"cache_write_tokens":41}}),
+        ] {
+            let mut usage = json!({"prompt_tokens":100,"completion_tokens":20});
+            usage
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let response = json!({"usage":usage});
+            assert_eq!(
+                validate_openai_buffered_usage(&response),
+                Err(BufferedUsageError::InconsistentUsage)
+            );
+            let event =
+                json!({"object":"chat.completion.chunk","choices":[],"usage":response["usage"]});
+            assert_eq!(
+                qualify_openai_stream_usage(&event),
+                Err(StreamUsageError::InvalidUsage(
+                    BufferedUsageError::InconsistentUsage
+                ))
+            );
+            assert_eq!(parse_openai_usage(&response).unwrap().tokens_in, 0);
+        }
+    }
+
+    #[test]
     fn openai_without_cache_details() {
         let resp = json!({ "usage": { "prompt_tokens": 50, "completion_tokens": 10 } });
         let u = parse_openai_usage(&resp).unwrap();
@@ -982,11 +1134,14 @@ mod tests {
 
     #[test]
     fn split_prompt_splits_and_flags_inconsistency() {
-        assert_eq!(split_prompt(1000, 800), (200, false));
-        assert_eq!(split_prompt(100, 0), (100, false));
+        assert_eq!(split_prompt(1000, 800, 0), (200, false));
+        assert_eq!(split_prompt(100, 0, 0), (100, false));
         // cached > prompt ⇒ fresh input saturates to 0 AND the inconsistency flag is set.
-        assert_eq!(split_prompt(100, 500), (0, true));
-        assert_eq!(split_prompt(0, 1), (0, true));
+        assert_eq!(split_prompt(100, 500, 0), (0, true));
+        assert_eq!(split_prompt(0, 1, 0), (0, true));
+        assert_eq!(split_prompt(100, 60, 30), (10, false));
+        assert_eq!(split_prompt(100, 60, 41), (0, true));
+        assert_eq!(split_prompt(100, u64::MAX, 1), (0, true));
     }
 
     #[test]
@@ -1021,7 +1176,7 @@ mod tests {
     #[test]
     fn inconsistent_cached_greater_than_prompt_is_observable() {
         // The decision predicate is directly testable...
-        assert_eq!(split_prompt(100, 500), (0, true));
+        assert_eq!(split_prompt(100, 500, 0), (0, true));
 
         // ...and the inconsistency is no longer silent: a targeted warn fires on this thread.
         let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));

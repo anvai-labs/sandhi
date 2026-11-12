@@ -9,7 +9,6 @@ use crate::{
 };
 use async_trait::async_trait;
 use sandhi_core::parse_gemini_usage;
-use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GeminiAuthScheme {
@@ -104,10 +103,7 @@ impl Provider for Gemini {
                 if !resp.status().is_success() {
                     return Err(error_for_response(resp, None).await);
                 }
-                let body: Value = resp
-                    .json()
-                    .await
-                    .map_err(|e| ProviderError::Transport(e.to_string()))?;
+                let body = crate::decode_response_json(resp).await?;
                 let (response_usage, observed_usage) =
                     crate::buffered_usage(sandhi_core::CacheReadFamily::Gemini, &body);
                 Ok((

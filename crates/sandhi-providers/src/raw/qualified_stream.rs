@@ -1,10 +1,11 @@
 //! Response-owned qualification; no task, retry, persistence or settlement owner.
 use super::RawChunkStream;
 use crate::attempt::AttemptGuard;
-use crate::stream_usage::{OpenAiStreamUsageObserver, StreamObservationError};
+use crate::stream_usage::{ProtocolStreamUsageObserver, StreamObservationError};
 use crate::{AttemptOutcome, ParsedUsage, ProviderError};
 use bytes::Bytes;
 use futures_core::Stream;
+use sandhi_core::{EndpointFamilyV1, UsageV2};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::sync::watch;
@@ -20,52 +21,95 @@ pub struct QualifiedStreamSnapshot {
     pub outcome: Option<AttemptOutcome>,
 }
 
+/// Canonical evidence, including partial progress and reported-zero fields.
+/// `snapshot` retains the original copyable projection for compatibility.
+/// Protocol completion and delivery success do not make partial usage final.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QualifiedStreamEvidence {
+    pub snapshot: QualifiedStreamSnapshot,
+    pub usage: Option<UsageV2>,
+}
+
 /// Read-only latest snapshot that survives stream drop. Reading copies the facts
 /// and never exposes a watch borrow that could block publication. This is bounded
 /// in-memory evidence, not durable storage or proof of origin cancellation. A
 /// handle does not poll the stream or keep its upstream request alive.
 #[derive(Clone)]
-pub struct QualifiedStreamObservation(watch::Receiver<QualifiedStreamSnapshot>);
+pub struct QualifiedStreamObservation(watch::Receiver<QualifiedStreamEvidence>);
 
 impl QualifiedStreamObservation {
     #[must_use]
     pub fn snapshot(&self) -> QualifiedStreamSnapshot {
-        *self.0.borrow()
+        self.0.borrow().snapshot
+    }
+
+    #[must_use]
+    pub fn evidence(&self) -> QualifiedStreamEvidence {
+        self.0.borrow().clone()
     }
 }
 
+#[cfg(test)]
 pub(super) fn observe(
     inner: RawChunkStream,
     guard: Option<AttemptGuard>,
 ) -> (RawChunkStream, QualifiedStreamObservation) {
-    let (sender, receiver) = watch::channel(QualifiedStreamSnapshot::default());
-    (
+    observe_endpoint(inner, guard, EndpointFamilyV1::OpenaiChatCompletions)
+        .expect("Chat stream qualification is supported")
+}
+
+pub(super) fn observe_endpoint(
+    inner: RawChunkStream,
+    guard: Option<AttemptGuard>,
+    endpoint: EndpointFamilyV1,
+) -> Result<(RawChunkStream, QualifiedStreamObservation), StreamObservationError> {
+    observe_response(inner, guard, endpoint, None)
+}
+
+pub(crate) fn observe_response(
+    inner: RawChunkStream,
+    guard: Option<AttemptGuard>,
+    endpoint: EndpointFamilyV1,
+    request_id: Option<String>,
+) -> Result<(RawChunkStream, QualifiedStreamObservation), StreamObservationError> {
+    let observer = ProtocolStreamUsageObserver::for_endpoint(endpoint)?;
+    let (sender, receiver) = watch::channel(QualifiedStreamEvidence::default());
+    Ok((
         Box::pin(QualifiedStream {
             inner,
-            observer: OpenAiStreamUsageObserver::new(),
+            observer,
             sender,
             guard,
             outcome: None,
+            request_id: request_id.map(|id| crate::attempt::bounded_label(&id, 256)),
         }),
         QualifiedStreamObservation(receiver),
-    )
+    ))
 }
 
 struct QualifiedStream {
     inner: RawChunkStream,
-    observer: OpenAiStreamUsageObserver,
-    sender: watch::Sender<QualifiedStreamSnapshot>,
+    observer: ProtocolStreamUsageObserver,
+    sender: watch::Sender<QualifiedStreamEvidence>,
     guard: Option<AttemptGuard>,
     outcome: Option<AttemptOutcome>,
+    request_id: Option<String>,
 }
 
 impl QualifiedStream {
     fn publish(&self) {
-        self.sender.send_replace(QualifiedStreamSnapshot {
-            usage: self.observer.usage(),
-            protocol_done: self.observer.is_done(),
-            qualification_error: self.observer.error(),
-            outcome: self.outcome,
+        let mut usage = self.observer.canonical_usage();
+        if let Some(usage) = &mut usage {
+            usage.upstream_request_id.clone_from(&self.request_id);
+        }
+        self.sender.send_replace(QualifiedStreamEvidence {
+            snapshot: QualifiedStreamSnapshot {
+                usage: self.observer.usage(),
+                protocol_done: self.observer.is_done(),
+                qualification_error: self.observer.error(),
+                outcome: self.outcome,
+            },
+            usage,
         });
     }
 
@@ -73,12 +117,13 @@ impl QualifiedStream {
         if self.outcome.is_some() {
             return;
         }
+        self.observer.close_on_abort();
         self.outcome = Some(outcome);
         // Publish first: a full/disconnected diagnostic channel cannot lose the
         // response owner's measurement. Neither channel is a durable ledger.
         self.publish();
         if let Some(mut guard) = self.guard.take() {
-            guard.finish_qualified_stream(outcome, self.observer.usage());
+            guard.finish_qualified_stream(outcome, self.observer.canonical_usage().as_ref());
         }
         // Release the upstream immediately, even when the caller retains this
         // fused stream after a terminal error.
@@ -111,7 +156,10 @@ impl Stream for QualifiedStream {
                 Poll::Ready(Some(Err(error)))
             }
             Poll::Ready(None) => {
-                let outcome = if self.observer.finish().is_ok() {
+                let qualified = self.observer.finish().is_ok();
+                let outcome = if self.observer.provider_failed() {
+                    AttemptOutcome::ProviderRejected
+                } else if qualified {
                     AttemptOutcome::Success
                 } else {
                     AttemptOutcome::IncompleteStream
@@ -162,6 +210,125 @@ mod tests {
 
     const USAGE: &[u8] = b"id: untrusted\ndata: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":6,\"completion_tokens\":5}}\n\n";
     const DONE: &[u8] = b"data: [DONE]\n\n";
+
+    #[tokio::test]
+    async fn responses_stream_keeps_canonical_evidence_and_one_terminal_across_drop_paths() {
+        let progress = b"data: {\"type\":\"response.in_progress\",\"response\":{\"id\":\"resp\",\"usage\":{\"input_tokens\":10,\"input_tokens_details\":{\"cached_tokens\":6},\"output_tokens\":2,\"output_tokens_details\":{\"reasoning_tokens\":0}}}}\n\n";
+        for mode in [
+            "unpolled",
+            "progress_drop",
+            "terminal_drop",
+            "partial_tail_drop",
+            "comment_tail_drop",
+            "eof",
+            "failed",
+            "error",
+            "truncated",
+            "timeout",
+        ] {
+            let (context, receiver) =
+                AttemptContext::single_attempt("execution", "a".repeat(64)).unwrap();
+            let guard = context.begin_checked("models", Some("fixture")).unwrap();
+            let status = if mode == "failed" {
+                "failed"
+            } else {
+                "completed"
+            };
+            let mut terminal = format!(
+                "data: {}\n\n",
+                serde_json::json!({"type":format!("response.{status}"),"response":{
+                "id":"resp","status":status,"usage":{"input_tokens":10,"input_tokens_details":{"cached_tokens":6},
+                "output_tokens":4,"output_tokens_details":{"reasoning_tokens":0}}}})
+            );
+            if mode == "partial_tail_drop" {
+                terminal.push_str("data: {");
+            }
+            if mode == "comment_tail_drop" {
+                terminal.push_str(": keepalive padding");
+            }
+            let mut chunks = vec![Ok(Bytes::from_static(progress))];
+            if !matches!(mode, "unpolled" | "progress_drop" | "timeout") {
+                chunks.push(Ok(Bytes::from(terminal)));
+            }
+            if mode == "error" {
+                chunks.push(Err(ProviderError::Transport("lost".into())));
+            }
+            if mode == "truncated" {
+                chunks.push(Ok(Bytes::from_static(b"data: {")));
+            }
+            let drops = Arc::new(AtomicUsize::new(0));
+            let (mut stream, observation) = observe_endpoint(
+                Box::pin(DropObservedStream(
+                    Box::pin(stream::iter(chunks)),
+                    drops.clone(),
+                )),
+                guard,
+                EndpointFamilyV1::OpenaiResponses,
+            )
+            .unwrap();
+            if mode != "unpolled" {
+                stream.next().await.unwrap().unwrap();
+                assert!(observation.snapshot().usage.is_none());
+                assert_eq!(
+                    observation.evidence().usage.unwrap().completeness,
+                    UsageCompleteness::Partial
+                );
+                if matches!(
+                    mode,
+                    "terminal_drop" | "partial_tail_drop" | "comment_tail_drop"
+                ) {
+                    stream.next().await.unwrap().unwrap();
+                } else if !matches!(mode, "progress_drop" | "timeout") {
+                    while stream.next().await.is_some() {}
+                }
+            }
+            if mode == "timeout" {
+                context.mark_timeout();
+            }
+            drop(stream);
+            assert_eq!(drops.load(Ordering::SeqCst), 1, "{mode}");
+            let evidence = observation.evidence();
+            let outcome = match mode {
+                "eof" => AttemptOutcome::Success,
+                "failed" => AttemptOutcome::ProviderRejected,
+                "error" => AttemptOutcome::TransportError,
+                "truncated" => AttemptOutcome::IncompleteStream,
+                "timeout" => AttemptOutcome::Timeout,
+                _ => AttemptOutcome::Cancelled,
+            };
+            assert_eq!(evidence.snapshot.outcome, Some(outcome), "{mode}");
+            let completeness = match mode {
+                "unpolled" => UsageCompleteness::Unavailable,
+                "progress_drop" | "timeout" | "truncated" | "partial_tail_drop" => {
+                    UsageCompleteness::Partial
+                }
+                _ => UsageCompleteness::Final,
+            };
+            if let Some(usage) = &evidence.usage {
+                assert_eq!(usage.completeness, completeness, "{mode}");
+                assert_eq!(usage.reasoning_tokens, Some(0));
+                assert_eq!(usage.cache_read_tokens, 6);
+                assert_eq!(
+                    usage.tokens_out,
+                    if matches!(mode, "progress_drop" | "timeout") {
+                        2
+                    } else {
+                        4
+                    }
+                );
+            } else {
+                assert_eq!(mode, "unpolled");
+            }
+            let events = receiver.drain();
+            assert_eq!(events.len(), 2, "{mode}");
+            assert_eq!(events[0].attempt_id, events[1].attempt_id);
+            assert!(
+                matches!(&events[1].phase,AttemptPhase::Terminal{outcome:actual,usage,usage_completeness,..}
+                if *actual == outcome && *usage_completeness == completeness && *usage == evidence.usage.as_ref().map(Into::into)),
+                "{mode}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn qualified_stream_retains_evidence_across_terminal_paths() {
@@ -271,7 +438,7 @@ mod tests {
             assert_eq!(observations[1].execution_id, "execution");
             assert!(
                 matches!(&observations[1].phase, AttemptPhase::Terminal { outcome, usage, usage_completeness, .. }
-                if *outcome == expected && *usage == snapshot.usage && *usage_completeness == if mode == "unpolled" { UsageCompleteness::Unavailable } else { UsageCompleteness::Final })
+                if *outcome == expected && *usage == snapshot.usage && *usage_completeness == if mode == "unpolled" { UsageCompleteness::Unavailable } else if snapshot.qualification_error.is_some() { UsageCompleteness::Partial } else { UsageCompleteness::Final })
             );
         }
     }

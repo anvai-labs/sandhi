@@ -141,6 +141,98 @@ def test_cache_observation_precedes_consumer_stopping_at_first_content():
         server.server_close()
 
 
+def test_native_stream_opt_in_preserves_wire_state_without_duplicate_usage():
+    frames = [
+        {"id": "fixture", "model": "fixture", "choices": [{"delta": {"content": "ok", "provider_state": "opaque"}}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}], "usage": {
+            "prompt_tokens": 100, "completion_tokens": 2,
+            "prompt_tokens_details": {"cached_tokens": 60, "cache_write_tokens": 30}}},
+    ]
+    body = ("".join(f"data: {json.dumps(frame)}\n\n" for frame in frames) + "data: [DONE]\n\n").encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.send_response(200)
+            self.send_header("content-type", "text/event-stream")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = _start_server(Handler)
+    try:
+        provider = sg.ProviderRuntime().openai_compat(
+            "fixture", f"http://127.0.0.1:{server.server_port}/v1", "fixture-key", max_retries=0
+        )
+
+        async def consume(native):
+            request = {"model": "fixture", "messages": [{"role": "user", "content": "hi"}]}
+            if native:
+                request["include_native_stream"] = True
+            return [json.loads(value) async for value in provider.stream_json(json.dumps(request))]
+
+        for native in (False, True):
+            events = asyncio.run(consume(native))
+            attachments = [event["frame"] for event in events if event["event"] == "native_frame"]
+            assert len(attachments) == (3 if native else 0)
+            if native:
+                assert all(frame["endpoint_family"] == "openai_chat_completions" for frame in attachments)
+                assert '"provider_state": "opaque"' in attachments[0]["sse"]
+                assert attachments[-1]["sse"] == "data: [DONE]\n\n"
+            assert "".join(event["delta"] for event in events if event["event"] == "text_delta") == "ok"
+            final = [event["usage"] for event in events if event["event"] == "usage" and event["usage"]["completeness"] == "final"]
+            assert len(final) == 1
+            assert [final[0][key] for key in ("tokens_in", "cache_read_tokens", "cache_creation_tokens", "tokens_out")] == [10, 60, 30, 2]
+            assert events[-1]["event"] == "finish"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_explicit_cache_suppression_and_undeclared_automatic_intent_cross_real_binding():
+    seen = []
+    encoded = json.dumps({"id": "fixture", "model": "fixture", "content": [{"type": "text", "text": "ok"}],
+                          "stop_reason": "end_turn", "usage": {"input_tokens": 2, "output_tokens": 1}}).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            seen.append(json.loads(self.rfile.read(int(self.headers["content-length"]))))
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def log_message(self, *_args):
+            pass
+
+    server = _start_server(Handler)
+    try:
+        provider = sg.ProviderRuntime().provider("anthropic", "fixture", "fixture-key",
+            base_url=f"http://127.0.0.1:{server.server_port}", max_retries=0)
+
+        async def run():
+            request = {"model": "fixture", "messages": [{"role": "system", "content": "policy"},
+                       {"role": "user", "content": "hello"}], "max_output_tokens": 16}
+            await provider.complete_json(json.dumps(request))
+            request["cache_intent"] = {"mode": "suppress_gateway"}
+            await provider.complete_json(json.dumps(request))
+            request["cache_intent"] = {"mode": "auto"}
+            with pytest.raises(sg.SandhiProviderError, match="requires declared"):
+                await provider.complete_json(json.dumps(request))
+
+        asyncio.run(run())
+        assert len(seen) == 2
+        assert seen[0]["system"][0]["cache_control"] == {"type": "ephemeral"}
+        assert "cache_control" not in seen[1]["system"][0]
+        assert all("cache_intent" not in body and "compiled_cache" not in body for body in seen)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_contract_discovery_and_schemas():
     assert sg.wire_contract_version() == "1"
     assert (
@@ -150,6 +242,8 @@ def test_contract_discovery_and_schemas():
     assert descriptor["slug"] == "anthropic"
     assert descriptor["endpoint_family"] == "anthropic_messages"
     schema = json.loads(sg.chat_contract_schema_json("chat-request.v1"))
+    assert "cache_intent" in schema["properties"]
+    assert "compiled_cache" not in schema["properties"]
     assert schema["title"] == "ChatRequestV1"
 
 

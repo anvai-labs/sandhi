@@ -32,6 +32,7 @@ def visible_run(page, dashboard):
         document = response.json()
     assert document["run"]["total"]["billable_tokens"] == 14
     connect(page, dashboard)
+    page.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name='Run explorer', exact=True).click()
     page.get_by_label("Run ID", exact=True).fill(run_id)
     page.get_by_role("button", name="Look up", exact=True).click()
     expect(page.locator("#run-tree")).to_have_attribute("data-state", "ready")
@@ -43,6 +44,7 @@ def visible_run(page, dashboard):
 
 
 def test_real_wrapped_run_and_missing_lookup_do_not_reuse_previous_results(page, visible_run):
+    page.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name='Run explorer', exact=True).click()
     page.get_by_label("Run ID", exact=True).fill("missing-run")
     page.get_by_role("button", name="Look up", exact=True).click()
     expect(page.locator("#run-tree")).to_have_attribute("data-state", "unconfigured")

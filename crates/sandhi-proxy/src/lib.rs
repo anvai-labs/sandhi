@@ -10,6 +10,7 @@ pub const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 mod access;
 pub mod auth;
+pub mod backend;
 pub mod client_credentials;
 mod codec;
 pub mod config;
@@ -26,6 +27,7 @@ pub mod policy_workers;
 mod preparation;
 pub mod profiles;
 pub mod ratelimit;
+mod routing;
 pub mod settlement;
 pub mod streaming;
 mod text_endpoints;
@@ -40,7 +42,8 @@ pub mod otel;
 // rehydration helpers used by the `sandhi-proxy` binary.
 pub use ledger::{reclaim_sweep_at, Admission, ProxyLedger};
 pub use operator::{
-    admin, build_provider_handle, rehydrate_alerts, rehydrate_budgets, rehydrate_live_keys,
+    admin, build_provider_handle, build_provider_handle_for_endpoint, rehydrate_alerts,
+    rehydrate_budgets, rehydrate_live_keys,
 };
 pub use persistence::BufferedAlertStore;
 
@@ -277,6 +280,11 @@ pub struct ProxyState {
     // --- TD-0003 P1 operator surface ---
     /// Durable provider-credential vault (metadata in SQLite, secret in the active backend).
     pub vault: Option<Arc<VaultStore>>,
+    /// Revisioned non-secret backend definitions, separate from vault references.
+    pub backends: Option<Arc<sandhi_store::BackendStore>>,
+    /// Durable logical routes and compatible session bindings, separate from credentials.
+    pub routes: Option<Arc<sandhi_store::routes::RouteStore>>,
+    pub routing_slots: Arc<tokio::sync::Semaphore>,
     /// One admitted credential mutation (no waiting queue). Held through persistence/publication,
     /// even if its HTTP caller disconnects. Keeps blocking vault work off async workers and bounded.
     pub vault_writer: Arc<tokio::sync::Semaphore>,
@@ -393,6 +401,9 @@ impl ProxyState {
             providers: Mutex::new(providers),
             store,
             vault: None,
+            backends: None,
+            routes: None,
+            routing_slots: Arc::new(tokio::sync::Semaphore::new(8)),
             vault_writer: Arc::new(tokio::sync::Semaphore::new(1)),
             diagnostics_reader: Arc::new(tokio::sync::Semaphore::new(1)),
             vkeys: None,
@@ -761,6 +772,13 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         .route("/admin/policy", get(operator::policy_status))
         .route("/admin/topology", get(operator::topology))
         .route("/admin/keys/reference", post(operator::register_reference))
+        .route(
+            "/admin/backends",
+            post(backend::register).get(backend::list),
+        )
+        .route("/admin/backends/:id", delete(backend::revoke))
+        .route("/admin/routes", post(routing::register).get(routing::list))
+        .route("/admin/routes/:id", delete(routing::revoke))
         .route(
             "/admin/keys",
             post(operator::add_key).get(operator::list_keys),
@@ -2184,7 +2202,13 @@ async fn list_models(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -
         Ok(pair) => pair,
         Err(response) => return response,
     };
-    let models = permitted_models(&vk, provider.slug());
+    let models = match &provider {
+        Some(provider) => permitted_provider_models(&vk, provider),
+        None => match routing::discovery(&state, &vk).await {
+            Ok(models) => models,
+            Err(message) => return ingress_error(dialect, StatusCode::BAD_GATEWAY, message),
+        },
+    };
     let body = match dialect {
         IngressDialect::Anthropic => json!({
             "data": models.iter().map(|id| json!({
@@ -2199,7 +2223,7 @@ async fn list_models(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -
             "data": models.iter().map(|id| json!({
                 "id": id,
                 "object": "model",
-                "owned_by": provider.slug(),
+                "owned_by": provider.as_ref().map_or("sandhi",ProviderHandle::slug),
             })).collect::<Vec<_>>(),
         }),
     };
@@ -2213,7 +2237,18 @@ async fn list_models_gemini(State(state): State<Arc<ProxyState>>, headers: Heade
         Ok(pair) => pair,
         Err(response) => return response,
     };
-    let models = permitted_models(&vk, provider.slug());
+    let models = match &provider {
+        Some(provider) => permitted_provider_models(&vk, provider),
+        None => match routing::discovery(&state, &vk).await {
+            Ok(models) => models
+                .into_iter()
+                .filter(|id| sandhi_core::model_id_is_path_safe(id))
+                .collect(),
+            Err(message) => {
+                return ingress_error(IngressDialect::Gemini, StatusCode::BAD_GATEWAY, message)
+            }
+        },
+    };
     Json(json!({
         "models": models.iter().map(|id| json!({
             // Gemini names a model by its resource path, and its SDK strips the prefix back off.
@@ -2226,12 +2261,36 @@ async fn list_models_gemini(State(state): State<Arc<ProxyState>>, headers: Heade
 }
 
 /// Shared auth + upstream resolution for the discovery endpoints.
+#[allow(clippy::result_large_err)]
+fn provider_for_key(
+    state: &ProxyState,
+    vk: &VirtualKey,
+    dialect: IngressDialect,
+) -> Result<Option<ProviderHandle>, Response> {
+    let provider = state
+        .providers
+        .lock()
+        .expect("providers poisoned")
+        .get(&vk.upstream_ref)
+        .cloned();
+    // Preserve existing host-owned names, including names that predate the route/
+    // namespace. Logical registration cannot replace these handles.
+    if provider.is_some() || vk.upstream_ref.starts_with("route/") {
+        return Ok(provider);
+    }
+    Err(ingress_error(
+        dialect,
+        StatusCode::BAD_GATEWAY,
+        "no upstream registered for this key",
+    ))
+}
+
 #[allow(clippy::result_large_err)] // axum::Response is intentionally large; idiomatic shape.
 async fn resolve_for_discovery(
     state: &Arc<ProxyState>,
     dialect: IngressDialect,
     headers: &HeaderMap,
-) -> Result<(VirtualKey, ProviderHandle), Response> {
+) -> Result<(VirtualKey, Option<ProviderHandle>), Response> {
     let Some(token) = dialect.extract_credential(headers) else {
         return Err(ingress_error(
             dialect,
@@ -2266,19 +2325,7 @@ async fn resolve_for_discovery(
             ));
         }
     };
-    let Some(provider) = state
-        .providers
-        .lock()
-        .expect("providers poisoned")
-        .get(&vk.upstream_ref)
-        .cloned()
-    else {
-        return Err(ingress_error(
-            dialect,
-            StatusCode::BAD_GATEWAY,
-            "no upstream registered for this key",
-        ));
-    };
+    let provider = provider_for_key(state, &vk, dialect)?;
     Ok((vk, provider))
 }
 
@@ -2287,6 +2334,18 @@ async fn resolve_for_discovery(
 /// With no allowlist the catalog is returned as-is. With an allowlist, entries the catalog does
 /// not know about are still listed — the catalog holds transport facts, not an authority on which
 /// models exist, so omitting an allowed-but-uncatalogued model would under-report what works.
+fn permitted_provider_models(vk: &VirtualKey, provider: &ProviderHandle) -> Vec<String> {
+    if let Some(binding) = provider.backend_binding() {
+        return binding
+            .models
+            .iter()
+            .filter(|model| vk.permits_model(&model.id))
+            .map(|model| model.id.clone())
+            .collect();
+    }
+    permitted_models(vk, provider.slug())
+}
+
 fn permitted_models(vk: &VirtualKey, slug: &str) -> Vec<String> {
     let catalog: Vec<String> = sandhi_providers::provider_descriptor(slug)
         .map(|d| d.models.into_iter().map(|m| m.id).collect())
@@ -2432,7 +2491,7 @@ async fn handle_with_policy_receipt(
     headers: HeaderMap,
     body: Bytes,
     dialect: IngressDialect,
-    gemini_route: Option<GeminiRoute>,
+    mut gemini_route: Option<GeminiRoute>,
     policy_receipt: Arc<Mutex<Option<String>>>,
 ) -> Response {
     // Body extraction may have spanned shutdown even after semaphore admission succeeded.
@@ -2475,18 +2534,9 @@ async fn handle_with_policy_receipt(
     };
 
     // 2. The upstream this key is bound to.
-    let Some(provider) = state
-        .providers
-        .lock()
-        .expect("providers poisoned")
-        .get(&vk.upstream_ref)
-        .cloned()
-    else {
-        return ingress_error(
-            dialect,
-            StatusCode::BAD_GATEWAY,
-            "no upstream registered for this key",
-        );
+    let provider = match provider_for_key(&state, &vk, dialect) {
+        Ok(provider) => provider,
+        Err(response) => return response,
     };
 
     let preparation::PreparedRequest {
@@ -2500,6 +2550,7 @@ async fn handle_with_policy_receipt(
         buffered_deadline,
         streaming_deadline,
         body_lifetime,
+        routing,
     } = match preparation::prepare(
         preparation::PreparationContext::from(state.as_ref()),
         preparation::ResolvedRoute {
@@ -2519,6 +2570,16 @@ async fn handle_with_policy_receipt(
         Ok(prepared) => prepared,
         Err(response) => return response,
     };
+    if let Some(plan) = &routing {
+        if let Some(route) = &mut gemini_route {
+            route.model = plan.actual_model.clone();
+        }
+        tracing::debug!(
+            route_revision = plan.route_revision,
+            backend_revision = plan.backend_revision,
+            "logical route dispatch plan frozen"
+        );
+    }
 
     // Reserve an estimated liability, not a proven token bound. Concurrent usage and
     // separate reasoning can exceed reservations/caps; settlement records measured usage.
@@ -2542,18 +2603,16 @@ async fn handle_with_policy_receipt(
     // never per-model, never hierarchical (owner-approved convention).
     let upstream_scope = format!("upstream:{}", provider.slug());
     if let Some(owned) = state.buffered_accounting.get() {
-        // Tracked (buffered) accounting admits its primary lease inside the jobs machinery, so
-        // the back-leg lease is taken here, before hand-off; `buffered::handle` releases it on
-        // every pre-dispatch refusal and settles it with the same actual at finalize.
-        let upstream_reservation =
-            match reserve_upstream_budget(&state, &upstream_scope, ceiling, dialect).await {
-                Ok(reservation) => reservation,
-                Err(response) => return response,
-            };
+        // The tracked owner atomically admits and links both budget legs in the
+        // original ledger. No independently reclaimable upstream lease precedes it.
         return settlement::buffered::handle(
             Arc::clone(&state),
             Arc::clone(owned),
             provider,
+            settlement::Selection {
+                upstream_ref: vk.upstream_ref.clone(),
+                routing,
+            },
             request,
             body,
             dialect,
@@ -2566,7 +2625,6 @@ async fn handle_with_policy_receipt(
             effective_max,
             input_len,
             upstream_scope,
-            upstream_reservation,
             buffered_deadline.map(|d| d.duration()),
             streaming_deadline,
         )
@@ -2689,13 +2747,12 @@ async fn handle_with_policy_receipt(
         dialect_label(dialect),
         plane,
     );
+    accounting.routing = routing;
     accounting.stream_body_lifetime = body_lifetime;
     accounting.input_len = input_len;
     accounting.operation = Some(operation);
-    // ADR-0015: the back-leg lease moves into the per-call accounting, which settles it with the
-    // same actual at finalize (on the legacy path under the same lock as the primary; in
-    // `finalize_owned` inside the primary's Settle work, right after the primary commits). The
-    // now-empty hold drops without settling anything.
+    // Legacy back-leg ownership moves into per-call accounting and settles under
+    // the same lock as its primary. Tracked paired admission returned above.
     let upstream_reservation = upstream_hold.take();
     accounting.with_upstream_budget(upstream_scope, upstream_reservation);
     // TD-0021 P4 (D1): the METER records the LOGICAL call once — a repeat of a settled
@@ -2906,6 +2963,14 @@ async fn transparent_complete_response(
     // virtual key) is key-authoritative metering input consumed by `usage_event`, never
     // forwarded (ADR-0001 §4).
     let call_headers = accounting.per_call_wire_headers();
+    let observed_forwarder = accounting.owned.as_ref().map(|owned| {
+        forwarder.clone().with_metered_attempt_context(
+            provider.slug(),
+            Some(accounting.model.clone()),
+            owned.attempts.context.clone(),
+        )
+    });
+    let forwarder = observed_forwarder.as_ref().unwrap_or(forwarder);
     let response = if accounting.owned.is_some() {
         forwarder
             .forward_qualified_with_headers(
@@ -2916,7 +2981,7 @@ async fn transparent_complete_response(
                 &call_headers,
             )
             .await
-            .map(|r| (r.response, r.usage.ok()))
+            .map(|r| (r.response, r.usage))
     } else {
         forwarder
             .forward_metered_with_headers(
@@ -2927,12 +2992,12 @@ async fn transparent_complete_response(
                 &call_headers,
             )
             .await
-            .map(|(raw, usage)| (raw, Some(usage)))
+            .map(|(raw, usage)| (raw, Ok(usage)))
     };
     match response {
         Ok((raw, usage)) => {
-            let qualified = usage.is_some();
-            let mut usage = usage.unwrap_or_default();
+            let qualified = usage.is_ok();
+            let mut usage = usage.unwrap_or_else(unqualified_buffered_usage);
             reconcile_boundary_duration(&mut usage, elapsed_ms(started));
             if qualified {
                 usage.completeness = UsageCompleteness::Final;
@@ -3291,6 +3356,7 @@ fn blocking_section<T>(operation: impl FnOnce() -> T) -> T {
 /// Owns the reservation and guarantees one terminal usage observation even when an HTTP body is
 /// abandoned. Counts are always measured; an unavailable observation releases the reservation.
 struct RequestAccounting {
+    routing: Option<routing::DispatchPlan>,
     owned: Option<settlement::buffered::Accounting>,
     stream_observation: Option<streaming::OwnedObservation>,
     /// Bounded metric dimensions for this call (TD-0011 D2) — set once at dispatch.
@@ -3306,7 +3372,7 @@ struct RequestAccounting {
     /// `None` when the call never took a back-leg lease (count-tokens, embedders, tests).
     upstream_scope: Option<String>,
     /// The back-leg lease, settled with the SAME actual as the primary at finalize (ADR-0015).
-    /// `None` when the upstream scope admitted fail-open (D6) or no lease was taken.
+    /// `None` for tracked paired executions (owned by SQL), fail-open or no lease.
     upstream_reservation: Option<Reservation>,
     provider: String,
     model: String,
@@ -3360,6 +3426,7 @@ impl RequestAccounting {
         };
         Self {
             owned: None,
+            routing: None,
             stream_observation: None,
             operation: None,
             stream_body_lifetime: state.stream_body_lifetime,
@@ -3642,7 +3709,15 @@ impl RequestAccounting {
         };
         self.finalized = true;
         streaming::capture_terminal(self);
+        if let Some(evidence) = owned.attempts.context.qualified_stream_evidence() {
+            streaming::capture_provider_terminal(self, evidence);
+        }
         let mut usage = self.usage.take().unwrap_or_default();
+        usage.attempts = owned
+            .attempts
+            .context
+            .dispatch_count()
+            .min(u64::from(u32::MAX)) as u32;
         usage.outcome.get_or_insert_with(|| self.outcome.into());
         let measured = matches!(
             usage.completeness,
@@ -3651,47 +3726,24 @@ impl RequestAccounting {
         // Retain immutable terminal evidence BEFORE invoking arbitrary best-effort
         // telemetry. A panicking sink must not erase a completed model's usage.
         let actual = if measured {
-            sandhi_core::billable_weighted(&usage, self.state.cache_read_weight_bp)
+            sandhi_core::billable_weighted(&usage, owned.cache_read_weight_bp)
         } else {
             0
         };
-        // ADR-0015: the back-leg lease settles with the same actual, inside the primary's Settle
-        // work and its ledger critical section, right after the primary commits. It is attached
-        // BEFORE submission and before any best-effort telemetry, so neither a contended ledger
-        // (the primary's nonblocking lock never races its own back leg) nor a panicking sink can
-        // strand it. `settle` is idempotent by lease id (ADR-0005 D2); a crash before commit
-        // leaves the lease to TTL reclaim, mirroring D2.
-        let (pending, unattached) = owned
+        // Both linked leases belong to the durable execution. The canonical
+        // settlement transaction charges both or neither; refusal/cancellation
+        // leaves unknown liability held instead of invoking legacy settle(0).
+        debug_assert!(self.upstream_reservation.is_none());
+        let pending = owned
             .execution
             .into_settlement(usage.clone())
-            .with_cache_read_weight(self.state.cache_read_weight_bp)
-            .with_back_leg(self.upstream_reservation.take(), actual);
-        // `into_settlement` is always tracked, so nothing comes back; never drop it silently.
-        debug_assert!(
-            unattached.is_none(),
-            "tracked settlement refused its back leg"
-        );
-        self.upstream_reservation = unattached;
+            .with_attempt_evidence(owned.attempts.finish())
+            .with_cache_read_weight(owned.cache_read_weight_bp);
         let submitted = owned
             .obligation
             .submit(settlement::jobs::Work::Settle(pending));
-        let ticket = match submitted {
-            Ok(ticket) => Some(ticket),
-            Err(mut rejected) => {
-                // The Settle work will never run, so no primary commit can contend: release the
-                // back leg here rather than leave it to TTL. The primary stays retained as before.
-                if let settlement::jobs::Work::Settle(pending) = &mut rejected.work {
-                    if let Some((back, back_actual)) = pending.take_back_leg() {
-                        blocking_section(|| {
-                            if let Ok(mut ledger) = self.state.ledger.lock() {
-                                ledger.settle(&back, back_actual);
-                            }
-                        });
-                    }
-                }
-                None
-            }
-        };
+        // A refusal already retained the immutable snapshot in the obligation.
+        let ticket = submitted.ok();
         self.emit_usage(&usage, actual, true);
         let Some(ticket) = ticket else {
             return false;
@@ -3700,20 +3752,38 @@ impl RequestAccounting {
             .await
             .is_err()
         {
+            tracing::warn!(request_id = %self.request_id, reason = "wait_timeout", "tracked terminal settlement unresolved");
             return false;
         }
-        matches!(
-            ticket.take(),
-            Some(settlement::jobs::Outcome::Settlement(
-                settlement::Attempt::Committed { .. }
-            ))
-        )
+        match ticket.take() {
+            Some(settlement::jobs::Outcome::Settlement(settlement::Attempt::Committed {
+                ..
+            })) => true,
+            outcome => {
+                let reason = match outcome {
+                    Some(settlement::jobs::Outcome::Settlement(
+                        settlement::Attempt::Unresolved { failure, .. },
+                    )) => failure.diagnostic_code(),
+                    _ => "missing_or_interrupted_result",
+                };
+                tracing::warn!(request_id = %self.request_id, reason, "tracked terminal settlement unresolved");
+                false
+            }
+        }
     }
 }
 
 impl Drop for RequestAccounting {
     fn drop(&mut self) {
         self.finalize();
+    }
+}
+
+fn unqualified_buffered_usage(error: sandhi_core::usage::BufferedUsageError) -> UsageV2 {
+    UsageV2 {
+        attempts: 1,
+        outcome: Some(format!("buffered_qualification:{error:?}")),
+        ..UsageV2::default()
     }
 }
 
@@ -3725,24 +3795,29 @@ async fn complete_response(
     full_error_detail: bool,
     permit: Arc<AdmissionPermit>,
 ) -> Response {
+    let started = std::time::Instant::now();
     let _permit = permit; // unary: held by the handler future, which is the whole call
     let correlation = accounting.per_call_wire_headers();
-    let result = if accounting.owned.is_some() {
+    let result = if let Some(owned) = &accounting.owned {
         provider
-            .complete_with_qualified_usage(request, correlation)
+            .complete_with_qualified_usage_and_attempts(
+                request,
+                correlation,
+                owned.attempts.context.clone(),
+            )
             .await
-            .map(|r| (r.response, r.usage.ok()))
+            .map(|r| (r.response, r.usage))
     } else {
         provider.complete_with(request, correlation).await.map(|r| {
             let usage = r.usage.clone();
-            (r, Some(usage))
+            (r, Ok(usage))
         })
     };
     match result {
         Ok((mut response, usage)) => {
-            let qualified = usage.is_some();
+            let qualified = usage.is_ok();
             if accounting.owned.is_some() {
-                response.usage = usage.unwrap_or_default();
+                response.usage = usage.unwrap_or_else(unqualified_buffered_usage);
             }
             if qualified {
                 response.usage.completeness = UsageCompleteness::Final;
@@ -3761,6 +3836,9 @@ async fn complete_response(
         }
         Err(error) => {
             accounting.set_outcome("error");
+            let mut unavailable = UsageV2::default();
+            reconcile_boundary_duration(&mut unavailable, elapsed_ms(started));
+            accounting.observe(&unavailable);
             if !accounting.finalize_owned().await {
                 return settlement::buffered::accounting_error(dialect, &accounting.request_id);
             }
@@ -3777,6 +3855,7 @@ async fn stream_response(
     full_error_detail: bool,
     permit: Arc<AdmissionPermit>,
 ) -> Response {
+    let native_stream = request.include_native_stream;
     let correlation = accounting.per_call_wire_headers();
     let mut upstream = match provider.stream_with(request, correlation).await {
         Ok(s) => s,
@@ -3787,7 +3866,8 @@ async fn stream_response(
         }
     };
 
-    let tail = (dialect == IngressDialect::OpenAi).then(|| Bytes::from_static(b"data: [DONE]\n\n"));
+    let tail = (dialect == IngressDialect::OpenAi && !native_stream)
+        .then(|| Bytes::from_static(b"data: [DONE]\n\n"));
     let body = streaming::body(accounting, permit, tail, move |accounting| {
         Box::pin(async_stream::stream! {
             let mut last_usage: Option<UsageV2> = None;
@@ -3803,6 +3883,7 @@ async fn stream_response(
             // adds frames to a caller's stream has broken something more important than it fixed.
             let mut accounting_only;
             let mut delta_out_bytes: u64 = 0;
+            let mut native_error_sent = false;
             while let Some(item) = upstream.next().await {
                 match item {
                     Ok(event) => {
@@ -3855,6 +3936,22 @@ async fn stream_response(
                         if accounting_only {
                             continue;
                         }
+                        if let sandhi_core::ChatStreamEventV1::NativeFrame { frame } = &event {
+                            if !native_stream || frame.endpoint_family != ingress_family(dialect).endpoint_family()
+                                || frame.sse.len() > sandhi_core::MAX_NATIVE_STREAM_FRAME_BYTES
+                            {
+                                accounting.set_outcome("error");
+                                yield Err(std::io::Error::other("incompatible or oversized native SSE attachment"));
+                                break;
+                            }
+                            native_error_sent |= frame.json_data().is_some_and(|value|
+                                value.get("error").is_some_and(|error| !error.is_null()) || value.get("type").and_then(serde_json::Value::as_str) == Some("error"));
+                            yield Ok::<Bytes,std::io::Error>(Bytes::from(frame.sse.clone()));
+                            continue;
+                        }
+                        if native_stream && (!matches!(event, sandhi_core::ChatStreamEventV1::Error { .. }) || native_error_sent) {
+                            continue;
+                        }
                         for (event_name, value) in
                             stream_encoder.encode(&event, last_usage.as_ref())
                         {
@@ -3863,6 +3960,7 @@ async fn stream_response(
                     }
                     Err(error) => {
                         accounting.set_outcome("error");
+                        if native_stream && native_error_sent { break; }
                         let typed = sandhi_core::ChatStreamEventV1::Error {
                             error: error.as_typed(Some(provider.slug())),
                         };
@@ -4238,25 +4336,21 @@ async fn handle_count_tokens(
             return ingress_error(dialect, StatusCode::UNAUTHORIZED, "unknown virtual key")
         }
     };
-    let Some(provider) = state
-        .providers
-        .lock()
-        .expect("providers poisoned")
-        .get(&vk.upstream_ref)
-        .cloned()
-    else {
-        return ingress_error(
-            dialect,
-            StatusCode::BAD_GATEWAY,
-            "no upstream registered for this key",
-        );
+    let provider = match provider_for_key(&state, &vk, dialect) {
+        Ok(provider) => provider,
+        Err(response) => return response,
     };
     let receipt = Arc::new(Mutex::new(None));
-    let preparation::PreparedRequest { request, body, .. } = match preparation::prepare(
-        preparation::PreparationContext::from(state.as_ref()),
+    let preparation::PreparedRequest {
+        request,
+        body,
+        provider,
+        ..
+    } = match preparation::prepare(
+        preparation::PreparationContext::from(state.as_ref()).for_counting(),
         preparation::ResolvedRoute {
             vk,
-            provider: provider.clone(),
+            provider,
             rate_identity,
             policy_identity,
         },

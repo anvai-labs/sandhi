@@ -76,14 +76,20 @@ function localServer(responses) {
   return new Promise((resolve) => {
     let calls = 0;
     let lastHeaders = {};
+    let lastBody;
     const server = createServer((request, response) => {
       lastHeaders = request.headers;
+      const chunks = [];
+      request.on("data", chunk => chunks.push(chunk));
       const item = responses[calls++];
-      response.writeHead(item.status ?? 200, {
-        "content-type": item.contentType,
-        "content-length": Buffer.byteLength(item.body),
+      request.on("end", () => {
+        lastBody = JSON.parse(Buffer.concat(chunks).toString());
+        response.writeHead(item.status ?? 200, {
+          "content-type": item.contentType,
+          "content-length": Buffer.byteLength(item.body),
+        });
+        response.end(item.body);
       });
-      response.end(item.body);
     });
     server.listen(0, "127.0.0.1", () => {
       resolve({
@@ -91,6 +97,7 @@ function localServer(responses) {
         baseUrl: `http://127.0.0.1:${server.address().port}/v1`,
         calls: () => calls,
         lastHeaders: () => lastHeaders,
+        lastBody: () => lastBody,
         close: () => new Promise((done) => server.close(done)),
       });
     });
@@ -124,6 +131,40 @@ test("cache observation is delivered before a consumer stops at first content", 
   } finally {
     await server.close();
   }
+});
+
+test("native stream opt-in preserves wire state without duplicate usage", async () => {
+  const frames = [
+    { id: "fixture", model: "fixture", choices: [{ delta: { content: "ok", provider_state: "opaque" } }] },
+    { choices: [{ delta: {}, finish_reason: "stop" }], usage: {
+      prompt_tokens: 100, completion_tokens: 2,
+      prompt_tokens_details: { cached_tokens: 60, cache_write_tokens: 30 },
+    } },
+  ];
+  const body = frames.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join("") + "data: [DONE]\n\n";
+  const item = { contentType: "text/event-stream", body };
+  const server = await localServer([item, item]);
+  try {
+    const provider = new ProviderRuntime().openaiCompat("fixture", server.baseUrl, "fixture-key", undefined, 0);
+    for (const native of [false, true]) {
+      const request = { model: "fixture", messages: [{ role: "user", content: "hi" }] };
+      if (native) request.include_native_stream = true;
+      const events = [];
+      for await (const value of provider.streamJson(JSON.stringify(request))) events.push(JSON.parse(value));
+      const attachments = events.filter(event => event.event === "native_frame").map(event => event.frame);
+      assert.equal(attachments.length, native ? 3 : 0);
+      if (native) {
+        assert.ok(attachments.every(frame => frame.endpoint_family === "openai_chat_completions"));
+        assert.ok(attachments[0].sse.includes('"provider_state":"opaque"'));
+        assert.equal(attachments.at(-1).sse, "data: [DONE]\n\n");
+      }
+      assert.equal(events.filter(event => event.event === "text_delta").map(event => event.delta).join(""), "ok");
+      const final = events.filter(event => event.event === "usage" && event.usage.completeness === "final");
+      assert.equal(final.length, 1);
+      assert.deepEqual(["tokens_in", "cache_read_tokens", "cache_creation_tokens", "tokens_out"].map(key => final[0].usage[key]), [10, 60, 30, 2]);
+      assert.equal(events.at(-1).event, "finish");
+    }
+  } finally { await server.close(); }
 });
 
 test("per-call wire headers ride and cannot override the credential (TD-0022)", async () => {
@@ -337,6 +378,29 @@ test("persistent typed provider completes and streams neutral documents", async 
   } finally {
     await server.close();
   }
+});
+
+test("explicit cache suppression and undeclared automatic intent cross the real binding", async () => {
+  const item = { contentType: "application/json", body: JSON.stringify({
+    id: "fixture", model: "fixture", content: [{ type: "text", text: "ok" }],
+    stop_reason: "end_turn", usage: { input_tokens: 2, output_tokens: 1 },
+  }) };
+  const server = await localServer([item, item]);
+  try {
+    const provider = new ProviderRuntime().provider("anthropic", "fixture", "fixture-key", server.origin, undefined, 0);
+    const request = { model: "fixture", max_output_tokens: 16,
+      messages: [{ role: "system", content: "policy" }, { role: "user", content: "hello" }] };
+    await provider.completeJson(JSON.stringify(request));
+    assert.deepEqual(server.lastBody().system[0].cache_control, { type: "ephemeral" });
+    request.cache_intent = { mode: "suppress_gateway" };
+    await provider.completeJson(JSON.stringify(request));
+    assert.equal(server.lastBody().system[0].cache_control, undefined);
+    assert.equal(server.lastBody().cache_intent, undefined);
+    assert.equal(server.lastBody().compiled_cache, undefined);
+    request.cache_intent = { mode: "auto" };
+    await assert.rejects(provider.completeJson(JSON.stringify(request)), /requires declared/);
+    assert.equal(server.calls(), 2);
+  } finally { await server.close(); }
 });
 
 test("Anthropic bearer auth is explicit across the typed binding", async () => {

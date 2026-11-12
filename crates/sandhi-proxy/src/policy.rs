@@ -25,6 +25,9 @@ pub struct Admission {
 #[derive(Debug)]
 pub struct Unavailable;
 impl PolicyGate {
+    pub(crate) fn revision(&self) -> u64 {
+        self.engine.configuration().revision
+    }
     pub fn new(engine: Engine, audit: Arc<PolicyAuditStore>) -> Self {
         Self::with_deadline_floor(engine, audit, Duration::ZERO)
     }

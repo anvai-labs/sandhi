@@ -4,9 +4,11 @@
 //! so the language bindings' wheels never pull in bundled SQLite.
 
 pub mod alerts;
+pub mod backends;
 pub mod diagnostics;
 pub mod ledger;
 pub mod profiles;
+pub mod routes;
 pub mod sharded;
 pub use sharded::ShardedLedger;
 pub mod vault;
@@ -24,6 +26,7 @@ use sandhi_core::{
 };
 
 pub use alerts::{AlertRuleRecord, AlertStore, CreateAlertRequest};
+pub use backends::{BackendDefinition, BackendRecord, BackendStore, BackendStoreError};
 pub use ledger::{BudgetRow, ReserveOutcome, SqliteLedger};
 pub use profiles::{ProfileRecord, ProfileStore};
 pub use vault::{

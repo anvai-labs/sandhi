@@ -483,6 +483,7 @@ def test_browser_registers_a_reference_without_sending_a_secret(broker):
             page.goto(str(client.base_url) + "/dashboard")
             page.get_by_label("Admin token", exact=True).fill("broker-test-admin")
             page.get_by_role("button", name="Use token", exact=True).click()
+            page.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name='Keys & credentials', exact=True).click()
             page.get_by_text("Add a credential", exact=True).click()
             page.get_by_label("Credential source").select_option("reference")
             expect(page.locator("#c-secret")).to_be_disabled()

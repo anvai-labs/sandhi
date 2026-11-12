@@ -166,6 +166,16 @@ class RequestMetadataV1(TypedDict, total=False):
 class ThinkingV1(TypedDict):
     enabled: bool
     budget_tokens: NotRequired[int]
+NativeInputFeatureV1 = Literal["opaque_state", "resource_reference", "unsupported_content", "native_control"]
+class NativeInputV1(TypedDict):
+    endpoint_family: Literal["openai_chat_completions", "openai_responses", "anthropic_messages", "gemini_generate_content", "cohere_chat", "ollama_chat", "bedrock_converse", "host_callback"]
+    projection_sha256: str
+    nonportable_features: NotRequired[list[NativeInputFeatureV1]]
+CacheModeV1 = Literal["preserve_native", "auto", "auto_stable_prefix", "auto_conversation_prefix", "suppress_gateway"]
+CacheLifetimeV1 = Literal["5m", "1h", "30m", "12h", "in_memory", "24h"]
+class CacheIntentV1(TypedDict):
+    mode: CacheModeV1
+    lifetime: NotRequired[CacheLifetimeV1]
 class ChatRequestV1(TypedDict):
     model: str
     messages: list[ChatMessageV1]
@@ -181,6 +191,13 @@ class ChatRequestV1(TypedDict):
     reasoning_effort: NotRequired[str]
     thinking: NotRequired[ThinkingV1]
     include_native_response: NotRequired[bool]
+    # Default false. Native SSE attachments plus canonical events, never concatenate both.
+    # Supported for Chat, Messages, Responses and Gemini; other families reject true.
+    include_native_stream: NotRequired[bool]
+    native_input: NotRequired[NativeInputV1]
+    # Automatic modes require declared backend/model capabilities. No implicit downgrade.
+    # Preserve/suppress cannot select a lifetime; suppression does not disable provider caching.
+    cache_intent: NotRequired[CacheIntentV1]
     extensions: NotRequired[dict[str, JsonValue]]
 class UsageV2(TypedDict):
     tokens_in: int
@@ -240,6 +257,9 @@ class ProviderErrorV1(TypedDict):
     request_id: NotRequired[str]
     details: NotRequired[dict[str, JsonValue]]
 
+class NativeStreamFrameV1(TypedDict):
+    endpoint_family: str
+    sse: str
 ChatStreamEventV1 = dict[str, JsonValue]
 ProviderDescriptorV1 = dict[str, JsonValue]
 
@@ -321,12 +341,27 @@ export type ChatMessageV1 =
 export interface ToolDefinitionV1 {{ name: string; parameters: JsonValue; description?: string; strict?: boolean }}
 export interface RequestMetadataV1 {{ session_id?: string; virtual_key_id?: string; subject_id?: string; group_id?: string; route?: string }}
 export interface ThinkingV1 {{ enabled: boolean; budget_tokens?: number }}
+export type NativeInputFeatureV1 = "opaque_state" | "resource_reference" | "unsupported_content" | "native_control"
+export interface NativeInputV1 {{
+  endpoint_family: "openai_chat_completions" | "openai_responses" | "anthropic_messages" | "gemini_generate_content" | "cohere_chat" | "ollama_chat" | "bedrock_converse" | "host_callback"
+  projection_sha256: string; nonportable_features?: NativeInputFeatureV1[]
+}}
+export type CacheModeV1 = "preserve_native" | "auto" | "auto_stable_prefix" | "auto_conversation_prefix" | "suppress_gateway"
+export type CacheLifetimeV1 = "5m" | "1h" | "30m" | "12h" | "in_memory" | "24h"
+export interface CacheIntentV1 {{ mode: CacheModeV1; lifetime?: CacheLifetimeV1 }}
 export interface ChatRequestV1 {{
   schema_version?: "1"; model: string; messages: ChatMessageV1[]; tools?: ToolDefinitionV1[]
   tool_choice?: "none" | "auto" | "required" | {{ name: string }}; temperature?: number
   max_output_tokens?: number; stop?: string[]; response_format?: JsonValue; seed?: number
   metadata?: RequestMetadataV1; reasoning_effort?: string; thinking?: ThinkingV1
   include_native_response?: boolean
+  /** Default false; Chat/Messages/Responses/Gemini only. Native frames supplement
+   * canonical accounting events; render either native frames or canonical content. */
+  include_native_stream?: boolean
+  native_input?: NativeInputV1
+  /** Automatic modes require declared backend/model capabilities. No downgrade.
+   * Preserve/suppress reject lifetimes; suppression does not disable provider caching. */
+  cache_intent?: CacheIntentV1
   extensions?: Record<string, JsonValue>
 }}
 export interface UsageV2 {{
@@ -362,7 +397,9 @@ export interface ChatResponseV1 {{
   finish_reason?: FinishReasonV1; usage: UsageV2; extensions?: Record<string, JsonValue>
 }}
 export interface ProviderErrorV1 {{ code: string; message: string; retryable: boolean; http_status?: number; provider?: string; request_id?: string; details?: Record<string, JsonValue> }}
+export interface NativeStreamFrameV1 {{ endpoint_family: string; sse: string }}
 export type ChatStreamEventV1 =
+  | {{ event: "native_frame"; frame: NativeStreamFrameV1 }}
   | {{ event: "response_start"; id?: string; model: string }}
   | {{ event: "text_delta" | "reasoning_delta" | "refusal_delta"; delta: string }}
   | {{ event: "tool_call_start"; index: number; id: string; name: string }}

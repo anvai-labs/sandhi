@@ -33,6 +33,16 @@ what,"* can't budget per person, and can't rate-limit a runaway user. And every 
 re-implements the same provider adapters + usage parsing — the exact place metering goes
 wrong. Sandhi is the single, fast, neutral implementation of both.
 
+**Context efficiency and egress control belong in the same call path.** The
+[cache-aware routing candidate](docs/product/cache-aware-routing.md) preserves
+eligible context boundaries, compiles declared backend controls and separates
+fresh, cache-read and cache-write tokens. Its final live Z.AI matrix covers four
+client APIs and three backend APIs in both modes; 48 repeated-prefix calls reported
+3,776 reused tokens out of 3,781 input tokens. This is measured cache reuse, not a
+percentage cost-saving promise. [Local policy and optional embedded ONNX](docs/operator/sensitive-policy.md)
+can inspect outgoing text before provider dispatch; the shipped classifier audits
+and deterministic rules own its blocks. Both complement identity and budgets.
+
 ## What it does
 
 - **Virtual keys** — one shared upstream key fronts many per-user keys; attribution and
@@ -100,20 +110,14 @@ That table is a CI gate, not a claim: the suite starts the real proxy against a 
 drives it with the vendors' clients, so a dialect that stops being drop-in fails the build. Rows
 are added when they pass, never in advance.
 
-> **Prompt-cache safe (by design).** Sandhi preserves per-conversation cache affinity — it
-> never collapses users to a single session and carries attribution *outside* the cached
-> prompt, so hosted prompt caches keep hitting and self-hosted KV routing stays sticky. The
-> **content-faithful forwarding** that guarantees this on the proxy path is **live** as the
-> transparent-metering plane of
-> [ADR-0004](docs/adr/0004-two-plane-proxy-and-enforcement-boundary.md): when the ingress dialect
-> and the upstream are the same family, the proxy forwards the client's bytes verbatim — except a
-> minimal envelope normalization that injects usage-metering on OpenAI streams (ADR-0004 D1) — and
-> meters the stream as it passes. A hard-capped request that omits its output limit uses translation
-> instead so the proxy can inject an enforceable ceiling. Otherwise, provider-specific extras
-> (e.g. message-level Anthropic `cache_control` breakpoints) survive untouched. A
-> **cross-family** request still re-encodes through the neutral contract — faithful for standard
-> fields, but it can drop those extras. The in-process bindings, which never re-encode, are
-> unaffected.
+> **Cache intent, placement and evidence are separate.** Attribution travels outside
+> prompt text. Compatible native controls and ordered input are preserved on both
+> forwarding planes; explicit cache policy can apply bounded native patches or
+> typed encoding. Required incompatible cache controls are refused before dispatch.
+> The unreleased [backend/cache policy](docs/operator/backends.md) supports scoped
+> OpenAI keys and exact declared lifetimes; it does not guarantee a provider hit,
+> physical isolation or transferable KV state. Logical switching and backend/account
+> affinity remain [active work](docs/td/TD-0034-protocol-neutral-router-cache-accounting.md).
 
 ## The usage event
 
@@ -181,8 +185,11 @@ docs/README.md                       # documentation map + current status index
 ```
 
 Configure [OIDC SSO](docs/operator/oidc-sso.md) and run the proxy with `SANDHI_STORE=usage.db` to persist events to SQLite and serve a self-hosted
-usage **dashboard** at `/dashboard` (per-user / per-team / per-provider totals; neutral units, no
-pricing).
+[operator console](docs/operator/dashboard.md) at `/dashboard`. Navigable workspaces
+cover usage and cache-read evidence, backend/logical-route inventory, budgets,
+credentials, runs, policy and configuration. Per-user/team/provider totals remain
+neutral units; pricing stays downstream. The redesigned console and logical
+routing are workspace candidates tracked in TD-0034.
 
 ## Operating it
 

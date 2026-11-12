@@ -26,7 +26,9 @@ pub use sandhi_core::usage::{
 pub mod anthropic;
 mod anthropic_typed;
 pub mod attempt;
+mod cache_policy;
 mod cache_read;
+pub use cache_policy::contains_native_cache_controls;
 pub mod catalog;
 pub mod cohere;
 mod deadline;
@@ -63,13 +65,15 @@ pub use openai_responses::{OpenAiResponses, OpenAiResponsesProfile};
 pub use openai_roles::{validate_openai_chat_messages, OpenAiChatRole};
 mod linesplit;
 pub mod metering;
+mod native_stream;
+mod qualified_stream;
 pub mod stream_usage;
 pub use metering::MeteredProvider;
 pub use resilience::{CircuitBreaker, ResilientProvider, RetryConfig, TimeoutConfig};
 pub use token_estimate::TokenEstimateCalibrator;
 pub use typed::{
-    ChatEventStream, ChatProvider, FamilyFacts, ProviderFamily, ProviderHandle, ProviderRuntime,
-    ProviderTransportConfig, UsageCadence,
+    BackendBinding, ChatEventStream, ChatProvider, FamilyFacts, ProviderFamily, ProviderHandle,
+    ProviderRuntime, ProviderTransportConfig, UsageCadence,
 };
 
 /// Shared HTTP client for the in-repo adapters: a 10s TCP/TLS connect bound as
@@ -127,8 +131,8 @@ pub struct ProviderRequest {
     /// Who this call is for (metering decorator input). Never enters the wire body —
     /// attribution rides outside the cached prompt (ADR-0001 §4); adapters ignore it.
     pub attribution: Attribution,
-    /// Optional W05b physical-attempt observer. It stays outside the wire body and headers and is
-    /// not connected to settlement, persistence, export, or enforcement.
+    /// Transport observer outside the wire body and headers. Diagnostic contexts
+    /// are opt-in; tracked HTTP binds a single-attempt context to its durable owner.
     pub attempt_context: Option<AttemptContext>,
 }
 
@@ -260,6 +264,19 @@ pub struct QualifiedCompletion<T> {
     pub usage: Result<sandhi_core::UsageV2, sandhi_core::usage::BufferedUsageError>,
 }
 
+/// Avoid competing interpretations of duplicate usage/content fields. Parse once
+/// under the transport guard; errors carry no provider body or credentials.
+pub(crate) async fn decode_response_json(
+    response: reqwest::Response,
+) -> Result<serde_json::Value, ProviderError> {
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| ProviderError::Transport(e.to_string()))?;
+    sandhi_core::policy::strict_json(&bytes)
+        .map_err(|_| ProviderError::Transport("invalid or ambiguous upstream JSON response".into()))
+}
+
 fn buffered_usage(
     family: sandhi_core::CacheReadFamily,
     body: &serde_json::Value,
@@ -325,6 +342,20 @@ pub struct StreamChunk {
 
 /// A streaming response with one measurement-terminal item; transport bytes can follow it.
 pub type ByteStream = Pin<Box<dyn Stream<Item = Result<StreamChunk, ProviderError>> + Send>>;
+
+/// Qualified bytes and response-owned evidence from one physical HTTP stream.
+/// Consumers must drain/drop the source before freezing its observation.
+pub struct QualifiedProviderStream {
+    pub stream: ByteStream,
+    pub observation: raw::QualifiedStreamObservation,
+}
+
+/// Transport bounds depend on the host delivery mode, even for SSE-only backends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QualifiedStreamDelivery {
+    Buffered,
+    Streaming,
+}
 
 #[derive(Debug)]
 #[non_exhaustive]
@@ -498,6 +529,18 @@ pub trait Provider: Send + Sync {
 
     /// Streaming call: SSE pass-through (O(1) memory), usage finalized from the terminal block.
     async fn stream(&self, req: ProviderRequest) -> Result<ByteStream, ProviderError>;
+
+    /// Opt-in complete-event qualification at the physical response boundary.
+    /// Host transports remain unsupported unless they implement this explicitly.
+    async fn stream_qualified(
+        &self,
+        _req: ProviderRequest,
+        _delivery: QualifiedStreamDelivery,
+    ) -> Result<QualifiedProviderStream, ProviderError> {
+        Err(ProviderError::InvalidRequest(
+            "qualified transport streaming is unsupported".into(),
+        ))
+    }
 }
 
 /// Hard cap on a single newline-delimited line while a stream is being decoded, on **both**
@@ -523,7 +566,7 @@ pub trait Provider: Send + Sync {
 /// allocation: normal SSE carries newlines every few KB, so the buffer stays small. Worst-case
 /// memory is this plus one chunk, times the concurrent streams — see TD-0014 P2, which bounds
 /// the second factor. Sizing against a real corpus is TD-0015's job.
-pub(crate) const MAX_STREAM_LINE_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_STREAM_LINE_BYTES: usize = sandhi_core::MAX_NATIVE_STREAM_FRAME_BYTES;
 
 /// Wrap a provider's byte stream in the metered pass-through: forward every upstream chunk
 /// verbatim (O(1) forwarding, ADR-0047 D9) while running `sniff` over each complete newline-

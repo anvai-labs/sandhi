@@ -2,7 +2,9 @@
 use std::time::Duration;
 
 mod qualified;
-pub(super) use qualified::{capture_terminal, qualified_response, OwnedObservation};
+pub(super) use qualified::{
+    capture_provider_terminal, capture_terminal, qualified_response, OwnedObservation,
+};
 
 /// Body-only lifetime after upstream headers; setup and idle transport limits are unchanged.
 /// This is not a bound on synchronous parsing, settlement, or origin-side cancellation.

@@ -188,7 +188,7 @@ def test_healthy_base_with_unopenable_shard_fails_startup(store_process, gated_p
         assert connection.execute("SELECT * FROM retained_data").fetchall() == [("unchanged",)]
 
 
-@pytest.mark.parametrize("component,table", [("vault", "vault"), ("vkeys", "virtual_keys"), ("alerts", "alert_rules")])
+@pytest.mark.parametrize("component,table", [("vault", "vault"), ("backends", "backends"), ("routes", "logical_routes"), ("vkeys", "virtual_keys"), ("alerts", "alert_rules")])
 def test_configured_component_initialization_failure_is_fatal(store_process, tmp_path, component, table):
     database = tmp_path / "usage.db"
     with closing(sqlite3.connect(database)) as connection:

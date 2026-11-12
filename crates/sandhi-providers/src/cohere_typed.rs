@@ -70,6 +70,9 @@ impl TypedCohere {
 
 #[async_trait]
 impl ChatProvider for TypedCohere {
+    fn preflight_request(&self, request: &ChatRequestV1) -> Result<(), ProviderError> {
+        encode_cohere_request(request).map(|_| ())
+    }
     fn slug(&self) -> &str {
         "cohere"
     }
@@ -112,6 +115,9 @@ impl ChatProvider for TypedCohere {
 }
 
 pub fn encode_cohere_request(request: &ChatRequestV1) -> Result<Value, ProviderError> {
+    request
+        .native_input_for(sandhi_core::EndpointFamilyV1::CohereChat)
+        .map_err(ProviderError::InvalidRequest)?;
     request.validate().map_err(ProviderError::InvalidRequest)?;
     let mut body = request
         .extensions
@@ -175,7 +181,13 @@ pub fn encode_cohere_request(request: &ChatRequestV1) -> Result<Value, ProviderE
     if let Some(format) = &request.response_format {
         body.insert("response_format".into(), format.clone());
     }
-    Ok(Value::Object(body))
+    let mut body = Value::Object(body);
+    crate::cache_policy::apply(
+        request,
+        sandhi_core::EndpointFamilyV1::CohereChat,
+        &mut body,
+    )?;
+    Ok(body)
 }
 
 fn encode_message(message: &ChatMessageV1) -> Result<Value, ProviderError> {

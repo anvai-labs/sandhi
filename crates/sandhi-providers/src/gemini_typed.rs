@@ -26,7 +26,8 @@ impl TypedGemini {
         request: ChatRequestV1,
         call_headers: http::HeaderMap,
         attempt_context: Option<crate::AttemptContext>,
-    ) -> Result<ChatResponseV1, ProviderError> {
+        qualify: bool,
+    ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
         request.validate().map_err(ProviderError::InvalidRequest)?;
         let body = encode_gemini_request(&request)?;
         let response = self
@@ -38,13 +39,29 @@ impl TypedGemini {
                 attempt_context,
             ))
             .await?;
+        let qualified = qualify.then(|| {
+            sandhi_core::usage::qualify_buffered_usage(
+                sandhi_core::EndpointFamilyV1::GeminiGenerateContent,
+                &response.body,
+            )
+        });
         let mut decoded = decode_gemini_response(response.body, response.usage, &request.model)?;
         if !request.include_native_response {
             decoded.extensions.remove("gemini");
         }
         decoded.usage.attempts = response.attempts;
         decoded.usage.outcome = Some("success".into());
-        Ok(decoded)
+        let usage = qualified
+            .unwrap_or_else(|| Ok(decoded.usage.clone()))
+            .map(|mut usage| {
+                usage.attempts = response.attempts;
+                usage.outcome = Some("success".into());
+                usage
+            });
+        Ok(crate::QualifiedCompletion {
+            response: decoded,
+            usage,
+        })
     }
 
     async fn stream_inner(
@@ -64,12 +81,25 @@ impl TypedGemini {
                 attempt_context,
             ))
             .await?;
-        Ok(decode_gemini_stream(raw, request.model))
+        Ok(decode_gemini_stream_mode(
+            raw,
+            request.model,
+            request.include_native_stream,
+        ))
     }
 }
 
 #[async_trait]
 impl ChatProvider for TypedGemini {
+    fn preflight_request(&self, request: &ChatRequestV1) -> Result<(), ProviderError> {
+        encode_gemini_request(request).map(|_| ())
+    }
+    fn allows_cache_synthesis(&self) -> bool {
+        true
+    }
+    fn supports_native_stream(&self) -> bool {
+        true
+    }
     fn slug(&self) -> &str {
         "gemini"
     }
@@ -79,7 +109,27 @@ impl ChatProvider for TypedGemini {
         request: ChatRequestV1,
         call_headers: http::HeaderMap,
     ) -> Result<ChatResponseV1, ProviderError> {
-        self.complete_inner(request, call_headers, None).await
+        self.complete_inner(request, call_headers, None, false)
+            .await
+            .map(|r| r.response)
+    }
+
+    async fn complete_qualified(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+    ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
+        self.complete_inner(request, call_headers, None, true).await
+    }
+
+    async fn complete_qualified_observed(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+        context: crate::AttemptContext,
+    ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
+        self.complete_inner(request, call_headers, Some(context), true)
+            .await
     }
 
     async fn stream(
@@ -96,8 +146,9 @@ impl ChatProvider for TypedGemini {
         call_headers: http::HeaderMap,
         attempt_context: crate::AttemptContext,
     ) -> Result<ChatResponseV1, ProviderError> {
-        self.complete_inner(request, call_headers, Some(attempt_context))
+        self.complete_inner(request, call_headers, Some(attempt_context), false)
             .await
+            .map(|r| r.response)
     }
 
     async fn stream_observed(
@@ -112,7 +163,20 @@ impl ChatProvider for TypedGemini {
 }
 
 pub fn encode_gemini_request(request: &ChatRequestV1) -> Result<Value, ProviderError> {
+    let mut body = encode_gemini_request_base(request)?;
+    crate::cache_policy::apply(
+        request,
+        sandhi_core::EndpointFamilyV1::GeminiGenerateContent,
+        &mut body,
+    )?;
+    Ok(body)
+}
+pub(crate) fn encode_gemini_request_base(request: &ChatRequestV1) -> Result<Value, ProviderError> {
     request.validate().map_err(ProviderError::InvalidRequest)?;
+    let native = request
+        .native_input_for(sandhi_core::EndpointFamilyV1::GeminiGenerateContent)
+        .map_err(ProviderError::InvalidRequest)?
+        .is_some();
     let mut body = request
         .extensions
         .get("gemini")
@@ -131,7 +195,7 @@ pub fn encode_gemini_request(request: &ChatRequestV1) -> Result<Value, ProviderE
         .collect::<BTreeMap<_, _>>();
     let mut system_parts = Vec::new();
     let mut contents = Vec::new();
-    for message in &request.messages {
+    for message in request.messages.iter().filter(|_| !native) {
         match message {
             ChatMessageV1::Developer { content, .. } | ChatMessageV1::System { content, .. } => {
                 system_parts.extend(gemini_parts(content)?);
@@ -184,17 +248,19 @@ pub fn encode_gemini_request(request: &ChatRequestV1) -> Result<Value, ProviderE
             }
         }
     }
-    body.insert("contents".into(), Value::Array(contents));
+    if !native {
+        body.insert("contents".into(), Value::Array(contents));
+    }
     if !system_parts.is_empty() {
         body.insert("systemInstruction".into(), json!({"parts":system_parts}));
     }
-    if !request.tools.is_empty() {
+    if !native && !request.tools.is_empty() {
         body.insert(
             "tools".into(),
             json!([{"functionDeclarations": request.tools}]),
         );
     }
-    if let Some(choice) = &request.tool_choice {
+    if let Some(choice) = request.tool_choice.as_ref().filter(|_| !native) {
         let config = match choice {
             ToolChoiceV1::Mode(ToolChoiceMode::None) => json!({"mode":"NONE"}),
             ToolChoiceV1::Mode(ToolChoiceMode::Auto) => json!({"mode":"AUTO"}),
@@ -358,18 +424,38 @@ fn decode_finish_reason(reason: &str) -> FinishReasonV1 {
     }
 }
 
+#[cfg(test)]
 fn decode_gemini_stream(raw: ByteStream, requested_model: String) -> ChatEventStream {
-    crate::cache_read::decode_with_observation(raw, requested_model, decode_gemini_stream_inner)
+    decode_gemini_stream_mode(raw, requested_model, false)
 }
 
-fn decode_gemini_stream_inner(mut raw: ByteStream, requested_model: String) -> ChatEventStream {
+pub(crate) fn decode_gemini_stream_mode(
+    raw: ByteStream,
+    requested_model: String,
+    native: bool,
+) -> ChatEventStream {
+    crate::cache_read::decode_with_observation_policy(
+        raw,
+        requested_model,
+        move |raw, model| decode_gemini_stream_inner(raw, model, native),
+        native,
+    )
+}
+
+fn decode_gemini_stream_inner(
+    mut raw: ByteStream,
+    requested_model: String,
+    native: bool,
+) -> ChatEventStream {
     use futures_util::StreamExt;
     let stream = async_stream::try_stream! {
         // TD-0014 P1: the shared bounded splitter. One ceiling across both planes; only the
         // over-budget POLICY differs, and it is applied below. See MAX_STREAM_LINE_BYTES.
-        let mut splitter = crate::linesplit::LineSplitter::new(crate::MAX_STREAM_LINE_BYTES);
+        let mut splitter = crate::native_stream::SseDecoder::new(native.then_some(sandhi_core::EndpointFamilyV1::GeminiGenerateContent));
         let mut started = false;
         let mut emitted_usage = false;
+        let mut native_usage = crate::native_stream::NativeUsage::default();
+        let mut protocol_done = false;
         // A candidate finish can precede the metered stream's terminal usage-only chunk.
         // Defer canonical completion until successful EOF so egress sees final usage first.
         let mut pending_finish = None;
@@ -408,8 +494,20 @@ fn decode_gemini_stream_inner(mut raw: ByteStream, requested_model: String) -> C
             // (The terminal usage-only chunk is likewise empty and previously skipped this.)
             {
                 splitter.push(&chunk.data);
-                while let Some(line) = splitter.next_line() {
-                    let Some(value) = crate::sse_data_json(&line) else { continue; };
+                while let Some((line, mut native_frame)) = splitter.next_line()? {
+                    if native {
+                        if let Some(usage) = native_usage.observe(&line, attempts, crate::gemini::sniff_usage_line) {
+                            yield ChatStreamEventV1::Usage { usage };
+                        }
+                    }
+                    let Some(value) = crate::sse_data_json(&line) else {
+                        if let Some(frame) = native_frame.take() { yield ChatStreamEventV1::NativeFrame { frame }; }
+                        continue;
+                    };
+                    if let Some(error) = crate::native_stream::upstream_error(&value) {
+                        if let Some(frame) = native_frame.take() { yield ChatStreamEventV1::NativeFrame { frame }; }
+                        Err(error)?;
+                    }
                     if !started {
                         yield ChatStreamEventV1::ResponseStart {
                             id: value.get("responseId").and_then(Value::as_str).map(str::to_owned),
@@ -443,6 +541,15 @@ fn decode_gemini_stream_inner(mut raw: ByteStream, requested_model: String) -> C
                     if let Some(reason) = value.pointer("/candidates/0/finishReason").and_then(Value::as_str) {
                         pending_finish = Some(decode_finish_reason(reason));
                     }
+                    if value.pointer("/promptFeedback/blockReason").and_then(Value::as_str).is_some() {
+                        pending_finish = Some(FinishReasonV1::ContentFilter);
+                    }
+                    if native && pending_finish.is_some() && value.get("usageMetadata").is_some() {
+                        if let Some(usage) = native_usage.finish(attempts) { yield ChatStreamEventV1::Usage { usage }; }
+                        emitted_usage = true; protocol_done = true;
+                    }
+                    if let Some(frame) = native_frame.take() { yield ChatStreamEventV1::NativeFrame { frame }; }
+                    if protocol_done { break; }
                 }
                 // TD-0014 P1 (gap G01): past MAX_STREAM_LINE_BYTES the upstream has sent no
                 // line boundary at all, which no real provider does. The raw plane drops the
@@ -456,6 +563,10 @@ fn decode_gemini_stream_inner(mut raw: ByteStream, requested_model: String) -> C
                         crate::MAX_STREAM_LINE_BYTES
                     )))?;
                 }
+            }
+            if native {
+                if protocol_done { break; }
+                continue;
             }
             if let Some(usage) = chunk.usage {
                 if !emitted_usage {
@@ -478,6 +589,12 @@ fn decode_gemini_stream_inner(mut raw: ByteStream, requested_model: String) -> C
                 usage.attempts = attempts;
                 yield ChatStreamEventV1::Usage { usage };
             }
+        }
+        if native && !emitted_usage {
+            if pending_finish.is_none() {
+                Err(ProviderError::Transport("native Gemini stream ended before a finish or block reason".into()))?;
+            }
+            if let Some(usage) = native_usage.finish_last() { yield ChatStreamEventV1::Usage { usage }; }
         }
         if let Some(reason) = pending_finish {
             yield ChatStreamEventV1::Finish { reason };

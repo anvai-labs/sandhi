@@ -108,10 +108,7 @@ impl Provider for Anthropic {
                 if !resp.status().is_success() {
                     return Err(error_for_response(resp, Some("anthropic-request-id")).await);
                 }
-                let body: Value = resp
-                    .json()
-                    .await
-                    .map_err(|e| ProviderError::Transport(e.to_string()))?;
+                let body = crate::decode_response_json(resp).await?;
                 let (response_usage, observed_usage) =
                     crate::buffered_usage(sandhi_core::CacheReadFamily::Anthropic, &body);
                 Ok((
@@ -172,8 +169,9 @@ impl Provider for Anthropic {
     }
 }
 
-/// Accumulate usage from Anthropic SSE lines: input + cache from `message_start`, output from
-/// `message_delta` (cumulative).
+/// Merge cumulative usage from Messages SSE. Hosted Anthropic reports input/cache
+/// on message_start; compatible endpoints can replace placeholder counts in a
+/// message_delta. Missing fields must retain prior measurements in either frame.
 pub(crate) fn sniff_usage_line(line: &[u8], acc: &mut ParsedUsage) -> bool {
     let Ok(s) = std::str::from_utf8(line) else {
         return false;
@@ -185,26 +183,33 @@ pub(crate) fn sniff_usage_line(line: &[u8], acc: &mut ParsedUsage) -> bool {
         return false;
     };
     crate::observe_stream_cache(sandhi_core::CacheReadFamily::Anthropic, &v, acc);
-    match v.get("type").and_then(Value::as_str) {
-        Some("message_start") => {
-            if let Some(u) = v.get("message").and_then(|m| m.get("usage")) {
-                acc.tokens_in = u64_at(u, "input_tokens");
-                acc.reasoning_included = Some(true);
-                acc.cache_creation_tokens = u64_at(u, "cache_creation_input_tokens");
-                acc.cache_read_tokens = u64_at(u, "cache_read_input_tokens");
-                return true;
-            }
+    let usage = match v.get("type").and_then(Value::as_str) {
+        Some("message_start") => v.pointer("/message/usage"),
+        Some("message_delta") => v.get("usage"),
+        _ => None,
+    };
+    let Some(usage) = usage.filter(|value| value.is_object()) else {
+        return false;
+    };
+    for (field, count) in [
+        ("input_tokens", &mut acc.tokens_in),
+        (
+            "cache_creation_input_tokens",
+            &mut acc.cache_creation_tokens,
+        ),
+        ("cache_read_input_tokens", &mut acc.cache_read_tokens),
+        ("output_tokens", &mut acc.tokens_out),
+    ] {
+        if let Some(value) = usage
+            .get(field)
+            .and_then(Value::as_u64)
+            .filter(|value| *value == u64_at(usage, field))
+        {
+            *count = value;
         }
-        Some("message_delta") => {
-            if let Some(u) = v.get("usage") {
-                acc.tokens_out = u64_at(u, "output_tokens");
-                acc.reasoning_included = Some(true);
-                return true;
-            }
-        }
-        _ => {}
     }
-    false
+    acc.reasoning_included = Some(true);
+    true
 }
 
 #[cfg(test)]
@@ -232,6 +237,36 @@ mod tests {
         duration_ms: None,
         time_to_first_token_ms: None,
     };
+
+    #[test]
+    fn terminal_delta_can_supply_input_and_cache_after_placeholder_start() {
+        let mut usage = ParsedUsage::default();
+        assert!(sniff_usage_line(br#"data: {"type":"message_start","message":{"usage":{"input_tokens":0,"output_tokens":0}}}"#, &mut usage));
+        assert!(sniff_usage_line(br#"data: {"type":"message_delta","usage":{"input_tokens":5,"cache_read_input_tokens":3776,"cache_creation_input_tokens":30,"output_tokens":67}}"#, &mut usage));
+        assert_eq!(
+            (
+                usage.tokens_in,
+                usage.cache_read_tokens,
+                usage.cache_creation_tokens,
+                usage.tokens_out
+            ),
+            (5, 3776, 30, 67)
+        );
+        // A later output-only update must not erase the input/cache evidence.
+        assert!(sniff_usage_line(
+            br#"data: {"type":"message_delta","usage":{"output_tokens":70}}"#,
+            &mut usage
+        ));
+        assert_eq!(
+            (
+                usage.tokens_in,
+                usage.cache_read_tokens,
+                usage.cache_creation_tokens,
+                usage.tokens_out
+            ),
+            (5, 3776, 30, 70)
+        );
+    }
 
     /// Drive an SSE byte-stream (pre-split into `chunks`) through the production streaming
     /// primitive (`metered_passthrough` + the real `sniff_usage_line`) and return the finalized

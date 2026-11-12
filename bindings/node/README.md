@@ -81,6 +81,18 @@ for await (const eventJson of provider.streamJson(request)) {
 }
 ```
 
+At contract minor 12, `include_native_stream: true` adds `native_frame` events for
+Chat, Messages, Responses and Gemini handles. Default is false; other families
+reject true. Render native frames or canonical content, and meter canonical usage
+once. Opaque provider state remains bound to its compatible backend/account.
+
+Minor 13 adds optional `cache_intent`, for example `{mode:"suppress_gateway"}`.
+Suppression preserves native controls and adds no gateway markers; it cannot turn
+off provider-internal caching. Direct unconfigured handles accept preserve/suppress
+and refuse undeclared automatic capabilities before HTTP. Registered gateway
+backends can declare exact model/lifetime support; the internal compiled plan is
+excluded from JSON and schema. See the [backend guide](../../docs/operator/backends.md).
+
 `completeJson` accepts an optional second JSON-string argument containing per-call wire headers;
 `streamJson` accepts the same argument and returns an async iterable. Transport-owned headers and
 credentials cannot be overridden. Invalid documents fail before network I/O; provider failures

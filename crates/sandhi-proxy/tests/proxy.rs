@@ -2,6 +2,9 @@
 //! it, budget-checks, forwards to a **wiremock** upstream with the **real** key, streams the
 //! response back, and emits a usage event. No live API keys.
 
+#[path = "proxy/qualified_codex.rs"]
+mod qualified_codex;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -431,7 +434,10 @@ async fn version_endpoint_is_unauthenticated_and_reports_the_contract() {
     assert_eq!(value["package_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(value["wire_contract_version"], "1");
     assert_eq!(value["chat_contract_version"], "1");
-    assert_eq!(value["chat_contract_minor"], 10);
+    assert_eq!(
+        value["chat_contract_minor"],
+        sandhi_core::CHAT_CONTRACT_MINOR
+    );
     let dialects = value["dialects"].as_array().unwrap();
     for expected in ["openai", "anthropic", "responses", "gemini"] {
         assert!(
@@ -4527,6 +4533,11 @@ async fn owned_buffered_settles_the_upstream_scope_with_the_primary() {
 /// both legs settled by the time each response returns.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn owned_buffered_back_leg_never_races_its_primary_settle() {
+    if std::env::var_os("RUST_LOG").is_some() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .try_init();
+    }
     let upstream = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!(
@@ -4549,7 +4560,18 @@ async fn owned_buffered_back_leg_never_races_its_primary_settle() {
             .oneshot(owned_request("/v1/chat/completions", owned_body()))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK, "call {call}");
+        if response.status() != StatusCode::OK {
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), 100_000)
+                .await
+                .unwrap();
+            panic!(
+                "call {call}: {status}, {}, retained={}, events={:?}",
+                String::from_utf8_lossy(&body),
+                sandhi_proxy::settlement::buffered::retained(&state),
+                sink.events().last()
+            );
+        }
         let ledger = state.ledger.lock().unwrap();
         assert_eq!(
             ledger.reserved("upstream:openai"),
@@ -4561,12 +4583,10 @@ async fn owned_buffered_back_leg_never_races_its_primary_settle() {
     }
 }
 
-/// Regression: gating the back-leg settle on the primary RECEIPT parked the back lease until TTL
-/// for every tracked call whose primary never commits (upstream error, missing usage). During an
-/// outage that filled the per-provider cap and denied all traffic to it for the TTL. The back
-/// leg settles once the terminal observation is durable: released at 0 when unmeasured.
+/// Unmeasured dispatch is unknown liability on both budget scopes. A failed call or absent
+/// usage cannot establish a measured zero, and expiry cannot erase either linked reservation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn owned_buffered_unresolved_primary_still_releases_the_back_leg() {
+async fn owned_buffered_unresolved_usage_retains_both_budget_legs() {
     for case in ["upstream_error", "missing_usage"] {
         let upstream = MockServer::start().await;
         let template = if case == "upstream_error" {
@@ -4599,24 +4619,30 @@ async fn owned_buffered_unresolved_primary_still_releases_the_back_leg() {
         let ledger = state.ledger.lock().unwrap();
         assert_eq!(
             ledger.reserved("upstream:openai"),
-            0,
-            "{case}: back lease parked"
+            ledger.reserved("group:platform"),
+            "{case}: unknown liability must be held on both scopes"
         );
+        assert!(ledger.reserved("upstream:openai") > 0);
         assert_eq!(
             ledger.spent("upstream:openai"),
             0,
             "{case}: unmeasured call charged"
         );
+        drop(ledger);
+        let mut durable = sandhi_store::SqliteLedger::open(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            durable
+                .reclaim_expired_durable(time::OffsetDateTime::now_utc() + time::Duration::hours(1))
+                .unwrap(),
+            0
+        );
     }
 }
 
-/// Regression (ADR-0015 review P1-1): the caller reserves the upstream lease BEFORE
-/// `buffered::handle`, so handle's own refusals — here the tracked-requirements 400 on a
-/// streaming request — must still release it. Without the hold covering those guards, the
-/// bare reservation dropped and held `reserved()` against a Block upstream cap until TTL
-/// reclaim: sustained ineligible traffic self-DoSed the back leg.
+/// Tracked eligibility is checked before atomic paired admission. An unsupported
+/// streaming request must create neither lease and must never contact the origin.
 #[tokio::test]
-async fn owned_buffered_ineligible_request_releases_the_upstream_lease() {
+async fn owned_buffered_ineligible_request_creates_neither_lease() {
     let upstream = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!(
@@ -4654,6 +4680,15 @@ async fn owned_buffered_ineligible_request_releases_the_upstream_lease() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(sink.events().len(), 0);
+    assert!(upstream.received_requests().await.unwrap().is_empty());
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM budget_reservation", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
 
     let ledger = state.ledger.lock().unwrap();
     assert_eq!(

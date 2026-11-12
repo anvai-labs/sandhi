@@ -14,11 +14,15 @@ use std::sync::Arc;
 
 pub(crate) struct TypedAnthropic {
     raw: Arc<dyn Provider>,
+    usage_profile: sandhi_core::usage::AnthropicUsageProfile,
 }
 
 impl TypedAnthropic {
-    pub(crate) fn new(raw: Arc<dyn Provider>) -> Self {
-        Self { raw }
+    pub(crate) fn new(
+        raw: Arc<dyn Provider>,
+        usage_profile: sandhi_core::usage::AnthropicUsageProfile,
+    ) -> Self {
+        Self { raw, usage_profile }
     }
 
     async fn complete_inner(
@@ -26,7 +30,8 @@ impl TypedAnthropic {
         request: ChatRequestV1,
         call_headers: http::HeaderMap,
         attempt_context: Option<crate::AttemptContext>,
-    ) -> Result<ChatResponseV1, ProviderError> {
+        qualify: bool,
+    ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
         request.validate().map_err(ProviderError::InvalidRequest)?;
         let body = encode_anthropic_request(&request)?;
         let response = self
@@ -38,13 +43,30 @@ impl TypedAnthropic {
                 attempt_context,
             ))
             .await?;
+        let qualified = qualify.then(|| {
+            sandhi_core::usage::qualify_buffered_usage_with_profile(
+                sandhi_core::EndpointFamilyV1::AnthropicMessages,
+                self.usage_profile,
+                &response.body,
+            )
+        });
         let mut decoded = decode_anthropic_response(response.body, response.usage, &request.model)?;
         if !request.include_native_response {
             decoded.extensions.remove("anthropic");
         }
         decoded.usage.attempts = response.attempts;
         decoded.usage.outcome = Some("success".into());
-        Ok(decoded)
+        let usage = qualified
+            .unwrap_or_else(|| Ok(decoded.usage.clone()))
+            .map(|mut usage| {
+                usage.attempts = response.attempts;
+                usage.outcome = Some("success".into());
+                usage
+            });
+        Ok(crate::QualifiedCompletion {
+            response: decoded,
+            usage,
+        })
     }
 
     async fn stream_inner(
@@ -64,12 +86,25 @@ impl TypedAnthropic {
                 attempt_context,
             ))
             .await?;
-        Ok(decode_anthropic_stream(raw, request.model))
+        Ok(decode_anthropic_stream_mode(
+            raw,
+            request.model,
+            request.include_native_stream,
+        ))
     }
 }
 
 #[async_trait]
 impl ChatProvider for TypedAnthropic {
+    fn preflight_request(&self, request: &ChatRequestV1) -> Result<(), ProviderError> {
+        encode_anthropic_request(request).map(|_| ())
+    }
+    fn allows_cache_synthesis(&self) -> bool {
+        true
+    }
+    fn supports_native_stream(&self) -> bool {
+        true
+    }
     fn slug(&self) -> &str {
         "anthropic"
     }
@@ -79,7 +114,27 @@ impl ChatProvider for TypedAnthropic {
         request: ChatRequestV1,
         call_headers: http::HeaderMap,
     ) -> Result<ChatResponseV1, ProviderError> {
-        self.complete_inner(request, call_headers, None).await
+        self.complete_inner(request, call_headers, None, false)
+            .await
+            .map(|r| r.response)
+    }
+
+    async fn complete_qualified(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+    ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
+        self.complete_inner(request, call_headers, None, true).await
+    }
+
+    async fn complete_qualified_observed(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+        context: crate::AttemptContext,
+    ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
+        self.complete_inner(request, call_headers, Some(context), true)
+            .await
     }
 
     async fn stream(
@@ -96,8 +151,9 @@ impl ChatProvider for TypedAnthropic {
         call_headers: http::HeaderMap,
         attempt_context: crate::AttemptContext,
     ) -> Result<ChatResponseV1, ProviderError> {
-        self.complete_inner(request, call_headers, Some(attempt_context))
+        self.complete_inner(request, call_headers, Some(attempt_context), false)
             .await
+            .map(|r| r.response)
     }
 
     async fn stream_observed(
@@ -112,7 +168,23 @@ impl ChatProvider for TypedAnthropic {
 }
 
 pub fn encode_anthropic_request(request: &ChatRequestV1) -> Result<Value, ProviderError> {
+    let mut body = encode_anthropic_request_base(request)?;
+    crate::cache_policy::apply(
+        request,
+        sandhi_core::EndpointFamilyV1::AnthropicMessages,
+        &mut body,
+    )?;
+    Ok(body)
+}
+
+pub(crate) fn encode_anthropic_request_base(
+    request: &ChatRequestV1,
+) -> Result<Value, ProviderError> {
     request.validate().map_err(ProviderError::InvalidRequest)?;
+    let native = request
+        .native_input_for(sandhi_core::EndpointFamilyV1::AnthropicMessages)
+        .map_err(ProviderError::InvalidRequest)?
+        .is_some();
     let mut body = request
         .extensions
         .get("anthropic")
@@ -131,10 +203,12 @@ pub fn encode_anthropic_request(request: &ChatRequestV1) -> Result<Value, Provid
     // uncached). A client-supplied bucket — including the empty object —
     // suppresses this and keeps marker placement client-owned (empty = the
     // documented opt-out).
-    let auto_cache_control = !request.extensions.contains_key("anthropic");
+    let auto_cache_control = request.cache_intent.is_none()
+        && request.compiled_cache.is_none()
+        && !request.extensions.contains_key("anthropic");
     let mut system = Vec::new();
     let mut messages = Vec::new();
-    for message in &request.messages {
+    for message in request.messages.iter().filter(|_| !native) {
         match message {
             ChatMessageV1::Developer { content, .. } | ChatMessageV1::System { content, .. } => {
                 system.push(json!({"type":"text", "text":text_only(content)?}));
@@ -185,7 +259,9 @@ pub fn encode_anthropic_request(request: &ChatRequestV1) -> Result<Value, Provid
         }
     }
     body.insert("model".into(), Value::String(request.model.clone()));
-    body.insert("messages".into(), Value::Array(messages));
+    if !native {
+        body.insert("messages".into(), Value::Array(messages));
+    }
     if !system.is_empty() {
         if let Some(native_system) = native_system {
             for (index, block) in system.iter_mut().enumerate() {
@@ -226,7 +302,7 @@ pub fn encode_anthropic_request(request: &ChatRequestV1) -> Result<Value, Provid
     if let Some(stop) = &request.stop {
         body.insert("stop_sequences".into(), json!(stop));
     }
-    if !request.tools.is_empty() {
+    if !native && !request.tools.is_empty() {
         let mut tools: Vec<Value> = request
             .tools
             .iter()
@@ -257,7 +333,7 @@ pub fn encode_anthropic_request(request: &ChatRequestV1) -> Result<Value, Provid
         }
         body.insert("tools".into(), Value::Array(tools));
     }
-    if let Some(choice) = &request.tool_choice {
+    if let Some(choice) = request.tool_choice.as_ref().filter(|_| !native) {
         match choice {
             ToolChoiceV1::Mode(ToolChoiceMode::None) => {
                 body.remove("tools");
@@ -407,19 +483,40 @@ fn decode_stop_reason(reason: &str) -> FinishReasonV1 {
     }
 }
 
+#[cfg(test)]
 fn decode_anthropic_stream(raw: ByteStream, requested_model: String) -> ChatEventStream {
-    crate::cache_read::decode_with_observation(raw, requested_model, decode_anthropic_stream_inner)
+    decode_anthropic_stream_mode(raw, requested_model, false)
 }
 
-fn decode_anthropic_stream_inner(mut raw: ByteStream, requested_model: String) -> ChatEventStream {
+pub(crate) fn decode_anthropic_stream_mode(
+    raw: ByteStream,
+    requested_model: String,
+    native: bool,
+) -> ChatEventStream {
+    crate::cache_read::decode_with_observation_policy(
+        raw,
+        requested_model,
+        move |raw, model| decode_anthropic_stream_inner(raw, model, native),
+        native,
+    )
+}
+
+fn decode_anthropic_stream_inner(
+    mut raw: ByteStream,
+    requested_model: String,
+    native: bool,
+) -> ChatEventStream {
     use futures_util::StreamExt;
     let stream = async_stream::try_stream! {
         // TD-0014 P1: the shared bounded splitter. One ceiling across both planes; only the
         // over-budget POLICY differs, and it is applied below. See MAX_STREAM_LINE_BYTES.
-        let mut splitter = crate::linesplit::LineSplitter::new(crate::MAX_STREAM_LINE_BYTES);
+        let mut splitter = crate::native_stream::SseDecoder::new(native.then_some(sandhi_core::EndpointFamilyV1::AnthropicMessages));
         let mut started = false;
         let mut open_tools = BTreeSet::<u32>::new();
         let mut emitted_usage = false;
+        let mut native_usage = crate::native_stream::NativeUsage::default();
+        let mut pending_finish = None;
+        let mut protocol_done = false;
         // The last running total published, so progress is emitted on change rather than per chunk.
         let mut last_running: Option<crate::ParsedUsage> = None;
         // TD-0014 P2b: after the real chunks end, ONE synthetic empty chunk flushes any
@@ -455,8 +552,20 @@ fn decode_anthropic_stream_inner(mut raw: ByteStream, requested_model: String) -
             // (The terminal usage-only chunk is likewise empty and previously skipped this.)
             {
                 splitter.push(&chunk.data);
-                while let Some(line) = splitter.next_line() {
-                    let Some(value) = crate::sse_data_json(&line) else { continue; };
+                while let Some((line, mut native_frame)) = splitter.next_line()? {
+                    if native {
+                        if let Some(usage) = native_usage.observe(&line, attempts, crate::anthropic::sniff_usage_line) {
+                            yield ChatStreamEventV1::Usage { usage };
+                        }
+                    }
+                    let Some(value) = crate::sse_data_json(&line) else {
+                        if let Some(frame) = native_frame.take() { yield ChatStreamEventV1::NativeFrame { frame }; }
+                        continue;
+                    };
+                    if let Some(error) = crate::native_stream::upstream_error(&value) {
+                        if let Some(frame) = native_frame.take() { yield ChatStreamEventV1::NativeFrame { frame }; }
+                        Err(error)?;
+                    }
                     match value.get("type").and_then(Value::as_str) {
                         Some("message_start") if !started => {
                             let message = value.get("message").unwrap_or(&Value::Null);
@@ -504,11 +613,18 @@ fn decode_anthropic_stream_inner(mut raw: ByteStream, requested_model: String) -
                         }
                         Some("message_delta") => {
                             if let Some(reason) = value.pointer("/delta/stop_reason").and_then(Value::as_str) {
-                                yield ChatStreamEventV1::Finish { reason: decode_stop_reason(reason) };
+                                pending_finish = Some(decode_stop_reason(reason));
                             }
+                        }
+                        Some("message_stop") if native => {
+                            if let Some(usage) = native_usage.finish(attempts) { yield ChatStreamEventV1::Usage { usage }; }
+                            emitted_usage = true;
+                            protocol_done = true;
                         }
                         _ => {}
                     }
+                    if let Some(frame) = native_frame.take() { yield ChatStreamEventV1::NativeFrame { frame }; }
+                    if protocol_done { break; }
                 }
                 // TD-0014 P1 (gap G01): past MAX_STREAM_LINE_BYTES the upstream has sent no
                 // line boundary at all, which no real provider does. The raw plane drops the
@@ -522,6 +638,10 @@ fn decode_anthropic_stream_inner(mut raw: ByteStream, requested_model: String) -
                         crate::MAX_STREAM_LINE_BYTES
                     )))?;
                 }
+            }
+            if native {
+                if protocol_done { break; }
+                continue;
             }
             if let Some(usage) = chunk.usage {
                 if !emitted_usage {
@@ -550,6 +670,10 @@ fn decode_anthropic_stream_inner(mut raw: ByteStream, requested_model: String) -
                 yield ChatStreamEventV1::Usage { usage };
             }
         }
+        if native && !protocol_done {
+            Err(ProviderError::Transport("native Messages stream ended before message_stop".into()))?;
+        }
+        if let Some(reason) = pending_finish { yield ChatStreamEventV1::Finish { reason }; }
     };
     Box::pin(stream)
 }

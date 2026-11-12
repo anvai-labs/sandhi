@@ -45,7 +45,7 @@ let activeToken = "";
 let authMode = "loading";
 let ssoSession = null;
 let expiryTimer;
-const actionPermissions = { lookupRun: "read", ackAlert: "operate", setBudget: "operate" };
+const actionPermissions = { lookupRun: "read", lookupEvidence: "diagnostics", ackAlert: "operate", setBudget: "operate" };
 function permits(permission) {
   return authMode === "tokens" ? !!activeToken : !!ssoSession?.permissions?.includes(permission);
 }
@@ -54,6 +54,8 @@ function signedIn() { return authMode === "tokens" ? !!activeToken : !!ssoSessio
 let authRevision = 0;
 const pending = new Set();
 const panels = new Map();
+let usageData = null;
+let attributionQuery = "";
 try { sessionStorage.removeItem("sandhi_admin_token"); } catch { /* Storage may be disabled. */ }
 function refreshTokenState() {
   const on = signedIn();
@@ -66,6 +68,8 @@ function refreshTokenState() {
   document.getElementById("sso-logout").hidden = !ssoSession?.subject;
   if (authMode === "oidc") document.getElementById("auth-status").textContent = ssoSession?.subject
     ? `${ssoSession.subject} — ${ssoSession.role}` : "Sign in with SSO to view protected data.";
+  document.getElementById("workspace-role").textContent = on
+    ? (authMode === "oidc" ? ssoSession.role : "Token supplied") : "No operator session";
 }
 function resetAuth(token) {
   activeToken = token;
@@ -74,7 +78,9 @@ function resetAuth(token) {
   pending.clear();
   panels.clear();
   pagers.clear();
-  for (const id of ["usage", "keys", "budgets", "alerts", "config", "policy", "run-tree"]) {
+  usageData = null;
+  attributionQuery = "";
+  for (const id of ["usage", "keys", "budgets", "alerts", "config", "policy", "run-tree", "backends", "routes", "topology", "request-evidence"]) {
     const el = document.getElementById(id);
     el.replaceChildren();
     el.dataset.state = "locked";
@@ -85,6 +91,8 @@ function resetAuth(token) {
   }
   document.querySelectorAll("[data-sensitive]").forEach(el => el.replaceChildren());
   document.getElementById("c-secret").value = "";
+  document.getElementById("run-id").value = "";
+  document.getElementById("evidence-value").value = "";
   document.getElementById("toasts").replaceChildren();
   document.getElementById("auth-status").textContent = token ? "Token supplied." : "No token supplied.";
   refreshTokenState();
@@ -158,7 +166,7 @@ async function adminCall(method, path, body, allowPartial = false) {
   }
 }
 
-async function loadPanel(id, path, render, permission = null) {
+async function loadPanel(id, path, render, permission = null, options = {}) {
   const el = document.getElementById(id);
   const revision = authRevision;
   const previous = panels.get(id);
@@ -169,7 +177,7 @@ async function loadPanel(id, path, render, permission = null) {
   el.textContent = "Loading…";
   try {
     if (permission && !permits(permission)) throw new ApiError(signedIn() ? 403 : 401, "Role does not allow this operation");
-    const data = await requestJSON("GET", path);
+    const data = await requestJSON(options.method || "GET", path, options.body);
     if (revision !== authRevision || panels.get(id) !== ticket) return;
     // Validate required fields before treating a response as a successful empty dataset.
     ticket.html = render(data);
@@ -271,25 +279,86 @@ function attributionRow(r) {
 function tbl(id, title, noun, rows) {
   return `<h3>${esc(title)}</h3>`
     + pagedTable(id, `${title} attribution`, ATTRIBUTION_HEAD, rows, attributionRow,
-      '<tr><td colspan=9>no data yet</td></tr>', noun, true, "table-help");
+      `<tr><td colspan=9>${attributionQuery ? "No matching rows" : "no data yet"}</td></tr>`, noun, true, "table-help");
 }
 
 function loadUsage() {
   return loadPanel("usage", "/dashboard/api/usage", d => {
     requireFields(d, ["by_subject", "by_group", "by_provider", "by_model"], ["total"]);
+    usageData = d;
     const t = d.total;
     return '<div class="cards" id="cards">' +
-      [["calls", fmt(t.calls)], ["tokens in", fmt(t.tokens_in)], ["tokens out", fmt(t.tokens_out)],
-       ["cache read", cacheRead(t)], ["cache reporting coverage", cacheCoverageLabel(t)], ["billable", fmt(t.billable_tokens)],
+      [["calls", fmt(t.calls)], ["billable tokens", fmt(t.billable_tokens)], ["fresh input", fmt(t.tokens_in)], ["output tokens", fmt(t.tokens_out)],
+       ["cache read", cacheRead(t)], ["cache reporting coverage", cacheCoverageLabel(t)],
        ["latency p50/p95", lat(t.latency)]]
       .map(([l, n]) => `<div class="card${l === "cache reporting coverage" || l === "latency p50/p95" ? " card-detail" : ""}"><div class="n">${n}</div><div class="l">${l}</div></div>`).join("")
-      + `</div><p class="muted">Cache read is reported cache-read input (origin or explicit caller observation), not proof of backend reuse; cache write is an explicit accounting category, not proof of new KV state. Counts are neutral tokens, not prices or savings. Reporting coverage counts calls in each displayed aggregate; it is not a cache hit rate. Mixed totals retain legacy numeric accounting.</p><h3>Attribution</h3><p id="table-help" class="muted">On narrow screens, scroll each table horizontally to see every column. Keyboard users can focus a table and use the arrow keys.</p><div id="tables">`
-      + tbl("attr-subject", "By user (subject)", "subjects", d.by_subject || [])
-      + tbl("attr-group", "By team (group)", "groups", d.by_group || [])
-      + tbl("attr-provider", "By provider", "providers", d.by_provider || [])
-      + tbl("attr-model", "By model", "models", d.by_model || [])
+      + `</div>${tokenSplit(t)}<p class="muted">Cache read is reported cache-read input (origin or explicit caller observation), not proof of backend reuse; cache write is an explicit accounting category, not proof of new KV state. Counts are neutral tokens, not prices or savings. Reporting coverage counts calls in each displayed aggregate; it is not a cache hit rate. Mixed totals retain legacy numeric accounting.</p><h3>Attribution</h3>
+      <div class="table-toolbar"><label for="usage-filter">Filter attribution</label><input id="usage-filter" type="search" value="${esc(attributionQuery)}" placeholder="Find a user, team, provider or model" maxlength="256"><span class="muted">Totals include all calls.</span></div>
+      <p id="table-help" class="muted">On narrow screens, scroll each table horizontally to see every column. Keyboard users can focus a table and use the arrow keys.</p><div id="tables">`
+      + usageTables(d)
       + `</div>`;
   });
+}
+
+function usageTables(d) {
+  const filter = rows => rows.filter(row => String(row.key).toLocaleLowerCase().includes(attributionQuery.toLocaleLowerCase()));
+  return tbl("attr-subject", "By user (subject)", "subjects", filter(d.by_subject))
+    + tbl("attr-group", "By team (group)", "groups", filter(d.by_group))
+    + tbl("attr-provider", "By provider", "providers", filter(d.by_provider))
+    + tbl("attr-model", "By model", "models", filter(d.by_model));
+}
+
+function tokenSplit(t) {
+  const coverage = cacheCoverage(t);
+  const parts = [t.tokens_in, t.cache_read_tokens, t.cache_creation_tokens];
+  const total = parts.reduce((sum, count) => sum + count, 0);
+  if (!coverage || coverage.reported !== t.calls || !t.calls
+      || parts.some(count => !Number.isSafeInteger(count) || count < 0) || !Number.isSafeInteger(total) || !total) {
+    return '<div class="token-insight"><h3>Input token composition</h3><p class="muted">A comparable split is available when every call reports cache-read usage. Missing measurements are not treated as zero or as cache savings.</p></div>';
+  }
+  const [fresh, read, write] = parts.map(count => count / total * 1000);
+  return `<div class="token-insight"><div class="insight-heading"><h3>Input token composition</h3><span class="badge back-leg">${(t.cache_read_tokens / total * 100).toFixed(1)}% cache-read share</span></div>
+    <svg class="token-bar" viewBox="0 0 1000 24" preserveAspectRatio="none" role="img" aria-label="${fmt(t.tokens_in)} fresh, ${fmt(t.cache_read_tokens)} cache-read and ${fmt(t.cache_creation_tokens)} cache-write input tokens">
+      <rect class="token-fresh" width="${fresh}" height="24"/><rect class="token-read" x="${fresh}" width="${read}" height="24"/><rect class="token-write" x="${fresh + read}" width="${write}" height="24"/></svg>
+    <div class="token-legend"><span><i class="token-fresh"></i>Fresh <strong>${fmt(t.tokens_in)}</strong></span><span><i class="token-read"></i>Cache read <strong>${fmt(t.cache_read_tokens)}</strong></span><span><i class="token-write"></i>Cache write <strong>${fmt(t.cache_creation_tokens)}</strong></span><span>Total input <strong>${fmt(total)}</strong></span></div>
+    <p class="hint">Read share describes input accounting, not a percentage cost saving. Cache-write counts are retained separately; this chart does not establish write-field reporting coverage. Output and reasoning follow their own inclusion convention.</p></div>`;
+}
+
+function backendRow(record) {
+  const d = record.definition;
+  if (!d || typeof d.id !== "string" || !Array.isArray(d.models) || !d.endpoint) throw new ApiError(502, "Incomplete backend inventory");
+  const policy = d.cache_policy;
+  const mode = policy ? policy.default_intent?.mode || "preserve_native" : "legacy default";
+  const ready = record.status === "active" && record.ready === true;
+  const detail = d.models.map(model => {
+    const capabilities = policy?.models?.[model.id];
+    return `<li><code>${esc(model.id)}</code> — ${esc(capabilities?.profile || "undeclared")}${capabilities?.lifetimes?.length ? `; TTL ${capabilities.lifetimes.map(esc).join(", ")}` : ""}</li>`;
+  }).join("");
+  return `<tr><td><strong>${esc(d.id)}</strong><br><span class="muted">revision ${fmt(record.revision)}</span></td>
+    <td><span class="badge ${ready ? "active" : "revoked"}">${ready ? "Available" : record.status === "revoked" ? "Revoked" : "Unavailable"}</span></td>
+    <td>${esc(d.endpoint.endpoint_family)}<br><span class="muted">${esc(d.endpoint.endpoint_profile || "standard")}</span></td>
+    <td><code>${esc(d.credential_ref)}</code><br><span class="muted">${d.base_url ? esc(d.base_url) : "Inherited from credential"}</span></td>
+    <td>${fmt(d.models.length)} models<br><span class="badge back-leg">${esc(mode)}</span><details><summary>Models &amp; cache policy</summary><ul class="model-list">${detail}</ul><p class="hint">Namespace: ${esc(policy?.namespace || "provider_default")}. Declared capabilities are operator assertions, not live qualification.</p></details></td></tr>`;
+}
+function loadBackends() {
+  return loadPanel("backends", "/admin/backends", d => {
+    requireFields(d, ["backends"]);
+    return pagedTable("backend-inventory", "Backend endpoints", '<tr><th>Backend</th><th>Status</th><th>Protocol / profile</th><th>Credential / endpoint</th><th>Models / caching</th></tr>', d.backends, backendRow,
+      '<tr><td colspan="5">No explicit backends configured. Register an endpoint with the CLI or declarative configuration.</td></tr>', "backends");
+  }, "read");
+}
+function loadRoutes() {
+  return loadPanel("routes", "/admin/routes", d => {
+    requireFields(d, ["routes"]);
+    return pagedTable("route-inventory", "Logical model mappings", '<tr><th>Route</th><th>Selection</th><th>Affinity</th><th>Model mappings</th></tr>', d.routes, record => {
+      const route = record.definition;
+      if (!route || typeof route.id !== "string" || !Array.isArray(route.models)) throw new ApiError(502, "Incomplete route inventory");
+      return `<tr><td><code>route/${esc(route.id)}</code><br><span class="muted">revision ${fmt(record.revision)} · ${esc(record.status)}</span></td>
+        <td>${esc(route.selection)}</td><td>${esc(route.affinity)}<br><span class="muted">${fmt(route.affinity_ttl_seconds)} seconds</span></td>
+        <td>${route.models.map(model => `<details><summary>${esc(model.id)}</summary><ul class="model-list">${model.targets.map(target => `<li><code>${esc(target.backend)}</code> → <code>${esc(target.model)}</code></li>`).join("")}</ul></details>`).join("")}</td></tr>`;
+    }, '<tr><td colspan="4">No logical routes configured. Fixed backend keys remain available.</td></tr>', "routes")
+      + '<p class="hint">An active definition does not guarantee a compatible target for every request. Availability, model grants and session binding are checked at admission.</p>';
+  }, "read");
 }
 
 // Keys: masked virtual keys + vault entries. Never a secret. Revoke/add are admin-gated.
@@ -500,6 +569,8 @@ function loadConfig() {
     requireFields(data, ["providers", "budgets", "alerts", "vkeys"]);
     return `<p class="muted" style="margin:0 0 .75rem">${esc(data.path)}</p>`
     + configPlanTable("Providers", data.providers, ["credential_id", "base_url"])
+    + configPlanTable("Backends", data.backends || [], ["id", "upstream_ref"])
+    + configPlanTable("Logical routes", data.routes || [], ["id", "upstream_ref", "revision"])
     + configPlanTable("Budgets", data.budgets, ["scope", "limit_tokens"])
     + configPlanTable("Alerts", data.alerts, ["scope", "threshold_pct"])
     + configPlanTable("Virtual keys", data.vkeys, ["upstream", "subject", "group"])
@@ -513,6 +584,7 @@ async function applyConfig() {
   const n = (x) => (x || []).length;
   const complete = data.ok !== false;
   let summary = `<div class="callout ${complete ? "ok" : "err"}">${complete ? "Applied" : "Incomplete — committed items were not rolled back"} — providers: ${n(data.providers.applied)}, `
+    + `backends: ${n(data.backends?.applied)}, routes: ${n(data.routes?.applied)}, `
     + `budgets: ${n(data.budgets.applied)}, alerts: ${n(data.alerts.created)} created / ${n(data.alerts.skipped)} already satisfied, `
     + `vkeys: ${n(data.vkeys.minted)} minted / ${n(data.vkeys.skipped)} already satisfied</div>`;
   if (!complete) summary += `<div class="callout err">Failed items — inspect before retrying:<br>`
@@ -523,7 +595,7 @@ async function applyConfig() {
       + `</div>`;
   }
   document.getElementById("config-result").innerHTML = summary;
-  loadConfig(); loadKeys(); loadBudgets(); loadAlerts();
+  loadConfig(); loadKeys(); loadBudgets(); loadAlerts(); loadBackends(); loadRoutes();
 }
 
 // Run cost tree: recursive own-vs-rollup breakdown for one agentic run. Admin-gated (attribution
@@ -560,6 +632,35 @@ function lookupRun() {
   }, "read");
 }
 
+function lookupEvidence() {
+  const kind = document.getElementById("evidence-kind").value;
+  const value = document.getElementById("evidence-value").value;
+  if (!["request", "session", "run"].includes(kind) || !value.trim()
+      || new TextEncoder().encode(value).length > 256 || /[\u0000-\u001f\u007f-\u009f]/.test(value)) {
+    toast("Enter an exact identifier of at most 256 UTF-8 bytes, without control characters.", false);
+    return;
+  }
+  panels.delete("request-evidence");
+  return loadPanel("request-evidence", "/admin/usage/diagnostics", data => {
+    requireFields(data, ["rows", "unavailable_evidence"]);
+    if (data.schema_version !== "1" || data.returned_rows !== data.rows.length || typeof data.truncated !== "boolean"
+        || data.rows.some(row => !row || typeof row !== "object")) throw new ApiError(502, "Incomplete usage evidence");
+    const rowHtml = row => {
+      const observed = row.cache_read_observation?.status;
+      const read = observed === "reported" ? fmt(row.cache_read_tokens) : observed === "absent" ? "not reported" : observed || "unknown";
+      return `<tr><td><code>${orDash(row.request_id)}</code><br><span class="muted">${orDash(row.occurred_at)}</span></td><td>${orDash(row.provider)}<br><code>${orDash(row.model)}</code></td>
+        <td class="num">${fmt(row.tokens_in)}</td><td class="num">${esc(read)}</td><td class="num">${fmt(row.cache_creation_tokens)}</td><td class="num">${fmt(row.tokens_out)}</td>
+        <td><details><summary>Details</summary><p>Reasoning: ${fmt(row.reasoning_tokens)} (${row.reasoning_included === true ? "included in output" : row.reasoning_included === false ? "separate from output" : "overlap not established"})</p>
+        <p>Duration: ${fmt(row.duration_ms)} ms · ${orDash(row.duration_source)}</p><p>Step: <code>${orDash(row.step_id)}</code></p></details></td></tr>`;
+    };
+    return `<h3>Results for ${esc(kind)}: <code>${esc(value)}</code></h3>
+      <p>${fmt(data.returned_rows)} persisted records${data.truncated ? ' · <strong>Result truncated; the query limit or byte limit was reached.</strong>' : ""}</p>`
+      + pagedTable("usage-evidence", "Persisted usage records", '<tr><th>Request / time</th><th>Provider / model</th><th class="num">Fresh</th><th class="num">Cache read</th><th class="num">Cache write</th><th class="num">Output</th><th></th></tr>', data.rows, rowHtml,
+        '<tr><td colspan="7">No persisted records matched. Active or unavailable observations may not have a row.</td></tr>', "records", true)
+      + `<p class="hint">${esc(data.snapshot_notice)}</p><details><summary>Evidence limits</summary><p class="hint">${esc(data.request_id_notice)}</p><p>Unavailable fields: ${data.unavailable_evidence.map(esc).join(", ")}</p></details>`;
+  }, "diagnostics", { method: "POST", body: { selector: { kind, value }, limit: 100 } });
+}
+
 async function refreshIdentity() {
   const status = await requestJSON("GET", "/auth/session");
   if (!["oidc", "tokens"].includes(status.mode)) throw new ApiError(502, "Invalid authentication mode");
@@ -585,8 +686,15 @@ async function refreshAll() {
     document.getElementById("auth-status").textContent = "Access verification unavailable. Retry with Refresh.";
     return;
   }
-  return Promise.all([loadUsage(), loadKeys(), loadBudgets(), loadAlerts(), loadConfig(), loadPolicy(), loadTopology()])
-    .then(() => { document.getElementById("refresh-status").textContent = "Updated " + new Date().toLocaleTimeString() + " — use Refresh to update."; });
+  const loadRevision = authRevision;
+  return Promise.all([loadUsage(), loadKeys(), loadBudgets(), loadAlerts(), loadConfig(), loadPolicy(), loadTopology(), loadBackends(), loadRoutes()])
+    .then(() => {
+      if (authRevision !== loadRevision) return;
+      const failed = [...document.querySelectorAll("[data-state]")].filter(el => ["unavailable", "stale"].includes(el.dataset.state)
+        || el.id === "usage" && el.dataset.state === "unconfigured").length;
+      document.getElementById("refresh-status").textContent = "Updated " + new Date().toLocaleTimeString()
+        + (failed ? ` · ${failed} panels need attention` : " · data loaded");
+    });
 }
 
 // Attribute values are inert data, never JavaScript source. Only this fixed action table
@@ -601,7 +709,7 @@ const actions = {
   revokeVkey: button => revokeVkey(button.dataset.id),
   revokeCred: button => revokeCred(button.dataset.provider, button.dataset.label),
   ackAlert: button => ackAlert(button.dataset.id),
-  mintVkey, addCredential, setBudget, applyConfig, lookupRun,
+  mintVkey, addCredential, setBudget, applyConfig, lookupRun, lookupEvidence,
   pager: button => {
     const id = button.dataset.pager;
     const state = pagers.get(id);
@@ -624,48 +732,43 @@ document.addEventListener("click", async event => {
 window.addEventListener("pagehide", () => { tokenEl.value = ""; ssoSession = null; clearTimeout(expiryTimer); resetAuth(""); });
 window.addEventListener("pageshow", event => { if (event.persisted) refreshAll(); });
 
-// Section nav highlighting: the nav link for the section currently under the sticky header
-// gets aria-current + .active. The observer watches a band at the top of the viewport, so
-// "active" means "the section you are reading", not "anywhere on screen". Dependency-free.
+// Views are allowlisted by existing nav links. Hashes carry navigation only, never
+// credentials. Back/forward and old section deep links work without a routing dependency.
 const sectionLinks = new Map();
 for (const link of document.querySelectorAll(".section-nav a")) sectionLinks.set(link.hash.slice(1), link);
-const sectionOrder = [...sectionLinks.keys()];
-let activeSection = null;
-function markActiveSection() {
-  for (const [id, link] of sectionLinks) {
-    const on = id === activeSection;
+function showView(id, focus = false) {
+  if (!sectionLinks.has(id)) id = "overview";
+  for (const view of document.querySelectorAll(".workspace-view")) view.hidden = view.dataset.view !== id;
+  for (const [key, link] of sectionLinks) {
+    const on = key === id;
     link.classList.toggle("active", on);
-    if (on) link.setAttribute("aria-current", "true"); else link.removeAttribute("aria-current");
+    if (on) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current");
   }
-}
-if (typeof IntersectionObserver === "function" && sectionOrder.length) {
-  activeSection = sectionOrder[0];
-  markActiveSection();
-  const inBand = new Map();
-  const sectionObserver = new IntersectionObserver(entries => {
-    for (const entry of entries) inBand.set(entry.target.id, entry.isIntersecting);
-    // Document order wins when several headings share the band; mid-scroll blanks keep the
-    // previous highlight rather than flickering to none.
-    for (const id of sectionOrder) {
-      if (inBand.get(id)) { if (activeSection !== id) { activeSection = id; markActiveSection(); } return; }
-    }
-  }, { rootMargin: "0px 0px -70% 0px" });
-  for (const id of sectionOrder) {
+  const name = sectionLinks.get(id).textContent;
+  document.getElementById("current-view").textContent = name;
+  document.title = `Sandhi — ${name}`;
+  if (focus) {
     const heading = document.getElementById(id);
-    if (heading) sectionObserver.observe(heading);
+    heading.tabIndex = -1;
+    heading.focus({ preventScroll: true });
+    window.scrollTo({ top: 0, behavior: "instant" });
   }
-  for (const link of sectionLinks.values()) {
-    link.addEventListener("click", () => { activeSection = link.hash.slice(1); markActiveSection(); });
-  }
-  // The observer band never reaches the last short sections pinned above the footer, so a
-  // scroll pinned at page bottom always means the final section is the one being read.
-  window.addEventListener("scroll", () => {
-    const last = sectionOrder[sectionOrder.length - 1];
-    if (window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 1 && activeSection !== last) {
-      activeSection = last;
-      markActiveSection();
-    }
-  }, { passive: true });
 }
+for (const [id, link] of sectionLinks) link.addEventListener("click", event => {
+  event.preventDefault();
+  if (location.hash !== `#${id}`) history.pushState(null, "", `#${id}`);
+  showView(id, true);
+});
+window.addEventListener("hashchange", () => showView(location.hash.slice(1)));
+window.addEventListener("popstate", () => showView(location.hash.slice(1)));
+document.addEventListener("input", event => {
+  if (event.target.id !== "usage-filter" || !usageData) return;
+  attributionQuery = event.target.value.slice(0, 256);
+  document.getElementById("tables").innerHTML = usageTables(usageData);
+});
+if (typeof ResizeObserver === "function") new ResizeObserver(entries => {
+  document.documentElement.style.setProperty("--header-h", `${entries[0].target.getBoundingClientRect().height}px`);
+}).observe(document.querySelector("header"));
+showView(location.hash.slice(1));
 refreshTokenState();
 refreshAll();

@@ -86,3 +86,21 @@ def test_models_list_returns_only_what_the_key_permits(client: openai.OpenAI):
     assert models, "a key with no allowlist should still discover its upstream's catalog"
     assert all(m.object == "model" for m in models)
     assert all(m.owned_by for m in models)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_responses_shorthand_input_reaches_chat_backend(client: openai.OpenAI, upstream, stream):
+    result = client.responses.create(
+        model="gpt-mock",
+        instructions="Be precise",
+        input=[{"role": "user", "content": "ping"}],
+        stream=stream,
+    )
+    if stream:
+        terminal = [event.response for event in result if event.type == "response.completed"]
+        assert len(terminal) == 1
+        result = terminal[0]
+    assert result.output[0].content[0].text == "pong"
+    messages = upstream.last().body["messages"]
+    assert [message["role"] for message in messages] == ["system", "user"]
+    assert messages[1]["content"] == "ping"

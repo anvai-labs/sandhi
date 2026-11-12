@@ -1,4 +1,4 @@
-//! Opt-in OpenAI Chat usage observation from complete, bounded SSE events.
+//! Opt-in protocol usage observation from complete, bounded SSE events.
 //!
 //! Create one observer per upstream HTTP response and keep it with the existing
 //! request/attempt owner. SSE `id` never becomes Sandhi attribution. This observer
@@ -7,6 +7,12 @@
 
 use crate::{linesplit::LineSplitter, ParsedUsage, MAX_STREAM_LINE_BYTES};
 use sandhi_core::usage::{qualify_openai_stream_usage, StreamUsageError};
+use sandhi_core::{EndpointFamilyV1, UsageCompleteness, UsageV2};
+use serde_json::Value;
+
+mod responses;
+#[cfg(test)]
+mod responses_tests;
 
 // Bound the extra copy when a caller supplies an arbitrarily large HTTP chunk.
 const INPUT_SLICE_BYTES: usize = 8192;
@@ -26,6 +32,11 @@ pub enum StreamObservationError {
     MissingTerminator,
     DataAfterTerminator,
     Closed,
+    UnsupportedEndpoint,
+    InvalidFamilyUsage(sandhi_core::usage::BufferedUsageError),
+    InvalidEnvelope,
+    IdentityMismatch,
+    ProviderEvent,
 }
 
 /// Response-scoped measurement, independent of delivery success or settlement.
@@ -48,13 +59,21 @@ pub struct OpenAiStreamUsageObserver {
     data: Vec<u8>,
     has_data: bool,
     message_event: bool,
+    event_name: Option<String>,
+    endpoint: EndpointFamilyV1,
+    responses: responses::ResponsesUsage,
     usage: Option<ParsedUsage>,
+    canonical_usage: Option<UsageV2>,
     error: Option<StreamObservationError>,
     done: bool,
     closed: bool,
     #[cfg(test)]
     peak_buffered: usize,
 }
+
+/// Complete-event observer shared across supported endpoint protocols. The old
+/// name and default constructor retain OpenAI Chat behavior.
+pub type ProtocolStreamUsageObserver = OpenAiStreamUsageObserver;
 
 impl Default for OpenAiStreamUsageObserver {
     fn default() -> Self {
@@ -67,6 +86,18 @@ impl OpenAiStreamUsageObserver {
         Self::with_limit(MAX_STREAM_LINE_BYTES)
     }
 
+    pub fn for_endpoint(endpoint: EndpointFamilyV1) -> Result<Self, StreamObservationError> {
+        if !matches!(
+            endpoint,
+            EndpointFamilyV1::OpenaiChatCompletions | EndpointFamilyV1::OpenaiResponses
+        ) {
+            return Err(StreamObservationError::UnsupportedEndpoint);
+        }
+        let mut observer = Self::new();
+        observer.endpoint = endpoint;
+        Ok(observer)
+    }
+
     fn with_limit(limit: usize) -> Self {
         Self {
             splitter: LineSplitter::new_sse(limit),
@@ -76,7 +107,11 @@ impl OpenAiStreamUsageObserver {
             data: Vec::new(),
             has_data: false,
             message_event: true,
+            event_name: None,
+            endpoint: EndpointFamilyV1::OpenaiChatCompletions,
+            responses: Default::default(),
             usage: None,
+            canonical_usage: None,
             error: None,
             done: false,
             closed: false,
@@ -89,11 +124,26 @@ impl OpenAiStreamUsageObserver {
         self.usage
     }
 
+    /// Canonical evidence includes field presence and progress completeness.
+    /// Legacy `usage()` remains a final-measurement projection only.
+    pub fn canonical_usage(&self) -> Option<UsageV2> {
+        self.canonical_usage.clone().map(|mut usage| {
+            if self.error.is_some() {
+                usage.completeness = UsageCompleteness::Partial;
+            }
+            usage
+        })
+    }
+
+    pub fn provider_failed(&self) -> bool {
+        self.responses.provider_failed
+    }
+
     pub fn error(&self) -> Option<StreamObservationError> {
         self.error
     }
 
-    /// A complete `[DONE]` event was observed; this does not imply usage or success.
+    /// A complete protocol terminal was observed; this does not imply usage or success.
     pub fn is_done(&self) -> bool {
         self.done
     }
@@ -141,6 +191,20 @@ impl OpenAiStreamUsageObserver {
         Ok(())
     }
 
+    /// Cancellation is not HTTP EOF and does not prove a missing terminator.
+    /// Already-observed unfinished framing still invalidates final qualification.
+    pub(crate) fn close_on_abort(&mut self) {
+        self.closed = true;
+        let pending_line = self.splitter.remainder();
+        // An interrupted comment cannot become a data event. Large keepalives
+        // can span HTTP chunks; their suffix must not erase a prior measurement.
+        let unfinished_data =
+            self.has_data || (!pending_line.is_empty() && !pending_line.starts_with(b":"));
+        if self.error.is_none() && unfinished_data {
+            let _ = self.fail(StreamObservationError::TruncatedEvent);
+        }
+    }
+
     fn fail(&mut self, error: StreamObservationError) -> Result<(), StreamObservationError> {
         self.error = Some(error);
         self.splitter.reset();
@@ -172,6 +236,7 @@ impl OpenAiStreamUsageObserver {
             self.data.clear();
             self.has_data = false;
             self.message_event = true;
+            self.event_name = None;
         } else if !content.starts_with(':') {
             let (field, value) = content.split_once(':').unwrap_or((content, ""));
             let value = value.strip_prefix(' ').unwrap_or(value);
@@ -183,7 +248,10 @@ impl OpenAiStreamUsageObserver {
                     self.data.extend_from_slice(value.as_bytes());
                     self.has_data = true;
                 }
-                "event" => self.message_event = value.is_empty() || value == "message",
+                "event" => {
+                    self.message_event = value.is_empty() || value == "message";
+                    self.event_name = (value.len() <= 128).then(|| value.to_owned());
+                }
                 _ => {} // id/retry are not request correlation or replay permission.
             }
         }
@@ -192,6 +260,31 @@ impl OpenAiStreamUsageObserver {
 
     fn event(&mut self) -> Result<(), StreamObservationError> {
         if !self.has_data {
+            return Ok(());
+        }
+        if self.endpoint == EndpointFamilyV1::OpenaiResponses {
+            if self.data == b"[DONE]" {
+                if !self.message_event {
+                    return Err(StreamObservationError::UnexpectedEventType);
+                }
+                return self.responses.tail_done(self.done);
+            }
+            if self.done {
+                return Err(StreamObservationError::DataAfterTerminator);
+            }
+            let event = sandhi_core::policy::strict_json(&self.data)
+                .map_err(|_| StreamObservationError::InvalidJson)?;
+            let update =
+                self.responses
+                    .event(&event, self.message_event, self.event_name.as_deref());
+            self.done = self.responses.done;
+            let update = update?;
+            if let Some(update) = update {
+                if update.completeness == UsageCompleteness::Final {
+                    self.usage = Some((&update).into());
+                }
+                self.canonical_usage = Some(update);
+            }
             return Ok(());
         }
         if self.done {
@@ -204,13 +297,20 @@ impl OpenAiStreamUsageObserver {
             self.done = true;
             return Ok(());
         }
-        let event =
-            serde_json::from_slice(&self.data).map_err(|_| StreamObservationError::InvalidJson)?;
+        let event = sandhi_core::policy::strict_json(&self.data)
+            .map_err(|_| StreamObservationError::InvalidJson)?;
         if let Some(next) =
             qualify_openai_stream_usage(&event).map_err(StreamObservationError::InvalidUsage)?
         {
             match self.usage {
-                None => self.usage = Some(next),
+                None => {
+                    let mut canonical: UsageV2 = next.into();
+                    canonical.reasoning_tokens = event
+                        .pointer("/usage/completion_tokens_details/reasoning_tokens")
+                        .and_then(Value::as_u64);
+                    self.canonical_usage = Some(canonical);
+                    self.usage = Some(next);
+                }
                 Some(first) if first == next => {}
                 Some(_) => return Err(StreamObservationError::ConflictingUsage),
             }

@@ -69,6 +69,9 @@ impl TypedOllama {
 
 #[async_trait]
 impl ChatProvider for TypedOllama {
+    fn preflight_request(&self, request: &ChatRequestV1) -> Result<(), ProviderError> {
+        encode_ollama_request(request).map(|_| ())
+    }
     fn slug(&self) -> &str {
         "ollama"
     }
@@ -111,6 +114,9 @@ impl ChatProvider for TypedOllama {
 }
 
 pub fn encode_ollama_request(request: &ChatRequestV1) -> Result<Value, ProviderError> {
+    request
+        .native_input_for(sandhi_core::EndpointFamilyV1::OllamaChat)
+        .map_err(ProviderError::InvalidRequest)?;
     request.validate().map_err(ProviderError::InvalidRequest)?;
     let mut body = request
         .extensions
@@ -165,7 +171,13 @@ pub fn encode_ollama_request(request: &ChatRequestV1) -> Result<Value, ProviderE
     if let Some(format) = &request.response_format {
         body.insert("format".into(), normalize_response_format(format));
     }
-    Ok(Value::Object(body))
+    let mut body = Value::Object(body);
+    crate::cache_policy::apply(
+        request,
+        sandhi_core::EndpointFamilyV1::OllamaChat,
+        &mut body,
+    )?;
+    Ok(body)
 }
 
 /// Normalize a client-supplied `response_format` into what Ollama's `format` field expects: a

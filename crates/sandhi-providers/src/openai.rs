@@ -132,10 +132,7 @@ impl Provider for OpenAiCompat {
                 if !resp.status().is_success() {
                     return Err(error_for_response(resp, self.request_id_header).await);
                 }
-                let body: Value = resp
-                    .json()
-                    .await
-                    .map_err(|e| ProviderError::Transport(e.to_string()))?;
+                let body = crate::decode_response_json(resp).await?;
                 let (response_usage, observed_usage) =
                     crate::buffered_usage(sandhi_core::CacheReadFamily::OpenAi, &body);
                 Ok((
@@ -198,6 +195,57 @@ impl Provider for OpenAiCompat {
                 // line for the terminal usage object; `metered_passthrough` is the shared streaming
                 // primitive (the chunk-boundary property test exercises this exact path).
                 Ok(metered_passthrough(resp.bytes_stream(), sniff_usage_line))
+            },
+        )
+        .await
+    }
+
+    async fn stream_qualified(
+        &self,
+        req: ProviderRequest,
+        _delivery: crate::QualifiedStreamDelivery,
+    ) -> Result<crate::QualifiedProviderStream, ProviderError> {
+        validate_openai_chat_messages(&req.body)?;
+        let context = req.attempt_context.clone();
+        let model = req.model.clone();
+        let headers = self.request_headers(&req);
+        let mut body = req.body;
+        body["stream"] = Value::Bool(true);
+        if !body.get("stream_options").is_some_and(Value::is_object) {
+            body["stream_options"] = json!({});
+        }
+        body["stream_options"]["include_usage"] = Value::Bool(true);
+        let mut request = self.client.post(self.chat_url()).headers(headers);
+        if !self.api_key.is_empty() {
+            request = request.bearer_auth(&self.api_key);
+        }
+        crate::attempt::observe_qualified_stream(
+            context,
+            self.slug(),
+            Some(&model),
+            sandhi_core::EndpointFamilyV1::OpenaiChatCompletions,
+            |facts| async move {
+                let response = request
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|error| ProviderError::Transport(error.to_string()))?;
+                facts.record_headers(
+                    response.status().as_u16(),
+                    response.headers(),
+                    self.request_id_header,
+                );
+                if !response.status().is_success() {
+                    return Err(error_for_response(response, self.request_id_header).await);
+                }
+                let request_id =
+                    crate::provider_request_id(response.headers(), self.request_id_header);
+                use futures_util::StreamExt;
+                let raw: crate::raw::RawChunkStream =
+                    Box::pin(response.bytes_stream().map(|chunk| {
+                        chunk.map_err(|error| ProviderError::Transport(error.to_string()))
+                    }));
+                Ok((raw, request_id))
             },
         )
         .await

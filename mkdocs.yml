@@ -1,5 +1,5 @@
 site_name: Sandhi
-site_description: AI usage, attribution and controlled access — measured in neutral units.
+site_description: Cache-aware AI routing, local egress control and accountable token usage.
 site_url: https://anvai-labs.github.io/sandhi/
 repo_url: https://github.com/anvai-labs/sandhi
 repo_name: anvai-labs/sandhi
@@ -67,7 +67,13 @@ exclude_docs: |
   product/evidence/
 nav:
   - Start here: index.md
+  - Efficiency and control:
+      - Cache-aware routing and tokens: product/cache-aware-routing.md
+      - Local ONNX evaluation: operator/embedded-onnx.md
+      - Sensitive-text egress policy: operator/sensitive-policy.md
   - Operate:
+      - Operator console: operator/dashboard.md
+      - Backends and cache configuration: operator/backends.md
       - Identity and access: operator/oidc-sso.md
       - Identity groups: operator/identity-groups.md
       - Buffered accounting: operator/buffered-accounting.md
@@ -82,6 +88,8 @@ nav:
       - Two processing planes: adr/0004-two-plane-proxy-and-enforcement-boundary.md
       - Budget guarantees: product/metering-and-budget-guarantees.md
       - Accounting and evidence: product/attempt-accounting-and-evidence.md
+      - Qualified Responses streams: adr/0026-qualified-responses-stream-accounting.md
+      - Qualified Codex accounting: adr/0027-qualified-codex-buffered-accounting.md
       - Cache reporting: adr/0010-cache-read-reporting-availability.md
   - Project:
       - Version 0.14.0: releases/v0.14.0.md

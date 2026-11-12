@@ -12,8 +12,12 @@
 pub mod alerts;
 pub mod allowance;
 pub mod budget;
+pub mod cache_policy;
 pub mod cache_read;
 pub mod chat;
+pub use cache_policy::*;
+pub mod native_input;
+pub use native_input::{NativeInputFeatureV1, NativeInputV1};
 pub mod conformance;
 pub mod event;
 // Generated typify narrow models (ADR-0003 §2/§4 pilot) — regenerated, never hand-edited.

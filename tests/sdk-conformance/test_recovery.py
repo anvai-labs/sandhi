@@ -201,20 +201,13 @@ def front_leases(base, shards):
 
 
 def back_leases(base, shards):
-    """ADR-0015 back-leg leases: outside the recovery registry, reclaimed by TTL."""
+    """Upstream budget leases; new tracked executions link these to their primary intent."""
     return [row for row in leases(base, shards) if row[0].startswith(BACK_LEG_PREFIX)]
 
 
-def assert_denial_left_only_released_back_leg(after, admitted, denials=1):
-    """Tracked admission reserves the ADR-0015 back leg before the jobs machinery decides the
-    front scope, so a front-denied call leaves released back-leg rows. They must carry no
-    spend, and every other durable fact must be untouched."""
-    added = [row for row in after["budget_reservation"] if row not in admitted["budget_reservation"]]
-    assert len(added) == denials, added
-    assert all(row[1].startswith(BACK_LEG_PREFIX) and row[3:5] == (0, 1) for row in added), added
-    assert [row for row in after["budget_reservation"] if row not in added] == admitted["budget_reservation"]
-    assert {table: rows for table, rows in after.items() if table != "budget_reservation"} == {
-        table: rows for table, rows in admitted.items() if table != "budget_reservation"}
+def assert_denial_left_no_accounting_rows(after, admitted):
+    """Both tracked budget legs share one transaction; denial must leave every row unchanged."""
+    assert after == admitted
 
 
 def get(client, path, *, headers=ADMIN):
@@ -463,8 +456,27 @@ def tracked_rows(database):
         connection.execute("BEGIN")
         return {table: connection.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
                 for table in ("budget_execution_intent", "budget_request_correlation",
-                              "budget_dispatch_fence", "budget_terminal_observation",
+                              "budget_dispatch_fence", "budget_execution_context", "budget_execution_back_leg", "budget_physical_attempt", "budget_terminal_observation",
                               "budget_settlement_outbox", "budget_reservation", "usage_events")}
+
+
+def assert_physical_attempt(rows, *, terminal):
+    intent, = rows["budget_execution_intent"]
+    fence, = rows["budget_dispatch_fence"]
+    attempt, = rows["budget_physical_attempt"]
+    execution, identity, authorized_at, encoded = attempt
+    assert execution == intent[0] == fence[0]
+    assert len(identity) == 64 and all(c in "0123456789abcdef" for c in identity)
+    assert fence[-2:] == (1, identity) and authorized_at == fence[2]
+    if not terminal:
+        assert encoded is None, "authorization alone must leave send status unknown"
+        return
+    evidence = json.loads(encoded)
+    assert evidence["version"] == 1 and evidence["attempt_id"] == identity
+    assert evidence["attempt_ordinal"] == 1
+    assert evidence["dispatch_observed_at_ms"] is not None
+    assert evidence["terminal"] is not None
+    assert evidence["dropped_observations"] == 0 and evidence["invalid"] is False
 
 
 def await_terminal(database):
@@ -472,6 +484,7 @@ def await_terminal(database):
     while True:
         rows = tracked_rows(database)
         if len(rows["budget_terminal_observation"]) == 1:
+            assert_physical_attempt(rows, terminal=True)
             return rows
         assert time.monotonic() < deadline, rows
         time.sleep(0.02)
@@ -604,6 +617,7 @@ def test_tracked_terminal_observed_during_sqlite_contention(
             assert correlation[0] == fence[0] == intent[0]
             assert correlation[1] and fence[1] == 1 and fence[2] is not None
             assert admitted["budget_terminal_observation"] == []
+            assert_physical_attempt(admitted, terminal=False)
             assert admitted["budget_settlement_outbox"] == admitted["usage_events"] == []
             held, = front_leases(source, 1)
             assert held[1] == intent[1] and held[2] > 0 and held[3:5] == (0, 0)
@@ -683,7 +697,7 @@ def test_tracked_terminal_observed_during_sqlite_contention(
             assert changed.status_code == 200, changed.text
             assert call(restarted.client, key, step="held-capacity").status_code == 429
             restarted.stop(expected_status=124)
-            assert_denial_left_only_released_back_leg(tracked_rows(source), admitted)
+            assert_denial_left_no_accounting_rows(tracked_rows(source), admitted)
         else:
             assert tracked_rows(source) == recovered
             budget, = get(restarted.client, "/dashboard/api/budgets", headers=restarted.admin_headers)["budgets"]
@@ -726,6 +740,7 @@ def test_tracked_sigkill_after_origin_acceptance_retains_unknown_liability(
             assert correlation[0] == fence[0] == intent[0]
             assert correlation[1] and fence[1] == 1 and fence[2] is not None
             assert admitted["budget_terminal_observation"] == []
+            assert_physical_attempt(admitted, terminal=False)
             assert admitted["budget_settlement_outbox"] == []
             assert admitted["usage_events"] == []
             held, = front_leases(source, 1)
@@ -753,7 +768,7 @@ def test_tracked_sigkill_after_origin_acceptance_retains_unknown_liability(
         assert denied.status_code == 429, denied.text
         assert denied.json()["error"]["message"] == "budget exhausted"
         restarted.stop(expected_status=124)
-    assert_denial_left_only_released_back_leg(tracked_rows(source), admitted)
+    assert_denial_left_no_accounting_rows(tracked_rows(source), admitted)
     assert len(gated_provider.requests) == 1
 
 
@@ -793,11 +808,11 @@ def test_tracked_sigkill_after_terminal_persistence_recovers_one_receipt(
         held, = front_leases(source, 1)
         assert held[0] == SCOPES[0]
         assert held[1] == intent[1] and held[3:5] == (0, 0)
-        # The back leg settles as soon as the terminal observation is durable, before (and
-        # independently of) the rejected receipt, so crash recovery of the front leg can
-        # never leave the back leg undercounted.
+        # Receipt failure rolls back both charges. Final usage is durable, while
+        # both linked reservations stay held for atomic recovery.
         back, = back_leases(source, 1)
-        assert back[3:5] == (14, 1)
+        assert back[2] == held[2] and back[3:5] == (0, 0)
+        assert before["budget_execution_back_leg"] == [(intent[0], 1, back[1])]
         wait_usage(gateway.client, 1, headers=gateway.admin_headers)
         subject = "recovery-member" if gateway.member_token is not None else "recovery-subject"
         with closing(sqlite3.connect(source)) as connection:
@@ -820,10 +835,13 @@ def test_tracked_sigkill_after_terminal_persistence_recovers_one_receipt(
         assert receipt[1:4] == (intent[1], held[0], 14)
         settled, = front_leases(source, 1)
         assert settled[1] == intent[1] and settled[3:5] == (14, 1)
-        # Receipt recovery must not touch the already-settled back leg.
-        assert back_leases(source, 1) == [back]
+        recovered_back, = back_leases(source, 1)
+        assert recovered_back[:3] == back[:3] and recovered_back[3:5] == (14, 1)
+        assert recovered_back[5] == back[5]
+        with closing(sqlite3.connect(source)) as connection:
+            assert connection.execute("SELECT DISTINCT settled_at FROM budget_reservation").fetchall() == [(receipt[4],)]
         for table in ("budget_execution_intent", "budget_request_correlation",
-                      "budget_dispatch_fence", "budget_terminal_observation", "usage_events"):
+                      "budget_dispatch_fence", "budget_execution_context", "budget_execution_back_leg", "budget_physical_attempt", "budget_terminal_observation", "usage_events"):
             assert recovered[table] == before[table], table
         budget, = get(restarted.client, "/dashboard/api/budgets", headers=restarted.admin_headers)["budgets"]
         assert budget["spent"] == 14

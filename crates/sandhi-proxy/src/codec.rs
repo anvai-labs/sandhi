@@ -1,7 +1,7 @@
 //! HTTP ingress/egress codecs for the typed gateway front door.
 //!
-//! These codecs translate public OpenAI Chat Completions and Anthropic Messages documents to
-//! Sandhi's canonical chat contract. Provider-native JSON never reaches the runtime handle.
+//! These codecs project public dialects into the canonical chat contract. Decoder-owned
+//! native input remains in its family bucket for compatible, loss-aware re-encoding.
 
 use std::collections::BTreeMap;
 
@@ -13,6 +13,7 @@ use sandhi_core::{
     UsageV2, CHAT_SCHEMA_VERSION_V1,
 };
 use serde_json::{json, Map, Value};
+mod fidelity;
 
 /// Lift the OpenAI-compat / ZAI `thinking` object (`{type, budget_tokens}`)
 /// into the neutral `ThinkingV1` at ingress (W3d/G7), so a promoted param
@@ -341,10 +342,27 @@ impl IngressDialect {
 
 pub(crate) fn decode_request(
     dialect: IngressDialect,
-    body: Value,
+    mut body: Value,
     metadata: RequestMetadataV1,
 ) -> Result<(ChatRequestV1, bool), String> {
-    match dialect {
+    let cache = body
+        .as_object_mut()
+        .and_then(|object| object.remove("sandhi_cache"))
+        .map(serde_json::from_value::<sandhi_core::CacheIntentV1>)
+        .transpose()
+        .map_err(|_| "sandhi_cache must be a valid cache intent object".to_string())?;
+    if cache.is_some()
+        && matches!(
+            dialect,
+            IngressDialect::Embeddings | IngressDialect::Completions
+        )
+    {
+        return Err("sandhi_cache is supported only on chat endpoints".into());
+    }
+    if let Some(intent) = &cache {
+        intent.validate().map_err(str::to_owned)?;
+    }
+    let (mut request, stream) = match dialect {
         IngressDialect::OpenAi => decode_openai_request(body, metadata),
         IngressDialect::Embeddings | IngressDialect::Completions => {
             crate::text_endpoints::decode(dialect, body, metadata)
@@ -352,7 +370,9 @@ pub(crate) fn decode_request(
         IngressDialect::Anthropic => decode_anthropic_request(body, metadata),
         IngressDialect::Responses => decode_responses_request(body, metadata),
         IngressDialect::Gemini => decode_gemini_request(body, metadata),
-    }
+    }?;
+    request.cache_intent = cache;
+    Ok((request, stream))
 }
 
 /// Faithful decode of a Gemini `generateContent` body (TD-0010 D4b).
@@ -393,72 +413,43 @@ fn decode_gemini_request(
             .map(Vec::as_slice)
             .unwrap_or(&[]);
 
-        // A `functionResponse` is a TOOL RESULT — its own role in the neutral contract, even
-        // though Gemini nests it inside a `user` turn.
-        let mut emitted_tool_result = false;
-        for fr in parts.iter().filter_map(|part| part.get("functionResponse")) {
+        // Split at tool results, preserving text/media on both sides in source order.
+        let mut start = 0;
+        for (index, part) in parts.iter().enumerate() {
+            let Some(fr) = part.get("functionResponse") else {
+                continue;
+            };
+            if start < index {
+                messages.push(decode_gemini_segment(content, &parts[start..index]));
+            }
             let tool_call_id = fr
                 .get("id")
                 .or_else(|| fr.get("name"))
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-            let output = fr
-                .get("response")
-                .and_then(|r| r.get("output"))
-                .cloned()
-                .unwrap_or(Value::Null);
+            let response = fr.get("response").unwrap_or(&Value::Null);
+            // Invert our own one-field wrapper, but retain arbitrary native objects
+            // and additional fields instead of replacing them with null.
+            let output = if response
+                .as_object()
+                .is_some_and(|object| object.len() == 1 && object.contains_key("output"))
+            {
+                &response["output"]
+            } else {
+                response
+            };
             messages.push(ChatMessageV1::Tool {
                 content: MessageContent::Text(match output {
-                    Value::String(text) => text,
+                    Value::String(text) => text.clone(),
                     other => other.to_string(),
                 }),
                 tool_call_id,
             });
-            emitted_tool_result = true;
+            start = index + 1;
         }
-        if emitted_tool_result {
-            continue;
-        }
-
-        let tool_calls: Vec<ToolCallV1> = parts
-            .iter()
-            .filter_map(|part| part.get("functionCall"))
-            .map(|fc| {
-                let name = fc
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                ToolCallV1 {
-                    id: fc
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .unwrap_or(name.as_str())
-                        .to_string(),
-                    name,
-                    arguments: fc
-                        .get("args")
-                        .map(ToString::to_string)
-                        .unwrap_or_else(|| "{}".to_string()),
-                    extensions: BTreeMap::new(),
-                }
-            })
-            .collect();
-
-        let decoded = gemini_content(parts);
-        if content.get("role").and_then(Value::as_str) == Some("model") {
-            messages.push(ChatMessageV1::Assistant {
-                content: decoded,
-                name: None,
-                tool_calls,
-                refusal: None,
-            });
-        } else {
-            messages.push(ChatMessageV1::User {
-                content: decoded.unwrap_or_else(|| MessageContent::Text(String::new())),
-                name: None,
-            });
+        if start < parts.len() || parts.is_empty() {
+            messages.push(decode_gemini_segment(content, &parts[start..]));
         }
     }
 
@@ -558,11 +549,16 @@ fn decode_gemini_request(
         }
     }
     let mut extensions = BTreeMap::new();
-    if !gemini_body.is_empty() {
-        extensions.insert("gemini".to_string(), Value::Object(gemini_body));
-    }
 
-    let request = ChatRequestV1 {
+    // Retain exact input sequences alongside the existing unmodelled extras.
+    // Generation controls remain projected/merged as before.
+    for key in ["contents", "systemInstruction", "tools", "toolConfig"] {
+        if let Some(value) = object.get(key) {
+            gemini_body.insert(key.into(), value.clone());
+        }
+    }
+    extensions.insert("gemini".into(), Value::Object(gemini_body));
+    let mut request = ChatRequestV1 {
         schema_version: CHAT_SCHEMA_VERSION_V1.to_string(),
         // Stamped by the handler from the path segment.
         model: String::new(),
@@ -581,11 +577,55 @@ fn decode_gemini_request(
         thinking: lift_gemini_thinking(object),
         // #90's native-response gate, matching every other dialect's decode.
         include_native_response: true,
+        include_native_stream: false,
+        native_input: None,
+        cache_intent: None,
+        compiled_cache: None,
         // D4b: the populated map — unmodelled Gemini keys survive here rather than being dropped.
         extensions,
     };
+    fidelity::capture(
+        &mut request,
+        sandhi_core::EndpointFamilyV1::GeminiGenerateContent,
+    )?;
     // Streaming is a path verb, not a body field; the handler stamps it.
     Ok((request, false))
+}
+
+fn decode_gemini_segment(content: &Value, parts: &[Value]) -> ChatMessageV1 {
+    let decoded = gemini_content(parts);
+    if content.get("role").and_then(Value::as_str) == Some("model") {
+        ChatMessageV1::Assistant {
+            content: decoded,
+            name: None,
+            tool_calls: parts
+                .iter()
+                .filter_map(|part| part.get("functionCall"))
+                .map(|call| {
+                    let name = call.get("name").and_then(Value::as_str).unwrap_or_default();
+                    ToolCallV1 {
+                        id: call
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .unwrap_or(name)
+                            .into(),
+                        name: name.into(),
+                        arguments: call
+                            .get("args")
+                            .map(ToString::to_string)
+                            .unwrap_or_else(|| "{}".into()),
+                        extensions: BTreeMap::new(),
+                    }
+                })
+                .collect(),
+            refusal: None,
+        }
+    } else {
+        ChatMessageV1::User {
+            content: decoded.unwrap_or_else(|| MessageContent::Text(String::new())),
+            name: None,
+        }
+    }
 }
 
 /// Gemini `parts[]` → neutral content. Text-only collapses to `Text`; anything richer keeps its
@@ -815,15 +855,17 @@ fn decode_sandhi_extensions(body: &mut Value) -> Result<Vec<(String, Value)>, St
 /// inside message content parses to a nested position and leaves the bytes
 /// untouched, and non-JSON or non-object bodies pass through unchanged.
 pub(crate) fn strip_reserved_passthrough(body: bytes::Bytes) -> bytes::Bytes {
-    const RESERVED: &[u8] = b"sandhi_extensions";
+    const RESERVED: &[&[u8]] = &[b"sandhi_extensions", b"sandhi_cache"];
     // Fast path: the literal bytes are absent AND no JSON unicode escape is
     // present, so no spelling of the reserved key can exist — stay byte-exact
     // without a parse. Any non-literal spelling of an ASCII key requires at
     // least one `\uXXXX` escape, so checking for `\u` is a necessary condition
     // (bodies carrying escaped non-ASCII text simply pay one parse).
-    let mentions_reserved = body.windows(RESERVED.len()).any(|w| w == RESERVED);
+    let mentions_reserved = RESERVED
+        .iter()
+        .any(|key| body.windows(key.len()).any(|window| window == *key));
     let mentions_escape = body.windows(2).any(|w| w == b"\\u");
-    if body.len() < RESERVED.len() || !(mentions_reserved || mentions_escape) {
+    if !(mentions_reserved || mentions_escape) {
         return body;
     }
     let Ok(mut value) = serde_json::from_slice::<Value>(&body) else {
@@ -832,7 +874,9 @@ pub(crate) fn strip_reserved_passthrough(body: bytes::Bytes) -> bytes::Bytes {
     let Some(object) = value.as_object_mut() else {
         return body;
     };
-    if object.remove("sandhi_extensions").is_some() {
+    let removed_extensions = object.remove("sandhi_extensions").is_some();
+    let removed_cache = object.remove("sandhi_cache").is_some();
+    if removed_extensions || removed_cache {
         return bytes::Bytes::from(serde_json::to_vec(&value).expect("re-serializing parsed JSON"));
     }
     body
@@ -886,7 +930,7 @@ pub(crate) fn decode_openai_request(
         })
         .transpose()?
         .unwrap_or_default();
-    let request = ChatRequestV1 {
+    let mut request = ChatRequestV1 {
         schema_version: CHAT_SCHEMA_VERSION_V1.into(),
         model,
         messages,
@@ -909,6 +953,10 @@ pub(crate) fn decode_openai_request(
         reasoning_effort: optional_string(object, "reasoning_effort")?,
         thinking: lift_openai_thinking(object),
         include_native_response: true,
+        include_native_stream: false,
+        native_input: None,
+        cache_intent: None,
+        compiled_cache: None,
         extensions: {
             let mut extensions = BTreeMap::from([("openai".into(), body.clone())]);
             for (family, bucket) in passthrough {
@@ -917,6 +965,10 @@ pub(crate) fn decode_openai_request(
             extensions
         },
     };
+    fidelity::capture(
+        &mut request,
+        sandhi_core::EndpointFamilyV1::OpenaiChatCompletions,
+    )?;
     request.validate()?;
     Ok((
         request,
@@ -1138,7 +1190,7 @@ fn decode_anthropic_request(
         })
         .transpose()?
         .unwrap_or_default();
-    let request = ChatRequestV1 {
+    let mut request = ChatRequestV1 {
         schema_version: CHAT_SCHEMA_VERSION_V1.into(),
         model: required_string(object, "model")?,
         messages,
@@ -1158,8 +1210,16 @@ fn decode_anthropic_request(
         reasoning_effort: None,
         thinking: lift_openai_thinking(object),
         include_native_response: true,
+        include_native_stream: false,
+        native_input: None,
+        cache_intent: None,
+        compiled_cache: None,
         extensions: BTreeMap::from([("anthropic".into(), body.clone())]),
     };
+    fidelity::capture(
+        &mut request,
+        sandhi_core::EndpointFamilyV1::AnthropicMessages,
+    )?;
     request.validate()?;
     Ok((
         request,
@@ -1388,6 +1448,12 @@ fn decode_responses_request(
         .map(|values| {
             values
                 .iter()
+                .filter(|value| {
+                    value
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .is_none_or(|kind| kind == "function")
+                })
                 .map(|value| {
                     let name = value
                         .get("name")
@@ -1412,7 +1478,7 @@ fn decode_responses_request(
         })
         .transpose()?
         .unwrap_or_default();
-    let request = ChatRequestV1 {
+    let mut request = ChatRequestV1 {
         schema_version: CHAT_SCHEMA_VERSION_V1.into(),
         model: required_string(object, "model")?,
         messages,
@@ -1439,8 +1505,13 @@ fn decode_responses_request(
             .map(str::to_owned),
         thinking: None,
         include_native_response: true,
+        include_native_stream: false,
+        native_input: None,
+        cache_intent: None,
+        compiled_cache: None,
         extensions: BTreeMap::from([("openai_responses".into(), body.clone())]),
     };
+    fidelity::capture(&mut request, sandhi_core::EndpointFamilyV1::OpenaiResponses)?;
     request.validate()?;
     Ok((
         request,
@@ -1455,7 +1526,15 @@ fn decode_responses_input_item(
     item: &Value,
     messages: &mut Vec<ChatMessageV1>,
 ) -> Result<(), String> {
-    let kind = item.get("type").and_then(Value::as_str).unwrap_or("");
+    // EasyInputMessage omits `type`; a role-bearing item is still a message.
+    // Keep explicitly typed native items on their existing dispatch path.
+    let kind = item.get("type").and_then(Value::as_str).unwrap_or_else(|| {
+        if item.get("role").is_some() {
+            "message"
+        } else {
+            ""
+        }
+    });
     match kind {
         "message" => messages.push(decode_responses_message_item(item)?),
         "function_call" => {
@@ -1500,8 +1579,8 @@ fn decode_responses_input_item(
                 tool_call_id: call_id.into(),
             });
         }
-        // `reasoning` items carry encrypted/summary-only reasoning state that has no canonical
-        // representation; unknown item types are forward-compatible noise. Both are skipped.
+        // The portable projection omits opaque/unknown items. Codec-owned native
+        // input preserves their exact order; the fidelity gate refuses incompatible targets.
         _ => {}
     }
     Ok(())
@@ -1521,34 +1600,68 @@ fn decode_responses_message_item(item: &Value) -> Result<ChatMessageV1, String> 
             .cloned()
             .ok_or_else(|| "Responses message content must be a string or array".to_string())?
     };
-    let mut text = String::new();
+    let mut content_parts = Vec::new();
     let mut refusal = String::new();
     for part in &parts {
         match part.get("type").and_then(Value::as_str) {
             Some("input_text") | Some("output_text") | Some("text") => {
-                text.push_str(part.get("text").and_then(Value::as_str).unwrap_or(""))
+                content_parts.push(ContentPart::Text {
+                    text: part
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .into(),
+                });
             }
             Some("refusal") => {
                 refusal.push_str(part.get("refusal").and_then(Value::as_str).unwrap_or(""))
             }
+            Some("input_image") => {
+                if let Some(url) = part.get("image_url").and_then(Value::as_str) {
+                    content_parts.push(ContentPart::ImageUrl {
+                        image_url: url.into(),
+                        detail: part
+                            .get("detail")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                    });
+                }
+                // Provider file IDs are retained in native input and marked
+                // resource-bound by the fidelity gate, never treated as URLs.
+            }
+            Some("input_file") => content_parts.push(ContentPart::File {
+                file_id: part
+                    .get("file_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                file_data: part
+                    .get("file_data")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                filename: part
+                    .get("filename")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            }),
             _ => {}
         }
     }
+    let content = content_from_parts(content_parts);
     match role.as_str() {
         "developer" => Ok(ChatMessageV1::Developer {
-            content: MessageContent::Text(text),
+            content: content.unwrap_or_else(|| MessageContent::Text(String::new())),
             name: None,
         }),
         "system" => Ok(ChatMessageV1::System {
-            content: MessageContent::Text(text),
+            content: content.unwrap_or_else(|| MessageContent::Text(String::new())),
             name: None,
         }),
         "user" => Ok(ChatMessageV1::User {
-            content: MessageContent::Text(text),
+            content: content.unwrap_or_else(|| MessageContent::Text(String::new())),
             name: None,
         }),
         "assistant" => Ok(ChatMessageV1::Assistant {
-            content: (!text.is_empty()).then_some(MessageContent::Text(text)),
+            content,
             name: None,
             tool_calls: Vec::new(),
             refusal: (!refusal.is_empty()).then_some(refusal),
@@ -1591,6 +1704,24 @@ fn responses_response_format(format: &Value) -> Result<Value, String> {
 }
 
 pub(crate) fn encode_response(dialect: IngressDialect, response: &ChatResponseV1) -> Value {
+    // These bodies are decoder-owned provider responses, not request extras.
+    // Compatible buffered egress must preserve signed/opaque state and unknown
+    // native output parts when admission required typed request execution.
+    let bucket = match dialect {
+        IngressDialect::OpenAi => Some(("openai", "choices")),
+        IngressDialect::Anthropic => Some(("anthropic", "content")),
+        IngressDialect::Responses => Some(("openai_responses", "output")),
+        IngressDialect::Gemini => Some(("gemini", "candidates")),
+        _ => None,
+    };
+    if let Some(native) = bucket.and_then(|(bucket, field)| {
+        response
+            .extensions
+            .get(bucket)
+            .filter(|value| value.get(field).is_some_and(Value::is_array))
+    }) {
+        return native.clone();
+    }
     match dialect {
         IngressDialect::OpenAi | IngressDialect::Embeddings | IngressDialect::Completions => {
             encode_openai_response(response)
@@ -1727,7 +1858,7 @@ fn responses_usage(usage: &UsageV2) -> Value {
     json!({
         "input_tokens":usage.tokens_in.saturating_add(usage.cache_read_tokens).saturating_add(usage.cache_creation_tokens),
         "output_tokens":output_including_reasoning(usage),
-        "input_tokens_details":{"cached_tokens":usage.cache_read_tokens},
+        "input_tokens_details":openai_input_details(usage),
         "output_tokens_details":{
             "reasoning_tokens":usage.reasoning_tokens.unwrap_or(0)
         }
@@ -1813,6 +1944,7 @@ impl StreamEventEncoder {
     ) -> Vec<(Option<&'static str>, Value)> {
         let mut frames: Vec<(Option<&'static str>, Value)> = Vec::new();
         match event {
+            ChatStreamEventV1::NativeFrame { .. } => {}
             ChatStreamEventV1::ResponseStart { id, model } => {
                 frames.push((
                     Some("message_start"),
@@ -2173,6 +2305,7 @@ fn encode_openai_stream_event(
     _last_usage: Option<&UsageV2>,
 ) -> Vec<(Option<&'static str>, Value)> {
     let value = match event {
+        ChatStreamEventV1::NativeFrame { .. } => return Vec::new(),
         ChatStreamEventV1::ResponseStart { id, model } => json!({
             "id":id,"object":"chat.completion.chunk","created":unix_now(),"model":model,
             "choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":Value::Null}]
@@ -2220,6 +2353,7 @@ fn encode_responses_stream_event(
     last_usage: Option<&UsageV2>,
 ) -> Vec<(Option<&'static str>, Value)> {
     match event {
+        ChatStreamEventV1::NativeFrame { .. } => Vec::new(),
         ChatStreamEventV1::ResponseStart { id, model } => vec![(
             Some("response.created"),
             json!({
@@ -2295,6 +2429,16 @@ fn output_including_reasoning(usage: &UsageV2) -> u64 {
     )
 }
 
+fn openai_input_details(usage: &UsageV2) -> Value {
+    let mut details = json!({"cached_tokens":usage.cache_read_tokens});
+    // Preserve legacy response shapes when no writes are measured. The neutral
+    // contract has no write-field provenance, so zero cannot establish reporting.
+    if usage.cache_creation_tokens > 0 {
+        details["cache_write_tokens"] = json!(usage.cache_creation_tokens);
+    }
+    details
+}
+
 fn openai_usage(usage: &UsageV2) -> Value {
     let prompt_tokens = usage
         .tokens_in
@@ -2305,7 +2449,7 @@ fn openai_usage(usage: &UsageV2) -> Value {
         "prompt_tokens":prompt_tokens,
         "completion_tokens":output,
         "total_tokens":prompt_tokens.saturating_add(output),
-        "prompt_tokens_details":{"cached_tokens":usage.cache_read_tokens},
+        "prompt_tokens_details":openai_input_details(usage),
         "completion_tokens_details":{
             "reasoning_tokens":usage.reasoning_tokens,
             "audio_tokens":usage.audio_output_tokens,
@@ -3128,6 +3272,83 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("model"));
+    }
+
+    #[test]
+    fn responses_shorthand_history_survives_translation() {
+        for stream in [false, true] {
+            let shorthand = json!({
+                "model":"gpt-test","stream":stream,"max_output_tokens":64,
+                "input":[
+                    {"role":"system","content":"be precise"},
+                    {"role":"developer","content":"preserve history"},
+                    {"role":"user","content":"first question"},
+                    {"role":"assistant","content":[{"type":"output_text","text":"first answer"}]},
+                    {"role":"user","content":[{"type":"input_text","text":"next question"}]}
+                ]
+            });
+            let mut explicit = shorthand.clone();
+            for item in explicit["input"].as_array_mut().unwrap() {
+                item["type"] = json!("message");
+            }
+            let (request, wants_stream) = decode_request(
+                IngressDialect::Responses,
+                shorthand,
+                RequestMetadataV1::default(),
+            )
+            .unwrap();
+            let (expected, _) = decode_request(
+                IngressDialect::Responses,
+                explicit,
+                RequestMetadataV1::default(),
+            )
+            .unwrap();
+            assert_eq!(wants_stream, stream);
+            assert_eq!(request.messages, expected.messages);
+            let wire = sandhi_providers::typed::encode_openai_request(&request).unwrap();
+            assert_eq!(wire["messages"].as_array().unwrap().len(), 5);
+            assert_eq!(wire["messages"][2]["content"], "first question");
+            assert_eq!(wire["messages"][4]["content"], "next question");
+        }
+    }
+
+    #[test]
+    fn translated_cache_write_usage_round_trips_without_double_counting() {
+        let usage = UsageV2 {
+            tokens_in: 10,
+            tokens_out: 20,
+            cache_read_tokens: 60,
+            cache_creation_tokens: 30,
+            ..UsageV2::default()
+        };
+        for (wire, parse) in [
+            (
+                openai_usage(&usage),
+                sandhi_core::parse_openai_usage as fn(&Value) -> Option<sandhi_core::ParsedUsage>,
+            ),
+            (
+                responses_usage(&usage),
+                sandhi_core::parse_openai_responses_usage
+                    as fn(&Value) -> Option<sandhi_core::ParsedUsage>,
+            ),
+        ] {
+            let parsed = parse(&json!({"usage":wire})).unwrap();
+            assert_eq!(parsed.tokens_in, 10);
+            assert_eq!(parsed.cache_read_tokens, 60);
+            assert_eq!(parsed.cache_creation_tokens, 30);
+            assert_eq!(sandhi_core::billable(&parsed.into()), 120);
+        }
+        // Existing payloads without measured writes retain their previous shape.
+        for wire in [
+            openai_usage(&UsageV2::default()),
+            responses_usage(&UsageV2::default()),
+        ] {
+            let details = wire
+                .get("prompt_tokens_details")
+                .or_else(|| wire.get("input_tokens_details"))
+                .unwrap();
+            assert!(details.get("cache_write_tokens").is_none());
+        }
     }
 
     #[test]

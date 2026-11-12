@@ -15,6 +15,9 @@ use sandhi_store::ShardedLedger;
 use std::sync::Mutex;
 
 pub mod admission;
+mod attempts;
+mod context;
+pub(crate) use context::Selection;
 pub mod buffered;
 pub mod jobs;
 
@@ -23,6 +26,9 @@ struct TrackedObservation {
     intent: ExecutionIntent,
     usage: UsageV2,
     recorded: bool,
+    attempt: Option<Box<sandhi_store::ledger::evidence::AttemptEvidence>>,
+    /// Compatibility for older unpaired library admissions. New tracked HTTP
+    /// executions link both legs in SQL and never use this RAM-only field.
     /// ADR-0015 back-leg lease and the call's measured actual (0 when unmeasured). Settled in
     /// the same ledger critical section as soon as this observation is durably recorded, so it
     /// never contends with its own primary for the proxy mutex, follows the jobs lifecycle, and
@@ -53,6 +59,22 @@ pub enum Failure {
     Evidence(EvidenceError),
 }
 
+impl Failure {
+    /// Bounded diagnostics: never serialize an intent, scope, observation or SQL error.
+    pub(crate) fn diagnostic_code(&self) -> &'static str {
+        match self {
+            Self::LedgerBusy => "ledger_busy",
+            Self::LedgerPoisoned => "ledger_poisoned",
+            Self::NoReservation => "no_reservation",
+            Self::NonDurableLedger => "non_durable_ledger",
+            Self::UnknownUsage => "unknown_usage",
+            Self::Evidence(EvidenceError::UnresolvedObservation) => "unresolved_observation",
+            Self::Evidence(EvidenceError::Storage(_)) => "storage",
+            Self::Evidence(_) => "evidence",
+        }
+    }
+}
+
 #[derive(Debug)]
 #[must_use]
 pub enum Attempt {
@@ -78,6 +100,7 @@ impl PendingSettlement {
                     intent: t.intent.clone(),
                     usage: t.usage.clone(),
                     recorded: t.recorded,
+                    attempt: t.attempt.clone(),
                     back_leg: t.back_leg.clone(),
                 })
             }),
@@ -111,12 +134,22 @@ impl PendingSettlement {
                 intent,
                 usage,
                 recorded: false,
+                attempt: None,
                 back_leg: None,
             })),
         }
     }
     pub fn terminal_usage(&self) -> Option<&UsageV2> {
         self.tracked.as_ref().map(|tracked| &tracked.usage)
+    }
+    pub(crate) fn with_attempt_evidence(
+        mut self,
+        evidence: sandhi_store::ledger::evidence::AttemptEvidence,
+    ) -> Self {
+        if let Some(tracked) = self.tracked.as_mut() {
+            tracked.attempt = Some(Box::new(evidence));
+        }
+        self
     }
     /// None for legacy attempts. True means a record/replay succeeded on the
     /// original ledger, not that settlement committed or usage was independently verified.
@@ -191,15 +224,38 @@ impl PendingSettlement {
         let charge = self.charge;
         let result = with_durable_ledger(ledger, |durable| {
             if let Some(tracked) = tracked.as_mut() {
+                if tracked.back_leg.is_some()
+                    && durable
+                        .execution_back_leg_durable(
+                            &tracked.intent.reservation.scope,
+                            &tracked.intent.execution_id,
+                        )?
+                        .is_some()
+                {
+                    // A paired execution owns its back leg in storage. Caller RAM
+                    // cannot replace that binding or choose its settlement charge.
+                    return Err(EvidenceError::InvalidInput);
+                }
                 // Exact record replay is intentional, even after a previous recorded
                 // attempt: the current ledger must confirm identical retained evidence.
-                match durable.record_terminal_for_intent_durable(
-                    &tracked.intent,
-                    &tracked.usage,
-                    self.cache_read_bp,
-                ) {
+                let recorded = match &tracked.attempt {
+                    Some(attempt) => durable.record_terminal_with_attempt_for_intent_durable(
+                        &tracked.intent,
+                        &tracked.usage,
+                        self.cache_read_bp,
+                        attempt,
+                    ),
+                    None => durable.record_terminal_for_intent_durable(
+                        &tracked.intent,
+                        &tracked.usage,
+                        self.cache_read_bp,
+                    ),
+                };
+                match recorded {
                     Ok(_) => {
                         tracked.recorded = true;
+                        // Compatibility for older, unpaired library admissions only.
+                        // New HTTP admissions settle both legs canonically below.
                         // The terminal observation is durable, so the call's measured actual
                         // (0 when unmeasured) is final for the back leg. Settle it NOW, before
                         // the receipt: a primary that never commits (upstream error, missing or
@@ -367,6 +423,9 @@ impl PendingDispatch {
 }
 
 impl AuthorizedExecution {
+    pub fn attempt_id(&self) -> Option<&str> {
+        self._permit.attempt_id()
+    }
     pub fn request_id(&self) -> &str {
         &self.request_id
     }

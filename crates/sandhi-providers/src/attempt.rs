@@ -100,6 +100,8 @@ struct SharedAttemptContext {
     sender: SyncSender<AttemptObservation>,
     next_ordinal: AtomicU64,
     dropped: AtomicU64,
+    single_attempt_id: Option<String>,
+    qualified_stream: OnceLock<crate::raw::QualifiedStreamObservation>,
 }
 
 struct AttemptCancellation {
@@ -148,6 +150,8 @@ impl AttemptContext {
                     sender,
                     next_ordinal: AtomicU64::new(0),
                     dropped: AtomicU64::new(0),
+                    single_attempt_id: None,
+                    qualified_stream: OnceLock::new(),
                 }),
                 cancellation: Arc::new(AttemptCancellation {
                     reason: AtomicU8::new(CANCELLED),
@@ -158,10 +162,73 @@ impl AttemptContext {
         ))
     }
 
+    /// Bind one retry-free transport invocation to an already persisted attempt
+    /// identity. This is correlation, not a credential or dispatch permit. Reuse
+    /// is refused before constructing/polling another transport future.
+    pub fn single_attempt(
+        execution_id: impl Into<String>,
+        attempt_id: impl Into<String>,
+    ) -> Result<(Self, AttemptReceiver), AttemptContextError> {
+        let attempt_id = attempt_id.into();
+        if attempt_id.len() != 64
+            || !attempt_id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(AttemptContextError::InvalidAttemptId);
+        }
+        let (mut context, receiver) = Self::channel(execution_id, 2)?;
+        Arc::get_mut(&mut context.shared)
+            .expect("new private context")
+            .single_attempt_id = Some(attempt_id);
+        Ok((context, receiver))
+    }
+
+    pub(crate) fn begin_checked(
+        &self,
+        provider: &str,
+        model: Option<&str>,
+    ) -> Result<Option<AttemptGuard>, ProviderError> {
+        let guard = self.begin(provider, model);
+        if guard.is_none() && self.shared.single_attempt_id.is_some() {
+            return Err(ProviderError::InvalidRequest(
+                "single physical-attempt context has already been consumed".into(),
+            ));
+        }
+        if guard.is_none() {
+            tracing::error!("physical-attempt ordinal exhausted; observation disabled for call");
+        }
+        Ok(guard)
+    }
+
     /// Observations dropped because the bounded channel was full or disconnected.
     #[must_use]
     pub fn dropped_observations(&self) -> u64 {
         self.shared.dropped.load(Ordering::Relaxed)
+    }
+
+    /// Gateway dispatches observed by this context, distinct from authorized
+    /// attempt slots or provider execution/billing. Counts do not authorize settlement.
+    pub fn dispatch_count(&self) -> u64 {
+        self.shared.next_ordinal.load(Ordering::Relaxed)
+    }
+
+    /// Source-qualified evidence survives decoder errors and stream drop. Only
+    /// the built-in physical transport can attach it, once, to a tracked attempt.
+    pub fn qualified_stream_evidence(&self) -> Option<crate::raw::QualifiedStreamEvidence> {
+        self.shared
+            .qualified_stream
+            .get()
+            .map(|observed| observed.evidence())
+    }
+
+    pub(crate) fn attach_qualified_stream(
+        &self,
+        observation: crate::raw::QualifiedStreamObservation,
+    ) {
+        if self.shared.single_attempt_id.is_some() {
+            let _ = self.shared.qualified_stream.set(observation);
+        }
     }
 
     /// Give one retry/setup future an independent cancellation reason while retaining execution
@@ -192,17 +259,28 @@ impl AttemptContext {
     }
 
     pub(crate) fn begin(&self, provider: &str, model: Option<&str>) -> Option<AttemptGuard> {
-        let ordinal = self
-            .shared
-            .next_ordinal
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                current.checked_add(1)
-            })
-            .ok()?
-            .saturating_add(1);
+        let ordinal = if self.shared.single_attempt_id.is_some() {
+            self.shared
+                .next_ordinal
+                .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
+                .ok()?;
+            1
+        } else {
+            self.shared
+                .next_ordinal
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    current.checked_add(1)
+                })
+                .ok()?
+                .saturating_add(1)
+        };
         let provider = bounded_label(provider, MAX_PROVIDER_BYTES);
         let model = model.map(|value| bounded_label(value, MAX_MODEL_BYTES));
-        let attempt_id = format!("att_{}_{ordinal:016x}", hex(&self.shared.nonce));
+        let attempt_id = self
+            .shared
+            .single_attempt_id
+            .clone()
+            .unwrap_or_else(|| format!("att_{}_{ordinal:016x}", hex(&self.shared.nonce)));
         let guard = AttemptGuard {
             context: self.clone(),
             attempt_id,
@@ -221,6 +299,7 @@ impl AttemptContext {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttemptContextError {
     InvalidExecutionId,
+    InvalidAttemptId,
     InvalidCapacity,
     EntropyUnavailable,
 }
@@ -229,6 +308,7 @@ impl fmt::Display for AttemptContextError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidExecutionId => write!(f, "invalid attempt execution id"),
+            Self::InvalidAttemptId => write!(f, "invalid persisted attempt id"),
             Self::InvalidCapacity => write!(f, "attempt channel capacity must be 1..=65536"),
             Self::EntropyUnavailable => write!(f, "attempt id entropy unavailable"),
         }
@@ -314,25 +394,20 @@ impl AttemptGuard {
         }
     }
 
-    /// Complete the opt-in qualified stream without downgrading an observed
-    /// request-total measurement when delivery fails. Qualification errors remain
-    /// on the stream snapshot; diagnostic events alone cannot authorize settlement.
+    /// Complete the opt-in stream with its canonical measurement completeness.
+    /// Delivery failure and measurement completeness remain independent facts.
     pub(crate) fn finish_qualified_stream(
         &mut self,
         outcome: AttemptOutcome,
-        usage: Option<ParsedUsage>,
+        usage: Option<&sandhi_core::UsageV2>,
     ) {
         let (status, request_id) = self.response_values();
         self.finish(
             outcome,
             status,
             request_id,
-            usage,
-            if usage.is_some() {
-                UsageCompleteness::Final
-            } else {
-                UsageCompleteness::Unavailable
-            },
+            usage.map(Into::into),
+            usage.map_or(UsageCompleteness::Unavailable, |usage| usage.completeness),
         );
     }
 
@@ -459,12 +534,13 @@ where
     F: std::future::Future<Output = Result<(T, Option<ParsedUsage>), ProviderError>>,
 {
     let facts = AttemptResponseFacts::default();
+    let guard = context
+        .as_ref()
+        .map(|context| context.begin_checked(provider, model))
+        .transpose()?
+        .flatten();
     let future = make_future(facts.clone());
-    let Some(context) = context else {
-        return future.await.map(|(response, _)| response);
-    };
-    let Some(mut guard) = context.begin(provider, model) else {
-        tracing::error!("physical-attempt ordinal exhausted; observation disabled for call");
+    let Some(mut guard) = guard else {
         return future.await.map(|(response, _)| response);
     };
     guard.set_response_facts(&facts);
@@ -513,12 +589,13 @@ where
     F: std::future::Future<Output = Result<ByteStream, ProviderError>>,
 {
     let facts = AttemptResponseFacts::default();
+    let guard = context
+        .as_ref()
+        .map(|context| context.begin_checked(provider, model))
+        .transpose()?
+        .flatten();
     let future = make_future(facts.clone());
-    let Some(context) = context else {
-        return future.await;
-    };
-    let Some(mut guard) = context.begin(provider, model) else {
-        tracing::error!("physical-attempt ordinal exhausted; observation disabled for call");
+    let Some(mut guard) = guard else {
         return future.await;
     };
     guard.set_response_facts(&facts);
@@ -534,6 +611,61 @@ where
 struct ObservedStream {
     inner: ByteStream,
     guard: Option<AttemptGuard>,
+}
+
+/// One guard at the actual HTTP response boundary; usage comes from the strict
+/// complete-event observer, independently of the typed decoder or diagnostics.
+pub(crate) async fn observe_qualified_stream<Make, F>(
+    context: Option<AttemptContext>,
+    provider: &str,
+    model: Option<&str>,
+    endpoint: sandhi_core::EndpointFamilyV1,
+    make_future: Make,
+) -> Result<crate::QualifiedProviderStream, ProviderError>
+where
+    Make: FnOnce(AttemptResponseFacts) -> F,
+    F: std::future::Future<
+        Output = Result<(crate::raw::RawChunkStream, Option<String>), ProviderError>,
+    >,
+{
+    let facts = AttemptResponseFacts::default();
+    let mut guard = context
+        .as_ref()
+        .map(|context| context.begin_checked(provider, model))
+        .transpose()?
+        .flatten();
+    if let Some(guard) = &mut guard {
+        guard.set_response_facts(&facts);
+    }
+    let (raw, request_id) = match make_future(facts).await {
+        Ok(response) => response,
+        Err(error) => {
+            if let Some(guard) = &mut guard {
+                guard.finish_error(&error);
+            }
+            return Err(error);
+        }
+    };
+    let (raw, observation) =
+        crate::raw::qualified_stream::observe_response(raw, guard, endpoint, request_id)
+            .expect("built-in qualified endpoint is supported");
+    if let Some(context) = context {
+        context.attach_qualified_stream(observation.clone());
+    }
+    use futures_util::StreamExt;
+    Ok(crate::QualifiedProviderStream {
+        stream: Box::pin(raw.map(|chunk| {
+            chunk.map(|data| StreamChunk {
+                data,
+                usage: None,
+                usage_running: None,
+                cache_read_observation: None,
+                attempts: 1,
+                terminal: false,
+            })
+        })),
+        observation,
+    })
 }
 
 impl Stream for ObservedStream {
@@ -598,7 +730,7 @@ fn validate_label(value: &str, max_bytes: usize) -> Result<(), ()> {
     Ok(())
 }
 
-fn bounded_label(value: &str, max_bytes: usize) -> String {
+pub(crate) fn bounded_label(value: &str, max_bytes: usize) -> String {
     let mut output = String::with_capacity(value.len().min(max_bytes));
     for character in value.chars() {
         let sanitized = if character.is_control() {
@@ -639,6 +771,42 @@ mod tests {
 
     fn context() -> (AttemptContext, AttemptReceiver) {
         AttemptContext::channel("exec_opaque", 16).unwrap()
+    }
+
+    #[tokio::test]
+    async fn single_attempt_reuse_refuses_before_constructing_any_transport_future() {
+        let id = "a".repeat(64);
+        let (context, receiver) = AttemptContext::single_attempt("execution", &id).unwrap();
+        observe_value(Some(context.fresh_call()), "provider", None, |_| async {
+            Ok(((), None))
+        })
+        .await
+        .unwrap();
+        let result = observe_value(Some(context.fresh_call()), "provider", None, |_| {
+            panic!("second transport future must never be constructed");
+            #[allow(unreachable_code)]
+            async {
+                Ok(((), None))
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(ProviderError::InvalidRequest(_))));
+        let result = observe_stream(Some(context.fresh_call()), "provider", None, |_| {
+            panic!("stream future must never be constructed after consuming a unary attempt");
+            #[allow(unreachable_code)]
+            async {
+                Ok(Box::pin(stream::empty()) as ByteStream)
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(ProviderError::InvalidRequest(_))));
+        let events = receiver.drain();
+        assert_eq!(events.len(), 2);
+        assert!(events
+            .iter()
+            .all(|e| e.attempt_id == id && e.attempt_ordinal == 1));
+        assert_eq!(context.dropped_observations(), 0);
+        assert!(AttemptContext::single_attempt("exec", "invalid").is_err());
     }
 
     #[tokio::test]
