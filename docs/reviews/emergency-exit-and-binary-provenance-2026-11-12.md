@@ -72,3 +72,19 @@ I/O completion or OS scheduling.
 The original accounting waits, Python signal exit and SDK timing occurrence remain
 open reliability/merge gates. No storage durability, settlement rule, inferred
 charge, accounting owner, provider retry or inference replay changed.
+
+## Public CI follow-up: nested dependency checkout
+
+The first public run of `3e3a3a7` passed twelve jobs, but its SDK job recorded
+366 passes, one failure, 208 fixture errors and one skip. The failure and errors
+share the same inventory assertion: CI creates `.inferflux-pinned/` as a nested
+Git checkout, which Git lists as a directory rather than traversing as outer
+untracked files. The fixture stopped before launching the affected gateway cases.
+This is failed qualification evidence, not a new process-shutdown diagnosis.
+
+The follow-up represents a nested repository by its HEAD and tracked-diff hash.
+Its files and untracked/generated contents remain explicitly outside the outer
+inventory. Embedded-checkout and tracked-gitlink regressions fail against the old
+helper and pass with this handling. The complete public SDK run still needs to
+validate that correction; the original failing run is retained in the
+[follow-up artifact](artifacts/nested-checkout-provenance-2026-11-12.json).

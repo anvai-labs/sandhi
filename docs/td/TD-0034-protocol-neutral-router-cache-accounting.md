@@ -1914,3 +1914,16 @@ An independent final-wheel Python investigation also retained 100 bounded debugg
 probes without reproducing the signal exit. Its
 [source-pinned evidence](../reviews/python-native-tls-exit-2026-11-12.md#final-wheel-bounded-debugger-follow-up)
 is non-reproduction, not a fix or clearance of that separate native-process gate.
+
+#### Public CI follow-up: nested checkout inventory
+
+The first M5w public SDK run was not green: 366 passed, one failed, 208 fixture
+errors and one skip. The affected cases share a pre-launch inventory assertion
+on CI's nested `.inferflux-pinned` Git checkout. The correction records nested
+HEAD/tracked-diff identity while explicitly excluding its content traversal.
+Two exact-old-helper reproductions fail; the corrected complete provenance
+selection passes eleven tests, and an existing real HTTP/TLS shutdown case passes
+with the same nested-checkout layout. The
+[retained failure and correction evidence](../reviews/artifacts/nested-checkout-provenance-2026-11-12.json)
+does not substitute for a corrected full public run or diagnose the earlier
+shutdown timing occurrence. No runtime accounting or inference semantics changed.

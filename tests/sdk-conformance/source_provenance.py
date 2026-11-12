@@ -44,6 +44,34 @@ def source_state(repo: Path) -> dict:
             )
         elif not path.exists():
             inputs.append({"path": relative, "kind": "deleted"})
+        elif path.is_dir():
+            # Git lists an embedded repository as one directory entry instead
+            # of traversing its files (the pinned CPU-origin checkout in CI).
+            # Its external/generated inputs are outside the outer inventory.
+            nested_root = Path(
+                _git(path, "rev-parse", "--show-toplevel").decode().strip()
+            )
+            assert (
+                nested_root.resolve() == path.resolve()
+            ), "non-file source is not a nested Git repository"
+            inputs.append(
+                {
+                    "path": relative,
+                    "kind": "nested_git_repository",
+                    "head": _git(path, "rev-parse", "HEAD").decode().strip(),
+                    "tracked_diff_sha256": hashlib.sha256(
+                        _git(
+                            path,
+                            "diff",
+                            "--no-ext-diff",
+                            "--no-textconv",
+                            "HEAD",
+                            "--binary",
+                        )
+                    ).hexdigest(),
+                    "contents_inventoried": False,
+                }
+            )
         else:
             raise AssertionError(
                 f"source inventory cannot fingerprint non-file: {relative}"
@@ -155,6 +183,7 @@ def build_metadata(repo: Path, command: list[str]) -> dict:
         "limits": [
             "Not a hermetic compiler input read-set or proof of a reproducible build.",
             "Git-ignored inputs, external dependency/generated inputs and directory symlink contents are not inventoried.",
+            "Nested Git repositories record HEAD and tracked-diff identity; their files and untracked inputs are not traversed.",
             "Arbitrary environment/config values are never recorded; extra flag values may be omitted.",
         ],
     }

@@ -149,3 +149,41 @@ def test_missing_or_ambiguous_binary_artifact_never_falls_back_to_stale_file(
         records.append(artifact)
     with pytest.raises(AssertionError, match="exactly one"):
         binary_artifact("\n".join(map(json.dumps, records)), "sandhi-proxy")
+
+
+@pytest.mark.parametrize("tracked", [False, True], ids=["embedded-checkout", "gitlink"])
+def test_nested_repository_has_explicit_identity_without_outer_file_inventory(
+    source_repo, tracked
+):
+    nested = source_repo / ".inferflux-pinned"
+    nested.mkdir()
+    git(nested, "init", "-q")
+    (nested / "README.md").write_text("synthetic external source")
+    git(nested, "add", "README.md")
+    git(nested, "commit", "-qm", "synthetic external baseline")
+    if tracked:
+        git(
+            source_repo,
+            "-c",
+            "advice.addEmbeddedRepo=false",
+            "add",
+            ".inferflux-pinned",
+        )
+        git(source_repo, "commit", "-qm", "synthetic pinned gitlink")
+    before = source_state(source_repo)
+    item = next(
+        row
+        for row in before["input_files"]
+        if row["path"].rstrip("/") == ".inferflux-pinned"
+    )
+    assert item["kind"] == "nested_git_repository"
+    assert item["head"] == git(nested, "rev-parse", "HEAD").decode().strip()
+    assert item["contents_inventoried"] is False
+    # External generated/untracked files are deliberately outside this inventory.
+    (nested / "generated.cache").write_text("synthetic external build output")
+    assert_unchanged(before, source_state(source_repo))
+    (nested / "README.md").write_text("changed external tracked source")
+    with pytest.raises(
+        AssertionError, match="(tracked diff|source input contents) changed"
+    ):
+        assert_unchanged(before, source_state(source_repo))
