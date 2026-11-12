@@ -1628,3 +1628,20 @@ blind retry or deadline increase was used. The
 [public failure report](../reviews/public-ci-admission-timeout-2026-11-12.md)
 retains structural evidence without inventing origin/receipt joins. This is an
 additional reliability observation, not proof of the earlier local failures' cause.
+
+The corrected `e728102` code checkpoint passes the final full current-SDK suite:
+549 passed, three optional skips, including real dashboard and CI-pinned CPU
+origin. All six gateway fixture copies share the frozen binary hash recorded in
+ADR 0035. Independent exact-tip re-review cleared the three findings and passed
+five parser units, three encoder units and 22 provider HTTP cases. All nine proxy
+stream tests and ten focused SDK accumulation/refusal cases pass; the new Chat
+proxy matrix covers 88 calls. The earlier workspace snapshot passed 1,178 tests
+with six opt-in ignored across 50 suites; subsequent fixes have focused regression
+evidence and default/ONNX Clippy. This does not erase the public reliability gate.
+
+The [credential audit](../reviews/credential-audit-2026-11-12.md) separates zero
+configured-value matches from seven generic full-history findings independently
+classified as CSS hashes, intentional TLS test keys and documented auth examples.
+No provider credential leak was identified; no suppressions or history rewrite
+were used. Broader Responses-source interim state and accounting-wait diagnostics
+remain the next work.

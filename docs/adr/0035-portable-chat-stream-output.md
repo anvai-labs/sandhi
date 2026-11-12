@@ -98,3 +98,21 @@ Actual HTTP drift cases and committed-method retention regressions cover these
 findings. The rejected tip received no clean review record. The source observer's
 broader Chat identity policy is not changed; this portable decoder refuses the
 contradictory output while retaining physical source usage evidence.
+
+The frozen corrected code checkpoint `e728102` passes the full current-SDK suite:
+**549 passed, three optional skips**, in 590.06 seconds. It includes real Playwright
+dashboard and the CI-pinned CPU origin. All six copied gateway fixtures match the
+active binary SHA-256
+`204452d976f8a860bd5fd062ca59a5d635467e0b75cf58bf4fd6261b8132d7dd`.
+Independent exact-commit re-review cleared all three findings and passed five
+Chat parser units, three Responses encoder units and 22 provider HTTP cases.
+
+The earlier full workspace snapshot passed 1,178 tests with six opt-in ignored
+across 50 suites. After review fixes, all nine proxy stream tests pass, including
+88 new Chat delivery cells; the ten focused SDK cases pass, including four
+default-SDK identity-drift refusals. Source completion remains successful and
+measured even when client output refuses. Default/ONNX all-target Clippy, formatting,
+strict documentation and generated bindings checks pass. The refreshed checkpoint
+still needs its own public CI; the retained public admission timeout remains an
+open merge/reliability gate. No new live provider or subscription acceptance is
+claimed by these synthetic tests.
