@@ -1,5 +1,6 @@
 //! Prepared admission inputs and inert recovery evidence. No HTTP activation.
-use super::{with_durable_ledger, Failure, PendingDispatch};
+use super::diagnostics::{mark, Progress, Stage};
+use super::{with_durable_ledger_observed, Failure, PendingDispatch};
 use crate::{lifecycle::Lifecycle, ProxyLedger};
 use sandhi_core::Denied;
 use sandhi_store::ledger::evidence::{EvidenceError, IntentAdmission};
@@ -71,14 +72,23 @@ impl PreparedAdmission {
         ledger: &Mutex<ProxyLedger>,
         lifecycle: &Lifecycle,
     ) -> AdmissionOutcome {
+        self.run_observed(ledger, lifecycle, None)
+    }
+    pub(super) fn run_observed(
+        self,
+        ledger: &Mutex<ProxyLedger>,
+        lifecycle: &Lifecycle,
+        progress: Option<&Progress>,
+    ) -> AdmissionOutcome {
         let evidence = self.evidence;
-        let result = with_durable_ledger(ledger, |store| {
+        let result = with_durable_ledger_observed(ledger, progress, |store| {
             // This check follows acquisition of the outer ledger lock. An inner
             // shard/SQLite wait may still cross cutoff: retain that late Prepared
             // result, never authorize or dispatch here.
             if !lifecycle.is_running() {
                 return Ok(None);
             }
+            mark(progress, Stage::ReserveCall);
             let admission = if let Some(context) = &evidence.context {
                 store.reserve_paired_contextual_durable(
                     &evidence.scope,

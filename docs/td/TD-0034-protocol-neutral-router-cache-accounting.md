@@ -1754,3 +1754,27 @@ source counts, correlation limits and the unchanged safety behavior. This narrow
 these occurrences beyond queueing but does not identify the internal ledger,
 backoff, I/O or scheduling cause. The failed run remains a merge/reliability gate;
 no blind retry or larger deadline replaces this evidence.
+
+Stable Responses source `eec5eaa` completed full current-SDK qualification:
+564 passed and three optional skips, including real dashboard and pinned CPU
+origin. Six distinct binary copies plus their alias have one frozen hash, recorded
+in ADR 0037's artifact. The two terminal-wait failures remain unresolved; a passing
+SDK run does not establish their cause or release their liabilities.
+
+### Owned ledger call and backoff observations
+
+The retained running-worker failures lack internal call evidence. A bounded
+private progress record now shares each existing owned job's lifetime and clock.
+It observes outer try-lock, admission/authorization/closure, terminal recording
+and receipt call boundaries, work-call counts, known outer-lock busy returns and
+existing retry-sleep wall time. No diagnostic value enters authority, deadlines,
+retry predicates, durable evidence, usage counters or liability decisions.
+Public library method signatures and generic-job behavior remain compatible.
+
+The [operator guide](../operator/accounting-wait-diagnostics.md) distinguishes
+unobserved generic jobs, call-entry markers and actual commit proof. Controlled
+outer-lock and SQLite-writer cases verify warning fields, cancelled-waiter
+ownership and one original settlement each. The actual database joins are
+exported with explicit synthetic/unpaired scope; there is no provider inference
+in those fixtures. Existing 24 job tests pass. New markers are intended to narrow
+the next spontaneous failure, not declare the retained failures resolved.

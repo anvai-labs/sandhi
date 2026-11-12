@@ -4,6 +4,7 @@ use std::time::Instant;
 
 pub(super) struct Timing {
     submitted: Instant,
+    pub(super) progress: super::super::diagnostics::Progress,
     started: AtomicU64,
     returned: AtomicU64,
     published: AtomicU64,
@@ -28,8 +29,10 @@ impl Timing {
             .map(|elapsed| elapsed.as_micros().min(u128::from(u64::MAX - 1)) as u64)
     }
     pub(super) fn new() -> Self {
+        let submitted = Instant::now();
         Self {
-            submitted: Instant::now(),
+            submitted,
+            progress: super::super::diagnostics::Progress::new(submitted),
             started: AtomicU64::new(0),
             returned: AtomicU64::new(0),
             published: AtomicU64::new(0),

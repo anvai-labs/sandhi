@@ -14,6 +14,8 @@ use sandhi_store::ledger::evidence::{
 use sandhi_store::ShardedLedger;
 use std::sync::Mutex;
 
+mod diagnostics;
+use diagnostics::{mark, Progress, Stage};
 pub mod admission;
 mod attempts;
 mod context;
@@ -204,7 +206,14 @@ impl PendingSettlement {
     /// An unresolved result owns the unchanged usage and must be retained.
     /// Always use the original ledger and unchanged topology. Scope matching is
     /// not caller authorization; request IDs are caller metadata, not execution IDs.
-    pub fn try_commit(mut self, ledger: &Mutex<ProxyLedger>) -> Attempt {
+    pub fn try_commit(self, ledger: &Mutex<ProxyLedger>) -> Attempt {
+        self.try_commit_observed(ledger, None)
+    }
+    fn try_commit_observed(
+        mut self,
+        ledger: &Mutex<ProxyLedger>,
+        progress: Option<&Progress>,
+    ) -> Attempt {
         if self.tracked.is_none() {
             if self.charge.is_none() {
                 return Attempt::Unresolved {
@@ -222,8 +231,11 @@ impl PendingSettlement {
         let tracked = &mut self.tracked;
         let reservation = &self.reservation;
         let charge = self.charge;
-        let result = with_durable_ledger(ledger, |durable| {
+        let result = with_durable_ledger_observed(ledger, progress, |durable| {
             if let Some(tracked) = tracked.as_mut() {
+                if tracked.back_leg.is_some() {
+                    mark(progress, Stage::BackLegLookupCall);
+                }
                 if tracked.back_leg.is_some()
                     && durable
                         .execution_back_leg_durable(
@@ -238,6 +250,7 @@ impl PendingSettlement {
                 }
                 // Exact record replay is intentional, even after a previous recorded
                 // attempt: the current ledger must confirm identical retained evidence.
+                mark(progress, Stage::RecordTerminalCall);
                 let recorded = match &tracked.attempt {
                     Some(attempt) => durable.record_terminal_with_attempt_for_intent_durable(
                         &tracked.intent,
@@ -264,6 +277,7 @@ impl PendingSettlement {
                         // Idempotent by lease id (`settled=0` guard), so retained replays are
                         // no-ops; a failure never undoes the primary and leaves the lease to TTL.
                         if let Some((back, actual)) = &tracked.back_leg {
+                            mark(progress, Stage::CompatibilityBackLegCall);
                             if let Err(error) =
                                 durable.settle_durable(&back.scope, back.id, *actual)
                             {
@@ -275,6 +289,7 @@ impl PendingSettlement {
                                 );
                             }
                         }
+                        mark(progress, Stage::SettleReceiptCall);
                         durable.settle_terminal_durable(
                             &tracked.intent.reservation.scope,
                             &tracked.intent.execution_id,
@@ -285,6 +300,7 @@ impl PendingSettlement {
                 }
             } else {
                 let reservation = reservation.as_ref().expect("legacy reservation checked");
+                mark(progress, Stage::LegacySettleCall);
                 durable.settle_with_evidence_durable(
                     &reservation.scope,
                     reservation.id,
@@ -311,6 +327,14 @@ fn with_durable_ledger<T>(
     ledger: &Mutex<ProxyLedger>,
     operation: impl FnOnce(&ShardedLedger) -> Result<T, EvidenceError>,
 ) -> Result<T, Failure> {
+    with_durable_ledger_observed(ledger, None, operation)
+}
+fn with_durable_ledger_observed<T>(
+    ledger: &Mutex<ProxyLedger>,
+    progress: Option<&Progress>,
+    operation: impl FnOnce(&ShardedLedger) -> Result<T, EvidenceError>,
+) -> Result<T, Failure> {
+    mark(progress, Stage::OuterTryLock);
     let guard = ledger.try_lock().map_err(|error| match error {
         std::sync::TryLockError::WouldBlock => Failure::LedgerBusy,
         std::sync::TryLockError::Poisoned(_) => Failure::LedgerPoisoned,
@@ -318,6 +342,7 @@ fn with_durable_ledger<T>(
     let ProxyLedger::Durable(durable) = &*guard else {
         return Err(Failure::NonDurableLedger);
     };
+    mark(progress, Stage::LedgerReady);
     operation(durable).map_err(Failure::Evidence)
 }
 
@@ -376,7 +401,15 @@ impl PendingDispatch {
     /// Only a first committed authorization returns an AuthorizedExecution.
     /// Errors retain the unchanged owner. Replays are uncertain, never a send retry.
     pub fn try_authorize(self, ledger: &Mutex<ProxyLedger>) -> DispatchAttempt {
-        match with_durable_ledger(ledger, |durable| {
+        self.try_authorize_observed(ledger, None)
+    }
+    fn try_authorize_observed(
+        self,
+        ledger: &Mutex<ProxyLedger>,
+        progress: Option<&Progress>,
+    ) -> DispatchAttempt {
+        match with_durable_ledger_observed(ledger, progress, |durable| {
+            mark(progress, Stage::AuthorizeCall);
             durable.authorize_dispatch_for_intent_durable(&self.intent)
         }) {
             Ok(DispatchOutcome::Authorized(permit)) => {
@@ -402,7 +435,15 @@ impl PendingDispatch {
 
     /// Close only proven never-authorized admission; never legacy settle(0).
     pub fn try_close(self, ledger: &Mutex<ProxyLedger>) -> DispatchAttempt {
-        match with_durable_ledger(ledger, |durable| {
+        self.try_close_observed(ledger, None)
+    }
+    fn try_close_observed(
+        self,
+        ledger: &Mutex<ProxyLedger>,
+        progress: Option<&Progress>,
+    ) -> DispatchAttempt {
+        match with_durable_ledger_observed(ledger, progress, |durable| {
+            mark(progress, Stage::CloseCall);
             durable.close_before_dispatch_for_intent_durable(&self.intent)
         }) {
             Ok(ClosureOutcome::Closed(closure) | ClosureOutcome::AlreadyClosed(closure)) => {

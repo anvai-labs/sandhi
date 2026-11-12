@@ -1,6 +1,8 @@
 # ADR 0037: Preserve Responses source output before translating delivery
 
-Status: implemented locally; exact-tip review and public CI are checkpoint gates.
+Status: implemented. Reviewed source `eec5eaa` / documentation tip `550b2fa`
+passes public CI and full current-SDK qualification. Two retained local accounting
+wait failures remain a separate reliability/merge gate.
 
 ## Problem and decision
 
@@ -111,7 +113,8 @@ refuses before storage. The rejected candidate has no clean review record.
 
 The pre-review full SDK run was intentionally interrupted after source fixes:
 248 passed and two skipped; it is partial evidence and cannot qualify the final
-source snapshot. The final-source suite and exact-tip re-review remain required.
+source snapshot. The partial run was excluded from final qualification; the completed run is recorded
+below.
 
 Protocol references:
 [Responses streaming events](https://developers.openai.com/api/reference/resources/responses/streaming-events),
@@ -133,4 +136,18 @@ focused matrices: 40 Responses, 26 Chat and 48 Codex HTTP cases. The verdict is
 clean for the fidelity/security increment. It explicitly retains the two
 accounting-terminal failures as an unresolved reliability/merge gate and does
 not imply green CI or merge approval. Default and ONNX/SentinelPass Clippy and
-strict documentation pass. Full final-source SDK qualification remains running.
+strict documentation pass. The completed final-source SDK result is recorded below.
+
+The stable final-source full SDK run completed: **564 passed, three optional
+skips** in 744.37 seconds, including the served dashboard and pinned CPU origin.
+Six distinct gateway fixture copies and their current alias share binary SHA-256
+`79583541e09ddde0c44c9837c02723a2ddc97487b225dc1e94041194c35eeeca`.
+The [sanitized artifact](../reviews/artifacts/provider-sdk-responses-fidelity-2026-11-12.json)
+records source/harness scope and limits. This passing suite does not erase the
+separate failed Rust accounting run or qualify a live subscription issuer.
+
+[Public CI for `550b2fa`](https://github.com/anvai-labs/sandhi/actions/runs/43233149595)
+completed successfully: all fourteen jobs, including the aggregate, passed on
+verified GitHub-hosted Ubuntu runners. Documentation passed. The obsolete base
+mirror had zero jobs and was cancelled. These results do not resolve the retained
+local accounting failures or close broader goal qualification.

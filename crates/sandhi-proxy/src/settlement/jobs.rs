@@ -18,10 +18,20 @@ mod timing;
 // Only LedgerBusy proves that the outer lock was never acquired and no SQL ran.
 // Retry that accounting work within one existing wait budget; never retry storage
 // ambiguity, reconstruct a permit, change evidence, or execute inference here.
+#[cfg(test)]
 fn run_owned(
+    input: Input,
+    lifecycle: &Lifecycle,
+    until: Option<std::time::Instant>,
+    run: impl FnMut(Input) -> ResultValue,
+) -> ResultValue {
+    run_owned_observed(input, lifecycle, until, None, run)
+}
+fn run_owned_observed(
     mut input: Input,
     lifecycle: &Lifecycle,
     until: Option<std::time::Instant>,
+    progress: Option<&super::diagnostics::Progress>,
     mut run: impl FnMut(Input) -> ResultValue,
 ) -> ResultValue {
     let mut delay = std::time::Duration::from_millis(1);
@@ -31,17 +41,10 @@ fn run_owned(
             &input,
             Input::Admission(_) | Input::Work(Work::Authorize(_))
         );
-        let outcome = run(input);
-        let Some(until) = until else {
-            return outcome;
-        };
-        let now = std::time::Instant::now();
-        let remaining = until
-            .saturating_duration_since(now)
-            .min(lifecycle.remaining().unwrap_or(std::time::Duration::MAX));
-        if remaining.is_zero() || (dispatching && !lifecycle.is_running()) {
-            return outcome;
+        if let Some(progress) = progress {
+            progress.call();
         }
+        let outcome = run(input);
         let busy = matches!(
             &outcome,
             ResultValue::Admission(AdmissionOutcome::Failed {
@@ -55,10 +58,29 @@ fn run_owned(
                 ..
             }))
         );
+        if let Some(progress) = progress {
+            progress.returned(busy);
+        }
+        let Some(until) = until else {
+            return outcome;
+        };
+        let now = std::time::Instant::now();
+        let remaining = until
+            .saturating_duration_since(now)
+            .min(lifecycle.remaining().unwrap_or(std::time::Duration::MAX));
+        if remaining.is_zero() || (dispatching && !lifecycle.is_running()) {
+            return outcome;
+        }
         if !busy {
             return outcome;
         }
+        if let Some(progress) = progress {
+            progress.begin_backoff();
+        }
         std::thread::sleep(delay.min(remaining));
+        if let Some(progress) = progress {
+            progress.end_backoff();
+        }
         if std::time::Instant::now() >= until
             || lifecycle.remaining().is_some_and(|left| left.is_zero())
             || (dispatching && !lifecycle.is_running())
@@ -110,10 +132,17 @@ impl Work {
         }
     }
     fn run(self, ledger: &Mutex<ProxyLedger>) -> Outcome {
+        self.run_observed(ledger, None)
+    }
+    fn run_observed(
+        self,
+        ledger: &Mutex<ProxyLedger>,
+        progress: Option<&super::diagnostics::Progress>,
+    ) -> Outcome {
         match self {
-            Self::Authorize(p) => Outcome::Dispatch(p.try_authorize(ledger)),
-            Self::Close(p) => Outcome::Dispatch(p.try_close(ledger)),
-            Self::Settle(p) => Outcome::Settlement(p.try_commit(ledger)),
+            Self::Authorize(p) => Outcome::Dispatch(p.try_authorize_observed(ledger, progress)),
+            Self::Close(p) => Outcome::Dispatch(p.try_close_observed(ledger, progress)),
+            Self::Settle(p) => Outcome::Settlement(p.try_commit_observed(ledger, progress)),
         }
     }
 }
@@ -566,16 +595,28 @@ impl Obligation {
         let _task = runtime.spawn_blocking(move || {
             worker.timing.start();
             if let Ok(outcome) = catch_unwind(AssertUnwindSafe(|| {
-                run_owned(input, &lifecycle, until, |input| {
-                    ledger
-                        .with(|ledger| match input {
-                            Input::Work(work) => ResultValue::Work(work.run(ledger)),
-                            Input::Admission(input) => {
-                                ResultValue::Admission(input.run(ledger, &lifecycle))
-                            }
-                        })
-                        .expect("owned proxy state")
-                })
+                run_owned_observed(
+                    input,
+                    &lifecycle,
+                    until,
+                    Some(&worker.timing.progress),
+                    |input| {
+                        ledger
+                            .with(|ledger| match input {
+                                Input::Work(work) => ResultValue::Work(
+                                    work.run_observed(ledger, Some(&worker.timing.progress)),
+                                ),
+                                Input::Admission(input) => {
+                                    ResultValue::Admission(input.run_observed(
+                                        ledger,
+                                        &lifecycle,
+                                        Some(&worker.timing.progress),
+                                    ))
+                                }
+                            })
+                            .expect("owned proxy state")
+                    },
+                )
             })) {
                 worker.finish(outcome);
             }
@@ -1047,6 +1088,7 @@ impl Ticket {
         started: std::time::Instant,
     ) {
         let timing = self.timing.snapshot();
+        let ledger = self.timing.progress.snapshot();
         tracing::warn!(
             request_id, transition, reason = "wait_timeout",
             wait_ms = wait.as_millis().min(u128::from(u64::MAX)) as u64,
@@ -1056,6 +1098,9 @@ impl Ticket {
             queue_us = timing.queue_us, run_us = ?timing.run_us,
             publication_us = ?timing.publication_us, published_at_us = ?timing.published_at_us,
             interrupted = timing.interrupted,
+            ledger_stage = ledger.stage, ledger_stage_us = ?ledger.stage_us,
+            ledger_calls = ledger.calls, ledger_busy_returns = ledger.busy_returns,
+            ledger_backoff_us = ledger.backoff_us,
             readiness = self.readiness(), "tracked accounting wait unresolved"
         );
     }
@@ -1093,6 +1138,205 @@ mod tests {
     use sandhi_store::ledger::evidence::ExecutionIntent;
     use std::time::Duration;
     use time::OffsetDateTime;
+
+    #[derive(Clone)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+        type Writer = Self;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // Deliberately hold the real outer mutex in one controlled case.
+    async fn diagnostics_distinguish_known_busy_backoff_from_a_sqlite_writer_wait() {
+        for block in ["outer_mutex", "sqlite_writer"] {
+            let (dir, jobs, mut obligation, pending) = prepared_obligation().await;
+            obligation.retry_wait = Some(Duration::from_secs(5));
+            let authorization = obligation.submit(Work::Authorize(pending)).unwrap();
+            authorization.wait().await;
+            let Some(Outcome::Dispatch(DispatchAttempt::Authorized(execution))) =
+                authorization.take()
+            else {
+                panic!("authorization");
+            };
+            let reservation_id = i64::try_from(execution.intent().reservation.id).unwrap();
+            let execution_id = execution.intent().execution_id.clone();
+            let pending = execution.into_settlement(UsageV2 {
+                tokens_in: 3,
+                completeness: UsageCompleteness::Final,
+                ..Default::default()
+            });
+            let LedgerAccess::Shared(ledger) = &jobs.ledger else {
+                panic!("fixture");
+            };
+            let guard = (block == "outer_mutex").then(|| ledger.lock().unwrap());
+            let connection = rusqlite::Connection::open(dir.path().join("owned.db")).unwrap();
+            if block == "sqlite_writer" {
+                connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+            }
+            let ticket = obligation.submit(Work::Settle(pending)).unwrap();
+            let observed = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let progress = ticket.timing.progress.snapshot();
+                    if progress.stage
+                        == if block == "outer_mutex" {
+                            "known_busy_backoff"
+                        } else {
+                            "record_terminal_call"
+                        }
+                    {
+                        break progress;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(ticket.timing.snapshot().stage, "running");
+            let wait_started = std::time::Instant::now();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), ticket.wait())
+                    .await
+                    .is_err()
+            );
+            assert!(ticket.take().is_none());
+            assert_eq!(jobs.retained(), 1);
+            assert_eq!(
+                connection
+                    .query_row("SELECT count(*) FROM budget_settlement_outbox", [], |r| r
+                        .get::<_, i64>(
+                        0
+                    ))
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT count(*) FROM budget_terminal_observation",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT settled FROM budget_reservation WHERE id=?1",
+                        [reservation_id],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                0
+            );
+            let waiting = ticket.timing.progress.snapshot();
+            if block == "outer_mutex" {
+                assert!(observed.busy_returns > 0 && waiting.backoff_us > 0);
+            } else {
+                assert_eq!(waiting.calls, 1);
+                assert_eq!(waiting.busy_returns, 0);
+                assert_eq!(waiting.backoff_us, 0);
+                assert_eq!(waiting.stage, "record_terminal_call");
+            }
+            let captured = Captured(Arc::new(Mutex::new(Vec::new())));
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .without_time()
+                .with_writer(captured.clone())
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                ticket.warn_timeout(
+                    block,
+                    "terminal_settlement",
+                    Duration::from_millis(10),
+                    wait_started,
+                )
+            });
+            let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+            assert_eq!(log.lines().count(), 1);
+            for field in [
+                block,
+                "terminal_settlement",
+                "ledger_stage=",
+                "ledger_stage_us=",
+                "ledger_calls=",
+                "ledger_busy_returns=",
+                "ledger_backoff_us=",
+            ] {
+                assert!(log.contains(field), "{field}: {log}");
+            }
+            if block == "sqlite_writer" {
+                for field in [
+                    "record_terminal_call",
+                    "ledger_calls=1",
+                    "ledger_busy_returns=0",
+                    "ledger_backoff_us=0",
+                ] {
+                    assert!(log.contains(field), "{field}: {log}");
+                }
+            }
+            if block == "sqlite_writer" {
+                connection.execute_batch("ROLLBACK").unwrap();
+            }
+            drop(guard);
+            tokio::time::timeout(Duration::from_secs(5), ticket.wait())
+                .await
+                .unwrap();
+            let completed = ticket.timing.progress.snapshot();
+            assert!(matches!(
+                ticket.take(),
+                Some(Outcome::Settlement(Attempt::Committed { .. }))
+            ));
+            assert!(ticket.take().is_none());
+            assert_eq!(completed.stage, "work_returned");
+            assert_eq!(completed.calls, completed.busy_returns + 1);
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT o.charged_tokens FROM budget_settlement_outbox o JOIN budget_execution_intent i USING(reservation_id) WHERE i.execution_id=?1",
+                        [&execution_id],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                3
+            );
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT settled,actual FROM budget_reservation WHERE id=?1",
+                        [reservation_id],
+                        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+                    )
+                    .unwrap(),
+                (1, 3)
+            );
+            let joined: (String,i64,String,i64,i64,i64)=connection.query_row(
+                "SELECT i.execution_id,i.reservation_id,o.receipt_id,o.charged_tokens,r.settled,r.actual FROM budget_execution_intent i JOIN budget_settlement_outbox o USING(reservation_id) JOIN budget_reservation r ON r.id=i.reservation_id WHERE i.execution_id=?1",
+                [&execution_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))
+            ).unwrap();
+            assert_eq!(joined.0, execution_id);
+            assert_eq!(joined.1, reservation_id);
+            assert_eq!((joined.3, joined.4, joined.5), (3, 1, 3));
+            println!(
+                "ledger_wait_evidence={}",
+                serde_json::json!({"block":block,"observed_stage":observed.stage,"waiting_stage":waiting.stage,"ledger_calls":waiting.calls,"ledger_busy_returns":waiting.busy_returns,"ledger_backoff_us":waiting.backoff_us,"completed_calls":completed.calls,"completed_busy_returns":completed.busy_returns,"receipt_count":1,"settled_actual":3,"waiter_cancelled_without_consuming":true,"durable_join":{"execution_id":joined.0,"reservation_id":joined.1,"receipt_id":joined.2,"charged_tokens":joined.3,"settled":joined.4,"actual":joined.5}})
+            );
+            drop(obligation);
+            assert_eq!(jobs.retained(), 0);
+        }
+    }
 
     #[test]
     fn diagnostics_distinguish_pool_queue_from_execution_without_consuming_admission() {
@@ -1152,23 +1396,6 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // Hold the registry only to observe blocked publication.
     async fn diagnostics_distinguish_running_work_from_blocked_publication() {
-        #[derive(Clone)]
-        struct Captured(Arc<Mutex<Vec<u8>>>);
-        impl std::io::Write for Captured {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(bytes);
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
-            type Writer = Self;
-            fn make_writer(&'a self) -> Self::Writer {
-                self.clone()
-            }
-        }
         let dir = tempfile::tempdir().unwrap();
         let lifecycle = Arc::new(Lifecycle::new());
         let ledger = Arc::new(Mutex::new(
@@ -1237,6 +1464,12 @@ mod tests {
             "wait_elapsed_us=",
             "readiness=",
             "registry_busy",
+            "ledger_stage=",
+            "unobserved",
+            "ledger_stage_us=None",
+            "ledger_calls=0",
+            "ledger_busy_returns=0",
+            "ledger_backoff_us=0",
         ] {
             assert!(log.contains(expected), "missing {expected}: {log}");
         }
