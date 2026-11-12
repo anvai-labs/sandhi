@@ -97,6 +97,14 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ### Fixed
 
+- Structured Chat file references now require compatible, established backend
+  affinity. Constrained Codex refuses unresolved resources before admission.
+  Non-text Responses tool outputs retain their native shape on Responses backends
+  and refuse cross-protocol translation until a faithful projection is supported.
+- Tracked accounting failures now send `x-should-retry: false`. OpenAI and
+  Anthropic SDKs otherwise retry a 502 with their default settings even when its
+  JSON body says not to retry. Default-retry SDK tests verify one model dispatch
+  for missing usage and receipt failure, plus accounting-only restart recovery.
 - All ingress protocols reject duplicate JSON keys before reservation or native
   forwarding, avoiding differing model/content interpretations at the origin.
 - Private actual-credential binding fences compiled cache plans, version 2 scoped

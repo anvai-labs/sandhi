@@ -146,6 +146,15 @@ settlement an opportunity, not a guarantee against SQLite contention.
 The client may not receive completed model output when accounting is unresolved.
 A 502 is not proof the model failed.
 
+Tracked accounting errors send `x-should-retry: false`. The tested OpenAI and
+Anthropic SDKs honor this before their status-based retry rules; a JSON message
+alone does not stop their default retries. Tracked typed failures with qualified
+final usage also suppress automatic SDK retry even when their receipt commits.
+Four synthetic default-retry SDK cases verify one model request for missing usage
+and receipt-write failure, including accounting-only recovery after restart.
+This header does not control clients that ignore it or transport failures for
+which no response arrives; callers still must not blindly repeat ambiguous work.
+
 For streams, headers and partial bytes can already have reached the client.
 A successful HTTP EOF waits for committed settlement; unresolved accounting ends
 the body with an error. Already-forwarded `[DONE]` is **not** an accounting receipt.

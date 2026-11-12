@@ -516,6 +516,46 @@ async fn denied_alias_and_unproven_state_never_dispatch_or_reserve_and_discovery
 }
 
 #[tokio::test]
+async fn file_references_require_an_established_stateful_route_before_pinning() {
+    for family in [Family::OpenaiChatCompletions, Family::OpenaiResponses] {
+        for affinity in [
+            sandhi_store::routes::Affinity::Session,
+            sandhi_store::routes::Affinity::None,
+        ] {
+            let origin = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(reply(family, false))
+                .mount(&origin)
+                .await;
+            let mut definition = definition(&["primary"]);
+            definition.affinity = affinity;
+            let (state, sink) = state(
+                vec![("primary", provider(&origin, "primary", family, 1, 1))],
+                definition,
+            );
+            let (route, body) = if family == Family::OpenaiChatCompletions {
+                (
+                    "/v1/chat/completions",
+                    json!({"model":"agent","max_tokens":64,"messages":[{"role":"user","content":[{"type":"file","file":{"file_id":"file_foreign"}}]}]}),
+                )
+            } else {
+                (
+                    "/v1/responses",
+                    json!({"model":"agent","max_output_tokens":64,"input":[{"type":"function_call_output","call_id":"call_1","output":[{"type":"input_file","file_id":"file_foreign"}]}]}),
+                )
+            };
+            let (status, _) = call(&state, route, body, "vk_one", "unbound-file").await;
+            assert_eq!(status, StatusCode::CONFLICT, "{family:?}/{affinity:?}");
+            assert!(origin.received_requests().await.unwrap().is_empty());
+            assert!(sink.events().is_empty());
+            let ledger = state.ledger.lock().unwrap();
+            assert_eq!(ledger.reserved("vk:vk_one"), 0);
+            assert_eq!(ledger.spent("vk:vk_one"), 0);
+        }
+    }
+}
+
+#[tokio::test]
 async fn gemini_discovery_only_lists_path_safe_logical_aliases() {
     let origin = MockServer::start().await;
     let mut desired = definition(&["primary"]);

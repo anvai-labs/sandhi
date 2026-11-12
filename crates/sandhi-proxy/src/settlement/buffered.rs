@@ -103,6 +103,16 @@ pub(crate) fn accounting_error(dialect: IngressDialect, request_id: &str) -> Res
         "x-sandhi-request-id",
         request_id.parse().expect("generated identity"),
     );
+    no_automatic_retry(response)
+}
+
+/// OpenAI/Anthropic SDKs consult this header before their status-based retry
+/// policy. JSON advice alone cannot prevent a second, possibly billed request.
+pub(crate) fn no_automatic_retry(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        "x-should-retry",
+        axum::http::HeaderValue::from_static("false"),
+    );
     response
 }
 

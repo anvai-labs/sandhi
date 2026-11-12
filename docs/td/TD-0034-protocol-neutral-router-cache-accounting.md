@@ -956,3 +956,37 @@ identified only unchanged public TLS test keys, brand checksums and documented
 placeholder credentials; no live API key was identified. Staged and committed
 content are checked again before push. Audit output stays outside Git and contains
 no printed credential values.
+
+### SDK retry follow-up before publication
+
+Installed OpenAI and Anthropic SDKs each repeated a mocked accounting 502 three
+times with their normal defaults despite JSON `retryable=false`. Both stopped
+after one request when `x-should-retry: false` was supplied. Tracked accounting
+errors and tracked typed errors after committed final usage now emit that header.
+The existing gateway/provider single-attempt fence remains independent.
+
+Four real SDK/gateway cases retain default retry settings and verify one upstream
+call, one execution and one physical attempt on missing usage or injected receipt
+failure. Unknown usage leaves both reservations held. Persisted final usage recovers
+one original receipt after process death/trigger removal, without another model
+call. The Codex four-ingress fixture also checks retry suppression for failed
+output with final accounting. Clients ignoring the header and network loss before
+headers remain outside this SDK response-hint guarantee.
+
+### Independent review: structured resource and tool-output fidelity
+
+The checkpoint review reproduced two additional refusal gaps. Chat file IDs in
+message content were not classified as backend-bound resources, and non-string
+Responses function outputs could become JSON text on another protocol. Structured
+file references are now detected recursively in admitted content, including tool
+outputs. They require an established stateful logical route, refuse cross-family
+translation and undergo endpoint-codec preflight before admission; constrained
+Codex therefore refuses unresolved file IDs without a lease or execution event.
+
+Non-string Responses function outputs retain their exact native shape on compatible
+Responses backends. Cross-family requests refuse before reservation or dispatch
+until a faithful portable projection exists. This includes text-block arrays as
+well as images, files and future output shapes; ordinary string outputs remain
+portable. Regression cases cover both delivery modes, all four target families,
+resource affinity and the constrained Codex profile. These are explicit fidelity
+boundaries, not evidence of completed multimodal tool-result translation.

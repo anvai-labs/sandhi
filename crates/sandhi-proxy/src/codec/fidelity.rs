@@ -34,7 +34,7 @@ pub(super) fn capture(request: &mut ChatRequestV1, family: EndpointFamilyV1) -> 
                     Some("reasoning") => mark(Feature::OpaqueState),
                     Some("message") | None if item.get("role").is_some() => {
                         for part in array(item.get("content")) {
-                            if part.get("file_id").is_some() {
+                            if contains_file_reference(part) {
                                 mark(Feature::ResourceReference);
                             }
                             if !matches!(
@@ -52,7 +52,19 @@ pub(super) fn capture(request: &mut ChatRequestV1, family: EndpointFamilyV1) -> 
                             }
                         }
                     }
-                    Some("function_call" | "function_call_output") => {}
+                    Some("function_call") => {}
+                    Some("function_call_output") => {
+                        let output = item.get("output").unwrap_or(&Value::Null);
+                        // Only string output has a faithful portable projection
+                        // today. Native arrays/objects remain exact on Responses;
+                        // other targets must not receive JSON text as image/media.
+                        if !output.is_string() {
+                            mark(Feature::UnsupportedContent);
+                        }
+                        if contains_file_reference(output) {
+                            mark(Feature::ResourceReference);
+                        }
+                    }
                     _ => mark(Feature::UnsupportedContent),
                 }
             }
@@ -162,6 +174,9 @@ pub(super) fn capture(request: &mut ChatRequestV1, family: EndpointFamilyV1) -> 
         }
         EndpointFamilyV1::OpenaiChatCompletions => {
             for message in array(body.get("messages")) {
+                if message.get("content").is_some_and(contains_file_reference) {
+                    mark(Feature::ResourceReference);
+                }
                 if ["reasoning_content", "reasoning", "thinking_blocks", "audio"]
                     .iter()
                     .any(|key| message.get(*key).is_some())
@@ -197,4 +212,17 @@ fn array(value: Option<&Value>) -> &[Value] {
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or(&[])
+}
+
+/// Inspect structured content only, never JSON-looking text/tool arguments.
+/// Provider file identifiers can appear inside file wrappers and tool outputs.
+fn contains_file_reference(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => {
+            object.get("file_id").is_some_and(|value| !value.is_null())
+                || object.values().any(contains_file_reference)
+        }
+        Value::Array(values) => values.iter().any(contains_file_reference),
+        _ => false,
+    }
 }

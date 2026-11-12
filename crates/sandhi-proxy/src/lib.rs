@@ -3796,6 +3796,7 @@ async fn complete_response(
     permit: Arc<AdmissionPermit>,
 ) -> Response {
     let started = std::time::Instant::now();
+    let tracked = accounting.owned.is_some();
     let _permit = permit; // unary: held by the handler future, which is the whole call
     let correlation = accounting.per_call_wire_headers();
     let result = if let Some(owned) = &accounting.owned {
@@ -3842,7 +3843,12 @@ async fn complete_response(
             if !accounting.finalize_owned().await {
                 return settlement::buffered::accounting_error(dialect, &accounting.request_id);
             }
-            provider_error(&error, dialect, provider.slug(), full_error_detail)
+            let response = provider_error(&error, dialect, provider.slug(), full_error_detail);
+            if tracked {
+                settlement::buffered::no_automatic_retry(response)
+            } else {
+                response
+            }
         }
     }
 }

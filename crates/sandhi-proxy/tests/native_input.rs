@@ -165,6 +165,122 @@ async fn responses_media_survives_cross_family_translation_in_order() {
     }
 }
 
+#[tokio::test]
+async fn chat_file_ids_refuse_other_protocols_and_constrained_codex_before_admission() {
+    for stream in [false, true] {
+        for target in [
+            Family::OpenaiResponses,
+            Family::AnthropicMessages,
+            Family::GeminiGenerateContent,
+        ] {
+            for position in ["user", "tool"] {
+                let upstream = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .respond_with(reply(target, stream))
+                    .mount(&upstream)
+                    .await;
+                let (state, sink) = state(target, &upstream);
+                let messages = if position == "user" {
+                    json!([{"role":"user","content":[{"type":"file","file":{"file_id":"file_foreign"}}]}])
+                } else {
+                    json!([{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]},
+                        {"role":"tool","tool_call_id":"call_1","content":[{"type":"input_file","file_id":"file_foreign"}]}])
+                };
+                let body = json!({"model":"fixture","messages":messages});
+                let (status, _) = call(&state, Family::OpenaiChatCompletions, body, stream).await;
+                assert_eq!(
+                    status,
+                    StatusCode::BAD_REQUEST,
+                    "{target:?}/{position}/{stream}"
+                );
+                assert!(upstream.received_requests().await.unwrap().is_empty());
+                assert!(sink.events().is_empty());
+                let ledger = state.ledger.lock().unwrap();
+                assert_eq!(ledger.reserved("vk:vk_fixture"), 0);
+                assert_eq!(ledger.spent("vk:vk_fixture"), 0);
+            }
+        }
+        for source in [Family::OpenaiChatCompletions, Family::OpenaiResponses] {
+            let upstream = MockServer::start().await;
+            let (state, sink) = state(Family::OpenaiResponses, &upstream);
+            state.providers.lock().unwrap().insert(
+                "fixed".into(),
+                ProviderRuntime::new().chatgpt_responses(
+                    "fixture",
+                    upstream.uri(),
+                    "synthetic-access",
+                    Default::default(),
+                    Some(0),
+                    None,
+                    None,
+                    None,
+                ),
+            );
+            let body = if source == Family::OpenaiChatCompletions {
+                json!({"model":"fixture","messages":[{"role":"developer","content":"Code"},{"role":"user","content":[{"type":"file","file":{"file_id":"file_foreign"}}]}]})
+            } else {
+                json!({"model":"fixture","instructions":"Code","input":[{"type":"function_call_output","call_id":"call_1","output":[{"type":"input_file","file_id":"file_foreign"}]}]})
+            };
+            let (status, _) = call(&state, source, body, stream).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "Codex/{source:?}/{stream}");
+            assert!(upstream.received_requests().await.unwrap().is_empty());
+            assert!(sink.events().is_empty());
+            assert_eq!(state.ledger.lock().unwrap().reserved("vk:vk_fixture"), 0);
+        }
+    }
+}
+
+#[tokio::test]
+async fn responses_nontext_tool_outputs_preserve_native_shape_or_refuse_translation() {
+    for output in [
+        json!([{"type":"input_image","image_url":"data:image/png;base64,aGVsbG8="}]),
+        json!([{"type":"input_file","file_id":"file_foreign"}]),
+        json!([{"type":"input_text","text":"first"},{"type":"input_text","text":"second"}]),
+        json!([{"type":"future_media","payload":"opaque"}]),
+        json!({"unprojected":{"value":42}}),
+    ] {
+        for stream in [false, true] {
+            for target in [
+                Family::OpenaiChatCompletions,
+                Family::OpenaiResponses,
+                Family::AnthropicMessages,
+                Family::GeminiGenerateContent,
+            ] {
+                let upstream = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .respond_with(reply(target, stream))
+                    .mount(&upstream)
+                    .await;
+                let (state, sink) = state(target, &upstream);
+                let original = json!({"model":"fixture","input":[
+                    {"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"},
+                    {"type":"function_call_output","call_id":"call_1","output":output},
+                    {"role":"user","content":"continue"}]});
+                let (status, body) =
+                    call(&state, Family::OpenaiResponses, original.clone(), stream).await;
+                if target == Family::OpenaiResponses {
+                    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+                    let calls = upstream.received_requests().await.unwrap();
+                    assert_eq!(calls.len(), 1);
+                    let sent: Value = calls[0].body_json().unwrap();
+                    assert_eq!(sent["input"], original["input"]);
+                } else {
+                    assert_eq!(
+                        status,
+                        StatusCode::BAD_REQUEST,
+                        "{target:?}/{stream}/{output}"
+                    );
+                    assert!(upstream.received_requests().await.unwrap().is_empty());
+                    assert!(sink.events().is_empty());
+                    let ledger = state.ledger.lock().unwrap();
+                    assert_eq!(ledger.reserved("vk:vk_fixture"), 0);
+                    assert_eq!(ledger.spent("vk:vk_fixture"), 0);
+                }
+            }
+        }
+    }
+}
+
 fn input(family: Family) -> Value {
     match family {
         Family::OpenaiChatCompletions => json!({

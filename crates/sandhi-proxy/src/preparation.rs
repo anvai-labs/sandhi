@@ -253,6 +253,19 @@ pub(super) async fn prepare(
         request.compiled_cache = provider
             .compile_cache_plan(&request)
             .map_err(|error| ingress_error(dialect, StatusCode::BAD_REQUEST, &error.to_string()))?;
+        // A same-family envelope can still name resources this endpoint profile
+        // cannot resolve (for example, constrained Codex requires materialized
+        // input). Run its actual encoder before admission rather than discovering
+        // that refusal after taking a lease or emitting an execution event.
+        if request.native_input.as_ref().is_some_and(|native| {
+            native
+                .nonportable_features
+                .contains(&sandhi_core::NativeInputFeatureV1::ResourceReference)
+        }) {
+            provider.preflight_request(&request).map_err(|error| {
+                ingress_error(dialect, StatusCode::BAD_REQUEST, &error.to_string())
+            })?;
+        }
     } else if provider
         .backend_binding()
         .is_some_and(|binding| binding.cache_policy.is_some())

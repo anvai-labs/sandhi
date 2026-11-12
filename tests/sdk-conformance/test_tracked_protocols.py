@@ -262,6 +262,65 @@ def test_tracked_vendor_sdk_matrix_joins_route_cache_attempt_usage_and_paired_re
             assert connection.execute("SELECT context_json FROM budget_execution_context").fetchone() == (row[1],)
 
 
+@pytest.mark.parametrize("client_flavor", ["openai", "anthropic"])
+@pytest.mark.parametrize("failure", ["missing_usage", "receipt_write"])
+def test_tracked_ambiguous_accounting_suppresses_default_sdk_redispatch(
+    tmp_path, backend_binaries, qualified_origin, client_flavor, failure,
+):
+    origin, calls, control = qualified_origin
+    if failure == "missing_usage":
+        control["mode"] = "missing"
+    with tracked_gateway(tmp_path, backend_binaries, origin, FAMILIES[0]) as (instance, token):
+        if failure == "receipt_write":
+            with sqlite3.connect(instance.database) as connection:
+                connection.execute("CREATE TRIGGER fail_sdk_receipt BEFORE INSERT ON budget_settlement_outbox BEGIN SELECT RAISE(ABORT,'synthetic failure'); END")
+        # Keep each SDK's normal retry defaults. Explicitly disabling retries
+        # here would hide duplicate model calls caused by a 502 status.
+        if client_flavor == "openai":
+            client = openai.OpenAI(base_url=instance.base + "/v1", api_key=token)
+            error_type = openai.APIStatusError
+            submit = lambda: client.chat.completions.create(model="agent", max_tokens=64,
+                messages=[{"role": "user", "content": "hello"}])
+        else:
+            import anthropic
+            client = anthropic.Anthropic(base_url=instance.base, api_key=token)
+            error_type = anthropic.APIStatusError
+            submit = lambda: client.messages.create(model="agent", max_tokens=64,
+                messages=[{"role": "user", "content": "hello"}])
+        try:
+            with pytest.raises(error_type) as caught:
+                submit()
+            assert caught.value.status_code == 502
+            assert caught.value.response.headers["x-should-retry"] == "false"
+        finally:
+            client.close()
+        assert len(calls) == 1, "default SDK retries must not create another model request"
+        with sqlite3.connect(instance.database) as connection:
+            assert connection.execute("SELECT count(*) FROM budget_execution_intent").fetchone() == (1,)
+            assert connection.execute("SELECT count(*) FROM budget_physical_attempt").fetchone() == (1,)
+            assert connection.execute("SELECT count(*) FROM budget_settlement_outbox").fetchone() == (0,)
+            assert connection.execute("SELECT settled FROM budget_reservation").fetchall() == [(0,), (0,)]
+        if failure == "missing_usage":
+            instance.process.terminate()
+            assert instance.process.wait(timeout=5) == 124
+        else:
+            instance.process.kill()
+            assert instance.process.wait(timeout=3) < 0
+            instance.stop()
+            with sqlite3.connect(instance.database) as connection:
+                connection.execute("DROP TRIGGER fail_sdk_receipt")
+            instance.start(SANDHI_BUFFERED_ACCOUNTING="tracked", SANDHI_CACHE_READ_WEIGHT="1000")
+            deadline = time.monotonic() + 5
+            while True:
+                with sqlite3.connect(instance.database) as connection:
+                    receipts = connection.execute("SELECT charged_tokens FROM budget_settlement_outbox").fetchall()
+                if receipts == [(5,)]:
+                    break
+                assert time.monotonic() < deadline
+                time.sleep(.02)
+            assert len(calls) == 1, "restart retries accounting only"
+
+
 @pytest.mark.parametrize("family", FAMILIES[1:])
 def test_tracked_protocol_receipt_failure_recovers_original_attempt_and_weight_without_redispatch(
     tmp_path, backend_binaries, qualified_origin, family,

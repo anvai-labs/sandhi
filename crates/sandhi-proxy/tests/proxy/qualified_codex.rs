@@ -138,6 +138,9 @@ async fn tracked_codex_buffered_four_ingress_routes_join_attempt_usage_and_both_
                 .to_str()
                 .unwrap()
                 .to_owned();
+            if !matches!(mode, "final" | "zero") {
+                assert_eq!(response.headers()["x-should-retry"], "false");
+            }
             let body = axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
                 .unwrap();
