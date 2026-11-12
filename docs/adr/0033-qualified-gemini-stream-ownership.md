@@ -66,8 +66,14 @@ Tracked typed decoding assembles bounded complete SSE events, never flushes an
 unfinished event at EOF and never stops HTTP polling at a candidate finish.
 Portable projection supports one candidate at index zero, text, thought-text and
 self-contained function calls. Function arguments must be an explicitly supplied
-JSON object. Stream-wide call indices and generated IDs are unique; duplicate
-provider IDs and unsupported streamed argument shapes refuse. `STOP` after calls
+JSON object. Stream-wide call indices are unique, and omitted IDs use a fresh
+128-bit random namespace per response across buffered, qualified and legacy
+streaming decoders. Entropy failure is explicit. Supplied IDs remain unchanged;
+duplicate IDs within a qualified response and unsupported argument shapes refuse.
+Request encoding consumes preceding unanswered calls in order, so reuse of a
+supplied ID in a later completed turn cannot relabel an earlier result. Future,
+already-consumed or duplicate-outstanding references refuse before dispatch.
+`STOP` after calls
 maps to tool completion, while `MAX_TOKENS` preserves the output-limit reason.
 Representable filtering reasons retain their filter semantics.
 
@@ -107,3 +113,14 @@ lifetime, explicit cache-resource lifecycle and live subscription acceptance nee
 their own evidence. The retained accounting-wait reliability gate and broader
 tool/media/issuer journeys remain open in
 [TD-0034](../td/TD-0034-protocol-neutral-router-cache-accounting.md).
+
+Independent review rejected activation checkpoint `fe782e3`: generated IDs repeated
+between responses, and a full-history last-wins lookup silently relabeled an
+earlier tool result in a three-request loop. The namespace/chronological-consumption
+fix covers all delivery paths. Four codec/stream regressions and sixteen real-SDK
+three-request cases exercise all ingress dialects, both delivery modes and omitted
+or reused supplied IDs. Each loop checks the actual third upstream request and
+three paired settlements. Re-review applies to the resulting fix commit; the
+rejected checkpoint has no clean approval record and was not published as a branch
+tip. Its [sanitized reproduction](../reviews/artifacts/gemini-tool-history-review-regression-2026-11-12.json)
+contains only synthetic tool names/results and structural evidence.

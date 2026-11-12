@@ -14,6 +14,28 @@ use std::sync::Arc;
 
 mod qualified;
 
+/// Correlate omitted wire IDs without reusing an identity in a later response or
+/// after a process restart. Native supplied IDs remain untouched.
+#[derive(Default)]
+struct GeneratedToolIds {
+    namespace: Option<String>,
+}
+impl GeneratedToolIds {
+    fn id(&mut self, index: usize) -> Result<String, ProviderError> {
+        if self.namespace.is_none() {
+            let mut nonce = [0u8; 16];
+            getrandom::getrandom(&mut nonce).map_err(|_| {
+                ProviderError::Transport("Gemini tool identity entropy unavailable".into())
+            })?;
+            self.namespace = Some(nonce.iter().map(|byte| format!("{byte:02x}")).collect());
+        }
+        Ok(format!(
+            "gemini_call_{}_{index}",
+            self.namespace.as_ref().expect("initialized namespace")
+        ))
+    }
+}
+
 pub(crate) struct TypedGemini {
     raw: Arc<dyn Provider>,
 }
@@ -212,16 +234,9 @@ pub(crate) fn encode_gemini_request_base(request: &ChatRequestV1) -> Result<Valu
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    let tool_names = request
-        .messages
-        .iter()
-        .filter_map(|message| match message {
-            ChatMessageV1::Assistant { tool_calls, .. } => Some(tool_calls),
-            _ => None,
-        })
-        .flatten()
-        .map(|call| (call.id.clone(), call.name.clone()))
-        .collect::<BTreeMap<_, _>>();
+    // Only preceding, unanswered calls can identify a tool result. A future
+    // turn must never relabel an earlier result when a provider reuses an ID.
+    let mut tool_names = BTreeMap::new();
     let mut system_parts = Vec::new();
     let mut contents = Vec::new();
     for message in request.messages.iter().filter(|_| !native) {
@@ -246,6 +261,14 @@ pub(crate) fn encode_gemini_request_base(request: &ChatRequestV1) -> Result<Valu
                     parts.push(json!({"text":refusal}));
                 }
                 for call in tool_calls {
+                    if tool_names
+                        .insert(call.id.clone(), call.name.clone())
+                        .is_some()
+                    {
+                        return Err(ProviderError::InvalidRequest(
+                            "duplicate outstanding Gemini tool call id".into(),
+                        ));
+                    }
                     let args: Value = serde_json::from_str(&call.arguments).map_err(|error| {
                         ProviderError::InvalidRequest(format!(
                             "tool call {} arguments are not valid JSON: {error}",
@@ -260,7 +283,7 @@ pub(crate) fn encode_gemini_request_base(request: &ChatRequestV1) -> Result<Valu
                 content,
                 tool_call_id,
             } => {
-                let name = tool_names.get(tool_call_id).ok_or_else(|| {
+                let name = tool_names.remove(tool_call_id).ok_or_else(|| {
                     ProviderError::InvalidRequest(format!(
                         "Gemini tool result references unknown tool call id {tool_call_id}"
                     ))
@@ -396,6 +419,7 @@ pub fn decode_gemini_response(
     let mut text = String::new();
     let mut reasoning = String::new();
     let mut tool_calls = Vec::new();
+    let mut generated_ids = GeneratedToolIds::default();
     for (index, part) in parts.iter().enumerate() {
         if let Some(value) = part.get("text").and_then(Value::as_str) {
             if part.get("thought").and_then(Value::as_bool) == Some(true) {
@@ -406,11 +430,10 @@ pub fn decode_gemini_response(
         }
         if let Some(call) = part.get("functionCall") {
             tool_calls.push(ToolCallV1 {
-                id: call
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| format!("gemini_call_{index}")),
+                id: match call.get("id").and_then(Value::as_str) {
+                    Some(id) => id.into(),
+                    None => generated_ids.id(index)?,
+                },
                 name: call
                     .get("name")
                     .and_then(Value::as_str)
@@ -426,6 +449,16 @@ pub fn decode_gemini_response(
     if !reasoning.is_empty() {
         extensions.insert("reasoning".into(), Value::String(reasoning));
     }
+    let finish_reason = candidate
+        .get("finishReason")
+        .and_then(Value::as_str)
+        .map(|reason| {
+            if reason == "STOP" && !tool_calls.is_empty() {
+                FinishReasonV1::ToolCalls
+            } else {
+                decode_finish_reason(reason)
+            }
+        });
     Ok(ChatResponseV1 {
         schema_version: sandhi_core::CHAT_SCHEMA_VERSION_V1.into(),
         id: body
@@ -442,10 +475,7 @@ pub fn decode_gemini_response(
             tool_calls,
             refusal: None,
         },
-        finish_reason: candidate
-            .get("finishReason")
-            .and_then(Value::as_str)
-            .map(decode_finish_reason),
+        finish_reason,
         usage: parsed_usage.into(),
         extensions,
     })
@@ -497,6 +527,8 @@ fn decode_gemini_stream_inner(
         // A candidate finish can precede the metered stream's terminal usage-only chunk.
         // Defer canonical completion until successful EOF so egress sees final usage first.
         let mut pending_finish = None;
+        let mut generated_ids=GeneratedToolIds::default();
+        let mut next_tool_index=0u32;
         // The last running total published, so progress is emitted on change rather than per chunk.
         let mut last_running: Option<crate::ParsedUsage> = None;
         // TD-0014 P2b: after the real chunks end, ONE synthetic empty chunk flushes any
@@ -555,7 +587,7 @@ fn decode_gemini_stream_inner(
                         started = true;
                     }
                     if let Some(parts) = value.pointer("/candidates/0/content/parts").and_then(Value::as_array) {
-                        for (index, part) in parts.iter().enumerate() {
+                        for part in parts {
                             if let Some(text) = part.get("text").and_then(Value::as_str) {
                                 if part.get("thought").and_then(Value::as_bool) == Some(true) {
                                     yield ChatStreamEventV1::ReasoningDelta { delta: text.into() };
@@ -564,9 +596,11 @@ fn decode_gemini_stream_inner(
                                 }
                             }
                             if let Some(call) = part.get("functionCall") {
-                                let stream_index = index as u32;
-                                let id = call.get("id").and_then(Value::as_str)
-                                    .map(str::to_owned).unwrap_or_else(|| format!("gemini_call_{index}"));
+                                let stream_index = next_tool_index;
+                                next_tool_index=next_tool_index.checked_add(1).ok_or_else(||ProviderError::Transport("too many Gemini tool calls".into()))?;
+                                let id = match call.get("id").and_then(Value::as_str) {
+                                    Some(id)=>id.into(),None=>generated_ids.id(stream_index as usize)?,
+                                };
                                 let name = call.get("name").and_then(Value::as_str).unwrap_or("").to_owned();
                                 let arguments = serde_json::to_string(call.get("args").unwrap_or(&Value::Null))
                                     .map_err(|error| ProviderError::Transport(error.to_string()))?;
@@ -577,7 +611,7 @@ fn decode_gemini_stream_inner(
                         }
                     }
                     if let Some(reason) = value.pointer("/candidates/0/finishReason").and_then(Value::as_str) {
-                        pending_finish = Some(decode_finish_reason(reason));
+                        pending_finish = Some(if reason=="STOP" && next_tool_index>0 {FinishReasonV1::ToolCalls} else {decode_finish_reason(reason)});
                     }
                     if value.pointer("/promptFeedback/blockReason").and_then(Value::as_str).is_some() {
                         pending_finish = Some(FinishReasonV1::ContentFilter);
@@ -754,6 +788,101 @@ mod tests {
         );
     }
     use super::*;
+
+    #[test]
+    fn tool_results_resolve_against_preceding_calls_when_ids_repeat_between_turns() {
+        let request: ChatRequestV1 = serde_json::from_value(json!({"model":"fixture","messages":[
+            {"role":"user","content":"hello"},
+            {"role":"assistant","tool_calls":[{"id":"reused","name":"alpha","arguments":"{}"}]},
+            {"role":"tool","tool_call_id":"reused","content":"alpha-result"},
+            {"role":"assistant","tool_calls":[{"id":"reused","name":"beta","arguments":"{}"}]},
+            {"role":"tool","tool_call_id":"reused","content":"beta-result"}
+        ]}))
+        .unwrap();
+        let body = encode_gemini_request(&request).unwrap();
+        assert_eq!(
+            body["contents"][2]["parts"][0]["functionResponse"]["name"],
+            "alpha"
+        );
+        assert_eq!(
+            body["contents"][4]["parts"][0]["functionResponse"]["name"],
+            "beta"
+        );
+    }
+
+    #[test]
+    fn buffered_generated_tool_ids_are_distinct_between_responses_and_keep_tool_finish() {
+        let reply = |name| json!({"candidates":[{"content":{"parts":[{"functionCall":{"name":name,"args":{}}}]},"finishReason":"STOP"}]});
+        let alpha = decode_gemini_response(reply("alpha"), Default::default(), "fixture").unwrap();
+        let beta = decode_gemini_response(reply("beta"), Default::default(), "fixture").unwrap();
+        assert_ne!(alpha.output.tool_calls[0].id, beta.output.tool_calls[0].id);
+        assert_eq!(alpha.finish_reason, Some(FinishReasonV1::ToolCalls));
+    }
+
+    #[test]
+    fn gemini_tool_results_cannot_reference_future_or_duplicate_outstanding_calls() {
+        let assistant = |name| json!({"role":"assistant","tool_calls":[{"id":"call","name":name,"arguments":"{}"}]});
+        let result = json!({"role":"tool","tool_call_id":"call","content":"result"});
+        for messages in [
+            vec![result.clone(), assistant("alpha")],
+            vec![assistant("alpha"), assistant("beta"), result.clone()],
+            vec![assistant("alpha"), result.clone(), result],
+        ] {
+            let request: ChatRequestV1 =
+                serde_json::from_value(json!({"model":"fixture","messages":messages})).unwrap();
+            assert!(matches!(
+                encode_gemini_request(&request),
+                Err(ProviderError::InvalidRequest(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_gemini_stream_call_indices_and_generated_identities_span_chunks_and_turns() {
+        use futures_util::StreamExt;
+        let wire = concat!(
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"alpha\",\"args\":{}}}]}}]}\n\n",
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"beta\",\"args\":{}}}]}}]}\n\n",
+            "data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n");
+        let mut all = std::collections::BTreeSet::new();
+        for _ in 0..2 {
+            let raw: ByteStream = Box::pin(futures_util::stream::iter(
+                wire.as_bytes()
+                    .chunks(7)
+                    .map(|bytes| {
+                        Ok(crate::StreamChunk {
+                            data: bytes::Bytes::copy_from_slice(bytes),
+                            ..Default::default()
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            ));
+            let events = decode_gemini_stream(raw, "fixture".into())
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            let indices = events
+                .iter()
+                .filter_map(|event| match event {
+                    ChatStreamEventV1::ToolCallStart { index, id, .. } => {
+                        assert!(all.insert(id.clone()));
+                        Some(*index)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(indices, vec![0, 1]);
+            assert!(matches!(
+                events.last(),
+                Some(ChatStreamEventV1::Finish {
+                    reason: FinishReasonV1::ToolCalls
+                })
+            ));
+        }
+        assert_eq!(all.len(), 4);
+    }
 
     /// TD-0014 P1 characterisation net (gap G01). The decoder must yield identical events no
     /// matter where the transport splits the byte stream. Written BEFORE the `LineSplitter`
@@ -939,6 +1068,6 @@ mod tests {
             Some(MessageContent::Text("ok".into()))
         );
         assert_eq!(response.output.tool_calls[0].arguments, "{\"q\":1}");
-        assert_eq!(response.finish_reason, Some(FinishReasonV1::Stop));
+        assert_eq!(response.finish_reason, Some(FinishReasonV1::ToolCalls));
     }
 }

@@ -672,6 +672,12 @@ fn state(
     sink: Arc<InMemorySink>,
     limits: Value,
 ) -> Arc<ProxyState> {
+    static TRACE: std::sync::Once = std::sync::Once::new();
+    TRACE.call_once(|| {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("sandhi_proxy=warn")
+            .try_init();
+    });
     let keys = KeyStore::new();
     keys.insert(VirtualKey {
         id: "vk_demo".into(),
@@ -1097,7 +1103,7 @@ async fn gemini_native_output_and_tools_preserve_source_accounting_across_projec
                 );
             } else if scenario == "two_calls" {
                 assert!(
-                    output.contains("gemini_call_0") && output.contains("call-b"),
+                    output.contains("gemini_call_") && output.contains("call-b"),
                     "{flavor}: {output}"
                 );
             } else if !portable {

@@ -23,7 +23,8 @@ adapter. Its authorized logical model resolves to a
 configured backend independently of the client's dialect. Sandhi preserves the
 portable conversation and applicable native state, applies explicit backend cache
 policy, renders the client's protocol and records attributable usage and settlement
-for each physical dispatch. Unsupported conversions fail explicitly before dispatch.
+for each physical dispatch. Unsupported request conversions fail before dispatch;
+unsupported source-output projections fail explicitly while retaining source evidence.
 
 Backend scope includes OpenAI-compatible API/open-weight servers, Anthropic
 Messages endpoints, standard OpenAI Responses, and constrained ChatGPT/Codex
@@ -72,7 +73,8 @@ as live-verified. A missing external prerequisite does not stop independent work
    codec and disabled raw bypass. A generic protocol override cannot weaken them.
    Grant refresh has one owner; do not copy/share refresh tokens between tools.
 6. **Avoid silent loss.** Preserve unknown native fields on compatible routes;
-   reject unsupported content/state/control transformations before dispatch.
+   reject unsupported request content/state/control transformations before dispatch.
+   Refuse unrepresentable source output without replay or hiding measured usage.
    A native body clone does not justify dropping ordered content on re-encode.
 7. **Keep native forwarding efficient.** Use minimal admission extraction plus
    policy inspection when forwarding native payloads. Re-encode only when needed.
@@ -1397,3 +1399,44 @@ new-tip public CI remain publication/merge gates. The preceding reviewed `c098f4
 passed all 14 jobs, with only GitHub Actions runner names and `ubuntu-24.04` /
 `ubuntu-24.04-arm` labels; its documentation build passed. No private or overflow
 runner was used.
+
+Independent review rejected `fe782e3` with a P1 tool-history finding. An actual
+three-request Chat-to-Gemini stream loop generated `gemini_call_0` twice and then
+sent the earlier `alpha-result` under function name `beta`. The new unit regression
+reproduced that wrong name before the fix. Omitted IDs now use response-specific
+128-bit random namespaces across buffered and both stream decoders. Supplied IDs
+stay unchanged. Gemini request encoding resolves and consumes only preceding
+unanswered calls; repeated IDs in later completed turns cannot change earlier
+results. Future references, consumed results and duplicate outstanding IDs refuse.
+Legacy stream call indices span chunks, and buffered/legacy tool completion now
+maps `STOP` with calls to neutral tool completion consistently with tracked streams.
+
+Four new Rust regressions and sixteen real-SDK three-request loops cover all four
+ingress families, both delivery modes, and omitted versus reused supplied IDs.
+The SDK loops passed independently of the earlier text matrix: all 48 actual
+upstream calls retained correct result names and identifiers, and every loop
+joined three receipts and six settled leases. No live provider or credential was
+used. The rejected commit was not published as a branch tip or given a clean record; validation
+and exact-commit re-review apply to the fix tree. The provider-label budget review
+lead was not a finding: ADR-0015/0021 deliberately retain adapter-slug scopes, and
+operator labels remain descriptive. It does not establish provider-label budget
+enforcement merely because a fixture provisions several scopes.
+
+The [sanitized independent reproduction](../reviews/artifacts/gemini-tool-history-review-regression-2026-11-12.json)
+records the wrong third wire payload and the sixteen corrected SDK loops. A broad
+fix-tree SDK run passed 162 cases and exposed a pre-existing failed-stream header
+race in the Responses progress-only fixture: HTTP body failure can close the
+connection before headers flush. The corrected assertion wraps the whole receive,
+retains source/one-send/partial-liability checks, and passed its focused case. A
+broad concurrent Rust run also retained six HTTP fixture failures; warning-phase
+diagnostics are now enabled in that fixture, and all eight tests subsequently
+passed without changing deadlines. That does not establish a timing cause or close
+the reliability gate; final regressions and exact-tree re-review remain required.
+
+The final fix-tree workspace completed all 48 suites: 1,158 passed, six opt-in
+ignored. The corrected complete SDK regression passed 163 cases, including the
+sixteen three-request tool loops. Both default and ONNX workspace/all-target
+Clippy, formatting, strict documentation and binding checks passed. Actual-secret
+and common encoded-form scans cleared all 542 indexed files; staged Gitleaks was
+clean. These successful reruns do not resolve the retained concurrent timing
+failures. Exact-commit independent re-review and new-tip public CI remain gates.

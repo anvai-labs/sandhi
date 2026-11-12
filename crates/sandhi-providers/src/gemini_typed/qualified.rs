@@ -82,6 +82,7 @@ struct Projection {
     finish: Option<FinishReasonV1>,
     calls: BTreeSet<String>,
     next_call: u32,
+    generated_ids: super::GeneratedToolIds,
 }
 
 impl Projection {
@@ -178,7 +179,7 @@ impl Projection {
                             let id = if call.get("id").is_some() {
                                 string(call, "id")?.into()
                             } else {
-                                format!("gemini_call_{index}")
+                                self.generated_ids.id(index as usize)?
                             };
                             if !self.calls.insert(id.clone()) {
                                 return Err(invalid("duplicate Gemini function call identity"));
@@ -314,7 +315,12 @@ mod tests {
                                 _ => None,
                             })
                             .collect::<Vec<_>>();
-                        assert_eq!(starts, vec![(0, "gemini_call_0"), (1, "call-b")]);
+                        assert_eq!(starts.len(), 2);
+                        assert_eq!(starts[0].0, 0);
+                        assert!(
+                            starts[0].1.starts_with("gemini_call_") && starts[0].1.ends_with("_0")
+                        );
+                        assert_eq!(starts[1], (1, "call-b"));
                         assert!(matches!(
                             events.last(),
                             Some(Event::Finish {

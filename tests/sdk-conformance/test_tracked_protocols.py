@@ -67,6 +67,15 @@ def qualified_origin():
             control["entered"].set()
             assert control["release"].wait(10), "test did not release origin"
             response = response_for(family)
+            if family == FAMILIES[3] and control.get("tool_loop"):
+                turn = len(calls)
+                if turn <= 2:
+                    call = {"name": "alpha" if turn == 1 else "beta", "args": {}}
+                    if control.get("supplied_tool_id"):
+                        call["id"] = "upstream-reused"
+                    response["candidates"][0]["content"]["parts"] = [{"functionCall": call}]
+                response["usageMetadata"] = {"promptTokenCount": 3, "cachedContentTokenCount": 2,
+                    "toolUsePromptTokenCount": 1, "candidatesTokenCount": 2, "thoughtsTokenCount": 1, "totalTokenCount": 7}
             if family == FAMILIES[1] and control.get("implicit_stream_writes"):
                 response["usage"].pop("cache_creation_input_tokens")
             if control["mode"] == "missing":
@@ -132,6 +141,8 @@ def qualified_origin():
                            "usageMetadata": {"promptTokenCount": 3, "cachedContentTokenCount": 2,
                                              "toolUsePromptTokenCount": 1, "candidatesTokenCount": 1,
                                              "thoughtsTokenCount": 1, "totalTokenCount": 6}}]
+                if control.get("tool_loop"):
+                    events[0]["candidates"][0]["content"] = response["candidates"][0]["content"]
                 if control["mode"] != "progress_only":
                     terminal = {"candidates": [{"index": 0, "finishReason": "MAX_TOKENS" if control["mode"] == "incomplete" else "STOP"}]}
                     if control["mode"] != "missing":
@@ -260,12 +271,13 @@ def test_tracked_responses_stream_preserves_canonical_usage_and_paired_settlemen
                 assert events[-1].type == ("response.completed" if mode == "valid" else "response.incomplete")
         else:
             with httpx.Client(timeout=10) as client:
-                with client.stream("POST", instance.base + "/v1/responses", headers={"authorization": "Bearer " + token},
-                    json={"model": "agent", "input": "hello", "max_output_tokens": 64, "stream": True}) as response:
-                    assert response.status_code == 200
-                    # These bodies must not silently end successfully after ambiguous
-                    # accounting or a provider failure, even though bytes were sent.
-                    with pytest.raises(httpx.RemoteProtocolError):
+                # Hyper can observe an immediately failed body before it flushes
+                # headers. Both failure positions must preserve source evidence;
+                # neither is a successfully completed model response.
+                with pytest.raises(httpx.RemoteProtocolError):
+                    with client.stream("POST", instance.base + "/v1/responses", headers={"authorization": "Bearer " + token},
+                        json={"model": "agent", "input": "hello", "max_output_tokens": 64, "stream": True}) as response:
+                        assert response.status_code == 200
                         response.read()
         assert len(calls) == 1
         qualified = mode in ("valid", "incomplete", "failed")
