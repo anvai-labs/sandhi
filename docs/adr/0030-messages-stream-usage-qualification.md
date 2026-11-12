@@ -1,7 +1,7 @@
 # ADR-0030: Qualify cumulative Messages stream usage before routing activation
 
-- **Status:** Library prerequisite, unreleased. Tracked Messages source routing
-  remains gated; this decision does not qualify a live provider or subscription.
+- **Status:** Implemented library prerequisite, unreleased. Messages source ownership
+  is connected separately in [ADR-0031](0031-qualified-messages-stream-ownership.md).
 - **Extends:** [Strict buffered qualification](0025-qualified-buffered-protocol-accounting.md),
   [Responses stream qualification](0026-qualified-responses-stream-accounting.md)
   and [typed stream ownership](0028-qualified-translated-stream-accounting.md).
@@ -79,11 +79,13 @@ forms, cumulative replacement, sparse updates, missing required parents, zero
 totals, identity/order errors, regressions, truncation, post-terminal events,
 provider errors, abort evidence and unknown-event injection.
 
-Raw qualified dispatch still rejects Messages and Gemini before sending or
-creating an attempt. No typed adapter gains qualified-stream opt-in here. Before
+At prerequisite checkpoint `74b4a10`, raw qualified dispatch rejected Messages and
+Gemini before sending or creating an attempt. No typed adapter gained opt-in in
+that increment. Before
 activating tracked Messages sources, wire the same declared profile through raw
 and typed owners, require complete-event decoder draining, and pass the four-client
 HTTP/SDK, cancellation, restart and paired-receipt matrix. Live ZAI Messages calls
 and native subscription lifecycle need their own evidence. Gemini source
-qualification remains a separate prerequisite. See
+qualification remains a separate prerequisite. Messages ownership and its scoped
+acceptance are now covered by ADR-0031. See
 [TD-0034](../td/TD-0034-protocol-neutral-router-cache-accounting.md).

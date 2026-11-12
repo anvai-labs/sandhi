@@ -171,6 +171,20 @@ pub(super) fn capture(request: &mut ChatRequestV1, family: EndpointFamilyV1) -> 
                 // Only unprojected generation controls remain in this bucket.
                 mark(Feature::NativeControl);
             }
+            if let Some(thinking) = body.pointer("/generationConfig/thinkingConfig") {
+                if thinking.as_object().is_none_or(|config| {
+                    config
+                        .keys()
+                        .any(|key| !matches!(key.as_str(), "thinkingBudget" | "thinking_budget"))
+                }) || (thinking
+                    .get("thinkingBudget")
+                    .or_else(|| thinking.get("thinking_budget"))
+                    .is_some()
+                    && request.thinking.is_none())
+                {
+                    mark(Feature::NativeControl);
+                }
+            }
         }
         EndpointFamilyV1::OpenaiChatCompletions => {
             for message in array(body.get("messages")) {

@@ -155,7 +155,7 @@ and breakpoint semantics. Preserve ADR-0013's existing opt-out during migration.
 | M2b: Backend registry and operator lifecycle | Implemented and source-validated | Config/admin/CLI persistence, restart reconstruction, credential rotation/revocation, declared model scoping and backward-compatible fixed routes. ADR-0017; targeted Rust and real-process evidence below. |
 | M3: Conversation and cache semantics | In progress | ADR-0018 implements codec-owned ordered input and classified refusal; ADR-0019 adds native streaming and Codex retention. ADR-0020 implements declared cache compilation, scoped keys and observed credential generations. Broader content/tool/media fidelity remains required. |
 | M4: Authorized routing and affinity | In progress | ADR-0021 candidate implements logical aliases, actual codec/profile preflight, deterministic priority/rendezvous selection, immutable in-memory plans, scoped discovery and durable compatible session pins. Issuer provenance and broader authorization/lifecycle qualification remain required. |
-| M5: Uniform execution accounting | In progress | ADR-0022 freezes context; ADR-0023 adds paired budget ownership; ADR-0024 persists single-attempt transport evidence; ADR-0025 qualifies four buffered protocols; ADR-0026 qualifies transparent standard Responses streaming; ADR-0027 qualifies constrained buffered Codex aggregation; ADR-0028 connects four client dialects to qualified typed Chat/Responses/Codex streams. Messages/Gemini source qualification and the retained intermittent accounting-wait failure remain open. |
+| M5: Uniform execution accounting | In progress | ADR-0022 freezes context; ADR-0023 adds paired budget ownership; ADR-0024 persists single-attempt transport evidence; ADR-0025 qualifies four buffered protocols; ADR-0026 qualifies transparent standard Responses streaming; ADR-0027 qualifies constrained buffered Codex aggregation; ADR-0028 connects four client dialects to qualified typed Chat/Responses/Codex streams; ADR-0031 connects Messages profiles with explicit native-state limits. Gemini source qualification and the retained intermittent accounting-wait failure remain open. |
 | M6: End-to-end qualification | In progress | Z.AI live text/cache matrices and synthetic SDK/lifecycle evidence recorded below. Full agent-loop/interrupt/restart and subscription qualification remain required; unresolved cases clearly gated. |
 | M7: Operator console and visible efficiency semantics | Implemented and source-validated | Navigable workspaces, backend/route inventory, token-composition/coverage, attribution filtering and bounded usage diagnostics. AgentBrowser inspected a synthetic preview; affected browser/management/SSO and strict docs checks passed. This is a workspace candidate, not a deployed release. |
 
@@ -1210,3 +1210,62 @@ Formatting, strict MkDocs and generated binding-facade checks passed. These chec
 qualify this library increment; they do not enable the gated families or explain
 the earlier intermittent accounting wait. Secret scans and exact-commit independent
 review remain publication requirements for the resulting tip.
+
+### M5i Messages source ownership and real SDK request controls
+
+[ADR-0031](../adr/0031-qualified-messages-stream-ownership.md) connects both Messages
+usage profiles to raw and typed physical owners. Profile validation precedes
+attempt authorization and HTTP setup. The existing bounded HTTP owner now accepts
+portable Messages output for four ingress dialects; the shared typed qualifier
+publishes one authoritative final usage and finish only after source EOF. Partial
+or absent evidence never settles. Previously qualified final usage remains
+independent of failed projection, delivery, cancellation and deadlines.
+
+The dedicated complete-event Messages projection preserves initial text/thinking
+and actual tool input, validates block lifecycle and refuses unsupported native
+state. Signed/redacted thinking, unknown events and tool-caller provenance survive
+native delivery or fail translation explicitly. The seven-case HTTP fixture now
+contains 385 calls, including 192 source/dialect/evidence calls, 24 lifecycle calls,
+one overflow case, 36 Gemini argument cases, 60 terminal-reason cases, 24 buffered
+argument cases and 48 native-state/tool-input cases. The provider matrix adds 64
+raw/typed profile/native/evidence calls. Multiline byte-boundary and truncated-EOF
+tests use the actual qualified source/decoder pipeline.
+
+The initial expanded cancellation fixture missed a reply carried in the first
+transparent chunk. Its join now inspects that chunk before waiting for another;
+production deadlines and settlement assertions were unchanged. The prior known
+admission-timeout cause remains open.
+
+The [live GLM Messages evidence](../reviews/zai-messages-tracked-streams-2026-11-12.md)
+retains the default-thinking failure: two native calls joined, six translations
+refused a nonempty signature and retained partial liabilities. A structural trace
+contains no content/signature values. Explicit thinking disable then exposed an
+encoder omission and the installed Gemini SDK's nested snake-case budget field.
+The first controlled report was started before the Gemini SDK failure was noticed;
+its six successes/two failures are retained. Explicit disable now reaches Messages,
+including Responses effort `none`; contradictory controls refuse. Both Gemini
+budget spellings are supported, ambiguous aliases reject, and unrepresented
+controls remain native-only. Structured Gemini SSE errors carry numeric codes.
+
+The corrected eight-call matrix passed every SDK/attempt/usage/paired-receipt join
+and exited 0, with six translated and two transparent calls. All eight reported
+reads: fresh/read/write/output totals 40/30,208/0/112. Reasoning was not separately
+reported. Its 99.87% input read share is not a price saving, TTL acceptance or
+cold-to-warm test; earlier diagnostics had used the same synthetic prefix. These
+are new qualification calls, not replay of earlier model executions. Default
+signed-thinking translation remains refused, and native Gemini source streams,
+broader agent journeys, subscription lifecycle, operator joins and reliability
+remain full-goal work. Final regression, secret and exact-review evidence applies
+to the resulting commit before publication.
+
+Final M5i default workspace validation passed 1,134 tests (six opt-in ignored),
+including all 385 HTTP calls and the admission-stress fixture. The full
+tracked/backend SDK suite passed 113 cases; the separate reasoning suite passed
+24 cases. One older refusal fixture still used Messages as its unsupported family;
+it now uses the still-unqualified Gemini source and retains all pre-admission,
+zero-dispatch and zero-reservation assertions. Default/ONNX workspace/all-target
+Clippy, formatting, strict docs and binding-facade checks passed. Public hosted
+[CI for reviewed `74b4a10`](https://github.com/anvai-labs/sandhi/actions/runs/43162442233)
+also passed every job, with its documentation run green. It predates M5i; the new
+tip needs its own hosted checks. Passing source tests still do not explain or
+resolve the earlier intermittent admission wait.

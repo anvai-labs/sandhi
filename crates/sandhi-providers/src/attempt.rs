@@ -621,6 +621,7 @@ pub(crate) async fn observe_qualified_stream<Make, F>(
     model: Option<&str>,
     endpoint: sandhi_core::EndpointFamilyV1,
     profile: sandhi_core::usage::OpenAiStreamUsageProfile,
+    anthropic_profile: sandhi_core::usage::AnthropicUsageProfile,
     make_future: Make,
 ) -> Result<crate::QualifiedProviderStream, ProviderError>
 where
@@ -629,6 +630,16 @@ where
         Output = Result<(crate::raw::RawChunkStream, Option<String>), ProviderError>,
     >,
 {
+    // Validate conventions before creating an attempt or performing HTTP I/O.
+    let observer =
+        crate::stream_usage::ProtocolStreamUsageObserver::for_endpoint_with_usage_profiles(
+            endpoint,
+            profile,
+            anthropic_profile,
+        )
+        .map_err(|_| {
+            ProviderError::InvalidRequest("stream usage profile does not match endpoint".into())
+        })?;
     let facts = AttemptResponseFacts::default();
     let mut guard = context
         .as_ref()
@@ -648,8 +659,7 @@ where
         }
     };
     let (raw, observation) =
-        crate::raw::qualified_stream::observe_response(raw, guard, endpoint, request_id, profile)
-            .expect("built-in qualified endpoint is supported");
+        crate::raw::qualified_stream::observe_response(raw, guard, observer, request_id);
     if let Some(context) = context {
         context.attach_qualified_stream(observation.clone());
     }
@@ -1132,5 +1142,47 @@ mod tests {
             .store(u64::MAX, Ordering::Relaxed);
         assert!(context.begin("provider", Some("model")).is_none());
         assert!(receiver.drain().is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalid_stream_profiles_refuse_before_attempt_authorization_or_http_setup() {
+        use sandhi_core::usage::{AnthropicUsageProfile as A, OpenAiStreamUsageProfile as O};
+        use sandhi_core::EndpointFamilyV1 as E;
+        for (endpoint, openai, anthropic) in [
+            (E::OpenaiChatCompletions, O::Standard, A::ImplicitCache),
+            (
+                E::AnthropicMessages,
+                O::TerminalChunk,
+                A::SeparateCacheWrites,
+            ),
+            (
+                E::GeminiGenerateContent,
+                O::Standard,
+                A::SeparateCacheWrites,
+            ),
+        ] {
+            let (context, receiver) =
+                AttemptContext::single_attempt("invalid-profile", "e".repeat(64)).unwrap();
+            let result = observe_qualified_stream(
+                Some(context.clone()),
+                "fixture",
+                Some("fixture"),
+                endpoint,
+                openai,
+                anthropic,
+                |_| async {
+                    panic!("invalid profile reached physical HTTP setup");
+                    #[allow(unreachable_code)]
+                    Ok((
+                        Box::pin(futures_util::stream::empty()) as crate::raw::RawChunkStream,
+                        None,
+                    ))
+                },
+            )
+            .await;
+            assert!(matches!(result, Err(ProviderError::InvalidRequest(_))));
+            assert_eq!(context.dispatch_count(), 0);
+            assert!(receiver.drain().is_empty());
+        }
     }
 }

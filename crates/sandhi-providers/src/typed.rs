@@ -867,6 +867,7 @@ impl ProviderRuntime {
             ProviderFamily::Anthropic => Arc::new(
                 Anthropic::new(config.base_url.clone(), config.api_key.clone())
                     .with_auth_scheme(config.anthropic_auth_scheme)
+                    .with_usage_profile(config.anthropic_usage_profile)
                     .with_headers(config.headers.clone()),
             ),
             ProviderFamily::Cohere => Arc::new(

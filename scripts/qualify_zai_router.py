@@ -50,6 +50,8 @@ def main():
     parser.add_argument("--accounting", choices=["legacy", "tracked"], default="legacy")
     parser.add_argument("--delivery", choices=["buffered", "streaming", "both"], default="both")
     parser.add_argument("--logical-route", action="store_true", help="Resolve an authorized alias before dispatch")
+    parser.add_argument("--thinking", choices=["default", "disabled"], default="default",
+                        help="Explicit client thinking control; support is endpoint/model-specific")
     args = parser.parse_args()
     if args.verify:
         report = json.loads(args.verify.read_text())
@@ -61,10 +63,6 @@ def main():
         parser.error("--live is required: this consumes provider inference quota")
     if args.output is None:
         parser.error("--output is required for live evidence")
-    if args.accounting == "tracked" and args.delivery != "buffered" and any(
-        backend not in ("chat", "responses") for backend in args.backend or ENDPOINTS
-    ):
-        parser.error("tracked streaming requires qualified chat/responses backend selections; all four clients are supported")
     if any(values and len(set(values)) != len(values) for values in (args.backend, args.client)):
         parser.error("duplicate backend/client selections would repeat inference cells")
     credential = json.loads(args.settings.read_text())["env"]["ANTHROPIC_AUTH_TOKEN"]
@@ -87,6 +85,7 @@ def main():
               "sdk_versions": {package: version(package) for package in ("openai", "anthropic", "google-genai")},
               "sdk_retries": 0,
               "accounting": args.accounting, "delivery": args.delivery, "logical_route": args.logical_route,
+              "thinking": args.thinking,
               "endpoint_profiles": {backend: "anthropic_implicit_cache" if backend == "messages" else "openai_terminal_chunk_usage" if backend == "chat" else "standard"
                                     for backend in args.backend or ENDPOINTS},
               "harness_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
@@ -184,7 +183,7 @@ def main():
                                     prompt = "Synthetic Python reference module:\n" + prefix + "\n\n" + prompt
                                 started = time.monotonic()
                                 try:
-                                    cell.update(infer(client, base, key, requested_model, prompt, stream, cell["step_id"]))
+                                    cell.update(infer(client, base, key, requested_model, prompt, stream, cell["step_id"], args.thinking))
                                     cell["status"] = "ok" if cell["text"].strip() else "empty_text"
                                 except Exception as error:
                                     cell.update(status="error", error_type=type(error).__name__, error=str(error))
@@ -234,7 +233,7 @@ def main():
         raise SystemExit(1)
 
 
-def infer(flavor, base, key, model, prompt, stream, step_id):
+def infer(flavor, base, key, model, prompt, stream, step_id, thinking="default"):
     headers = {"x-sandhi-session": "zai-router-qualification", "x-sandhi-run-id": "zai-router-qualification",
                "x-sandhi-step-id": step_id}
     text, reasoning, usage, events = [], [], [], []
@@ -244,6 +243,7 @@ def infer(flavor, base, key, model, prompt, stream, step_id):
             if flavor == "chat":
                 result = sdk.chat.completions.create(model=model, max_tokens=1024,
                     messages=[{"role": "user", "content": prompt}], stream=stream,
+                    **({"extra_body": {"thinking": {"type": "disabled"}}} if thinking == "disabled" else {}),
                     **({"stream_options": {"include_usage": True}} if stream else {}))
                 if stream:
                     for chunk in result:
@@ -260,7 +260,8 @@ def infer(flavor, base, key, model, prompt, stream, step_id):
                     usage.append(result.usage.model_dump(exclude_none=True) if result.usage else None)
                     events.append(result.choices[0].finish_reason)
             else:
-                result = sdk.responses.create(model=model, input=prompt, max_output_tokens=1024, stream=stream)
+                result = sdk.responses.create(model=model, input=prompt, max_output_tokens=1024, stream=stream,
+                    **({"reasoning": {"effort": "none"}} if thinking == "disabled" else {}))
                 if stream:
                     for event in result:
                         if event.type == "response.output_text.delta":
@@ -276,7 +277,8 @@ def infer(flavor, base, key, model, prompt, stream, step_id):
         with anthropic.Anthropic(base_url=base, api_key=key, max_retries=0,
                                   timeout=150, default_headers=headers) as sdk:
             result = sdk.messages.create(model=model, max_tokens=1024,
-                messages=[{"role": "user", "content": prompt}], stream=stream)
+                messages=[{"role": "user", "content": prompt}], stream=stream,
+                **({"thinking": {"type": "disabled"}} if thinking == "disabled" else {}))
             if stream:
                 for event in result:
                     if event.type == "content_block_delta":
@@ -297,7 +299,8 @@ def infer(flavor, base, key, model, prompt, stream, step_id):
         with genai.Client(api_key=key, http_options=types.HttpOptions(base_url=base,
                 timeout=150000, headers=headers, retry_options=types.HttpRetryOptions(attempts=1))) as sdk:
             result = (sdk.models.generate_content_stream if stream else sdk.models.generate_content)(
-                model=model, contents=prompt, config=types.GenerateContentConfig(max_output_tokens=1024))
+                model=model, contents=prompt, config=types.GenerateContentConfig(max_output_tokens=1024,
+                    **({"thinking_config": types.ThinkingConfig(thinking_budget=0)} if thinking == "disabled" else {})))
             for chunk in result if stream else [result]:
                 for candidate in chunk.candidates or []:
                     for part in candidate.content.parts if candidate.content else []:

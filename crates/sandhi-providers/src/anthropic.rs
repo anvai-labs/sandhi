@@ -28,6 +28,7 @@ pub struct Anthropic {
     version: String,
     auth_scheme: AnthropicAuthScheme,
     headers: http::HeaderMap,
+    usage_profile: sandhi_core::usage::AnthropicUsageProfile,
 }
 
 impl Anthropic {
@@ -39,6 +40,7 @@ impl Anthropic {
             version: ANTHROPIC_VERSION.to_string(),
             auth_scheme: AnthropicAuthScheme::ApiKey,
             headers: http::HeaderMap::new(),
+            usage_profile: Default::default(),
         }
     }
 
@@ -50,6 +52,16 @@ impl Anthropic {
     #[must_use]
     pub fn with_auth_scheme(mut self, auth_scheme: AnthropicAuthScheme) -> Self {
         self.auth_scheme = auth_scheme;
+        self
+    }
+
+    /// Explicit response-usage convention for qualified Messages streaming.
+    #[must_use]
+    pub fn with_usage_profile(
+        mut self,
+        profile: sandhi_core::usage::AnthropicUsageProfile,
+    ) -> Self {
+        self.usage_profile = profile;
         self
     }
 
@@ -120,6 +132,59 @@ impl Provider for Anthropic {
                     },
                     observed_usage,
                 ))
+            },
+        )
+        .await
+    }
+
+    async fn stream_qualified(
+        &self,
+        req: ProviderRequest,
+        _delivery: crate::QualifiedStreamDelivery,
+    ) -> Result<crate::QualifiedProviderStream, ProviderError> {
+        let context = req.attempt_context.clone();
+        let model = req.model.clone();
+        let mut body = req.body;
+        body.as_object_mut()
+            .ok_or_else(|| {
+                ProviderError::InvalidRequest("Messages request must be a JSON object".into())
+            })?
+            .insert("stream".into(), Value::Bool(true));
+        let request = self
+            .client
+            .post(self.messages_url())
+            .header("anthropic-version", &self.version)
+            .headers(crate::merge_call_headers(&self.headers, &req.extra_headers))
+            .json(&body);
+        crate::attempt::observe_qualified_stream(
+            context,
+            self.slug(),
+            Some(&model),
+            sandhi_core::EndpointFamilyV1::AnthropicMessages,
+            Default::default(),
+            self.usage_profile,
+            |facts| async move {
+                let response = self
+                    .authenticate(request)
+                    .send()
+                    .await
+                    .map_err(|error| ProviderError::Transport(error.to_string()))?;
+                facts.record_headers(
+                    response.status().as_u16(),
+                    response.headers(),
+                    Some("anthropic-request-id"),
+                );
+                if !response.status().is_success() {
+                    return Err(error_for_response(response, Some("anthropic-request-id")).await);
+                }
+                let request_id =
+                    crate::provider_request_id(response.headers(), Some("anthropic-request-id"));
+                use futures_util::StreamExt;
+                let raw: crate::raw::RawChunkStream =
+                    Box::pin(response.bytes_stream().map(|chunk| {
+                        chunk.map_err(|error| ProviderError::Transport(error.to_string()))
+                    }));
+                Ok((raw, request_id))
             },
         )
         .await

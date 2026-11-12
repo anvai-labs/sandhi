@@ -35,7 +35,9 @@ Logical routes run the actual streaming preflight before pin confirmation. A
 translated target can now be selected or remain pinned when its source qualifies.
 Unbounded streams, retry-enabled handles, unqualified source families and
 unsupported profile/content/cache controls still refuse before admission. Current
-Messages/Gemini **upstream** streams remain unqualified; accepting their client
+At this checkpoint, Messages/Gemini **upstream** streams remained unqualified;
+[ADR-0031](0031-qualified-messages-stream-ownership.md) subsequently connects Messages
+with explicit native-state limits. Accepting their client
 request formats does not qualify their source accounting.
 
 ## Source evidence owns accounting

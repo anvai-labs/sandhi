@@ -551,7 +551,7 @@ impl RawForwarder {
         })
     }
 
-    /// Opt-in complete-event qualification for Chat and Responses streams.
+    /// Opt-in complete-event qualification for Chat, Responses and Messages streams.
     /// Missing/true `stream` is accepted and normalized; conflicting modes and
     /// unsupported operations fail before dispatch. Response bytes (including
     /// malformed SSE) pass unchanged. Inspect the observation's qualification
@@ -574,6 +574,9 @@ impl RawForwarder {
             (ProviderFamily::OpenAiResponses, "/v1/responses" | "/responses") => {
                 sandhi_core::EndpointFamilyV1::OpenaiResponses
             }
+            (ProviderFamily::Anthropic, "/v1/messages" | "/messages") => {
+                sandhi_core::EndpointFamilyV1::AnthropicMessages
+            }
             _ => {
                 return Err(ProviderError::InvalidRequest(
                     "qualified streaming requires a supported generation operation".into(),
@@ -593,6 +596,15 @@ impl RawForwarder {
                 "qualified streaming requires synchronous stream delivery".into(),
             ));
         }
+        let observer =
+            crate::stream_usage::ProtocolStreamUsageObserver::for_endpoint_with_usage_profiles(
+                endpoint,
+                self.openai_stream_usage_profile,
+                self.anthropic_usage_profile,
+            )
+            .map_err(|_| {
+                ProviderError::InvalidRequest("stream usage profile does not match endpoint".into())
+            })?;
         let (response, guard, idle) = self
             .setup_stream(path, body, session, correlation, call_headers)
             .await?;
@@ -606,14 +618,8 @@ impl RawForwarder {
                 .bytes_stream()
                 .map(|chunk| chunk.map_err(|error| ProviderError::Transport(error.to_string()))),
         );
-        let (stream, observation) = qualified_stream::observe_response(
-            with_idle_timeout(raw, idle),
-            guard,
-            endpoint,
-            None,
-            self.openai_stream_usage_profile,
-        )
-        .expect("endpoint qualification was validated before dispatch");
+        let (stream, observation) =
+            qualified_stream::observe_response(with_idle_timeout(raw, idle), guard, observer, None);
         Ok(RawQualifiedStreamResponse {
             status,
             headers,
@@ -1682,12 +1688,10 @@ data: [DONE]\n\n";
         let (context, receiver) = crate::AttemptContext::channel("not-dispatched", 4).unwrap();
         for (family, path, body) in [
             (ProviderFamily::Anthropic, "/v1/chat/completions", "{}"),
-            // A library observer prerequisite does not activate a source family
-            // before its raw/typed ownership and HTTP acceptance are qualified.
             (
                 ProviderFamily::Anthropic,
                 "/v1/messages",
-                "{\"stream\":true}",
+                "{\"stream\":false}",
             ),
             (
                 ProviderFamily::Gemini,

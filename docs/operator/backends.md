@@ -103,8 +103,10 @@ before pinning; an existing incompatible pin refuses. Bounded transparent standa
 [Responses streaming](../adr/0026-qualified-responses-stream-accounting.md) is now
 qualified alongside Chat. Constrained [Codex buffered aggregation](../adr/0027-qualified-codex-buffered-accounting.md)
 also qualifies through its typed owner. [Tracked translated streams](../adr/0028-qualified-translated-stream-accounting.md)
-now connect four client formats to qualified Chat/Responses/Codex sources.
-Messages/Gemini source stream accounting remains gated. Tracked stream selection checks delivery compatibility and
+now connect four client formats to qualified Chat/Messages/Responses/Codex sources.
+[Messages streaming](../adr/0031-qualified-messages-stream-ownership.md) preserves
+native state or explicitly refuses unsupported projection; signed thinking is not
+portable by default. Gemini source stream accounting remains gated. Tracked stream selection checks delivery compatibility and
 deadline configuration before confirming a pin.
 
 ## Usage qualification profiles

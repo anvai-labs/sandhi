@@ -154,7 +154,7 @@ pub(crate) async fn handle(
         || request.max_output_tokens.is_none()
     {
         return ingress_error(dialect, StatusCode::BAD_REQUEST,
-            "tracked accounting requires buffered Chat, Messages, Responses or Gemini with a supported retry-free backend, or bounded streaming from qualified Chat/Responses/Codex backends; Block policy, explicit output limit and no idempotency key are required");
+            "tracked accounting requires buffered Chat, Messages, Responses or Gemini with a supported retry-free backend, or bounded streaming from qualified Chat/Messages/Responses/Codex backends; Block policy, explicit output limit and no idempotency key are required");
     }
     let preflight = if wants_stream {
         provider.preflight_owned_streaming(&request)

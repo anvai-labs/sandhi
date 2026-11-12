@@ -235,6 +235,7 @@ impl Provider for OpenAiCompat {
             Some(&model),
             sandhi_core::EndpointFamilyV1::OpenaiChatCompletions,
             self.stream_usage_profile,
+            Default::default(),
             |facts| async move {
                 let response = request
                     .json(&body)

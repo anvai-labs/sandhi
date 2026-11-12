@@ -12,6 +12,8 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+mod qualified;
+
 pub(crate) struct TypedAnthropic {
     raw: Arc<dyn Provider>,
     usage_profile: sandhi_core::usage::AnthropicUsageProfile,
@@ -96,6 +98,33 @@ impl TypedAnthropic {
 
 #[async_trait]
 impl ChatProvider for TypedAnthropic {
+    fn supports_qualified_streaming(&self) -> bool {
+        true
+    }
+    async fn stream_qualified_observed(
+        &self,
+        request: ChatRequestV1,
+        headers: http::HeaderMap,
+        context: crate::AttemptContext,
+    ) -> Result<ChatEventStream, ProviderError> {
+        request.validate().map_err(ProviderError::InvalidRequest)?;
+        let source = self
+            .raw
+            .stream_qualified(
+                provider_request_observed(
+                    &request,
+                    encode_anthropic_request(&request)?,
+                    headers,
+                    Some(context),
+                ),
+                crate::QualifiedStreamDelivery::Streaming,
+            )
+            .await?;
+        Ok(crate::qualified_stream::decode(
+            qualified::decode(source.stream, request.model, request.include_native_stream),
+            source.observation,
+        ))
+    }
     fn preflight_request(&self, request: &ChatRequestV1) -> Result<(), ProviderError> {
         encode_anthropic_request(request).map(|_| ())
     }
@@ -351,8 +380,19 @@ pub(crate) fn encode_anthropic_request_base(
     }
     // W3d/G7: Anthropic extended thinking is `{type: enabled, budget_tokens}`.
     // Typed field wins over an extensions-carried duplicate (inserted after
-    // the extensions clone). `reasoning_effort` has no Anthropic analogue —
-    // explicitly ignored (consumer-decision row).
+    // the extensions clone). Effort `none` is an explicit no-thinking request;
+    // other effort levels retain their existing consumer decision.
+    let no_reasoning = request.reasoning_effort.as_deref() == Some("none");
+    if no_reasoning
+        && request
+            .thinking
+            .as_ref()
+            .is_some_and(|thinking| thinking.enabled)
+    {
+        return Err(ProviderError::InvalidRequest(
+            "reasoning effort none conflicts with enabled thinking".into(),
+        ));
+    }
     if let Some(thinking) = &request.thinking {
         if thinking.enabled {
             let mut obj = serde_json::Map::new();
@@ -362,8 +402,10 @@ pub(crate) fn encode_anthropic_request_base(
             }
             body.insert("thinking".into(), Value::Object(obj));
         } else {
-            body.remove("thinking");
+            body.insert("thinking".into(), json!({"type":"disabled"}));
         }
+    } else if no_reasoning {
+        body.insert("thinking".into(), json!({"type":"disabled"}));
     }
     Ok(Value::Object(body))
 }
@@ -680,6 +722,25 @@ fn decode_anthropic_stream_inner(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn explicitly_disabled_thinking_is_sent_instead_of_relying_on_backend_defaults() {
+        for control in [
+            serde_json::json!({"thinking":{"enabled":false}}),
+            serde_json::json!({"reasoning_effort":"none"}),
+        ] {
+            let mut value = serde_json::json!({"model":"fixture","max_output_tokens":64,"messages":[{"role":"user","content":"hello"}]});
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(control.as_object().unwrap().clone());
+            let request = serde_json::from_value(value).unwrap();
+            let body = super::encode_anthropic_request(&request).unwrap();
+            assert_eq!(body["thinking"], serde_json::json!({"type":"disabled"}));
+        }
+        let request=serde_json::from_value(serde_json::json!({"model":"fixture","max_output_tokens":64,
+            "reasoning_effort":"none","thinking":{"enabled":true},"messages":[{"role":"user","content":"hello"}]})).unwrap();
+        assert!(super::encode_anthropic_request(&request).is_err());
+    }
 
     /// TD-0014 P1, the opposing guard. The six `..._is_bounded_and_errors_...` tests pin the
     /// ceiling from BELOW; on their own they would all still pass with the bound set to 1 KiB,

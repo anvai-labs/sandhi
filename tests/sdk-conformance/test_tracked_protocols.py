@@ -65,6 +65,8 @@ def qualified_origin():
             control["entered"].set()
             assert control["release"].wait(10), "test did not release origin"
             response = response_for(family)
+            if family == FAMILIES[1] and control.get("implicit_stream_writes"):
+                response["usage"].pop("cache_creation_input_tokens")
             if control["mode"] == "missing":
                 response.pop("usageMetadata" if family == FAMILIES[3] else "usage")
             elif control["mode"] == "no_writes":
@@ -76,7 +78,7 @@ def qualified_origin():
             if control["mode"] == "ambiguous":
                 key = "usageMetadata" if family == FAMILIES[3] else "usage"
                 encoded = encoded[:-1] + b',"' + key.encode() + b'":' + json.dumps(response[key]).encode() + b'}'
-            streaming = body.get("stream") is True and family in (FAMILIES[0], FAMILIES[2])
+            streaming = body.get("stream") is True and family in (FAMILIES[0], FAMILIES[1], FAMILIES[2])
             if streaming and family == FAMILIES[0]:
                 events = [{"id": "chat_fixture", "object": "chat.completion.chunk", "created": 1, "model": "fixture",
                     "choices": [{"index": 0, "delta": {"content": "reply"}, "finish_reason": "length" if control["mode"] == "incomplete" else "stop"}]}]
@@ -86,6 +88,35 @@ def qualified_origin():
                     events.append({"id": "chat_fixture", "object": "chat.completion.chunk", "created": 1,
                         "model": "fixture", "choices": [], "usage": response["usage"]})
                 encoded = ("".join("data: " + json.dumps(e) + "\n\n" for e in events) + "data: [DONE]\n\n").encode()
+                if control["mode"] == "post_terminal":
+                    encoded += b'data: {}\n\n'
+            elif streaming and family == FAMILIES[1]:
+                usage = dict(response.get("usage", {}))
+                final_usage = {"output_tokens": usage["output_tokens"]} if "output_tokens" in usage else {}
+                if "output_tokens" in usage:
+                    usage["output_tokens"] = 1
+                events = [
+                    {"type": "message_start", "message": {"id": "msg_fixture", "type": "message",
+                     "role": "assistant", "model": "fixture", "content": [], "usage": usage}},
+                    {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+                    {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "reply"}},
+                    {"type": "content_block_stop", "index": 0},
+                ]
+                if control.get("signed_output"):
+                    for event in events:
+                        if "index" in event:
+                            event["index"] = 1
+                    events[1:1] = [
+                        {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": "", "signature": ""}},
+                        {"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "synthetic-nonportable"}},
+                        {"type": "content_block_stop", "index": 0},
+                    ]
+                if control["mode"] != "progress_only":
+                    events += [
+                        {"type": "message_delta", "delta": {"stop_reason": "max_tokens" if control["mode"] == "incomplete" else "end_turn"}, "usage": final_usage},
+                        {"type": "message_stop"},
+                    ]
+                encoded = "".join("event: " + e["type"] + "\ndata: " + json.dumps(e) + "\n\n" for e in events).encode()
                 if control["mode"] == "post_terminal":
                     encoded += b'data: {}\n\n'
             elif streaming:
@@ -638,7 +669,8 @@ def test_messages_usage_profile_survives_restart_and_revision_change_fences_the_
 
 
 @pytest.mark.parametrize("mode", ["valid", "incomplete"])
-@pytest.mark.parametrize("family,profile", [(FAMILIES[0], "standard"), (FAMILIES[0], "openai_terminal_chunk_usage"), (FAMILIES[2], "standard")])
+@pytest.mark.parametrize("family,profile", [(FAMILIES[0], "standard"), (FAMILIES[0], "openai_terminal_chunk_usage"), (FAMILIES[2], "standard"),
+                                         (FAMILIES[1], "standard"), (FAMILIES[1], "anthropic_implicit_cache")])
 @pytest.mark.parametrize("ingress", FAMILIES)
 def test_tracked_stream_real_sdks_translate_and_settle_source_counts(
     tmp_path, backend_binaries, qualified_origin, family, profile, ingress, mode,
@@ -646,6 +678,10 @@ def test_tracked_stream_real_sdks_translate_and_settle_source_counts(
     origin, calls, control = qualified_origin
     control["mode"] = mode
     control["terminal_chunk_usage"] = profile == "openai_terminal_chunk_usage"
+    control["implicit_stream_writes"] = profile == "anthropic_implicit_cache"
+    written = 0 if profile == "anthropic_implicit_cache" else 1
+    inclusive_input = 4 + written
+    charged = 4 + written
     with tracked_gateway(tmp_path, backend_binaries, origin, family, endpoint_profile=profile, streaming=True) as (instance, token):
         headers = {"x-sandhi-session": "stream-protocol-session"}
         if ingress in (FAMILIES[0], FAMILIES[2]):
@@ -656,7 +692,7 @@ def test_tracked_stream_real_sdks_translate_and_settle_source_counts(
                         messages=[{"role": "user", "content": "hello"}], stream=True))
                     text = "".join(event.choices[0].delta.content or "" for event in events if event.choices)
                     assert events[-1].usage is not None
-                    assert events[-1].usage.prompt_tokens == 5
+                    assert events[-1].usage.prompt_tokens == inclusive_input
                     assert any(event.choices[0].finish_reason == ("length" if mode == "incomplete" else "stop") for event in events if event.choices)
                 else:
                     events = list(client.responses.create(model="agent", max_output_tokens=64,
@@ -664,7 +700,7 @@ def test_tracked_stream_real_sdks_translate_and_settle_source_counts(
                     text = "".join(event.delta for event in events if event.type == "response.output_text.delta")
                     assert events[-1].type == ("response.incomplete" if mode == "incomplete" else "response.completed")
                     assert events[-1].response.status == ("incomplete" if mode == "incomplete" else "completed")
-                    assert events[-1].response.usage.input_tokens == 5
+                    assert events[-1].response.usage.input_tokens == inclusive_input
                     assert events[-1].response.usage.output_tokens == 2
         elif ingress == FAMILIES[1]:
             import anthropic
@@ -678,7 +714,7 @@ def test_tracked_stream_real_sdks_translate_and_settle_source_counts(
                     assert final.usage.output_tokens == 2
                     assert final.usage.input_tokens == 2
                     assert final.usage.cache_read_input_tokens == 2
-                    assert final.usage.cache_creation_input_tokens == 1
+                    assert final.usage.cache_creation_input_tokens == (None if ingress == FAMILIES[1] and not written else written)
         else:
             from google import genai
             from google.genai import types
@@ -706,11 +742,11 @@ def test_tracked_stream_real_sdks_translate_and_settle_source_counts(
         assert context["backend"]["endpoint_profile"] == profile
         assert context["plane"] == ("transparent" if ingress == family else "translation")
         assert usage["completeness"] == "final" and usage["reasoning_tokens"] == 1
-        assert (usage["tokens_in"], usage["cache_read_tokens"], usage["cache_creation_tokens"], usage["tokens_out"]) == (2, 2, 1, 2)
-        assert charge == 5
+        assert (usage["tokens_in"], usage["cache_read_tokens"], usage["cache_creation_tokens"], usage["tokens_out"]) == (2, 2, written, 2)
+        assert charge == charged
         with sqlite3.connect(instance.database) as connection:
-            assert connection.execute("SELECT charged_tokens FROM budget_settlement_outbox").fetchall() == [(5,)]
-            assert connection.execute("SELECT settled,actual FROM budget_reservation").fetchall() == [(1, 5)] * 2
+            assert connection.execute("SELECT charged_tokens FROM budget_settlement_outbox").fetchall() == [(charged,)]
+            assert connection.execute("SELECT settled,actual FROM budget_reservation").fetchall() == [(1, charged)] * 2
 
 
 def test_terminal_chat_profile_survives_restart_and_profile_change_fences_pin(
@@ -739,3 +775,65 @@ def test_terminal_chat_profile_survives_restart_and_profile_change_fences_pin(
         assert refused.value.status_code == 409
         assert len(calls) == 2
         assert evidence(instance.database)[0] == first
+
+
+def test_messages_stream_profile_survives_restart_and_profile_change_fences_pin(
+    tmp_path, backend_binaries, qualified_origin,
+):
+    origin, calls, control = qualified_origin
+    control["implicit_stream_writes"] = True
+    with tracked_gateway(tmp_path, backend_binaries, origin, FAMILIES[1],
+            endpoint_profile="anthropic_implicit_cache", streaming=True) as (instance, token):
+        def submit():
+            with instance.client(token) as client:
+                events = list(client.responses.create(model="agent", input="hello", max_output_tokens=64,
+                    stream=True, extra_headers={"x-sandhi-session": "messages-stream-profile-session"}))
+                assert events[-1].type == "response.completed"
+                assert events[-1].response.usage.input_tokens == 4
+                assert events[-1].response.usage.output_tokens == 2
+        submit()
+        first = evidence(instance.database)[0]
+        instance.stop()
+        instance.start(SANDHI_BUFFERED_ACCOUNTING="tracked", SANDHI_CACHE_READ_WEIGHT="1000")
+        submit()
+        instance.cli("set", "primary", "--provider", "models", "--credential-ref", "openai:default",
+            "--endpoint-family", FAMILIES[1], "--endpoint-profile", "standard", "--model", "fixture", "--revision", "1")
+        with pytest.raises(openai.APIStatusError) as refused:
+            submit()
+        assert refused.value.status_code == 409
+        assert len(calls) == 2
+        assert evidence(instance.database)[0] == first
+
+
+@pytest.mark.parametrize("ingress", ["chat", "messages", "responses", "gemini"])
+def test_explicit_thinking_disable_reaches_messages_from_each_real_sdk(
+    tmp_path, backend_binaries, qualified_origin, ingress,
+):
+    import importlib.util
+    from conftest import REPO_ROOT
+    spec = importlib.util.spec_from_file_location("thinking_harness", REPO_ROOT / "scripts/qualify_zai_router.py")
+    harness = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(harness)
+    origin, calls, _ = qualified_origin
+    with tracked_gateway(tmp_path, backend_binaries, origin, FAMILIES[1], streaming=True) as (instance, token):
+        result = harness.infer(ingress, instance.base, token, "agent", "hello", True, "thinking-intent", "disabled")
+        assert result["text"] == "reply"
+        assert len(calls) == 1
+        assert calls[0][1]["thinking"] == {"type": "disabled"}
+
+
+def test_gemini_default_sdk_stream_refusal_has_no_type_error_or_inference_replay(
+    tmp_path, backend_binaries, qualified_origin,
+):
+    from google import genai
+    from google.genai import types, errors
+    origin, calls, control = qualified_origin
+    control["signed_output"] = True
+    with tracked_gateway(tmp_path, backend_binaries, origin, FAMILIES[1], streaming=True) as (instance, token):
+        with genai.Client(api_key=token, http_options=types.HttpOptions(base_url=instance.base)) as client:
+            with pytest.raises((errors.APIError, httpx.RemoteProtocolError)) as failed:
+                list(client.models.generate_content_stream(model="agent", contents="hello",
+                    config=types.GenerateContentConfig(max_output_tokens=64)))
+        if isinstance(failed.value, errors.APIError):
+            assert failed.value.code == 502
+        assert len(calls) == 1, "default SDK must not replay a dispatched inference on a stream projection error"

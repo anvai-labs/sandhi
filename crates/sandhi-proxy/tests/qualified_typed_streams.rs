@@ -33,6 +33,9 @@ fn ingress(flavor: &str) -> (&str, Value) {
 }
 
 fn wire(profile: &str, mode: &str) -> String {
+    if profile.starts_with("messages") {
+        return messages_wire(profile, mode);
+    }
     let chat = matches!(profile, "chat" | "terminal_chat");
     let mut usage = if chat {
         json!({"prompt_tokens":10,"completion_tokens":4,"prompt_tokens_details":{"cached_tokens":6,"cache_write_tokens":2},"completion_tokens_details":{"reasoning_tokens":0}})
@@ -87,11 +90,97 @@ fn wire(profile: &str, mode: &str) -> String {
     result
 }
 
+fn written(profile: &str) -> u64 {
+    if profile == "messages_implicit" {
+        0
+    } else {
+        2
+    }
+}
+fn charge(profile: &str) -> u64 {
+    12 + written(profile)
+}
+fn message_frame(value: Value) -> String {
+    format!(
+        "event: {}\ndata: {value}\n\n",
+        value["type"].as_str().unwrap()
+    )
+}
+fn messages_wire(profile: &str, mode: &str) -> String {
+    let mut usage = json!({"input_tokens":2,"output_tokens":1,"cache_read_input_tokens":6,"cache_creation_input_tokens":written(profile),"output_tokens_details":{"thinking_tokens":0}});
+    if mode == "zero" {
+        usage = json!({"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens_details":{"thinking_tokens":0}});
+    }
+    if profile == "messages_implicit" {
+        usage
+            .as_object_mut()
+            .unwrap()
+            .remove("cache_creation_input_tokens");
+    }
+    if mode == "missing_input" {
+        usage.as_object_mut().unwrap().remove("input_tokens");
+    }
+    let mut wire = message_frame(
+        json!({"type":"message_start","message":{"id":"msg_fixture","type":"message","role":"assistant","content":[],"model":"gpt-4o-mini","usage":if mode=="missing" {Value::Null} else {usage}}}),
+    );
+    wire += &message_frame(
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+    );
+    wire += &message_frame(
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"reply"}}),
+    );
+    wire += &message_frame(json!({"type":"content_block_stop","index":0}));
+    if mode == "provider_error" {
+        wire += &message_frame(
+            json!({"type":"error","error":{"type":"overloaded_error","message":"synthetic"}}),
+        );
+        return wire;
+    }
+    let mut usage = match mode {
+        "missing" => Value::Null,
+        "missing_output" => json!({}),
+        "malformed" => json!({"output_tokens":"4"}),
+        "zero" => json!({"output_tokens":0}),
+        _ => json!({"output_tokens":4}),
+    };
+    if mode == "cache_conflict" {
+        usage["cache_read_input_tokens"] = json!(5);
+    }
+    wire += &message_frame(
+        json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":usage}),
+    );
+    if mode != "missing_terminal" {
+        wire += &message_frame(json!({"type":"message_stop"}));
+    }
+    if mode == "post_terminal" {
+        wire += &message_frame(json!({"type":"ping"}));
+    }
+    if mode == "truncated" {
+        wire += "data: {";
+    }
+    wire
+}
+
 fn provider(profile: &str, uri: String) -> ProviderHandle {
     let runtime = ProviderRuntime::new();
     let mut headers = axum::http::HeaderMap::new();
     headers.insert("chatgpt-account-id", "synthetic-account".parse().unwrap());
     let handle = match profile {
+        "messages" | "messages_implicit" => runtime.anthropic_with_usage_profile(
+            uri,
+            "synthetic-access",
+            sandhi_providers::AnthropicAuthScheme::ApiKey,
+            Default::default(),
+            Some(0),
+            None,
+            None,
+            None,
+            if profile == "messages_implicit" {
+                sandhi_core::usage::AnthropicUsageProfile::ImplicitCache
+            } else {
+                sandhi_core::usage::AnthropicUsageProfile::SeparateCacheWrites
+            },
+        ),
         "chat" | "terminal_chat" => runtime.openai_compat_with_stream_usage_profile(
             "models",
             uri,
@@ -138,6 +227,8 @@ fn provider(profile: &str, uri: String) -> ProviderHandle {
         credential_generation: 1,
         endpoint_family: if matches!(profile, "chat" | "terminal_chat") {
             sandhi_core::EndpointFamilyV1::OpenaiChatCompletions
+        } else if profile.starts_with("messages") {
+            sandhi_core::EndpointFamilyV1::AnthropicMessages
         } else {
             sandhi_core::EndpointFamilyV1::OpenaiResponses
         },
@@ -145,6 +236,8 @@ fn provider(profile: &str, uri: String) -> ProviderHandle {
             "chatgpt_codex"
         } else if profile == "terminal_chat" {
             "openai_terminal_chunk_usage"
+        } else if profile == "messages_implicit" {
+            "anthropic_implicit_cache"
         } else {
             "standard"
         }
@@ -156,7 +249,14 @@ fn provider(profile: &str, uri: String) -> ProviderHandle {
 
 #[tokio::test]
 async fn tracked_typed_streams_join_all_ingress_formats_to_source_usage_and_paired_receipts() {
-    for profile in ["chat", "terminal_chat", "responses", "codex"] {
+    for profile in [
+        "chat",
+        "terminal_chat",
+        "responses",
+        "codex",
+        "messages",
+        "messages_implicit",
+    ] {
         for flavor in ["chat", "messages", "responses", "gemini"] {
             for mode in [
                 "final",
@@ -166,8 +266,26 @@ async fn tracked_typed_streams_join_all_ingress_formats_to_source_usage_and_pair
                 "missing_terminal",
                 "post_terminal",
                 "truncated",
+                "missing_input",
+                "missing_output",
+                "malformed",
+                "provider_error",
+                "cache_conflict",
             ] {
-                if matches!(profile, "chat" | "terminal_chat") && mode == "failed" {
+                if (matches!(
+                    profile,
+                    "chat" | "terminal_chat" | "messages" | "messages_implicit"
+                ) && mode == "failed")
+                    || (!profile.starts_with("messages")
+                        && matches!(
+                            mode,
+                            "missing_input"
+                                | "missing_output"
+                                | "malformed"
+                                | "provider_error"
+                                | "cache_conflict"
+                        ))
+                {
                     continue;
                 }
                 let upstream = MockServer::start().await;
@@ -229,6 +347,7 @@ async fn tracked_typed_streams_join_all_ingress_formats_to_source_usage_and_pair
                     context["plane"],
                     if (flavor == "chat" && matches!(profile, "chat" | "terminal_chat"))
                         || (flavor == "responses" && profile == "responses")
+                        || (flavor == "messages" && profile.starts_with("messages"))
                     {
                         "transparent"
                     } else {
@@ -248,7 +367,7 @@ async fn tracked_typed_streams_join_all_ingress_formats_to_source_usage_and_pair
                     );
                     assert_eq!(
                         usage["cache_creation_tokens"],
-                        if mode == "zero" { 0 } else { 2 }
+                        if mode == "zero" { 0 } else { written(profile) }
                     );
                     assert_eq!(usage["tokens_out"], if mode == "zero" { 0 } else { 4 });
                     assert_eq!(usage["reasoning_tokens"], 0);
@@ -272,7 +391,14 @@ async fn tracked_typed_streams_join_all_ingress_formats_to_source_usage_and_pair
                     leases,
                     vec![
                         if final_usage {
-                            (1, if mode == "zero" { 0 } else { 14 })
+                            (
+                                1,
+                                if mode == "zero" {
+                                    0
+                                } else {
+                                    charge(profile) as i64
+                                },
+                            )
                         } else {
                             (0, 0)
                         };
@@ -303,7 +429,14 @@ async fn translated_stream_cancellation_keeps_source_final_counts_without_anothe
     use futures_util::StreamExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
-    for profile in ["chat", "terminal_chat", "responses", "codex"] {
+    for profile in [
+        "chat",
+        "terminal_chat",
+        "responses",
+        "codex",
+        "messages",
+        "messages_implicit",
+    ] {
         for case in ["disconnect", "deadline", "shutdown", "expired_shutdown"] {
             let calls = Arc::new(AtomicUsize::new(0));
             let observed = calls.clone();
@@ -352,16 +485,18 @@ async fn translated_stream_cancellation_keeps_source_final_counts_without_anothe
             assert!(!first.is_empty());
             // Join the source, not the projected message_start. The decoder can
             // deliver that start before its next poll has observed upstream bytes.
-            tokio::time::timeout(Duration::from_secs(2), async {
-                loop {
-                    let next = body.next().await.unwrap().unwrap();
-                    if String::from_utf8_lossy(&next).contains("reply") {
-                        break;
+            if !String::from_utf8_lossy(&first).contains("reply") {
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    loop {
+                        let next = body.next().await.unwrap().unwrap();
+                        if String::from_utf8_lossy(&next).contains("reply") {
+                            break;
+                        }
                     }
-                }
-            })
-            .await
-            .unwrap();
+                })
+                .await
+                .unwrap_or_else(|_| panic!("source reply was not observed: {profile}/{case}"));
+            }
             if case.ends_with("shutdown") {
                 state
                     .lifecycle
@@ -402,7 +537,11 @@ async fn translated_stream_cancellation_keeps_source_final_counts_without_anothe
             );
             assert_eq!(
                 state.ledger.lock().unwrap().spent("group:platform"),
-                if case == "expired_shutdown" { 0 } else { 14 },
+                if case == "expired_shutdown" {
+                    0
+                } else {
+                    charge(profile)
+                },
                 "{profile}/{case}"
             );
             let before = sink.events().len();
@@ -532,6 +671,22 @@ async fn translated_stream_projection_is_bounded_and_cannot_settle_estimated_out
 }
 
 fn tool_wire(profile: &str, reason: &str, args: &str) -> String {
+    if profile.starts_with("messages") {
+        let prefix = messages_wire(profile, "final");
+        let start = prefix.split("event: content_block_start").next().unwrap();
+        return start.to_owned()
+            + &message_frame(
+                json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_1","name":"inspect","input":{}}}),
+            )
+            + &message_frame(
+                json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":args}}),
+            )
+            + &message_frame(json!({"type":"content_block_stop","index":0}))
+            + &message_frame(
+                json!({"type":"message_delta","delta":{"stop_reason":if reason=="tool_calls" {"tool_use"} else {"max_tokens"}},"usage":{"output_tokens":4}}),
+            )
+            + &message_frame(json!({"type":"message_stop"}));
+    }
     let chat = matches!(profile, "chat" | "terminal_chat");
     let usage = if chat {
         json!({"prompt_tokens":10,"completion_tokens":4,"prompt_tokens_details":{"cached_tokens":6,"cache_write_tokens":2},"completion_tokens_details":{"reasoning_tokens":0}})
@@ -575,13 +730,14 @@ fn tool_wire(profile: &str, reason: &str, args: &str) -> String {
 }
 
 async fn tool_delivery(profile: &str, flavor: &str, reason: &str, args: &str) -> (bool, String) {
+    source_delivery(profile, flavor, tool_wire(profile, reason, args)).await
+}
+
+async fn source_delivery(profile: &str, flavor: &str, frames: String) -> (bool, String) {
     use futures_util::StreamExt;
     let upstream = MockServer::start().await;
     Mock::given(method("POST"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_raw(tool_wire(profile, reason, args), "text/event-stream"),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_raw(frames, "text/event-stream"))
         .expect(1)
         .mount(&upstream)
         .await;
@@ -600,11 +756,7 @@ async fn tool_delivery(profile: &str, flavor: &str, reason: &str, args: &str) ->
         .oneshot(owned_request(route, request))
         .await
         .unwrap();
-    assert_eq!(
-        response.status(),
-        StatusCode::OK,
-        "{profile}/{flavor}/{reason}/{args}"
-    );
+    assert_eq!(response.status(), StatusCode::OK, "{profile}/{flavor}");
     let mut stream = response.into_body().into_data_stream();
     let mut bytes = Vec::new();
     let mut clean = true;
@@ -626,7 +778,7 @@ async fn tool_delivery(profile: &str, flavor: &str, reason: &str, args: &str) ->
     assert_eq!(
         sink.events()[0].usage_completeness,
         sandhi_core::UsageCompleteness::Final,
-        "{profile}/{flavor}/{reason}/{args}"
+        "{profile}/{flavor}"
     );
     let conn = rusqlite::Connection::open(&database).unwrap();
     assert_eq!(
@@ -636,12 +788,12 @@ async fn tool_delivery(profile: &str, flavor: &str, reason: &str, args: &str) ->
             |row| row.get::<_, i64>(0)
         )
         .unwrap(),
-        14
+        charge(profile) as i64
     );
     assert_eq!(
         conn.query_row(
-            "SELECT count(*) FROM budget_reservation WHERE settled=1 AND actual=14",
-            [],
+            "SELECT count(*) FROM budget_reservation WHERE settled=1 AND actual=?1",
+            [charge(profile) as i64],
             |row| row.get::<_, i64>(0)
         )
         .unwrap(),
@@ -651,8 +803,97 @@ async fn tool_delivery(profile: &str, flavor: &str, reason: &str, args: &str) ->
 }
 
 #[tokio::test]
+async fn messages_native_output_is_preserved_or_refused_without_losing_source_accounting() {
+    for profile in ["messages", "messages_implicit"] {
+        for scenario in [
+            "signature",
+            "opaque_block",
+            "future_event",
+            "tool_caller",
+            "initial_tool",
+            "empty_tool",
+        ] {
+            let ordinary = messages_wire(profile, "final");
+            let mut frames = ordinary
+                .split("event: content_block_start")
+                .next()
+                .unwrap()
+                .to_owned();
+            match scenario {
+                "signature" => {
+                    frames += &message_frame(
+                        json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}),
+                    );
+                    frames += &message_frame(
+                        json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"synthetic thinking"}}),
+                    );
+                    frames += &message_frame(
+                        json!({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"synthetic-signature"}}),
+                    );
+                    frames += &message_frame(json!({"type":"content_block_stop","index":0}));
+                }
+                "opaque_block" => {
+                    frames += &message_frame(
+                        json!({"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"synthetic-native-state"}}),
+                    );
+                    frames += &message_frame(json!({"type":"content_block_stop","index":0}));
+                }
+                "future_event" => {
+                    frames += &message_frame(
+                        json!({"type":"future_native_event","state":"synthetic-native-state"}),
+                    )
+                }
+                _ => {
+                    let mut block = json!({"type":"tool_use","id":"call_1","name":"inspect","input":if scenario=="empty_tool" {json!({})} else {json!({"target":"a"})}});
+                    if scenario == "tool_caller" {
+                        block["caller"] = json!({"type":"code_execution","tool_id":"issuer-bound"});
+                    }
+                    frames += &message_frame(
+                        json!({"type":"content_block_start","index":0,"content_block":block}),
+                    );
+                    frames += &message_frame(json!({"type":"content_block_stop","index":0}));
+                }
+            }
+            frames += &message_frame(
+                json!({"type":"message_delta","delta":{"stop_reason":if scenario.ends_with("tool")||scenario=="tool_caller" {"tool_use"} else {"end_turn"}},"usage":{"output_tokens":4}}),
+            );
+            frames += &message_frame(json!({"type":"message_stop"}));
+            for flavor in ["chat", "messages", "responses", "gemini"] {
+                let (clean, output) = source_delivery(profile, flavor, frames.clone()).await;
+                let portable = matches!(scenario, "initial_tool" | "empty_tool");
+                assert_eq!(
+                    clean,
+                    flavor == "messages" || portable,
+                    "{profile}/{scenario}/{flavor}: {output}"
+                );
+                if flavor == "messages" {
+                    assert_eq!(output, frames, "transparent native bytes");
+                }
+                if portable {
+                    assert!(output.contains("inspect"));
+                }
+                if flavor != "messages" && !portable {
+                    assert!(
+                        !output.contains("synthetic-signature")
+                            && !output.contains("synthetic-native-state")
+                            && !output.contains("issuer-bound")
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn gemini_tool_projection_refuses_invalid_arguments_without_losing_final_accounting() {
-    for profile in ["chat", "terminal_chat", "responses", "codex"] {
+    for profile in [
+        "chat",
+        "terminal_chat",
+        "responses",
+        "codex",
+        "messages",
+        "messages_implicit",
+    ] {
         for args in [
             r#"{"target":"a"}"#,
             r#"{"target":""#,
@@ -662,7 +903,8 @@ async fn gemini_tool_projection_refuses_invalid_arguments_without_losing_final_a
             r#"{"target":1,"target":2}"#,
         ] {
             let (clean, wire) = tool_delivery(profile, "gemini", "length", args).await;
-            let valid = args == r#"{"target":"a"}"#;
+            let actual_empty = profile.starts_with("messages") && args.is_empty();
+            let valid = args == r#"{"target":"a"}"# || actual_empty;
             assert_eq!(clean, valid, "{profile}/{args}: {wire}");
             if valid {
                 assert!(
@@ -676,7 +918,11 @@ async fn gemini_tool_projection_refuses_invalid_arguments_without_losing_final_a
                     .collect();
                 assert!(parts.iter().any(|event| event
                     .pointer("/candidates/0/content/parts/0/functionCall/args")
-                    == Some(&json!({"target":"a"}))));
+                    == Some(&if actual_empty {
+                        json!({})
+                    } else {
+                        json!({"target":"a"})
+                    })));
             } else {
                 assert!(
                     !wire.contains("functionCall"),
@@ -689,12 +935,21 @@ async fn gemini_tool_projection_refuses_invalid_arguments_without_losing_final_a
 
 #[tokio::test]
 async fn translated_tool_terminals_preserve_output_limit_and_filter_reasons() {
-    for profile in ["chat", "terminal_chat", "responses", "codex"] {
+    for profile in [
+        "chat",
+        "terminal_chat",
+        "responses",
+        "codex",
+        "messages",
+        "messages_implicit",
+    ] {
         for flavor in ["chat", "messages", "responses", "gemini"] {
             for reason in ["tool_calls", "length", "content_filter"] {
                 // Anthropic has no direct content_filter stop-reason value;
                 // this test does not claim that separate semantic mapping.
-                if flavor == "messages" && reason == "content_filter" {
+                if (flavor == "messages" || profile.starts_with("messages"))
+                    && reason == "content_filter"
+                {
                     continue;
                 }
                 let (clean, wire) =

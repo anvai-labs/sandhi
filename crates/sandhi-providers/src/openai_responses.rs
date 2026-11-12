@@ -205,6 +205,7 @@ impl Provider for OpenAiResponses {
             Some(&model),
             sandhi_core::EndpointFamilyV1::OpenaiResponses,
             Default::default(),
+            Default::default(),
             |facts| async move {
                 let response = request
                     .json(&body)

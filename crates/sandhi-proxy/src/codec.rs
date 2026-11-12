@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use sandhi_core::chat::ThinkingV1;
 use sandhi_core::{
     ChatMessageV1, ChatRequestV1, ChatResponseV1, ChatStreamEventV1, ContentPart, FinishReasonV1,
@@ -34,16 +34,27 @@ fn lift_openai_thinking(object: &Map<String, Value>) -> Option<ThinkingV1> {
 /// Lift Gemini's `generationConfig.thinkingConfig.thinkingBudget` into the
 /// neutral `ThinkingV1` (W3d/G7). Budget 0 = disabled; a positive budget = on
 /// with a cap.
-fn lift_gemini_thinking(object: &Map<String, Value>) -> Option<ThinkingV1> {
-    let budget = object
-        .get("generationConfig")?
-        .get("thinkingConfig")?
-        .get("thinkingBudget")?
-        .as_u64()?;
-    Some(ThinkingV1 {
+fn lift_gemini_thinking(object: &Map<String, Value>) -> Result<Option<ThinkingV1>, String> {
+    let Some(config) = object
+        .get("generationConfig")
+        .and_then(|v| v.get("thinkingConfig"))
+    else {
+        return Ok(None);
+    };
+    if config.get("thinkingBudget").is_some() && config.get("thinking_budget").is_some() {
+        return Err("Gemini thinking budget aliases must not both be supplied".into());
+    }
+    let Some(budget) = config
+        .get("thinkingBudget")
+        .or_else(|| config.get("thinking_budget"))
+        .and_then(Value::as_u64)
+    else {
+        return Ok(None);
+    };
+    Ok(Some(ThinkingV1 {
         enabled: budget != 0,
         budget_tokens: (budget != 0).then_some(budget),
-    })
+    }))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -574,7 +585,7 @@ fn decode_gemini_request(
         // W3d/G7: Gemini has no effort concept; thinking rides
         // generationConfig.thinkingConfig.thinkingBudget.
         reasoning_effort: None,
-        thinking: lift_gemini_thinking(object),
+        thinking: lift_gemini_thinking(object)?,
         // #90's native-response gate, matching every other dialect's decode.
         include_native_response: true,
         include_native_stream: false,
@@ -786,7 +797,17 @@ fn encode_gemini_stream_event(
         )],
         // Gemini SSE surfaces failures as an `{"error": ...}` data frame, not a
         // dropped stream — previously this fell into the silent catch-all.
-        ChatStreamEventV1::Error { error } => vec![(None, json!({"error": error}))],
+        ChatStreamEventV1::Error { error } => {
+            let status = error
+                .http_status
+                .and_then(|s| StatusCode::from_u16(s).ok())
+                .filter(|s| s.is_client_error() || s.is_server_error())
+                .unwrap_or(StatusCode::BAD_GATEWAY);
+            vec![(
+                None,
+                json!({"error":{"code":status.as_u16(),"message":error.message,"status":google_status(status)}}),
+            )]
+        }
         ChatStreamEventV1::Finish { reason } => {
             let mut chunk = json!({"candidates":[{
                 "content": {"role": "model", "parts": []},
@@ -2784,7 +2805,9 @@ mod tests {
             )
             .unwrap();
         assert_eq!(error_frames.len(), 1, "errors must render, not vanish");
-        assert!(error_frames[0].1.get("error").is_some());
+        assert_eq!(error_frames[0].1["error"]["code"], 502);
+        assert_eq!(error_frames[0].1["error"]["message"], "boom");
+        assert!(error_frames[0].1["error"]["status"].is_string());
     }
 
     #[test]
@@ -3100,16 +3123,48 @@ mod tests {
 
     #[test]
     fn gemini_ingress_lifts_thinking_budget() {
-        let (request, _) = decode_gemini_request(
-            json!({
-                "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
-                "generationConfig": {"thinkingConfig": {"thinkingBudget": 0}}
-            }),
-            RequestMetadataV1::default(),
-        )
-        .unwrap();
-        let thinking = request.thinking.expect("thinking lifted");
-        assert!(!thinking.enabled); // budget 0 = disabled
+        for key in ["thinkingBudget", "thinking_budget"] {
+            let (request, _) = decode_gemini_request(
+                json!({
+                    "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+                    "generationConfig": {"thinkingConfig": {key: 0}}
+                }),
+                RequestMetadataV1::default(),
+            )
+            .unwrap();
+            let thinking = request.thinking.expect("thinking lifted");
+            assert!(!thinking.enabled); // budget 0 = disabled
+        }
+        assert!(decode_gemini_request(json!({"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":0,"thinking_budget":1}}}),RequestMetadataV1::default()).unwrap_err().contains("aliases"));
+    }
+
+    #[test]
+    fn gemini_unrepresented_thinking_controls_stay_native_instead_of_disappearing() {
+        for config in [
+            json!({"thinkingBudget":-1}),
+            json!({"thinking_budget":-1}),
+            json!({"thinkingBudget":0,"includeThoughts":true}),
+            json!({"thinkingLevel":"high"}),
+        ] {
+            let (request, _) = decode_gemini_request(
+                json!({"contents":[{"role":"user","parts":[{"text":"hi"}]}],
+                "generationConfig":{"maxOutputTokens":64,"thinkingConfig":config}}),
+                RequestMetadataV1::default(),
+            )
+            .unwrap();
+            assert!(request
+                .native_input
+                .as_ref()
+                .unwrap()
+                .nonportable_features
+                .contains(&sandhi_core::NativeInputFeatureV1::NativeControl));
+            assert!(request
+                .native_input_for(sandhi_core::EndpointFamilyV1::AnthropicMessages)
+                .is_err());
+            assert!(request
+                .native_input_for(sandhi_core::EndpointFamilyV1::GeminiGenerateContent)
+                .is_ok());
+        }
     }
 
     #[test]

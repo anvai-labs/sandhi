@@ -5,7 +5,9 @@ use crate::stream_usage::{ProtocolStreamUsageObserver, StreamObservationError};
 use crate::{AttemptOutcome, ParsedUsage, ProviderError};
 use bytes::Bytes;
 use futures_core::Stream;
-use sandhi_core::{EndpointFamilyV1, UsageV2};
+#[cfg(test)]
+use sandhi_core::EndpointFamilyV1;
+use sandhi_core::UsageV2;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::sync::watch;
@@ -64,20 +66,22 @@ pub(super) fn observe_endpoint(
     guard: Option<AttemptGuard>,
     endpoint: EndpointFamilyV1,
 ) -> Result<(RawChunkStream, QualifiedStreamObservation), StreamObservationError> {
-    observe_response(inner, guard, endpoint, None, Default::default())
+    Ok(observe_response(
+        inner,
+        guard,
+        ProtocolStreamUsageObserver::for_endpoint(endpoint)?,
+        None,
+    ))
 }
 
 pub(crate) fn observe_response(
     inner: RawChunkStream,
     guard: Option<AttemptGuard>,
-    endpoint: EndpointFamilyV1,
+    observer: ProtocolStreamUsageObserver,
     request_id: Option<String>,
-    profile: sandhi_core::usage::OpenAiStreamUsageProfile,
-) -> Result<(RawChunkStream, QualifiedStreamObservation), StreamObservationError> {
-    let observer =
-        ProtocolStreamUsageObserver::for_endpoint_with_openai_usage_profile(endpoint, profile)?;
+) -> (RawChunkStream, QualifiedStreamObservation) {
     let (sender, receiver) = watch::channel(QualifiedStreamEvidence::default());
-    Ok((
+    (
         Box::pin(QualifiedStream {
             inner,
             observer,
@@ -87,7 +91,7 @@ pub(crate) fn observe_response(
             request_id: request_id.map(|id| crate::attempt::bounded_label(&id, 256)),
         }),
         QualifiedStreamObservation(receiver),
-    ))
+    )
 }
 
 struct QualifiedStream {

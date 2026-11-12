@@ -8,7 +8,7 @@
     other value fails startup.
 
 The development source also admits **Chat, Messages, Responses and Gemini clients
-streaming from qualified Chat, standard Responses or constrained Codex backends** when
+streaming from qualified Chat, Messages, standard Responses or constrained Codex backends** when
 tracked accounting and a complete [streaming deadline policy](streaming-deadlines.md)
 are both configured. This extension is not in 0.12.0 and is not deployment acceptance.
 Streaming without that policy remains refused before admission.
@@ -19,11 +19,11 @@ backend protocols through the existing tracked owner. This is an unreleased sour
 candidate; the 0.12.0 release's narrower activation remains historical evidence.
 Constrained [Codex buffered aggregation](../adr/0027-qualified-codex-buffered-accounting.md)
 also qualifies through its typed SSE owner. [Translated and Codex tracked streams](../adr/0028-qualified-translated-stream-accounting.md)
-reuse that source evidence and the bounded response owner. Messages/Gemini upstream
-stream accounting remains gated. The
-[Messages usage observer prerequisite](../adr/0030-messages-stream-usage-qualification.md)
-qualifies cumulative evidence in the library; it does not enable either source
-family in tracked dispatch. See
+reuse that source evidence and the bounded response owner.
+[Messages source ownership](../adr/0031-qualified-messages-stream-ownership.md) now
+connects both declared cache-usage profiles. Portable output translates across all
+four clients; nonportable signed/native state requires compatible native delivery
+or explicit refusal. Gemini upstream stream accounting remains gated. See
 [qualified Responses streaming](../adr/0026-qualified-responses-stream-accounting.md)
 for partial/final usage and protocol-terminal semantics.
 
@@ -94,9 +94,9 @@ snapshot needed for accounting recovery.
 | Surface | Required in tracked mode | Refused before admission |
 |---|---|---|
 | Ledger | One file-backed ledger, fixed topology | Volatile or sharded ledgers fail startup |
-| Ingress | Buffered Chat, Messages, Responses or Gemini; bounded streams from qualified Chat, Responses or Codex sources | Other dialects; unbounded streams or unqualified source families |
+| Ingress | Buffered Chat, Messages, Responses or Gemini; bounded streams from qualified Chat, Messages, Responses or Codex sources | Other dialects; unbounded streams or unqualified source families |
 | Buffered upstream | Built-in retry-free standard Chat, Messages, Responses or Gemini transport; constrained Codex SSE aggregation | Custom transports; other expiring handles without a qualified codec |
-| Streaming upstream | Qualified retry-free Chat, standard Responses or constrained Codex typed source | Messages/Gemini and custom sources without a strict qualifier |
+| Streaming upstream | Qualified retry-free Chat, Messages, standard Responses or constrained Codex typed source | Gemini and custom sources without a strict qualifier |
 | Operations | Synchronous generation | Background/async Responses; logical routes preflight eligibility before pinning |
 | Policy | Explicit output limit and Block policy | Warn, fail-open, retry and logical-idempotency combinations |
 | Processing plane | Buffered and streaming transparent/translated | No silent downgrade to legacy accounting |
