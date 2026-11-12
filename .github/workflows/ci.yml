@@ -221,7 +221,7 @@ jobs:
           EOF
       - name: run binding tests
         run: |
-          pip install pytest
+          python -m pip install -r bindings/python/requirements-test.txt
           python -m pytest bindings/python/tests/ -q
       - name: binding glue coverage (fail under 85% lines)
         # Instrumented rebuild + harness → llvm-cov over bindings/python/src/lib.rs only. The
@@ -263,7 +263,7 @@ jobs:
             venv="$RUNNER_TEMP/wheel-$version"
             "python$version" -m venv "$venv"
             "$venv/bin/python" -m pip install --no-index --no-deps --only-binary=:all: "${wheels[0]}"
-            "$venv/bin/python" -m pip install pytest==8.4.1
+            "$venv/bin/python" -m pip install -r bindings/python/requirements-test.txt
             "$venv/bin/python" -I -c 'import sandhi_gateway; assert sandhi_gateway.__file__.startswith(__import__("sys").prefix)'
             "$venv/bin/python" -m pytest bindings/python/tests/ -q
           done

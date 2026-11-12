@@ -183,3 +183,17 @@ wire counts can differ from original source categories after translation, notabl
 Gemini cache writes and inclusive reasoning output. Consult gateway source evidence
 and receipts for accounting. See the [gateway peer contract](../../docs/adr/0041-explicit-gateway-peer-contract.md)
 for protocol bases, conventions, boundaries and synthetic qualification.
+
+
+## Testing the binding
+
+Use an isolated virtual environment with the shared test requirements before
+running the suite. The asynchronous provider tests require pytest-asyncio;
+pytest alone cannot execute them.
+
+```bash
+python -m pip install -r bindings/python/requirements-test.txt
+python -m pytest bindings/python/tests/ -q
+```
+
+The CI wheel, ARM interpreter and coverage paths use this same dependency file.
