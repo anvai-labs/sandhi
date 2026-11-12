@@ -58,6 +58,9 @@ async fn codex_qualified_aggregation_retains_source_usage_without_raw_bypass_or_
                 _ => "completed",
             };
             let mut body = terminal(status);
+            if status == "incomplete" {
+                body["incomplete_details"] = json!({"reason":"max_output_tokens"});
+            }
             if !opaque {
                 body["output"] = json!([{"type":"message","role":"assistant","content":[{"type":"output_text","text":"reply","annotations":[]}]}]);
             }

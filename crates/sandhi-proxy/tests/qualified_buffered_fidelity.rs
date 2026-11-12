@@ -342,6 +342,107 @@ async fn buffered_native_state_reasoning_and_tool_refusals_join_source_usage_and
 }
 
 #[tokio::test]
+async fn buffered_filter_terminals_never_become_successful_completion() {
+    for (family, reason) in [
+        ("chat", "content_filter"),
+        ("responses", "content_filter"),
+        ("gemini", "SAFETY"),
+        ("gemini", "RECITATION"),
+        ("gemini", "BLOCKLIST"),
+        ("gemini", "PROHIBITED_CONTENT"),
+        ("gemini", "SPII"),
+        ("gemini", "MODEL_ARMOR"),
+    ] {
+        for flavor in ["chat", "messages", "responses", "gemini"] {
+            let mut original = output(family, "portable");
+            match family {
+                "chat" => original["choices"][0]["finish_reason"] = reason.into(),
+                "responses" => {
+                    original["status"] = "incomplete".into();
+                    original["incomplete_details"] = json!({"reason":reason});
+                }
+                _ => original["candidates"][0]["finishReason"] = reason.into(),
+            }
+            let upstream = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(original.clone()))
+                .expect(1)
+                .mount(&upstream)
+                .await;
+            let directory = tempfile::tempdir().unwrap();
+            let database = directory.path().join("ledger.db");
+            let sink = Arc::new(InMemorySink::new());
+            let state = state(family, upstream.uri(), &database, sink.clone());
+            let (route, request) = ingress(flavor);
+            let response = build_app(state)
+                .oneshot(
+                    Request::post(route)
+                        .header("authorization", "Bearer vk_fixture")
+                        .header("content-type", "application/json")
+                        .body(Body::from(request.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                if flavor == "messages" {
+                    StatusCode::BAD_GATEWAY
+                } else {
+                    StatusCode::OK
+                },
+                "{family}/{reason}/{flavor}"
+            );
+            let body: Value = serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), 100_000)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            if family == flavor {
+                assert_eq!(body, original);
+            }
+            if flavor == "chat" {
+                assert_eq!(body["choices"][0]["finish_reason"], "content_filter");
+            }
+            if flavor == "responses" {
+                assert_eq!(body["status"], "incomplete", "{family}/{reason}");
+                assert_eq!(body["incomplete_details"]["reason"], "content_filter");
+            }
+            if flavor == "gemini" && family != flavor {
+                assert_eq!(body["candidates"][0]["finishReason"], "SAFETY");
+            }
+            assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
+            let events = sink.events();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].usage_completeness, UsageCompleteness::Final);
+            let charge = if family == "gemini" { 13 } else { 12 };
+            let connection = rusqlite::Connection::open(database).unwrap();
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT count(*) FROM budget_settlement_outbox WHERE charged_tokens=?1",
+                        [charge],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT count(*) FROM budget_reservation WHERE settled=1 AND actual=?1",
+                        [charge],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                2
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn malformed_buffered_output_keeps_final_source_usage_and_one_paired_receipt() {
     for family in ["chat", "messages", "responses", "gemini"] {
         let upstream = MockServer::start().await;

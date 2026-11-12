@@ -51,6 +51,12 @@ measured provider work: final source counts settle once, while unknown counts
 retain liability. Native signed/encrypted state stays with a compatible client;
 plain reasoning presentation is not a transferable provider-state credential.
 
+The subsequent [live buffered fidelity/cache run](../reviews/zai-buffered-fidelity-cache-pairs-2026-11-12.md)
+passed 24/24 four-client calls across GLM's three advertised backends with joined
+attempts, source counts and paired settlements. Every second request in its 12
+pairs reported cached input. Its 83.22% observed input read share is not a price
+saving or cache-lifetime guarantee; some first requests were already warm.
+
 The [live tracked translation/cache matrix](../reviews/zai-router-tracked-translated-streams-2026-11-11.md)
 passed all 16 Chat/Responses streaming calls from four SDK formats, with complete
 paired accounting joins and 15 observed cache reads. It retains the initial Chat

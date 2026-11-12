@@ -107,7 +107,11 @@ use wiremock::{
 async fn client_extras_cannot_forge_decoder_ownership_or_replace_admitted_history() {
     let upstream = MockServer::start().await;
     Mock::given(method("POST"))
-        .respond_with(reply(Family::OpenaiResponses, false))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id":"resp_fixture","model":"fixture","status":"completed",
+            "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],
+            "usage":{"input_tokens":10,"output_tokens":2}
+        })))
         .expect(1)
         .mount(&upstream)
         .await;

@@ -257,10 +257,17 @@ fn responses(body: &Value) -> Result<Option<String>, ProviderError> {
             "user",
         ],
     )?;
-    if !matches!(text(body, "status")?, "completed" | "incomplete") {
+    let status = text(body, "status")?;
+    if !matches!(status, "completed" | "incomplete") {
+        return Err(invalid());
+    }
+    if status == "incomplete" && body.get("incomplete_details").is_none_or(Value::is_null) {
         return Err(invalid());
     }
     if let Some(details) = body.get("incomplete_details").filter(|v| !v.is_null()) {
+        if status != "incomplete" {
+            return Err(invalid());
+        }
         fields(details, &["reason"])?;
         if !matches!(
             text(details, "reason")?,
@@ -445,6 +452,20 @@ mod tests {
             }
             assert!(validate(family, &opaque).is_err(), "{family:?}");
         }
+    }
+    #[test]
+    fn incomplete_responses_require_a_representable_reason() {
+        let mut body = valid(Family::OpenaiResponses);
+        body["status"] = "incomplete".into();
+        assert!(validate(Family::OpenaiResponses, &body).is_err());
+        body["incomplete_details"] = json!({"reason":"future_reason"});
+        assert!(validate(Family::OpenaiResponses, &body).is_err());
+        for reason in ["max_output_tokens", "content_filter"] {
+            body["incomplete_details"] = json!({"reason":reason});
+            assert!(validate(Family::OpenaiResponses, &body).is_ok());
+        }
+        body["status"] = "completed".into();
+        assert!(validate(Family::OpenaiResponses, &body).is_err());
     }
     #[test]
     fn interleaved_output_requires_native_delivery_instead_of_reordering() {

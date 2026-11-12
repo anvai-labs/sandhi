@@ -1459,12 +1459,13 @@ reasoning and checks its terminal snapshot; interim Responses/Chat event fidelit
 remains open. Bare Gemini complete, legacy stream and qualified stream methods now
 all reject unsafe model paths and non-object bodies before dispatch.
 
-The expanded Rust HTTP matrix passes 116 calls, including all four sources and
+The expanded Rust HTTP matrix initially passed 116 calls, including all four sources and
 clients, native envelope equality, projection failures with Final usage, reported
 zero and unavailable missing/malformed counters. Provider unit tests pass 337
 cases. The first new SDK run passed 35/36: a synthetic Gemini signature was not
 base64 and was correctly rejected by the Google SDK. The corrected fixture passed
-its isolated case; no production validation was relaxed. The broader Rust run
+its isolated case; the combined SDK regression then passed all 199 cases. No
+production validation was relaxed. The broader Rust run
 exposed an old Codex test that expected encrypted reasoning to disappear on
 portable output. Its expanded 48-call matrix now covers both portable text and
 opaque state, requiring explicit refusal for incompatible state while retaining
@@ -1481,3 +1482,34 @@ macOS/Windows release matrix. Private and overflow runners are not used.
 The retained admission/dispatch timing failures and broader subscription/agent
 journeys remain open. No new live-provider request, credential change, merge,
 deployment or release was performed for this increment.
+
+Independent review rejected `23caa78` with P2: buffered Gemini `SPII` and
+`MODEL_ARMOR` filtering became Responses `completed`. The
+[sanitized two-call reproduction](../reviews/artifacts/buffered-filter-terminal-review-regression-2026-11-12.json)
+records it. Both now map to filtering. The expanded 32-call terminal matrix covers
+all four clients: supported filter terminals are preserved and unsupported
+Messages projection refuses, with Final source counts and both leases settled.
+Incomplete Responses without a representable reason also refuses. The combined
+buffered matrix now passes 148 HTTP calls. A request-ownership fixture formerly
+relied on dropping encrypted output; its portable-text reply now keeps the test
+focused on admitted history and spoof rejection. All nine native-input tests pass.
+
+The fix-tree workspace passes all 49 suites: 1,168 tests and six opt-in ignored.
+Provider units pass 338 cases, including missing/contradictory incomplete reasons.
+Default and ONNX Clippy pass with warnings denied. The initial combined SDK run
+passed 199 cases; the final fix-tree SDK run and independent re-review remain
+publication checks. Earlier negative runs remain documented rather than being
+counted as successful acceptance. Passing stress/lifecycle runs do not establish
+the cause or resolution of the retained admission/authorization timing failures.
+
+The [fresh live GLM buffered cache-pair run](../reviews/zai-buffered-fidelity-cache-pairs-2026-11-12.md)
+passed 24/24 calls and full SDK/source/attempt/receipt joins across four clients
+and the three advertised GLM endpoints, using explicit thinking-disable controls.
+All 12 second requests reported 3,776 cached input tokens; 20/24 calls reported
+positive reads. Fresh/read/write/output totals were 15,224/75,520/0/615. Responses
+reported 290 reasoning tokens already included in output; Messages did not report
+a separate thinking count. The 83.22% input read share is observed reuse, not a
+price saving, cold-cache test or TTL proof. The source/harness hashes and all 24
+joins are retained without credentials. The disposable gateway shut down cleanly
+with 24 receipts and 48 settled leases; the existing dashboard remains available
+at the requested loopback URL and was not redeployed by this qualification.

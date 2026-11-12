@@ -1762,6 +1762,11 @@ pub(crate) fn encode_response(
         MessageContent::Parts(parts) if parts.iter().any(|part|!matches!(part,ContentPart::Text{..})))) {
         return Err("buffered output media requires compatible native delivery");
     }
+    if dialect == IngressDialect::Anthropic
+        && response.finish_reason == Some(FinishReasonV1::ContentFilter)
+    {
+        return Err("buffered filtering semantics require a compatible client protocol");
+    }
     if matches!(dialect, IngressDialect::Anthropic | IngressDialect::Gemini)
         && response
             .output

@@ -496,7 +496,7 @@ fn decode_finish_reason(reason: &str) -> FinishReasonV1 {
     match reason {
         "STOP" => FinishReasonV1::Stop,
         "MAX_TOKENS" => FinishReasonV1::Length,
-        "SAFETY" | "RECITATION" | "BLOCKLIST" | "PROHIBITED_CONTENT" => {
+        "SAFETY" | "RECITATION" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "SPII" | "MODEL_ARMOR" => {
             FinishReasonV1::ContentFilter
         }
         _ => FinishReasonV1::Unknown,

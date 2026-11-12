@@ -57,7 +57,10 @@ The neutral response renders materialized reasoning, visible text/refusal and
 then function calls. Source content that revisits an earlier content kind refuses
 instead of silently changing that order. Chat/Responses refusal text is preserved
 between those protocols; Messages/Gemini projection refuses when it cannot retain
-the refusal semantics. Native delivery retains the original envelope, including
+the refusal semantics. Filtering reasons become an explicit filter result in Chat,
+Responses or Gemini; Messages projection refuses when it cannot retain that result.
+An incomplete Responses result requires a representable incomplete reason.
+Native delivery retains the original envelope, including
 unknown fields and upstream argument representations.
 
 Plain reasoning text is exposed as Chat `reasoning_content`, a Messages thinking
@@ -89,7 +92,8 @@ not currency prices or a subscription entitlement estimate.
 The Rust HTTP matrix covers four sources, four clients and seven output/usage
 scenarios: plain reasoning, opaque state, invalid tools, unknown fields, missing
 usage, malformed usage and reported zero. Another four calls force typed decode
-failure with valid counts: **116 physical calls** total. Assertions join source
+failure with valid counts. Thirty-two additional calls cover filtering terminals
+from eight source profiles across four clients: **148 physical calls** total. Assertions join source
 usage to one receipt and two settled leases, or no receipt and two held leases.
 Native cases compare the complete original JSON value.
 
@@ -104,3 +108,12 @@ because the fixture was not valid base64. The corrected fixture uses base64
 provider state; no production rule was weakened. These are synthetic origins,
 not new live Google, subscription or cache-lifetime acceptance. The retained
 admission/dispatch timing failures remain open independently of these checks.
+
+Independent review rejected `23caa78`: the validator admitted Gemini `SPII` and
+`MODEL_ARMOR`, but the buffered decoder mapped them to unknown completion. Actual
+Responses clients received `completed`. The fix maps both to filtering and checks
+actual terminals, source usage and both leases across four clients. The
+[sanitized reproduction](../reviews/artifacts/buffered-filter-terminal-review-regression-2026-11-12.json)
+retains the finding. The separate request-ownership test now uses a portable text
+reply so its success assertion does not depend on silently discarding encrypted
+output; its request-spoofing and admitted-history checks remain intact.
