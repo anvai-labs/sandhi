@@ -540,6 +540,63 @@ def test_workspace_navigation_history_filter_and_deep_link(page, dashboard):
     assert "gpt-mock" not in page.locator("body").text_content()
 
 
+@pytest.mark.parametrize("width", [390, 1440])
+def test_routing_cache_guide_connects_operator_tasks_and_keeps_history(page, dashboard, width):
+    page.set_viewport_size({"width": width, "height": 900})
+    connect(page, dashboard)
+    shortcut = page.get_by_role("link", name="Reuse context Follow routing, cache controls and token evidence")
+    shortcut.focus()
+    page.keyboard.press("Enter")
+    expect(page).to_have_url(dashboard.base + "/dashboard#flow-section")
+    expect(page.locator("#flow-section")).to_be_focused()
+    guide = page.locator('[data-view="flow-section"]')
+    expect(guide.get_by_role("list", name="Request path")).to_be_visible()
+    expect(guide).to_contain_text("2 fresh + 6 read + 2 write")
+    expect(guide).to_contain_text("4 uncached + 6 read")
+    expect(guide).to_contain_text("do not prove that every call settled")
+    expect(guide).to_contain_text("not currency saved")
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    for link in guide.locator('a[target="_blank"]').all():
+        assert link.get_attribute("href").startswith("https://anvai-labs.github.io/sandhi/")
+        assert "noopener" in link.get_attribute("rel")
+    guide.get_by_role("link", name="Inspect backends & routes", exact=True).click()
+    expect(page.locator("#routing-section")).to_be_focused()
+    expect(page.locator("#backends")).to_have_attribute("data-state", "ready")
+    page.go_back()
+    expect(guide).to_be_visible()
+    guide.get_by_role("link", name="Inspect usage evidence", exact=True).click()
+    expect(page.locator("#evidence-section")).to_be_focused()
+    page.go_back()
+    page.reload()
+    expect(guide).to_be_visible()
+    expect(page.get_by_label("Admin token", exact=True)).to_have_value("")
+    expect(page.locator("#usage")).to_have_attribute("data-state", "locked")
+
+
+def test_usage_labels_do_not_present_observations_as_money_or_settlement(page, dashboard):
+    connect(page, dashboard)
+    expect(page.locator("#cards")).to_contain_text("observed units")
+    assert "billable tokens" not in page.locator("#cards").inner_text()
+    expect(page.locator("#usage")).to_contain_text("do not establish per-request settlement")
+    run_id = "synthetic-release-run"
+    with httpx.Client(base_url=dashboard.base, timeout=3) as client:
+        response = client.post("/v1/chat/completions", headers={
+            "Authorization": f"Bearer {VK_OPENAI}", "x-sandhi-run-id": run_id,
+            "x-sandhi-step-id": "guide-check",
+        }, json={"model": "gpt-mock", "max_tokens": 10,
+                 "messages": [{"role": "user", "content": "synthetic dashboard check"}]})
+        assert response.status_code == 200, response.text
+        deadline = time.monotonic() + 3
+        while client.get(f"/admin/usage/run/{run_id}", headers=dashboard.headers).status_code != 200:
+            assert time.monotonic() < deadline, "run observation did not persist"
+            time.sleep(0.02)
+    page.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name="Run explorer", exact=True).click()
+    page.get_by_label("Run ID", exact=True).fill(run_id)
+    page.get_by_role("button", name="Look up", exact=True).click()
+    expect(page.locator("#run-tree")).to_have_attribute("data-state", "ready")
+    expect(page.locator("#run-tree")).to_contain_text("observed token units")
+
+
 def test_backend_route_inventory_is_escaped_and_cleared_on_auth_change(page, dashboard):
     hostile = '<img src=x onerror="window.inventoryInjected=true">'
     backend = {"id": "preview", "provider": "fixture", "credential_ref": "fixture:default",

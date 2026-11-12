@@ -1927,3 +1927,19 @@ with the same nested-checkout layout. The
 [retained failure and correction evidence](../reviews/artifacts/nested-checkout-provenance-2026-11-12.json)
 does not substitute for a corrected full public run or diagnose the earlier
 shutdown timing occurrence. No runtime accounting or inference semantics changed.
+
+### M5x — Cohesive operator console and cache/token documentation
+
+The [console/docs increment](../reviews/cohesive-operator-release-2026-11-12.md)
+adds a routing/cache guide and Overview shortcuts, with matching diagrams,
+source-versus-wire and token semantics across MkDocs, README, operator docs and
+the prepared changelog. Observed units and Run usage tree describe existing
+neutral totals; no API arithmetic, budget spend or frozen-charge semantics change.
+Historical reasoning fallback stays explicit rather than being presented as
+qualified source evidence.
+
+The integrated actual-gateway browser suite passed 49 cases; three affected cases
+passed after review-only wording correction. AgentBrowser and independent mobile,
+keyboard/history/auth checks preserve source-asset and synthetic screenshot
+evidence. These are UI/documentation checks, not live-provider, release or open
+router/default/cache/state/reliability-gate acceptance.

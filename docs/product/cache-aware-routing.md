@@ -5,63 +5,44 @@ Sandhi combines protocol translation, backend-specific cache controls and neutra
 usage accounting at the gateway, alongside [local egress policy](../operator/policy-evaluation.md)
 and [embedded ONNX evaluation](../operator/embedded-onnx.md).
 
-!!! info "Development implementation; qualification is endpoint-specific"
-    Explicit backend/cache policy is an unreleased workspace candidate. Live Z.AI
-    tests cover four client protocols, three backend protocols and both delivery
-    modes with `glm-5.3`. They establish text interoperability and observed implicit
-    cache reads for that setup. Automatic backend switching, uniform durable attempt
-    attribution and broader agent-loop qualification remain [active work](../td/TD-0034-protocol-neutral-router-cache-accounting.md).
+!!! info "Prepared source release; qualification remains endpoint-specific"
+    Sandhi **0.17.0** and Victor **0.29.0** are prepared, unpublished source versions.
+    Four client dialects and explicit backend profiles are implemented. Coordinated
+    gateway peering, the accounting-default migration, broader cache lifecycle and
+    subscription acceptance, and retained reliability failures remain
+    [release gates](../td/TD-0034-protocol-neutral-router-cache-accounting.md).
+    A passing docs build or a configured backend does not qualify a deployment.
 
-The subsequent [tracked buffered qualification](../reviews/zai-router-tracked-buffered-2026-11-11.md)
-passed 24 live cache-pair calls through logical aliases, with 24 qualified durable
-attempt/usage/paired-receipt joins. It also retains the missing-counter and
-accounting-response failures found along the way. Additional tracked streaming
-and subscription profiles remain gated.
+## One operator workflow
 
-The [tracked Responses streaming pair](../reviews/zai-router-tracked-responses-stream-2026-11-11.md)
-also passed with final attempt/usage/receipt joins. Its repeated request reported
-3,776 cached input tokens, while progress counters remained partial until a valid
-terminal response. This is a narrow endpoint qualification; translated tracked
-streams are covered by the subsequent source increment below; live Codex
-subscription acceptance remains active work.
+The dashboard's **Routing & cache guide** (`/dashboard#flow-section`) uses the same
+request path and terms as this guide:
 
-The subsequent [Codex source qualification](../reviews/codex-qualified-accounting-source-2026-11-11.md)
-adds tracked buffered host delivery through its constrained SSE codec. Source token
-evidence survives decoder failure and remains separate from client delivery. This
-uses synthetic origins; live subscription acceptance remains open.
+| Question | Inspect | What the result establishes |
+| --- | --- | --- |
+| Which API does the agent speak? | Client dialect: Chat, Messages, Responses or Gemini | Request/response format; not the upstream credential or endpoint profile |
+| Where can this logical model run? | Backends & routes | Declared target, protocol, profile, model and credential reference; not a live health or cache-hit guarantee |
+| What context may be reused? | Declared cache policy and compatible native controls | Eligible placement, lifetime and namespace rules; not transferable KV state |
+| What content may leave? | Content policy | Configured rules/evaluator coverage before source dispatch |
+| Which work was measured? | Overview, Run explorer and Usage evidence | Observed normalized token units and available correlation; not proof of per-request settlement |
+| What was settled? | Tracked accounting's original source/attempt/receipt join | Qualified source measurement and its committed charge, when tracked execution is enabled |
 
-[Qualified translated streaming](../adr/0028-qualified-translated-stream-accounting.md)
-now connects all four client protocols to tracked Chat, Messages, Responses, Gemini and constrained
-Codex sources. The same source counters settle both budget scopes; SDK-visible
-output is not accounting evidence. [Messages ownership](../adr/0031-qualified-messages-stream-ownership.md)
-supports portable output; signed/native state requires compatible native delivery
-or explicit refusal. [Gemini source ownership](../adr/0033-qualified-gemini-stream-ownership.md)
-keeps cached input within prompt tokens and thought tokens separate from candidate
-output. Its source counts become final only after clean HTTP EOF. Broader
-tool/media/subscription and native Google cache-lifetime journeys remain follow-ups.
+[Shared buffered qualification](../reviews/shared-buffered-qualification-2026-11-12.md)
+and [qualified translated streams](../adr/0028-qualified-translated-stream-accounting.md)
+keep source usage separate from output delivery. Native signed/encrypted state stays
+with a compatible client; portable delivery refuses meaningful state it cannot
+represent. Usage absence, partial evidence and reported zero remain distinct.
 
-The [live Messages cache matrix](../reviews/zai-messages-tracked-streams-2026-11-12.md)
-adds eight joined four-client calls with explicitly disabled thinking. Its 99.87%
-observed input read share came from an already-used synthetic prefix; it is not
-a price saving, cold-cache test or proof of default signed-thinking portability.
-
-[Buffered source evidence](../adr/0034-buffered-source-evidence-and-output-fidelity.md)
-also survives an unsupported output translation. A delivery error does not erase
-measured provider work: final source counts settle once, while unknown counts
-retain liability. Native signed/encrypted state stays with a compatible client;
-plain reasoning presentation is not a transferable provider-state credential.
-
-The subsequent [live buffered fidelity/cache run](../reviews/zai-buffered-fidelity-cache-pairs-2026-11-12.md)
-passed 24/24 four-client calls across GLM's three advertised backends with joined
-attempts, source counts and paired settlements. Every second request in its 12
-pairs reported cached input. Its 83.22% observed input read share is not a price
-saving or cache-lifetime guarantee; some first requests were already warm.
-
-The [live tracked translation/cache matrix](../reviews/zai-router-tracked-translated-streams-2026-11-11.md)
-passed all 16 Chat/Responses streaming calls from four SDK formats, with complete
-paired accounting joins and 15 observed cache reads. It retains the initial Chat
-placement failure and its explicit-profile correction. Measured input read share
-was 93.63%; this is not a percentage price saving.
+Live cache results qualify their recorded source and endpoint configuration. The
+[live buffered fidelity/cache report](../reviews/zai-buffered-fidelity-cache-pairs-2026-11-12.md)
+contains 24 joined calls across four client formats and three GLM backend APIs.
+Its 83.22% input read share measures reuse, not savings; some first calls were
+already warm. Streaming evidence is retained separately for
+[Messages](../reviews/zai-messages-tracked-streams-2026-11-12.md),
+[Chat/Responses translation](../reviews/zai-router-tracked-translated-streams-2026-11-11.md)
+and [Responses source ownership](../reviews/zai-router-tracked-responses-stream-2026-11-11.md).
+These reports do not qualify cache-resource lifetime, account changes or live
+subscription execution.
 
 ## Two reasons to put Sandhi in the call path
 
@@ -86,8 +67,9 @@ flowchart TB
     B --> C["Selected backend and model<br/>Compile declared cache intent"]
     C --> D["Budget admission<br/>Native forwarding or translation"]
     D --> E["Provider inference and cache"]
-    E --> F["Measured tokens<br/>Fresh · Read · Write · Output"]
-    F --> G["Usage evidence and allowances<br/>Pricing remains downstream"]
+    E --> F["Original source evidence<br/>Fresh · Read · Write · Output · Reasoning overlap"]
+    F --> G["Compatible client response<br/>Wire format may combine categories"]
+    F --> H["Tracked source ledger and receipts<br/>When enabled; pricing remains downstream"]
 ```
 
 ## Client protocol and backend protocol are independent
@@ -168,6 +150,32 @@ output count already includes reasoning. Do not add included reasoning twice.
 | `reasoning_tokens` / `reasoning_included` | Reasoning amount and overlap evidence | Prevent double-counting output |
 | `cache_read_status` | Reported, absent, malformed, unsupported or unknown | Distinguish a reported zero from unavailable evidence |
 
+### Server source and client wire are different views
+
+The selected backend reports source counts. A compatible client response uses its
+own API's counter vocabulary. Translating that vocabulary cannot recover a category
+the client format does not expose.
+
+```mermaid
+flowchart LR
+    S["Illustrative source input<br/>2 fresh + 6 read + 2 write"] --> L["Server canonical evidence<br/>2 fresh · 6 read · 2 write"]
+    S --> G["Gemini client wire<br/>4 uncached + 6 read"]
+```
+
+Gemini's response format has no separate cache-write category. Its four uncached
+input tokens in this example include the source's two write tokens. Separately
+reported Gemini thought tokens can also become inclusive output in another wire
+format. Keep the original source convention for tracked settlement; client-visible
+counts describe the immediate wire view, not original-source provenance.
+
+Dashboard **Observed units** and run totals are normalized usage observations.
+They are not currency amounts or committed charges. The Usage evidence API is a
+bounded logical-call observation view; it does not supply a complete physical
+attempt/receipt inventory. Use the [accounting contract](attempt-accounting-and-evidence.md)
+when evaluating settlement. The [gateway peer contract work](../td/TD-0034-protocol-neutral-router-cache-accounting.md#next-increments-identified-by-parallel-investigation)
+coordinates response conventions and a single server-side cache compiler; it does
+not turn metadata into credential authority.
+
 ### Measured example: 3,776 reused tokens, 5 fresh tokens
 
 In the final live Z.AI long-prefix run, every one of 48 calls reported this input
@@ -210,8 +218,9 @@ A namespace hash does not move KV state, pin a provider worker or establish
 physical isolation. APIs without caller-controlled namespaces retain their native
 sharing semantics. Changing backend/model/account can make cached or opaque state
 incompatible. The [logical-routing candidate](../operator/backends.md#logical-models-and-deterministic-selection)
-pins compatible sessions and refuses incompatible live pins; broader fidelity and
-durable dispatch accounting remain active milestones. Inspect the declared targets
+pins compatible sessions and refuses incompatible live pins. Gateway-client
+coordination, provider-label/budget-scope migration and broader lifecycle
+qualification remain active milestones. Inspect the declared targets
 and measured categories in the [operator console](../operator/dashboard.md).
 There is no implicit retry on another model after ambiguous inference.
 

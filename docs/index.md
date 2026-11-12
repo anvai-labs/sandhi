@@ -50,12 +50,21 @@ dispatch. Pricing and billing belong to downstream systems.
 </div>
 
 !!! info "Cache routing is a development candidate"
-    Explicit backend/cache policy is implemented in the workspace and live-tested
-    on Z.AI. Broader switching, affinity and durable attempt accounting remain in
+    Sandhi **0.17.0** and Victor **0.29.0** are prepared, unpublished source versions.
+    Explicit backend/cache policy and strict source qualification are implemented;
+    live Z.AI evidence belongs to its recorded endpoint/source configuration.
+    Gateway peer coordination, mandatory accounting, provider-label/budget-scope
+    migration and broader lifecycle/subscription acceptance remain in
     [TD-0034](td/TD-0034-protocol-neutral-router-cache-accounting.md). A docs build
     does not release or deploy these changes.
 
 ## One request, two responsibilities
+
+The console's **Routing & cache guide** (`/dashboard#flow-section`) and the
+[visual cache/token guide](product/cache-aware-routing.md) follow the same operator
+workflow: inspect the client dialect, selected backend/cache policy, local egress
+rules and original source evidence. Client response counters, dashboard observations
+and tracked settlement receipts are separate views of that work.
 
 ```mermaid
 flowchart LR
@@ -75,7 +84,7 @@ flowchart LR
 | Enforce proxy budgets and admission | Yes, single node | No proxy ledger enforcement |
 | Price usage or bill customers | Downstream responsibility | Downstream responsibility |
 
-## Released changes and their adoption gates
+## Earlier release evidence and adoption gates
 
 The [published 0.14.0 release](releases/v0.14.0.md) includes Codex transport fixes,
 opt-in Rust allowance arithmetic and Rustls security repairs. Every artifact target

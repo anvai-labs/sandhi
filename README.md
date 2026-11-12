@@ -36,10 +36,13 @@ wrong. Sandhi is the single, fast, neutral implementation of both.
 **Context efficiency and egress control belong in the same call path.** The
 [cache-aware routing candidate](docs/product/cache-aware-routing.md) preserves
 eligible context boundaries, compiles declared backend controls and separates
-fresh, cache-read and cache-write tokens. Its final live Z.AI matrix covers four
-client APIs and three backend APIs in both modes; 48 repeated-prefix calls reported
-3,776 reused tokens out of 3,781 input tokens. This is measured cache reuse, not a
-percentage cost-saving promise. [Local policy and optional embedded ONNX](docs/operator/sensitive-policy.md)
+fresh, cache-read and cache-write source tokens. The operator console's
+**Routing & cache guide** (`/dashboard#flow-section`) and the MkDocs guide use the
+same request path, marker-placement diagrams and token vocabulary. Recorded live
+Z.AI probes demonstrate repeated-prefix reuse; they do not promise a percentage
+cost saving or qualify other endpoints. Client wire counters, observed dashboard
+units and tracked settlement receipts remain separate evidence.
+[Local policy and optional embedded ONNX](docs/operator/sensitive-policy.md)
 can inspect outgoing text before provider dispatch; the shipped classifier audits
 and deterministic rules own its blocks. Both complement identity and budgets.
 
@@ -51,8 +54,9 @@ and deterministic rules own its blocks. Both complement identity and budgets.
 - **Budgets** — per-virtual-key / per-team **token** admission limits enforced by a lease ledger
   (reserve an estimate, settle measured usage by lease id), with calendar-aligned daily/monthly/total
   **windows**, a block-or-**warn** policy, and threshold **alerts**. Set `SANDHI_STORE` and the
-  ledger is **durable**: spend, caps, and in-flight leases survive a restart, and dangling leases
-  are reclaimed. Without it the ledger is in-memory and a restart resets accrued spend.
+  ledger is **durable**: spend, caps, and in-flight leases survive a restart. Only
+  expiry-eligible leases are reclaimed; unknown tracked dispatch liabilities stay
+  held. Without it the ledger is in-memory and a restart resets accrued spend.
   These are **not strict total-token caps**: multiple in-flight calls can exceed their estimates.
   See [metering semantics and budget guarantees](docs/product/metering-and-budget-guarantees.md).
 - **Rate limits** — per-virtual-key requests/minute, enforced by a token bucket before the budget

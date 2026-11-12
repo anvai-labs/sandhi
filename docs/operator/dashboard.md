@@ -1,6 +1,6 @@
 # Operator console
 
-Status: workspace candidate, 2026-11-11. Open `/dashboard` on your gateway. The
+Status: prepared 0.17.0 source candidate; not a published release. Open `/dashboard` on your gateway. The
 console uses the gateway's existing APIs and serves local assets; no separate
 frontend build or service is required. Production identity and TLS configuration
 follow the [identity guide](oidc-sso.md).
@@ -27,10 +27,19 @@ appearance, keyboard navigation and reduced-motion preferences are supported.
 | Content policy | Inspect configured policy and decision receipts. |
 | Configuration | Preview and apply additive provider/backend/route/key/budget intent with component-level results. |
 | Topology | Inspect the configured gateway topology snapshot, when available. |
+| Routing & cache guide | Follow the request path, distinguish client dialect from backend profile, and interpret source/wire usage and settlement boundaries. |
 
 For example, `/dashboard#routing-section` opens routing inventory and
-`/dashboard#evidence-section` opens usage evidence. A fragment carries navigation
+`/dashboard#evidence-section` opens usage evidence. `/dashboard#flow-section`
+opens the matching [cache/token guide](../product/cache-aware-routing.md) inside
+the console. Overview shortcuts and guide actions use the same navigation/history
+and move keyboard focus to the selected heading. A fragment carries navigation
 only. Do not put credentials in the URL.
+
+![Routing, cache and evidence guide with an illustrative source-versus-wire token split](../assets/operator-console/guide-synthetic.png)
+
+*The guide connects backend inventory, local egress policy and usage evidence.
+The numerical conversion is illustrative; this screenshot contains no admin credential.*
 
 ![Synthetic backend and logical-route inventory](../assets/operator-console/routing-synthetic.png)
 
@@ -57,6 +66,14 @@ measurement. Reasoning may be included in output or separate, as recorded.
 Read share is not a percentage cost saving, and latency does not prove cache reuse.
 See the [visual cache/token guide](../product/cache-aware-routing.md) for marker
 placement and the retained live example.
+
+The **Observed units** summary and Run usage tree show normalized usage totals.
+Recorded reasoning overlap takes precedence; historical rows without that flag
+retain the existing magnitude fallback. Aggregates are not qualified-source proof,
+prices, frozen weighted charges or proof that all calls settled. Compatible client wire
+formats can combine source categories: Gemini has no separate cache-write field.
+Tracked settlement retains the original source split independently of that client
+view. The guide labels its numerical protocol example as illustrative.
 
 The Usage evidence view queries at most 100 rows per request and paginates its
 display. It preserves exact identifiers, including meaningful surrounding spaces,

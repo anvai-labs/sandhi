@@ -261,9 +261,8 @@ function paintPager(id) {
 }
 
 const ATTRIBUTION_HEAD = `<tr><th>key</th><th class="num">calls</th>`
-  + `<th class="num">in</th><th class="num">out</th><th class="num">cache write</th>`
-  + `<th class="num">cache read</th><th>cache reporting coverage</th><th class="num" title="ADR-0005 D4: the quantity budgets `
-  + `are enforced on — fresh input + cache split + output (+ unfolded reasoning)">billable`
+  + `<th class="num">fresh</th><th class="num">output</th><th class="num">cache write</th>`
+  + `<th class="num">cache read</th><th>cache reporting coverage</th><th class="num" title="Normalized observed tokens under recorded or historical reasoning-overlap conventions. Not a frozen weighted charge or currency amount.">observed units`
   + `</th><th class="num" title="p50 / p95 milliseconds over the sampled calls that reported a `
   + `duration — approximate by design; tokens above are exact">latency</th></tr>`;
 
@@ -288,11 +287,11 @@ function loadUsage() {
     usageData = d;
     const t = d.total;
     return '<div class="cards" id="cards">' +
-      [["calls", fmt(t.calls)], ["billable tokens", fmt(t.billable_tokens)], ["fresh input", fmt(t.tokens_in)], ["output tokens", fmt(t.tokens_out)],
+      [["calls", fmt(t.calls)], ["observed units", fmt(t.billable_tokens)], ["fresh input", fmt(t.tokens_in)], ["output tokens", fmt(t.tokens_out)],
        ["cache read", cacheRead(t)], ["cache reporting coverage", cacheCoverageLabel(t)],
        ["latency p50/p95", lat(t.latency)]]
       .map(([l, n]) => `<div class="card${l === "cache reporting coverage" || l === "latency p50/p95" ? " card-detail" : ""}"><div class="n">${n}</div><div class="l">${l}</div></div>`).join("")
-      + `</div>${tokenSplit(t)}<p class="muted">Cache read is reported cache-read input (origin or explicit caller observation), not proof of backend reuse; cache write is an explicit accounting category, not proof of new KV state. Counts are neutral tokens, not prices or savings. Reporting coverage counts calls in each displayed aggregate; it is not a cache hit rate. Mixed totals retain legacy numeric accounting.</p><h3>Attribution</h3>
+      + `</div>${tokenSplit(t)}<p class="muted">Cache read is reported cache-read input (origin or explicit caller observation), not proof of backend reuse; cache write is an explicit accounting category, not proof of new KV state. Counts are neutral tokens, not prices or savings. Reporting coverage counts calls in each displayed aggregate; it is not a cache hit rate. Historical rows retain their existing reasoning-overlap fallback. Aggregate observations do not establish per-request settlement or qualified source usage.</p><h3>Attribution</h3>
       <div class="table-toolbar"><label for="usage-filter">Filter attribution</label><input id="usage-filter" type="search" value="${esc(attributionQuery)}" placeholder="Find a user, team, provider or model" maxlength="256"><span class="muted">Totals include all calls.</span></div>
       <p id="table-help" class="muted">On narrow screens, scroll each table horizontally to see every column. Keyboard users can focus a table and use the arrow keys.</p><div id="tables">`
       + usageTables(d)
@@ -328,7 +327,7 @@ function backendRow(record) {
   const d = record.definition;
   if (!d || typeof d.id !== "string" || !Array.isArray(d.models) || !d.endpoint) throw new ApiError(502, "Incomplete backend inventory");
   const policy = d.cache_policy;
-  const mode = policy ? policy.default_intent?.mode || "preserve_native" : "legacy default";
+  const mode = policy ? policy.default_intent?.mode || "preserve_native" : "endpoint default";
   const ready = record.status === "active" && record.ready === true;
   const detail = d.models.map(model => {
     const capabilities = policy?.models?.[model.id];
@@ -598,7 +597,7 @@ async function applyConfig() {
   loadConfig(); loadKeys(); loadBudgets(); loadAlerts(); loadBackends(); loadRoutes();
 }
 
-// Run cost tree: recursive own-vs-rollup breakdown for one agentic run. Admin-gated (attribution
+// Run usage tree: recursive own-vs-rollup neutral observations for one agentic run. Admin-gated (attribution
 // across a whole run can span multiple subjects, so it is treated like any other admin query).
 function renderNode(n) {
   if (!n || typeof n.step_id !== "string" || (n.children !== undefined && !Array.isArray(n.children))) {
@@ -627,7 +626,7 @@ function lookupRun() {
     if (run.run_id !== id) throw new ApiError(502, "Mismatched run response from server");
     requireRunCounts(run.total);
     const roots = run.roots.map(renderNode).join("");
-    return `<div class="callout info">Total: ${fmt(run.total.billable_tokens)} billable tokens across ${fmt(run.total.calls)} calls</div>`
+    return `<div class="callout info">Total: ${fmt(run.total.billable_tokens)} observed token units across ${fmt(run.total.calls)} calls</div>`
       + `<ul class="tree" style="margin-top:.6rem">${roots || '<li class="muted">no steps recorded for this run</li>'}</ul>`;
   }, "read");
 }
@@ -754,7 +753,9 @@ function showView(id, focus = false) {
     window.scrollTo({ top: 0, behavior: "instant" });
   }
 }
-for (const [id, link] of sectionLinks) link.addEventListener("click", event => {
+for (const link of document.querySelectorAll(".section-nav a, [data-view-link]")) link.addEventListener("click", event => {
+  const id = link.hash.slice(1);
+  if (!sectionLinks.has(id)) return;
   event.preventDefault();
   if (location.hash !== `#${id}`) history.pushState(null, "", `#${id}`);
   showView(id, true);

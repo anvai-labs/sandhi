@@ -37,6 +37,7 @@
   <a href="#run-section">Run explorer</a>
   <a href="#evidence-section">Usage evidence</a>
   <span class="rail-label">Gateway</span>
+  <a href="#flow-section">Routing &amp; cache guide</a>
   <a href="#policy-section">Content policy</a>
   <a href="#configuration">Configuration</a><a href="#topology-section">Topology</a>
 </nav>
@@ -46,7 +47,47 @@
 <section class="workspace-view" data-view="overview" aria-labelledby="overview">
 <h2 id="overview" tabindex="-1">Overview</h2>
 <p class="view-description">Understand request volume, token reuse and the teams behind your model traffic.</p>
+<div class="operator-shortcuts" aria-label="Explore gateway controls">
+  <a href="#flow-section" data-view-link><strong>Reuse context</strong><span>Follow routing, cache controls and token evidence</span><span aria-hidden="true">↗</span></a>
+  <a href="#policy-section" data-view-link><strong>Control egress</strong><span>Review configured rules and local evaluators</span><span aria-hidden="true">↗</span></a>
+  <a href="#evidence-section" data-view-link><strong>Inspect evidence</strong><span>Look up persisted observations by exact ID</span><span aria-hidden="true">↗</span></a>
+</div>
 <section class="panel" id="usage" aria-label="Usage overview"></section>
+</section>
+
+<section class="workspace-view" data-view="flow-section" aria-labelledby="flow-section" hidden>
+<h2 id="flow-section" tabindex="-1">Routing, cache &amp; evidence</h2>
+<p class="view-description">Choose a client API, inspect its backend binding, and follow the evidence. Cache reuse and local egress control share the same request path.</p>
+<section class="panel flow-guide" aria-labelledby="call-path-title">
+  <div class="guide-heading"><div><span class="eyebrow">One request path</span><h3 id="call-path-title">From agent call to source evidence</h3></div><a class="docs-link" href="https://anvai-labs.github.io/sandhi/product/cache-aware-routing/" target="_blank" rel="noopener noreferrer">Read the guide ↗</a></div>
+  <ol class="call-path" aria-label="Request path">
+    <li><span class="path-step">01</span><strong>Client API</strong><p>Chat, Messages, Responses or Gemini</p><span class="hint">The request dialect</span></li>
+    <li><span class="path-step">02</span><strong>Gateway decisions</strong><p>Authorize the logical model and evaluate configured egress rules</p><span class="hint">Before source dispatch</span></li>
+    <li><span class="path-step">03</span><strong>Backend binding</strong><p>Select protocol/profile, model and credential reference; compile declared cache intent</p><span class="hint">Then reserve before dispatch</span></li>
+    <li><span class="path-step">04</span><strong>Source evidence</strong><p>Observe token categories and physical attempts</p><span class="hint">Tracked accounting owns settlement when enabled</span></li>
+  </ol>
+  <div class="evidence-views">
+    <article><span class="eyebrow">Client wire view</span><h4>Compatible response</h4><p>The selected API format can combine or omit categories. It does not reconstruct the original source evidence.</p></article>
+    <article><span class="eyebrow">Server accounting view</span><h4>Original source counts</h4><p>Tracked execution retains disjoint fresh/read/write counts, reasoning inclusion and paired settlement evidence. Unknown usage retains liability.</p></article>
+  </div>
+  <p class="callout info">A response, an observed usage row and a settlement receipt are different facts. This console's aggregate and Usage evidence views show observations; they do not prove that every call settled.</p>
+</section>
+<div class="guide-grid">
+  <section class="panel"><span class="eyebrow">Context efficiency</span><h3>Reuse an eligible prefix</h3><p>Keep stable instructions and tools before the changing conversation tail. The selected backend's declared cache policy determines eligible marker placement, lifetime and namespace rules.</p><p>Changing a backend, model or account does not transfer its cache or opaque state.</p><a class="btn" href="#routing-section" data-view-link>Inspect backends &amp; routes</a></section>
+  <section class="panel"><span class="eyebrow">Local egress control</span><h3>Review what may leave</h3><p>Configured policy can evaluate supported request content before inference, optionally with a local ONNX evaluator. The shipped sensitive-text classifier audits; deterministic rules own its blocks.</p><p>Protocol routing support does not imply identical inspected-content coverage.</p><a class="btn" href="#policy-section" data-view-link>Inspect content policy</a></section>
+</div>
+<section class="panel" aria-labelledby="token-guide-title">
+  <div class="guide-heading"><div><span class="eyebrow">Measure before pricing</span><h3 id="token-guide-title">Read the token categories</h3></div><a class="docs-link" href="https://anvai-labs.github.io/sandhi/product/cache-aware-routing/#follow-the-tokens-then-evaluate-cost" target="_blank" rel="noopener noreferrer">Token semantics ↗</a></div>
+  <dl class="token-glossary">
+    <div><dt><i class="token-fresh" aria-hidden="true"></i>Fresh input</dt><dd>Input outside the source's reported cache-read and cache-write categories.</dd></div>
+    <div><dt><i class="token-read" aria-hidden="true"></i>Cache read</dt><dd>Reported reused input. An absent or malformed report is not a measured zero.</dd></div>
+    <div><dt><i class="token-write" aria-hidden="true"></i>Cache write</dt><dd>A separate reported source category. It does not prove new KV state or a retention guarantee.</dd></div>
+    <div><dt>Output &amp; reasoning</dt><dd>Reasoning may overlap output or be separate. Add it only when the inclusion convention says it is excluded.</dd></div>
+  </dl>
+  <div class="wire-example"><strong>Illustrative protocol conversion</strong><p>Source: <code>2 fresh + 6 read + 2 write</code> → Gemini wire: <code>4 uncached + 6 read</code>. Gemini's response format has no separate cache-write category; the server's original source split remains separate.</p></div>
+  <p class="hint">Cache-read share describes input composition, not currency saved. Model rates, cache writes, retention and subscription quotas determine economic benefit. Sandhi reports neutral units.</p>
+  <a class="btn" href="#evidence-section" data-view-link>Inspect usage evidence</a>
+</section>
 </section>
 
 <section class="workspace-view" data-view="routing-section" aria-labelledby="routing-section" hidden>
@@ -135,7 +176,7 @@
 </section>
 
 <section class="workspace-view" data-view="run-section" aria-labelledby="run-section" hidden>
-<h2 id="run-section">Run cost tree <span class="hint">one agent run's spend, per step, own vs subtree</span></h2>
+<h2 id="run-section">Run usage tree <span class="hint">one agent run's neutral usage, per step, own vs subtree</span></h2>
 <p class="view-description">Trace an agent run from individual steps to its total neutral-token usage.</p>
 <section class="panel">
   <div class="form-row" style="margin-top:0">

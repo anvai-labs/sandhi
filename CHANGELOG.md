@@ -30,8 +30,28 @@ Prepared package version: **0.17.0**. This version is not yet released.
   A validated terminal protocol and source counters replace permissive EOF
   completion. See [ADR-0038](docs/adr/0038-coordinated-victor-contract-migration.md)
   for remaining migration and qualification gates. Wire schema v1 is unchanged.
+- Ordinary buffered Chat, Messages, Responses and Gemini calls also share strict
+  source qualification; constrained Codex uses its existing qualified SSE owner.
+  Missing or invalid usage cannot become measured final zero. Completed malformed
+  responses refuse without replay, and native/portable generation outcomes remain
+  separate from physical HTTP success. See [ADR-0040](docs/adr/0040-shared-buffered-source-qualification.md).
+- The prepared Victor consumer omits gateway idempotency headers while preserving
+  attribution and retry-free transport. Gateway peer/counts/cache coordination,
+  mandatory accounting and provider-label/budget-scope migration remain release
+  gates. Broader cache/state/subscription and packaging acceptance remains separate;
+  retained native-exit, shutdown and accounting failures are not cleared by passing
+  follow-up probes.
 
 ### Added
+
+- A cohesive **Routing & cache guide** in the operator console and MkDocs:
+  request-path and cache-placement diagrams, fresh/read/write/output/reasoning
+  vocabulary, and the distinction between client wire counts, observed usage and
+  tracked settlement receipts. Overview task shortcuts use keyboard/history-aware
+  navigation. Console totals use **Observed units** and **Run usage tree** labels;
+  arithmetic and API field names are unchanged. Read share remains a reuse measure,
+  not a percentage currency saving. Cache efficiency and local ONNX egress policy
+  are presented together, with their distinct coverage and qualification limits.
 
 - Explicit `openai_terminal_chunk_usage` backend profile for compatible Chat
   streams reporting totals on one terminal choice. Standard qualification stays
@@ -43,7 +63,8 @@ Prepared package version: **0.17.0**. This version is not yet released.
   paired settlement independently of typed delivery; translated finish events wait
   for final usage, and Anthropic stop deltas work with SDK stream accumulators.
   Projection state is bounded separately from token estimates. Messages/Gemini
-  source qualification and live subscription acceptance remain open. See
+  source qualification follows their declared conventions; broader media/native
+  state lifecycle and live subscription acceptance remain open. See
   [ADR-0028](docs/adr/0028-qualified-translated-stream-accounting.md).
 
 - Qualified tracked buffered Codex delivery through its constrained typed codec,
@@ -55,12 +76,13 @@ Prepared package version: **0.17.0**. This version is not yet released.
   bounded response owner and paired settlement. Progress remains partial; terminal
   counters preserve disjoint cache categories and explicit reasoning zero. Missing,
   contradictory or malformed evidence retains both liabilities without model replay.
-  Translated streams remain gated. See
+  Translated streams use the qualified source pipeline; broader lifecycle
+  acceptance remains separate. See
   [ADR-0026](docs/adr/0026-qualified-responses-stream-accounting.md).
 - Qualified tracked buffered routing across Chat, Messages, Responses and Gemini
   clients and standard backends. Protocol-specific validators preserve zero and
   reject missing/malformed/inconsistent evidence; tracked routes preflight accounting
-  eligibility before pinning. Broader streaming remains gated.
+  eligibility before pinning. Broader cache/state/subscription acceptance remains gated.
   Gemini tool-use input and Anthropic reported thinking are accounted explicitly.
   See [ADR-0025](docs/adr/0025-qualified-buffered-protocol-accounting.md).
 - Durable single-attempt identities and bounded transport evidence for new supported
@@ -72,8 +94,8 @@ Prepared package version: **0.17.0**. This version is not yet released.
   tracked calls reserve both scopes together; either denial leaves no rows.
   Qualified final usage charges both atomically under one receipt. Unknown usage
   stays held on both through expiry/restart, and receipt failures recover both
-  without inference replay. Default legacy mode and older unpaired rows retain
-  their existing semantics. See [ADR-0023](docs/adr/0023-paired-budget-settlement.md).
+  without inference replay. Accounting activation and older unpaired rows retain
+  their existing semantics until coordinated cutover. See [ADR-0023](docs/adr/0023-paired-budget-settlement.md).
 - Atomic durable execution-context records for existing tracked HTTP admissions:
   selected route/backend/model, transport/cache fingerprints and the admitted
   accounting policy survive restart. Terminal recording refuses weight changes;
