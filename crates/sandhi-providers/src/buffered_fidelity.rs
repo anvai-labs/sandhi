@@ -222,41 +222,39 @@ fn messages(body: &Value) -> Result<Option<String>, ProviderError> {
     }
     Ok((!reasoning.is_empty()).then_some(reasoning))
 }
+pub(crate) const RESPONSES_FIELDS: &[&str] = &[
+    "id",
+    "object",
+    "created_at",
+    "completed_at",
+    "model",
+    "status",
+    "output",
+    "usage",
+    "incomplete_details",
+    "background",
+    "instructions",
+    "max_output_tokens",
+    "max_tool_calls",
+    "metadata",
+    "parallel_tool_calls",
+    "prompt_cache_key",
+    "prompt_cache_retention",
+    "reasoning",
+    "safety_identifier",
+    "service_tier",
+    "store",
+    "temperature",
+    "text",
+    "tool_choice",
+    "tools",
+    "top_logprobs",
+    "top_p",
+    "truncation",
+    "user",
+];
 fn responses(body: &Value) -> Result<Option<String>, ProviderError> {
-    fields(
-        body,
-        &[
-            "id",
-            "object",
-            "created_at",
-            "completed_at",
-            "model",
-            "status",
-            "output",
-            "usage",
-            "incomplete_details",
-            "background",
-            "instructions",
-            "max_output_tokens",
-            "max_tool_calls",
-            "metadata",
-            "parallel_tool_calls",
-            "prompt_cache_key",
-            "prompt_cache_retention",
-            "reasoning",
-            "safety_identifier",
-            "service_tier",
-            "store",
-            "temperature",
-            "text",
-            "tool_choice",
-            "tools",
-            "top_logprobs",
-            "top_p",
-            "truncation",
-            "user",
-        ],
-    )?;
+    fields(body, RESPONSES_FIELDS)?;
     let status = text(body, "status")?;
     if !matches!(status, "completed" | "incomplete") {
         return Err(invalid());

@@ -1707,3 +1707,32 @@ ONNX/SentinelPass all-target Clippy pass, along with formatting, generated
 bindings and strict docs. The controlled HTTP artifact retains real database
 joins; its test-source hash matches the compiled test file. Exact-tip independent
 review and this increment's own public CI remain required before merge.
+
+### Qualified Responses source fidelity
+
+[ADR 0037](../adr/0037-portable-responses-source-output.md) adds an ordered,
+bounded complete-event portable projection for qualified Responses and Codex
+sources. It materializes terminal-only output, fences identity/prefix drift and
+refuses meaningful interim native state. Refusal drains the same bounded source;
+later actual counts remain available to the original owner. Native SSE frames
+remain original. Buffered native assembly uses complete item snapshots and
+refuses incomplete replay state or uncovered materialized content. Both Chat
+and Responses recognize typed transport padding without disabling it upstream.
+Legacy canonical delivery and source accounting authority remain separate.
+
+Fifteen current-SDK gateway cases pass across OpenAI Chat, Messages and Gemini
+clients, including three two-turn tool-result histories, real source/database
+joins and paired neutral-unit settlement. Provider pin checks against PyPI find
+OpenAI 3.49.0, Anthropic 2.8.0 and Google GenAI 3.2.0 current. Fresh `develop`
+alignment needs no rebase. Broader workspace/feature checks, exact-tip review and
+public CI remain this increment's checkpoint gates.
+
+The published recovery checkpoint's twelve successful public CI jobs include
+SDK/dashboard conformance, coverage and packaging. Its ONNX Rust step failed on
+remote policy 503 versus expected403, before the provider/evaluator/receipt
+assertions. The [failure report](../reviews/public-ci-policy-verdict-2026-11-12.md)
+retains that evidence limit and fourteen actual public runner allocations. A
+controlled valid reply delayed beyond the original remote cap reproduces the
+symptom. The corrected semantic fixture uses explicit bounded budgets, preserves
+tight deadline tests, and asserts actual zero provider calls and durable audit.
+This is not proof of CI causation or a resolution of spontaneous accounting waits.

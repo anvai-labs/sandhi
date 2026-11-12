@@ -1,6 +1,6 @@
 //! Buffered typed delivery over one qualified SSE transport response.
 use super::{
-    aggregate_stream, decode_responses_stream_delivery, project_buffered_aggregate,
+    aggregate_stream_for_delivery, decode_responses_stream_delivery, project_buffered_aggregate,
     provider_request_observed, TypedOpenAiResponses,
 };
 use crate::{AttemptContext, ProviderError, QualifiedCompletion, QualifiedStreamDelivery};
@@ -20,13 +20,13 @@ pub(super) async fn complete(
             QualifiedStreamDelivery::Buffered,
         )
         .await?;
-    let mut response = aggregate_stream(decode_responses_stream_delivery(
-        transport.stream,
-        request.model,
-        true,
-        true,
-    ))
-    .await?;
+    let decoded = if request.include_native_response {
+        decode_responses_stream_delivery(transport.stream, request.model, true, true)
+    } else {
+        crate::responses_projection::decode(transport.stream, request.model, true)
+    };
+    let mut response =
+        aggregate_stream_for_delivery(decoded, !request.include_native_response, true).await?;
     project_buffered_aggregate(&mut response, request.include_native_response)?;
     let evidence = transport.observation.evidence();
     if evidence.snapshot.outcome == Some(crate::AttemptOutcome::ProviderRejected) {
@@ -86,8 +86,8 @@ mod tests {
             crate::attempt::observe_qualified_stream(request.attempt_context,"fixture",Some(&request.model),
                 sandhi_core::EndpointFamilyV1::OpenaiResponses,Default::default(),Default::default(),|facts| async move {
                     facts.record_headers(200,&http::HeaderMap::new(),None);
-                    let prefix="data: {\"type\":\"response.in_progress\",\"response\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n\ndata: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{}\"}\n\n";
-                    let terminal="data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"output_tokens_details\":{\"reasoning_tokens\":0}}}}\n\n";
+                    let prefix="data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_fixture\",\"status\":\"in_progress\",\"output\":[]}}\n\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_0\",\"summary\":[],\"encrypted_content\":\"opaque\"}}\n\n";
+                    let terminal="data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_fixture\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"output_tokens_details\":{\"reasoning_tokens\":0}}}}\n\n";
                     let chunks=if self.same_chunk {vec![format!("{prefix}{terminal}")]}else{vec![prefix.to_owned(),terminal.to_owned()]};
                     let polled=self.polled.clone();
                     let raw:crate::raw::RawChunkStream=Box::pin(futures_util::stream::iter(chunks).map(move|chunk|{
@@ -99,7 +99,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn decoder_failure_retains_only_the_counts_actually_observed_by_the_source() {
+    async fn projection_refusal_drains_the_same_source_for_later_final_counts() {
         for same_chunk in [false, true] {
             let polled = Arc::new(AtomicUsize::new(0));
             let provider = TypedOpenAiResponses::new(
@@ -121,26 +121,19 @@ mod tests {
             )
             .await
             .is_err());
-            assert_eq!(polled.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                polled.load(Ordering::SeqCst),
+                if same_chunk { 1 } else { 2 }
+            );
             let evidence = context.qualified_stream_evidence().unwrap();
             assert_eq!(
                 evidence.snapshot.outcome,
-                Some(crate::AttemptOutcome::Cancelled)
+                Some(crate::AttemptOutcome::Success)
             );
             let usage = evidence.usage.unwrap();
-            assert_eq!(usage.tokens_out, if same_chunk { 4 } else { 1 });
-            assert_eq!(
-                usage.completeness,
-                if same_chunk {
-                    UsageCompleteness::Final
-                } else {
-                    UsageCompleteness::Partial
-                }
-            );
-            assert_eq!(
-                usage.reasoning_tokens,
-                if same_chunk { Some(0) } else { None }
-            );
+            assert_eq!(usage.tokens_out, 4);
+            assert_eq!(usage.completeness, UsageCompleteness::Final);
+            assert_eq!(usage.reasoning_tokens, Some(0));
             assert_eq!(receiver.drain().len(), 2);
         }
     }

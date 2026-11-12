@@ -14,6 +14,7 @@ use sandhi_core::{
 use serde_json::{json, Map, Value};
 use std::{collections::BTreeMap, sync::Arc};
 
+mod native_aggregate;
 mod qualified;
 
 pub(crate) struct TypedOpenAiResponses {
@@ -160,15 +161,12 @@ impl ChatProvider for TypedOpenAiResponses {
                 crate::QualifiedStreamDelivery::Streaming,
             )
             .await?;
-        Ok(crate::qualified_stream::decode(
-            decode_responses_stream_delivery(
-                source.stream,
-                request.model,
-                request.include_native_stream,
-                true,
-            ),
-            source.observation,
-        ))
+        let decoded = if request.include_native_stream {
+            decode_responses_stream_delivery(source.stream, request.model, true, true)
+        } else {
+            crate::responses_projection::decode(source.stream, request.model, false)
+        };
+        Ok(crate::qualified_stream::decode(decoded, source.observation))
     }
     fn qualified_buffered_without_raw(&self) -> bool {
         self.profile == OpenAiResponsesProfile::ChatGptCodex
@@ -680,7 +678,15 @@ fn usage_v2(body: &Value, parsed: ParsedUsage) -> UsageV2 {
     }
 }
 
-async fn aggregate_stream(mut stream: ChatEventStream) -> Result<ChatResponseV1, ProviderError> {
+async fn aggregate_stream(stream: ChatEventStream) -> Result<ChatResponseV1, ProviderError> {
+    aggregate_stream_for_delivery(stream, false, false).await
+}
+
+async fn aggregate_stream_for_delivery(
+    mut stream: ChatEventStream,
+    portable: bool,
+    qualified: bool,
+) -> Result<ChatResponseV1, ProviderError> {
     use futures_util::StreamExt;
     let mut id = None;
     let mut model = String::new();
@@ -690,80 +696,109 @@ async fn aggregate_stream(mut stream: ChatEventStream) -> Result<ChatResponseV1,
     let mut reasoning = String::new();
     let mut usage = UsageV2::default();
     let mut finish_reason = None;
-    let mut native_response = None;
+    let mut native = native_aggregate::NativeAggregate::for_delivery(portable || !qualified);
+    let mut failure = None;
+    let mut phase = 0_u8;
     let mut retained_bytes = 0_usize;
     while let Some(event) = stream.next().await {
-        match event? {
-            ChatStreamEventV1::NativeFrame { frame } => {
-                if let Some(value) = frame.json_data() {
-                    if matches!(
-                        value.get("type").and_then(Value::as_str),
-                        Some("response.completed" | "response.incomplete" | "response.failed")
-                    ) {
-                        native_response = value.get("response").cloned();
+        let event = event?;
+        if failure.is_some() {
+            continue;
+        }
+        let result = (|| -> Result<(), ProviderError> {
+            if portable {
+                let next = match &event {
+                    ChatStreamEventV1::ReasoningDelta { delta } if !delta.is_empty() => Some(0),
+                    ChatStreamEventV1::TextDelta { delta } if !delta.is_empty() => Some(1),
+                    ChatStreamEventV1::RefusalDelta { delta } if !delta.is_empty() => Some(2),
+                    ChatStreamEventV1::ToolCallStart { .. } => Some(3),
+                    _ => None,
+                };
+                if let Some(next) = next {
+                    if next < phase {
+                        return Err(ProviderError::OutputProjection(
+                            "buffered portable output cannot preserve Responses item ordering"
+                                .into(),
+                        ));
+                    }
+                    phase = next;
+                }
+            }
+            match event {
+                ChatStreamEventV1::NativeFrame { frame } => {
+                    if let Some(value) = frame.json_data() {
+                        native.observe(&value)?;
                     }
                 }
-            }
-            ChatStreamEventV1::ResponseStart {
-                id: response_id,
-                model: response_model,
-            } => {
-                id = response_id;
-                model = response_model;
-            }
-            ChatStreamEventV1::TextDelta { delta } => {
-                retain_bytes(&mut retained_bytes, delta.len())?;
-                text.push_str(&delta);
-            }
-            ChatStreamEventV1::RefusalDelta { delta } => {
-                retain_bytes(&mut retained_bytes, delta.len())?;
-                refusal.push_str(&delta);
-            }
-            ChatStreamEventV1::ReasoningDelta { delta } => {
-                retain_bytes(&mut retained_bytes, delta.len())?;
-                reasoning.push_str(&delta);
-            }
-            ChatStreamEventV1::ToolCallStart { index, id, name } => {
-                retain_bytes(
-                    &mut retained_bytes,
-                    id.len()
-                        .saturating_add(name.len())
-                        .saturating_add(std::mem::size_of::<ToolCallV1>()),
-                )?;
-                tools.insert(
-                    index,
-                    ToolCallV1 {
-                        id,
-                        name,
-                        arguments: String::new(),
-                        extensions: BTreeMap::new(),
-                    },
-                );
-            }
-            ChatStreamEventV1::ToolCallArgumentsDelta { index, delta } => {
-                retain_bytes(&mut retained_bytes, delta.len())?;
-                if let Some(call) = tools.get_mut(&index) {
-                    call.arguments.push_str(&delta);
+                ChatStreamEventV1::ResponseStart {
+                    id: response_id,
+                    model: response_model,
+                } => {
+                    id = response_id;
+                    model = response_model;
+                }
+                ChatStreamEventV1::TextDelta { delta } => {
+                    retain_bytes(&mut retained_bytes, delta.len())?;
+                    text.push_str(&delta);
+                }
+                ChatStreamEventV1::RefusalDelta { delta } => {
+                    retain_bytes(&mut retained_bytes, delta.len())?;
+                    refusal.push_str(&delta);
+                }
+                ChatStreamEventV1::ReasoningDelta { delta } => {
+                    retain_bytes(&mut retained_bytes, delta.len())?;
+                    reasoning.push_str(&delta);
+                }
+                ChatStreamEventV1::ToolCallStart { index, id, name } => {
+                    retain_bytes(
+                        &mut retained_bytes,
+                        id.len()
+                            .saturating_add(name.len())
+                            .saturating_add(std::mem::size_of::<ToolCallV1>()),
+                    )?;
+                    tools.insert(
+                        index,
+                        ToolCallV1 {
+                            id,
+                            name,
+                            arguments: String::new(),
+                            extensions: BTreeMap::new(),
+                        },
+                    );
+                }
+                ChatStreamEventV1::ToolCallArgumentsDelta { index, delta } => {
+                    retain_bytes(&mut retained_bytes, delta.len())?;
+                    if let Some(call) = tools.get_mut(&index) {
+                        call.arguments.push_str(&delta);
+                    }
+                }
+                ChatStreamEventV1::ToolCallEnd { .. } => {}
+                ChatStreamEventV1::Usage { usage: update } => {
+                    let mut observation = usage.cache_read_observation;
+                    sandhi_core::merge_cache_read_observation(
+                        &mut observation,
+                        update.cache_read_observation,
+                    );
+                    if update.completeness != UsageCompleteness::Unavailable {
+                        usage = update;
+                    }
+                    usage.cache_read_observation = observation;
+                }
+                ChatStreamEventV1::Finish { reason } => finish_reason = Some(reason),
+                ChatStreamEventV1::Error { error } => {
+                    return Err(ProviderError::Transport(error.message));
                 }
             }
-            ChatStreamEventV1::ToolCallEnd { .. } => {}
-            ChatStreamEventV1::Usage { usage: update } => {
-                let mut observation = usage.cache_read_observation;
-                sandhi_core::merge_cache_read_observation(
-                    &mut observation,
-                    update.cache_read_observation,
-                );
-                if update.completeness != UsageCompleteness::Unavailable {
-                    usage = update;
-                }
-                usage.cache_read_observation = observation;
-            }
-            ChatStreamEventV1::Finish { reason } => finish_reason = Some(reason),
-            ChatStreamEventV1::Error { error } => {
-                return Err(ProviderError::Transport(error.message));
-            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            failure = Some(error);
         }
     }
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    let native_response = native.finish()?;
     let mut extensions = BTreeMap::from([(
         "openai_responses".into(),
         native_response.unwrap_or_else(|| json!({"transport":"chatgpt_codex_stream_aggregate"})),
@@ -858,6 +893,11 @@ impl StreamedToolArguments {
                 "tool arguments delta after completion".into(),
             ));
         }
+        if self.emitted.len().saturating_add(delta.len()) > crate::MAX_STREAM_LINE_BYTES {
+            return Err(ProviderError::OutputProjection(
+                "Responses tool arguments exceed the retention limit".into(),
+            ));
+        }
         self.emitted.push_str(delta);
         Ok(())
     }
@@ -869,6 +909,11 @@ impl StreamedToolArguments {
         if (self.finalized && arguments != self.emitted) || !arguments.starts_with(&self.emitted) {
             return Err(ProviderError::Transport(
                 "conflicting completed tool arguments".into(),
+            ));
+        }
+        if arguments.len() > crate::MAX_STREAM_LINE_BYTES {
+            return Err(ProviderError::OutputProjection(
+                "Responses tool arguments exceed the retention limit".into(),
             ));
         }
         let suffix = arguments[self.emitted.len()..].to_owned();
@@ -891,6 +936,8 @@ fn decode_responses_stream_inner(
         let mut splitter = crate::native_stream::SseDecoder::new((native || drain_terminal).then_some(sandhi_core::EndpointFamilyV1::OpenaiResponses));
         let mut started = false;
         let mut open_tools = BTreeMap::<u32, StreamedToolArguments>::new();
+        let mut tool_bytes = 0_usize;
+        let mut tool_count = 0_usize;
         let mut emitted_usage = false;
         let mut emitted_finish = false;
         let mut protocol_done = false;
@@ -965,9 +1012,14 @@ fn decode_responses_stream_inner(
                                     item.get("call_id").and_then(Value::as_str),
                                     item.get("name").and_then(Value::as_str),
                                 ) {
+                                    if open_tools.contains_key(&index) || tool_count >= 1024 {
+                                        Err(ProviderError::OutputProjection("Responses tool count or index exceeds the retention limit".into()))?;
+                                    }
+                                    tool_count += 1;
                                     open_tools.insert(index, StreamedToolArguments::default());
                                     yield ChatStreamEventV1::ToolCallStart { index, id:id.into(), name:name.into() };
                                     if let Some(arguments) = item.get("arguments").and_then(Value::as_str) {
+                                        retain_bytes(&mut tool_bytes, arguments.len())?;
                                         open_tools.get_mut(&index).unwrap().delta(arguments)?;
                                         if !arguments.is_empty() {
                                             yield ChatStreamEventV1::ToolCallArgumentsDelta { index, delta: arguments.into() };
@@ -981,6 +1033,7 @@ fn decode_responses_stream_inner(
                             if let Some(delta) = event.get("delta").and_then(Value::as_str) {
                                 let state = open_tools.get_mut(&index).ok_or_else(||
                                     ProviderError::Transport("tool arguments delta without an open call".into()))?;
+                                retain_bytes(&mut tool_bytes, delta.len())?;
                                 state.delta(delta)?;
                                 yield ChatStreamEventV1::ToolCallArgumentsDelta { index, delta:delta.into() };
                             }
@@ -990,6 +1043,7 @@ fn decode_responses_stream_inner(
                             if let Some(arguments) = event.get("arguments").and_then(Value::as_str) {
                                 let state = open_tools.get_mut(&index).ok_or_else(||
                                     ProviderError::Transport("completed tool arguments without an open call".into()))?;
+                                retain_bytes(&mut tool_bytes, arguments.len().saturating_sub(state.emitted.len()))?;
                                 let suffix = state.complete(arguments)?;
                                 if !suffix.is_empty() {
                                     yield ChatStreamEventV1::ToolCallArgumentsDelta { index, delta:suffix };
@@ -1000,11 +1054,13 @@ fn decode_responses_stream_inner(
                             let index = event.get("output_index").and_then(Value::as_u64).unwrap_or(0) as u32;
                             if let Some(mut state) = open_tools.remove(&index) {
                                 if let Some(arguments) = event.pointer("/item/arguments").and_then(Value::as_str) {
+                                    retain_bytes(&mut tool_bytes, arguments.len().saturating_sub(state.emitted.len()))?;
                                     let suffix = state.complete(arguments)?;
                                     if !suffix.is_empty() {
                                         yield ChatStreamEventV1::ToolCallArgumentsDelta { index, delta:suffix };
                                     }
                                 }
+                                tool_bytes = tool_bytes.saturating_sub(state.emitted.len());
                                 yield ChatStreamEventV1::ToolCallEnd { index };
                             }
                         }
@@ -1086,6 +1142,53 @@ fn decode_responses_stream_inner(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn portable_buffered_order_refusal_keeps_polling_the_same_bounded_source() {
+        use sandhi_core::ChatStreamEventV1 as E;
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let polled = Arc::new(AtomicUsize::new(0));
+        let observed = polled.clone();
+        let stream = futures_util::stream::iter([
+            E::ToolCallStart {
+                index: 0,
+                id: "call".into(),
+                name: "inspect".into(),
+            },
+            E::ToolCallArgumentsDelta {
+                index: 0,
+                delta: "{}".into(),
+            },
+            E::ToolCallEnd { index: 0 },
+            E::TextDelta {
+                delta: "after".into(),
+            },
+            E::Finish {
+                reason: sandhi_core::FinishReasonV1::Stop,
+            },
+        ])
+        .map(move |event| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(event)
+        });
+        assert!(matches!(
+            super::aggregate_stream_for_delivery(Box::pin(stream), true, true).await,
+            Err(crate::ProviderError::OutputProjection(_))
+        ));
+        assert_eq!(polled.load(Ordering::SeqCst), 5);
+    }
+    #[test]
+    fn native_tool_argument_limit_precedes_storage() {
+        let mut state = super::StreamedToolArguments {
+            emitted: "x".repeat(crate::MAX_STREAM_LINE_BYTES),
+            finalized: false,
+        };
+        assert!(state.delta("y").is_err());
+        assert_eq!(state.emitted.len(), crate::MAX_STREAM_LINE_BYTES);
+        assert!(!state.finalized);
+    }
     #[tokio::test]
     async fn buffered_stream_aggregate_is_bounded_across_small_frames() {
         use sandhi_core::ChatStreamEventV1;

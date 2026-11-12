@@ -109,8 +109,15 @@ impl Projection {
                 "system_fingerprint",
                 "service_tier",
                 "request_id",
+                "obfuscation",
             ],
         )?;
+        if value
+            .get("obfuscation")
+            .is_some_and(|v| !v.is_null() && !v.is_string())
+        {
+            return Err(invalid());
+        }
         for (key, previous) in [("id", &mut self.response_id), ("model", &mut self.model)] {
             if value.get(key).is_some_and(|v| !v.is_null()) {
                 let incoming = id(value, key)?;

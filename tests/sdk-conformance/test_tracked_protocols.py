@@ -184,6 +184,7 @@ def qualified_origin():
                     response["incomplete_details"] = {"reason": "max_output_tokens"}
                 if control["mode"] != "progress_only":
                     events.append({"type": "response." + response["status"], "response": response})
+                events = control.get("responses_events", events)
                 encoded = "".join("event: " + e["type"] + "\ndata: " + json.dumps(e) + "\n\n" for e in events).encode()
                 if control["mode"] == "post_terminal":
                     encoded += b'data: {}\n\n'

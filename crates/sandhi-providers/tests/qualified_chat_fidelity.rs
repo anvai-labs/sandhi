@@ -67,6 +67,14 @@ fn frames(mode: &str) -> Vec<Value> {
     for value in &mut values {
         value["object"] = "chat.completion.chunk".into();
     }
+    if mode == "obfuscation" {
+        for value in &mut values {
+            value["obfuscation"] = "padding-only".into();
+        }
+    }
+    if mode == "bad_obfuscation" {
+        values[0]["obfuscation"] = json!({"state":"not-padding"});
+    }
     values
 }
 
@@ -84,6 +92,8 @@ async fn chat_native_or_portable_projection_joins_one_http_attempt_and_final_sou
         "after_tool",
         "id_drift",
         "model_drift",
+        "obfuscation",
+        "bad_obfuscation",
     ] {
         for native in [false, true] {
             let values = frames(mode);
@@ -127,7 +137,8 @@ async fn chat_native_or_portable_projection_joins_one_http_attempt_and_final_sou
                 .unwrap()
                 .collect::<Vec<_>>()
                 .await;
-            let clean = native || matches!(mode, "text" | "reasoning" | "fragments");
+            let clean =
+                native || matches!(mode, "text" | "reasoning" | "fragments" | "obfuscation");
             assert_eq!(
                 actual.iter().any(Result::is_err),
                 !clean,

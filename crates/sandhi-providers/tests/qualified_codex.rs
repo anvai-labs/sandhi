@@ -29,7 +29,7 @@ fn prefix() -> String {
 }
 
 fn terminal(status: &str) -> Value {
-    json!({"id":"resp_fixture","status":status,"model":"fixture","output":[{"type":"reasoning","encrypted_content":"opaque-fixture","summary":[]}],
+    json!({"id":"resp_fixture","status":status,"model":"fixture","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"reply","annotations":[]}]},{"type":"reasoning","encrypted_content":"opaque-fixture","summary":[]}],
         "usage":{"input_tokens":10,"output_tokens":4,"total_tokens":14,
         "input_tokens_details":{"cached_tokens":6,"cache_write_tokens":2},"output_tokens_details":{"reasoning_tokens":0}}})
 }
@@ -167,7 +167,7 @@ async fn codex_qualified_aggregation_retains_source_usage_without_raw_bypass_or_
                 );
                 if native && opaque {
                     assert_eq!(
-                        result.response.extensions["openai_responses"]["output"][0]
+                        result.response.extensions["openai_responses"]["output"][1]
                             ["encrypted_content"],
                         "opaque-fixture"
                     );
