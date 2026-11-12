@@ -581,6 +581,54 @@ async fn nonportable_native_state_refuses_before_reservation_and_dispatch() {
 }
 
 #[tokio::test]
+async fn native_gemini_thinking_controls_survive_forced_output_cap() {
+    for budget_key in ["thinkingBudget", "thinking_budget"] {
+        for stream in [false, true] {
+            let upstream = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path(upstream_path(Family::GeminiGenerateContent, stream)))
+                .respond_with(reply(Family::GeminiGenerateContent, stream))
+                .expect(1)
+                .mount(&upstream)
+                .await;
+            let (state, sink) = state(Family::GeminiGenerateContent, &upstream);
+            let original = json!({"contents":[{"role":"user","parts":[{"text":"hello"}]}],
+                "generationConfig":{"thinkingConfig":{budget_key:0,"includeThoughts":true}}});
+            let (status, body) =
+                call(&state, Family::GeminiGenerateContent, original, stream).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{budget_key}/{stream}: {}",
+                String::from_utf8_lossy(&body)
+            );
+            let calls = upstream.received_requests().await.unwrap();
+            assert_eq!(calls.len(), 1);
+            let sent: Value = calls[0].body_json().unwrap();
+            assert_eq!(
+                sent["generationConfig"]["maxOutputTokens"], 4096,
+                "must exercise capped typed re-encoding"
+            );
+            assert_eq!(
+                sent["generationConfig"]["thinkingConfig"]["includeThoughts"], true,
+                "{budget_key}/{stream}: {sent}"
+            );
+            assert_eq!(
+                sent["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+                0
+            );
+            assert!(
+                sent["generationConfig"]["thinkingConfig"]
+                    .get("thinking_budget")
+                    .is_none(),
+                "budget alias canonicalizes without duplication"
+            );
+            assert_eq!(sink.events().len(), 1);
+        }
+    }
+}
+
+#[tokio::test]
 async fn mixed_gemini_results_preserve_adjacent_text_and_arbitrary_response_objects() {
     let upstream = MockServer::start().await;
     Mock::given(method("POST"))

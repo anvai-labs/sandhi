@@ -1269,3 +1269,22 @@ Clippy, formatting, strict docs and binding-facade checks passed. Public hosted
 also passed every job, with its documentation run green. It predates M5i; the new
 tip needs its own hosted checks. Passing source tests still do not explain or
 resolve the earlier intermittent admission wait.
+
+Independent review rejected `7a4571c` with one native-control finding: compatible
+Gemini requests lost `includeThoughts` when output-cap injection forced typed
+re-encoding. The new wire regression reproduced that loss before the fix. The
+Gemini encoder now merges the original thinking object, replaces only modeled
+budget controls and canonicalizes the two accepted budget spellings without
+duplicates. Four routed cases cover both spellings and both delivery modes, with
+an asserted 4,096-token injected cap and the original native control preserved.
+The complete nine-case native-input integration fixture passed. The rejected tip
+has no clean approval record and has not been pushed; re-review applies to the
+resulting fix commit. This follow-up changes Gemini backend re-encoding, which is
+outside the recorded live Messages-source path; it does not claim a new live
+Gemini-source qualification.
+
+The combined fix tree passed the full default workspace: 1,135 tests, six opt-in
+ignored. Workspace/all-target Clippy passed with and without ONNX; formatting,
+strict MkDocs and generated binding-facade checks passed. The earlier live binary
+hashes retain their report-specific scope. Exact-commit re-review and new-tip
+public hosted CI remain separate publication/merge requirements.

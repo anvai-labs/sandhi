@@ -290,7 +290,16 @@ pub(crate) fn encode_gemini_request_base(request: &ChatRequestV1) -> Result<Valu
     // over an extensions duplicate. `reasoning_effort` has no Gemini analogue —
     // explicitly ignored (consumer-decision row).
     if let Some(thinking) = &request.thinking {
-        let mut thinking_config = serde_json::Map::new();
+        // Typed budget changes must not erase other family-owned controls when
+        // a compatible native request is re-encoded (for example, to inject an
+        // output cap). Normalize the two accepted budget spellings only.
+        let mut thinking_config = generation
+            .get("thinkingConfig")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        thinking_config.remove("thinkingBudget");
+        thinking_config.remove("thinking_budget");
         if !thinking.enabled {
             thinking_config.insert("thinkingBudget".into(), json!(0));
         } else if let Some(budget) = thinking.budget_tokens {

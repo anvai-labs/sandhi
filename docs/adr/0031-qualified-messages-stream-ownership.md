@@ -76,6 +76,11 @@ of vanishing. Gemini SSE failures use numeric HTTP codes and canonical status
 names so structured failures can be parsed by the Google SDK. A failed body can
 also raise a transport error; the default-SDK fixture verifies one origin send.
 
+Compatible Gemini re-encoding merges the original thinking object and replaces
+only the modeled budget fields. This preserves native members such as
+`includeThoughts` when output-cap injection selects the typed path. Both accepted
+budget spellings canonicalize to one wire field; they do not erase other controls.
+
 ## Evidence and remaining gates
 
 The provider matrix checks both profiles, native attachment modes, eight evidence
