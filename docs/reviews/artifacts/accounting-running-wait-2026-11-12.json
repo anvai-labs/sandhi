@@ -1,0 +1,76 @@
+{
+  "evidence_kind": "local_unresolved_accounting_wait",
+  "source_commit": "eec5eaab7706d11852f229f5e9046ae23f24781d",
+  "command": "cargo test --workspace",
+  "concurrent_work": "Full current-provider-SDK conformance run in another process, with the same stable source.",
+  "log_sha256": "12c6d93322f8ef8de0b7bbc9d2d17a672273de5ea6a99e8938896c85008ed76c",
+  "failures": [
+    {
+      "test": "owned_buffered_back_leg_never_races_its_primary_settle",
+      "request_id": "req_1794491696669_303",
+      "call_ordinal": 170,
+      "http_status": 502,
+      "retryable": false,
+      "retained_jobs": 1,
+      "observed_total_upstream_calls": 170,
+      "observed_usage_event": {
+        "completeness": "final",
+        "tokens_in": 10,
+        "tokens_out": 2,
+        "cache_read_tokens": 0,
+        "cache_creation_tokens": 0
+      },
+      "limits": [
+        "170 upstream calls include preceding successful requests, not 170 attempts for this request.",
+        "The log does not export a paired reservation/receipt database join for this request."
+      ]
+    },
+    {
+      "test": "qualified_codex::tracked_codex_buffered_four_ingress_routes_join_attempt_usage_and_both_receipts",
+      "actual_receipt_count": 0,
+      "expected_receipt_count": 1,
+      "request_id": null,
+      "limits": [
+        "The assertion does not print its ingress/mode or request ID. Do not assign the adjacent unlabelled wait trace to this cell as a proven join."
+      ]
+    }
+  ],
+  "wait_traces": [
+    {
+      "request_id": "req_1794491696669_303",
+      "transition": "terminal_settlement",
+      "wait_ms": 2000,
+      "wait_started_us": 91,
+      "wait_elapsed_us": 2001292,
+      "job_stage": "running",
+      "elapsed_us": 2001382,
+      "queue_us": 63,
+      "run_us": 2001319,
+      "publication_us": null,
+      "published_at_us": null,
+      "readiness": "pending",
+      "interrupted": false
+    },
+    {
+      "request_id": "req_1794491696670_304",
+      "transition": "terminal_settlement",
+      "wait_ms": 2000,
+      "wait_started_us": 74,
+      "wait_elapsed_us": 2000317,
+      "job_stage": "running",
+      "elapsed_us": 2000385,
+      "queue_us": 50,
+      "run_us": 2000335,
+      "publication_us": null,
+      "published_at_us": null,
+      "readiness": "pending",
+      "interrupted": false
+    }
+  ],
+  "evidence_limits": [
+    "These workers started promptly; the trace does not separate ledger operations, known-busy backoff, filesystem I/O or descheduling during execution.",
+    "The outcome after the HTTP waiter stopped is not established.",
+    "Four separate queued admission timeouts in this run belong to the deliberately controlled late-admission test and are not spontaneous failures."
+  ],
+  "disposition": "Unresolved reliability/merge gate. Preserve the failure; no deadline increase, inferred zero, inference replay or blind rerun."
+}

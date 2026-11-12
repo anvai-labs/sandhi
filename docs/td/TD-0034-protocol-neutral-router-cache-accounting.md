@@ -1744,3 +1744,13 @@ account terminal snapshot bytes, and refuse post-terminal/unretained metadata.
 The candidate has no clean record. Its pre-review full SDK run was interrupted
 at 248 passing/two skipped cases to avoid qualifying a changing source snapshot;
 final-source qualification and exact-tip re-review are still gates.
+
+On stable source `eec5eaa`, full workspace validation reproduced two terminal
+settlement failures under concurrent SDK qualification. New timing markers
+show prompt worker starts (50/63 microseconds), followed by over two seconds in
+running state with no publication. The
+[local failure report](../reviews/accounting-running-wait-2026-11-12.md) retains
+source counts, correlation limits and the unchanged safety behavior. This narrows
+these occurrences beyond queueing but does not identify the internal ledger,
+backoff, I/O or scheduling cause. The failed run remains a merge/reliability gate;
+no blind retry or larger deadline replaces this evidence.

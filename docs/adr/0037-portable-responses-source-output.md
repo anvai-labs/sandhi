@@ -98,9 +98,10 @@ synthetic tests do not qualify a live Codex subscription, Gemini issuer, cache
 TTL, media path or provider cache-price discount. The broader qualification and
 spontaneous accounting-wait work remains open in TD-0034.
 
-Independent review rejected candidate `9a7cc77`: complete per-item snapshots
-could omit previously emitted parts, and buffered native materialization did not
-bind delta item IDs to complete item IDs. Three independent actual-HTTP probes
+Independent review rejected candidate `9a7cc77` for four P2 findings: complete
+per-item snapshots could omit emitted parts, native materialized item IDs were
+not bound to complete item IDs, meaningful root event metadata could disappear,
+and terminal snapshot bytes were omitted from retained-budget accounting. Three independent actual-HTTP probes
 confirmed successful delivery of those contradictions while retaining one
 physical dispatch and final source counts. The corrected projection requires
 complete part coverage; native assembly binds identities and requires their
@@ -116,3 +117,20 @@ Protocol references:
 [Responses streaming events](https://developers.openai.com/api/reference/resources/responses/streaming-events),
 [Responses creation and padding](https://developers.openai.com/api/reference/resources/responses/methods/create),
 and [Chat streaming events](https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events).
+
+The final-source workspace run reproduced two unresolved terminal-settlement
+waits. Workers started within 50–63 microseconds, then remained running beyond
+the unchanged two-second wait with no published result. The
+[retained failure report](../reviews/accounting-running-wait-2026-11-12.md)
+distinguishes the explicitly correlated request from an unassigned adjacent
+trace. This is a separate reliability/merge gate; the source-fidelity fixes do
+not resolve the worker's internal latency or authorize liability release.
+
+Independent re-review cleared all four findings on `eec5eaa` against `4443ed8`.
+The reviewer reran the original HTTP/method probes in a fresh SHA-specific
+target, seven portable projection units, four native aggregate units and the
+focused matrices: 40 Responses, 26 Chat and 48 Codex HTTP cases. The verdict is
+clean for the fidelity/security increment. It explicitly retains the two
+accounting-terminal failures as an unresolved reliability/merge gate and does
+not imply green CI or merge approval. Default and ONNX/SentinelPass Clippy and
+strict documentation pass. Full final-source SDK qualification remains running.
