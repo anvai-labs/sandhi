@@ -81,6 +81,11 @@ impl Provider for Gemini {
     }
 
     async fn complete(&self, req: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        if !req.body.is_object() || !sandhi_core::model_id_is_path_safe(&req.model) {
+            return Err(ProviderError::InvalidRequest(
+                "Gemini requires an object and a path-safe generation model".into(),
+            ));
+        }
         let attempt_context = req.attempt_context.clone();
         let model = req.model.clone();
         let request = self
@@ -88,10 +93,12 @@ impl Provider for Gemini {
             .post(self.url(&req.model, "generateContent"))
             .headers(crate::merge_call_headers(&self.headers, &req.extra_headers))
             .json(&req.body);
-        crate::attempt::observe_complete(
+        crate::attempt::observe_complete_qualified(
             attempt_context,
             self.slug(),
             Some(&model),
+            sandhi_core::EndpointFamilyV1::GeminiGenerateContent,
+            Default::default(),
             |facts| async move {
                 let resp = self
                     .authenticate(request)
@@ -121,6 +128,11 @@ impl Provider for Gemini {
     }
 
     async fn stream(&self, req: ProviderRequest) -> Result<ByteStream, ProviderError> {
+        if !req.body.is_object() || !sandhi_core::model_id_is_path_safe(&req.model) {
+            return Err(ProviderError::InvalidRequest(
+                "Gemini requires an object and a path-safe generation model".into(),
+            ));
+        }
         let attempt_context = req.attempt_context.clone();
         let model = req.model.clone();
         let url = format!("{}?alt=sse", self.url(&req.model, "streamGenerateContent"));
@@ -274,6 +286,40 @@ mod tests {
     use serde_json::json;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn every_delivery_rejects_unsafe_models_and_nonobjects_before_dispatch() {
+        let server = MockServer::start().await;
+        let provider = Gemini::new(server.uri(), "synthetic");
+        let (context, receiver) = crate::AttemptContext::channel("gemini-preflight", 4).unwrap();
+        for (model, body) in [
+            ("../fixture", json!({})),
+            ("fixture?key=value", json!({})),
+            ("fixture#fragment", json!({})),
+            ("fixture/models/other", json!({})),
+            ("fixture", json!([])),
+        ] {
+            for delivery in 0..3 {
+                let mut request = ProviderRequest::new(model, body.clone());
+                request.attempt_context = Some(context.clone());
+                let result = match delivery {
+                    0 => provider.complete(request).await.map(|_| ()),
+                    1 => provider.stream(request).await.map(|_| ()),
+                    _ => provider
+                        .stream_qualified(request, crate::QualifiedStreamDelivery::Streaming)
+                        .await
+                        .map(|_| ()),
+                };
+                assert!(
+                    matches!(result, Err(ProviderError::InvalidRequest(_))),
+                    "{model}/{delivery}"
+                );
+            }
+        }
+        assert_eq!(context.dispatch_count(), 0);
+        assert!(receiver.drain().is_empty());
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
 
     #[tokio::test]
     async fn complete_parses_usage_metadata_and_sends_api_key() {

@@ -67,6 +67,8 @@ def qualified_origin():
             control["entered"].set()
             assert control["release"].wait(10), "test did not release origin"
             response = response_for(family)
+            if "response_override" in control:
+                response = control["response_override"]
             if family == FAMILIES[3] and control.get("tool_loop"):
                 turn = len(calls)
                 if turn <= 2:

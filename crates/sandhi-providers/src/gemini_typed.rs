@@ -69,6 +69,12 @@ impl TypedGemini {
                 &response.body,
             )
         });
+        if !request.include_native_response {
+            crate::buffered_fidelity::validate(
+                sandhi_core::EndpointFamilyV1::GeminiGenerateContent,
+                &response.body,
+            )?;
+        }
         let mut decoded = decode_gemini_response(response.body, response.usage, &request.model)?;
         if !request.include_native_response {
             decoded.extensions.remove("gemini");
@@ -224,6 +230,11 @@ pub fn encode_gemini_request(request: &ChatRequestV1) -> Result<Value, ProviderE
 }
 pub(crate) fn encode_gemini_request_base(request: &ChatRequestV1) -> Result<Value, ProviderError> {
     request.validate().map_err(ProviderError::InvalidRequest)?;
+    if !sandhi_core::model_id_is_path_safe(&request.model) {
+        return Err(ProviderError::InvalidRequest(
+            "Gemini requires a path-safe generation model".into(),
+        ));
+    }
     let native = request
         .native_input_for(sandhi_core::EndpointFamilyV1::GeminiGenerateContent)
         .map_err(ProviderError::InvalidRequest)?

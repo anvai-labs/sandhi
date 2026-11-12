@@ -105,10 +105,12 @@ impl Provider for Anthropic {
             .header("anthropic-version", &self.version)
             .headers(crate::merge_call_headers(&self.headers, &req.extra_headers))
             .json(&body);
-        crate::attempt::observe_complete(
+        crate::attempt::observe_complete_qualified(
             attempt_context,
             self.slug(),
             Some(&model),
+            sandhi_core::EndpointFamilyV1::AnthropicMessages,
+            self.usage_profile,
             |facts| async move {
                 let resp = self
                     .authenticate(request)

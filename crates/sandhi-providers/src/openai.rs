@@ -127,10 +127,12 @@ impl Provider for OpenAiCompat {
         if !self.api_key.is_empty() {
             request = request.bearer_auth(&self.api_key);
         }
-        crate::attempt::observe_complete(
+        crate::attempt::observe_complete_qualified(
             attempt_context,
             self.slug(),
             Some(&model),
+            sandhi_core::EndpointFamilyV1::OpenaiChatCompletions,
+            Default::default(),
             |facts| async move {
                 let resp = request
                     .json(&body)

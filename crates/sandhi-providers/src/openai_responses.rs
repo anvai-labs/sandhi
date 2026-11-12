@@ -104,10 +104,12 @@ impl Provider for OpenAiResponses {
             // Keyless local upstreams get no Authorization header (ADR-0008 D1).
             request = request.bearer_auth(&self.bearer_token);
         }
-        crate::attempt::observe_complete(
+        crate::attempt::observe_complete_qualified(
             attempt_context,
             self.slug(),
             Some(&model),
+            sandhi_core::EndpointFamilyV1::OpenaiResponses,
+            Default::default(),
             |facts| async move {
                 let response = request
                     .json(&body)

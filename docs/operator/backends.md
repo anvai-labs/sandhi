@@ -112,6 +112,12 @@ streams retain partial evidence. Native state is preserved or translation refuse
 Tracked stream selection checks delivery compatibility and
 deadline configuration before confirming a pin.
 
+[Buffered output fidelity](../adr/0034-buffered-source-evidence-and-output-fidelity.md)
+keeps source token evidence independent of client translation. Compatible native
+output preserves its envelope; opaque state, unrepresentable ordering and invalid
+tools refuse across protocols. Such a delivery error can still settle measured
+source usage. It must not trigger an inference replay to obtain another format.
+
 ## Usage qualification profiles
 
 Chat-compatible endpoints that place request-total stream usage on their single

@@ -52,6 +52,12 @@ impl TypedAnthropic {
                 &response.body,
             )
         });
+        if !request.include_native_response {
+            crate::buffered_fidelity::validate(
+                sandhi_core::EndpointFamilyV1::AnthropicMessages,
+                &response.body,
+            )?;
+        }
         let mut decoded = decode_anthropic_response(response.body, response.usage, &request.model)?;
         if !request.include_native_response {
             decoded.extensions.remove("anthropic");

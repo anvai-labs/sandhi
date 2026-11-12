@@ -699,17 +699,20 @@ fn gemini_parts_text(parts: Option<&Value>) -> Option<String> {
 /// Needed only on the CROSS-FAMILY path: a Gemini client talking to a Gemini upstream gets the
 /// upstream's own bytes back verbatim (D4a). When the upstream is another family, the client
 /// still expects Gemini's shape, so this is the mirror of the adapter's response parser.
-fn gemini_tool_arguments(arguments: &str) -> Result<Value, &'static str> {
+fn object_tool_arguments(arguments: &str) -> Result<Value, &'static str> {
     let value = sandhi_core::policy::strict_json(arguments.as_bytes())
-        .map_err(|_| "invalid or incomplete tool arguments cannot be translated to Gemini")?;
+        .map_err(|_| "invalid or incomplete tool arguments cannot be translated to an object")?;
     if !value.is_object() {
-        return Err("non-object tool arguments cannot be translated to Gemini");
+        return Err("tool arguments must be an explicit JSON object");
     }
     Ok(value)
 }
 
 fn encode_gemini_response(response: &ChatResponseV1) -> Result<Value, &'static str> {
     let mut parts: Vec<Value> = Vec::new();
+    if let Some(reasoning) = buffered_reasoning(response) {
+        parts.push(json!({"text":reasoning,"thought":true}));
+    }
     if let Some(content) = &response.output.content {
         match content {
             MessageContent::Text(text) if !text.is_empty() => parts.push(json!({ "text": text })),
@@ -728,7 +731,7 @@ fn encode_gemini_response(response: &ChatResponseV1) -> Result<Value, &'static s
             "name": call.name,
             "id": call.id,
             // Gemini carries arguments as an OBJECT, not the JSON string the OpenAI family uses.
-            "args": gemini_tool_arguments(&call.arguments)?,
+            "args": object_tool_arguments(&call.arguments)?,
         }}));
     }
 
@@ -1755,11 +1758,24 @@ pub(crate) fn encode_response(
     }) {
         return Ok(native.clone());
     }
+    if response.output.content.as_ref().is_some_and(|content|matches!(content,
+        MessageContent::Parts(parts) if parts.iter().any(|part|!matches!(part,ContentPart::Text{..})))) {
+        return Err("buffered output media requires compatible native delivery");
+    }
+    if matches!(dialect, IngressDialect::Anthropic | IngressDialect::Gemini)
+        && response
+            .output
+            .refusal
+            .as_ref()
+            .is_some_and(|text| !text.is_empty())
+    {
+        return Err("buffered refusal semantics require a compatible client protocol");
+    }
     match dialect {
         IngressDialect::OpenAi | IngressDialect::Embeddings | IngressDialect::Completions => {
             Ok(encode_openai_response(response))
         }
-        IngressDialect::Anthropic => Ok(encode_anthropic_response(response)),
+        IngressDialect::Anthropic => encode_anthropic_response(response),
         IngressDialect::Responses => Ok(encode_responses_response(response)),
         IngressDialect::Gemini => encode_gemini_response(response),
     }
@@ -1797,6 +1813,9 @@ fn encode_openai_response(response: &ChatResponseV1) -> Value {
     if let Some(refusal) = &response.output.refusal {
         message.insert("refusal".into(), Value::String(refusal.clone()));
     }
+    if let Some(reasoning) = buffered_reasoning(response) {
+        message.insert("reasoning_content".into(), reasoning.into());
+    }
     json!({
         "id": response.id,
         "object":"chat.completion",
@@ -1807,18 +1826,22 @@ fn encode_openai_response(response: &ChatResponseV1) -> Value {
     })
 }
 
-fn encode_anthropic_response(response: &ChatResponseV1) -> Value {
+fn encode_anthropic_response(response: &ChatResponseV1) -> Result<Value, &'static str> {
     let mut content = Vec::new();
+    if let Some(reasoning) = buffered_reasoning(response) {
+        // Presentation of materialized text only, never a provider signature.
+        content.push(json!({"type":"thinking","thinking":reasoning,"signature":""}));
+    }
     if let Some(text) = response.output.content.as_ref().map(content_text) {
         if !text.is_empty() {
             content.push(json!({"type":"text","text":text}));
         }
     }
     for call in &response.output.tool_calls {
-        let input = serde_json::from_str::<Value>(&call.arguments).unwrap_or(Value::Null);
+        let input = object_tool_arguments(&call.arguments)?;
         content.push(json!({"type":"tool_use","id":call.id,"name":call.name,"input":input}));
     }
-    json!({
+    Ok(json!({
         "id":response.id,
         "type":"message",
         "role":"assistant",
@@ -1827,7 +1850,15 @@ fn encode_anthropic_response(response: &ChatResponseV1) -> Value {
         "stop_reason":anthropic_finish(response.finish_reason),
         "stop_sequence":Value::Null,
         "usage":anthropic_usage(&response.usage),
-    })
+    }))
+}
+
+fn buffered_reasoning(response: &ChatResponseV1) -> Option<&str> {
+    response
+        .extensions
+        .get("reasoning")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
 }
 
 /// Encode the canonical response as an OpenAI Responses document — the inverse of
@@ -1836,6 +1867,10 @@ fn encode_anthropic_response(response: &ChatResponseV1) -> Value {
 /// `status` derived from the finish reason and a Responses-shaped `usage` block.
 fn encode_responses_response(response: &ChatResponseV1) -> Value {
     let mut output = Vec::new();
+    if let Some(reasoning) = buffered_reasoning(response) {
+        output.push(json!({"type":"reasoning","id":format!("reasoning_{}",response.id.as_deref().unwrap_or("buffered")),
+            "summary":[{"type":"summary_text","text":reasoning}],"status":"completed"}));
+    }
     let text = response.output.content.as_ref().map(content_text);
     let has_text = text.as_deref().is_some_and(|text| !text.is_empty());
     let has_refusal = response
@@ -2324,7 +2359,7 @@ impl StreamEventEncoder {
             }
             ChatStreamEventV1::ToolCallEnd { index } => match self.gemini_calls.remove(index) {
                 Some((id, name, args)) => {
-                    let args_value = gemini_tool_arguments(&args)?;
+                    let args_value = object_tool_arguments(&args)?;
                     vec![(
                         None,
                         json!({"candidates":[{

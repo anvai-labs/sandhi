@@ -55,16 +55,16 @@ impl TypedOpenAiResponses {
             if qualify {
                 return qualified::complete(self, request, call_headers, attempt_context).await;
             }
-            request.include_native_stream = request.include_native_response;
-            return aggregate_stream(
+            let native = request.include_native_response;
+            request.include_native_stream = true;
+            let mut response = aggregate_stream(
                 self.stream_inner(request, call_headers, attempt_context)
                     .await?,
             )
-            .await
-            .map(|response| {
-                let usage = Ok(response.usage.clone());
-                crate::QualifiedCompletion { response, usage }
-            });
+            .await?;
+            project_buffered_aggregate(&mut response, native)?;
+            let usage = Ok(response.usage.clone());
+            return Ok(crate::QualifiedCompletion { response, usage });
         }
         let body = if qualify {
             self.qualified_request(&request)?
@@ -86,7 +86,20 @@ impl TypedOpenAiResponses {
                 &response.body,
             )
         });
+        let reasoning = if request.include_native_response {
+            None
+        } else {
+            crate::buffered_fidelity::validate(
+                sandhi_core::EndpointFamilyV1::OpenaiResponses,
+                &response.body,
+            )?
+        };
         let mut decoded = decode_responses_response(response.body, response.usage, &request.model)?;
+        if let Some(reasoning) = reasoning {
+            decoded
+                .extensions
+                .insert("reasoning".into(), Value::String(reasoning));
+        }
         if !request.include_native_response {
             decoded.extensions.remove("openai_responses");
         }
@@ -674,6 +687,7 @@ async fn aggregate_stream(mut stream: ChatEventStream) -> Result<ChatResponseV1,
     let mut text = String::new();
     let mut refusal = String::new();
     let mut tools = BTreeMap::<u32, ToolCallV1>::new();
+    let mut reasoning = String::new();
     let mut usage = UsageV2::default();
     let mut finish_reason = None;
     let mut native_response = None;
@@ -705,7 +719,10 @@ async fn aggregate_stream(mut stream: ChatEventStream) -> Result<ChatResponseV1,
                 retain_bytes(&mut retained_bytes, delta.len())?;
                 refusal.push_str(&delta);
             }
-            ChatStreamEventV1::ReasoningDelta { .. } => {}
+            ChatStreamEventV1::ReasoningDelta { delta } => {
+                retain_bytes(&mut retained_bytes, delta.len())?;
+                reasoning.push_str(&delta);
+            }
             ChatStreamEventV1::ToolCallStart { index, id, name } => {
                 retain_bytes(
                     &mut retained_bytes,
@@ -747,6 +764,13 @@ async fn aggregate_stream(mut stream: ChatEventStream) -> Result<ChatResponseV1,
             }
         }
     }
+    let mut extensions = BTreeMap::from([(
+        "openai_responses".into(),
+        native_response.unwrap_or_else(|| json!({"transport":"chatgpt_codex_stream_aggregate"})),
+    )]);
+    if !reasoning.is_empty() {
+        extensions.insert("reasoning".into(), Value::String(reasoning));
+    }
     Ok(ChatResponseV1 {
         schema_version: sandhi_core::CHAT_SCHEMA_VERSION_V1.into(),
         id,
@@ -758,12 +782,30 @@ async fn aggregate_stream(mut stream: ChatEventStream) -> Result<ChatResponseV1,
         },
         finish_reason,
         usage,
-        extensions: BTreeMap::from([(
-            "openai_responses".into(),
-            native_response
-                .unwrap_or_else(|| json!({"transport":"chatgpt_codex_stream_aggregate"})),
-        )]),
+        extensions,
     })
+}
+
+fn project_buffered_aggregate(
+    response: &mut ChatResponseV1,
+    native: bool,
+) -> Result<(), ProviderError> {
+    if !native {
+        let body = response.extensions.get("openai_responses").ok_or_else(|| {
+            ProviderError::Transport("buffered Responses terminal is missing".into())
+        })?;
+        let reasoning = crate::buffered_fidelity::validate(
+            sandhi_core::EndpointFamilyV1::OpenaiResponses,
+            body,
+        )?;
+        response.extensions.remove("openai_responses");
+        if let Some(reasoning) = reasoning {
+            response
+                .extensions
+                .insert("reasoning".into(), Value::String(reasoning));
+        }
+    }
+    Ok(())
 }
 
 fn retain_bytes(retained: &mut usize, additional: usize) -> Result<(), ProviderError> {

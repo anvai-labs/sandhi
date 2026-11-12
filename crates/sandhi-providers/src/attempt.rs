@@ -101,7 +101,21 @@ struct SharedAttemptContext {
     next_ordinal: AtomicU64,
     dropped: AtomicU64,
     single_attempt_id: Option<String>,
-    qualified_stream: OnceLock<crate::raw::QualifiedStreamObservation>,
+    qualified_response: OnceLock<QualifiedResponseEvidence>,
+}
+
+/// Strict counts from one completed JSON response, independent of subsequent
+/// codec/projection success. Numeric evidence only; no provider body is retained.
+#[derive(Debug, Clone)]
+pub struct QualifiedBufferedEvidence {
+    pub endpoint: sandhi_core::EndpointFamilyV1,
+    pub upstream_request_id: Option<String>,
+    pub usage: Result<sandhi_core::UsageV2, sandhi_core::usage::BufferedUsageError>,
+}
+
+enum QualifiedResponseEvidence {
+    Buffered(Box<QualifiedBufferedEvidence>),
+    Stream(crate::raw::QualifiedStreamObservation),
 }
 
 struct AttemptCancellation {
@@ -151,7 +165,7 @@ impl AttemptContext {
                     next_ordinal: AtomicU64::new(0),
                     dropped: AtomicU64::new(0),
                     single_attempt_id: None,
-                    qualified_stream: OnceLock::new(),
+                    qualified_response: OnceLock::new(),
                 }),
                 cancellation: Arc::new(AttemptCancellation {
                     reason: AtomicU8::new(CANCELLED),
@@ -216,10 +230,17 @@ impl AttemptContext {
     /// Source-qualified evidence survives decoder errors and stream drop. Only
     /// the built-in physical transport can attach it, once, to a tracked attempt.
     pub fn qualified_stream_evidence(&self) -> Option<crate::raw::QualifiedStreamEvidence> {
-        self.shared
-            .qualified_stream
-            .get()
-            .map(|observed| observed.evidence())
+        match self.shared.qualified_response.get()? {
+            QualifiedResponseEvidence::Stream(observed) => Some(observed.evidence()),
+            QualifiedResponseEvidence::Buffered(_) => None,
+        }
+    }
+
+    pub fn qualified_buffered_evidence(&self) -> Option<QualifiedBufferedEvidence> {
+        match self.shared.qualified_response.get()? {
+            QualifiedResponseEvidence::Buffered(observed) => Some(observed.as_ref().clone()),
+            QualifiedResponseEvidence::Stream(_) => None,
+        }
     }
 
     pub(crate) fn attach_qualified_stream(
@@ -227,7 +248,10 @@ impl AttemptContext {
         observation: crate::raw::QualifiedStreamObservation,
     ) {
         if self.shared.single_attempt_id.is_some() {
-            let _ = self.shared.qualified_stream.set(observation);
+            let _ = self
+                .shared
+                .qualified_response
+                .set(QualifiedResponseEvidence::Stream(observation));
         }
     }
 
@@ -575,6 +599,76 @@ where
     F: std::future::Future<Output = Result<(ProviderResponse, Option<ParsedUsage>), ProviderError>>,
 {
     observe_value(context, provider, model, make_future).await
+}
+
+/// Qualify one built-in JSON response at its physical boundary, before a typed
+/// codec can refuse it. Legacy calls/channels retain their existing behavior.
+pub(crate) async fn observe_complete_qualified<Make, F>(
+    context: Option<AttemptContext>,
+    provider: &str,
+    model: Option<&str>,
+    endpoint: sandhi_core::EndpointFamilyV1,
+    profile: sandhi_core::usage::AnthropicUsageProfile,
+    make_future: Make,
+) -> Result<ProviderResponse, ProviderError>
+where
+    Make: FnOnce(AttemptResponseFacts) -> F,
+    F: std::future::Future<Output = Result<(ProviderResponse, Option<ParsedUsage>), ProviderError>>,
+{
+    use sandhi_core::{usage::AnthropicUsageProfile as A, EndpointFamilyV1 as E};
+    if !matches!(
+        endpoint,
+        E::OpenaiChatCompletions
+            | E::OpenaiResponses
+            | E::AnthropicMessages
+            | E::GeminiGenerateContent
+    ) || (profile != A::SeparateCacheWrites && endpoint != E::AnthropicMessages)
+    {
+        return Err(ProviderError::InvalidRequest(
+            "buffered usage profile does not match endpoint".into(),
+        ));
+    }
+    let tracked = context
+        .clone()
+        .filter(|context| context.shared.single_attempt_id.is_some());
+    observe_value(context, provider, model, move |facts| {
+        let response_facts = facts.clone();
+        let future = make_future(facts);
+        async move {
+            let (response, usage) = future.await?;
+            if let Some(context) = tracked {
+                let facts = response_facts.values();
+                let request_id = facts.provider_request_id.map(|id| bounded_label(&id, 256));
+                let counts = if facts.provider_status != Some(response.status)
+                    || !(200..300).contains(&response.status)
+                {
+                    Err(sandhi_core::usage::BufferedUsageError::InvalidResponse)
+                } else {
+                    sandhi_core::usage::qualify_buffered_usage_with_profile(
+                        endpoint,
+                        profile,
+                        &response.body,
+                    )
+                }
+                .map(|mut usage| {
+                    usage.upstream_request_id = request_id.clone();
+                    usage
+                });
+                let _ = context
+                    .shared
+                    .qualified_response
+                    .set(QualifiedResponseEvidence::Buffered(Box::new(
+                        QualifiedBufferedEvidence {
+                            endpoint,
+                            upstream_request_id: request_id,
+                            usage: counts,
+                        },
+                    )));
+            }
+            Ok((response, usage))
+        }
+    })
+    .await
 }
 
 /// Observe stream setup and retain the lifecycle guard until the stream terminates or is dropped.
@@ -1179,6 +1273,73 @@ mod tests {
             assert!(matches!(result, Err(ProviderError::InvalidRequest(_))));
             assert_eq!(context.dispatch_count(), 0);
             assert!(receiver.drain().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_buffered_profiles_refuse_before_authorization_and_http_setup() {
+        use sandhi_core::{usage::AnthropicUsageProfile as A, EndpointFamilyV1 as E};
+        for (endpoint, profile) in [
+            (E::OpenaiChatCompletions, A::ImplicitCache),
+            (E::CohereChat, A::SeparateCacheWrites),
+        ] {
+            let (context, receiver) =
+                AttemptContext::single_attempt("invalid-buffer-profile", "a".repeat(64)).unwrap();
+            let result = observe_complete_qualified(
+                Some(context.clone()),
+                "fixture",
+                Some("fixture"),
+                endpoint,
+                profile,
+                |_| async {
+                    panic!("invalid buffered profile reached HTTP setup");
+                    #[allow(unreachable_code)]
+                    Ok((
+                        ProviderResponse {
+                            status: 200,
+                            body: serde_json::json!({}),
+                            usage: Default::default(),
+                            attempts: 1,
+                        },
+                        None,
+                    ))
+                },
+            )
+            .await;
+            assert!(matches!(result, Err(ProviderError::InvalidRequest(_))));
+            assert_eq!(context.dispatch_count(), 0);
+            assert!(context.qualified_buffered_evidence().is_none());
+            assert!(receiver.drain().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn buffered_source_evidence_survives_diagnostic_loss_and_requires_response_facts() {
+        use sandhi_core::{EndpointFamilyV1 as E, UsageCompleteness};
+        for headers in [false, true] {
+            let (context, receiver) =
+                AttemptContext::single_attempt("buffered-facts", "b".repeat(64)).unwrap();
+            drop(receiver);
+            observe_complete_qualified(Some(context.clone()),"fixture",Some("fixture"),E::OpenaiChatCompletions,Default::default(),
+                |facts|async move {
+                    if headers {facts.record_headers(200,&Default::default(),None);}
+                    Ok((ProviderResponse{status:200,body:serde_json::json!({"usage":{"prompt_tokens":8,"completion_tokens":4,
+                        "prompt_tokens_details":{"cached_tokens":6},"completion_tokens_details":{"reasoning_tokens":0}}}),
+                        usage:Default::default(),attempts:1},None))
+                }).await.unwrap();
+            let evidence = context.qualified_buffered_evidence().unwrap();
+            assert!(context.qualified_stream_evidence().is_none());
+            assert_eq!(evidence.usage.is_ok(), headers);
+            if let Ok(usage) = evidence.usage {
+                assert_eq!(
+                    (usage.tokens_in, usage.cache_read_tokens, usage.tokens_out),
+                    (2, 6, 4)
+                );
+                assert_eq!(usage.reasoning_tokens, Some(0));
+                assert_eq!(usage.completeness, UsageCompleteness::Final);
+            }
+            assert_eq!(context.dispatch_count(), 1);
+            assert_eq!(context.dropped_observations(), 2);
         }
     }
 }

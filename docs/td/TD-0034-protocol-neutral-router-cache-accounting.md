@@ -155,7 +155,7 @@ and breakpoint semantics. Preserve ADR-0013's existing opt-out during migration.
 | M1: Initial content/accounting fixes | Implemented and source-validated | Responses shorthand, cache-write categorization/rendering, strict write qualification and stream completion ordering; 18-case matrix. |
 | M2a: Explicit endpoint binding | Implemented and source-validated | Typed protocol/profile selection and factory validation independent of provider slug; supported legacy defaults and Codex fences pinned by tests. See ADR-0016 and evidence below. |
 | M2b: Backend registry and operator lifecycle | Implemented and source-validated | Config/admin/CLI persistence, restart reconstruction, credential rotation/revocation, declared model scoping and backward-compatible fixed routes. ADR-0017; targeted Rust and real-process evidence below. |
-| M3: Conversation and cache semantics | In progress | ADR-0018 implements codec-owned ordered input and classified refusal; ADR-0019 adds native streaming and Codex retention. ADR-0020 implements declared cache compilation, scoped keys and observed credential generations. Broader content/tool/media fidelity remains required. |
+| M3: Conversation and cache semantics | In progress | ADR-0018 implements codec-owned ordered input and classified refusal; ADR-0019 adds native streaming and Codex retention. ADR-0020 implements declared cache compilation, scoped keys and observed credential generations. ADR-0034 validates portable buffered output while preserving compatible native state. Broader streaming content/tool/media fidelity remains required. |
 | M4: Authorized routing and affinity | In progress | ADR-0021 candidate implements logical aliases, actual codec/profile preflight, deterministic priority/rendezvous selection, immutable in-memory plans, scoped discovery and durable compatible session pins. Issuer provenance and broader authorization/lifecycle qualification remain required. |
 | M5: Uniform execution accounting | In progress | ADR-0022 freezes context; ADR-0023 adds paired budget ownership; ADR-0024 persists single-attempt transport evidence; ADR-0025 qualifies four buffered protocols; ADR-0026 qualifies transparent standard Responses streaming; ADR-0027 qualifies constrained buffered Codex aggregation; ADR-0028 connects four client dialects to qualified typed Chat/Responses/Codex streams; ADR-0031 connects Messages profiles; ADR-0032/0033 connect Gemini source qualification and EOF ownership with explicit native-state limits. The retained intermittent accounting-wait failure and broader accounting acceptance remain open. |
 | M6: End-to-end qualification | In progress | Z.AI live text/cache matrices and synthetic SDK/lifecycle evidence recorded below. Full agent-loop/interrupt/restart and subscription qualification remain required; unresolved cases clearly gated. |
@@ -1440,3 +1440,44 @@ Clippy, formatting, strict documentation and binding checks passed. Actual-secre
 and common encoded-form scans cleared all 542 indexed files; staged Gitleaks was
 clean. These successful reruns do not resolve the retained concurrent timing
 failures. Exact-commit independent re-review and new-tip public CI remain gates.
+
+### M5l — Buffered source evidence and explicit output fidelity
+
+[ADR-0034](../adr/0034-buffered-source-evidence-and-output-fidelity.md) records the
+confirmed buffered failure: valid source counts disappeared when typed decoding
+failed. Built-in completed JSON transports now retain strict numeric usage in the
+existing single-attempt response slot before decoding. The tracked owner uses it
+for the same durable attempt/usage/paired-settlement pipeline. A delivery error
+cannot erase measured work; missing/malformed measurements still hold liability.
+
+Gateway preparation requests native buffered output only for a compatible client.
+Portable validation rejects meaningful opaque/unknown output, media/provenance,
+invalid tools and content interleaving the neutral response cannot preserve.
+Materialized reasoning is rendered in each client protocol without inventing a
+provider signature or portable continuation credential. Buffered Codex retains
+reasoning and checks its terminal snapshot; interim Responses/Chat event fidelity
+remains open. Bare Gemini complete, legacy stream and qualified stream methods now
+all reject unsafe model paths and non-object bodies before dispatch.
+
+The expanded Rust HTTP matrix passes 116 calls, including all four sources and
+clients, native envelope equality, projection failures with Final usage, reported
+zero and unavailable missing/malformed counters. Provider unit tests pass 337
+cases. The first new SDK run passed 35/36: a synthetic Gemini signature was not
+base64 and was correctly rejected by the Google SDK. The corrected fixture passed
+its isolated case; no production validation was relaxed. The broader Rust run
+exposed an old Codex test that expected encrypted reasoning to disappear on
+portable output. Its expanded 48-call matrix now covers both portable text and
+opaque state, requiring explicit refusal for incompatible state while retaining
+Final source measurements; it passes. Final broad regression and exact-commit
+independent review are required before this checkpoint is pushed.
+
+The preceding published fix `598f9cf` completed all 14 jobs in the same
+[public CI run](https://github.com/anvai-labs/sandhi/actions/runs/43185927674),
+including real SDK conformance, coverage and ARM wheels. Actual jobs used only
+GitHub Actions runner names with `ubuntu-24.04` or `ubuntu-24.04-arm` labels.
+Its documentation run also passed. `OWNER_PRIVATE_CI_ENABLED` remains `false`;
+branch workflows select public GitHub-hosted runners, including the public
+macOS/Windows release matrix. Private and overflow runners are not used.
+The retained admission/dispatch timing failures and broader subscription/agent
+journeys remain open. No new live-provider request, credential change, merge,
+deployment or release was performed for this increment.

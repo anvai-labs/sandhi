@@ -45,6 +45,12 @@ adds eight joined four-client calls with explicitly disabled thinking. Its 99.87
 observed input read share came from an already-used synthetic prefix; it is not
 a price saving, cold-cache test or proof of default signed-thinking portability.
 
+[Buffered source evidence](../adr/0034-buffered-source-evidence-and-output-fidelity.md)
+also survives an unsupported output translation. A delivery error does not erase
+measured provider work: final source counts settle once, while unknown counts
+retain liability. Native signed/encrypted state stays with a compatible client;
+plain reasoning presentation is not a transferable provider-state credential.
+
 The [live tracked translation/cache matrix](../reviews/zai-router-tracked-translated-streams-2026-11-11.md)
 passed all 16 Chat/Responses streaming calls from four SDK formats, with complete
 paired accounting joins and 15 observed cache reads. It retains the initial Chat

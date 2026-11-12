@@ -32,6 +32,15 @@ for partial/final usage and protocol-terminal semantics.
 Keep the existing authentication, TLS, credential and `SANDHI_STORE` configuration.
 This switch grants no permissions and changes no provider credentials.
 
+**A translation error can still have measured token usage.** The current source
+captures strict buffered usage before output decoding. Unsupported signed/encrypted
+state, media, unknown output or invalid tools refuses explicitly on incompatible
+client protocols; compatible native delivery preserves the source envelope.
+Valid final source measurements still settle both budgets once, even after a
+502 delivery error. Missing or malformed measurements retain both liabilities.
+Plain reasoning presentation does not make provider state portable for replay.
+See [buffered output fidelity and source evidence](../adr/0034-buffered-source-evidence-and-output-fidelity.md).
+
 The current workspace candidate additionally freezes a bounded execution-context
 record with the original admission: ingress/delivery/plane, optional logical-route
 and backend revisions, actual model, transport/cache-plan fingerprints and the

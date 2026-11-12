@@ -36,7 +36,7 @@ fn terminal(status: &str) -> Value {
 
 #[tokio::test]
 async fn codex_qualified_aggregation_retains_source_usage_without_raw_bypass_or_replay() {
-    for native in [false, true] {
+    for (opaque, native) in [(false, false), (false, true), (true, false), (true, true)] {
         for mode in [
             "final",
             "incomplete",
@@ -58,6 +58,9 @@ async fn codex_qualified_aggregation_retains_source_usage_without_raw_bypass_or_
                 _ => "completed",
             };
             let mut body = terminal(status);
+            if !opaque {
+                body["output"] = json!([{"type":"message","role":"assistant","content":[{"type":"output_text","text":"reply","annotations":[]}]}]);
+            }
             if mode == "missing" {
                 body.as_object_mut().unwrap().remove("usage");
             }
@@ -141,7 +144,7 @@ async fn codex_qualified_aggregation_retains_source_usage_without_raw_bypass_or_
                 .complete_with_qualified_usage_and_attempts(request(native), spoof, context.clone())
                 .await;
             let good = matches!(mode, "final" | "incomplete" | "multiline");
-            if good {
+            if good && (native || !opaque) {
                 let result = result.unwrap();
                 let usage = result.usage.unwrap();
                 assert_eq!(
@@ -159,13 +162,15 @@ async fn codex_qualified_aggregation_retains_source_usage_without_raw_bypass_or_
                     result.response.extensions.contains_key("openai_responses"),
                     native
                 );
-                if native {
+                if native && opaque {
                     assert_eq!(
                         result.response.extensions["openai_responses"]["output"][0]
                             ["encrypted_content"],
                         "opaque-fixture"
                     );
                 }
+            } else if good {
+                assert!(result.is_err(), "opaque reasoning became portable: {mode}");
             } else if let Ok(result) = result {
                 assert!(result.usage.is_err(), "{mode}");
             }

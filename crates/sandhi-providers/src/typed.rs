@@ -1421,7 +1421,20 @@ impl TypedOpenAiCompat {
                 &response.body,
             )
         });
+        let reasoning = if request.include_native_response {
+            None
+        } else {
+            crate::buffered_fidelity::validate(
+                sandhi_core::EndpointFamilyV1::OpenaiChatCompletions,
+                &response.body,
+            )?
+        };
         let mut decoded = decode_openai_response(response.body, response.usage, &request.model)?;
+        if let Some(reasoning) = reasoning {
+            decoded
+                .extensions
+                .insert("reasoning".into(), Value::String(reasoning));
+        }
         if !request.include_native_response {
             decoded.extensions.remove("openai");
         }

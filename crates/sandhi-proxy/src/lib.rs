@@ -3713,6 +3713,24 @@ impl RequestAccounting {
         if let Some(evidence) = owned.attempts.context.qualified_stream_evidence() {
             streaming::capture_provider_terminal(self, evidence);
         }
+        if let Some(evidence) = owned.attempts.context.qualified_buffered_evidence() {
+            let mut source = match evidence.usage {
+                Ok(mut usage) => {
+                    usage.outcome = Some(self.outcome.into());
+                    usage
+                }
+                Err(error) => unqualified_buffered_usage(error),
+            };
+            source.upstream_request_id = evidence.upstream_request_id;
+            // Projection can contribute boundary timing, never replace counts.
+            if let Some(previous) = &self.usage {
+                source.duration_ms = previous.duration_ms;
+                source.duration_source = previous.duration_source;
+                source.time_to_first_token_ms = previous.time_to_first_token_ms;
+                source.time_to_first_token_source = previous.time_to_first_token_source;
+            }
+            self.observe(&source);
+        }
         let mut usage = self.usage.take().unwrap_or_default();
         usage.attempts = owned
             .attempts

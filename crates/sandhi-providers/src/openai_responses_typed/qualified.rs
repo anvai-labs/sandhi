@@ -1,7 +1,7 @@
 //! Buffered typed delivery over one qualified SSE transport response.
 use super::{
-    aggregate_stream, decode_responses_stream_delivery, provider_request_observed,
-    TypedOpenAiResponses,
+    aggregate_stream, decode_responses_stream_delivery, project_buffered_aggregate,
+    provider_request_observed, TypedOpenAiResponses,
 };
 use crate::{AttemptContext, ProviderError, QualifiedCompletion, QualifiedStreamDelivery};
 use sandhi_core::{ChatRequestV1, ChatResponseV1, UsageCompleteness};
@@ -23,13 +23,11 @@ pub(super) async fn complete(
     let mut response = aggregate_stream(decode_responses_stream_delivery(
         transport.stream,
         request.model,
-        request.include_native_response,
+        true,
         true,
     ))
     .await?;
-    if !request.include_native_response {
-        response.extensions.clear();
-    }
+    project_buffered_aggregate(&mut response, request.include_native_response)?;
     let evidence = transport.observation.evidence();
     if evidence.snapshot.outcome == Some(crate::AttemptOutcome::ProviderRejected) {
         return Err(ProviderError::Transport(

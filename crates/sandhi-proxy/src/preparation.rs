@@ -246,6 +246,10 @@ pub(super) async fn prepare(
     request
         .native_input_for(provider.family().endpoint_family())
         .map_err(|message| ingress_error(dialect, StatusCode::BAD_REQUEST, &message))?;
+    // Decoder-owned native output belongs only to a compatible client. Keeping
+    // an unused source bucket on a translated response would bypass its portable
+    // fidelity check and then silently discard that state during rendering.
+    request.include_native_response = ingress_family(dialect) == provider.family();
     request.include_native_stream = wants_stream
         && ingress_family(dialect) == provider.family()
         && provider.supports_native_stream();

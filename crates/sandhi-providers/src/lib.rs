@@ -26,6 +26,7 @@ pub use sandhi_core::usage::{
 pub mod anthropic;
 mod anthropic_typed;
 pub mod attempt;
+mod buffered_fidelity;
 mod cache_policy;
 mod cache_read;
 pub use cache_policy::contains_native_cache_controls;
@@ -50,7 +51,7 @@ pub mod typed;
 pub use anthropic::{Anthropic, AnthropicAuthScheme};
 pub use attempt::{
     AttemptContext, AttemptContextError, AttemptObservation, AttemptOutcome, AttemptPhase,
-    AttemptReceiver, ATTEMPT_OBSERVATION_VERSION,
+    AttemptReceiver, QualifiedBufferedEvidence, ATTEMPT_OBSERVATION_VERSION,
 };
 pub use catalog::{
     openai_compat_descriptor, provider_descriptor, resolve_openai_compat_provider,
