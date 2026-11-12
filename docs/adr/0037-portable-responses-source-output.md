@@ -98,6 +98,20 @@ synthetic tests do not qualify a live Codex subscription, Gemini issuer, cache
 TTL, media path or provider cache-price discount. The broader qualification and
 spontaneous accounting-wait work remains open in TD-0034.
 
+Independent review rejected candidate `9a7cc77`: complete per-item snapshots
+could omit previously emitted parts, and buffered native materialization did not
+bind delta item IDs to complete item IDs. Three independent actual-HTTP probes
+confirmed successful delivery of those contradictions while retaining one
+physical dispatch and final source counts. The corrected projection requires
+complete part coverage; native assembly binds identities and requires their
+presence in the replay envelope. Terminal clone bytes enter the retention budget,
+post-terminal assembly events refuse, and meaningful unretained event metadata
+refuses before storage. The rejected candidate has no clean review record.
+
+The pre-review full SDK run was intentionally interrupted after source fixes:
+248 passed and two skipped; it is partial evidence and cannot qualify the final
+source snapshot. The final-source suite and exact-tip re-review remain required.
+
 Protocol references:
 [Responses streaming events](https://developers.openai.com/api/reference/resources/responses/streaming-events),
 [Responses creation and padding](https://developers.openai.com/api/reference/resources/responses/methods/create),

@@ -1736,3 +1736,11 @@ controlled valid reply delayed beyond the original remote cap reproduces the
 symptom. The corrected semantic fixture uses explicit bounded budgets, preserves
 tight deadline tests, and asserts actual zero provider calls and durable audit.
 This is not proof of CI causation or a resolution of spontaneous accounting waits.
+
+Independent review rejected Responses candidate `9a7cc77` after three real HTTP
+probes confirmed omitted complete-item content and mismatched native delta item
+identity. Fixes require complete part coverage and replay identity consistency,
+account terminal snapshot bytes, and refuse post-terminal/unretained metadata.
+The candidate has no clean record. Its pre-review full SDK run was interrupted
+at 248 passing/two skipped cases to avoid qualifying a changing source snapshot;
+final-source qualification and exact-tip re-review are still gates.

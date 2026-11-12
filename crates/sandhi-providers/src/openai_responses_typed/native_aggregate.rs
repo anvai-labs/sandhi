@@ -19,6 +19,7 @@ pub(super) struct NativeAggregate {
     model: Option<String>,
     materialized: BTreeMap<(u32, u32, u8), (String, bool)>,
     validate_materialized: bool,
+    item_ids: BTreeMap<u32, String>,
 }
 
 // Count serialized bytes without allocating another copy of a bounded frame.
@@ -70,6 +71,24 @@ fn covers(prior: &Value, complete: &Value, key: &str) -> bool {
     }
 }
 impl NativeAggregate {
+    fn item_identity(&mut self, index: u32, value: &Value, key: &str) -> Result<(), ProviderError> {
+        if !self.validate_materialized || value.get(key).is_none_or(Value::is_null) {
+            return Ok(());
+        }
+        let id = crate::buffered_fidelity::id(value, key).map_err(|_| invalid())?;
+        if let Some(prior) = self.item_ids.get(&index) {
+            return if prior == id { Ok(()) } else { Err(invalid()) };
+        }
+        if self.item_ids.len() >= 1024
+            || self.item_ids.values().any(|prior| prior == id)
+            || self.retained.saturating_add(id.len()) > crate::MAX_STREAM_LINE_BYTES
+        {
+            return Err(invalid());
+        }
+        self.retained += id.len();
+        self.item_ids.insert(index, id.to_owned());
+        Ok(())
+    }
     pub(super) fn for_delivery(portable: bool) -> Self {
         Self {
             validate_materialized: !portable,
@@ -150,7 +169,9 @@ impl NativeAggregate {
                     value,
                 )
             };
-        let key = (number("output_index")?, part, channel);
+        let index = number("output_index")?;
+        self.item_identity(index, event, "item_id")?;
+        let key = (index, part, channel);
         let snapshot = complete || kind.ends_with(".added");
         let prior = self.materialized.get(&key);
         if prior.is_none() && self.materialized.len() >= 1024 {
@@ -192,6 +213,11 @@ impl NativeAggregate {
                     return Err(invalid());
                 }
                 if slot.is_none() {
+                    let retained = self.retained.saturating_add(value.len());
+                    if retained > crate::MAX_STREAM_LINE_BYTES {
+                        return Err(invalid());
+                    }
+                    self.retained = retained;
                     *slot = Some(value.to_owned());
                 }
             }
@@ -202,6 +228,7 @@ impl NativeAggregate {
         if !item.is_object() {
             return Err(invalid());
         }
+        self.item_identity(index, item, "id")?;
         if let Some((prior, was_done, _)) = self.items.get(&index) {
             if *was_done || !covers(prior, item, "") {
                 return Err(invalid());
@@ -223,6 +250,38 @@ impl NativeAggregate {
         Ok(())
     }
     pub(super) fn observe(&mut self, event: &Value) -> Result<(), ProviderError> {
+        if self.response.is_some() {
+            return Err(invalid());
+        }
+        if self.validate_materialized {
+            crate::buffered_fidelity::fields(
+                event,
+                &[
+                    "type",
+                    "sequence_number",
+                    "response_id",
+                    "response",
+                    "output_index",
+                    "item_id",
+                    "content_index",
+                    "summary_index",
+                    "item",
+                    "part",
+                    "delta",
+                    "text",
+                    "refusal",
+                    "arguments",
+                    "obfuscation",
+                ],
+            )
+            .map_err(|_| invalid())?;
+            if event
+                .get("obfuscation")
+                .is_some_and(|v| !v.is_null() && !v.is_string())
+            {
+                return Err(invalid());
+            }
+        }
         match event.get("type").and_then(Value::as_str) {
             Some("response.output_item.added" | "response.output_item.done") => {
                 let index = event
@@ -266,11 +325,21 @@ impl NativeAggregate {
                     .filter(|v| v.is_object())
                     .ok_or_else(invalid)?;
                 self.identity(response)?;
+                if let Some(output) = response.get("output").filter(|v| !v.is_null()) {
+                    let output = output
+                        .as_array()
+                        .filter(|v| v.len() <= 1024)
+                        .ok_or_else(invalid)?;
+                    for (index, item) in output.iter().enumerate() {
+                        self.item_identity(index as u32, item, "id")?;
+                    }
+                }
                 if self.response.is_some()
                     || self.retained.saturating_add(size(response)?) > crate::MAX_STREAM_LINE_BYTES
                 {
                     return Err(invalid());
                 }
+                self.retained += size(response)?;
                 self.response = Some(response.clone());
             }
             Some(
@@ -302,6 +371,16 @@ impl NativeAggregate {
                 Err(invalid())
             };
         };
+        if self.validate_materialized {
+            for (key, prior) in [("id", &self.response_id), ("model", &self.model)] {
+                if prior
+                    .as_deref()
+                    .is_some_and(|prior| response.get(key).and_then(Value::as_str) != Some(prior))
+                {
+                    return Err(invalid());
+                }
+            }
+        }
         if self.items.is_empty() && self.materialized.is_empty() {
             return Ok(Some(response));
         }
@@ -323,6 +402,16 @@ impl NativeAggregate {
                 output.push(item);
             } else {
                 // Neither a partial item nor a hole is a complete replay input.
+                return Err(invalid());
+            }
+        }
+        for (index, id) in self.item_ids {
+            if output
+                .get(index as usize)
+                .and_then(|item| item.get("id"))
+                .and_then(Value::as_str)
+                != Some(id.as_str())
+            {
                 return Err(invalid());
             }
         }
@@ -404,6 +493,14 @@ mod tests {
         assert!(state.finish().is_err());
         let mut state = NativeAggregate::for_delivery(false);
         assert!(state.observe(&json!({"type":"response.output_text.annotation.added","annotation":{"url":"https://example.invalid"}})).is_err());
+        for event in [
+            json!({"type":"response.output_text.delta","delta":"reply","logprobs":[{"token":"reply"}]}),
+            json!({"type":"response.output_text.done","text":"reply","obfuscation":{"state":"opaque"}}),
+        ] {
+            let mut state = NativeAggregate::for_delivery(false);
+            assert!(state.observe(&event).is_err());
+            assert!(state.materialized.is_empty());
+        }
     }
     #[test]
     fn native_retention_preflights_clones_and_rejects_output_holes() {
@@ -423,6 +520,37 @@ mod tests {
         assert!(state.materialized.is_empty());
         let mut state = NativeAggregate::for_delivery(false);
         state.observe(&json!({"type":"response.output_item.done","output_index":1,"item":{"type":"reasoning","encrypted_content":"complete"}})).unwrap();
+        state
+            .observe(&json!({"type":"response.completed","response":{"output":[]}}))
+            .unwrap();
+        assert!(state.finish().is_err());
+    }
+    #[test]
+    fn materialized_item_ids_must_agree_and_terminal_bytes_stay_accounted() {
+        let mut state = NativeAggregate::for_delivery(false);
+        state.observe(&json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_a","content":[]}})).unwrap();
+        assert!(state.observe(&json!({"type":"response.output_text.delta","output_index":0,"item_id":"msg_b","delta":"reply"})).is_err());
+        assert!(state.materialized.is_empty());
+        let mut state = NativeAggregate::for_delivery(false);
+        state.observe(&json!({"type":"response.output_text.delta","output_index":0,"item_id":"msg_a","delta":"reply"})).unwrap();
+        assert!(state.observe(&json!({"type":"response.completed","response":{"output":[{"type":"message","id":"msg_b","content":[{"type":"output_text","text":"reply"}]}]}})).is_err());
+        let response = json!({"output":[]});
+        let mut state = NativeAggregate::for_delivery(false);
+        state
+            .observe(&json!({"type":"response.completed","response":response}))
+            .unwrap();
+        assert_eq!(state.retained, size(&response).unwrap());
+        let retained = state.retained;
+        assert!(state
+            .observe(&json!({"type":"response.output_text.delta","delta":"after"}))
+            .is_err());
+        assert_eq!(state.retained, retained);
+        let mut state = NativeAggregate::for_delivery(false);
+        state.observe(&json!({"type":"response.output_text.delta","output_index":0,"item_id":"msg_a","delta":"reply"})).unwrap();
+        state.observe(&json!({"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"reply"}]}]}})).unwrap();
+        assert!(state.finish().is_err());
+        let mut state = NativeAggregate::for_delivery(false);
+        state.observe(&json!({"type":"response.created","response":{"id":"resp_a","model":"fixture","output":[]}})).unwrap();
         state
             .observe(&json!({"type":"response.completed","response":{"output":[]}}))
             .unwrap();

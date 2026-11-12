@@ -335,6 +335,38 @@ impl Projection {
             return Err(invalid());
         }
         self.ensure(index, kind, optional(value, "id")?)?;
+        if complete {
+            // A complete item must cover every retained meaningful part. An
+            // empty aggregate output may be a sparse provider envelope, but an
+            // explicit complete message/reasoning item cannot erase its parts.
+            for ((part, channel), prior) in &self.items[&index].parts {
+                if prior.value.is_empty() {
+                    continue;
+                }
+                let key = if *channel == Channel::Summary {
+                    "summary"
+                } else {
+                    "content"
+                };
+                let parts = value
+                    .get(key)
+                    .and_then(Value::as_array)
+                    .ok_or_else(invalid)?;
+                let part = parts.get(*part as usize).ok_or_else(invalid)?;
+                let expected = match channel {
+                    Channel::Text => "output_text",
+                    Channel::Refusal => "refusal",
+                    Channel::Summary => "summary_text",
+                    Channel::Reasoning => "reasoning_text",
+                };
+                if text(part, "type")? != expected {
+                    return Err(invalid());
+                }
+            }
+            if kind == Kind::Call {
+                text(value, "arguments")?;
+            }
+        }
         if announced && (self.items[&index].announced || self.items[&index].closed) {
             return Err(invalid());
         }
@@ -414,7 +446,18 @@ impl Projection {
             &mut self.retained,
         )?;
         if value.get("output").is_some_and(|v| !v.is_null()) {
-            for (i, item) in array(value, "output")?.iter().enumerate() {
+            let output = array(value, "output")?;
+            if terminal
+                && !output.is_empty()
+                && self.items.iter().any(|(index, item)| {
+                    (*index as usize) >= output.len()
+                        && (!item.arguments.is_empty()
+                            || item.parts.values().any(|part| !part.value.is_empty()))
+                })
+            {
+                return Err(invalid());
+            }
+            for (i, item) in output.iter().enumerate() {
                 self.snapshot_item(i as u32, item, terminal, false)?;
             }
         }
@@ -714,6 +757,33 @@ mod tests {
         let mut failed = call(0, true);
         failed["item"]["status"] = "failed".into();
         assert!(projection.event(&failed).is_err());
+    }
+    #[test]
+    fn complete_item_snapshots_must_cover_previously_emitted_parts() {
+        for (delta, item) in [
+            (
+                json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"reply"}),
+                json!({"type":"message","role":"assistant","content":[]}),
+            ),
+            (
+                json!({"type":"response.reasoning_summary_text.delta","output_index":0,"summary_index":0,"delta":"summary"}),
+                json!({"type":"reasoning","summary":[]}),
+            ),
+        ] {
+            for terminal in [false, true] {
+                let mut projection = Projection::default();
+                projection.event(&delta).unwrap();
+                let complete = if terminal {
+                    json!({"type":"response.completed","response":{"status":"completed","output":[item]}})
+                } else {
+                    json!({"type":"response.output_item.done","output_index":0,"item":item})
+                };
+                assert!(
+                    projection.event(&complete).is_err(),
+                    "accepted omitted content: {complete}"
+                );
+            }
+        }
     }
     #[test]
     fn part_index_precedes_channel_and_progress_snapshots_do_not_duplicate_text() {

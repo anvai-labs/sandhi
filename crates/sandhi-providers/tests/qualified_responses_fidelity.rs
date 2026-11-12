@@ -56,6 +56,17 @@ fn frames(mode: &str) -> Vec<Value> {
             values.push(json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_0","delta":"reply","obfuscation":"padding-only"}));
             output.push(message);
         }
+        "omitted_message"=>{
+            values.push(json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_0","delta":"reply"}));
+            let mut omitted=message;omitted["content"]=json!([]);
+            values.push(json!({"type":"response.output_item.done","output_index":0,"item":omitted.clone()}));
+            output.push(omitted);
+        }
+        "native_item_identity"=>{
+            values.push(json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_0","role":"assistant","content":[]}}));
+            values.push(json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"different","delta":"reply"}));
+            output.push(message);
+        }
         "tool_identity_drift"=>{
             values.push(json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_0","call_id":"call_0","name":"inspect","arguments":""}}));
             values.push(json!({"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_0","delta":"{}"}));
@@ -111,6 +122,8 @@ async fn portable_responses_refuses_interim_native_state_and_identity_drift_with
             "interim_encrypted",
             "interim_done_encrypted",
             "tool_identity_drift",
+            "omitted_message",
+            "native_item_identity",
         ] {
             let (server, _) = fixture(mode).await;
             let (context, receiver) =
@@ -226,6 +239,8 @@ async fn buffered_codex_does_not_drop_interim_state_or_terminal_only_portable_ou
             "terminal_text",
             "terminal_tool",
             "obfuscation",
+            "omitted_message",
+            "native_item_identity",
         ] {
             let (server, _) = fixture(mode).await;
             let (context, _) =
@@ -237,7 +252,11 @@ async fn buffered_codex_does_not_drop_interim_state_or_terminal_only_portable_ou
                     context.clone(),
                 )
                 .await;
-            if mode == "interim_encrypted" || (mode == "interim_done_encrypted" && !native) {
+            if matches!(
+                mode,
+                "interim_encrypted" | "omitted_message" | "native_item_identity"
+            ) || (mode == "interim_done_encrypted" && !native)
+            {
                 assert!(result.is_err(), "lost interim state: native={native}");
             } else if mode == "interim_done_encrypted" {
                 let result = result.unwrap();
