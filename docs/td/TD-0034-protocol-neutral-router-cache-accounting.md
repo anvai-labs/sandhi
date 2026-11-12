@@ -1585,5 +1585,9 @@ restart assertions; all three focused cases pass. The older installed SDKs pass
 34 generation/discovery/matrix/recovery compatibility cases against the updated
 gateway. An initial full latest-SDK run passed 538 tests, skipped three opt-in
 integrations and retained the Anthropic discovery failure before its fix. Its
-corrected two-case current-SDK discovery rerun passes. Final frozen-source full
-qualification and exact-commit review remain required before publication.
+corrected two-case current-SDK discovery rerun passes. The final frozen-source
+full suite passed 539 tests with three optional skips, including real dashboard
+and CI-pinned CPU-origin qualification. Independent review cleared `f7cd6bf`
+against `4443ed8` and passed 17 archived-source gateway cases, including mixed
+credential/header precedence. Public CI for the refreshed checkpoint remains
+required before merge; broader streaming and accounting-wait gates stay open.

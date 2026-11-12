@@ -56,8 +56,13 @@ the Anthropic discovery failure reproduced before its header-hint fix. The
 corrected current-SDK discovery rerun passes both the unmodified client and the
 shared-path authorization test. This diagnostic run is retained; it is not
 counted as final clean qualification.
-Full current-SDK/dashboard/origin qualification and independent exact-commit
-review remain publication gates for this increment.
+The final frozen-source run passed **539 tests with three optional skips** in
+585.25 seconds, including SDK, real Playwright dashboard and pinned CPU-origin
+qualification. Independent review of `f7cd6bf` against `4443ed8` found no actionable
+issues and independently passed 17 archived-source gateway cases, including
+mixed-header/two-key precedence and zero-inference discovery. Formatting, strict
+documentation, generated bindings and six public-runner policy tests passed.
+The refreshed checkpoint still requires its own public CI before merge.
 
 The full suite uses the CI-pinned InferFlux source
 `bfdf32c00ccf40c7af73b86df2eedabc20a7ae85` and llama.cpp submodule
@@ -66,6 +71,11 @@ built with the public CI's CPU-only flags. It does not use the unrelated current
 InferFlux checkout as evidence for that pin. These are synthetic local origins;
 SDK qualification does not establish new live provider, GPU or subscription
 acceptance.
+
+Actual configured-credential scanning checked 552 indexed files and 3,191 locally
+reachable blobs for five credential values in 15 raw/common encoded forms, with
+zero matches. Gitleaks cleared all 16 branch commits. Provider credentials remain
+outside Git; this SDK qualification uses synthetic fixture credentials.
 
 Fresh `origin/develop` remained `4443ed8544404d1fdd944e596141ac615f3f23d9`.
 The published routing branch contained it already: zero commits behind and
