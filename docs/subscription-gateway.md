@@ -15,8 +15,11 @@ Codex login owner --> access-only lease publisher --> OS credential vault
 A gateway configuration is a complete authentication mode in Victor. It takes
 precedence over `auth_mode=oauth`, explicit upstream keys, environment keys and
 local credential resolution. Victor neither reads nor refreshes an OpenAI grant
-in this mode. It sends ordinary Chat Completions with its virtual key to the
-configured HTTPS or literal/localhost loopback HTTP gateway. There is no direct
+in this mode. It declares an immediate gateway peer and selects Chat, Messages,
+ordinary Responses or Gemini as its client dialect, independently of the direct
+provider's backend profile. Codex behind a gateway uses ordinary Responses when
+that dialect is selected, without upstream account/profile headers. Its virtual
+key targets the configured HTTPS or literal/localhost loopback HTTP gateway. There is no direct
 upstream fallback. Invalid/missing gateway credentials fail before discovery.
 
 Sandhi's `openai` vault entry with `scheme=oauth` contains a strict JSON envelope:
@@ -92,7 +95,9 @@ model: <model explicitly allowed on the virtual key>
 ```
 
 Set `SANDHI_GATEWAY_URL` and `SANDHI_GATEWAY_VIRTUAL_KEY_OPENAI` only for that
-client process, or pass `gateway={url, virtual_key}` to `SandhiOpenAIProvider`.
+client process, or pass `gateway={"url": url, "virtual_key": virtual_key, "protocol": "responses"}` to
+`SandhiOpenAIProvider` to select ordinary Responses explicitly. The client protocol
+is independent of the gateway's constrained Codex backend profile.
 Do not set `OPENAI_API_KEY` to the subscription access token. Do not let global
 routing settings silently move message-hub's private triage to a cloud provider.
 

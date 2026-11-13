@@ -61,8 +61,9 @@ dispatch. Pricing and billing belong to downstream systems.
     Explicit backend/cache policy and strict source qualification are implemented;
     live Z.AI evidence belongs to its recorded endpoint/source configuration.
     The current candidate also separates provider labels from immutable budget
-    scopes and requires one durable HTTP execution owner. Integrated SDK/public CI,
-    packaging, issuer-bound continuation and broader lifecycle acceptance remain in
+    scopes, requires one durable HTTP execution owner and records supported same-owner
+    source-issued native proofs on that ledger. Exact-source public CI, packaging,
+    deployment and broader external-resource/provider lifecycle acceptance remain in
     [TD-0034](td/TD-0034-protocol-neutral-router-cache-accounting.md). A docs build
     does not release or deploy these changes.
 

@@ -10,9 +10,10 @@ once. [Cache routing and token efficiency](cache-aware-routing.md) complements
     This matrix describes implementation and synthetic acceptance boundaries.
     It does not establish publication, deployment or live acceptance for every
     provider. The recorded [Z.AI evidence](../reviews/zai-router-live-2026-11-11.md)
-    applies to its exact endpoints and configuration. Integrated SDK/public CI,
-    issuer-bound continuation ownership, broader lifecycle and coordinated
-    packaging remain in [TD-0034](../td/TD-0034-protocol-neutral-router-cache-accounting.md).
+    applies to its exact endpoints and configuration. Supported source-issued native
+    ownership initializes on the original ledger; externally created resources still
+    have no implicit adoption workflow. Exact-source public CI, release/deployment
+    and broader provider lifecycle qualification remain in [TD-0034](../td/TD-0034-protocol-neutral-router-cache-accounting.md).
 
 ## Client APIs stay independent of backend selection
 
@@ -37,7 +38,7 @@ provider-specific feature. Content inspection coverage is a separate
 | Anthropic-compatible Messages | Separate cache writes, or explicitly selected implicit-cache convention | Wire Bearer/API-key choice does not imply a managed subscription |
 | Standard Responses | Standard Responses source qualifier | Async/background execution is outside this synchronous owner |
 | ChatGPT/Codex Responses | Constrained fixed-origin codec and expiring access-only lease | Buffered SSE aggregation and bounded streams; operator-configured account fencing and out-of-band renewal |
-| Gemini | Native source usage and EOF qualifier | Cache resources and opaque continuation require their own lifecycle/provenance; no cross-account transfer |
+| Gemini | Native source usage and EOF qualifier | Supported source-issued state needs matching native proof; external cache lifecycle/adoption remains separate |
 | Cohere v2 | Actual `usage.tokens`, separately from vendor `billed_units` | Buffered and streamed qualified sources; billed-only or missing actual counts remain unknown |
 | Ollama native Chat | Reported prompt/output totals; optional cached input is an inclusive prompt subset | Buffered and NDJSON streaming; absent cached input is unavailable coverage, not a measured zero |
 

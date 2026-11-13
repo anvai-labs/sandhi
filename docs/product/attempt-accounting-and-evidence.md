@@ -1,5 +1,21 @@
 # Attempt accounting and durable evidence
 
+!!! warning "Current 0.17.0 contract; historical phase records below"
+    HTTP generation requires the original single-file paired owner, shared by binary
+    and public serving. Remove `SANDHI_BUFFERED_ACCOUNTING`; there is no accounting-off,
+    volatile-serving or usage-absence-as-zero path. Source attempts/usage and one paired
+    receipt remain separate from best-effort observations; unknown liabilities survive
+    expiry/restart. Provider FFI stays ledger-free. Native proof metadata is initialized
+    on that same file, with lifecycle-owned workers and original request/shutdown bounds.
+    Follow [ADR-0043](../adr/0043-mandatory-durable-http-execution.md),
+    [ADR-0044](../adr/0044-native-reference-ownership.md) and the
+    [0.17.0 upgrade checklist](../releases/v0.17.0.md).
+
+## Historical W05/M5 design and checkpoint records
+
+The remaining phase text preserves earlier implementation/activation scopes, including
+removed opt-in/legacy paths. It is evidence history, not current serving instructions.
+
 Status: W05 in progress. W05a and W05b are integrated. W05b remains
 opt-in diagnostics; W05c/d now include a limited tracked buffered HTTP mode, while broader W05c–e gates remain pending.
 Date: 2026-09-08. Tracker: [TD-0026](../td/TD-0026-gateway-product-evolution.md).

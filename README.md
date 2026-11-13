@@ -18,7 +18,7 @@ key, and set per-user budgets — without hand-rolling provider APIs.
   unreleased features explicitly.
 - **Status:** early and released. The metering core, typed provider runtime, four proxy ingress
   dialects, operator surface, durable single-node lease ledger, rate limiting, observability/OTLP,
-  transparent metering, idempotent usage recording, and opt-in listener TLS are shipped. The
+  transparent metering, attributed usage recording, and opt-in listener TLS are shipped. The
   concise implementation status and active roadmap live in the
   [documentation map](docs/README.md), so this README does not freeze a release number or duplicate
   25 TD phase tables.
@@ -195,7 +195,10 @@ docs/td/                             # implementation designs and phase status
 docs/README.md                       # documentation map + current status index
 ```
 
-Configure [OIDC SSO](docs/operator/oidc-sso.md) and run the proxy with `SANDHI_STORE=usage.db` to persist events to SQLite and serve a self-hosted
+Configure [OIDC SSO](docs/operator/oidc-sso.md) and run the proxy with the required original
+`SANDHI_STORE=usage.db` file and one ledger shard; remove `SANDHI_BUFFERED_ACCOUNTING`.
+Follow the [0.17.0 upgrade checklist](docs/releases/v0.17.0.md) before reusing an installation.
+The proxy persists observations separately from paired receipts and serves a self-hosted
 [operator console](docs/operator/dashboard.md) at `/dashboard`. Navigable workspaces
 cover usage and cache-read evidence, backend/logical-route inventory, budgets,
 credentials, runs, policy and configuration. Per-user/team/provider totals remain

@@ -43,7 +43,7 @@ request, meters it as the bytes pass through, and reconciles the caller's budget
                                           |  ^
                                           v  |  UsageEvent (tokens + cache split)
                                        +-----------------+
-                                       |  usage sink/db  |   durable when SANDHI_STORE is set
+                                       |  original DB    |   required durable paired execution + observations
                                        +-----------------+
 ....
 
@@ -92,10 +92,18 @@ virtual key references it by name only.
 
 == Step 1 — start the proxy
 
-The server binary reads **environment variables only** — it takes no CLI flags.
+Serving configuration comes from environment/configuration files. Informational `--help`
+and `--version` do not initialize stores. HTTP generation requires the original ordinary
+SQLite file and one ledger shard; remove the obsolete accounting variable before startup.
+The following is explicit local token bootstrap, not an OIDC bypass. For an upgrade,
+quiesce old writers and retain the original file/caps/holds first; follow
+link:../releases/v0.17.0.md[the 0.17.0 migration checklist].
 
 [source,bash]
 ----
+unset SANDHI_BUFFERED_ACCOUNTING
+SANDHI_AUTH_MODE=tokens \
+SANDHI_LEDGER_SHARDS=1 \
 SANDHI_STORE=usage.db \
 SANDHI_ADMIN_TOKEN=admin-secret \
 cargo run -p sandhi-proxy --bin sandhi-proxy
@@ -122,19 +130,23 @@ sandhi-proxy listening on http://127.0.0.1:8787  (OpenAI Chat/Responses | Anthro
 
 | `SANDHI_CONFIG`
 | _(unset)_
-| Declarative JSON configuration. Optional `tls.cert` / `tls.key` enable listener TLS. Optional `buffered_deadlines` configures global, credential-endpoint and exact-model buffered limits; see link:buffered-deadlines.md[buffered deadlines]. Optional `streaming_deadlines` configures complete setup/idle/body limits per authorized route; see link:streaming-deadlines.md[streaming deadlines]. These sections require restart; invalid startup configuration fails before bind.
+| Declarative JSON configuration. Optional `tls.cert` / `tls.key` enable listener TLS. Optional `buffered_deadlines` configures global, credential-endpoint and exact-model buffered limits; see link:buffered-deadlines.md[buffered deadlines]. Optional `streaming_deadlines` configures complete setup/idle/body limits per authorized route; see link:streaming-deadlines.md[streaming deadlines]. Without a streaming override the source defaults are setup 30 s / idle 90 s / body 180 s, under a 240 s ceiling. These sections require restart; invalid startup configuration fails before bind.
 
 | `SANDHI_STORE`
-| _(unset → in-memory)_
-| Ordinary SQLite filesystem path. Committed usage, vkeys, budgets and ledger rows survive restart; best-effort queued observations can be lost. Configured database initialization failures exit `2` before binding, without memory fallback. Empty/whitespace-only values, `:memory:` and SQLite `file:` URIs are refused; unset it explicitly for development memory mode. Recovery still requires a complete, fixed-topology file set.
-
-| `SANDHI_MEMORY_SINK_MAX`
-| `10000`
-| Maximum events retained by the bounded in-memory ring when `SANDHI_STORE` is unset. Oldest events are evicted and counted; this does not affect a durable store.
+| _required_
+| Original ordinary SQLite file. Committed usage, vkeys, budgets, paired execution and reference proofs survive restart; best-effort observations remain separate. Absent/empty paths, `:memory:` and SQLite `file:` URIs refuse startup before stores open. Storage initialization failures exit `2` before binding. Preserve the existing file and complete recovery state; there is no development memory-serving fallback.
 
 | `SANDHI_LEDGER_SHARDS`
 | `1`
-| Durable enforcement-ledger files, from `1` through `64`. More shards reduce cross-scope lock contention; changing from one shard migrates ledger rows into `<store>-ledger-shard-N.db` files. Benchmark before tuning.
+| Must be unset or exactly `1` for serving. Other values refuse before ledger open/migration. Legacy multi-shard snapshots require explicit offline migration; this is not a contention-tuning switch.
+
+| `SANDHI_BUFFERED_ACCOUNTING`
+| _removed; must be unset_
+| Any supplied value, including `tracked` or `off`, refuses startup. All generation uses one paired durable owner; provider FFI remains ledger-free.
+
+| `SANDHI_DEFAULT_MAX_OUTPUT_TOKENS`
+| `4096`
+| Operator-owned missing-chat-limit default (positive integer up to 1,000,000); a declared model ceiling can narrow it. Explicit caller limits stay explicit. This is an admission estimate, not a universal physical bound; constrained Codex keeps its codec's omitted wire maximum. Native Text Completions defaults to `16`; Embeddings is input-only.
 
 | `SANDHI_ADMIN_TOKEN`
 | _(unset → admin API disabled)_
@@ -150,7 +162,7 @@ sandhi-proxy listening on http://127.0.0.1:8787  (OpenAI Chat/Responses | Anthro
 
 | `SANDHI_OPENAI_KEY` / `SANDHI_ANTHROPIC_KEY` / `SANDHI_GEMINI_KEY`
 | _(unset)_
-| Legacy demo bootstrap: register one in-memory upstream and `vk_*_demo` key without the operator vault. Prefer Steps 2–4 for persistent deployments.
+| Demo environment bootstrap: transient upstream/`vk_*_demo` credential handles without the operator vault. The required original durable execution ledger is unchanged; prefer Steps 2–4 for persistent credential management.
 
 | `SANDHI_OPENAI_BASE` / `SANDHI_ANTHROPIC_BASE` / `SANDHI_GEMINI_BASE`
 | provider default
@@ -223,17 +235,17 @@ sandhi-proxy listening on http://127.0.0.1:8787  (OpenAI Chat/Responses | Anthro
 
 [CAUTION]
 ====
-Changing `SANDHI_LEDGER_SHARDS` from `1` to multiple shards migrates existing enforcement rows
-out of the original SQLite file. Returning to `1` does not merge shard files back; changing an
-existing multi-shard topology is not a supported automatic migration. Quiesce writers and back
-up the store before a supported migration; this is not a per-process tuning toggle.
+Serving uses the original single-file paired ledger. Do not change shard count, substitute
+an empty database or delete evidence to bypass refusal. Quiesce older writers, preserve the
+complete snapshot and plan any legacy topology conversion offline. Historical caps, settled
+spend, live holds, dedup history and compatible route pins remain authoritative.
 
-W05a adds opt-in store APIs for atomic settlement receipts and delivery claims. The proxy still
-uses its existing settlement path: there is no new authoritative export mode, receiver, or
-attempt timeline. If a library caller uses these primitives, receipt/acknowledgement rows have
-no automatic retention and single-file widening refuses that evidence-bearing source before
-creating destination files or moving rows. Do not delete receipts to bypass the guard. See
-link:../product/attempt-accounting-and-evidence.md[accounting/evidence gates] before adoption.
+Qualified source evidence and one physical attempt commit before an original paired receipt;
+usage events and dashboard observations are not those receipts. Unknown usage remains held
+through expiry/restart, while historical unpaired TTL semantics stay separate. Native-reference
+proofs also initialize on this same file; no separate registry setup or second ledger is needed.
+See link:buffered-accounting.md[durable execution] and
+link:backends.md#native-reference-ownership[native ownership] for the supported boundaries.
 ====
 
 When `SANDHI_VAULT_BACKEND=sentinelpass`, native IPC reads `SENTINELPASS_CLIENT_TOKEN`,
@@ -385,14 +397,14 @@ reports `restart required` when `tls` is present.
 [source,bash]
 ----
 curl -sS http://localhost:8787/admin/config \
-  -H 'Authorization: Bearer admin-secret'
+  -H "Authorization: Bearer ${SANDHI_ADMIN_TOKEN}"
 
 curl -sS -X POST http://localhost:8787/admin/config/apply \
-  -H 'Authorization: Bearer admin-secret'
+  -H "Authorization: Bearer ${SANDHI_ADMIN_TOKEN}"
 ----
 
-Both routes require `SANDHI_ADMIN_TOKEN`; durable provider/vkey/alert state also requires
-`SANDHI_STORE`. Use the manual CLI flow below when a virtual key needs an explicit budget scope,
+Both routes require the admin bearer in this explicit token-mode example and use the
+required original durable `SANDHI_STORE`. Production OIDC authorization remains unchanged. Use the manual CLI flow below when a virtual key needs an explicit budget scope,
 expiry, or another field not represented by the desired-state `vkeys[]` entry.
 
 === Management commit and failure semantics
@@ -408,11 +420,13 @@ from zero through 100. Unknown spellings are errors, not fallback policy choices
 budget request returns 400 before writing. Config apply validates all declared budget and alert
 intent before touching any backend. Other component errors are reported as apply failures.
 
-With `SANDHI_STORE`, budget persistence must succeed before live metadata changes or the API
-acknowledges the update. A failed budget commit returns 503 and leaves the previous policy
+Budget persistence on the required original `SANDHI_STORE` must succeed before live metadata
+changes or the API acknowledges the update. A failed budget commit returns 503 and leaves the previous policy
 unchanged. Concurrent budget updates are serialized through commit/publication; the final live
 policy matches durable state. This is last-writer-wins, not revision/ETag conflict detection.
-Without `SANDHI_STORE`, budgets remain explicitly volatile and reset on restart.
+Missing storage refuses serving; `Warn` may exceed a soft cap but never admits generation
+through a storage failure. Unknown paired usage remains held beyond TTL until qualified
+settlement or valid pre-dispatch closure; it is not a timer-based zero.
 
 [IMPORTANT]
 ====
@@ -564,7 +578,7 @@ Before wiring up a client, confirm the resolve → forward → meter loop with o
 curl -sS http://localhost:8787/v1/messages \
   -H 'Content-Type: application/json' \
   -H 'anthropic-version: 2023-06-01' \
-  -H 'x-api-key: vk_3Kp9...mQ' \
+  -H "x-api-key: ${SANDHI_VIRTUAL_KEY}" \
   -d '{"model":"claude-sonnet-5","max_tokens":64,"messages":[{"role":"user","content":"Say hi in one word."}]}'
 ----
 
@@ -713,7 +727,10 @@ cleanup exits `124`, possibly leaving uncertain settlement or best-effort observ
 Do not interpret timeout as a successful flush or retry an uncertain model call blindly.
 The process watchdog does not depend on Tokio cancellation and does not log on its hard-exit
 path. See link:recovery-drill.md[the isolated recovery rehearsal] for fixed-topology snapshots,
-crash leases and revocation reconciliation. Authoritative attempt evidence remains W05 scope.
+crash liabilities and revocation reconciliation. Physical-attempt evidence and paired receipts
+are part of the required owner; best-effort telemetry remains separate. Native-reference proof
+workers retain lifecycle ownership through queue residence, mutex/SQLite waits and completion;
+they share the original request/response and earlier shutdown deadline, without a fresh window.
 
 Library embedders retain runtime ownership: deadline expiry requests cancellation and returns
 `io::ErrorKind::TimedOut`, rather than forcing process termination. Synchronous destructors
@@ -723,7 +740,7 @@ policy if a hard bound is required.
 === Logs
 
 `SANDHI_LOG` (falling back to `RUST_LOG`) controls the tracing filter; logs go to stderr. The
-default keeps reservation denials, fail-open admissions, lease reclaims, and settle failures
+default keeps admission/accounting failures and bounded recovery/shutdown diagnostics
 without per-request chatter. `SANDHI_LOG=debug` adds plane selection per call.
 
 === Prometheus metrics
@@ -759,15 +776,18 @@ liveness check. These metrics follow the existing `/metrics` bearer/public-read 
 
 Investigate sustained queue growth or `increase(sandhi_buffer_dropped_total[5m]) > 0` as loss of
 best-effort observation. Do not interpret zero drops as complete accounting: storage insert
-failures and in-memory ring evictions are separate, not yet exported signals. These are not
+failures are separate, and observations are not settlement receipts. The former standalone
+memory-ring mode is not a serving option. These are not
 W05 settlement-outbox backlog metrics. The new buffer signals are Prometheus-only; OTLP parity,
 oldest-item age remain tracked follow-ups. Offline backup/restore rehearsals are covered by
 link:recovery-drill.md[W06c]; online/fleet recovery is not implied.
 
 Unlabelled `sandhi_ready`, `sandhi_shutdown_active_operations` and
 `sandhi_shutdown_elapsed_seconds` follow the same metrics authorization. Active operations
-counts tracked model/reservation/admin work, not durable commits, queued requests or all
-connections. Elapsed time is zero before cutoff; metrics are scrapeable only while their
+counts tracked model/reservation/admin work and retained native-reference metadata workers,
+including workers queued for the blocking pool or waiting on storage. It does not count every
+unadmitted queued HTTP request or connection and does not prove a durable commit.
+Elapsed time is zero before cutoff; metrics are scrapeable only while their
 connection remains reachable. Drain progress logs report active connections/operations and
 remaining time; these signals do not confirm persistence.
 
@@ -777,11 +797,11 @@ remaining time; these signals do not confirm persistence.
 
 | Capacity leaking
 | `increase(sandhi_settle_failures_total[15m]) > 0`
-| A failed settlement holds budget until the lease TTL expires.
+| Inspect the original receipt and retained liability. Unknown paired usage survives TTL/restart; expiry is not zero usage. This retained counter alone does not cover all current owner failures.
 
-| Enforcement is off
+| Unexpected legacy unmetered signal
 | `increase(sandhi_admitted_unmetered_total[15m]) > 0`
-| A `Warn` scope admitted fail-open during a ledger fault.
+| Retained compatibility counter; current paired HTTP has no ledger-error fail-open path, including Warn. Investigate a nonzero legacy/exporter signal; do not select it as an operating mode.
 
 | Callers being refused
 | `rate(sandhi_reservations_denied_total{policy="block"}[5m]) > 0`
@@ -792,19 +812,28 @@ remaining time; these signals do not confirm persistence.
 | Surfaces a slow provider/model before clients report it.
 |===
 
-A sustained `sandhi_leases_reclaimed_total` also deserves investigation: reclaims are normal after
-a restart, while a steady trickle suggests requests are not settling.
+These retained metric names are not activation switches or complete authoritative accounting
+coverage. Their historical HELP text does not authorize fail-open admission or TTL release of
+unknown pairs. Zero legacy counters do not establish healthy receipts. A sustained
+`sandhi_leases_reclaimed_total` concerns expiry-eligible legacy leases; canonical unknown pairs
+remain held. Inspect persisted execution/receipt evidence and accounting diagnostics separately.
 
 === OTLP export (opt-in)
 
 Build the proxy with `otel-otlp`, then opt in at runtime. The exporter emits one `gen_ai` operation
 span per chat call plus token-usage, operation-duration, and time-to-first-token metrics. It runs
-beside `/metrics`; both may be enabled.
+beside `/metrics`; both may be enabled. This example uses the guide's explicit local
+token bootstrap. Production must retain its approved OIDC/roles/TLS/vault configuration;
+enabling export does not change authentication or the original store path.
 
 [source,bash]
 ----
 cargo build -p sandhi-proxy --features otel-otlp
 
+unset SANDHI_BUFFERED_ACCOUNTING
+SANDHI_AUTH_MODE=tokens \
+SANDHI_LEDGER_SHARDS=1 \
+SANDHI_ADMIN_TOKEN=admin-secret \
 SANDHI_OTEL_EXPORT=otlp \
 SANDHI_OTEL_ENDPOINT=http://otelcol:4318 \
 SANDHI_STORE=usage.db \
@@ -830,12 +859,12 @@ What happens to one call, end to end:
 
 [literal]
 ....
-  authenticate      normalize          authorize/admit          forward          finalize
-  ------------      ---------          ---------------          -------          --------
-  resolve vk    ->  decode caller  ->  check allowlist     ->  transparent  ->  UsageEvent
-  resolve upstream  dialect            check attribution      or translate      + settle lease
-                                        check rate limit       with real key     against measured
-                                        reserve ceiling                         billable usage
+  authenticate      normalize          authorize/admit          source            account/deliver
+  ------------      ---------          ---------------          ------            ---------------
+  resolve vk    ->  decode caller  ->  model/attribution   ->  dispatch once  ->  source usage/attempt
+  select binding    compile cache      rate/default/proof     real credential   original paired receipt
+                                        freeze context         observe result    compatible response
+                                        reserve both scopes                     best-effort UsageEvent
 ....
 
 [NOTE]
@@ -858,12 +887,17 @@ real measurement.
   TRANSPARENT plane                        TRANSLATION plane
   bytes forwarded verbatim                 decode -> ChatRequestV1 -> re-encode
   provider extras survive                  (e.g. /v1/messages -> OpenAI upstream)
-  (Anthropic cache_control, etc.)          standard fields preserved; extras can drop
-  metered as the stream passes             faithful for common requests, lossy for vendor extras
+  (Anthropic cache_control, etc.)          representable fields/controls preserved
+  metered as the stream passes             unsupported meaningful state refuses explicitly
 ....
 
-Pick an upstream that **matches the client's dialect** when you need byte-exact forwarding
-of provider-specific fields (prompt-cache breakpoints, vendor params).
+Matching endpoint families can preserve compatible native fields, but transparent eligibility
+also depends on admitted model/limit/cache changes and credential fences. Missing output limits
+can force canonical encoding. Both planes share strict source qualification: native state is
+preserved when compatible, otherwise the request/output refuses without silent field loss or
+inference replay. Source measurements can settle once even when client delivery fails.
+Caller IDs/session hints do not establish native-reference ownership; matching durable source
+issuance proof is required before supported continuation. See link:backends.md[backend contracts].
 
 
 == Reference
@@ -900,12 +934,13 @@ TD-0010 P4, `POST /v1/models/{model}:generateContent` and its `/v1beta` equivale
 
 [NOTE]
 ====
-A hard (`block`) budget must reserve an enforceable output ceiling. If a same-family request omits
-its output limit, Sandhi injects one through the typed request and therefore selects the translation
-plane for that call. Set an explicit provider-native output limit (`max_tokens`,
-`max_output_tokens`, or the dialect equivalent) to remain eligible for transparent forwarding.
-This affects fidelity and cache behavior, not whether measured usage is settled: both planes settle
-the provider's reported billable usage.
+Both Block and Warn use the caller's explicit output limit or the operator-owned missing-chat
+limit default (4096 unless configured, narrowed only by a declared model ceiling). Injection
+selects canonical encoding; compatible native controls survive or refuse explicitly. An explicit
+provider-native limit keeps transparent eligibility subject to the other model/cache/credential
+fences. These are estimates, not strict physical bounds; constrained Codex keeps its codec's
+omitted wire maximum. Both planes use original qualified source evidence for one paired receipt;
+unknown usage retains both liabilities. Delivery success and observed counters do not prove settlement.
 ====
 
 [NOTE]
@@ -990,8 +1025,8 @@ Every CLI command maps 1:1 onto a call under `/admin/*` (all require the admin b
 | Spend looks doubled
 | You turned on Victor's in-process metering (`usage_gateway.enabled`). Leave it off in proxy mode.
 
-| Budget spend survives a restart at 0
-| `SANDHI_STORE` was unset — metering was in-memory. Set it (Step 1).
+| Saved budget/spend is missing after restart
+| Check that the exact original `SANDHI_STORE` file was reopened and restored completely. Current serving rejects an unset store; a different empty file is not migration. Quarantine and reconcile the original snapshot rather than recreating caps.
 |===
 
 [NOTE]

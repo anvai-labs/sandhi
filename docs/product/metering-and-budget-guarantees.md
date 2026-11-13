@@ -4,6 +4,11 @@ Status: W03 complete in the working tree; release/migration contract below. Stri
 Date: 2026-09-05
 Tracker: [TD-0026](../td/TD-0026-gateway-product-evolution.md).
 
+The reasoning-minor-7 sections retain their original scope/date. Current HTTP serving
+follows the [0.17.0 durable-owner migration](../releases/v0.17.0.md) and shares strict
+source qualification; a legacy optional measurement marker does not authorize unknown
+usage to settle as zero or reactivate a permissive execution mode.
+
 ## Reasoning accounting: contract minor 7
 
 `ParsedUsage`, `UsageV2` and `UsageEvent` carry optional `reasoning_included`:
@@ -86,8 +91,12 @@ tokenizer or upper-bound proof. See the [durable migration](../operator/buffered
 **No provider/model combination currently qualifies as a strict total-token cap.** There is no
 strict mode to select today. A Block policy atomically rejects a reservation exceeding available
 capacity; it does not promise that later measured usage stays below that reservation. Warn
-admits over budget and tracks usage. Volatile mode resets on restart; durable single-node mode
-persists leases and charges. Fleet coordination remains a separate gate.
+admits over a soft cap and tracks usage, but never bypasses an admission storage failure.
+Current HTTP generation requires the original single-file durable owner; there is no volatile
+serving mode. Qualified source evidence commits one paired receipt; unknown dispatch/usage
+keeps both liabilities through expiry/restart. Historical unpaired TTL rules stay distinct.
+Pure provider FFI remains ledger-free; fleet coordination remains a separate gate. See
+[the 0.17.0 migration](../releases/v0.17.0.md).
 
 Measured settlement is never clamped to an estimate. Every in-flight underestimated call can
 contribute excess: two reservations of 50 under a 100 cap may settle at 80 and 90, producing 170

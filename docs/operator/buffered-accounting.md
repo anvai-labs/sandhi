@@ -12,8 +12,8 @@
 Chat, Messages, Responses and Gemini clients use qualified buffered or streaming
 source transports through the existing paired owner. Standard Chat, Messages,
 Responses, Gemini and constrained Codex sources share the source/attempt/receipt
-contract. Native Cohere/Ollama source qualification is a coordinated gate; their
-pure FFI availability does not itself authorize durable HTTP execution. OpenAI-
+contract. Native Cohere/Ollama backend sources also have strict usage/EOF qualification;
+pure FFI availability alone does not authorize durable HTTP execution. OpenAI-
 shaped open-weight backends use the qualified Chat source contract.
 
 The standalone process and public serve functions reject unavailable/unsupported
@@ -21,6 +21,12 @@ execution ownership before binding. `build_app` can assemble read-only operator
 states; such a state stays unready and refuses generation before credential or
 route processing. A valid existing single-file ledger initializes its canonical
 owner through the normal builder. No library path creates a replacement ledger.
+Native-reference metadata initializes privately on the same original ledger before serving.
+Its queued/running storage workers remain lifecycle-owned until actual completion and use the
+original request/response deadline, shortened by shutdown when applicable; mutex/SQLite waits
+do not obtain a fresh budget or admit new work after expiry. Uninterruptible storage can
+outlive its waiter while retaining ownership and causing incomplete shutdown. Public serving
+supervises these workers and recovery alongside active responses. Proof failure does not authorize replay or invent usage.
 Pure provider FFI remains an observer/codec boundary without a SQLite owner.
 
 Default streams have validated 30-second setup, 90-second idle and 180-second body

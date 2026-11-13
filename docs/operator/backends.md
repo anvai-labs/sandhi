@@ -360,4 +360,10 @@ Proof is captured from compatible native output before its reference-bearing byt
 
 The shared execution owner automatically opens the registry on its actual original single-file ledger before binary or public-library serving can bind. Missing, malformed or read-only storage refuses startup; read-only health/readiness app construction remains available. The effective selected backend payload, including its selected extension bucket, is authorized before pin confirmation or budget admission. Count-only requests acquire no generation default, pin, lease or proof.
 
+Proof storage workers are tracked through blocking-pool residence, mutex/SQLite waits and
+completion under the original request/response deadline and any earlier shutdown deadline.
+A disconnected waiter cannot turn late storage work into new proof authority; no fresh time
+window or inference retry is granted. The shared server lifecycle retains these operations
+until the worker ends, and storage unavailability conserves original source accounting/holds.
+
 The registry retains at most 100,000 entries globally, 4,096 per owner and 128 per operation. Proof lasts at most 24 hours and is capped by key expiry. Ordinary credentials also cap it at the issuing lease expiry. Existing account-fenced Codex renewals preserve proof across access-token rotation only when the actual account/origin/static-header binding remains identical; every new call still requires a current lease. An unleased account-only Codex handle cannot admit HTTP generation. It is not a provider resource TTL. Storage/capacity failures can occur after a successful provider call and return a terminal delivery error; do not automatically retry. Original final accounting or unknown liability remains with the existing execution owner. See [ADR-0044](../adr/0044-native-reference-ownership.md) and the [scoped evidence](../reviews/native-reference-ownership-2026-11-12.md). Quiesce old HTTP writers during this migration and retain the registry with the original database.
