@@ -72,6 +72,85 @@ fn configuration_rejects_an_upstream_prefixed_grant_budget_scope() {
 }
 
 #[test]
+fn access_token_audience_configuration_requires_an_exact_bounded_string() {
+    let original = serde_json::to_value(config()).unwrap();
+    for audience in [
+        json!("https://sandhi.example.test/resource"),
+        json!("a".repeat(512)),
+    ] {
+        let mut value = original.clone();
+        value["access_token_audience"] = audience;
+        assert!(serde_json::from_value::<Config>(value)
+            .unwrap()
+            .validate()
+            .is_ok());
+    }
+    for audience in [
+        json!(""),
+        json!(" "),
+        json!(" resource"),
+        json!("resource "),
+        json!("a\nb"),
+        json!("a\u{0000}b"),
+        json!("*"),
+        json!("resource/*"),
+        json!("a".repeat(513)),
+    ] {
+        let mut value = original.clone();
+        value["access_token_audience"] = audience;
+        assert!(serde_json::from_value::<Config>(value)
+            .unwrap()
+            .validate()
+            .is_err());
+    }
+    for audience in [Value::Null, json!(false), json!(3), json!([]), json!({})] {
+        let mut value = original.clone();
+        value["access_token_audience"] = audience;
+        assert!(serde_json::from_value::<Config>(value).is_err());
+    }
+}
+
+#[test]
+fn access_token_resource_audience_is_independent_of_the_oauth_client() {
+    let mut oidc = offline_oidc();
+    let legacy = serde_json::to_value(&oidc.config).unwrap();
+    assert!(legacy.get("access_token_audience").is_none());
+    assert!(serde_json::from_value::<Config>(legacy)
+        .unwrap()
+        .access_token_audience
+        .is_none());
+    let mut token = json!({"active":true,"iss":oidc.config.issuer,"aud":"sandhi",
+        "sub":"agent-id","exp":unix_now()+300,"token_type":"Bearer","client_id":"victor-origin"});
+    assert!(
+        oidc.introspection_subject(&token).is_some(),
+        "legacy audience defaults to client_id"
+    );
+    let mut value = serde_json::to_value(&oidc.config).unwrap();
+    value["access_token_audience"] = json!("https://sandhi.example.test/resource");
+    oidc.config = serde_json::from_value(value).unwrap();
+    assert!(oidc.config.validate().is_ok());
+    assert_eq!(oidc.config.client_id, "sandhi");
+    for audience in [
+        json!("https://sandhi.example.test/resource"),
+        json!(["other", "https://sandhi.example.test/resource"]),
+    ] {
+        token["aud"] = audience;
+        assert!(oidc.introspection_subject(&token).is_some());
+    }
+    for audience in [
+        json!("sandhi"),
+        json!("victor-origin"),
+        json!("https://sandhi.example.test/resource/"),
+        json!("HTTPS://sandhi.example.test/resource"),
+        json!(["https://sandhi.example.test/resource", 3]),
+        Value::Null,
+    ] {
+        token["aud"] = audience;
+        assert!(oidc.introspection_subject(&token).is_none());
+    }
+}
+
+#[test]
 fn roles_are_explicit_and_inference_does_not_imply_operator_access() {
     let c = config();
     for (subject, expected) in [
@@ -276,6 +355,7 @@ struct IdpState {
     codes: HashMap<String, Value>,
     verifier: Option<String>,
     introspection_auth: Option<String>,
+    introspection_client_id: Option<String>,
     introspection_status: Option<StatusCode>,
     token_failure: Option<(StatusCode, String)>,
     token_delay: Duration,
@@ -316,6 +396,7 @@ impl Authority {
             codes: HashMap::new(),
             verifier: None,
             introspection_auth: None,
+            introspection_client_id: None,
             introspection_status: None,
             token_failure: None,
             token_delay: Duration::ZERO,
@@ -488,6 +569,18 @@ async fn idp_introspect(
     headers: HeaderMap,
     axum::Form(data): axum::Form<HashMap<String, String>>,
 ) -> Response {
+    if state
+        .lock()
+        .unwrap()
+        .introspection_client_id
+        .as_deref()
+        .is_some_and(|client_id| {
+            data.get("client_id").map(String::as_str) != Some(client_id)
+                || data.get("token_type_hint").map(String::as_str) != Some("access_token")
+        })
+    {
+        return unauthorized();
+    }
     if let Some(status) = state.lock().unwrap().introspection_status {
         return (status, Json(json!({"error":"authority_failure"}))).into_response();
     }
@@ -524,6 +617,7 @@ async fn confidential_introspection_encodes_oauth_client_credentials() {
             "Basic {}",
             STANDARD.encode("client%3Aname:a%2Bb+%25")
         ));
+        state.introspection_client_id = Some("client:name".into());
         state.tokens.insert(
             "access".into(),
             json!({"active":true,"iss":authority.config.issuer,
@@ -535,6 +629,17 @@ async fn confidential_introspection_encodes_oauth_client_credentials() {
     oidc.introspection_client_auth = client_auth;
     assert!(client_auth);
     assert!(oidc.inference("access", &HeaderMap::new()).await.is_ok());
+    // The resource audience and originating client do not replace the consuming
+    // application's Basic identity or form client_id.
+    oidc.config.access_token_audience = Some("https://sandhi.example.test/resource".into());
+    {
+        let mut state = authority.state.lock().unwrap();
+        let token = state.tokens.get_mut("access").unwrap();
+        token["aud"] = json!("https://sandhi.example.test/resource");
+        token["client_id"] = json!("victor-origin");
+    }
+    assert!(oidc.inference("access", &HeaderMap::new()).await.is_ok());
+    assert_eq!(oidc.config.client_id, "client:name");
     authority.state.lock().unwrap().introspection_status = Some(StatusCode::UNAUTHORIZED);
     assert_eq!(
         oidc.inference("access", &HeaderMap::new())
@@ -612,12 +717,15 @@ async fn signed_oidc_login_pkce_csrf_logout_and_one_use_callback() {
 }
 async fn verify_signed_login(algorithm: &str) {
     use tower::ServiceExt;
-    let authority = Authority::start().await;
+    let mut authority = Authority::start().await;
+    // Browser ID tokens remain addressed to the OAuth client, not this resource.
+    authority.config.access_token_audience = Some("https://sandhi.example.test/resource".into());
     let app = crate::build_app(app_state(
         Oidc::new(authority.config.clone()).await.unwrap(),
     ));
     let (cookie, query) = start_login(&app).await;
     assert_eq!(query["code_challenge_method"], "S256");
+    assert_eq!(query["client_id"], "sandhi");
     let id_token = if algorithm == "ES256" {
         authority.issue_es256("good", &query["nonce"])
     } else {
@@ -709,12 +817,14 @@ async fn verify_signed_login(algorithm: &str) {
 }
 #[tokio::test]
 async fn signed_identity_and_browser_binding_fail_closed() {
-    let authority = Authority::start().await;
+    let mut authority = Authority::start().await;
+    authority.config.access_token_audience = Some("https://sandhi.example.test/resource".into());
     let oidc = Oidc::new(authority.config.clone()).await.unwrap();
     let app = crate::build_app(app_state(oidc));
     for overrides in [
         json!({"iss":"https://evil.example.test"}),
         json!({"aud":["other"]}),
+        json!({"aud":["https://sandhi.example.test/resource"]}),
         json!({"exp":unix_now()-1}),
         json!({"nonce":"wrong"}),
         json!({"at_hash":"wrong"}),
