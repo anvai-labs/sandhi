@@ -276,7 +276,8 @@ def test_catalog_serves_curated_model_data():
     grok = json.loads(sg.provider_models_json("grok"))
     assert any(m["id"] == "grok-4" for m in grok)
     for slug, expected in [
-        ("deepseek", "deepseek-chat"),
+        ("deepseek", "deepseek-flash"),
+        ("deepseek", "deepseek-v4-pro"),
         ("mistral", "mistral-large-latest"),
         ("zai", "glm-4.6"),
         ("qwen", "qwen3-max"),
@@ -285,6 +286,15 @@ def test_catalog_serves_curated_model_data():
     ]:
         models = json.loads(sg.provider_models_json(slug))
         assert any(m["id"] == expected for m in models), slug
+    deepseek = {model["id"]: model for model in json.loads(sg.provider_models_json("deepseek"))}
+    for model_id, vision in [("deepseek-flash", True), ("deepseek-v4-pro", False)]:
+        model = deepseek[model_id]
+        assert model["max_input_tokens"] == 1_048_576
+        assert model["max_output_tokens"] == 393_216
+        assert model["capabilities"]["vision"] is vision
+        assert model["capabilities"]["reasoning"] is True
+        assert model["extensions"]["reasoning_effort_values"] == ["low", "high", "max"]
+        assert "default_temperature" not in model
     # Aggregators stay empty (dynamic hosting catalogs -- live discovery).
     assert json.loads(sg.provider_models_json("openrouter")) == []
     # Self-hosted InferFlux: model ids are operator config server-side, never vendor facts.
@@ -333,7 +343,7 @@ def test_persistent_typed_provider_complete_and_stream():
         {
             "id": "r1",
             "model": "gpt-test",
-            "choices": [{"message": {"content": "hello"}, "finish_reason": "stop"}],
+            "choices": [{"message": {"content": "hello", "reasoning_content": "summary"}, "finish_reason": "stop"}],
             "usage": {
                 "prompt_tokens": 10,
                 "completion_tokens": 3,
@@ -379,6 +389,7 @@ def test_persistent_typed_provider_complete_and_stream():
         request = json.dumps(
             {
                 "schema_version": "1",
+                "include_native_response": False,
                 "model": "gpt-test",
                 "messages": [{"role": "user", "content": "hi"}],
             }
@@ -394,6 +405,9 @@ def test_persistent_typed_provider_complete_and_stream():
         response, events = asyncio.run(run())
         assert provider.provider == "openai"
         assert response["output"]["content"] == "hello"
+        assert response["output"]["reasoning"] == "summary"
+        assert response["extensions"]["reasoning"] == "summary"
+        assert "openai" not in response["extensions"]
         assert response["usage"]["tokens_in"] == 6
         assert response["usage"]["cache_read_observation"] == {
             "status": "reported", "source": "origin_usage"

@@ -3,10 +3,7 @@ use crate::{
     AnthropicAuthScheme, GeminiAuthScheme, ProviderError, ProviderFamily, ProviderHandle,
     ProviderRuntime,
 };
-use sandhi_core::{
-    usage::{AnthropicUsageProfile, OpenAiStreamUsageProfile},
-    EndpointProfileV1 as Profile,
-};
+use sandhi_core::{usage::AnthropicUsageProfile, EndpointProfileV1 as Profile};
 
 /// Constructor inputs shared by language bindings. Intentionally not Debug:
 /// api_key and headers may contain credentials. No source policy enters a request body.
@@ -214,11 +211,7 @@ impl ProviderRuntime {
                 timeout,
                 setup,
                 idle,
-                if profile == Profile::OpenaiTerminalChunkUsage {
-                    OpenAiStreamUsageProfile::TerminalChunk
-                } else {
-                    OpenAiStreamUsageProfile::Standard
-                },
+                profile.openai_stream_usage_profile(),
             ),
             ProviderFamily::OpenAiResponses if profile == Profile::ChatGptCodex => self
                 .chatgpt_responses(
@@ -327,6 +320,8 @@ mod tests {
     fn incompatible_profiles_and_authentication_refuse_at_construction() {
         for (protocol, profile) in [
             ("responses", "openai_terminal_chunk_usage"),
+            ("responses", "zai_final_choice_usage"),
+            ("anthropic_messages", "deepseek_final_choice_usage"),
             ("anthropic_messages", "chatgpt_codex"),
             ("gemini_generate_content", "anthropic_implicit_cache"),
             ("chatgpt_responses", "standard"),
@@ -451,6 +446,16 @@ mod tests {
                 "chat_completions",
                 "openai_terminal_chunk_usage",
                 sandhi_core::UsageConventionV1::ChatTerminal,
+            ),
+            (
+                "chat_completions",
+                "zai_final_choice_usage",
+                sandhi_core::UsageConventionV1::ChatZaiFinalChoice,
+            ),
+            (
+                "chat_completions",
+                "deepseek_final_choice_usage",
+                sandhi_core::UsageConventionV1::ChatDeepseekFinalChoice,
             ),
             (
                 "anthropic_messages",

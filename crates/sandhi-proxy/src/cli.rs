@@ -149,7 +149,8 @@ enum BackendsAction {
         credential_ref: String,
         #[arg(long)]
         endpoint_family: String,
-        /// standard, chatgpt_codex, anthropic_implicit_cache, or openai_terminal_chunk_usage.
+        /// standard, chatgpt_codex, anthropic_implicit_cache, openai_terminal_chunk_usage,
+        /// zai_final_choice_usage, or deepseek_final_choice_usage.
         #[arg(long, default_value = "standard")]
         endpoint_profile: String,
         #[arg(long)]

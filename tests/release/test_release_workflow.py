@@ -428,7 +428,9 @@ def test_oidc_advisory_gate_precedes_scoped_ignore(oidc_advisory_guard):
     assert job.index("python3 scripts/check-oidc-advisory.py") < job.index("cargo deny")
     assert job.count("cargo deny --locked --all-features") == 3
     ignored = tomllib.loads((ROOT / "deny.toml").read_text())["advisories"]["ignore"]
-    assert ignored == [record["advisory"] for record in records]
+    assert ignored == [record["advisory"] for record in records
+                       if record["status"] == "not_affected_under_reviewed_usage"]
+    oidc_advisory_guard.check_exceptions(ROOT, records)
     filters = str(workflow("ci.yml")["jobs"]["changes"])
     assert "scripts/check-oidc-advisory.py" in filters
     assert "docs/security/**" in filters
@@ -462,8 +464,8 @@ def test_oidc_advisory_rejects_review_drift(tmp_path, oidc_advisory_guard, drift
 
 
 def test_oidc_advisory_rejects_additional_production_consumer(oidc_advisory_guard):
-    names = {"proxy": ("sandhi-proxy", "0.7.0"), "oidc": ("openidconnect", "4.0.1"),
-        "rsa": ("rsa", "0.9.10"), "bigint": ("crypto-bigint", "0.5.5")}
+    names = {"proxy": ("sandhi-proxy", "0.7.0"), "oidc": ("openidconnect", "4.1.0"),
+        "rsa": ("rsa", "0.9.10"), "bigint": ("crypto-bigint", "0.7.11")}
     edge = lambda target, kind: {"pkg": target, "dep_kinds": [{"kind": kind}]}
     metadata = {"workspace_members": ["proxy"],
         "packages": [{"id": key, "name": name, "version": version} for key, (name, version) in names.items()],
@@ -471,6 +473,10 @@ def test_oidc_advisory_rejects_additional_production_consumer(oidc_advisory_guar
             {"id": "oidc", "deps": [edge("rsa", None), edge("bigint", None)]},
             {"id": "rsa", "deps": []}, {"id": "bigint", "deps": []}]}}
     oidc_advisory_guard.check_graph(metadata, True)
+    vulnerable = copy.deepcopy(metadata)
+    next(p for p in vulnerable["packages"] if p["id"] == "bigint")["version"] = "0.7.5"
+    with pytest.raises(ValueError, match="patched floor"):
+        oidc_advisory_guard.check_graph(vulnerable, True)
     changed = copy.deepcopy(metadata)
     changed["resolve"]["nodes"][0]["deps"][-1]["dep_kinds"][0]["kind"] = None
     with pytest.raises(ValueError, match="additional production RSA consumer"):
@@ -488,6 +494,14 @@ def test_oidc_advisory_rejects_additional_production_consumer(oidc_advisory_guar
         oidc_advisory_guard.check_graph(rerouted, True)
     with pytest.raises(ValueError, match="binding production graph"):
         oidc_advisory_guard.check_graph(metadata, False)
+
+
+def test_remediated_oidc_crypto_advisory_cannot_retain_an_ignore(tmp_path, oidc_advisory_guard):
+    import json
+    records = [json.loads((ROOT / path).read_text()) for path in oidc_advisory_guard.RECORDS]
+    (tmp_path / "deny.toml").write_text('[advisories]\nignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0387"]\n')
+    with pytest.raises(ValueError, match="active scoped exceptions"):
+        oidc_advisory_guard.check_exceptions(tmp_path, records)
 
 
 def test_binary_release_ships_optional_sensitive_policy():

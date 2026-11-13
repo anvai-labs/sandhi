@@ -514,11 +514,7 @@ fn build_provider_handle_with_endpoint(
             None,
             None,
             None,
-            if endpoint.profile == crate::backend::BackendProfile::OpenaiTerminalChunkUsage {
-                sandhi_core::usage::OpenAiStreamUsageProfile::TerminalChunk
-            } else {
-                sandhi_core::usage::OpenAiStreamUsageProfile::Standard
-            },
+            endpoint.profile.openai_stream_usage_profile(),
         )),
         ProviderFamily::OpenAiResponses => Some(runtime.openai_responses(
             provider,

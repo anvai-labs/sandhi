@@ -19,6 +19,7 @@ pub use embedded::{load_backend, register_models};
 mod embedded {
     use super::*;
     use ort::{
+        environment::Environment,
         session::{RunOptions, Session},
         value::{Tensor, TensorElementType, ValueType},
     };
@@ -56,7 +57,7 @@ mod embedded {
         profile: String,
         vocabulary: Vec<String>,
     }
-    static RUNTIME: Mutex<Option<(PathBuf, String)>> = Mutex::new(None);
+    static RUNTIME: Mutex<Option<(PathBuf, String, Environment)>> = Mutex::new(None);
     fn bytes(path: &Path, hash: &str, max: usize) -> Result<Vec<u8>, EvaluationError> {
         if !path.is_absolute()
             || hash.len() != 64
@@ -83,34 +84,32 @@ mod embedded {
         }
         Ok(m)
     }
-    fn runtime(m: &Manifest) -> Result<(), EvaluationError> {
+    fn runtime(m: &Manifest) -> Result<Environment, EvaluationError> {
         let mut loaded = RUNTIME.lock().map_err(|_| EvaluationError)?;
         let path = m
             .runtime_library
             .canonicalize()
             .map_err(|_| EvaluationError)?;
-        if let Some((current, hash)) = loaded.as_ref() {
+        if let Some((current, hash, environment)) = loaded.as_ref() {
             if current != &path || hash != &m.runtime_sha256 {
                 return Err(EvaluationError);
             }
-            return Ok(());
+            return Ok(environment.clone());
         }
         bytes(&m.runtime_library, &m.runtime_sha256, 268435456)?;
-        let committed = ort::init_from(&path)
+        let environment = ort::init_from(&path)
             .map_err(|_| EvaluationError)?
             .with_logger(Arc::new(|_, _, _, _, _| {}))
-            .commit();
-        if !committed {
-            return Err(EvaluationError);
-        }
-        *loaded = Some((path, m.runtime_sha256.clone()));
-        Ok(())
+            .build()
+            .map_err(|_| EvaluationError)?;
+        *loaded = Some((path, m.runtime_sha256.clone(), environment.clone()));
+        Ok(environment)
     }
     pub fn register_models(registry: &mut Registry, data: &[u8]) -> Result<(), EvaluationError> {
         let m = manifest(data)?;
-        runtime(&m)?;
+        let environment = runtime(&m)?;
         for d in m.models {
-            let backend = Arc::new(Backend::load(&d)?);
+            let backend = Arc::new(Backend::load(&d, &environment)?);
             registry.register(&d.name, move |v| {
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
@@ -127,13 +126,15 @@ mod embedded {
         Ok(())
     }
     /// Load a single approved deployment for validation or trusted embedding use.
+    /// Embedders must initialize this adapter before any other ORT API can load
+    /// a library; upstream cannot prove an already-loaded dylib's path or hash.
     pub fn load_backend(data: &[u8]) -> Result<Arc<dyn ScoreBackend>, EvaluationError> {
         let m = manifest(data)?;
         if m.models.len() != 1 {
             return Err(EvaluationError);
         }
-        runtime(&m)?;
-        Ok(Arc::new(Backend::load(&m.models[0])?))
+        let environment = runtime(&m)?;
+        Ok(Arc::new(Backend::load(&m.models[0], &environment)?))
     }
     struct Backend {
         session: Mutex<Session>,
@@ -141,14 +142,14 @@ mod embedded {
         trigrams: bool,
     }
     impl Backend {
-        fn load(d: &Deployment) -> Result<Self, EvaluationError> {
+        fn load(d: &Deployment, environment: &Environment) -> Result<Self, EvaluationError> {
             let data = bytes(&d.preprocessing, &d.preprocessing_sha256, 262144)?;
             let pre: Preprocessing =
                 serde_json::from_value(strict_json(&data)?).map_err(|_| EvaluationError)?;
             let trigrams = pre.profile == "utf8_byte_trigrams_v1";
             let vocabulary = validate_preprocessing(pre)?;
             let model = bytes(&d.model, &d.model_sha256, 8388608)?;
-            let session = Session::builder()
+            let session = Session::builder(environment)
                 .map_err(|_| EvaluationError)?
                 .with_intra_threads(1)
                 .map_err(|_| EvaluationError)?

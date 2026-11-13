@@ -11,7 +11,7 @@ mistaken for shipped behavior.
 | Question | Source of truth |
 |---|---|
 | What can I run today? | The root [README](../README.md) and [proxy operator guide](operator/proxy-guide.adoc) |
-| How do users, groups and long-running clients authenticate? | [Identity and agent credentials](operator/identity-groups.md) (feature candidate; live migration pending) |
+| How do users, groups and long-running clients authenticate? | [OIDC provider setup and SSO](operator/oidc-sso.md): provider contracts and live IDM compatibility limits; [identity and agent credentials](operator/identity-groups.md); [resource audience](adr/0045-access-token-resource-audience.md) separates access-token resource identity from OAuth client identity |
 | How is prompt egress inspected? | [Policy MVP](operator/policy-evaluation.md) (candidate); [evaluator backends and Python/MLflow](operator/python-ml-evaluators.md) (Python, optional ONNX and remote-service candidates); [resource-limited container profile](../templates/python-evaluator/DEPLOYMENT.md) |
 | How does Sandhi improve repeated-context efficiency? | [Visual cache routing and token guide](product/cache-aware-routing.md): marker placement, fresh/read/write accounting, cost boundaries and the complementary ONNX egress mechanism |
 | What has been tested with live provider caching? | [Z.AI qualification](reviews/zai-router-live-2026-11-11.md): 24 final protocol/mode cells and 48 cache calls; retained defects/timeouts and remaining gates |
@@ -34,6 +34,7 @@ mistaken for shipped behavior.
 | What evidence gates the M1 checkpoint? | [Workload and acceptance](product/m1-acceptance.md); UA01 accepts engineering evidence for this release and defers hands-on usability until before production |
 | Which acceptance decisions remain, and why? | [M1 decision packet](product/m1-acceptance-decisions.md); automated evidence, operating-limit choices and a focused user-review script |
 | What is the release state? | [Published releases](https://github.com/anvai-labs/sandhi/releases) and [CHANGELOG](../CHANGELOG.md); [release safeguards](product/release-safeguards.md) records the historical v0.7.0 milestone, not the current installed version |
+| Which PRs remain after the 0.17.0 audit? | [Development PR progress](reviews/post-0.17.0-pr-train.md): disposition, owner lane, qualification and next merge/release gate for all eight audited PRs |
 | What is the three-way co-design state? | [TD-0027](td/TD-0027-three-way-origin-codesign.md) and [delivery review](reviews/three-way-release-review-2026-09-16.md); original lanes integrated, cross-repository release follow-through in progress |
 | What adversarial checks cover the first checkpoint? | [2026-09-05 checkpoint review](reviews/checkpoint-adversarial-review-2026-09-05.md); findings, corrections and remaining integration gates |
 
@@ -116,7 +117,7 @@ TD-0028 keeps its merge/deployment gates separate from the remaining diagnostic 
 | [0026](adr/0026-qualified-responses-stream-accounting.md) | Bounded source-qualified Responses streaming, partial progress and original token evidence |
 | [0027](adr/0027-qualified-codex-buffered-accounting.md) | Constrained Codex SSE aggregation, original deadlines and source usage independent of delivery |
 | [0028](adr/0028-qualified-translated-stream-accounting.md) | Qualified native/portable streaming with source-owned paired accounting and bounded projection |
-| [0029](adr/0029-explicit-terminal-chat-usage-profile.md) | Explicit terminal-choice Chat usage convention; strict standard qualifier and binding fences retained |
+| [0029](adr/0029-explicit-terminal-chat-usage-profile.md) | Explicit generic and vendor final-choice Chat usage conventions; strict standard qualifier and binding fences retained |
 | [0039](adr/0039-shared-embedded-endpoint-profiles.md) | Shared embedded endpoint factory/profiles; gateway peers use an independent declared client dialect |
 | [0040](adr/0040-shared-buffered-source-qualification.md) | Shared strict buffered source usage and portable/native fidelity; no measured zero from absence |
 | [0041](adr/0041-explicit-gateway-peer-contract.md) | Explicit immediate peer role, server-owned emitted counts convention and one cache compiler |
@@ -153,9 +154,9 @@ perpetually open.
 | [0034](td/TD-0034-protocol-neutral-router-cache-accounting.md) | Active goal | Explicit backend/operator lifecycle, loss-aware conversation/cache handling, authorized routing/affinity and uniform execution accounting; source/live qualification tracked separately |
 | [0032](td/TD-0032-weighted-allowance-policy.md) | W01 released in 0.14.0 | Opt-in weighted allowance arithmetic; reporting provenance, admission-bound policy snapshots, durable enforcement and live acceptance pending |
 | [0001](td/TD-0001-provider-adapter-qa-and-codegen.md) | Complete | — |
-| [0002](td/TD-0002-typed-provider-runtime.md) | Complete | Consumer-repository cleanup is outside Sandhi's completion gate |
+| [0002](td/TD-0002-typed-provider-runtime.md) | Complete | Consumer-repository cleanup is outside Sandhi's completion gate; typed display reasoning minor14 remains a postrelease candidate |
 | [0003](td/TD-0003-operator-surface-keys-budgets-attribution.md) | Complete | — |
-| [0004](td/TD-0004-catalog-governance-dual-mode.md) | In progress | Shared-governance core and optional in-process durable surface; policy engine is TD-0005 |
+| [0004](td/TD-0004-catalog-governance-dual-mode.md) | In progress | Shared-governance core and optional in-process durable surface; DeepSeek descriptor refresh and consumer gates; policy engine is TD-0005 |
 | [0005](td/TD-0005-declarative-policy-engine.md) | In progress | Opt-in [policy MVP](operator/policy-evaluation.md): regex/threshold/lexical checks, verified identity selection, durable metadata receipts and dispatch denial; [Python workers/offline MLflow](operator/python-ml-evaluators.md) implemented as candidates; [embedded ONNX](operator/embedded-onnx.md) profile and multi-model remote service/replica adapter implemented; semantic models, payload quarantine and signed distribution remain proposed |
 | [0006](td/TD-0006-two-plane-proxy-transparent-metering.md) | Complete | — |
 | [0007](td/TD-0007-enforcement-ledger-backends.md) | In progress | Shared/HA backend selection and implementation |

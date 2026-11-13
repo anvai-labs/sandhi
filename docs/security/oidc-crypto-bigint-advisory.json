@@ -1,41 +1,41 @@
 {
   "advisory": "RUSTSEC-2026-0387",
-  "status": "not_affected_under_reviewed_usage",
-  "reviewed_on": "2026-11-09",
+  "status": "remediated_in_locked_graph",
+  "reviewed_on": "2026-11-13",
   "expires_on": "2026-11-18",
   "adapter": "crates/sandhi-proxy/src/auth.rs",
-  "adapter_sha256": "3fd0ab9aa58d6937efaad52ef9ad1b6d9f1173baac14fd78f3517e73b6123175",
+  "adapter_sha256": "2f8c16e0c488e27ae063dd5c378dc56a24adf5147b8559658cc3cbf4684044ed",
   "packages": {
     "openidconnect": {
-      "version": "4.0.1",
+      "version": "4.1.0",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "checksum": "0d8c6709ba2ea764bbed26bce1adf3c10517113ddea6f2d4196e4851757ef2b2"
+      "checksum": "df0d098a59353679624d406825940139e2b2d554a52b64c9fb1b1bc42a11fe5c"
     },
     "p384": {
-      "version": "0.13.1",
+      "version": "0.14.0",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "checksum": "fe42f1670a52a47d448f14b6a5c61dd78fce51856e68edaa38f7ae3a46b8d6b6"
+      "checksum": "d17b851e6b3e378ab4ecb07fa2ed23f4d15f075735f8fec9fa1e7bdce5f8301f"
     },
     "p256": {
-      "version": "0.13.2",
+      "version": "0.14.0",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "checksum": "c9863ad85fa8f4460f9c48cb909d38a0d689dba1f6f6988a5e3e0d31071bcd4b"
+      "checksum": "d2c9239b2dbc807adbbe147e8cf72ea7450c3a0aabe62cb8e75ff4ec22e1f72a"
     },
     "primeorder": {
-      "version": "0.13.6",
+      "version": "0.14.0",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "checksum": "353e1ca18966c16d9deb1c69278edbc5f194139612772bd9537af60ac231e1e6"
+      "checksum": "5c9f42978c78a00e3d68f69fc03e57a234debae69da4020a4fb588fcdcd07b06"
     },
     "elliptic-curve": {
-      "version": "0.13.8",
+      "version": "0.14.3",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "checksum": "b5e6043086bf7973472e0c7dff2142ea0b680d30e18d9cc40f267efbf222bd47"
+      "checksum": "900f37e7e18d74a2347389af6cd69e3a30d5cc9e697f40004865679aa75e9c7c"
     },
     "crypto-bigint": {
-      "version": "0.5.5",
+      "version": "0.7.11",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "checksum": "0dc92fb57ca44df6db8059111ab3af99a63d5d0f8375d9972e319a379c6bab76"
+      "checksum": "914c195c4d7fbc5ed7f88d14cbf85914d5c664967658d43404b263913a477e82"
     }
   },
-  "note": "2026-11-09 reassessment: auth.rs added ADR-0015 budget scope validation (rejects grants using reserved upstream: prefix) — config validation only, no change to OIDC/private-key operation path. Prior adapter checksum cb14a0b19712dca2c3d9c733f177f66d5577aa3c5b43d60dc61d32ef1239fbb0. 2026-10-25 initial assessment: crypto-bigint 0.5.5 reaches the workspace only transitively through the RustCrypto curve family (crypto-bigint is consumed by elliptic-curve 0.13.8, reached via p256 0.13.2 / p384 0.13.1 / primeorder 0.13.6) under openidconnect 4.0.1, and only for OIDC ECDSA (P-256 and P-384) signature verification in crates/sandhi-proxy/src/auth.rs. RUSTSEC-2026-0387 is timing variability in integer operations intended to be constant-time; exploitation requires high-resolution timing observation of the gateway's token-verification path by an attacker positioned on the trust boundary \u2014 the same reviewed-usage threat model and adapter as RUSTSEC-2023-0071 (docs/security/oidc-rsa-advisory.json). No patched in-range upgrade exists: the advisory's fix requires crypto-bigint >=0.7.6, which needs elliptic-curve >=0.14 / p384 >=0.14, while openidconnect 4.0.1 (latest published) pins the 0.13 curve family. Reassess when openidconnect ships a 0.14-compatible release; the record expires in 24 days regardless."
+  "note": "2026-11-13 dependency remediation: openidconnect 4.1.0 upgrades the curve family to 0.14 and resolves crypto-bigint 0.7.11, above the RustSec patched floor 0.7.6. The synthetic ES256 fixture also uses p256 0.14, removing the old vulnerable dev-only 0.5.5 copy from the full lockfile. Compared upstream verification operations and retained the unchanged auth.rs owner. Removed the RUSTSEC-2026-0387 ignore; the gate rejects vulnerable versions, drift, bypass consumers and reinstated ignores. This is scoped to this advisory, not a general cryptographic safety claim. Existing 2026-11-18 review deadline remains unchanged. Integration reassessment source combines the explicit resource-audience selector with OIDC 4.1.0; the selector changes only exact introspection audience matching, without adding signing, decryption, client assertions, or a cryptographic consumer. Independent exact-source review is required before adoption."
 }

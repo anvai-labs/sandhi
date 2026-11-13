@@ -93,6 +93,13 @@ pub enum GroupSource {
 pub struct Config {
     pub issuer: String,
     pub client_id: String,
+    /// Access-token resource audience; omission preserves the OAuth client audience.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_access_token_audience"
+    )]
+    pub access_token_audience: Option<String>,
     pub redirect_url: String,
     pub ca_file: Option<PathBuf>,
     pub client_secret_env: Option<String>,
@@ -111,8 +118,25 @@ pub struct Config {
     #[serde(default)]
     pub max_subject_key_ttl_seconds: u32,
 }
+
+fn deserialize_access_token_audience<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    // Only omission selects the legacy default; an explicit null is not an audience.
+    String::deserialize(deserializer).map(Some)
+}
+
 impl Config {
     pub fn validate(&self) -> Result<(), String> {
+        if self.access_token_audience.as_ref().is_some_and(|audience| {
+            audience.is_empty()
+                || audience.len() > 512
+                || audience
+                    .chars()
+                    .any(|c| c.is_whitespace() || c.is_control() || c == '*')
+        }) {
+            return Err("access_token_audience must be an exact nonblank string of at most 512 bytes without whitespace, controls or wildcards".into());
+        }
         if self.max_subject_key_ttl_seconds > 31_536_000 {
             return Err("subject key lifetime must not exceed one year".into());
         }
@@ -692,9 +716,14 @@ impl Oidc {
     }
     fn introspection_subject(&self, v: &Value) -> Option<String> {
         let aud = &v["aud"];
-        let audience = aud.as_str() == Some(self.config.client_id.as_str())
+        let expected_audience = self
+            .config
+            .access_token_audience
+            .as_deref()
+            .unwrap_or(&self.config.client_id);
+        let audience = aud.as_str() == Some(expected_audience)
             || aud.as_array().is_some_and(|a| {
-                a.iter().all(Value::is_string) && a.iter().any(|a| a == &self.config.client_id)
+                a.iter().all(Value::is_string) && a.iter().any(|a| a == expected_audience)
             });
         let sub = v["sub"].as_str()?;
         if v["active"] != true
