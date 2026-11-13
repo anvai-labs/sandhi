@@ -18,14 +18,28 @@ dependency order before the Sandhi → official SDK → Victor release train.
 | Victor Agent interoperability | Corrected gateway and reviewed Victor source passed 16 actual tool-loop cases plus three Anvai resource-token session cases with the optimized IDM and official SDK 0.17.1 | Official SDK 0.18 adoption after publication |
 | Dashboard and documentation | Three starter browser cases, 12 script security regressions and actual Anvai browser SSO passed. Admin/operator/viewer/unassigned roles, TLS/cookies/CSRF/logout and replay refusals qualified; actual local screenshots included | Final docs checks and exact committed review |
 | IDM source | Current Anvai Identity source includes introspection, explicit consumer registration and schema 70 | Qualify optimized deployment artifact |
-| Public development IDM | Reviewed optimized artifact and schema 70 deployed; existing data/custody hashes preserved. Public HTTPS discovery now advertises Basic introspection | Public machine endpoint returned 403; qualify edge transport, dedicated clients and end-to-end flows |
-| Deployment tooling | Narrow replacement path reviewed; nine guards and synthetic 67→70/catalog/backup checks passed. Actual-host artifact/configuration preflight and private backup integrity passed before migration | Complete public acceptance and merge the reviewed operations PR |
+| Public development IDM | Reviewed optimized artifact and schema 70 deployed; existing data/custody hashes preserved. Both issuers advertise Basic introspection. Actual Sandhi/broker profiles receive origin 401/no-store through the public edge; real Sandhi public startup/fail-closed checks passed | Dedicated real-account registrations and successful end-to-end live flows; generic Python-UA 403 remains a separate transport observation |
+| Deployment tooling | Narrow replacement path reviewed; nine guards and synthetic 67→70/catalog/backup checks passed. Actual-host artifact/configuration preflight and private backup integrity passed before migration. Private operations PR #257 and exact post-merge CI passed | Preserve artifact-bound deployment evidence; live account acceptance remains separate |
+| One-shot public PKCE publisher | Reviewed Anvai Identity browser fixture and example merged through private PR #258. Ten adversarial guards and actual HTTPS/PKCE/UserInfo/resource/receipt/Victor-file acceptance passed; expiry and untrusted CA refused | Real owner ceremony before live use; no automatic renewal claim |
 | Publication | Sandhi 0.17.1 remains published; 0.18 and Victor 0.29 remain candidates | Sandhi release/artifact verification, then Victor official-SDK qualification and release |
 
 The development upgrade uses a private backup kept on the existing host and
 compares existing data and custody hashes there. No live identity database is
 exported to local test fixtures. Full rollback rehearsal was waived for this
 development endpoint; failures remain closed while corrected forward.
+
+An earlier default-Python-user-agent 403 was initially overstated as an actual
+Sandhi transport blocker. Direct tests of the clients' existing declared user
+agents and the actual gateway corrected that conclusion. No Cloudflare policy
+was changed. The optional configuration tool's existing credential could not
+inspect zone settings; its GET-only 403 made no mutation. Real owner access is
+needed for live client registration, separately from transport compatibility.
+
+Checkpoint [PR #459](https://github.com/anvai-labs/sandhi/pull/459) passed all
+24 executed public checks, including both Linux/macOS release-feature binary
+preflights, and merged as `0af02a79`. The merge tree matches the reviewed
+candidate. The documentation follow-up records corrected public-profile
+evidence; main promotion, package publication and live registration remain open.
 
 ## Release boundary
 
