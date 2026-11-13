@@ -1,0 +1,119 @@
+{
+  "observed_at": "2026-11-12T06:03:58.209848+00:00",
+  "model": "glm-5.3",
+  "purpose": "Structural inspection only; content and signatures omitted",
+  "source_metadata_sha256": "bacfe441020b4d0f40adfdabb2036941ee2036f0bdfc48b79bbb0b6657e43d4c",
+  "event_shapes": [
+    {
+      "fields": [
+        "type",
+        "message"
+      ],
+      "message_fields": [
+        "id",
+        "type",
+        "role",
+        "model",
+        "content",
+        "stop_reason",
+        "stop_sequence",
+        "usage"
+      ],
+      "type": "message_start",
+      "occurrences": 1
+    },
+    {
+      "fields": [
+        "type"
+      ],
+      "type": "ping",
+      "occurrences": 1
+    },
+    {
+      "content_block": {
+        "fields": [
+          "type",
+          "thinking",
+          "signature"
+        ],
+        "signature_length": 0,
+        "type": "thinking"
+      },
+      "fields": [
+        "type",
+        "index",
+        "content_block"
+      ],
+      "index": 0,
+      "type": "content_block_start",
+      "occurrences": 1
+    },
+    {
+      "delta": {
+        "fields": [
+          "type",
+          "thinking"
+        ],
+        "type": "thinking_delta"
+      },
+      "fields": [
+        "type",
+        "index",
+        "delta"
+      ],
+      "index": 0,
+      "type": "content_block_delta",
+      "occurrences": 127
+    },
+    {
+      "delta": {
+        "fields": [
+          "type",
+          "signature"
+        ],
+        "signature_length": 24,
+        "type": "signature_delta"
+      },
+      "fields": [
+        "type",
+        "index",
+        "delta"
+      ],
+      "index": 0,
+      "type": "content_block_delta",
+      "occurrences": 1
+    },
+    {
+      "fields": [
+        "type",
+        "index"
+      ],
+      "index": 0,
+      "type": "content_block_stop",
+      "occurrences": 1
+    },
+    {
+      "delta": {
+        "fields": [
+          "stop_reason",
+          "stop_sequence"
+        ],
+        "type": null
+      },
+      "fields": [
+        "type",
+        "delta",
+        "usage"
+      ],
+      "type": "message_delta",
+      "occurrences": 1
+    },
+    {
+      "fields": [
+        "type"
+      ],
+      "type": "message_stop",
+      "occurrences": 1
+    }
+  ]
+}

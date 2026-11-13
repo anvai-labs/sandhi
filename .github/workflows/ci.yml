@@ -4,94 +4,19 @@ on:
   push:
     branches: [main, develop]
   pull_request:
-  # Protected-base definition for owner-authored, same-repository PRs only.
-  # Every job below independently routes this event through the approval gate
-  # before any pull-request code reaches the private runner pool.
-  pull_request_target:
 
 permissions:
   contents: read
   pull-requests: read
 
-# Same-ref supersede: a new commit on a PR cancels that PR's previous runs (both the
-# gated run and its plain mirror — event name keys them apart, so a PR's two runs never
-# cancel each other). Trunk pushes are NEVER cancelled: back-to-back merges must not
-# permanently cancel a release verification on main/develop. Note this does NOT limit
-# how many DIFFERENT PRs run concurrently — groups are per-ref.
+# A new PR commit cancels its previous run. Trunk verification is never cancelled
+# by a later push. Different PRs remain independent because groups are per-ref.
 concurrency:
   group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name != 'push' }}
 
 jobs:
-  # Keep public/plain-PR jobs on the explicit hosted image. The public-overflow
-  # self-hosted pool carries a colliding ubuntu-latest label but does not meet
-  # the workflow's current glibc/CMake floor; the private route selects that
-  # pool explicitly where intended.
-  trust-route:
-    # Decides WHICH environment authorizes the privileged path — BEFORE any PR-head code
-    # runs anywhere. Runs on ubuntu-latest, touches no pool and no secrets beyond the
-    # read-only token, and only asks one question: does this PR edit the workflows that
-    # define CI's own trust conditions? Those PRs ("the gatekeepers") keep the human
-    # review; everything else takes the no-click path. Evaluated against the PR's file
-    # list via the API — the base-ref workflow (not the PR head) executes this job.
-    name: Route CI trust (gatekeeper detection)
-    if: >-
-      github.event_name == 'pull_request_target' &&
-      vars.OWNER_PRIVATE_CI_ENABLED == 'true'
-    runs-on: ubuntu-24.04
-    outputs:
-      gatekeeper: ${{ steps.route.outputs.gatekeeper }}
-    steps:
-      - name: Does this PR edit the CI trust conditions?
-        id: route
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-          files=$(gh api "repos/${{ github.repository }}/pulls/${PR_NUMBER}/files" --paginate             -q '[.[].filename] | join("\n")')
-          if grep -qE '^\.github/workflows/' <<<"$files"; then
-            echo "gatekeeper=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "gatekeeper=false" >> "$GITHUB_OUTPUT"
-          fi
-
-  authorize-owner:
-    name: Authorize owner private CI
-    # The trust predicate, evaluated in the base-ref workflow (a PR cannot relax these
-    # conditions for its own run — and see the base-ref restriction below, which also
-    # stops a workflow edited on an unprotected base branch from ever authorizing the
-    # privileged path). Population: the owner's own PRs, from same-repo heads, based on
-    # a PROTECTED trunk. The human approval this job used to require per run was never
-    # dual-control (its sole reviewer was the actor it screened), so routine runs —
-    # PRs that do not touch .github/workflows/** — route to ci-trusted (no reviewers):
-    # zero clicks, no capability change, because the predicate already bounds who and
-    # what runs. PRs that DO edit the workflows (the gatekeepers) keep owner-private-ci:
-    # a human stays between any change to CI's own trust conditions and the pool — the
-    # one place a stolen credential could otherwise rewrite the rules it runs under.
-    if: >-
-      github.event_name == 'pull_request_target' &&
-      vars.OWNER_PRIVATE_CI_ENABLED == 'true' &&
-      github.actor_id == '5168752' &&
-      github.event.pull_request.user.id == '5168752' &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      (github.event.pull_request.base.ref == 'develop' ||
-       github.event.pull_request.base.ref == 'main')
-    needs: trust-route
-    runs-on: ubuntu-24.04
-    environment: ${{ needs.trust-route.outputs.gatekeeper == 'true' && 'owner-private-ci' || 'ci-trusted' }}
-    steps:
-      - name: Verify immutable owner and same-repository head
-        env:
-          ACTOR_ID: ${{ github.actor_id }}
-          AUTHOR_ID: ${{ github.event.pull_request.user.id }}
-          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
-          REPOSITORY: ${{ github.repository }}
-        run: |
-          test "$ACTOR_ID" = "5168752"
-          test "$AUTHOR_ID" = "5168752"
-          test "$HEAD_REPOSITORY" = "$REPOSITORY"
-
+  # Public repository CI runs only on GitHub-hosted images.
   # Detect what changed so a docs-only change (docs/**, README, etc.) skips
   # compilation / coverage / bindings and runs only the always-on audit
   # (attribution) + the aggregate gate. Each heavy job is gated on these
@@ -99,21 +24,7 @@ jobs:
   # check still reports on docs-only PRs. A change to this workflow itself
   # re-runs everything (it is listed in every filter).
   changes:
-    needs: authorize-owner
-    if: >-
-      always() && (
-        github.event_name == 'push' ||
-        (github.event_name == 'pull_request' && (
-          vars.OWNER_PRIVATE_CI_ENABLED != 'true' ||
-          github.actor_id != '5168752' ||
-          github.event.pull_request.user.id != 5168752 ||
-          github.event.pull_request.head.repo.full_name != github.repository
-        )) ||
-        (github.event_name == 'pull_request_target' &&
-          vars.OWNER_PRIVATE_CI_ENABLED == 'true' &&
-          needs.authorize-owner.result == 'success')
-      )
-    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       python: ${{ steps.filter.outputs.python }}
@@ -124,7 +35,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.0
         id: filter
@@ -162,6 +72,7 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'scripts/coverage-bindings.sh'
+              - 'scripts/qualify_native_wheel.py'
               - '.github/workflows/release.yml'
               - '.github/workflows/ci.yml'
             node:
@@ -171,6 +82,8 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'scripts/coverage-bindings.sh'
+              - 'scripts/qualify_native_node.cjs'
+              - '.github/workflows/release.yml'
               - '.github/workflows/ci.yml'
             schema:
               - 'schemas/**'
@@ -194,11 +107,10 @@ jobs:
   rust:
     needs: changes
     if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.rust == 'true' }}
-    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable 2026-08-30
         with:
@@ -253,11 +165,10 @@ jobs:
   schema:
     needs: changes
     if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.schema == 'true' }}
-    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -272,17 +183,13 @@ jobs:
   python-binding:
     needs: changes
     if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.python == 'true' }}
-    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
     env:
-      # Self-hosted runners persist user-site packages across jobs. A sandhi-gateway left
-      # there by any other work must never shadow the wheel this job just built — the
-      # failure mode is silent (tests run against the stale module) and only surfaces as
-      # confusing catalog misses on newly admitted providers.
+      # Test the wheel built by this job without user-site packages shadowing it.
       PYTHONNOUSERSITE: 1
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable 2026-08-30
         with:
@@ -317,7 +224,7 @@ jobs:
           EOF
       - name: run binding tests
         run: |
-          pip install pytest
+          python -m pip install -r bindings/python/requirements-test.txt
           python -m pytest bindings/python/tests/ -q
       - name: binding glue coverage (fail under 85% lines)
         # Instrumented rebuild + harness → llvm-cov over bindings/python/src/lib.rs only. The
@@ -335,7 +242,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
@@ -360,7 +266,7 @@ jobs:
             venv="$RUNNER_TEMP/wheel-$version"
             "python$version" -m venv "$venv"
             "$venv/bin/python" -m pip install --no-index --no-deps --only-binary=:all: "${wheels[0]}"
-            "$venv/bin/python" -m pip install pytest==8.4.1
+            "$venv/bin/python" -m pip install -r bindings/python/requirements-test.txt
             "$venv/bin/python" -I -c 'import sandhi_gateway; assert sandhi_gateway.__file__.startswith(__import__("sys").prefix)'
             "$venv/bin/python" -m pytest bindings/python/tests/ -q
           done
@@ -370,33 +276,70 @@ jobs:
           path: dist/*.whl
           if-no-files-found: error
 
+  # Native release-shaped artifacts, tested without publishing or release secrets.
+  python-wheel-native:
+    name: Python native (${{ matrix.target }}, ${{ matrix.python }})
+    needs: changes
+    if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.python == 'true' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: macos-latest, target: aarch64-apple-darwin, python: '3.11'}
+          - {os: macos-latest, target: aarch64-apple-darwin, python: '3.12'}
+          - {os: macos-latest, target: aarch64-apple-darwin, python: '3.13'}
+          - {os: windows-latest, target: x86_64-pc-windows-msvc, python: '3.11'}
+          - {os: windows-latest, target: x86_64-pc-windows-msvc, python: '3.12'}
+          - {os: windows-latest, target: x86_64-pc-windows-msvc, python: '3.13'}
+    env:
+      PYTHONNOUSERSITE: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: ${{ matrix.python }}
+          architecture: x64
+        if: runner.os == 'Windows'
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: ${{ matrix.python }}
+          architecture: arm64
+        if: runner.os == 'macOS'
+      - name: Require the advertised native runtime and compiler host
+        run: python -I scripts/qualify_native_wheel.py --check-host --target ${{ matrix.target }} --expected-python ${{ matrix.python }}
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b
+        with:
+          command: build
+          args: --release --locked -m bindings/python/Cargo.toml --out dist
+          target: ${{ matrix.target }}
+          manylinux: auto
+      - name: Verify wheel tags and exact isolated install, then run all binding tests
+        run: python -I scripts/qualify_native_wheel.py --target ${{ matrix.target }} --expected-python ${{ matrix.python }} --wheel-dir dist --venv "${{ runner.temp }}/native-wheel-venv" --report native-wheel-report.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: native-wheel-${{ matrix.target }}-py${{ matrix.python }}
+          path: |
+            native-wheel-report.json
+            dist/*.whl
+          if-no-files-found: error
+
   attribution:
-    needs: authorize-owner
-    if: >-
-      always() && (
-        github.event_name == 'push' ||
-        (github.event_name == 'pull_request' && (
-          vars.OWNER_PRIVATE_CI_ENABLED != 'true' ||
-          github.actor_id != '5168752' ||
-          github.event.pull_request.user.id != 5168752 ||
-          github.event.pull_request.head.repo.full_name != github.repository
-        )) ||
-        (github.event_name == 'pull_request_target' &&
-          vars.OWNER_PRIVATE_CI_ENABLED == 'true' &&
-          needs.authorize-owner.result == 'success')
-      )
-    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
           fetch-depth: 0
       - name: No AI-agent authorship attribution in commit messages
         run: |
           set -e
-          if [ "${{ github.event_name }}" = "pull_request" ] || \
-             [ "${{ github.event_name }}" = "pull_request_target" ]; then
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
             python3 scripts/check_no_agent_attribution.py \
               --range "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
           elif echo "${{ github.event.before }}" | grep -qE '^0{40}$'; then
@@ -413,18 +356,14 @@ jobs:
     # newly reported advisories against unchanged dependencies between workflow runs.
     needs: changes
     if: ${{ always() && needs.changes.result == 'success' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.python == 'true' || needs.changes.outputs.node == 'true') }}
-    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      # cargo-deny shells out to `cargo metadata`, so it needs a real toolchain on PATH — the
-      # self-hosted overflow runners have none preinstalled (github-hosted runners do, which is
-      # why this only surfaced once owner PRs started routing there). Same pinned action the
-      # rust/coverage jobs use.
+      # cargo-deny uses cargo metadata; install the same pinned toolchain as Rust CI.
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable 2026-08-30
-      # Keep this binary-based: Docker container actions cannot run on every private-runner host.
+      # Install the pinned advisory checker directly.
       - uses: taiki-e/install-action@ea647c55f74bb153499600c054578c0d83fa19d5 # 2026-08-30
         with:
           tool: cargo-deny@0.20.2
@@ -436,22 +375,10 @@ jobs:
           cargo deny --locked --all-features --manifest-path bindings/node/Cargo.toml --config deny.toml check advisories
 
   lint-title:
+    if: github.event_name == 'pull_request'
     # Conventional-commit PR title gate. Dependabot PRs are prefixed `chore:`
     # (.github/dependabot.yml) so they pass too. PR-only (the action errors on push events).
-    needs: authorize-owner
-    if: >-
-      always() && (
-        (github.event_name == 'pull_request' && (
-          vars.OWNER_PRIVATE_CI_ENABLED != 'true' ||
-          github.actor_id != '5168752' ||
-          github.event.pull_request.user.id != 5168752 ||
-          github.event.pull_request.head.repo.full_name != github.repository
-        )) ||
-        (github.event_name == 'pull_request_target' &&
-          vars.OWNER_PRIVATE_CI_ENABLED == 'true' &&
-          needs.authorize-owner.result == 'success')
-      )
-    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.0
         env:
@@ -473,11 +400,10 @@ jobs:
   node-binding:
     needs: changes
     if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.node == 'true' }}
-    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable 2026-08-30
         with:
@@ -501,14 +427,47 @@ jobs:
         # node_modules installed by the step above).
         run: bash scripts/coverage-bindings.sh node
 
+  node-binding-macos:
+    name: Node native macOS ARM64
+    needs: changes
+    if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.node == 'true' }}
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      NODE_PATH: ''
+      NODE_OPTIONS: ''
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '24'
+          architecture: arm64
+      - name: Require native Node and Rust hosts
+        run: node scripts/qualify_native_node.cjs --check-host
+      - name: Build the locked release addon
+        working-directory: bindings/node
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npx --no-install napi build --platform --release --target aarch64-apple-darwin --cargo-flags="--locked"
+      - name: Verify exact native addon load and run the full binding suite
+        run: node scripts/qualify_native_node.cjs
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: native-node-aarch64-apple-darwin
+          path: native-node-report.json
+          if-no-files-found: error
+
   coverage:
     needs: changes
     if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.rust == 'true' }}
-    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable 2026-08-30
         with:
@@ -524,19 +483,15 @@ jobs:
   codegen-drift:
     needs: changes
     if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.codegen == 'true' }}
-    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable 2026-08-30
         with:
           components: rustfmt
-      # gen-provider-models.sh invokes `cargo typify` and its own install guard
-      # (`cargo install --list | grep`) can pass spuriously on the self-hosted runners while the
-      # binary is not resolvable on PATH — install the pinned binary the same way the security
-      # job installs cargo-deny, so drift-checking doesn't depend on host cargo-home state.
+      # Install the pinned generator explicitly before checking committed output.
       - uses: taiki-e/install-action@ea647c55f74bb153499600c054578c0d83fa19d5 # 2026-08-30
         with:
           tool: cargo-typify@0.4.3
@@ -556,11 +511,10 @@ jobs:
     name: SDK conformance (real vendor SDKs)
     needs: changes
     if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.sdk_conformance == 'true' }}
-    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable 2026-08-30
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.8.2
@@ -613,10 +567,10 @@ jobs:
             -DENABLE_SBOM=OFF
           cmake --build build-sandhi --target inferfluxd -j2
           ccache --show-stats
-      # The vendors' own clients decide how a request is shaped. Pinning majors keeps a vendor
-      # release from turning this gate red without a code change, while still tracking real SDKs.
+      # Local qualification and public CI share exact provider SDK releases.
+      # Qualify release upgrades against real client requests before changing the pins.
       - name: Install the vendor SDKs and browser test driver
-        run: python -m pip install --quiet 'openai>=2,<3' 'anthropic>=0.97,<1' 'google-genai>=1.73,<2' 'httpx>=0.27' pytest 'playwright==1.58.0' 'PyJWT[crypto]>=2.10,<3'
+        run: python -m pip install --quiet -r tests/sdk-conformance/requirements.txt
       - name: Install the dashboard test browser
         run: python -m playwright install --with-deps chromium
       - name: Drive the proxy with vendor SDKs and the served dashboard
@@ -634,7 +588,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -648,31 +601,19 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund
       - run: python scripts/check-release-version.py
       - run: python -m pytest tests/release -q
-      - name: Validate release and CI workflow syntax
+      - name: Validate all workflow syntax
         working-directory: ${{ runner.temp }}
         run: |
           curl --fail --silent --show-error --location --retry 3 --max-time 60 https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz -o actionlint.tar.gz
           echo '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz' | sha256sum --check --status
           tar -xzf actionlint.tar.gz actionlint
-          ./actionlint "$GITHUB_WORKSPACE/.github/workflows/release.yml" "$GITHUB_WORKSPACE/.github/workflows/publish-crates.yml" "$GITHUB_WORKSPACE/.github/workflows/ci.yml"
+          ./actionlint "$GITHUB_WORKSPACE"/.github/workflows/*.yml
 
   ci-success:
+    if: always()
     name: CI Success
-    runs-on: ${{ github.event_name == 'pull_request_target' && fromJSON('["self-hosted","Linux","X64","public-overflow"]') || 'ubuntu-24.04' }}
-    if: >-
-      always() && (
-        github.event_name == 'push' ||
-        (github.event_name == 'pull_request' && (
-          vars.OWNER_PRIVATE_CI_ENABLED != 'true' ||
-          github.actor_id != '5168752' ||
-          github.event.pull_request.user.id != 5168752 ||
-          github.event.pull_request.head.repo.full_name != github.repository
-        )) ||
-        (github.event_name == 'pull_request_target' &&
-          vars.OWNER_PRIVATE_CI_ENABLED == 'true' &&
-          needs.authorize-owner.result == 'success')
-      )
-    needs: [authorize-owner, changes, rust, schema, python-binding, python-wheel-arm64, node-binding, attribution, coverage, codegen-drift, sdk-conformance, security, lint-title, release-safeguards]
+    runs-on: ubuntu-24.04
+    needs: [changes, rust, schema, python-binding, python-wheel-arm64, python-wheel-native, node-binding, node-binding-macos, attribution, coverage, codegen-drift, sdk-conformance, security, lint-title, release-safeguards]
     steps:
       - name: Verify no required job failed (skipped is OK for docs-only)
         env:

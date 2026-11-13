@@ -51,6 +51,16 @@ pub struct SqliteLedger {
 }
 
 impl SqliteLedger {
+    pub(crate) fn reference_store_path(&self) -> Option<String> {
+        if self.conn.is_readonly("main").ok()? {
+            return None;
+        }
+        self.conn
+            .path()
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+    }
+
     pub(crate) fn is_file_backed(&self) -> bool {
         self.conn.path().is_some_and(|path| !path.is_empty())
     }
@@ -230,7 +240,11 @@ impl SqliteLedger {
             "DELETE FROM budget_reservation
              WHERE scope = ?1 AND settled = 0 AND expires_at <= ?2
                AND NOT EXISTS (SELECT 1 FROM budget_execution_intent
-                               WHERE reservation_id = budget_reservation.id)",
+                               WHERE reservation_id = budget_reservation.id)
+               AND NOT EXISTS (SELECT 1 FROM budget_execution_back_leg
+                               WHERE reservation_id = budget_reservation.id)
+               AND NOT EXISTS (SELECT 1 FROM budget_dispatch_fence
+                               WHERE back_reservation_id = budget_reservation.id)",
             params![scope, now_ts],
         )?;
 
@@ -430,7 +444,11 @@ impl SqliteLedger {
         let n = self.conn.execute(
             "DELETE FROM budget_reservation WHERE settled = 0 AND expires_at <= ?1
                AND NOT EXISTS (SELECT 1 FROM budget_execution_intent
-                               WHERE reservation_id = budget_reservation.id)",
+                               WHERE reservation_id = budget_reservation.id)
+               AND NOT EXISTS (SELECT 1 FROM budget_execution_back_leg
+                               WHERE reservation_id = budget_reservation.id)
+               AND NOT EXISTS (SELECT 1 FROM budget_dispatch_fence
+                               WHERE back_reservation_id = budget_reservation.id)",
             params![now_ts],
         )?;
         // TD-0021 P4 review finding: the dedup table is not prune-on-sight only —

@@ -145,6 +145,30 @@ handle). "Sandhi owns transport" is unconditional for both families.
 
 ## Operating rules going forward
 
+### Minor 11/12 consumer decisions (2026-11-11 candidate)
+
+| Surface | Consumer decision |
+| --- | --- |
+| `native_input` request metadata (minor 11) | Proxy codecs construct the projection fence; compatible encoders preserve source ordering, incompatible classified features fail before reservation/dispatch. Direct typed hosts own capture/projection. |
+| `include_native_stream` and `native_frame` (minor 12) | Proxy opts in only for compatible supported transports and renders frames instead of duplicate canonical content. Metering consumes canonical events, ignoring frame JSON. |
+| Python and Node typed consumers | Default off; real binding conformance exercises omitted/enabled flags, preserved opaque fields, canonical deltas, one numeric final usage and one DONE marker. Facades document supported families. |
+| Victor and other external consumers | Remain default off. No native-frame consumption or external conformance is claimed. Before release, notify the owner with the minor/schema changes and require an explicit consume/surface/ignore decision before enabling the flag. No external notification has been sent from this workspace task. |
+
+The local source candidate is not a release or an acknowledgement from an external
+consumer. See [ADR-0018](../adr/0018-ordered-native-input-and-projection.md) and
+[ADR-0019](../adr/0019-native-stream-attachments.md).
+
+### Cache intent consumer decisions (minor 13, 2026-11-11)
+
+| Surface/consumer | Local decision and evidence |
+| --- | --- |
+| `cache_intent` | Optional neutral request field; absent preserves existing direct-binding behavior. HTTP codecs consume the reserved `sandhi_cache` equivalent. Proxy compiles against the selected backend/model before reservation. |
+| Compiled cache plan | Internal trusted runtime value, skipped by serde and excluded from schema/facades. JSON cannot import a plan or change its frozen target/input binding. Durable M5 execution attribution remains open. |
+| Python/Node bindings | Generated minor-13 facades document modes, exact TTL capability requirements and suppression semantics. Real rebuilt bindings accept suppression, refuse undeclared synthesis before HTTP, and exclude compiled plans from the schema; 98 Python tests and 90 Node checks passed. Direct unconfigured handles do not acquire invented capabilities. |
+| Victor/external consumers | Optional field remains absent by default. No external notification, acknowledgement or release is claimed. External release coordination and an explicit consume/surface/ignore decision remain required. |
+
+### Rules
+
 1. **New event variants / contract fields ship with a consumer-decision row in this TD** —
    producer-side capability without consumer-side intent is how silent gaps form.
 2. **Diagnostics are part of the contract.** Anything the boundary can reject (4xx, contract

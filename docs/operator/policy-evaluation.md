@@ -76,8 +76,11 @@ directory group. Policy configuration does not grant inference or administration
 
 ## Supported request coverage
 
-The initial gate supports **text-only OpenAI Chat Completions ingress**, including
-its typed translation to the existing subscription Responses backend. It checks
+The gate supports **text-only OpenAI Chat Completions and Anthropic Messages
+ingress**, including typed translation to a configured backend. It also supports
+the bounded text inputs on [embeddings and completions](text-endpoints.md).
+Responses and Gemini ingress currently fail closed with inspection enabled,
+regardless of the selected backend's protocol. It checks
 system/developer/user/assistant prefill, tool results, tool descriptions/schemas,
 decoded tool-argument JSON, and supported string-bearing request extras. Regex
 also runs over joined text to catch a marker split across text parts/messages.
@@ -90,9 +93,10 @@ OpenAI-family upstreams; the gateway's Anthropic, Gemini and Ollama translators
 still reject non-JSON arguments as an invalid request. Regex rules anchored to
 line or value boundaries match decoded argument values but not values inside
 such text; do not rely on anchors for tool arguments.
-Unknown top-level/message fields, image/file/audio content parts and other ingress
-dialects return `policy_unavailable` while the gate is enabled. There is no silent
-uninspected fallback. This narrower coverage is intentional for the MVP.
+Unknown top-level/message fields and image/file/audio content parts return
+`policy_unavailable` while the gate is enabled. There is no silent uninspected
+fallback. Accepted native control metadata remains subject to inspection; gateway
+cache directives do not bypass the policy gate.
 
 No remote URLs are fetched. Arbitrary base64, steganography, other encodings and
 semantic paraphrases are not automatically decoded/detected. Text matching is not

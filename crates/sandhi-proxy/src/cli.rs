@@ -52,6 +52,16 @@ enum Command {
         #[command(subcommand)]
         action: KeysAction,
     },
+    /// Explicit backend definitions (non-secret endpoint and credential references).
+    Backends {
+        #[command(subcommand)]
+        action: BackendsAction,
+    },
+    /// Logical model routes and session-affinity policy (non-secret JSON).
+    Routes {
+        #[command(subcommand)]
+        action: RoutesAction,
+    },
     /// Virtual keys (share / list / revoke).
     Vkeys {
         #[command(subcommand)]
@@ -118,6 +128,97 @@ impl DiagnoseArgs {
         query.validate()?;
         Ok(query)
     }
+}
+
+fn backend_id(value: &str) -> Result<String, String> {
+    sandhi_store::vault::validate_reference("backend", value)
+        .map(|()| value.to_string())
+        .map_err(|_| "invalid backend id".into())
+}
+
+#[derive(Subcommand, Debug)]
+enum BackendsAction {
+    List,
+    /// Create or update a backend; updates require the current revision.
+    Set {
+        #[arg(value_parser = backend_id)]
+        id: String,
+        #[arg(long)]
+        provider: String,
+        #[arg(long)]
+        credential_ref: String,
+        #[arg(long)]
+        endpoint_family: String,
+        /// standard, chatgpt_codex, anthropic_implicit_cache, or openai_terminal_chunk_usage.
+        #[arg(long, default_value = "standard")]
+        endpoint_profile: String,
+        #[arg(long)]
+        base_url: Option<String>,
+        #[arg(long)]
+        user_agent: Option<String>,
+        /// Bounded JSON cache policy file (non-secret endpoint/model capabilities).
+        #[arg(long,value_parser=read_cache_policy)]
+        cache_policy: Option<Box<sandhi_core::BackendCachePolicyV1>>,
+        #[arg(long = "model", required = true)]
+        models: Vec<String>,
+        #[arg(long)]
+        revision: Option<u64>,
+    },
+    /// Revoke a backend without changing or deleting its credential.
+    Revoke {
+        #[arg(value_parser = backend_id)]
+        id: String,
+        #[arg(long)]
+        revision: u64,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum RoutesAction {
+    List,
+    /// Register a complete non-secret route definition from a bounded JSON file.
+    Set {
+        #[arg(value_parser=read_route_definition)]
+        definition: Box<sandhi_store::routes::RouteDefinition>,
+        #[arg(long)]
+        revision: Option<u64>,
+    },
+    Revoke {
+        #[arg(value_parser=backend_id)]
+        id: String,
+        #[arg(long)]
+        revision: u64,
+    },
+}
+
+fn read_route_definition(path: &str) -> Result<Box<sandhi_store::routes::RouteDefinition>, String> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .map_err(|_| "could not open route definition file")?
+        .take(65_537)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "could not read route definition file")?;
+    if bytes.len() > 65_536 {
+        return Err("route definition file exceeds metadata limit".into());
+    }
+    serde_json::from_slice(&bytes)
+        .map(Box::new)
+        .map_err(|_| "route definition file is invalid".into())
+}
+
+fn read_cache_policy(path: &str) -> Result<Box<sandhi_core::BackendCachePolicyV1>, String> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .map_err(|_| "could not open cache policy file")?
+        .take(65_537)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "could not read cache policy file")?;
+    if bytes.len() > 65_536 {
+        return Err("cache policy file exceeds the backend metadata limit".into());
+    }
+    serde_json::from_slice(&bytes)
+        .map(Box::new)
+        .map_err(|_| "cache policy file is not a valid cache policy object".into())
 }
 
 #[derive(Subcommand, Debug)]
@@ -243,6 +344,62 @@ pub(crate) fn admin_request(base_url: &str, command: &Command) -> AdminRequest {
     let (method, path, body): (&str, String, Option<Value>) = match command {
         // Diagnose validates its query and never enters the legacy unbounded executor.
         Command::Diagnose(_) => unreachable!("separate diagnostic request path"),
+        Command::Routes {
+            action: RoutesAction::List,
+        } => ("GET", "/admin/routes".into(), None),
+        Command::Routes {
+            action:
+                RoutesAction::Set {
+                    definition,
+                    revision,
+                },
+        } => (
+            "POST",
+            "/admin/routes".into(),
+            Some(json!({"definition":definition,"expected_revision":revision})),
+        ),
+        Command::Routes {
+            action: RoutesAction::Revoke { id, revision },
+        } => (
+            "DELETE",
+            format!("/admin/routes/{id}?revision={revision}"),
+            None,
+        ),
+        Command::Backends {
+            action: BackendsAction::List,
+        } => ("GET", "/admin/backends".into(), None),
+        Command::Backends {
+            action:
+                BackendsAction::Set {
+                    id,
+                    provider,
+                    credential_ref,
+                    endpoint_family,
+                    endpoint_profile,
+                    base_url,
+                    user_agent,
+                    cache_policy,
+                    models,
+                    revision,
+                },
+        } => (
+            "POST",
+            "/admin/backends".into(),
+            Some(json!({
+                "definition":{"id":id,"provider":provider,"credential_ref":credential_ref,
+                    "endpoint":{"endpoint_family":endpoint_family,"endpoint_profile":endpoint_profile},
+                    "base_url":base_url,"user_agent":user_agent,"cache_policy":cache_policy,
+                    "models":models.iter().map(|id|json!({"id":id})).collect::<Vec<_>>()},
+                "expected_revision":revision,
+            })),
+        ),
+        Command::Backends {
+            action: BackendsAction::Revoke { id, revision },
+        } => (
+            "DELETE",
+            format!("/admin/backends/{id}?revision={revision}"),
+            None,
+        ),
         Command::Keys {
             action:
                 KeysAction::Add {

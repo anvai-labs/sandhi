@@ -1,0 +1,90 @@
+{
+  "evidence_kind": "local_sdk_shutdown_timeout",
+  "source_parent": "9bc7a3ef570e4e32d0159de604366b932effb29c",
+  "sdk_run": {
+    "passed": 563,
+    "failed": 1,
+    "skipped": 3,
+    "seconds": 687.17,
+    "test": "test_tracked_binary_correlation_and_shutdown[streaming-unresolved-tls]",
+    "failure": "process.wait(timeout=6) expired; expected exit124 for deliberately unavailable usage",
+    "teardown_observation": "Failure traceback shows Popen returncode124 by traceback rendering/teardown; the six-second wait still timed out. No exact later exit timestamp captured."
+  },
+  "log_sha256": "46bac4d2a433283c10a6052c05e138d52a59dbffde3bafc17101a5a949cf527a",
+  "stderr_sha256": "d8c72a579cf5e643a3c099a8986512e7c191c16649fbdcce59e8b00f91591af4",
+  "chronology_utc": [
+    "17:55:55.955099 source usage unresolved for req_1794506155941_0",
+    "17:55:55.955566 shutdown signal received",
+    "17:55:55.955585 cutoff with4.999948693s remaining",
+    "17:55:57.206336 draining connections",
+    "17:55:57.208855 tracked shutdown incomplete with1 retained job"
+  ],
+  "durable_join": {
+    "request_id": "req_1794506155941_0",
+    "execution_id": "c8d5cef287854a3288ee8322fd5703712e1af97ca0385dd7b2bd13e2afdfd7ab",
+    "primary": {
+      "reservation_id": 1,
+      "scope": "group:demo",
+      "ceiling": 34,
+      "actual": 0,
+      "settled": 0
+    },
+    "back_leg": {
+      "back_id": 2,
+      "back_scope": "upstream:openai",
+      "back_ceiling": 34,
+      "back_actual": 0,
+      "back_settled": 0
+    },
+    "frozen_charge": null,
+    "source_attempt": {
+      "version": 1,
+      "attempt_id": "dc71d2233e489a374b48c700ff147f87d18657e5b785f5c7d083120afcf61bd4",
+      "attempt_ordinal": 1,
+      "dispatch_observed_at_ms": 1794506155949,
+      "terminal": {
+        "observed_at_ms": 1794506155950,
+        "outcome": "success",
+        "provider_status": 200,
+        "provider_request_id": null
+      },
+      "dropped_observations": 0,
+      "invalid": false
+    },
+    "usage": {
+      "tokens_in": 0,
+      "tokens_out": 0,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "completeness": "unavailable",
+      "basis": "provider_reported",
+      "attempts": 1,
+      "outcome": "stream_usage_unavailable;delivery:success",
+      "duration_ms": 1,
+      "duration_source": "boundary",
+      "time_to_first_token_ms": 1,
+      "time_to_first_token_source": "boundary"
+    },
+    "receipts": [],
+    "request_usage_rows": 1
+  },
+  "limits": [
+    "One upstream request was asserted before SIGTERM; the final post-shutdown assertion was not reached.",
+    "Unsettled actual0 and unavailable zero placeholders are not measured zero or released liability; both ceilings remain reserved and no receipt exists.",
+    "The last log precedes the process-exit timeout; no native thread/stack or exact blocking teardown phase was captured.",
+    "No causal attribution to the buffered delta or earlier accounting waits is established.",
+    "The same source has broader successful tests; this complete SDK run remains failed evidence.",
+    "The original pytest temporary stderr/database directory was absent during later audit; chronology/hash/join were exported before cleanup. Backend fixture binary hashes do not pin the shared shutdown executable."
+  ],
+  "disposition": "Unresolved shutdown reliability/merge gate. Preserve the request-specific join and investigate original-deadline teardown; no timeout increase, inferred zero or inference replay.",
+  "shutdown_process_binary": {
+    "path_at_launch": "/tmp/sandhi-public-hosted-ci/target/debug/sandhi-proxy",
+    "occurrence_time_sha256": null,
+    "scope": "session proxy_binary fixture built and launched shared target; no occurrence-time executable hash captured"
+  },
+  "backend_fixture_binary_copies": {
+    "count": 6,
+    "sha256": "5dc2f556ad03e3bf0d0dcde409333f623ef2589079656204df80ba8a7eaec7da",
+    "scope": "separate backend test fixtures, not an occurrence-time hash pin of the shutdown process"
+  }
+}

@@ -47,6 +47,7 @@ case "$LANG_ARG" in
     # `maturin develop`, which additionally requires the venv to be *activated*). Isolation comes
     # from the caller's venv, so this never touches system Python.
     BUILD() {
+      "$PY" -m pip install -q -r requirements-test.txt
       rm -rf target/cov-dist
       "$PY" -m maturin build --out target/cov-dist
       "$PY" -m pip install -q --force-reinstall --no-deps target/cov-dist/*.whl

@@ -78,6 +78,7 @@ mod tests {
         let p = FnProvider::new("custom", |req| async move {
             // Echo the request model back; report fixed usage.
             Ok(ProviderResponse {
+                usage_convention: None,
                 status: 200,
                 body: json!({ "model": req.model }),
                 usage: ParsedUsage {

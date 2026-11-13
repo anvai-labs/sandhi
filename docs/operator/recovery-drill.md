@@ -15,16 +15,17 @@ keys. A continued request must add only its own measured usage and settlement. R
 keys in the saved state remain unusable; a lost plaintext virtual key cannot be recovered from its
 hash. Provision new keys if the caller no longer has its original secret.
 
-A forced exit has a different contract. An unexpired reservation remains held after restart and
-must still constrain admission. Missing usage after the crash is unknown, not zero consumption.
-Lease expiry/reclaim releases capacity without reconstructing provider consumption. W05's physical
-attempt and authoritative settlement delivery work remains separate; these drills do not activate
-that storage foundation or claim lossless accounting.
+A forced exit has a different contract. New paired reservations with unknown dispatch or
+unqualified usage remain held through expiry/restart and still constrain admission; missing
+usage is never zero consumption. Historical unpaired leases keep their former TTL behavior.
+Recovery may finish retained accounting from immutable source evidence, never replay inference.
+The required owner already retains physical attempts, paired receipts and native-reference
+proofs; these drills do not promise lossless telemetry or reconstruct evidence lost before commit.
 
 ## Before taking a snapshot
 
 1. Record the build/commit and binary digest, configuration revision, SQLite/schema identity,
-   exact `SANDHI_LEDGER_SHARDS`, UTC snapshot time, shutdown result and last observed committed
+   exact topology (current serving requires one shard), UTC snapshot time, shutdown result and last observed committed
    usage. Keep this record with the protected archive, without secrets.
 2. Stop admission, then stop **all** writers, including other processes, CLI sessions and maintenance
    tasks. Wait for the actual process exit. Exit `0` proves the shutdown coordinator completed,
@@ -33,8 +34,10 @@ that storage foundation or claim lossless accounting.
 3. Keep the source directory stable. With one shard, the base SQLite file contains enforcement
    and management/usage state. With N>1, capture the base plus **every**
    `<base>-ledger-shard-<i>.db`, for i from 0 through N−1, together while writers are stopped.
-   Do not change N during recovery. Multi-file live snapshots are not a transactionally consistent
-   snapshot of the gateway. Legacy shard migration is not a restore mechanism.
+   This N>1 case is offline preservation of legacy stores, not permission to serve them with
+   0.17.0. Keep the complete original topology and plan migration separately; current serving
+   rejects shard counts other than one before ledger open. Multi-file live snapshots are not
+   transactionally consistent, and restoring files is not a topology migration.
 4. Include any required WAL or rollback-journal state when staging stopped files. Do not delete
    sidecars or copy only the main file of an active WAL database. The drill stages the stopped
    files privately, then uses SQLite backup to produce standalone databases. SQLite documents
@@ -60,16 +63,20 @@ Before starting any restored service:
    database or shard, failed integrity check, checksum mismatch, incompatible manifest, unexpected
    schema or unknown topology. Compare expected table identities and rows with the saved evidence.
    Do not boot an incomplete output directory after an interrupted copy.
-2. Use the same compatible binary and unchanged shard count first. Provision configuration
-   separately and validate its destinations; block external webhook/provider egress in quarantine.
+2. Use a compatible binary and validate topology offline first. A legacy multi-shard archive
+   must not be booted with the current single-file owner before an explicit migration. Provision
+   configuration separately and validate destinations; block external webhook/provider egress.
+   Keep old writers stopped and preserve historical caps/spend/holds/pins; never restore onto a
+   different empty ledger to obtain apparent capacity.
 3. Bind to isolated loopback, keep load balancers and callers disconnected, and withhold provider
    credentials/broker grants. `/readyz=200` is **not** a storage-integrity or credential-health
-   check. W06c corrects the prior durable-open fallback: configured database initialization errors
-   now fail startup before binding rather than substituting memory. Only an absent `SANDHI_STORE`
-   selects development memory mode; empty/invalid configuration, `:memory:` and SQLite `file:`
-   URIs are refused (use an ordinary filesystem path). Missing shard files
-   can still be created during normal initialization. Therefore file completeness and durable
-   state checks must precede startup; verify saved budgets/spend through SQL and APIs afterward.
+   check. Current serving requires the original ordinary-file `SANDHI_STORE`, one shard and an
+   unset `SANDHI_BUFFERED_ACCOUNTING`. Missing/empty configuration, memory/URI forms and
+   unsupported topology refuse before stores open; a later component initialization can still
+   fail after earlier schema work. There is no development memory-serving fallback. File
+   completeness/integrity and saved caps/spend/holds/pins must be checked before startup, then
+   verified through SQL and authenticated APIs afterward. `/admin/version` owner capability is
+   a separate configured fact, not a per-request receipt or live storage-health guarantee.
 4. Reconcile changes made **after** the snapshot: virtual-key revocations, local credential status,
    provider/broker revocations, budgets and configuration. An old database can resurrect a later
    revocation. There is no automatic revocation overlay. If the current authoritative revocation
@@ -102,7 +109,8 @@ SANDHI_AGENTBROWSER_ROOT=/path/to/built/agentbrowser \
   python -m pytest tests/sdk-conformance/test_recovery_agentbrowser.py -q
 ```
 
-The cases cover single-file/two-shard restart and offline restore; standalone WAL recovery;
+The cases cover current single-file serving/restart, offline legacy two-shard preservation and
+pre-open serving refusal, plus standalone WAL recovery;
 malformed/changed/missing snapshot rejection; real SIGKILL with a held lease; post-snapshot
 revocation reconciliation before credential-enabled startup; and synthetic native/plain broker
 recovery. AgentBrowser exercises the served restored dashboard's locked state, secret-reference
@@ -124,10 +132,12 @@ For each deployment rehearsal, record:
 
 A deployment that previously logged a durable-store error and continued without enforcement
 state now exits nonzero before serving requests. Repair the configured storage; do not unset
-`SANDHI_STORE` to bypass this failure in a durable deployment. Valid stores still use their existing
-initialization/migration paths, with no new database format. External broker unavailability is
+`SANDHI_STORE` or use a new empty file to bypass this failure. Existing data stays on its original
+file; startup initializes the current owner and bounded native-proof metadata there without
+inventing historical attempts or receipts. External broker unavailability is
 different: metadata may open successfully while individual secret references remain unresolved
-and cannot dispatch. Runtime `Warn`/`Block` policy is unchanged. Initialization is not one
+and cannot dispatch. `Warn` remains a soft cap; both policies fail closed on admission storage
+failure and conserve unknown paired holds. Initialization is not one
 cross-component transaction: earlier successful schema setup can remain if a later component
 fails. Preserve the pre-startup snapshot; a refused listener is not a promise of zero disk writes.
 

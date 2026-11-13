@@ -81,6 +81,47 @@ for await (const eventJson of provider.streamJson(request)) {
 }
 ```
 
+At contract minor 12, `include_native_stream: true` adds `native_frame` events for
+Chat, Messages, Responses and Gemini handles. Default is false; other families
+reject true. Render native frames or canonical content, and meter canonical usage
+once. Opaque provider state remains bound to its compatible backend/account.
+
+`runtime.provider()` accepts explicit `protocol` and the final optional
+`endpointProfile` argument independently of the provider label. Its existing
+positional arguments are preserved:
+
+```js
+const provider = runtime.provider(
+  "my-coding-backend", "my-model", API_KEY,
+  "https://api.z.ai/api/coding/paas/v4", // baseUrl
+  undefined, 0, 30, 10,               // headersJson, maxRetries, timeout, idle
+  "bearer", "chat_completions", 10,   // authScheme, protocol, setup timeout
+  "openai_terminal_chunk_usage",      // endpointProfile
+);
+```
+
+Profiles default to `standard`; `anthropic_implicit_cache` is an explicit Messages
+convention. `responses` and `gemini_generate_content` select those wire families.
+Profiles describe the immediate source, stay out of model request bodies and grant
+no credential authority. See [shared endpoint profiles](../../docs/adr/0039-shared-embedded-endpoint-profiles.md)
+for family constraints. For a gateway second hop, select the explicit
+[gateway peer contract](../../docs/adr/0041-explicit-gateway-peer-contract.md)
+and its client protocol rather than a source endpoint profile.
+
+Prepared 0.17.0 buffered calls share strict source usage qualification with
+accounted calls for Chat, Messages, Responses and Gemini. Codex uses the qualified
+SSE aggregation path. Missing/invalid counters and malformed known tool fields
+produce nonretryable `output_projection_error`, preserving the distinction from
+actual network errors. See [buffered qualification](../../docs/adr/0040-shared-buffered-source-qualification.md)
+for native/portable behavior and remaining gates.
+
+Minor 13 adds optional `cache_intent`, for example `{mode:"suppress_gateway"}`.
+Suppression preserves native controls and adds no gateway markers; it cannot turn
+off provider-internal caching. Direct unconfigured handles accept preserve/suppress
+and refuse undeclared automatic capabilities before HTTP. Registered gateway
+backends can declare exact model/lifetime support; the internal compiled plan is
+excluded from JSON and schema. See the [backend guide](../../docs/operator/backends.md).
+
 `completeJson` accepts an optional second JSON-string argument containing per-call wire headers;
 `streamJson` accepts the same argument and returns an async iterable. Transport-owned headers and
 credentials cannot be overridden. Invalid documents fail before network I/O; provider failures
@@ -94,3 +135,28 @@ preserve evidence for consumers that stop reading after content; transparent and
 translated provider wire responses are unchanged.
 
 Apache-2.0. The transport surface links `sandhi-providers` (async HTTP stack) into the addon.
+
+
+### Connect the binding to a Sandhi gateway
+
+Append `peerRole="sandhi_gateway_v1"` to `ProviderRuntime.provider` and select the
+client protocol independently of the backend. The positional options remain
+`baseUrl, headersJson, maxRetries, timeoutSecs, streamIdleTimeoutSecs, authScheme,
+protocol, streamSetupTimeoutSecs, endpointProfile, peerRole`.
+
+```js
+const provider = runtime.provider(
+  "agent-client", "logical-model", virtualKey, "https://gateway.example/v1",
+  undefined, 0, 60, 30, "bearer", "chat_completions", 10,
+  undefined, "sandhi_gateway_v1",
+);
+```
+
+Use the root base for Messages, `/v1` for Chat/Responses and `/v1beta` for Gemini.
+HTTPS or loopback HTTP, explicit client protocol and zero retries are required;
+backend endpoint profiles and Codex account/protocol options refuse on this peer.
+Typed `cache_intent` is forwarded for one server policy compilation without local
+cache markers or invented backend capabilities. Native/portable fidelity remains
+explicit. Counts metadata describes the immediate wire convention, not upstream
+provenance or committed spend; consult source evidence/receipts after translation.
+See the [gateway peer contract](../../docs/adr/0041-explicit-gateway-peer-contract.md).

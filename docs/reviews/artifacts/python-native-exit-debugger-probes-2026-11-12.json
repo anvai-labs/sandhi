@@ -1,0 +1,49 @@
+{
+  "evidence_kind": "bounded_synthetic_python_native_exit_nonreproduction",
+  "wheel_sha256": "08cd41e9b3f8964d5e888983a327d2004f84015d60e8f25e418c7b686185f1d1",
+  "extension_sha256": "fb2e0adbba1947e720dbbe204d47fcc151c861b063d81d79ba8119c8fc7070d7",
+  "python_executable_sha256": "838a38ca5b69ea9fd8b5e15a763f117460f0c49ef2ebd9e7f9205929fa9b64c5",
+  "initial_probes": 96,
+  "initial_variant_counts": {
+    "baseline": 32,
+    "python-debug-allocator": 32,
+    "glibc-perturb": 32
+  },
+  "loaded_extension_verification_probes": 4,
+  "total_probes": 100,
+  "passed": 100,
+  "sigsegv": 0,
+  "timeouts": 0,
+  "actual_crash_stack_captured": false,
+  "actual_crash_core_captured": false,
+  "max_concurrent_test_children": 3,
+  "positive_observations": [
+    "Every probe reported expected transport_error for the synthetic invalid TLS hostname and exited0.",
+    "Every probe reached asyncio-run return and Python atexit markers.",
+    "All native debugger event files report exit0 and no stopped signal.",
+    "Four additional probes explicitly asserted actual loaded extension path and SHA.",
+    "No HTTP request crossed the invalid-hostname TLS boundary."
+  ],
+  "controls": [
+    "Generated local CA and synthetic-invalid credential only.",
+    "Minimal constructed child environment; no inherited provider credentials, proxy environment, user site or user debugger startup.",
+    "GDB debuginfod disabled, ASLR preserved, stop/backtrace/gcore configured only for owned child on unexpected stop.",
+    "No forced garbage collection, arbitrary sleep or manual runtime shutdown.",
+    "No OS trust/core-pattern changes and no repository/shared target/installed package changes."
+  ],
+  "artifact_sha256": {
+    "run_probes.py": "fff610363f151e5a94ab3bd5e1ba278f2b4d97deb24bb3a484fa596cd7c39328",
+    "probe.py": "8e07b04afcc9f8183598c0f571f6ef35f519f4209127e58b5a6e1b5bcdbd5956",
+    "provenance.json": "eb58710e80051d47fea51e74fafe606f4a2874f02747e4a3f2a158b4771cdee2",
+    "results.json": "3f3c2ee5a8c5662d9b8a38bc501b6559929373553df773953eb26f1e6b25cf63",
+    "summary.json": "1124c633487d7ed3dad75b6332016a1eb553d4bdff557bf4b4c9a50808c7fc98",
+    "verify_loaded_extension.py": "400dd1d0cbb72d0df3727e4e4819521ebf60935e1c2e4be718a2648bde2dd028",
+    "loaded-extension-verification/summary.json": "01c770e77e2bc34d7834716ad9c90ad04e9e215ab4d8934c5dacf602995a53cc"
+  },
+  "disposition": "Non-reproduction only. Original SIGSEGV remains unexplained and its reliability gate remains open; no fix or immunity established.",
+  "limits": [
+    "Debugger, explicit markers, isolated wheel path and minimal child environment differ from the original failing full binding suite and may alter timing.",
+    "The host WSL core handler is external; native core capture was configured through GDB in owned directories but no crash occurred.",
+    "Do not infer that TLS/native/PyO3 code is fixed or clear the retained failed evidence from these passes."
+  ]
+}

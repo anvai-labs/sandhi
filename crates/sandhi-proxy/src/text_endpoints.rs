@@ -187,6 +187,8 @@ pub(crate) fn decode(
         metadata,
     )?;
     request.extensions.clear();
+    // This is an admission-only projection, not an OpenAI Chat wire input.
+    request.native_input = None;
     request
         .extensions
         .insert("sandhi.input_multiplier".into(), json!(alternatives));

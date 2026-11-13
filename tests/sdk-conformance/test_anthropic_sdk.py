@@ -1,9 +1,10 @@
 """The Anthropic SDK, unmodified, against the proxy (TD-0010 D1/D5).
 
 This is the suite that would have caught the shipped defect. The proxy read only
-`Authorization: Bearer`, while `anthropic.Anthropic` authenticates with `x-api-key` — so every
+`Authorization: Bearer`, while the original SDK authenticated with `x-api-key` — so every
 stock client got a 401, and no test noticed because every test hand-rolled the header the proxy
-happened to want.
+happened to want. Current Anthropic SDK majors use Bearer authentication; the
+gateway preserves both presentations and uses anthropic-version for discovery.
 
 Nothing here sets a header by hand. `api_key=` is passed the way a user would pass it, and the SDK
 decides how to present it.
@@ -33,7 +34,7 @@ def test_messages_create_works_unmodified(client: anthropic.Anthropic, upstream)
     assert message.usage.input_tokens == 11
     assert message.usage.output_tokens == 3
 
-    # The SDK authenticated its own way (x-api-key) and the proxy accepted it — reaching the
+    # The SDK authenticated its own way and the proxy accepted it — reaching the
     # upstream at all is the proof, since a rejected credential never gets this far.
     assert upstream.last().path.endswith("/v1/messages")
 

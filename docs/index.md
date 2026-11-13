@@ -1,10 +1,40 @@
-# Every model call, accounted for
+# Control egress. Reuse context. Account for every token.
 
 Sandhi routes AI requests, applies access policy and measures usage in **neutral
 units**. Use the standalone gateway for enforcement or the library for metering.
-Pricing and billing belong to downstream systems.
+Cache-aware routing helps agents reuse repeated context across supported API
+dialects; optional local ONNX evaluation supports content policy before provider
+dispatch. Pricing and billing belong to downstream systems.
 
 <div class="grid cards" markdown>
+
+- **Reuse context across agent APIs**
+
+    Compile declared cache intent for the selected backend. Preserve marker
+    boundaries and measure fresh, read and write tokens separately.
+
+    [Cache-aware routing and token efficiency →](product/cache-aware-routing.md)
+
+- **Inspect protocol and credential support**
+
+    Choose the client wire API separately from the backend protocol, source
+    qualifier and credential profile. Unsupported native state refuses explicitly.
+
+    [Protocol and credential matrix →](product/protocol-and-credential-matrix.md)
+
+- **Control outgoing content locally**
+
+    Apply configured egress rules with optional embedded ONNX evaluation.
+    The shipped classifier audits; deterministic rules own its blocks.
+
+    [Local ONNX and egress policy →](operator/sensitive-policy.md)
+
+- **Verify the token benefit**
+
+    Live Z.AI probes reported 3,776 reused tokens out of 3,781 input tokens.
+    Read the evidence and its limits; cache-read share is not cost saved.
+
+    [See the measured split →](product/cache-aware-routing.md#measured-example-3776-reused-tokens-5-fresh-tokens)
 
 - **Connect with identity**
 
@@ -22,21 +52,40 @@ Pricing and billing belong to downstream systems.
 
     Separate observed usage from persisted evidence and committed accounting.
 
-    [Explore tracked accounting →](operator/buffered-accounting.md)
+    [Inspect durable execution →](operator/buffered-accounting.md)
 
 </div>
 
+!!! info "Cache routing is a development candidate"
+    Sandhi **0.17.0** and Victor **0.29.0** are prepared, unpublished source versions.
+    Explicit backend/cache policy and strict source qualification are implemented;
+    live Z.AI evidence belongs to its recorded endpoint/source configuration.
+    The current candidate also separates provider labels from immutable budget
+    scopes, requires one durable HTTP execution owner and records supported same-owner
+    source-issued native proofs on that ledger. Exact-source public CI, packaging,
+    deployment and broader external-resource/provider lifecycle acceptance remain in
+    [TD-0034](td/TD-0034-protocol-neutral-router-cache-accounting.md). A docs build
+    does not release or deploy these changes.
+
 ## One request, two responsibilities
+
+The console's **Routing & cache guide** (`/dashboard#flow-section`) and the
+[visual cache/token guide](product/cache-aware-routing.md) follow the same operator
+workflow: inspect the client dialect, selected backend/cache policy, local egress
+rules and original source evidence. Client response counters, dashboard observations
+and committed source receipts are separate views of that work. The
+[protocol and credential matrix](product/protocol-and-credential-matrix.md) keeps
+client dialects, backend qualification and subscription boundaries distinct.
 
 ```mermaid
 flowchart LR
-    A[Agent or application] --> B[Identity and policy]
-    B --> C[Budget admission]
-    C --> D[Provider transport]
-    D --> E[Model provider]
-    E --> F[Usage observation]
-    F --> G[Accounting ledger]
-    F -. best effort .-> H[Dashboard and telemetry]
+    A[Agent API] --> B[Identity and local egress policy]
+    B --> C[Declared backend and one cache compiler]
+    C --> D[Paired durable admission]
+    D --> E[One source dispatch]
+    E --> F[Qualified source evidence]
+    F --> G[Original paired receipt]
+    F -. best effort .-> H[Dashboard observations]
 ```
 
 | Responsibility | Standalone gateway | In-process library |
@@ -46,11 +95,21 @@ flowchart LR
 | Enforce proxy budgets and admission | Yes, single node | No proxy ledger enforcement |
 | Price usage or bill customers | Downstream responsibility | Downstream responsibility |
 
-## Released changes and their adoption gates
+## Earlier release evidence and adoption gates
 
 The [published 0.14.0 release](releases/v0.14.0.md) includes Codex transport fixes,
 opt-in Rust allowance arithmetic and Rustls security repairs. Every artifact target
 is verified; consumer adoption and managed deployment remain separate gates.
+
+!!! info "Current source: one durable HTTP execution contract"
+    The current source requires the original `SANDHI_STORE` path and one ledger
+    shard for every HTTP generation call. Client/upstream admission and measured
+    settlement share one owner; the permissive execution mode is removed.
+    Pure provider FFI stays ledger free. Follow the
+    [migration and capability check](operator/buffered-accounting.md) and verify
+    `capabilities.execution_accounting == "paired_durable_v1"` on your actual
+    binary before qualification. Current source behavior does not establish
+    publication or managed deployment.
 
 !!! warning "Release verified; managed adoption remains pending"
     Tracked buffered accounting is opt-in in the [published 0.12.0 release](releases/v0.12.0.md).
@@ -74,6 +133,9 @@ contracts, design history and co-design snapshots.
 
 | Your task | Guide |
 |---|---|
+| Inspect usage, routing and management in one console | [Operator console](operator/dashboard.md) · open `/dashboard` on your gateway |
+| Reuse agent context and understand cache marker/token semantics | [Cache-aware routing](product/cache-aware-routing.md) · [backend configuration](operator/backends.md) |
+| Evaluate outgoing text locally before provider dispatch | [Embedded ONNX](operator/embedded-onnx.md) · [sensitive-text policy](operator/sensitive-policy.md) |
 | Let people sign in and assign roles | [OIDC setup](operator/oidc-sso.md) · [groups and delegated keys](operator/identity-groups.md) |
 | Set global, endpoint or model deadlines | [Buffered calls](operator/buffered-deadlines.md) · [streaming](operator/streaming-deadlines.md) |
 | Understand cache counts and missing measurements | [Cache reporting](adr/0010-cache-read-reporting-availability.md) |

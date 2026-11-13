@@ -2,8 +2,9 @@
 
 Gemini is the first dialect whose **model and streaming choice live in the URL**
 (`/v1beta/models/{model}:generateContent`) rather than the body, and whose credential is
-`x-goog-api-key`. D4a admits it on the transparent plane only: a Gemini client must resolve to a
-Gemini upstream, where the body is forwarded byte-for-byte and metered in flight.
+`x-goog-api-key`. Same-family traffic uses the transparent plane; D4b also admits
+cross-family translation, including the OpenAI-backed SDK case below. Native
+feature fidelity beyond the existing cases remains part of TD-0034.
 
 The `?key=` query form Google also documents is deliberately NOT accepted — it would put a live
 virtual key into access logs and crash reports. That gap is stated in the README matrix rather
@@ -65,14 +66,15 @@ def test_streaming_works_unmodified(client, upstream):
     assert "alt=sse" in upstream.last().path
 
 
-def test_the_query_key_form_is_not_accepted(proxy: str):
+@pytest.mark.parametrize("api_version", ["v1", "v1beta"])
+def test_the_query_key_form_is_not_accepted(proxy: str, api_version):
     """`?key=` is a documented Gemini scheme we deliberately refuse (TD-0010 D4a).
 
     Accepting it would put a live virtual key in a URL — access logs, crash reports, browser
     history. The refusal must be explicit, not incidental.
     """
     response = httpx.post(
-        f"{proxy}/v1beta/models/gemini-mock:generateContent",
+        f"{proxy}/{api_version}/models/gemini-mock:generateContent",
         params={"key": VK_GEMINI},
         json={"contents": [{"role": "user", "parts": [{"text": "ping"}]}]},
         timeout=10,
@@ -80,10 +82,11 @@ def test_the_query_key_form_is_not_accepted(proxy: str):
     assert response.status_code == 401
 
 
-def test_errors_come_back_in_googles_shape(proxy: str):
+@pytest.mark.parametrize("api_version", ["v1", "v1beta"])
+def test_errors_come_back_in_googles_shape(proxy: str, api_version):
     """A google-genai client classifies failures from `error.code` / `error.status`."""
     response = httpx.post(
-        f"{proxy}/v1beta/models/gemini-mock:generateContent",
+        f"{proxy}/{api_version}/models/gemini-mock:generateContent",
         headers={"x-goog-api-key": "vk_not_a_real_key"},
         json={"contents": [{"role": "user", "parts": [{"text": "ping"}]}]},
         timeout=10,
@@ -94,11 +97,12 @@ def test_errors_come_back_in_googles_shape(proxy: str):
     assert error["status"] == "UNAUTHENTICATED"
 
 
-def test_an_unsupported_method_is_refused_in_googles_shape(proxy: str):
+@pytest.mark.parametrize("api_version", ["v1", "v1beta"])
+def test_an_unsupported_method_is_refused_in_googles_shape(proxy: str, api_version):
     # countTokens is SUPPORTED now (ADR-0014) — embedContent stands in as the
     # still-unsupported method this 501 shape pins.
     response = httpx.post(
-        f"{proxy}/v1beta/models/gemini-mock:embedContent",
+        f"{proxy}/{api_version}/models/gemini-mock:embedContent",
         headers={"x-goog-api-key": VK_GEMINI},
         json={"content": {"parts": [{"text": "ping"}]}},
         timeout=10,
@@ -107,18 +111,25 @@ def test_an_unsupported_method_is_refused_in_googles_shape(proxy: str):
     assert response.json()["error"]["status"] == "UNIMPLEMENTED"
 
 
-def test_count_tokens_answers_in_googles_shape(proxy: str):
+@pytest.mark.parametrize("api_version", ["v1", "v1beta"])
+def test_count_tokens_answers_in_googles_shape(proxy: str, api_version):
     # ADR-0014 D1: counting runs the full pre-dispatch pipeline and answers
     # from the body alone — Gemini clients (Antigravity class) get a
     # spec-shaped totalTokens without a generation.
     response = httpx.post(
-        f"{proxy}/v1beta/models/gemini-mock:countTokens",
+        f"{proxy}/{api_version}/models/gemini-mock:countTokens",
         headers={"x-goog-api-key": VK_GEMINI},
         json={"contents": [{"role": "user", "parts": [{"text": "ping"}]}]},
         timeout=10,
     )
     assert response.status_code == 200
     assert response.json()["totalTokens"] > 0
+
+
+def test_count_tokens_works_unmodified(client):
+    # This is Sandhi's admission estimate, not the vendor's exact tokenizer.
+    response = client.models.count_tokens(model="gemini-mock", contents="ping")
+    assert response.total_tokens > 0
 
 
 def test_models_list_works_unmodified(client):

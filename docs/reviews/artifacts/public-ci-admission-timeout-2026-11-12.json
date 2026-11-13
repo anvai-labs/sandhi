@@ -1,0 +1,146 @@
+{
+  "schema_version": 1,
+  "evidence_kind": "public_ci_failure",
+  "commit": "45b2ae118df25a1a6d6afcd39daf973dbd14d5a4",
+  "run_url": "https://github.com/anvai-labs/sandhi/actions/runs/43208267099",
+  "failed_job_id": 131148979877,
+  "failed_job": "rust",
+  "failed_command": "cargo test -p sandhi-proxy -p sandhi-store --features sentinelpass-ipc --locked",
+  "test": "tracked_typed_streams_join_all_ingress_formats_to_source_usage_and_paired_receipts",
+  "cell": {
+    "source_profile": "messages_implicit",
+    "ingress": "gemini",
+    "mode": "malformed",
+    "expected_http": 200,
+    "actual_http": 502
+  },
+  "warning": {
+    "phase": "admission",
+    "reason": "wait_timeout",
+    "request_id": "req_1794483399643_449"
+  },
+  "origin_call_count": null,
+  "receipt_count": null,
+  "limits": [
+    "Request-ID suffix is not an origin-call counter.",
+    "Public log does not provide a durable attempt/receipt join for the failed cell.",
+    "Same failure shape as retained local admission timeout; root cause remains unproven.",
+    "Passing SDK/dashboard, docs and earlier stress runs do not resolve the reliability gate."
+  ],
+  "failed_log_sha256": "affef8d0eedab1526aeeb005809470722d1716c61cbe9228d64ba6f80d8baaa3",
+  "public_runners_verified": true,
+  "jobs": [
+    {
+      "name": "lint-title",
+      "runner_name": "GitHub Actions 1000350276",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "conclusion": "success"
+    },
+    {
+      "name": "changes",
+      "runner_name": "GitHub Actions 1000350277",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "conclusion": "success"
+    },
+    {
+      "name": "attribution",
+      "runner_name": "GitHub Actions 1000350278",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "conclusion": "success"
+    },
+    {
+      "name": "security",
+      "runner_name": "GitHub Actions 1000350280",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "conclusion": "success"
+    },
+    {
+      "name": "python-binding",
+      "runner_name": "GitHub Actions 1000350281",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "conclusion": "success"
+    },
+    {
+      "name": "Python manylinux aarch64 wheel",
+      "runner_name": "GitHub Actions 1000350284",
+      "labels": [
+        "ubuntu-24.04-arm"
+      ],
+      "conclusion": "success"
+    },
+    {
+      "name": "rust",
+      "runner_name": "GitHub Actions 1000350288",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "conclusion": "failure"
+    },
+    {
+      "name": "Release safeguards",
+      "runner_name": "GitHub Actions 1000350283",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "conclusion": "success"
+    },
+    {
+      "name": "schema",
+      "runner_name": "GitHub Actions 1000350289",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "conclusion": "success"
+    },
+    {
+      "name": "node-binding",
+      "runner_name": "GitHub Actions 1000350287",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "conclusion": "success"
+    },
+    {
+      "name": "coverage",
+      "runner_name": "GitHub Actions 1000350282",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "conclusion": "success"
+    },
+    {
+      "name": "codegen-drift",
+      "runner_name": "GitHub Actions 1000350286",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "conclusion": "success"
+    },
+    {
+      "name": "SDK conformance (real vendor SDKs)",
+      "runner_name": "GitHub Actions 1000350285",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "conclusion": "success"
+    },
+    {
+      "name": "CI Success",
+      "runner_name": "GitHub Actions 1000350291",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "conclusion": "failure"
+    }
+  ]
+}

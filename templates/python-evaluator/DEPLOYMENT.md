@@ -152,7 +152,6 @@ Both internal and published profiles have live acceptance: the internal profile 
 no host port binding and passes authenticated TLS readiness inside its isolated
 network; the published profile passes the remote-port test. Host and GPU variants still need acceptance on their target runtime.
 
-Hosted Linux CI runs the container smoke automatically. The self-hosted runner lane
-keeps the portable conformance/TLS tests and leaves Docker enforcement acceptance as
-an explicit target-runtime check; Docker/cgroup support is not assumed on those hosts.
-CI does not deploy or push the image.
+GitHub-hosted Linux CI runs the container smoke and portable conformance/TLS tests
+automatically. Host and GPU deployment environments still require their own Docker
+and cgroup acceptance. CI does not deploy or push the image.

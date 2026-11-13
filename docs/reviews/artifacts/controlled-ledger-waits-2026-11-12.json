@@ -1,0 +1,59 @@
+{
+  "evidence_kind": "controlled_owned_settlement_diagnostics",
+  "test": "diagnostics_distinguish_known_busy_backoff_from_a_sqlite_writer_wait",
+  "command": "cargo test -p sandhi-proxy --lib settlement::jobs::tests -- --nocapture",
+  "job_tests_passed": 24,
+  "test_source_sha256": "3896cf042932a41cbd3e293c83c6f3bae0ccd17ff2686aa81bd4a6a3d75d733a",
+  "log_sha256": "32949145eb18c7d00f79f5bfa6e657b37da6fe097ccf9870970111a3bbca72b1",
+  "cases": [
+    {
+      "block": "outer_mutex",
+      "completed_busy_returns": 4,
+      "completed_calls": 5,
+      "durable_join": {
+        "actual": 3,
+        "charged_tokens": 3,
+        "execution_id": "bbe4dd287bb232eb854c132753587246ac4bd100c25a2c7ddca3b021484380ef",
+        "receipt_id": "b524e70f7fe7500727b7d3260d3327a01f69079e6d8c1e84711c5080193d7a2d",
+        "reservation_id": 1,
+        "settled": 1
+      },
+      "ledger_backoff_us": 11412,
+      "ledger_busy_returns": 4,
+      "ledger_calls": 4,
+      "observed_stage": "known_busy_backoff",
+      "receipt_count": 1,
+      "settled_actual": 3,
+      "waiter_cancelled_without_consuming": true,
+      "waiting_stage": "known_busy_backoff"
+    },
+    {
+      "block": "sqlite_writer",
+      "completed_busy_returns": 0,
+      "completed_calls": 1,
+      "durable_join": {
+        "actual": 3,
+        "charged_tokens": 3,
+        "execution_id": "35f11807d281f3a68699fe02cf3cc791d8011f47504d7c65b5fa5c7a2c58bb93",
+        "receipt_id": "633b3758d3b14339830372a364df208c617387a24a570410207dfabe3a9bc13f",
+        "reservation_id": 1,
+        "settled": 1
+      },
+      "ledger_backoff_us": 0,
+      "ledger_busy_returns": 0,
+      "ledger_calls": 1,
+      "observed_stage": "record_terminal_call",
+      "receipt_count": 1,
+      "settled_actual": 3,
+      "waiter_cancelled_without_consuming": true,
+      "waiting_stage": "record_terminal_call"
+    }
+  ],
+  "limits": [
+    "Synthetic caller-supplied final usage, three neutral units per fixture; provider transport and inference are not exercised.",
+    "Each fixture has one unpaired reservation; the paired HTTP recovery evidence remains separate.",
+    "A cancelled ticket waiter does not cancel or consume the original accounting work.",
+    "Controlled causes validate diagnostic discrimination but do not identify the two retained spontaneous waits.",
+    "Stage/counter observations are not an atomic database view or authority for retries, dispatch or liability release."
+  ]
+}

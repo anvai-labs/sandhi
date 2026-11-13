@@ -9,6 +9,8 @@ emitted. This runs its own short-lived proxy rather than the session-scoped one,
 from __future__ import annotations
 
 import os
+import json
+import sqlite3
 import subprocess
 import time
 import urllib.error
@@ -20,15 +22,18 @@ from conftest import REAL_OPENAI_KEY, VK_OPENAI, MockUpstream, _free_port
 
 
 @pytest.fixture
-def verbose_proxy(proxy_binary, upstream: MockUpstream):
+def verbose_proxy(proxy_binary, upstream: MockUpstream, tmp_path):
     """A proxy with debug logging, torn down so its stderr can be read."""
     port = _free_port()
     env = {
-        **os.environ,
+        **{key: value for key, value in os.environ.items()
+           if not key.startswith(("SANDHI_", "SENTINELPASS_"))},
         "SANDHI_AUTH_MODE": "tokens", "SANDHI_BIND": f"127.0.0.1:{port}",
         "SANDHI_OPENAI_KEY": REAL_OPENAI_KEY,
         "SANDHI_OPENAI_BASE": upstream.base_url,
         "SANDHI_LOG": "debug",
+        "SANDHI_STORE": str(tmp_path / "observability.db"),
+        "SANDHI_LEDGER_SHARDS": "1",
     }
     proc = subprocess.Popen(
         [str(proxy_binary)],
@@ -51,7 +56,7 @@ def verbose_proxy(proxy_binary, upstream: MockUpstream):
         proc.kill()
         raise AssertionError("proxy did not become healthy")
 
-    yield base, proc
+    yield base, proc, tmp_path / "observability.db"
 
     proc.terminate()
     try:
@@ -60,27 +65,48 @@ def verbose_proxy(proxy_binary, upstream: MockUpstream):
         proc.kill()
 
 
-def _stderr_after_request(verbose_proxy) -> str:
-    base, proc = verbose_proxy
+def _stderr_after_request(verbose_proxy, *, explicit_limit=False) -> str:
+    base, proc, database = verbose_proxy
     response = httpx.post(
         f"{base}/v1/chat/completions",
         headers={"authorization": f"Bearer {VK_OPENAI}"},
-        json={"model": "gpt-mock", "messages": [{"role": "user", "content": "ping"}]},
+        json={"model": "gpt-mock", "messages": [{"role": "user", "content": "ping"}],
+              **({"max_tokens": 64} if explicit_limit else {})},
         timeout=10,
     )
     assert response.status_code == 200, response.text
+    request_id = response.headers["x-sandhi-request-id"]
     proc.terminate()
     _out, err = proc.communicate(timeout=15)
+    assert proc.returncode == 0
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute(
+            "SELECT a.evidence_json,o.usage_json,s.charged_tokens FROM budget_request_correlation c "
+            "JOIN budget_physical_attempt a USING(execution_id) "
+            "JOIN budget_terminal_observation o USING(execution_id) "
+            "JOIN budget_execution_intent i USING(execution_id) "
+            "JOIN budget_settlement_outbox s ON s.reservation_id=i.reservation_id "
+            "WHERE c.request_id=?", (request_id,),
+        ).fetchall()
+        assert len(rows) == 1
+        attempt, usage = map(json.loads, rows[0][:2])
+        assert attempt["attempt_ordinal"] == 1 and attempt["terminal"]["provider_status"] == 200
+        assert usage["completeness"] == "final"
+        assert (usage["tokens_in"], usage["cache_read_tokens"], usage["tokens_out"]) == (7, 4, 3)
+        assert rows[0][2] == 14
+        assert connection.execute("SELECT settled,actual FROM budget_reservation").fetchall() == [(1, 14)] * 2
     return err.decode(errors="replace")
 
 
-def test_plane_selection_is_observable(verbose_proxy):
+@pytest.mark.parametrize("explicit_limit,plane", [(True, "transparent"), (False, "translation")])
+def test_plane_selection_is_observable(verbose_proxy, explicit_limit, plane):
     """The ADR-0004 adoption signal: which plane served the call (TD-0011 D6)."""
-    logs = _stderr_after_request(verbose_proxy)
+    logs = _stderr_after_request(verbose_proxy, explicit_limit=explicit_limit)
 
     assert "plane selected" in logs, f"no plane event emitted; got:\n{logs[-2000:]}"
-    # Same family in this fixture (OpenAI ingress -> OpenAI upstream), so the byte-exact plane.
-    assert "transparent" in logs
+    # Same-family delivery stays transparent with an explicit bound. Injecting
+    # the canonical default output bound selects the typed translation plane.
+    assert plane in logs
     # Bounded fields are present and useful.
     assert "provider" in logs and "gpt-mock" in logs
 

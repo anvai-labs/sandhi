@@ -1,0 +1,3 @@
+# Shared by local wheel checks, CI, ARM interpreter checks and glue coverage.
+pytest==8.4.1
+pytest-asyncio==1.1.0

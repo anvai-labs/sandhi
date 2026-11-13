@@ -19,6 +19,147 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-11-13
+
+### Upgrade and compatibility
+
+- **HTTP generation now requires durable accounting.** Set `SANDHI_STORE` to the
+  **same existing ordinary file** and leave `SANDHI_LEDGER_SHARDS` unset or set
+  exactly `1`. In-memory/URI stores and unsupported shard counts refuse startup
+  before stores open. Remove `SANDHI_BUFFERED_ACCOUNTING` entirely: every supplied
+  value, including `tracked` or `off`, is rejected. There is no permissive HTTP
+  execution branch. Quiesce old writers and back up the complete store before
+  upgrading; multi-shard installations require an explicit offline migration.
+- Preserve existing caps, windows, Block/Warn policies, settled spend, live holds,
+  deduplication history and compatible route pins on that original ledger. New
+  paired evidence does not backfill old rows or rename upstream scopes. Unknown
+  tracked usage remains held through expiry/restart; historical unpaired expiry
+  retains its previous semantics. Do not downgrade an old writer onto new tracked
+  evidence. See the [upgrade checklist](docs/releases/v0.17.0.md).
+- Upgrade the sole coordinated consumer to Victor **0.29.0**, with the exact
+  `sandhi-gateway==0.17.0` dependency. Ordinary typed buffered and streaming calls
+  now use the same strict source validation and native/portable fidelity rules as
+  accounted calls. Physical handles are retry-free; unrepresentable state and
+  invalid terminal usage refuse instead of silently completing or replaying.
+  Package version **0.17.0** communicates this semantic migration. Usage/chat wire
+  schema **v1** remains unchanged; additive chat contract minor **13**, count
+  convention versions and persisted evidence versions are separate contracts.
+- Chat requests without an output limit receive an operator-owned default of
+  **4,096**, configurable by `SANDHI_DEFAULT_MAX_OUTPUT_TOKENS`; a declared model
+  ceiling can narrow the default. Explicit caller limits remain explicit. Streams
+  default to **30 s setup / 90 s idle / 180 s body**, under a **240 s ceiling**;
+  configured route policies can override them. These are estimated admission and
+  lifetime controls, not universal physical token guarantees; constrained Codex
+  retains its codec's omitted wire maximum. Native Text
+  Completions retains its explicit `max_tokens=16` default; Embeddings is input-only.
+- Public Rust `serve*` entry points initialize/validate the same owner and supervise
+  recovery, active responses and bounded shutdown. Native-reference proof storage
+  initializes privately on the original ledger before serving; no second ledger
+  or registry setup is required. Operator-only app construction remains read-only,
+  unready and unable to generate. Provider FFI remains ledger-free.
+- Native-reference lookup/issuance jobs remain lifecycle-owned through actual
+  completion after caller cancellation. Transient SQLite contention uses one
+  original request budget, shortened by shutdown; frames cannot restart it.
+  Proof commits before native bytes are exposed, without replaying inference.
+  See the [correction evidence](docs/reviews/native-proof-work-2026-11-13.md).
+
+### Added
+
+- **Protocol-neutral routing and explicit gateway peers:** Chat Completions,
+  Messages, Responses and Gemini clients select their wire dialect independently
+  of the authorized backend protocol/profile. Explicit `openai_terminal_chunk_usage`
+  and `anthropic_implicit_cache` profiles retain their declared conventions;
+  standard qualification stays strict. One response-boundary decision interprets
+  actual emitted counts. Caller headers cannot
+  grant Codex, credential, account or budget authority. Victor forwards cache intent
+  for one server compilation and omits obsolete gateway idempotency headers.
+- **One durable execution path:** new admissions freeze the selected backend,
+  model, cache plan, policy and paired scopes; one physical source attempt joins
+  qualified usage before one atomic paired receipt. Missing/invalid usage retains
+  both liabilities. Delivery or accounting failure never authorizes model replay.
+  Warn stays a soft-cap policy, with the same durable/storage requirements as Block.
+- **Immutable upstream budget authority:** backend records retain their stored
+  `upstream_budget_scope` independently of configured provider labels. Migration,
+  updates and restart preserve existing scope authority, caps, spend, holds and
+  compatible v1 binding/route/cache digests. Attempt evidence v2 adds bounded
+  diagnostic labels; those labels do not select charges or authorization.
+- **Same-owner native continuation proof:** source-issued supported IDs and opaque
+  state are recorded as bounded digests on the original ledger before delivery.
+  Matching owner/binding proof survives restart; foreign, expired, changed-binding
+  or unknown state refuses before inference. Resource IDs remain exclusive;
+  independently reissued self-contained opaque values need each owner's own
+  source issuance. Externally created resources have no implicit adoption path.
+- Qualified buffered and bounded streaming sources for Chat, Messages, standard
+  Responses, Gemini, constrained Codex, Cohere v2 and Ollama. Cohere uses actual
+  token counts separately from billed units; Ollama cached input is a reported
+  subset of its prompt total. Native OpenAI-compatible Text Completions and
+  Embeddings retain their endpoints under the same paired owner.
+- Explicit cache-intent and backend/model capability compilation: native marker
+  precedence, suppression, scoped OpenAI keys and credential-generation fencing.
+  Chat contract minors 11–13 add ordered native input, opt-in native SSE attachments
+  and portable cache intent without changing wire schema v1. Compatible native
+  state is preserved; unsupported translation refuses rather than dropping it.
+- Backend registry/config/admin/CLI lifecycle, fixed `backend/<id>` routes,
+  logical model aliases, priority/rendezvous selection and durable compatible
+  session affinity. Credential, account, revision and model fences prevent silent
+  rerouting or incompatible state reuse.
+- Navigable operator-console workspaces with execution-contract/readiness facts,
+  immutable budget scopes, bounded evidence lookup and disjoint token visuals.
+  The console and prominent MkDocs routing/cache guide explain the same mechanism
+  alongside local ONNX egress control. Observed units, source receipts and client
+  delivery remain distinct. Cache-read share is not a USD saving or billing claim.
+- Nonpublishing native-artifact CI on public GitHub-hosted runners, including
+  macOS ARM64 and Windows x86_64 Python 3.11–3.13 wheels and macOS ARM64 Node.
+  Exact host/tag/installed-extension checks and aggregate gating complement
+  existing Linux tests. Private and overflow runner routing is removed.
+
+### Fixed
+
+- Strict source EOF/terminal/count validation now applies to ordinary buffered
+  and streaming typed delivery as well as HTTP accounting. Missing, malformed,
+  contradictory or unavailable usage cannot become measured final zero.
+- Qualified source usage survives output-projection refusal. Compatible native
+  signatures, encrypted reasoning, ordered output and complete SSE frames are
+  preserved; portable output refuses meaningful unrepresented state. Known terminal
+  refusals remain nonretryable through explicit peers and Victor recovery paths.
+- Messages terminal usage can replace initial zero placeholders field by field.
+  Chat/Responses cache writes remain separate and are subtracted from inclusive
+  input once. Translated terminal usage preserves disjoint categories and reported
+  zero/absence; reasoning follows its recorded inclusion convention.
+- Gemini tool arguments reject malformed/duplicate-key/non-object values rather
+  than inventing objects; mixed tool-result/media turns retain their content.
+  Inline-image MIME aliases and standard/URL-safe base64 normalize consistently,
+  while native-compatible input keeps its original form.
+- Responses role-bearing input items, tool outputs and generation outcomes retain
+  their native meaning. Constrained Codex aggregation carries terminal-only content
+  and outcomes without replacing earlier portable content with sparse output.
+- All ingress protocols reject duplicate JSON keys before reservation/forwarding.
+  Credential/profile construction rejects unimplemented generic OAuth; use explicit
+  API-key or externally managed Bearer API transport. Gemini Bearer uses Bearer auth.
+
+### Verification and scope
+
+- The [integrated qualification record](docs/reviews/cohesive-router-qualification-2026-11-12.md)
+  retains exact binary/wheel hashes and failures followed by corrections: 1,289
+  workspace tests, 341 Python tests, 88 Node tests, 1,991 Victor consumer tests and
+  eight real framework/tool-loop cases. The earlier full SDK run's four obsolete
+  browser assertions are retained alongside the corrected five-journey pass;
+  they are not relabeled as a single all-green run.
+- Recorded live GLM qualification covers four client dialects × three advertised
+  endpoints × buffered/streaming, with repeated cache probes. Successful portable
+  Messages cells explicitly disable thinking; default-output refusals remain
+  negative fidelity evidence with source receipts. This is API-key Coding Plan
+  evidence, not live first-party Anthropic OAuth or Codex subscription acceptance.
+- Current Linux shutdown/TLS/public-serving/watchdog probes pass within unchanged
+  deadlines. Historical native Python TLS exits, shutdown timing and accounting
+  waits remain retained; passing follow-ups do not diagnose their causes, establish
+  a failure-rate bound or prove those occurrences fixed.
+- Release publication remains governed by the exact reviewed commit, successful
+  applicable public CI and [release safeguards](RELEASING.md). Local results or this
+  dated changelog do not establish a merged promotion, published artifact or
+  deployed upgrade. External cache/file/retrieval adoption, arbitrary provider
+  extensions and first-party Claude Pro/Max OAuth relay are outside this release.
+
 ## [0.16.2] — 2026-11-09
 
 ### Fixed

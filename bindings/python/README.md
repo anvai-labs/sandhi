@@ -58,11 +58,53 @@ async for event_json in provider.stream_json(json.dumps(request)):
     event = json.loads(event_json)  # response_start, text_delta, tool_call_*, usage, finish
 ```
 
+At contract minor 12, streaming requests can set `include_native_stream: true` for
+Chat, Messages, Responses and Gemini handles. Default is false; other families
+reject true. Opt-in adds `native_frame` events alongside canonical events. Render
+the native frames or the canonical content, and meter canonical usage once. Native
+frames preserve opaque provider state but do not make it portable across backends.
+
+Minor 13 adds optional `cache_intent`, for example `{"mode":"suppress_gateway"}`.
+Suppression preserves native controls and adds no gateway markers; it cannot turn
+off provider-internal caching. Direct unconfigured handles accept preserve/suppress
+and refuse undeclared automatic capabilities before HTTP. Registered gateway
+backends can declare exact model/lifetime support; the internal compiled plan is
+excluded from JSON and schema. See the [backend guide](../../docs/operator/backends.md).
+
 The JSON bridge carries typed v1 data, not provider-native JSON. The handle retains its HTTP pool,
 circuit breaker, retry policy, and timeouts. Invalid documents fail before network I/O; runtime
 failures raise `SandhiProviderError`, whose message contains a serialized `ProviderErrorV1`.
-`runtime.provider()` resolves a known endpoint from Sandhi's catalog;
-`runtime.openai_compat()` is the explicit custom-endpoint escape hatch.
+`runtime.provider()` resolves catalog defaults or accepts an explicit protocol and
+base URL. The provider label does not constrain an explicitly selected protocol:
+
+```python
+provider = runtime.provider(
+    "my-coding-backend", "my-model", api_key,
+    base_url="https://api.z.ai/api/coding/paas/v4",
+    protocol="chat_completions",
+    endpoint_profile="openai_terminal_chunk_usage",
+    max_retries=0,
+)
+```
+
+Use `anthropic_messages`, `responses` or `gemini_generate_content` for those wire
+families. Profiles default to `standard`; compatible nonstandard Messages endpoints
+can explicitly select `anthropic_implicit_cache`. Profiles configure the immediate
+source and are never request-body parameters. They do not grant subscription or
+vault authority. See [shared endpoint profiles](../../docs/adr/0039-shared-embedded-endpoint-profiles.md)
+for constraints. For a gateway second hop, use the explicit
+[gateway peer contract](../../docs/adr/0041-explicit-gateway-peer-contract.md);
+provider profiles describe direct upstream sources.
+`runtime.openai_compat()` remains a convenience for custom standard Chat endpoints.
+
+Prepared 0.17.0 buffered calls use the same strict source usage qualification as
+accounted calls for Chat, Messages, Responses and Gemini, including Codex's
+constrained SSE aggregation. Missing/invalid counts or malformed known tool fields
+raise nonretryable `output_projection_error`; they cannot become final zero usage
+or empty executable arguments. Native envelopes retain opaque state; portable
+delivery explicitly refuses unsupported projections. Cohere v2 and Ollama also
+qualify native physical counts: Cohere billed units are not token totals, and
+absent cache fields remain unavailable. See [buffered qualification](../../docs/adr/0040-shared-buffered-source-qualification.md).
 
 Canonical streams may emit accounting-only `usage` events before content or after a
 numeric usage snapshot. When `usage.completeness` is `"unavailable"` and a valid
@@ -115,3 +157,47 @@ Unknown dimension → `ValueError`.
 
 Apache-2.0. See the [main README](https://github.com/anvai-labs/sandhi) and
 [ADR-0001](https://github.com/anvai-labs/sandhi/blob/main/docs/adr/0001-sandhi-architecture-and-wire-contract.md).
+
+
+### Connect the binding to a Sandhi gateway
+
+Set `peer_role="sandhi_gateway_v1"` and choose the **client** protocol explicitly.
+The gateway selects and authorizes its backend separately; do not copy a backend
+`endpoint_profile` or Codex credential/account configuration onto this handle.
+
+```python
+provider = runtime.provider(
+    "agent-client", "logical-model", virtual_key,
+    base_url="https://gateway.example/v1",
+    protocol="chat_completions",
+    peer_role="sandhi_gateway_v1",
+    max_retries=0,
+)
+```
+
+Use the root base for Messages, `/v1` for Chat/Responses and `/v1beta` for Gemini.
+The gateway requires HTTPS or loopback HTTP and Bearer authentication. Typed
+`cache_intent` is forwarded for one server-side policy compilation; the client
+needs no selected-backend capability configuration. Unsupported server policy
+still refuses before dispatch. Native/portable fidelity checks remain active.
+
+The explicit peer validates the server's counts-convention header before decoding;
+metadata cannot activate Codex transport or grant backend authority. Its observed
+wire counts can differ from original source categories after translation, notably
+Gemini cache writes and inclusive reasoning output. Consult gateway source evidence
+and receipts for accounting. See the [gateway peer contract](../../docs/adr/0041-explicit-gateway-peer-contract.md)
+for protocol bases, conventions, boundaries and synthetic qualification.
+
+
+## Testing the binding
+
+Use an isolated virtual environment with the shared test requirements before
+running the suite. The asynchronous provider tests require pytest-asyncio;
+pytest alone cannot execute them.
+
+```bash
+python -m pip install -r bindings/python/requirements-test.txt
+python -m pytest bindings/python/tests/ -q
+```
+
+The CI wheel, ARM interpreter and coverage paths use this same dependency file.

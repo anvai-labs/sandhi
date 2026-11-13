@@ -18,7 +18,7 @@ key, and set per-user budgets — without hand-rolling provider APIs.
   unreleased features explicitly.
 - **Status:** early and released. The metering core, typed provider runtime, four proxy ingress
   dialects, operator surface, durable single-node lease ledger, rate limiting, observability/OTLP,
-  transparent metering, idempotent usage recording, and opt-in listener TLS are shipped. The
+  transparent metering, attributed usage recording, and opt-in listener TLS are shipped. The
   concise implementation status and active roadmap live in the
   [documentation map](docs/README.md), so this README does not freeze a release number or duplicate
   25 TD phase tables.
@@ -33,6 +33,23 @@ what,"* can't budget per person, and can't rate-limit a runaway user. And every 
 re-implements the same provider adapters + usage parsing — the exact place metering goes
 wrong. Sandhi is the single, fast, neutral implementation of both.
 
+**Context efficiency and egress control belong in the same call path.** The
+[cache-aware routing candidate](docs/product/cache-aware-routing.md) preserves
+eligible context boundaries, compiles declared backend controls and separates
+fresh, cache-read and cache-write source tokens. The operator console's
+**Routing & cache guide** (`/dashboard#flow-section`) and the MkDocs guide use the
+same request path, marker-placement diagrams and token vocabulary. Recorded live
+Z.AI probes demonstrate repeated-prefix reuse; they do not promise a percentage
+cost saving or qualify other endpoints. Client wire counters, observed dashboard
+units and original paired receipts remain separate evidence. The
+[protocol and credential matrix](docs/product/protocol-and-credential-matrix.md)
+distinguishes four client APIs, qualified backend sources and supported credential
+profiles, including the boundary between GLM Coding Plan and first-party Claude
+subscription OAuth.
+[Local policy and optional embedded ONNX](docs/operator/sensitive-policy.md)
+can inspect outgoing text before provider dispatch; the shipped classifier audits
+and deterministic rules own its blocks. Both complement identity and budgets.
+
 ## What it does
 
 - **Virtual keys** — one shared upstream key fronts many per-user keys; attribution and
@@ -40,9 +57,13 @@ wrong. Sandhi is the single, fast, neutral implementation of both.
 - **Per-user / per-team attribution** — every call tagged with `subject_id` / `group_id`.
 - **Budgets** — per-virtual-key / per-team **token** admission limits enforced by a lease ledger
   (reserve an estimate, settle measured usage by lease id), with calendar-aligned daily/monthly/total
-  **windows**, a block-or-**warn** policy, and threshold **alerts**. Set `SANDHI_STORE` and the
-  ledger is **durable**: spend, caps, and in-flight leases survive a restart, and dangling leases
-  are reclaimed. Without it the ledger is in-memory and a restart resets accrued spend.
+  **windows**, a block-or-**warn** policy, and threshold **alerts**. The current source
+  requires `SANDHI_STORE` and one file-backed ledger for HTTP generation: spend,
+  caps and in-flight leases survive restart. Both client and upstream budgets
+  share one admission and receipt. Only expiry-eligible leases are reclaimed;
+  unknown dispatch liabilities stay held. The former permissive HTTP execution
+  mode is removed; pure provider FFI remains ledger free. See the
+  [durable execution migration](docs/operator/buffered-accounting.md).
   These are **not strict total-token caps**: multiple in-flight calls can exceed their estimates.
   See [metering semantics and budget guarantees](docs/product/metering-and-budget-guarantees.md).
 - **Rate limits** — per-virtual-key requests/minute, enforced by a token bucket before the budget
@@ -81,8 +102,8 @@ Point the vendor's own SDK at Sandhi — change the `base_url` and the key, noth
 | client | ingress | drop-in | proven by |
 |---|---|---|---|
 | **OpenAI SDK** | `/v1/chat/completions`, `/v1/responses` | ✅ | `tests/sdk-conformance/` drives `openai-python` in CI |
-| **Anthropic SDK** | `/v1/messages` | ✅ | same suite drives `anthropic-python`, authenticating with `x-api-key` as the SDK does |
-| **Gemini SDK** | `/v1beta/models/{model}:generateContent` | ✅ *(header auth)* | same suite drives `google-genai`; the credential must be the `x-goog-api-key` **header** — the documented `?key=` query form is refused, since it would put a live virtual key in URLs and access logs |
+| **Anthropic SDK** | `/v1/messages` | ✅ | same suite drives pinned `anthropic-python`; both older `x-api-key` and current Bearer SDK presentations are supported |
+| **Gemini SDK** | `/v1/models/{model}:generateContent` and `/v1beta` | ✅ *(header auth)* | same suite drives pinned `google-genai`, including its current `/v1` default; the credential must be the `x-goog-api-key` **header** — the documented `?key=` query form is refused, since it would put a live virtual key in URLs and access logs |
 
 ```python
 client = anthropic.Anthropic(base_url="http://sandhi:8787", api_key="vk_…")   # unmodified
@@ -100,20 +121,14 @@ That table is a CI gate, not a claim: the suite starts the real proxy against a 
 drives it with the vendors' clients, so a dialect that stops being drop-in fails the build. Rows
 are added when they pass, never in advance.
 
-> **Prompt-cache safe (by design).** Sandhi preserves per-conversation cache affinity — it
-> never collapses users to a single session and carries attribution *outside* the cached
-> prompt, so hosted prompt caches keep hitting and self-hosted KV routing stays sticky. The
-> **content-faithful forwarding** that guarantees this on the proxy path is **live** as the
-> transparent-metering plane of
-> [ADR-0004](docs/adr/0004-two-plane-proxy-and-enforcement-boundary.md): when the ingress dialect
-> and the upstream are the same family, the proxy forwards the client's bytes verbatim — except a
-> minimal envelope normalization that injects usage-metering on OpenAI streams (ADR-0004 D1) — and
-> meters the stream as it passes. A hard-capped request that omits its output limit uses translation
-> instead so the proxy can inject an enforceable ceiling. Otherwise, provider-specific extras
-> (e.g. message-level Anthropic `cache_control` breakpoints) survive untouched. A
-> **cross-family** request still re-encodes through the neutral contract — faithful for standard
-> fields, but it can drop those extras. The in-process bindings, which never re-encode, are
-> unaffected.
+> **Cache intent, placement and evidence are separate.** Attribution travels outside
+> prompt text. Compatible native controls and ordered input are preserved on both
+> forwarding planes; explicit cache policy can apply bounded native patches or
+> typed encoding. Required incompatible cache controls are refused before dispatch.
+> The unreleased [backend/cache policy](docs/operator/backends.md) supports scoped
+> OpenAI keys and exact declared lifetimes; it does not guarantee a provider hit,
+> physical isolation or transferable KV state. Logical switching and backend/account
+> affinity remain [active work](docs/td/TD-0034-protocol-neutral-router-cache-accounting.md).
 
 ## The usage event
 
@@ -180,9 +195,15 @@ docs/td/                             # implementation designs and phase status
 docs/README.md                       # documentation map + current status index
 ```
 
-Configure [OIDC SSO](docs/operator/oidc-sso.md) and run the proxy with `SANDHI_STORE=usage.db` to persist events to SQLite and serve a self-hosted
-usage **dashboard** at `/dashboard` (per-user / per-team / per-provider totals; neutral units, no
-pricing).
+Configure [OIDC SSO](docs/operator/oidc-sso.md) and run the proxy with the required original
+`SANDHI_STORE=usage.db` file and one ledger shard; remove `SANDHI_BUFFERED_ACCOUNTING`.
+Follow the [0.17.0 upgrade checklist](docs/releases/v0.17.0.md) before reusing an installation.
+The proxy persists observations separately from paired receipts and serves a self-hosted
+[operator console](docs/operator/dashboard.md) at `/dashboard`. Navigable workspaces
+cover usage and cache-read evidence, backend/logical-route inventory, budgets,
+credentials, runs, policy and configuration. Per-user/team/provider totals remain
+neutral units; pricing stays downstream. The redesigned console and logical
+routing are workspace candidates tracked in TD-0034.
 
 ## Operating it
 

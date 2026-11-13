@@ -9,6 +9,10 @@ operator round-trip coverage, declarative-config parsing, and end-to-end
 proxy tests (including regression tests for the lease-release paths surfaced
 in review).
 
+The current workspace extends new tracked admissions with
+[atomic paired budget ownership](0023-paired-budget-settlement.md); default
+legacy behavior is preserved. This is a source candidate, not deployment evidence.
+
 Relates to [ADR-0005](0005-enforcement-correctness-reservation-ledger-observe-enforce-split.md)
 (the lease ledger — D1 reserve/settle, D2 rollback, D4 `billable()`, D6
 fail-open/closed), [ADR-0004](0004-two-plane-proxy-and-enforcement-boundary.md)
@@ -67,13 +71,12 @@ same conservative ceiling (`reservation_ceiling`, unchanged):
    front-denial check, so a front denial short-circuits without ever taking a
    back lease.
 
-**Tracked/buffered mode differs (known gap).** There the primary lease is
-admitted inside the settlement-jobs machinery, so the back lease is reserved
-*before* hand-off and released on every pre-dispatch refusal. A front-denied
-tracked call therefore takes and releases a back lease: one extra durable write
-and transient back-cap capacity, with zero recorded spend (pinned by the SDK
-conformance recovery tests). Aligning tracked admission with the front-first
-order above is follow-up work.
+**New tracked admissions use one transaction** for the front and upstream
+reserves, selected execution context and durable back-leg linkage. Either scope's
+denial commits no reservation or execution rows. Canonical settlement and restart
+recovery charge both together. See [ADR-0023](0023-paired-budget-settlement.md).
+Older released/unpaired tracked behavior reserved the upstream leg before jobs
+admission; new source no longer uses that path for new tracked HTTP calls.
 
 The back reserve runs while the front-scope `PendingAdmission` still owns its
 lease: a cancellation of the handler future at the back reserve's await point
@@ -96,16 +99,15 @@ it exactly once. On the legacy path the hold exists only briefly — after the
 back reserve, the front denial has already been checked and the
 deadline-infeasibility and cutoff guards have already run, so the remaining
 stretch to the accounting construction has no early returns; the hold is the
-invariant, not a busy guard. The buffered/tracked path is where the hold does
-real work: `settlement::buffered` receives the already-admitted back lease as
-parameters and wraps it in the hold **before any of its own guards**, so its
-refusals — the tracked-requirements 400, the transport-deadline guard,
-capacity, denied admission, authorization failure, cutoff — cannot leak a
-lease: ineligible traffic must not hold `reserved()` against a Block upstream
-cap until TTL reclaim. Every pre-dispatch refusal there settles it to 0.
+invariant, not a busy guard. This hold belongs to the legacy path. New tracked
+admission receives no independently owned upstream reservation; both belong to
+the same durable execution.
 
-An `upstream:*` scope under `Warn` on a ledger backend error admits
-**unmetered** (D6 fail-open), logged and counted like the front path.
+On the legacy path an `upstream:*` scope under `Warn` on a ledger backend error
+admits **unmetered** (D6 fail-open), logged and counted like the front path.
+Tracked mode requires a durable admission of both scopes and cannot substitute
+an unmetered upstream leg. A successful Warn admission still follows its existing
+limit semantics and records a durable reservation.
 
 ## D3. Settlement — same actual, finalize-time
 
@@ -119,45 +121,27 @@ configured limit, reusing the same helper — **on the legacy settlement path
 only**. Tracked/buffered mode fires no alerts for either scope (a pre-existing
 gap, unchanged by this ADR; the primary scope did not alert there either).
 
-In the tracked/buffered path the primary lease settles canonically through
-the settlement-jobs machinery. `finalize_owned` attaches the back lease and the
-call's measured actual (0 when unmeasured) to the primary's `PendingSettlement`
-before submitting it, and before any best-effort telemetry. The Settle work
-settles the back lease in the **same ledger critical section, as soon as the
-terminal observation is durably recorded** and before the primary receipt is
-attempted. A primary that then stays unresolved therefore never parks the back
-lease. Examples are an upstream error, missing or non-final usage, a failing
-receipt, or a crash before receipt recovery. Front-leg recovery from durable
-evidence never leaves the back leg undercounted. Settle is idempotent by lease
-id (ADR-0005 D2), so retained replays are no-ops.
+For new tracked admissions, canonical settlement inserts the primary receipt and
+updates both linked reservations in one SQLite transaction, with the same frozen
+charge and timestamp. Failure charges neither. Restart recovery uses the same
+API and original persisted charge; it never contacts the model. Missing or
+unqualified usage retains both liabilities, including after expiry. Explicit
+reported zero remains distinct from unavailable usage.
 
-If the observation itself cannot be recorded (ledger busy, SQLite failure), the
-back lease stays with the retained primary and settles when a retry records
-it. If that RAM owner is lost first, the lease is left to TTL reclaim (D4).
+A safe closure proven before dispatch authorization releases both atomically at
+zero, with closure evidence rather than a provider-usage receipt. Callback failure,
+client disconnect and an uncertain authorization do not establish such closure.
+Older unpaired tracked/library rows retain their original evidence/semantics;
+linkage is never guessed from scope or reservation ordering.
 
-A refused Settle submission settles the back lease directly. If the refused
-primary was retained and the process then exits before its terminal evidence
-is durable, the front is TTL-reclaimed at 0 while the back keeps the actual.
-This is the narrow mirror image of D4 and is accepted.
+## D4. Crash semantics — legacy expiry and tracked retained liability
 
-An earlier revision settled the back lease with a separate blocking ledger
-write in `finalize_owned`. Placed before submission, it stalled the receipt
-under SQLite contention. Detached after submission, it raced the primary's
-nonblocking `try_lock` and turned completed calls into
-`502 accounting unresolved`.
-
-On the legacy path, unfinalized calls (settle-on-drop) settle both leases
-through the existing drop path. In tracked mode the drop path does not settle
-once the owned accounting exists. A task that dies before `finalize_owned`
-leaves the back lease to TTL reclaim, like a crash.
-
-## D4. Crash semantics — TTL reclaim, no spend recorded
-
-The back lease does **not** participate in the buffered recovery registry or
-terminal-evidence machinery. A crash mid-call leaves the upstream lease held
-until TTL reclaim releases it **without recording spend** — accepted, exactly
-mirroring the existing D2 reclaim semantics for front leases. The exposure
-window is the reservation TTL, same as today's front leg.
+Default legacy upstream leases still expire without recording spend, matching
+the historical front-leg lease convention. New tracked pairs participate in the
+same durable execution/terminal/recovery machinery. A crash without qualified
+final usage retains both ceilings through expiry and restart. Durable final usage
+recovers one original receipt and both charges atomically. Held unknown liability
+can deny future admissions; no automatic release or inference replay is implied.
 
 ## D5. Cost — a second lease per call, even when no cap is set
 
@@ -171,6 +155,10 @@ who does not configure `upstream:*` caps pays only the extra writes. Reuse of
 a ledger connection pool keeps this bounded; the unconditional reserve was
 chosen over conditional reserving so the scope's `reserved()` reflects
 in-flight load uniformly and the code carries no second admission mode.
+
+New tracked pairs keep two reservation rows but share admission and settlement
+transactions; context/link/fence/receipt add durable evidence writes.
+Transaction sharing is not a throughput or latency benchmark claim.
 
 ## D6. Everything else reuses the generic scope machinery
 

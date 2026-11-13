@@ -2,8 +2,8 @@
 //! (`cache_creation_input_tokens` / `cache_read_input_tokens`) the meter depends on.
 
 use crate::{
-    error_for_response, metered_passthrough, ByteStream, ParsedUsage, Provider, ProviderError,
-    ProviderRequest, ProviderResponse,
+    metered_passthrough, ByteStream, ParsedUsage, Provider, ProviderError, ProviderRequest,
+    ProviderResponse,
 };
 use async_trait::async_trait;
 use sandhi_core::usage::u64_at;
@@ -23,22 +23,26 @@ pub enum AnthropicAuthScheme {
 /// together.
 pub struct Anthropic {
     client: reqwest::Client,
+    peer_role: sandhi_core::PeerRoleV1,
     base_url: String,
     api_key: String,
     version: String,
     auth_scheme: AnthropicAuthScheme,
     headers: http::HeaderMap,
+    usage_profile: sandhi_core::usage::AnthropicUsageProfile,
 }
 
 impl Anthropic {
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
         Self {
             client: crate::default_client(),
+            peer_role: Default::default(),
             base_url: base_url.into(),
             api_key: api_key.into(),
             version: ANTHROPIC_VERSION.to_string(),
             auth_scheme: AnthropicAuthScheme::ApiKey,
             headers: http::HeaderMap::new(),
+            usage_profile: Default::default(),
         }
     }
 
@@ -53,12 +57,27 @@ impl Anthropic {
         self
     }
 
+    /// Explicit response-usage convention for qualified Messages streaming.
+    #[must_use]
+    pub fn with_usage_profile(
+        mut self,
+        profile: sandhi_core::usage::AnthropicUsageProfile,
+    ) -> Self {
+        self.usage_profile = profile;
+        self
+    }
+
     /// Caller-supplied provider headers, transport-owned names stripped (TD-0022 D3: this
     /// family previously dropped `ProviderTransportConfig::headers` entirely, so gateway-path
     /// wire headers never reached the upstream).
     #[must_use]
     pub fn with_headers(mut self, headers: http::HeaderMap) -> Self {
         self.headers = crate::strip_transport_owned(headers);
+        self
+    }
+
+    pub(crate) fn with_peer_role(mut self, role: sandhi_core::PeerRoleV1) -> Self {
+        self.peer_role = role;
         self
     }
 
@@ -76,11 +95,16 @@ impl Anthropic {
 
 #[async_trait]
 impl Provider for Anthropic {
+    fn peer_role(&self) -> sandhi_core::PeerRoleV1 {
+        self.peer_role
+    }
+
     fn slug(&self) -> &str {
         "anthropic"
     }
 
     async fn complete(&self, req: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        let request_headers = crate::peer::request_headers(self.peer_role, &self.headers, &req);
         let attempt_context = req.attempt_context.clone();
         let model = req.model.clone();
         let mut body = req.body;
@@ -91,12 +115,14 @@ impl Provider for Anthropic {
             .client
             .post(self.messages_url())
             .header("anthropic-version", &self.version)
-            .headers(crate::merge_call_headers(&self.headers, &req.extra_headers))
+            .headers(request_headers)
             .json(&body);
-        crate::attempt::observe_complete(
+        crate::attempt::observe_complete_qualified(
             attempt_context,
             self.slug(),
             Some(&model),
+            sandhi_core::EndpointFamilyV1::AnthropicMessages,
+            self.usage_profile,
             |facts| async move {
                 let resp = self
                     .authenticate(request)
@@ -104,18 +130,32 @@ impl Provider for Anthropic {
                     .await
                     .map_err(|e| ProviderError::Transport(e.to_string()))?;
                 let status = resp.status().as_u16();
-                facts.record_headers(status, resp.headers(), Some("anthropic-request-id"));
+                facts.record_peer_headers(
+                    self.peer_role,
+                    status,
+                    resp.headers(),
+                    Some("anthropic-request-id"),
+                );
                 if !resp.status().is_success() {
-                    return Err(error_for_response(resp, Some("anthropic-request-id")).await);
+                    return Err(crate::peer::error_for_response(
+                        self.peer_role,
+                        resp,
+                        Some("anthropic-request-id"),
+                    )
+                    .await);
                 }
-                let body: Value = resp
-                    .json()
-                    .await
-                    .map_err(|e| ProviderError::Transport(e.to_string()))?;
+                let usage_convention = crate::peer::resolve(
+                    self.peer_role,
+                    sandhi_core::EndpointFamilyV1::AnthropicMessages,
+                    resp.headers(),
+                )?;
+                facts.record_usage_convention(usage_convention);
+                let body = crate::decode_response_json(resp).await?;
                 let (response_usage, observed_usage) =
                     crate::buffered_usage(sandhi_core::CacheReadFamily::Anthropic, &body);
                 Ok((
                     ProviderResponse {
+                        usage_convention,
                         status,
                         body,
                         usage: response_usage,
@@ -128,7 +168,77 @@ impl Provider for Anthropic {
         .await
     }
 
+    async fn stream_qualified(
+        &self,
+        req: ProviderRequest,
+        _delivery: crate::QualifiedStreamDelivery,
+    ) -> Result<crate::QualifiedProviderStream, ProviderError> {
+        let request_headers = crate::peer::request_headers(self.peer_role, &self.headers, &req);
+        let context = req.attempt_context.clone();
+        let model = req.model.clone();
+        let mut body = req.body;
+        body.as_object_mut()
+            .ok_or_else(|| {
+                ProviderError::InvalidRequest("Messages request must be a JSON object".into())
+            })?
+            .insert("stream".into(), Value::Bool(true));
+        let request = self
+            .client
+            .post(self.messages_url())
+            .header("anthropic-version", &self.version)
+            .headers(request_headers)
+            .json(&body);
+        crate::attempt::observe_qualified_stream(
+            context,
+            self.slug(),
+            Some(&model),
+            sandhi_core::EndpointFamilyV1::AnthropicMessages,
+            Default::default(),
+            self.usage_profile,
+            |facts| async move {
+                let response = self
+                    .authenticate(request)
+                    .send()
+                    .await
+                    .map_err(|error| ProviderError::Transport(error.to_string()))?;
+                facts.record_peer_headers(
+                    self.peer_role,
+                    response.status().as_u16(),
+                    response.headers(),
+                    Some("anthropic-request-id"),
+                );
+                if !response.status().is_success() {
+                    return Err(crate::peer::error_for_response(
+                        self.peer_role,
+                        response,
+                        Some("anthropic-request-id"),
+                    )
+                    .await);
+                }
+                let usage_convention = crate::peer::resolve(
+                    self.peer_role,
+                    sandhi_core::EndpointFamilyV1::AnthropicMessages,
+                    response.headers(),
+                )?;
+                facts.record_usage_convention(usage_convention);
+                let request_id = crate::peer::response_request_id(
+                    self.peer_role,
+                    response.headers(),
+                    Some("anthropic-request-id"),
+                );
+                use futures_util::StreamExt;
+                let raw: crate::raw::RawChunkStream =
+                    Box::pin(response.bytes_stream().map(|chunk| {
+                        chunk.map_err(|error| ProviderError::Transport(error.to_string()))
+                    }));
+                Ok((raw, request_id))
+            },
+        )
+        .await
+    }
+
     async fn stream(&self, req: ProviderRequest) -> Result<ByteStream, ProviderError> {
+        let request_headers = crate::peer::request_headers(self.peer_role, &self.headers, &req);
         let attempt_context = req.attempt_context.clone();
         let model = req.model.clone();
         let mut body = req.body;
@@ -139,7 +249,7 @@ impl Provider for Anthropic {
             .client
             .post(self.messages_url())
             .header("anthropic-version", &self.version)
-            .headers(crate::merge_call_headers(&self.headers, &req.extra_headers))
+            .headers(request_headers)
             .json(&body);
         crate::attempt::observe_stream(
             attempt_context,
@@ -151,14 +261,26 @@ impl Provider for Anthropic {
                     .send()
                     .await
                     .map_err(|e| ProviderError::Transport(e.to_string()))?;
-                facts.record_headers(
+                facts.record_peer_headers(
+                    self.peer_role,
                     resp.status().as_u16(),
                     resp.headers(),
                     Some("anthropic-request-id"),
                 );
                 if !resp.status().is_success() {
-                    return Err(error_for_response(resp, Some("anthropic-request-id")).await);
+                    return Err(crate::peer::error_for_response(
+                        self.peer_role,
+                        resp,
+                        Some("anthropic-request-id"),
+                    )
+                    .await);
                 }
+                let usage_convention = crate::peer::resolve(
+                    self.peer_role,
+                    sandhi_core::EndpointFamilyV1::AnthropicMessages,
+                    resp.headers(),
+                )?;
+                facts.record_usage_convention(usage_convention);
                 // Forward every upstream chunk verbatim (O(1) memory, ADR-0047 D9) while sniffing each
                 // complete line for usage. `metered_passthrough` is the single shared streaming
                 // primitive — the chunk-boundary property test exercises this exact path.
@@ -172,8 +294,9 @@ impl Provider for Anthropic {
     }
 }
 
-/// Accumulate usage from Anthropic SSE lines: input + cache from `message_start`, output from
-/// `message_delta` (cumulative).
+/// Merge cumulative usage from Messages SSE. Hosted Anthropic reports input/cache
+/// on message_start; compatible endpoints can replace placeholder counts in a
+/// message_delta. Missing fields must retain prior measurements in either frame.
 pub(crate) fn sniff_usage_line(line: &[u8], acc: &mut ParsedUsage) -> bool {
     let Ok(s) = std::str::from_utf8(line) else {
         return false;
@@ -185,26 +308,33 @@ pub(crate) fn sniff_usage_line(line: &[u8], acc: &mut ParsedUsage) -> bool {
         return false;
     };
     crate::observe_stream_cache(sandhi_core::CacheReadFamily::Anthropic, &v, acc);
-    match v.get("type").and_then(Value::as_str) {
-        Some("message_start") => {
-            if let Some(u) = v.get("message").and_then(|m| m.get("usage")) {
-                acc.tokens_in = u64_at(u, "input_tokens");
-                acc.reasoning_included = Some(true);
-                acc.cache_creation_tokens = u64_at(u, "cache_creation_input_tokens");
-                acc.cache_read_tokens = u64_at(u, "cache_read_input_tokens");
-                return true;
-            }
+    let usage = match v.get("type").and_then(Value::as_str) {
+        Some("message_start") => v.pointer("/message/usage"),
+        Some("message_delta") => v.get("usage"),
+        _ => None,
+    };
+    let Some(usage) = usage.filter(|value| value.is_object()) else {
+        return false;
+    };
+    for (field, count) in [
+        ("input_tokens", &mut acc.tokens_in),
+        (
+            "cache_creation_input_tokens",
+            &mut acc.cache_creation_tokens,
+        ),
+        ("cache_read_input_tokens", &mut acc.cache_read_tokens),
+        ("output_tokens", &mut acc.tokens_out),
+    ] {
+        if let Some(value) = usage
+            .get(field)
+            .and_then(Value::as_u64)
+            .filter(|value| *value == u64_at(usage, field))
+        {
+            *count = value;
         }
-        Some("message_delta") => {
-            if let Some(u) = v.get("usage") {
-                acc.tokens_out = u64_at(u, "output_tokens");
-                acc.reasoning_included = Some(true);
-                return true;
-            }
-        }
-        _ => {}
     }
-    false
+    acc.reasoning_included = Some(true);
+    true
 }
 
 #[cfg(test)]
@@ -232,6 +362,36 @@ mod tests {
         duration_ms: None,
         time_to_first_token_ms: None,
     };
+
+    #[test]
+    fn terminal_delta_can_supply_input_and_cache_after_placeholder_start() {
+        let mut usage = ParsedUsage::default();
+        assert!(sniff_usage_line(br#"data: {"type":"message_start","message":{"usage":{"input_tokens":0,"output_tokens":0}}}"#, &mut usage));
+        assert!(sniff_usage_line(br#"data: {"type":"message_delta","usage":{"input_tokens":5,"cache_read_input_tokens":3776,"cache_creation_input_tokens":30,"output_tokens":67}}"#, &mut usage));
+        assert_eq!(
+            (
+                usage.tokens_in,
+                usage.cache_read_tokens,
+                usage.cache_creation_tokens,
+                usage.tokens_out
+            ),
+            (5, 3776, 30, 67)
+        );
+        // A later output-only update must not erase the input/cache evidence.
+        assert!(sniff_usage_line(
+            br#"data: {"type":"message_delta","usage":{"output_tokens":70}}"#,
+            &mut usage
+        ));
+        assert_eq!(
+            (
+                usage.tokens_in,
+                usage.cache_read_tokens,
+                usage.cache_creation_tokens,
+                usage.tokens_out
+            ),
+            (5, 3776, 30, 70)
+        );
+    }
 
     /// Drive an SSE byte-stream (pre-split into `chunks`) through the production streaming
     /// primitive (`metered_passthrough` + the real `sniff_usage_line`) and return the finalized

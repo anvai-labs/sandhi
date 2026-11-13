@@ -1,0 +1,58 @@
+{
+  "evidence_kind": "synthetic_current_sdk_full_suite",
+  "source_commit": "eec5eaab7706d11852f229f5e9046ae23f24781d",
+  "documentation_tip": "550b2fa8c46e523e31c49b1073f51b342d78e2c2",
+  "source_unchanged_during_run": true,
+  "command": "INFERFLUX_SERVER_BIN=<pinned CPU stub> INFERFLUX_CONFIG=<pinned config> python -m pytest tests/sdk-conformance -q",
+  "sdk_versions": {
+    "openai": "3.49.0",
+    "anthropic": "2.8.0",
+    "google-genai": "3.2.0"
+  },
+  "passed": 564,
+  "skipped": 3,
+  "duration_seconds": 744.37,
+  "log_sha256": "4873f40a17465a1ae78237243c9a4141e5e8cfff9369890efa404f7b24833561",
+  "gateway_binary_sha256": "79583541e09ddde0c44c9837c02723a2ddc97487b225dc1e94041194c35eeeca",
+  "distinct_gateway_fixture_copies": 6,
+  "current_alias_resolves_to_fixture": 5,
+  "fixture_copies": [
+    {
+      "fixture": 0,
+      "sha256": "79583541e09ddde0c44c9837c02723a2ddc97487b225dc1e94041194c35eeeca"
+    },
+    {
+      "fixture": 1,
+      "sha256": "79583541e09ddde0c44c9837c02723a2ddc97487b225dc1e94041194c35eeeca"
+    },
+    {
+      "fixture": 2,
+      "sha256": "79583541e09ddde0c44c9837c02723a2ddc97487b225dc1e94041194c35eeeca"
+    },
+    {
+      "fixture": 3,
+      "sha256": "79583541e09ddde0c44c9837c02723a2ddc97487b225dc1e94041194c35eeeca"
+    },
+    {
+      "fixture": 4,
+      "sha256": "79583541e09ddde0c44c9837c02723a2ddc97487b225dc1e94041194c35eeeca"
+    },
+    {
+      "fixture": 5,
+      "sha256": "79583541e09ddde0c44c9837c02723a2ddc97487b225dc1e94041194c35eeeca"
+    }
+  ],
+  "inferflux_source": "bfdf32c00ccf40c7af73b86df2eedabc20a7ae85",
+  "coverage": [
+    "OpenAI, Anthropic and Gemini SDK requests",
+    "15 Responses-source fidelity cases including three two-turn tool continuations",
+    "operator dashboard Playwright checks",
+    "pinned InferFlux CPU origin",
+    "durable source/attempt/paired-settlement assertions in tracked fixtures"
+  ],
+  "limits": [
+    "Synthetic protocol and pinned CPU-origin evidence, not live subscription or Google issuer qualification.",
+    "Three opt-in cases skipped.",
+    "The separate final-source Rust workspace run failed two accounting-terminal cases; this passing SDK run does not resolve them."
+  ]
+}

@@ -1,4 +1,5 @@
 //! Subscription credentials stay gateway-side; clients use independent scoped keys.
+mod support;
 use sandhi_providers::{ProviderFamily, ProviderRuntime};
 use sandhi_proxy::build_provider_handle;
 use sandhi_store::CredentialScheme;
@@ -102,7 +103,7 @@ async fn independent_clients_share_subscription_but_not_identity_or_authority() 
         http::{Request, StatusCode},
     };
     use sandhi_core::{InMemorySink, KeyStore, VirtualKey};
-    use sandhi_proxy::{build_app, ProxyLedger, ProxyState};
+    use sandhi_proxy::build_app;
     use std::{collections::HashMap, sync::Arc};
     use tower::ServiceExt;
     use wiremock::{
@@ -154,9 +155,9 @@ async fn independent_clients_share_subscription_but_not_identity_or_authority() 
         });
     }
     let sink = Arc::new(InMemorySink::new());
-    let mut state = ProxyState::new(
+    let mut state = support::state(
         keys,
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         sink.clone(),
         HashMap::from([("openai:subscription".into(), handle)]),
         None,
@@ -232,7 +233,7 @@ async fn subscription_stream_enforces_idle_and_body_limits_without_replay() {
         Router,
     };
     use sandhi_core::{InMemorySink, KeyStore, VirtualKey};
-    use sandhi_proxy::{build_app, ProxyLedger, ProxyState};
+    use sandhi_proxy::build_app;
     use std::{
         collections::HashMap,
         sync::{
@@ -281,9 +282,9 @@ async fn subscription_stream_enforces_idle_and_body_limits_without_replay() {
             ..Default::default()
         });
         let sink = Arc::new(InMemorySink::new());
-        let mut state = ProxyState::new(
+        let mut state = support::state(
             keys,
-            ProxyLedger::in_memory(),
+            support::Ledger::new(),
             sink.clone(),
             HashMap::from([("openai:codex".into(), handle)]),
             None,

@@ -18,7 +18,16 @@ struct Observation {
 pub(crate) fn decode_with_observation(
     raw: ByteStream,
     model: String,
-    decode: fn(ByteStream, String) -> ChatEventStream,
+    decode: impl FnOnce(ByteStream, String) -> ChatEventStream,
+) -> ChatEventStream {
+    decode_with_observation_policy(raw, model, decode, false)
+}
+
+pub(crate) fn decode_with_observation_policy(
+    raw: ByteStream,
+    model: String,
+    decode: impl FnOnce(ByteStream, String) -> ChatEventStream,
+    prefer_decoded: bool,
 ) -> ChatEventStream {
     let state = Arc::new(Mutex::new(Observation::default()));
     let incoming = Arc::clone(&state);
@@ -50,7 +59,7 @@ pub(crate) fn decode_with_observation(
             };
             match next {
                 Some(Ok(ChatStreamEventV1::Usage { mut usage })) => {
-                    if observation.is_some() {
+                    if observation.is_some() && !(prefer_decoded && usage.cache_read_observation.is_some()) {
                         usage.cache_read_observation = observation;
                     }
                     last = Some(usage.clone());
@@ -58,6 +67,9 @@ pub(crate) fn decode_with_observation(
                     yield Ok(ChatStreamEventV1::Usage { usage });
                 }
                 other => {
+                    let observation = if prefer_decoded {
+                        last.as_ref().and_then(|usage| usage.cache_read_observation).or(observation)
+                    } else { observation };
                     // Metadata-only corrections precede content/finish/error, and keep every prior
                     // numeric value. Unavailable marks an accounting-only update, never a
                     // second final numeric verdict (or a translated provider usage frame).

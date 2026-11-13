@@ -42,6 +42,11 @@ pub struct SandhiFileConfig {
     pub tls: Option<TlsEntry>,
     #[serde(default)]
     pub providers: Vec<ProviderEntry>,
+    /// Non-secret explicit endpoints referring to exact stored credentials.
+    #[serde(default)]
+    pub backends: Vec<sandhi_store::BackendDefinition>,
+    #[serde(default)]
+    pub routes: Vec<sandhi_store::routes::RouteDefinition>,
     #[serde(default)]
     pub budgets: Vec<BudgetEntry>,
     #[serde(default)]

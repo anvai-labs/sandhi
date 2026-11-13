@@ -1,0 +1,178 @@
+{
+  "evidence_kind": "public_ci_nested_checkout_provenance_correction",
+  "failed_source": "3e3a3a72d99f4d0efbe3792ead38b4828c4c7190",
+  "public_run": 43295542936,
+  "public_sdk_job": 131452853795,
+  "runner": "GitHub Actions 1000350514",
+  "labels": [
+    "ubuntu-24.04"
+  ],
+  "failed_sdk_result": {
+    "failed": 1,
+    "passed": 366,
+    "errors": 208,
+    "skipped": 1,
+    "seconds": 347.55,
+    "shared_failure": "source inventory cannot fingerprint non-file: .inferflux-pinned/"
+  },
+  "cause": "Git lists an embedded or gitlink checkout as a directory. The outer file-only inventory rejected the pinned CPU-origin repository before the affected gateway fixtures launched.",
+  "correction": "Record nested Git HEAD and tracked-diff hash as external repository identity, without traversing or claiming its content inventory.",
+  "local_validation": {
+    "old_helper_red_cases": 2,
+    "new_complete_provenance_cases_passed": 11,
+    "new_provenance_seconds": 0.27,
+    "actual_nested_checkout_tls_fixture": {
+      "result": "passed",
+      "case": "streaming-unresolved-tls",
+      "nested_repository_record": {
+        "path": ".inferflux-pinned/",
+        "kind": "nested_git_repository",
+        "head": "2714e1331e34060346743711957a4fb1821c7fff",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "contents_inventoried": false
+      },
+      "source_parent": "3e3a3a72d99f4d0efbe3792ead38b4828c4c7190",
+      "scope": "synthetic nested Git checkout plus existing real HTTP/TLS process fixture, unchanged6second/no-replay/retained-liability checks"
+    }
+  },
+  "sha256": {
+    "public_sdk_failed_log": "c7c7c776336e67554463888a69da24aeb42d8bca2f8a9dace2a51b9d547c3aad",
+    "old_helper_red_log": "27932e042ac51426b705079c497d1fea5d445ff04ed7c1a9f67946663060642f",
+    "new_provenance_log": "c1b9970d9ba1306b6beaf0105d2da0b7d1bf8b0d24750646d0a8fcfe102621cf",
+    "nested_real_tls_fixture_log": "c972b257d505bb1ba3c12af07677ae6c33fd74cacb2197f641d9529df3f962dc",
+    "corrected_public_sdk_log": "186957677dc4aed31a72f306da6e5faba3d8a98cc732be5318192a6bd53143a2",
+    "corrected_public_allocations": "ab070403903bc9f7805d8b077e18ecd709e3d70c5592b8e314da157c2cbbd862"
+  },
+  "limits": [
+    "The corrected complete public SDK run passed on397d537; the original failed run remains retained. Neither result qualifies subsequent source changes or clears separate reliability gates.",
+    "Nested repository files/untracked/generated contents remain outside the outer inventory; this is not hermetic provenance.",
+    "This fixture correction does not diagnose or clear the earlier native-exit, accounting-wait or shutdown-timing occurrences.",
+    "No runtime routing, settlement, cache, retry or credential semantics changed."
+  ],
+  "corrected_public_run": {
+    "source": "397d5372d50bc082e77a438864ec06c7983671cf",
+    "run": 43301980222,
+    "sdk_job": 131475367696,
+    "sdk_result": {
+      "passed": 575,
+      "skipped": 3,
+      "seconds": 677.39
+    },
+    "all_jobs_success": 14,
+    "allocations": [
+      {
+        "conclusion": "success",
+        "labels": [
+          "ubuntu-24.04"
+        ],
+        "name": "attribution",
+        "runner_name": "GitHub Actions 1000350521"
+      },
+      {
+        "conclusion": "success",
+        "labels": [
+          "ubuntu-24.04"
+        ],
+        "name": "changes",
+        "runner_name": "GitHub Actions 1000350522"
+      },
+      {
+        "conclusion": "success",
+        "labels": [
+          "ubuntu-24.04"
+        ],
+        "name": "lint-title",
+        "runner_name": "GitHub Actions 1000350523"
+      },
+      {
+        "conclusion": "success",
+        "labels": [
+          "ubuntu-24.04"
+        ],
+        "name": "python-binding",
+        "runner_name": "GitHub Actions 1000350524"
+      },
+      {
+        "conclusion": "success",
+        "labels": [
+          "ubuntu-24.04-arm"
+        ],
+        "name": "Python manylinux aarch64 wheel",
+        "runner_name": "GitHub Actions 1000350532"
+      },
+      {
+        "conclusion": "success",
+        "labels": [
+          "ubuntu-24.04"
+        ],
+        "name": "security",
+        "runner_name": "GitHub Actions 1000350525"
+      },
+      {
+        "conclusion": "success",
+        "labels": [
+          "ubuntu-24.04"
+        ],
+        "name": "rust",
+        "runner_name": "GitHub Actions 1000350528"
+      },
+      {
+        "conclusion": "success",
+        "labels": [
+          "ubuntu-24.04"
+        ],
+        "name": "node-binding",
+        "runner_name": "GitHub Actions 1000350526"
+      },
+      {
+        "conclusion": "success",
+        "labels": [
+          "ubuntu-24.04"
+        ],
+        "name": "SDK conformance (real vendor SDKs)",
+        "runner_name": "GitHub Actions 1000350527"
+      },
+      {
+        "conclusion": "success",
+        "labels": [
+          "ubuntu-24.04"
+        ],
+        "name": "codegen-drift",
+        "runner_name": "GitHub Actions 1000350529"
+      },
+      {
+        "conclusion": "success",
+        "labels": [
+          "ubuntu-24.04"
+        ],
+        "name": "schema",
+        "runner_name": "GitHub Actions 1000350530"
+      },
+      {
+        "conclusion": "success",
+        "labels": [
+          "ubuntu-24.04"
+        ],
+        "name": "coverage",
+        "runner_name": "GitHub Actions 1000350533"
+      },
+      {
+        "conclusion": "success",
+        "labels": [
+          "ubuntu-24.04"
+        ],
+        "name": "Release safeguards",
+        "runner_name": "GitHub Actions 1000350531"
+      },
+      {
+        "conclusion": "success",
+        "labels": [
+          "ubuntu-24.04"
+        ],
+        "name": "CI Success",
+        "runner_name": "GitHub Actions 1000350534"
+      }
+    ],
+    "scope": "Exact corrected source; does not qualify later peer or identity/default migrations."
+  }
+}

@@ -1,4 +1,4 @@
-//! Opt-in OpenAI Chat usage observation from complete, bounded SSE events.
+//! Response-owned protocol usage observation from complete, bounded SSE events.
 //!
 //! Create one observer per upstream HTTP response and keep it with the existing
 //! request/attempt owner. SSE `id` never becomes Sandhi attribution. This observer
@@ -6,7 +6,26 @@
 //! streaming. Legacy byte forwarding and metering are unchanged.
 
 use crate::{linesplit::LineSplitter, ParsedUsage, MAX_STREAM_LINE_BYTES};
-use sandhi_core::usage::{qualify_openai_stream_usage, StreamUsageError};
+use sandhi_core::usage::{
+    qualify_openai_stream_usage_for_profile, AnthropicUsageProfile, OpenAiStreamUsageProfile,
+    StreamUsageError,
+};
+use sandhi_core::{EndpointFamilyV1, UsageCompleteness, UsageV2};
+use serde_json::Value;
+
+mod anthropic;
+#[cfg(test)]
+mod anthropic_tests;
+#[cfg(test)]
+mod chat_profile_tests;
+mod gemini;
+#[cfg(test)]
+mod gemini_tests;
+mod native_chat;
+mod responses;
+#[cfg(test)]
+mod responses_tests;
+mod text_completion;
 
 // Bound the extra copy when a caller supplies an arbitrarily large HTTP chunk.
 const INPUT_SLICE_BYTES: usize = 8192;
@@ -26,21 +45,32 @@ pub enum StreamObservationError {
     MissingTerminator,
     DataAfterTerminator,
     Closed,
+    UnsupportedEndpoint,
+    InvalidFamilyUsage(sandhi_core::usage::BufferedUsageError),
+    InvalidEnvelope,
+    IdentityMismatch,
+    ProviderEvent,
 }
 
 /// Response-scoped measurement, independent of delivery success or settlement.
 ///
-/// Usage is accepted at a complete empty-choices usage event, before `[DONE]`.
-/// Identical observations are idempotent; conflicts and malformed/truncated later
-/// events preserve the first observation and set a sticky error. Inspect both
-/// [`usage`](Self::usage) and [`error`](Self::error); neither erases the other.
-/// Complete post-DONE data events fail explicitly and cannot change usage.
+/// Chat totals follow the declared placement profile. Responses terminal objects
+/// and cumulative Messages/Gemini updates use their family qualifiers. Messages
+/// progress becomes final only at a qualified `message_stop`. Gemini additionally
+/// requires clean HTTP EOF after candidate completion and a complete final usage
+/// frame; abort never promotes Gemini progress. Canonical evidence preserves
+/// partial completeness; legacy [`usage`](Self::usage) exposes final measurements
+/// only. Malformed/conflicting later events retain prior observations and set a
+/// sticky [`error`](Self::error). Complete post-terminal data events fail explicitly.
 ///
 /// SSE lines and events each have the existing 8 MiB ceiling, including comments
 /// and ignored fields. Incoming chunks are inspected in bounded slices. CR/LF/CRLF,
 /// one initial BOM, multiline data and ordinary message events are supported. EOF
 /// never dispatches a partial event. This is not an EventSource/reconnection client.
 pub struct OpenAiStreamUsageObserver {
+    text_completion: Option<text_completion::TextCompletion>,
+    gateway_peer: bool,
+    gateway_failure: Option<crate::GatewayFailure>,
     splitter: LineSplitter,
     limit: usize,
     first_line: bool,
@@ -48,13 +78,27 @@ pub struct OpenAiStreamUsageObserver {
     data: Vec<u8>,
     has_data: bool,
     message_event: bool,
+    event_name: Option<String>,
+    endpoint: EndpointFamilyV1,
+    openai_usage_profile: OpenAiStreamUsageProfile,
+    anthropic_usage_profile: AnthropicUsageProfile,
+    anthropic: anthropic::AnthropicUsage,
+    responses: responses::ResponsesUsage,
+    gemini: gemini::GeminiUsage,
+    native_chat: native_chat::NativeChatUsage,
     usage: Option<ParsedUsage>,
+    canonical_usage: Option<UsageV2>,
+    cache_read_observation: Option<sandhi_core::CacheReadObservation>,
     error: Option<StreamObservationError>,
     done: bool,
     closed: bool,
     #[cfg(test)]
     peak_buffered: usize,
 }
+
+/// Complete-event observer shared across supported endpoint protocols. The old
+/// name and default constructor retain OpenAI Chat behavior.
+pub type ProtocolStreamUsageObserver = OpenAiStreamUsageObserver;
 
 impl Default for OpenAiStreamUsageObserver {
     fn default() -> Self {
@@ -67,8 +111,64 @@ impl OpenAiStreamUsageObserver {
         Self::with_limit(MAX_STREAM_LINE_BYTES)
     }
 
+    /// Strict source observation for the authorized native Text Completion path.
+    pub fn for_text_completion() -> Self {
+        let mut observer = Self::new();
+        observer.text_completion = Some(text_completion::TextCompletion::default());
+        observer
+    }
+
+    pub fn for_endpoint(endpoint: EndpointFamilyV1) -> Result<Self, StreamObservationError> {
+        Self::for_endpoint_with_openai_usage_profile(endpoint, OpenAiStreamUsageProfile::Standard)
+    }
+
+    pub fn for_endpoint_with_openai_usage_profile(
+        endpoint: EndpointFamilyV1,
+        profile: OpenAiStreamUsageProfile,
+    ) -> Result<Self, StreamObservationError> {
+        Self::for_endpoint_with_usage_profiles(endpoint, profile, AnthropicUsageProfile::default())
+    }
+
+    /// Endpoint conventions are explicit and family-scoped. This constructor
+    /// observes evidence only; it does not enable tracked routing for a family.
+    pub fn for_endpoint_with_usage_profiles(
+        endpoint: EndpointFamilyV1,
+        openai_profile: OpenAiStreamUsageProfile,
+        anthropic_profile: AnthropicUsageProfile,
+    ) -> Result<Self, StreamObservationError> {
+        if (openai_profile != OpenAiStreamUsageProfile::Standard
+            && endpoint != EndpointFamilyV1::OpenaiChatCompletions)
+            || (anthropic_profile != AnthropicUsageProfile::SeparateCacheWrites
+                && endpoint != EndpointFamilyV1::AnthropicMessages)
+        {
+            return Err(StreamObservationError::UnsupportedEndpoint);
+        }
+        if !matches!(
+            endpoint,
+            EndpointFamilyV1::OpenaiChatCompletions
+                | EndpointFamilyV1::OpenaiResponses
+                | EndpointFamilyV1::AnthropicMessages
+                | EndpointFamilyV1::GeminiGenerateContent
+                | EndpointFamilyV1::CohereChat
+                | EndpointFamilyV1::OllamaChat
+        ) {
+            return Err(StreamObservationError::UnsupportedEndpoint);
+        }
+        let mut observer = Self::new();
+        if endpoint == EndpointFamilyV1::OllamaChat {
+            observer.splitter = LineSplitter::new(MAX_STREAM_LINE_BYTES);
+        }
+        observer.endpoint = endpoint;
+        observer.openai_usage_profile = openai_profile;
+        observer.anthropic_usage_profile = anthropic_profile;
+        Ok(observer)
+    }
+
     fn with_limit(limit: usize) -> Self {
         Self {
+            text_completion: None,
+            gateway_peer: false,
+            gateway_failure: None,
             splitter: LineSplitter::new_sse(limit),
             limit,
             first_line: true,
@@ -76,7 +176,17 @@ impl OpenAiStreamUsageObserver {
             data: Vec::new(),
             has_data: false,
             message_event: true,
+            event_name: None,
+            endpoint: EndpointFamilyV1::OpenaiChatCompletions,
+            openai_usage_profile: OpenAiStreamUsageProfile::Standard,
+            anthropic_usage_profile: AnthropicUsageProfile::SeparateCacheWrites,
+            anthropic: Default::default(),
+            responses: Default::default(),
+            gemini: Default::default(),
+            native_chat: Default::default(),
             usage: None,
+            canonical_usage: None,
+            cache_read_observation: None,
             error: None,
             done: false,
             closed: false,
@@ -85,15 +195,81 @@ impl OpenAiStreamUsageObserver {
         }
     }
 
+    pub(crate) fn with_gateway_peer(mut self) -> Self {
+        self.gateway_peer = true;
+        self
+    }
+    pub(crate) fn gateway_peer(&self) -> bool {
+        self.gateway_peer
+    }
+    pub(crate) fn gateway_failure(&self) -> Option<crate::GatewayFailure> {
+        self.gateway_failure.clone()
+    }
+    fn observe_gateway_failure(&mut self, event: &Value) {
+        if self.gateway_peer && self.gateway_failure.is_none() {
+            if let Some(error) = event
+                .get("error")
+                .or_else(|| event.pointer("/response/error"))
+                .filter(|error| !error.is_null())
+            {
+                self.gateway_failure =
+                    Some(crate::peer::failure_from_value(Some(error), None, None));
+            }
+        }
+    }
+
+    pub(crate) fn cache_read_observation(&self) -> Option<sandhi_core::CacheReadObservation> {
+        self.cache_read_observation
+    }
+
+    fn observe_cache(&mut self, event: &Value) {
+        use sandhi_core::{CacheReadFamily as C, EndpointFamilyV1 as F};
+        let family = match self.endpoint {
+            F::OpenaiChatCompletions => C::OpenAi,
+            F::OpenaiResponses => C::OpenAiResponses,
+            F::AnthropicMessages => C::Anthropic,
+            F::GeminiGenerateContent => C::Gemini,
+            F::CohereChat => C::Cohere,
+            F::OllamaChat => C::Ollama,
+            _ => return,
+        };
+        sandhi_core::merge_cache_read_observation(
+            &mut self.cache_read_observation,
+            sandhi_core::observe_cache_read_stream(family, event),
+        );
+        self.cache_read_observation.get_or_insert_with(|| {
+            sandhi_core::CacheReadObservation::origin(sandhi_core::CacheReadStatus::Absent)
+        });
+    }
+
     pub fn usage(&self) -> Option<ParsedUsage> {
         self.usage
+    }
+
+    /// Canonical evidence includes field presence and progress completeness.
+    /// Legacy `usage()` remains a final-measurement projection only.
+    pub fn canonical_usage(&self) -> Option<UsageV2> {
+        self.canonical_usage.clone().map(|mut usage| {
+            if self.error.is_some() {
+                usage.completeness = UsageCompleteness::Partial;
+            }
+            usage
+        })
+    }
+
+    pub fn provider_failed(&self) -> bool {
+        self.gateway_failure.is_some()
+            || self.responses.provider_failed
+            || self.anthropic.provider_failed
+            || self.gemini.provider_failed
+            || self.native_chat.provider_failed
     }
 
     pub fn error(&self) -> Option<StreamObservationError> {
         self.error
     }
 
-    /// A complete `[DONE]` event was observed; this does not imply usage or success.
+    /// A complete protocol terminal was observed; this does not imply usage or success.
     pub fn is_done(&self) -> bool {
         self.done
     }
@@ -128,17 +304,65 @@ impl OpenAiStreamUsageObserver {
     /// Record EOF without manufacturing a blank line or measurement. Idempotent.
     /// Cancellation/transport failure remains the caller's separate outcome fact.
     pub fn finish(&mut self) -> Result<(), StreamObservationError> {
-        self.closed = true;
         if let Some(error) = self.error {
             return Err(error);
         }
+        if self.closed && !self.done && self.endpoint == EndpointFamilyV1::GeminiGenerateContent {
+            return self.fail(StreamObservationError::Closed);
+        }
+        self.closed = true;
+        // NDJSON permits a complete final object without a trailing newline.
+        if self.endpoint == EndpointFamilyV1::OllamaChat && !self.splitter.remainder().is_empty() {
+            let remainder = self.splitter.remainder().to_vec();
+            self.splitter.reset();
+            if let Err(error) = self.native_event(&remainder) {
+                return self.fail(error);
+            }
+        }
+        if matches!(
+            self.endpoint,
+            EndpointFamilyV1::CohereChat | EndpointFamilyV1::OllamaChat
+        ) && self.native_chat.done
+        {
+            let mut usage = self
+                .native_chat
+                .usage
+                .clone()
+                .expect("validated native terminal");
+            usage.completeness = UsageCompleteness::Final;
+            self.usage = Some((&usage).into());
+            self.canonical_usage = Some(usage);
+        }
         if !self.splitter.remainder().is_empty() || self.event_bytes != 0 {
             return self.fail(StreamObservationError::TruncatedEvent);
+        }
+        if self.endpoint == EndpointFamilyV1::GeminiGenerateContent && !self.done {
+            let usage = match self.gemini.finish() {
+                Ok(usage) => usage,
+                Err(error) => return self.fail(error),
+            };
+            self.usage = Some((&usage).into());
+            self.canonical_usage = Some(usage);
+            self.done = true;
         }
         if !self.done {
             return self.fail(StreamObservationError::MissingTerminator);
         }
         Ok(())
+    }
+
+    /// Cancellation is not HTTP EOF and does not prove a missing terminator.
+    /// Already-observed unfinished framing still invalidates final qualification.
+    pub(crate) fn close_on_abort(&mut self) {
+        self.closed = true;
+        let pending_line = self.splitter.remainder();
+        // An interrupted comment cannot become a data event. Large keepalives
+        // can span HTTP chunks; their suffix must not erase a prior measurement.
+        let unfinished_data =
+            self.has_data || (!pending_line.is_empty() && !pending_line.starts_with(b":"));
+        if self.error.is_none() && unfinished_data {
+            let _ = self.fail(StreamObservationError::TruncatedEvent);
+        }
     }
 
     fn fail(&mut self, error: StreamObservationError) -> Result<(), StreamObservationError> {
@@ -151,6 +375,9 @@ impl OpenAiStreamUsageObserver {
     fn line(&mut self, line: &[u8]) -> Result<(), StreamObservationError> {
         if line.len() > self.limit {
             return Err(StreamObservationError::LineTooLong);
+        }
+        if self.endpoint == EndpointFamilyV1::OllamaChat {
+            return self.native_event(line);
         }
         self.event_bytes += line.len();
         if self.event_bytes > self.limit {
@@ -172,6 +399,7 @@ impl OpenAiStreamUsageObserver {
             self.data.clear();
             self.has_data = false;
             self.message_event = true;
+            self.event_name = None;
         } else if !content.starts_with(':') {
             let (field, value) = content.split_once(':').unwrap_or((content, ""));
             let value = value.strip_prefix(' ').unwrap_or(value);
@@ -183,15 +411,100 @@ impl OpenAiStreamUsageObserver {
                     self.data.extend_from_slice(value.as_bytes());
                     self.has_data = true;
                 }
-                "event" => self.message_event = value.is_empty() || value == "message",
+                "event" => {
+                    self.message_event = value.is_empty() || value == "message";
+                    self.event_name = (value.len() <= 128).then(|| value.to_owned());
+                }
                 _ => {} // id/retry are not request correlation or replay permission.
             }
         }
         Ok(())
     }
 
+    fn native_event(&mut self, data: &[u8]) -> Result<(), StreamObservationError> {
+        let event = sandhi_core::policy::strict_json(data)
+            .map_err(|_| StreamObservationError::InvalidJson)?;
+        if self.endpoint == EndpointFamilyV1::CohereChat
+            && self.event_name.as_deref().is_some_and(|name| {
+                name != "message" && Some(name) != event.get("type").and_then(Value::as_str)
+            })
+        {
+            return Err(StreamObservationError::UnexpectedEventType);
+        }
+        self.observe_cache(&event);
+        if let Some(update) = self.native_chat.event(self.endpoint, &event)? {
+            self.canonical_usage = Some(update);
+        }
+        self.done = self.native_chat.done;
+        Ok(())
+    }
+
     fn event(&mut self) -> Result<(), StreamObservationError> {
         if !self.has_data {
+            return Ok(());
+        }
+        if self.endpoint == EndpointFamilyV1::CohereChat {
+            let data = self.data.clone();
+            return self.native_event(&data);
+        }
+        if self.endpoint == EndpointFamilyV1::GeminiGenerateContent {
+            let event = sandhi_core::policy::strict_json(&self.data)
+                .map_err(|_| StreamObservationError::InvalidJson)?;
+            self.observe_gateway_failure(&event);
+            self.observe_cache(&event);
+            if let Some(update) = self.gemini.event(&event, self.message_event)? {
+                self.canonical_usage = Some(update);
+            }
+            return Ok(());
+        }
+        if self.endpoint == EndpointFamilyV1::AnthropicMessages {
+            if self.done {
+                return Err(StreamObservationError::DataAfterTerminator);
+            }
+            let event = sandhi_core::policy::strict_json(&self.data)
+                .map_err(|_| StreamObservationError::InvalidJson)?;
+            self.observe_gateway_failure(&event);
+            self.observe_cache(&event);
+            let update = self.anthropic.event(
+                &event,
+                self.message_event,
+                self.event_name.as_deref(),
+                self.anthropic_usage_profile,
+            );
+            self.done = self.anthropic.done;
+            if let Some(update) = update? {
+                if update.completeness == UsageCompleteness::Final {
+                    self.usage = Some((&update).into());
+                }
+                self.canonical_usage = Some(update);
+            }
+            return Ok(());
+        }
+        if self.endpoint == EndpointFamilyV1::OpenaiResponses {
+            if self.data == b"[DONE]" {
+                if !self.message_event {
+                    return Err(StreamObservationError::UnexpectedEventType);
+                }
+                return self.responses.tail_done(self.done);
+            }
+            if self.done {
+                return Err(StreamObservationError::DataAfterTerminator);
+            }
+            let event = sandhi_core::policy::strict_json(&self.data)
+                .map_err(|_| StreamObservationError::InvalidJson)?;
+            self.observe_gateway_failure(&event);
+            self.observe_cache(&event);
+            let update =
+                self.responses
+                    .event(&event, self.message_event, self.event_name.as_deref());
+            self.done = self.responses.done;
+            let update = update?;
+            if let Some(update) = update {
+                if update.completeness == UsageCompleteness::Final {
+                    self.usage = Some((&update).into());
+                }
+                self.canonical_usage = Some(update);
+            }
             return Ok(());
         }
         if self.done {
@@ -201,17 +514,47 @@ impl OpenAiStreamUsageObserver {
             return Err(StreamObservationError::UnexpectedEventType);
         }
         if self.data == b"[DONE]" {
+            if let Some(text) = &self.text_completion {
+                text.finish()?;
+            }
             self.done = true;
             return Ok(());
         }
-        let event =
-            serde_json::from_slice(&self.data).map_err(|_| StreamObservationError::InvalidJson)?;
+        let event = sandhi_core::policy::strict_json(&self.data)
+            .map_err(|_| StreamObservationError::InvalidJson)?;
+        self.observe_gateway_failure(&event);
+        self.observe_cache(&event);
+        if let Some(text) = &mut self.text_completion {
+            if let Some(usage) = text.event(&event)? {
+                self.usage = Some((&usage).into());
+                self.canonical_usage = Some(usage);
+            }
+            return Ok(());
+        }
         if let Some(next) =
-            qualify_openai_stream_usage(&event).map_err(StreamObservationError::InvalidUsage)?
+            qualify_openai_stream_usage_for_profile(&event, self.openai_usage_profile)
+                .map_err(StreamObservationError::InvalidUsage)?
         {
             match self.usage {
-                None => self.usage = Some(next),
-                Some(first) if first == next => {}
+                None => {
+                    let mut canonical: UsageV2 = next.into();
+                    canonical.reasoning_tokens = event
+                        .pointer("/usage/completion_tokens_details/reasoning_tokens")
+                        .and_then(Value::as_u64);
+                    self.canonical_usage = Some(canonical);
+                    self.usage = Some(next);
+                }
+                Some(first) if first == next => {
+                    // A repeated identical total can add explicit optional zero
+                    // presence; absence in the first frame must not erase it.
+                    if let Some(canonical) = self.canonical_usage.as_mut() {
+                        if canonical.reasoning_tokens.is_none() {
+                            canonical.reasoning_tokens = event
+                                .pointer("/usage/completion_tokens_details/reasoning_tokens")
+                                .and_then(Value::as_u64);
+                        }
+                    }
+                }
                 Some(_) => return Err(StreamObservationError::ConflictingUsage),
             }
         }

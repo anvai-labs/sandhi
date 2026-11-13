@@ -1,6 +1,7 @@
 //! TD-0031 client-credentials grant: integration tests over the axum app (no network).
 //! Mirrors tests/operator.rs harness: in-memory stores, wiremock upstream, oneshot requests.
 
+mod support;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -14,7 +15,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use sandhi_core::{KeyStore, Sink};
 use sandhi_proxy::client_credentials::{ClientCredentialEntry, ClientCredentialRegistry};
-use sandhi_proxy::{build_app, ProxyLedger, ProxyState};
+use sandhi_proxy::{build_app, ProxyState};
 use sandhi_store::{SqliteStore, VaultStore, VirtualKeyStore};
 
 const TOKEN: &str = "admin-secret";
@@ -59,9 +60,9 @@ fn state_with_registry(registry: Option<ClientCredentialRegistry>) -> Arc<ProxyS
     let vault = Arc::new(VaultStore::in_memory().unwrap());
     let vkeys = Arc::new(VirtualKeyStore::in_memory().unwrap());
     let sink: Arc<dyn Sink> = store.clone();
-    let mut state = ProxyState::new(
+    let mut state = support::state(
         KeyStore::new(),
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         sink,
         HashMap::new(),
         Some(store),

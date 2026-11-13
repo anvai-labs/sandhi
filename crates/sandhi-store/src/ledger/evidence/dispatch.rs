@@ -18,10 +18,14 @@ pub struct PreDispatchClosure {
 #[must_use]
 pub struct DispatchPermit {
     execution_id: String,
+    attempt_id: Option<String>,
 }
 impl DispatchPermit {
     pub fn execution_id(&self) -> &str {
         &self.execution_id
+    }
+    pub fn attempt_id(&self) -> Option<&str> {
+        self.attempt_id.as_deref()
     }
 }
 
@@ -59,6 +63,10 @@ pub(super) fn checked_fence(
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
+    // A new contextual admission cannot silently degrade to an older unbound row.
+    context::read(conn, execution_id)?;
+    paired::read(conn, execution_id, reservation_id)?;
+    let attempt = attempts::read(conn, execution_id)?;
     let Some((phase, transitioned_at)) = row else {
         return Ok(None);
     };
@@ -77,6 +85,12 @@ pub(super) fn checked_fence(
         return Err(EvidenceError::WrongScope);
     }
     let observed = read_observation(conn, execution_id, reservation_id, scope)?;
+    if attempt
+        .as_ref()
+        .is_some_and(|a| a.evidence.is_some() != observed.is_some())
+    {
+        return Err(EvidenceError::CorruptObservation);
+    }
     let has_receipt: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM budget_settlement_outbox WHERE reservation_id=?1)",
         [reservation_id as i64],
@@ -93,7 +107,11 @@ pub(super) fn checked_fence(
             Ok(Some(Fence::Prepared))
         }
         (1, Some(_)) => {
-            let charge = match observed.as_ref().map(terminal_charge).transpose() {
+            let charge = match observed
+                .as_ref()
+                .map(|o| terminal_charge(conn, o))
+                .transpose()
+            {
                 Ok(value) => value,
                 Err(EvidenceError::UnresolvedObservation) => None,
                 Err(error) => return Err(error),
@@ -164,6 +182,7 @@ pub(super) fn transition(
         return Ok((fence, false));
     }
     let now = OffsetDateTime::now_utc().unix_timestamp();
+    let back = paired::read(tx, execution_id, reservation_id)?;
     if authorize {
         let expires_at: i64 = tx.query_row(
             "SELECT expires_at FROM budget_reservation WHERE id=?1",
@@ -182,12 +201,15 @@ pub(super) fn transition(
         return Err(EvidenceError::InconsistentDispatch);
     }
     if authorize {
+        attempts::allocate(tx, execution_id, now)?;
         return Ok((Fence::Authorized, true));
     }
     let changed = tx.execute("UPDATE budget_reservation SET settled=1, actual=0, settled_at=?2 WHERE id=?1 AND settled=0", params![reservation_id as i64,now])?;
     if changed != 1 {
         return Err(EvidenceError::InconsistentDispatch);
     }
+    paired::close(tx, back.as_ref(), now)?;
+    paired::read(tx, execution_id, reservation_id)?;
     Ok((
         Fence::Closed(PreDispatchClosure {
             execution_id: execution_id.to_string(),
@@ -213,10 +235,12 @@ impl SqliteLedger {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (fence, changed) = transition(&tx, scope, execution_id, true)?;
+        let attempt_id = attempts::read(&tx, execution_id)?.map(|a| a.attempt_id);
         tx.commit()?;
         match fence {
             Fence::Authorized if changed => Ok(DispatchOutcome::Authorized(DispatchPermit {
                 execution_id: execution_id.to_string(),
+                attempt_id,
             })),
             Fence::Authorized => Ok(DispatchOutcome::MayHaveDispatched),
             Fence::Closed(value) => Ok(DispatchOutcome::ClosedBeforeDispatch(value)),

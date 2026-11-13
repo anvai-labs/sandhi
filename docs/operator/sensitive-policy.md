@@ -40,7 +40,8 @@ The model's registered name does not confer authorization to a user or group.
 The policy also inspects text on `/v1/embeddings` and `/v1/completions`, including
 all batch items and string-bearing options. Token-ID inputs and unsupported fields
 are rejected rather than forwarded uninspected. See [text endpoints](text-endpoints.md).
-Other wire dialects still fail closed when this policy is enabled.
+Text-only Chat and Messages ingress use the corresponding bounded inspectors.
+Responses and Gemini ingress still fail closed when this policy is enabled.
 
 ## Model evidence and limits
 

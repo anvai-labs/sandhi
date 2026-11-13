@@ -41,10 +41,14 @@ is `max_tokens × prompt_count × max(n, best_of)`; input bytes include the wire
 prompt, then multiply by the number of generated alternatives before token estimation.
 The body already includes every prompt; a shared suffix does not. Repeated context is
 counted arithmetically without allocating duplicate strings.
-Measured upstream usage settles the lease. Input token estimates remain heuristic,
+Qualified source usage and physical-attempt evidence settle the original paired
+client/upstream reservations with one receipt. Input token estimates remain heuristic,
 not a strict proof of an upper bound; these routes do not turn the existing budget
-ledger into exact provider tokenization. Missing/partial usage keeps the existing
-metering semantics and must not be represented as an exact measurement.
+ledger into exact provider tokenization. Missing, malformed or partial usage retains both liabilities, including across
+restart; it is not estimated into a successful charge or measured zero. Only the
+frozen embedding operation makes output inapplicable. Text SSE requires a native
+`text_completion` envelope, finished choices, separate request-total usage and a
+complete `[DONE]` event. No source retry repairs missing evidence.
 
 The canonical chat request is only an internal admission/accounting view. These routes
 never dispatch it through a chat encoder. Model capability still belongs to the

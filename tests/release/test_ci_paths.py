@@ -27,7 +27,7 @@ def test_push_comparison_uses_immutable_event_bounds_without_changing_pr_api_rou
     assert options.get("base") == BASE
     assert options.get("ref") == REF
     # Keep the default GitHub token: the pinned action uses PR changed-files API
-    # for both PR event types. Empty non-push inputs do not override that route.
+    # for pull_request events. Empty non-push inputs do not override that route.
     assert "token" not in options
     for patterns in yaml.safe_load(options["filters"]).values():
         assert ".github/workflows/ci.yml" in patterns

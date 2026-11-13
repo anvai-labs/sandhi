@@ -59,10 +59,9 @@ def dashboard(proxy_binary, upstream, tmp_path, request):
     })
     if options.get("admin", True):
         env["SANDHI_ADMIN_TOKEN"] = ADMIN_TOKEN
-    if options.get("store", True):
-        env["SANDHI_STORE"] = str(database)
-    if options.get("tracked"):
-        env["SANDHI_BUFFERED_ACCOUNTING"] = "tracked"
+    assert options.get("store", True), "the gateway requires a durable store"
+    env["SANDHI_STORE"] = str(database)
+    env["SANDHI_LEDGER_SHARDS"] = "1"
     if options.get("public"):
         env["SANDHI_DASHBOARD_PUBLIC"] = "1"
     authority = request.getfixturevalue("oidc_authority") if options.get("oidc") else None
@@ -72,9 +71,9 @@ def dashboard(proxy_binary, upstream, tmp_path, request):
         policy.write_text(json.dumps({
             "issuer": authority.issuer, "client_id": "sandhi-browser",
             "redirect_url": authority.redirect, "ca_file": str(authority.certificate),
-            "subjects": {role: {"role": role, "grants": {
+            "subjects": {role: {"role": role, "allow_diagnostics": options.get("diagnostics", False), "grants": {
                 "fixture": {"upstream": "openai", "models": ["gpt-mock"],
-                            **({"group": "dashboard"} if options.get("tracked") else {})}
+                            **({"group": "dashboard"} if options.get("scoped_budget") else {})}
             } if role == "admin" else {}} for role in ("viewer", "operator", "admin")},
         }))
         config.write_text(json.dumps({"tls": {
@@ -105,27 +104,26 @@ def dashboard(proxy_binary, upstream, tmp_path, request):
                 if time.monotonic() >= deadline:
                     pytest.fail("dashboard proxy startup timed out")
                 time.sleep(0.05)
-            if options.get("store", True):
-                if options.get("admin", True):
-                    response = client.post("/admin/budget", headers=server.headers, json={
-                        "scope": "group:dashboard", "limit_tokens": 10000,
-                        "policy": "block" if options.get("tracked") else "warn", "window": "total",
-                    })
-                    assert response.status_code == 200, response.text
-                response = client.post("/v1/chat/completions", headers={
-                    **(server.headers if authority else {"Authorization": f"Bearer {VK_OPENAI}"}),
-                    **({"x-sandhi-session": "sso-session", "x-sandhi-run-id": "sso-run",
-                        "x-sandhi-step-id": "seed"} if options.get("tracked") else {}),
-                }, json={
-                    "model": "gpt-mock", "messages": [{"role": "user", "content": "ping"}],
-                    **({"max_tokens": 10} if options.get("tracked") else {}),
+            if options.get("admin", True):
+                response = client.post("/admin/budget", headers=server.headers, json={
+                    "scope": "group:dashboard", "limit_tokens": 10000,
+                    "policy": "block" if options.get("scoped_budget") else "warn", "window": "total",
                 })
                 assert response.status_code == 200, response.text
-                server.seed_request_id = response.headers.get("x-sandhi-request-id")
-                # The production observer is buffered; wait for the seeded call to be queryable.
-                while client.get("/dashboard/api/usage", headers=server.headers).json()["total"]["calls"] != 1:
-                    assert time.monotonic() < deadline, "usage never persisted"
-                    time.sleep(0.05)
+            response = client.post("/v1/chat/completions", headers={
+                **(server.headers if authority else {"Authorization": f"Bearer {VK_OPENAI}"}),
+                **({"x-sandhi-session": "sso-session", "x-sandhi-run-id": "sso-run",
+                    "x-sandhi-step-id": "seed"} if options.get("scoped_budget") else {}),
+            }, json={
+                "model": "gpt-mock", "messages": [{"role": "user", "content": "ping"}],
+                **({"max_tokens": 10} if options.get("scoped_budget") else {}),
+            })
+            assert response.status_code == 200, response.text
+            server.seed_request_id = response.headers.get("x-sandhi-request-id")
+            # The production observer is buffered; wait for the seeded call to be queryable.
+            while client.get("/dashboard/api/usage", headers=server.headers).json()["total"]["calls"] != 1:
+                assert time.monotonic() < deadline, "usage never persisted"
+                time.sleep(0.05)
         yield server
     finally:
         proc.terminate()
@@ -178,7 +176,7 @@ def hold_authenticated_request(page, dashboard, path):
     return held
 
 
-@pytest.mark.parametrize("dashboard", [{"oidc": True, "tracked": True}], indirect=True)
+@pytest.mark.parametrize("dashboard", [{"oidc": True, "scoped_budget": True}], indirect=True)
 @pytest.mark.parametrize("denial", ["bearer", "model", "attribution"])
 def test_tracked_oidc_accounting_and_pre_admission_denials(
     dashboard, oidc_authority, upstream, denial,
@@ -231,8 +229,8 @@ def test_tracked_oidc_accounting_and_pre_admission_denials(
     assert len(upstream.requests) == dashboard.origin_requests_before + 1
 
 
-@pytest.mark.parametrize("dashboard", [{"oidc": True}, {"oidc": True, "tracked": True}],
-                         ids=["legacy", "tracked"], indirect=True)
+@pytest.mark.parametrize("dashboard", [{"oidc": True}, {"oidc": True, "scoped_budget": True}],
+                         ids=["default-budget", "scoped-budget"], indirect=True)
 @pytest.mark.parametrize("page", [{"tls": True}], indirect=True)
 @pytest.mark.parametrize("role", ["viewer", "operator", "admin"])
 def test_sso_browser_roles_cookie_mutations_and_logout(page, dashboard, oidc_authority, role):
@@ -247,6 +245,7 @@ def test_sso_browser_roles_cookie_mutations_and_logout(page, dashboard, oidc_aut
     assert cookie["secure"] and cookie["httpOnly"] and cookie["sameSite"] == "Lax"
     assert "__Host-sandhi-session" not in page.evaluate("document.cookie")
     expect(page.locator("#config")).to_have_attribute("data-state", "ready" if role == "admin" else "forbidden")
+    page.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name='Budgets', exact=True).click()
     page.get_by_text("Set a budget", exact=True).click()
     budget = page.get_by_role("button", name="Set budget", exact=True)
     if role == "viewer":
@@ -321,6 +320,7 @@ def test_authenticated_keyboard_journey_and_one_time_key(page, dashboard):
     page.screenshot(path=str(REPO_ROOT / "target/dashboard-authenticated.png"), full_page=True)
     assert page.evaluate("sessionStorage.getItem('sandhi_admin_token')") is None
 
+    page.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name='Budgets', exact=True).click()
     page.get_by_text("Set a budget", exact=True).click()
     page.get_by_label("Scope", exact=True).fill("group:keyboard")
     page.get_by_label("Limit (tokens)").fill("700")
@@ -328,6 +328,7 @@ def test_authenticated_keyboard_journey_and_one_time_key(page, dashboard):
     page.keyboard.press("Enter")
     expect(page.locator("#budgets")).to_contain_text("group:keyboard")
 
+    page.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name='Keys & credentials', exact=True).click()
     page.get_by_text("Mint a virtual key", exact=True).click()
     page.get_by_label("Upstream", exact=True).fill("openai")
     page.get_by_label("Subject", exact=True).fill("keyboard-user")
@@ -355,16 +356,18 @@ def test_public_reads_remain_available_but_admin_actions_are_locked(page, dashbo
     expect(page.locator("#usage")).to_have_attribute("data-state", "ready")
     expect(page.locator("#usage")).to_contain_text("gpt-mock")
     expect(page.locator("#config")).to_have_attribute("data-state", "locked")
+    page.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name='Budgets', exact=True).click()
     page.get_by_text("Set a budget", exact=True).click()
     expect(page.get_by_role("button", name="Set budget", exact=True)).to_be_disabled()
 
 
-@pytest.mark.parametrize("dashboard", [{"store": False}], indirect=True)
-def test_missing_store_is_not_zero_usage(page, dashboard):
+def test_failed_store_is_not_zero_usage(page, dashboard):
+    with sqlite3.connect(dashboard.database) as connection:
+        connection.execute("DROP TABLE usage_events")
     page.goto(dashboard.base + "/dashboard")
     page.get_by_label("Admin token", exact=True).fill(ADMIN_TOKEN)
     page.get_by_role("button", name="Use token", exact=True).click()
-    expect(page.locator("#usage")).to_have_attribute("data-state", "unconfigured")
+    expect(page.locator("#usage")).to_have_attribute("data-state", "unavailable")
     assert page.locator("#cards").count() == 0
 
 
@@ -450,6 +453,7 @@ def test_credential_metadata_is_inert_and_actions_preserve_exact_labels(page, da
         route.fulfill(json={"deleted": True})
 
     page.route("**/admin/keys/openai/*", intercept_delete)
+    page.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name='Keys & credentials', exact=True).click()
     page.locator('[data-action="revokeCred"]').click()
     expect(page.locator("#toasts")).to_contain_text("Credential disabled locally")
     assert unquote(deletes[0].split("/admin/keys/openai/", 1)[1]) == label
@@ -504,3 +508,189 @@ def test_served_assets_and_csp(page, dashboard, width, theme):
     expect(tables).to_have_attribute("tabindex", "0")
     tables.focus()
     expect(tables).to_be_focused()
+
+
+def test_workspace_navigation_history_filter_and_deep_link(page, dashboard):
+    connect(page, dashboard)
+    nav = page.get_by_role("navigation", name="Dashboard sections")
+    expect(nav.get_by_role("link", name="Overview", exact=True)).to_have_attribute("aria-current", "page")
+    expect(page.locator('[data-view="access"]')).to_be_hidden()
+    nav.get_by_role("link", name="Backends & routes", exact=True).click()
+    expect(page).to_have_url(dashboard.base + "/dashboard#routing-section")
+    expect(page.locator("#backends")).to_have_attribute("data-state", "ready")
+    expect(page.locator("#routes")).to_have_attribute("data-state", "ready")
+    expect(page.locator("#usage")).to_be_hidden()
+    page.go_back()
+    expect(page.locator("#usage")).to_be_visible()
+    before = page.locator("#cards").inner_text()
+    page.get_by_role("searchbox", name="Filter attribution").fill("missing-attribution-fixture")
+    expect(page.locator("#tables")).to_contain_text("No matching rows")
+    assert page.locator("#cards").inner_text() == before
+    page.get_by_role("searchbox", name="Filter attribution").fill("gpt-mock")
+    expect(page.get_by_role("region", name="By model attribution")).to_contain_text("gpt-mock")
+    nav.get_by_role("link", name="Keys & credentials", exact=True).focus()
+    page.keyboard.press("Enter")
+    expect(page.locator('[data-view="access"]')).to_be_visible()
+    expect(page.locator("#access")).to_be_focused()
+    page.reload()
+    expect(page.locator('[data-view="access"]')).to_be_visible()
+    expect(page.get_by_label("Admin token", exact=True)).to_have_value("")
+    expect(page.locator("#keys")).to_have_attribute("data-state", "locked")
+    assert "gpt-mock" not in page.locator("body").text_content()
+
+
+@pytest.mark.parametrize("width", [390, 1440])
+def test_routing_cache_guide_connects_operator_tasks_and_keeps_history(page, dashboard, width):
+    page.set_viewport_size({"width": width, "height": 900})
+    connect(page, dashboard)
+    shortcut = page.get_by_role("link", name="Reuse context Follow routing, cache controls and token evidence")
+    shortcut.focus()
+    page.keyboard.press("Enter")
+    expect(page).to_have_url(dashboard.base + "/dashboard#flow-section")
+    expect(page.locator("#flow-section")).to_be_focused()
+    guide = page.locator('[data-view="flow-section"]')
+    expect(guide.get_by_role("list", name="Request path")).to_be_visible()
+    expect(guide).to_contain_text("2 fresh + 6 read + 2 write")
+    expect(guide).to_contain_text("4 uncached + 6 read")
+    expect(guide).to_contain_text("do not prove that every call settled")
+    expect(guide).to_contain_text("not currency saved")
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    for link in guide.locator('a[target="_blank"]').all():
+        assert link.get_attribute("href").startswith("https://anvai-labs.github.io/sandhi/")
+        assert "noopener" in link.get_attribute("rel")
+    guide.get_by_role("link", name="Inspect backends & routes", exact=True).click()
+    expect(page.locator("#routing-section")).to_be_focused()
+    expect(page.locator("#backends")).to_have_attribute("data-state", "ready")
+    page.go_back()
+    expect(guide).to_be_visible()
+    guide.get_by_role("link", name="Inspect usage evidence", exact=True).click()
+    expect(page.locator("#evidence-section")).to_be_focused()
+    page.go_back()
+    page.reload()
+    expect(guide).to_be_visible()
+    expect(page.get_by_label("Admin token", exact=True)).to_have_value("")
+    expect(page.locator("#usage")).to_have_attribute("data-state", "locked")
+
+
+def test_usage_labels_do_not_present_observations_as_money_or_settlement(page, dashboard):
+    connect(page, dashboard)
+    expect(page.locator("#cards")).to_contain_text("observed units")
+    assert "billable tokens" not in page.locator("#cards").inner_text()
+    expect(page.locator("#usage")).to_contain_text("do not establish per-request settlement")
+    run_id = "synthetic-release-run"
+    with httpx.Client(base_url=dashboard.base, timeout=3) as client:
+        response = client.post("/v1/chat/completions", headers={
+            "Authorization": f"Bearer {VK_OPENAI}", "x-sandhi-run-id": run_id,
+            "x-sandhi-step-id": "guide-check",
+        }, json={"model": "gpt-mock", "max_tokens": 10,
+                 "messages": [{"role": "user", "content": "synthetic dashboard check"}]})
+        assert response.status_code == 200, response.text
+        deadline = time.monotonic() + 3
+        while client.get(f"/admin/usage/run/{run_id}", headers=dashboard.headers).status_code != 200:
+            assert time.monotonic() < deadline, "run observation did not persist"
+            time.sleep(0.02)
+    page.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name="Run explorer", exact=True).click()
+    page.get_by_label("Run ID", exact=True).fill(run_id)
+    page.get_by_role("button", name="Look up", exact=True).click()
+    expect(page.locator("#run-tree")).to_have_attribute("data-state", "ready")
+    expect(page.locator("#run-tree")).to_contain_text("observed token units")
+
+
+def test_backend_route_inventory_is_escaped_and_cleared_on_auth_change(page, dashboard):
+    hostile = '<img src=x onerror="window.inventoryInjected=true">'
+    backend = {"id": "preview", "provider": "fixture", "credential_ref": "fixture:default",
+               "endpoint": {"endpoint_family": "openai_chat_completions"},
+               "models": [{"id": hostile}], "cache_policy": {"models": {hostile: {"profile": "native_only"}}}}
+    route = {"id": "coding", "models": [{"id": hostile, "targets": [{"backend": "preview", "model": hostile}]}]}
+    with sqlite3.connect(dashboard.database) as connection:
+        connection.execute("INSERT INTO backends (id,definition_json,revision,status,created_at,updated_at,upstream_budget_scope) VALUES (?,?,1,'active','fixture','fixture','upstream:fixture')", ("preview", json.dumps(backend)))
+        connection.execute("INSERT INTO logical_routes VALUES (?,?,1,'active')", ("coding", json.dumps(route)))
+    connect(page, dashboard)
+    page.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name="Backends & routes", exact=True).click()
+    expect(page.locator("#backends")).to_have_attribute("data-state", "ready")
+    expect(page.locator("#routes")).to_have_attribute("data-state", "ready")
+    expect(page.locator("#backends")).to_contain_text("Unavailable")
+    expect(page.locator("#backends")).to_contain_text("native_only")
+    expect(page.locator("#routes")).to_contain_text(hostile)
+    assert page.locator("#backends img, #routes img").count() == 0
+    assert page.evaluate("window.inventoryInjected") is None
+    page.get_by_label("Admin token", exact=True).fill("changed-token")
+    for panel in ("backends", "routes", "topology"):
+        expect(page.locator("#" + panel)).to_have_attribute("data-state", "locked")
+    assert hostile not in page.locator("body").text_content()
+
+
+def test_input_composition_chart_requires_complete_reporting(page, dashboard):
+    data = httpx.get(dashboard.base + "/dashboard/api/usage", headers=dashboard.headers).json()
+    data["total"].update(tokens_in=3, cache_read_tokens=5, cache_creation_tokens=2,
+                         cache_read_coverage={"reported": 1, "absent": 0, "malformed": 0, "unsupported": 0, "unknown": 0})
+    page.route("**/dashboard/api/usage", lambda route: route.fulfill(json=data))
+    connect(page, dashboard)
+    expect(page.get_by_role("img", name="3 fresh, 5 cache-read and 2 cache-write input tokens")).to_be_visible()
+    expect(page.locator(".token-insight")).to_contain_text("50.0% cache-read share")
+    expect(page.locator(".token-insight")).to_contain_text("not a percentage cost saving")
+    data["total"]["cache_read_coverage"] = {"reported": 0, "absent": 1, "malformed": 0, "unsupported": 0, "unknown": 0}
+    page.get_by_role("button", name="Refresh", exact=True).click()
+    expect(page.locator("#usage")).to_have_attribute("data-state", "ready")
+    expect(page.locator(".token-bar")).to_have_count(0)
+    expect(page.locator(".token-insight")).to_contain_text("Missing measurements are not treated as zero")
+
+
+def test_usage_evidence_queries_real_store_and_clears_different_failed_query(page, dashboard):
+    with sqlite3.connect(dashboard.database) as connection:
+        persisted_id = connection.execute("SELECT request_id FROM usage_events").fetchone()[0]
+    assert persisted_id
+    connect(page, dashboard)
+    page.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name="Usage evidence", exact=True).click()
+    page.get_by_label("Exact identifier").fill(persisted_id)
+    with page.expect_request("**/admin/usage/diagnostics") as pending:
+        page.get_by_role("button", name="Inspect usage", exact=True).click()
+    assert pending.value.post_data_json == {
+        "selector": {"kind": "request", "value": persisted_id}, "limit": 100,
+    }
+    evidence = page.locator("#request-evidence")
+    expect(evidence).to_have_attribute("data-state", "ready")
+    expect(evidence).to_contain_text("1 persisted records")
+    row = evidence.get_by_role("region", name="Persisted usage records").locator("tbody tr")
+    expect(row).to_contain_text("gpt-mock")
+    assert [cell.inner_text() for cell in row.locator("td").all()][2:6] == ["7", "4", "0", "3"]
+    expect(evidence).to_contain_text("physical_attempts")
+    page.get_by_label("Exact identifier").fill("missing-record")
+    page.get_by_role("button", name="Inspect usage", exact=True).click()
+    expect(evidence).to_contain_text("0 persisted records")
+    expect(evidence).to_contain_text("No persisted records matched")
+    assert "gpt-mock" not in evidence.inner_text()
+    page.route("**/admin/usage/diagnostics", lambda route: route.fulfill(status=503, json={"error": "synthetic unavailable"}))
+    page.get_by_label("Exact identifier").fill("different-failed-query")
+    page.get_by_role("button", name="Inspect usage", exact=True).click()
+    expect(evidence).to_have_attribute("data-state", "unavailable")
+    assert "persisted records" not in evidence.inner_text()
+    page.get_by_role("button", name="Clear token", exact=True).click()
+    expect(evidence).to_have_attribute("data-state", "locked")
+    expect(page.get_by_label("Exact identifier")).to_have_value("")
+
+
+@pytest.mark.parametrize("dashboard", [{"oidc": True}, {"oidc": True, "diagnostics": True}],
+                         ids=["read-is-insufficient", "explicit-diagnostics"], indirect=True)
+@pytest.mark.parametrize("page", [{"tls": True}], indirect=True)
+def test_usage_evidence_respects_separate_sso_diagnostics_permission(page, dashboard, oidc_authority, request):
+    oidc_authority.subject = "viewer"
+    page.goto(dashboard.base + "/dashboard")
+    page.get_by_role("link", name="Sign in with SSO").click()
+    expect(page.locator("#usage")).to_have_attribute("data-state", "ready")
+    page.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name="Usage evidence", exact=True).click()
+    inspect = page.get_by_role("button", name="Inspect usage", exact=True)
+    if request.node.callspec.params["dashboard"].get("diagnostics"):
+        expect(inspect).to_be_enabled()
+        with sqlite3.connect(dashboard.database) as connection:
+            persisted_id = connection.execute("SELECT request_id FROM usage_events").fetchone()[0]
+        page.get_by_label("Exact identifier").fill(persisted_id)
+        inspect.click()
+        expect(page.locator("#request-evidence")).to_have_attribute("data-state", "ready")
+        expect(page.locator("#request-evidence")).to_contain_text("gpt-mock")
+    else:
+        expect(inspect).to_be_disabled()
+    page.get_by_role("button", name="Sign out").click()
+    expect(page.locator("#usage")).to_have_attribute("data-state", "locked")
+    expect(page.locator("#request-evidence")).to_have_attribute("data-state", "locked")
+    assert "gpt-mock" not in page.locator("body").text_content()
