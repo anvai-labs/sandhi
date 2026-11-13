@@ -1,4 +1,4 @@
-# OIDC SSO setup and migration
+# OIDC provider setup, SSO and migration
 
 The standalone `sandhi-proxy` defaults to `SANDHI_AUTH_MODE=oidc`. It refuses to start
 without valid OIDC configuration and verified HTTPS discovery. `--help` and `--version`
@@ -36,48 +36,55 @@ does not verify the token: Sandhi still introspects it. This candidate does not
 implement a Victor login/refresh broker, migrate any issuer or qualify a live IDM
 deployment. See [the audience decision](../adr/0045-access-token-resource-audience.md).
 
-## Configure the identity provider
+## Choose a compatible OIDC provider
 
-Register a dedicated OAuth client with authorization-code flow, S256 PKCE and an exact
-HTTPS callback ending in `/auth/callback`. ES256 and RS256 signing are supported. The
-provider must publish discovery, JWKS and RFC 7662 introspection endpoints on its issuer
-origin. Sandhi validates signature, issuer, audience, expiry, nonce and any access-token
-hash for browser login; bearer access tokens are introspected on each request.
+Sandhi uses OIDC and OAuth contracts, not a required identity product. Kanidm is
+one example below. Register Sandhi as its own application with your provider;
+provider discovery alone does not establish that its access tokens are compatible.
 
-For Kanidm, use a dedicated client and access groups; do not reuse another application's
-registration. For a public client, no application secret is needed:
+| Setting or contract | Required Sandhi behavior |
+| --- | --- |
+| Issuer | An exact HTTPS issuer, including any tenant/client path. Discovery's `issuer` must match `oidc.json`; a hostname, discovery URL and issuer are different values. |
+| Discovery | Sandhi appends `/.well-known/openid-configuration` to the issuer after trimming a trailing slash for that request. Configure `issuer`, not the complete discovery URL. |
+| Authority endpoints | Discovery must advertise HTTPS `authorization_endpoint`, `token_endpoint`, `jwks_uri` and `introspection_endpoint`, all on the issuer's origin. If group policy uses UserInfo, that endpoint must also be on the issuer origin. |
+| Browser application | Authorization-code flow, advertised S256 PKCE, and an exact external HTTPS redirect `https://YOUR_GATEWAY/auth/callback`; no wildcard callback. ES256 and RS256 ID-token signatures are supported. |
+| Client registration | Set the assigned `client_id`. A public client needs no application secret; a confidential client names a private environment variable with `client_secret_env`. Never put its secret in the JSON file. |
+| Scopes | Sandhi requests `openid` automatically. Request only additional scopes admitted for this application, such as `profile`; requesting a scope does not grant a Sandhi role or inference permission. |
+| Audience | The configured `client_id` remains the ID-token audience. Introspected access tokens must target `access_token_audience` when configured, otherwise `client_id`. Tokens intended for another service do not qualify. |
+| Introspection | Bearer access tokens are introspected for each request. Discovery must explicitly advertise `introspection_endpoint_auth_methods_supported`; supported methods are `none` and `client_secret_basic`. Token-endpoint methods do not substitute for introspection methods. |
+| Introspection result | Require `active: true`, exact `iss`, `aud` equal to or containing the selected access-token audience (only strings are allowed in audience arrays), nonempty `sub`, future `exp`, bearer `token_type`, and a valid `nbf` when present. A signed JWT access token still needs this introspection path. |
 
-```sh
-kanidm system oauth2 create-public sandhi 'Sandhi Gateway' https://gateway.example.com/dashboard
-kanidm system oauth2 add-redirect-url sandhi https://gateway.example.com/auth/callback
-kanidm system oauth2 enable-strict-redirect-url sandhi
-kanidm group create sandhi_users
-kanidm system oauth2 update-scope-map sandhi sandhi_users openid profile
-kanidm group add-members sandhi_users YOUR_ACCOUNT
-```
+For introspection, Sandhi selects `client_secret_basic` when a secret is configured
+and the provider advertises it; otherwise it uses an advertised `none`. Missing or
+unsupported methods fail startup. This is Sandhi's supported profile, not a claim
+that every compliant OIDC provider exposes token introspection. ID-token verification
+also checks the signature, issuer, audience, expiry, browser nonce and access-token
+hash when supplied.
 
-Kanidm's issuer is client-specific: `https://IDP/oauth2/openid/sandhi`. Modern Kanidm
-discovery advertises S256 and ES256, and its introspection endpoint advertises `none`
-authentication. Sandhi selects the advertised introspection method independently of
-login-client authentication: `none` or `client_secret_basic`. RFC 8414 provides no default
-for this endpoint; missing or unsupported methods fail startup. A confidential client
-can use `client_secret_env` in the
-configuration below; keep that secret in the deployment's private environment.
+Get the issuer from your provider's application/tenant registration, then inspect
+its public discovery document over verified HTTPS. Verify advertised JWKS and the
+contracts above before registering accounts or changing a running gateway. Do not
+invent endpoint paths, rewrite discovery metadata or disable TLS verification to
+make an unsupported provider appear compatible. See [OIDC Discovery](https://openid.net/specs/openid-connect-discovery-1_0.html),
+[OAuth metadata](https://www.rfc-editor.org/rfc/rfc8414.html) and
+[token introspection](https://www.rfc-editor.org/rfc/rfc7662.html).
 
 ## Configure Sandhi
 
-Create a private `oidc.json`. Subject keys are the verified OIDC `sub` (Kanidm UUID),
-not display names, email addresses or caller headers. Replace every example value:
+Create a private `oidc.json`. Subject keys are the verified OIDC `sub` under that
+issuer, not display names, email addresses or caller headers. A subject may be an
+opaque string rather than a UUID. Replace every example value; the example issuer
+below is a placeholder, not a live service:
 
 ```json
 {
-  "issuer": "https://idp.example.com/oauth2/openid/sandhi",
+  "issuer": "https://idp.example.com/YOUR_TENANT",
   "client_id": "sandhi",
   "redirect_url": "https://gateway.example.com/auth/callback",
   "scopes": ["profile"],
   "subjects": {
-    "OPERATOR_SUBJECT_UUID": {"role": "admin"},
-    "AGENT_SUBJECT_UUID": {
+    "VERIFIED_OPERATOR_SUBJECT": {"role": "admin"},
+    "VERIFIED_AGENT_SUBJECT": {
       "grants": {
         "local": {
           "upstream": "inferflux:local",
@@ -109,6 +116,70 @@ OIDC configuration grants access; provider credentials still live in the existin
 or explicitly configured provider environment. Register credentials through an administrator
 session or declarative provider configuration before inference.
 
+## Provider examples
+
+### Kanidm
+
+Use a dedicated client and access groups; do not reuse another application's
+registration. For a public client, no application secret is needed:
+
+```sh
+kanidm system oauth2 create-public sandhi 'Sandhi Gateway' https://gateway.example.com/dashboard
+kanidm system oauth2 add-redirect-url sandhi https://gateway.example.com/auth/callback
+kanidm system oauth2 enable-strict-redirect-url sandhi
+kanidm group create sandhi_users
+kanidm system oauth2 update-scope-map sandhi sandhi_users openid profile
+kanidm group add-members sandhi_users YOUR_ACCOUNT
+```
+
+Kanidm's issuer is client-specific: `https://IDP/oauth2/openid/sandhi`.
+Check that registration's discovery for S256, a supported signing algorithm and
+explicit introspection authentication methods. A public Sandhi client requires
+advertised `none` introspection authentication; a confidential client can use
+`client_secret_basic` with `client_secret_env` in the configuration above. Login-client
+authentication and introspection authentication are selected independently.
+
+Use the issuer returned by that client's discovery document, rather than the
+placeholder issuer in the generic JSON. A Kanidm account UUID can be obtained with
+`kanidm person get YOUR_ACCOUNT -o json`; verify it belongs to the intended issuer.
+For the example access group, `kanidm group add-members sandhi_users YOUR_ACCOUNT`
+admits that account to this application. Subject-to-role binding in Sandhi is still
+separate. Check commands against your installed [Kanidm administration version](https://kanidm.github.io/kanidm/stable/integrations/oauth2.html).
+
+### AnvaiOps development IDM: discovery checked, integration not qualified
+
+A credential-free HTTPS check on **2026-11-13 UTC** returned discovery from
+[`https://id.anvaiops.dev/.well-known/openid-configuration`](https://id.anvaiops.dev/.well-known/openid-configuration)
+with the exact issuer **`https://id.anvaiops.dev`**. The advertised public JWKS
+endpoint also returned successfully. This is the development host, not the
+historical Kanidm issuer recorded in [the migration snapshot](identity-groups.md).
+
+| Public metadata | Observed value |
+| --- | --- |
+| `issuer` | `https://id.anvaiops.dev` |
+| `authorization_endpoint` | `https://id.anvaiops.dev/oauth2/authorize` |
+| `token_endpoint` | `https://id.anvaiops.dev/oauth2/token` |
+| `jwks_uri` | `https://id.anvaiops.dev/oauth2/jwks` |
+| Code flow / PKCE / signing | `code` / `S256` / `RS256` |
+| `token_endpoint_auth_methods_supported` | `none`, `client_secret_basic` |
+| `introspection_endpoint` | Absent |
+| `introspection_endpoint_auth_methods_supported` | Absent |
+
+**This discovery does not currently satisfy Sandhi's startup profile.** The absent
+introspection endpoint and its authentication metadata are required even when the
+initial goal is browser login. Do not append a guessed introspection URL or switch
+authentication modes as a fallback. A compatible, advertised introspection contract
+and a dedicated Sandhi registration must be provided and qualified before using
+this issuer with Sandhi. The check established no Sandhi client ID, callback,
+account admission, role binding, token audience or end-to-end login. No credentials
+were used, client registrations changed or deployments migrated. Recheck public
+metadata and the intended tenant issuer before future setup; do not silently
+substitute a production or another tenant's issuer.
+
+### Local candidate qualification is separate from the live host
+
+The isolated local Sandhi, Victor and IDM candidates have exercised actual HTTPS code/PKCE resource-token exchange, per-request introspection, token rotation and joined durable usage receipts. Wrong-purpose, wrong-resource, expiry and logout controls refused access. The local IDM fixture used supported owner registration and resource ACLs; these tests used synthetic credentials and disposable state. They did not deploy or change `id.anvaiops.dev`, and do not qualify a live tenant or production migration. The live discovery limitations above remain distinct from this local candidate evidence.
+
 ## Roles and agent access
 
 | Role | Allowed operations |
@@ -127,22 +198,22 @@ Two independent permissions are required: the identity provider must admit the a
 to the Sandhi application, and Sandhi must bind its verified subject to a role. A working
 administrator test login does not establish access for another account.
 
-1. Obtain the account's UUID with `kanidm person get YOUR_ACCOUNT -o json`. Verify that
-   it is the intended account under the configured issuer before granting access.
-   Do not use a username, email address, group name or an unverified token payload
-   as the subject binding.
-2. Add the account to a group mapped to the Sandhi client's `openid` and `profile`
-   scopes. For the setup above, use `kanidm group add-members sandhi_users YOUR_ACCOUNT`.
-   An existing deployment may use separate groups such as `sandhi_viewers`; use its
-   actual client scope mapping rather than creating another group or changing another
-   application's registration. Group names do not grant Sandhi roles automatically.
-   Read back the membership and confirm the account UUID still matches.
+1. Obtain the account's stable subject from the provider's verified account/claim
+   tooling. Confirm the intended account under the exact configured issuer before
+   granting access. Do not trust a username, email address, group name or an
+   unverified token payload as the subject binding. The [Kanidm example](#kanidm)
+   gives its UUID lookup command.
+2. Admit the account to the dedicated Sandhi application using the provider's
+   assignment, access group or scope policy. Read back the assignment and subject.
+   Do not alter another application's registration or assume an IdP group grants
+   a Sandhi role automatically. Use the deployment's existing group policy where
+   explicitly configured; see [identity and group boundaries](identity-groups.md).
 3. Back up the private file referenced by `SANDHI_OIDC_CONFIG`, then add an entry to its
    existing `subjects` object. Preserve the issuer, client, callback, CA, existing
    administrators and agent grants. For read-only dashboard access, the entry is:
 
    ```json
-   "VERIFIED_PERSON_UUID": {"role": "viewer"}
+   "VERIFIED_PERSON_SUBJECT": {"role": "viewer"}
    ```
 
    This is a JSON object entry, not a replacement configuration file. Choose
@@ -196,7 +267,7 @@ token compatibility mode still requires its existing admin token for diagnostics
 Open `/dashboard` and select **Sign in with SSO**. Tokens stay server-side. Browser
 sessions use Secure, HttpOnly, SameSite=Lax `__Host-` cookies. Writes require both a CSRF
 proof and the exact configured Origin. **Sign out** invalidates this Sandhi session; it
-does not sign the user out of Kanidm or other applications.
+does not sign the user out of the identity provider or other applications.
 
 Dashboard section links jump to usage, configuration, access, budgets, alerts and run
 lookup. Keyboard users can use **Skip to overview** and focus each attribution table
@@ -235,9 +306,11 @@ Keep route selection, model selection and identity separate in the client UX. Sh
 selected endpoint and whether Sandhi metering is active; distinguish gateway connection
 failure, identity-provider unavailability, expired login, forbidden access and model
 readiness. Browser users sign in once through SSO; unattended agents use a dedicated
-service identity and short-lived OAuth access tokens. Kanidm supports exchanging a
-service-account API token for these access tokens; the bootstrap credential must remain
-private. This does not eliminate provider credentials such as ZAI's API key.
+service identity and short-lived OAuth access tokens through the provider's supported
+client/service-account flow. For example, Kanidm offers service-account token exchange;
+keep any bootstrap credential private. A provider's machine-token flow and resulting
+introspection claims require separate qualification. This does not eliminate upstream
+provider credentials such as ZAI's API key.
 
 Each service validates its own intended token audience. A token issued for Sandhi must
 not simply be forwarded to InferFlux. Upstream token acquisition, renewal and exchange

@@ -11,7 +11,7 @@ mistaken for shipped behavior.
 | Question | Source of truth |
 |---|---|
 | What can I run today? | The root [README](../README.md) and [proxy operator guide](operator/proxy-guide.adoc) |
-| How do users, groups and long-running clients authenticate? | [Identity and agent credentials](operator/identity-groups.md) (feature candidate; live migration pending); [access-token resource audience](adr/0045-access-token-resource-audience.md) separates the post-release resource audience candidate from OAuth client identity |
+| How do users, groups and long-running clients authenticate? | [OIDC provider setup and SSO](operator/oidc-sso.md): provider contracts and live IDM compatibility limits; [identity and agent credentials](operator/identity-groups.md); [resource audience](adr/0045-access-token-resource-audience.md) separates access-token resource identity from OAuth client identity |
 | How is prompt egress inspected? | [Policy MVP](operator/policy-evaluation.md) (candidate); [evaluator backends and Python/MLflow](operator/python-ml-evaluators.md) (Python, optional ONNX and remote-service candidates); [resource-limited container profile](../templates/python-evaluator/DEPLOYMENT.md) |
 | How does Sandhi improve repeated-context efficiency? | [Visual cache routing and token guide](product/cache-aware-routing.md): marker placement, fresh/read/write accounting, cost boundaries and the complementary ONNX egress mechanism |
 | What has been tested with live provider caching? | [Z.AI qualification](reviews/zai-router-live-2026-11-11.md): 24 final protocol/mode cells and 48 cache calls; retained defects/timeouts and remaining gates |
