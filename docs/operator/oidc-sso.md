@@ -209,9 +209,11 @@ No inference usage is shown.*
 | Viewer | 200 | 403 | 403 | 401 |
 | Unassigned subject | No dashboard session | Denied | Denied | No inference grant |
 
-The run verified actual PKCE/callback processing, Secure/HttpOnly/host-only
-cookies, exact-origin/CSRF refusals, mixed-credential refusal, logout and rejection
-of the captured session cookie after logout. TLS verification stayed enabled.
+Local fixtures verified PKCE/callback processing, Secure/HttpOnly/host-only
+cookies, exact-origin/CSRF refusals, mixed-credential refusal and session-cookie
+replay refusal after logout. The separate deployed admin check verified login,
+CSRF enforcement, logout and subsequent access denial over trusted HTTPS; it did
+not replay a copied cookie or test other live roles.
 
 ### Accounting interpretation
 
