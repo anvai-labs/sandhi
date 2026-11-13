@@ -82,6 +82,11 @@ def main():
             SANDHI_ERROR_DETAIL="redacted",
             SANDHI_DASHBOARD_PUBLIC="0",
         )
+        if "listener_config" in config:
+            listener_config = config["listener_config"]
+            if not isinstance(listener_config, str) or not listener_config.strip():
+                raise ValueError("listener_config must be a nonempty configuration-file path")
+            env["SANDHI_CONFIG"] = listener_config
         if mode == "oidc":
             env["SANDHI_OIDC_CONFIG"] = config["oidc_config"]
         elif secret is not None:

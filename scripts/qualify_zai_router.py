@@ -164,7 +164,7 @@ def main():
         base = f"http://127.0.0.1:{port}"
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith(("SANDHI_", "SENTINELPASS_"))}
-        environment.update(SANDHI_AUTH_MODE="tokens", SANDHI_BIND=f"127.0.0.1:{port}",
+        environment.update(SANDHI_AUTH_MODE="tokens", SANDHI_ALLOW_LOOPBACK_HTTP="1", SANDHI_BIND=f"127.0.0.1:{port}",
                            SANDHI_ADMIN_TOKEN=private[1], SANDHI_STORE=str(database),
                            SANDHI_CONFIG=str(config), SANDHI_VAULT_BACKEND="credstore",
                            SANDHI_CREDENTIALS_DIR=str(credentials), SANDHI_SHUTDOWN_QUIESCE_MS="0",

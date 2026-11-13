@@ -24,6 +24,31 @@ behavior and does not include the resource-audience override described here.
 - All profiles retain the original durable ledger, both budget legs, cache rules and source accounting.
 - Starter callers share one trust realm. This is not per-user or tenant isolation. An explicit non-loopback bind makes that access available on the selected network.
 
+### Listener transport
+
+| Credential surface | Standalone listener requirement |
+| --- | --- |
+| Credential-free starter | Local HTTP remains available |
+| Tokens or OIDC | Listener TLS; plaintext companions refused by default |
+| Starter with an admin token or client-credentials registry | Same TLS requirement |
+| Deliberate local test or same-host TLS termination | `SANDHI_ALLOW_LOOPBACK_HTTP=1`; every plaintext socket must be literal IP loopback |
+
+Configure `tls.cert` and `tls.key` in `SANDHI_CONFIG` for authenticated LAN or public
+listeners. The loopback exception accepts only `1`; unset or `0` keeps enforcement,
+and all other values fail startup. It never admits wildcard, LAN or IPv4-mapped
+IPv6 sockets. Forwarding headers do not establish TLS. A local terminator must
+provide HTTPS and prevent untrusted access to its loopback backend. The standalone
+guard runs before OIDC discovery or durable state initialization.
+
+The private `scripts/subscription_service.py` gateway runner accepts an explicit
+`"listener_config": "/private/gateway.json"` in `service.json` to supply that TLS
+configuration. Its configured `gateway` URL must use the corresponding HTTPS
+address. It does not inherit a plaintext exception or enable one automatically.
+
+In-process provider FFI has no listener. Programmatic `serve*` callers own transport
+selection and must use TLS or their own protected local termination boundary;
+these APIs do not read the standalone exception variable.
+
 For a local starter, use `scripts/quickstart.sh`. Provider credentials and model
 configuration are separate from client authentication.
 

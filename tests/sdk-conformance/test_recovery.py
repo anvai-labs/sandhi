@@ -82,7 +82,7 @@ def recovery_gateway(proxy_binary, gated_provider, tmp_path, request):
         env = {key: value for key, value in os.environ.items()
                if not key.startswith(("SANDHI_", "SENTINELPASS_"))}
         env.update({
-            "SANDHI_AUTH_MODE": "tokens", "SANDHI_BIND": f"127.0.0.1:{_free_port()}",
+            "SANDHI_AUTH_MODE": "tokens", "SANDHI_ALLOW_LOOPBACK_HTTP": "1", "SANDHI_BIND": f"127.0.0.1:{_free_port()}",
             "SANDHI_STORE": str(database), "SANDHI_LEDGER_SHARDS": str(shards),
             "SANDHI_CONFIG": str(config), "SANDHI_ADMIN_TOKEN": "recovery-test-admin",
             "SANDHI_SHUTDOWN_GRACE_SECS": "3", "SANDHI_SHUTDOWN_QUIESCE_MS": "100",
@@ -905,7 +905,7 @@ def test_historical_shards_snapshot_restore_preserves_rows_and_refuses_automatic
     inventory = sorted(p.name for p in restored.parent.iterdir())
     env = {key: value for key, value in os.environ.items()
            if not key.startswith(("SANDHI_", "SENTINELPASS_"))}
-    env.update(SANDHI_AUTH_MODE="tokens", SANDHI_STORE=str(restored), SANDHI_LEDGER_SHARDS="2",
+    env.update(SANDHI_AUTH_MODE="tokens", SANDHI_ALLOW_LOOPBACK_HTTP="1", SANDHI_STORE=str(restored), SANDHI_LEDGER_SHARDS="2",
                SANDHI_BIND=f"127.0.0.1:{_free_port()}")
     refusal = subprocess.run([str(proxy_binary)], env=env, capture_output=True, text=True, timeout=5)
     assert refusal.returncode == 2

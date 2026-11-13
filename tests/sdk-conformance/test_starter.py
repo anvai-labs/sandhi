@@ -41,8 +41,11 @@ def starter_gateway(starter_binary, gated_provider, tmp_path):
                    SANDHI_SHUTDOWN_QUIESCE_MS="0")
         if mode is not None:
             env["SANDHI_AUTH_MODE"] = mode
+            if mode == "tokens":
+                env["SANDHI_ALLOW_LOOPBACK_HTTP"] = "1"
         if admin is not None:
             env["SANDHI_ADMIN_TOKEN"] = admin
+            env["SANDHI_ALLOW_LOOPBACK_HTTP"] = "1"
         env.update(extra or {})
         with (tmp_path / f"starter-{port}.log").open("wb") as log:
             process = subprocess.Popen([str(starter_binary)], env=env, cwd=tmp_path,
