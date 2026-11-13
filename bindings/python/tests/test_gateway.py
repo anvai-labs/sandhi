@@ -343,7 +343,7 @@ def test_persistent_typed_provider_complete_and_stream():
         {
             "id": "r1",
             "model": "gpt-test",
-            "choices": [{"message": {"content": "hello"}, "finish_reason": "stop"}],
+            "choices": [{"message": {"content": "hello", "reasoning_content": "summary"}, "finish_reason": "stop"}],
             "usage": {
                 "prompt_tokens": 10,
                 "completion_tokens": 3,
@@ -389,6 +389,7 @@ def test_persistent_typed_provider_complete_and_stream():
         request = json.dumps(
             {
                 "schema_version": "1",
+                "include_native_response": False,
                 "model": "gpt-test",
                 "messages": [{"role": "user", "content": "hi"}],
             }
@@ -404,6 +405,9 @@ def test_persistent_typed_provider_complete_and_stream():
         response, events = asyncio.run(run())
         assert provider.provider == "openai"
         assert response["output"]["content"] == "hello"
+        assert response["output"]["reasoning"] == "summary"
+        assert response["extensions"]["reasoning"] == "summary"
+        assert "openai" not in response["extensions"]
         assert response["usage"]["tokens_in"] == 6
         assert response["usage"]["cache_read_observation"] == {
             "status": "reported", "source": "origin_usage"

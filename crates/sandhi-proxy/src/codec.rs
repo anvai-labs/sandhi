@@ -1924,9 +1924,10 @@ fn encode_anthropic_response(response: &ChatResponseV1) -> Result<Value, &'stati
 
 fn buffered_reasoning(response: &ChatResponseV1) -> Option<&str> {
     response
-        .extensions
-        .get("reasoning")
-        .and_then(Value::as_str)
+        .output
+        .reasoning
+        .as_deref()
+        .or_else(|| response.extensions.get("reasoning").and_then(Value::as_str))
         .filter(|text| !text.is_empty())
 }
 
@@ -3249,6 +3250,7 @@ mod tests {
             id: Some("r".into()),
             model: "m".into(),
             output: AssistantOutputV1 {
+                reasoning: None,
                 content: Some(MessageContent::Text("ok".into())),
                 tool_calls: Vec::new(),
                 refusal: None,
@@ -3416,6 +3418,7 @@ mod tests {
             id: Some("resp_1".into()),
             model: "gpt-test".into(),
             output: AssistantOutputV1 {
+                reasoning: None,
                 content: Some(MessageContent::Text("hi".into())),
                 tool_calls: vec![ToolCallV1 {
                     id: "call_1".into(),
@@ -3462,6 +3465,7 @@ mod tests {
             id: None,
             model: "m".into(),
             output: AssistantOutputV1 {
+                reasoning: None,
                 content: Some(MessageContent::Text("...".into())),
                 tool_calls: Vec::new(),
                 refusal: None,
@@ -3766,6 +3770,7 @@ mod gemini_codec_tests {
             id: Some("resp_1".into()),
             model: "gpt-mock".into(),
             output: AssistantOutputV1 {
+                reasoning: None,
                 content: Some(MessageContent::Text("pong".into())),
                 tool_calls: vec![ToolCallV1 {
                     id: "call_1".into(),
@@ -3799,5 +3804,23 @@ mod gemini_codec_tests {
         assert_eq!(encoded["usageMetadata"]["cachedContentTokenCount"], 4);
         // A tool turn is an ordinary STOP for Gemini; the functionCall part is the signal.
         assert_eq!(encoded["candidates"][0]["finishReason"], "STOP");
+    }
+    #[test]
+    fn canonical_buffered_reasoning_precedes_legacy_extension_in_every_projection() {
+        let mut response: ChatResponseV1 = serde_json::from_value(json!({"model":"fixture","output":{"content":"answer","reasoning":"canonical"},"usage":{"tokens_in":1,"tokens_out":2,"cache_read_tokens":0,"cache_creation_tokens":0},"extensions":{"reasoning":"legacy"}})).unwrap();
+        for dialect in [
+            IngressDialect::OpenAi,
+            IngressDialect::Anthropic,
+            IngressDialect::Responses,
+            IngressDialect::Gemini,
+        ] {
+            let encoded = encode_response(dialect, &response).unwrap().to_string();
+            assert!(encoded.contains("canonical"));
+            assert!(!encoded.contains("legacy"));
+        }
+        response.output.reasoning = Some(String::new());
+        assert_eq!(buffered_reasoning(&response), None);
+        response.output.reasoning = None;
+        assert_eq!(buffered_reasoning(&response), Some("legacy"));
     }
 }

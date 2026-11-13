@@ -192,3 +192,31 @@ The implementation rows above are internal milestones, not external package rele
 published version is 0.1.1 and there are no external users. Complete the entire admitted TD-0002
 scope, delete the superseded raw surfaces, pass every release gate, and publish it once as 0.1.2
 across crates.io, PyPI, and npm. Do not publish partial stepping stones.
+
+## Postrelease candidate: typed display reasoning (contract minor 14)
+
+PR #364's remaining unique behavior is an optional `output.reasoning` string in
+`AssistantOutputV1`. Current portable buffered output already retains validated
+reasoning in `extensions.reasoning`; this candidate makes that display text
+available through the named output contract and keeps the extension for existing
+consumers. It is separate from reasoning token counts and never represents an
+opaque signature, encrypted continuation, replay state or action authority.
+
+The existing `buffered_fidelity` validator remains the extraction owner for Chat,
+Messages, Responses and Gemini. Portable delivery still refuses malformed or
+unrepresentable output. Native delivery keeps its original envelope and populates
+the optional typed field only when the same validator establishes a safe display
+projection; otherwise the field is absent. Existing extension clients retain
+their behavior. Buffered Codex uses its current bounded typed-event aggregation
+and terminal projection fences. HTTP projections prefer the canonical field and
+fall back to the legacy extension only when the field is absent; an explicitly
+empty field does not resurrect older extension text.
+
+The JSON field is optional, defaults to absent, and is omitted when absent.
+Existing JSON consumers remain compatible. Rust callers constructing public
+`AssistantOutputV1` literals must add `reasoning: None` (or validated display
+text); that source migration accompanies the additive wire minor. Schemas and
+Python/TypeScript facades are regenerated from their existing owners. This is a
+postrelease review candidate, not a change to the immutable 0.17.0 release or a
+claim of new live-provider acceptance. Source package versions remain unchanged
+until the separately reviewed release train is prepared.

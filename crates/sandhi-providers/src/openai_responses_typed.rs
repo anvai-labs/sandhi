@@ -605,6 +605,14 @@ pub(crate) fn decode_responses_response(
             .unwrap_or(requested_model)
             .into(),
         output: AssistantOutputV1 {
+            // Native delivery preserves unprojectable envelopes. Only the existing
+            // portable validator can establish a canonical display projection.
+            reasoning: crate::buffered_fidelity::validate(
+                sandhi_core::EndpointFamilyV1::OpenaiResponses,
+                &body,
+            )
+            .ok()
+            .flatten(),
             content: (!text.is_empty()).then_some(MessageContent::Text(text)),
             tool_calls,
             refusal: (!refusal.is_empty()).then_some(refusal),
@@ -778,6 +786,7 @@ async fn aggregate_stream_for_delivery(
     if let Some(error) = failure {
         return Err(error);
     }
+    let reasoning_output = (!reasoning.is_empty()).then(|| reasoning.clone());
     let native_response = native.finish()?;
     let mut extensions = BTreeMap::from([(
         "openai_responses".into(),
@@ -791,6 +800,7 @@ async fn aggregate_stream_for_delivery(
         id,
         model,
         output: AssistantOutputV1 {
+            reasoning: reasoning_output,
             content: (!text.is_empty()).then_some(MessageContent::Text(text)),
             tool_calls: tools.into_values().collect(),
             refusal: (!refusal.is_empty()).then_some(refusal),
@@ -842,6 +852,7 @@ fn project_buffered_aggregate(
         )?;
         response.extensions.remove("openai_responses");
         if let Some(reasoning) = reasoning {
+            response.output.reasoning = Some(reasoning.clone());
             response
                 .extensions
                 .insert("reasoning".into(), Value::String(reasoning));

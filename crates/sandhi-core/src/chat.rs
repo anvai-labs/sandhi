@@ -21,9 +21,10 @@ pub const CHAT_SCHEMA_VERSION_V1: &str = "1";
 /// with a portable-projection consistency fence (TD-0034 M3).
 /// 12 = opt-in native SSE attachments alongside canonical metering events.
 /// 13 = explicit cache intent; handle-compiled plans never enter the wire contract.
+/// 14 = optional typed display reasoning in assistant output.
 /// Consumers feature-detect the binding export and treat an absent fn as
 /// minor 0.
-pub const CHAT_CONTRACT_MINOR: u32 = 13;
+pub const CHAT_CONTRACT_MINOR: u32 = 14;
 pub const MAX_NATIVE_STREAM_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 fn schema_v1() -> String {
@@ -402,6 +403,11 @@ pub enum FinishReasonV1 {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct AssistantOutputV1 {
+    /// Validated provider-supplied display reasoning or summary text, separate from the answer.
+    /// This is not an opaque replay token, signature, or execution authority (minor 14).
+    /// Native envelopes that cannot be safely projected leave this field absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<MessageContent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -939,10 +945,36 @@ mod tests {
         let digest = fnv1a(concatenated.as_bytes());
         assert_eq!(
             (CHAT_CONTRACT_MINOR, digest),
-            (13, 0xf232aa30c05c9de1_u64),
+            (14, 0x752548491ceba344_u64),
             "contract schemas changed: bump CHAT_CONTRACT_MINOR and update this digest \
              (new digest = {digest:#x})"
         );
+    }
+
+    #[test]
+    fn assistant_reasoning_is_optional_and_strictly_display_text() {
+        use serde_json::json;
+        let legacy = json!({"content":"answer","refusal":"no","tool_calls":[{"id":"c","name":"read","arguments":"{}"}]});
+        let output: AssistantOutputV1 = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(output.reasoning, None);
+        assert_eq!(serde_json::to_value(&output).unwrap(), legacy);
+        for text in ["", "summary\nλ"] {
+            let mut value = legacy.clone();
+            value["reasoning"] = json!(text);
+            let output: AssistantOutputV1 = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(output.reasoning.as_deref(), Some(text));
+            assert_eq!(serde_json::to_value(output).unwrap(), value);
+        }
+        for invalid in [
+            json!(false),
+            json!(42),
+            json!([]),
+            json!({"signature":"opaque"}),
+        ] {
+            assert!(
+                serde_json::from_value::<AssistantOutputV1>(json!({"reasoning":invalid})).is_err()
+            );
+        }
     }
 
     #[test]
