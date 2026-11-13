@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Local single-node starter: no client authentication or identity-provider dependency.
-# Optional protected profile: SANDHI_AUTH_MODE=tokens ./scripts/quickstart.sh
+# Optional loopback test profile: SANDHI_AUTH_MODE=tokens SANDHI_ALLOW_LOOPBACK_HTTP=1 ./scripts/quickstart.sh
 # Provider credentials/state remain under the private SANDHI_HOME, never in this script.
 set -euo pipefail
 umask 077
@@ -44,6 +44,11 @@ case "$MODE" in
 esac
 if [ "$MODE" = none ] && [ "${SANDHI_OIDC_CONFIG+x}" = x ]; then
   log "OIDC configuration conflicts with explicit no-auth mode; choose the intended mode."; exit 1
+fi
+# This helper speaks HTTP. Never silently exempt a credential-bearing profile from TLS.
+if { [ "$MODE" = tokens ] || [ "${SANDHI_ADMIN_TOKEN+x}" = x ]; } && [ "${SANDHI_ALLOW_LOOPBACK_HTTP:-0}" != 1 ]; then
+  log "Protected listeners require TLS. For this loopback-only HTTP test helper, explicitly set SANDHI_ALLOW_LOOPBACK_HTTP=1; use the operator guide for HTTPS."
+  exit 1
 fi
 mkdir -p "$SANDHI_HOME"
 EXPECTED_VERSION="$(python3 -c 'import sys,tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["workspace"]["package"]["version"])' "$REPO_ROOT/Cargo.toml")"

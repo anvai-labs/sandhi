@@ -174,6 +174,50 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
             return 1;
         }
     };
+    let config_path = std::env::var("SANDHI_CONFIG")
+        .ok()
+        .map(std::path::PathBuf::from);
+    let StartupConfig {
+        tls,
+        buffered_deadlines,
+        streaming_deadlines,
+    } = match startup_config_from_file(config_path.as_deref()) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("sandhi-proxy: startup configuration error: {error}");
+            std::process::exit(1);
+        }
+    };
+    // Validate transport before authority requests, durable state or listener binding.
+    let http_addr = match http_bind_from_env(tls.is_some(), addr) {
+        Ok(http_addr) => http_addr,
+        Err(error) => {
+            eprintln!("sandhi-proxy: {error}");
+            return 1;
+        }
+    };
+
+    let allow_loopback_http = match loopback_http_from_env() {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("sandhi-proxy: {error}");
+            return 1;
+        }
+    };
+    let credential_surface = auth_mode != sandhi_proxy::auth::AuthMode::None
+        || admin_token.is_some()
+        || std::env::var_os("SANDHI_CLIENT_CREDENTIALS_FILE").is_some();
+    if let Err(error) = validate_authenticated_transport(
+        credential_surface,
+        addr,
+        tls.is_some(),
+        http_addr,
+        allow_loopback_http,
+    ) {
+        eprintln!("sandhi-proxy: {error}");
+        return 1;
+    }
+
     let oidc = if auth_mode == sandhi_proxy::auth::AuthMode::Oidc {
         match sandhi_proxy::auth::Oidc::from_file(std::path::Path::new(
             oidc_path.as_ref().expect("validated OIDC configuration"),
@@ -443,32 +487,6 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
     // topology. No startup path substitutes volatile caps or leases.
     let ledger = ProxyLedger::durable(store_path.as_deref().expect("validated durable path"), 1)
         .unwrap_or_else(|_| startup_store_fatal("ledger"));
-
-    let config_path = std::env::var("SANDHI_CONFIG")
-        .ok()
-        .map(std::path::PathBuf::from);
-    let StartupConfig {
-        tls,
-        buffered_deadlines,
-        streaming_deadlines,
-    } = match startup_config_from_file(config_path.as_deref()) {
-        Ok(config) => config,
-        Err(error) => {
-            eprintln!("sandhi-proxy: startup configuration error: {error}");
-            std::process::exit(1);
-        }
-    };
-    // Dual-scheme serving (TD-0017 D7): TLS keeps the primary SANDHI_BIND socket;
-    // SANDHI_HTTP_BIND opts an explicit plaintext companion listener in for
-    // trusted-network clients that cannot speak HTTPS. Both listeners then share
-    // one process, one admission budget, and one drain.
-    let http_addr = match http_bind_from_env(tls.is_some(), addr) {
-        Ok(http_addr) => http_addr,
-        Err(error) => {
-            eprintln!("sandhi-proxy: {error}");
-            return 1;
-        }
-    };
 
     let public_url = std::env::var("SANDHI_PUBLIC_URL").unwrap_or_else(|_| {
         format!(
@@ -863,6 +881,35 @@ fn configured_store_path() -> String {
         }
         _ => startup_store_fatal("configuration"),
     }
+}
+
+/// Strict, deliberate exception for disposable loopback tests or a local TLS terminator.
+/// Never infer transport security from caller-controlled forwarding headers.
+fn loopback_http_from_env() -> Result<bool, &'static str> {
+    match std::env::var("SANDHI_ALLOW_LOOPBACK_HTTP") {
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        Ok(value) if value == "0" => Ok(false),
+        Ok(value) if value == "1" => Ok(true),
+        _ => Err("SANDHI_ALLOW_LOOPBACK_HTTP must be unset, 0 or 1"),
+    }
+}
+
+fn validate_authenticated_transport(
+    credential_surface: bool,
+    primary: SocketAddr,
+    tls: bool,
+    companion: Option<SocketAddr>,
+    allow_loopback_http: bool,
+) -> Result<(), &'static str> {
+    if !credential_surface {
+        return Ok(());
+    }
+    let allowed = |addr: SocketAddr| allow_loopback_http && addr.ip().is_loopback();
+    if (!tls && !allowed(primary)) || companion.is_some_and(|addr| !allowed(addr)) {
+        return Err("authenticated listeners require TLS and no plaintext companion; \
+                    SANDHI_ALLOW_LOOPBACK_HTTP=1 permits only loopback HTTP for tests or local TLS termination");
+    }
+    Ok(())
 }
 
 /// Resolve the optional plaintext companion listener from `SANDHI_HTTP_BIND`.

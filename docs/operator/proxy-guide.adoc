@@ -128,7 +128,11 @@ sandhi-proxy listening on http://127.0.0.1:8787  (OpenAI Chat/Responses | Anthro
 
 | `SANDHI_HTTP_BIND`
 | _(unset → no plaintext listener)_
-| Optional second, **plaintext** HTTP listener served by the same process — for trusted-network clients that cannot speak HTTPS. Requires listener TLS (`tls.cert`/`tls.key`; without it the `SANDHI_BIND` socket is already plaintext, so setting this fails startup) and must differ from `SANDHI_BIND`. Both sockets share one admission budget, one per-IP table, and one graceful drain. A non-loopback plaintext port warns at startup because virtual keys are bearer credentials.
+| Optional second, **plaintext** HTTP listener served by the same process. Authenticated profiles refuse it unless `SANDHI_ALLOW_LOOPBACK_HTTP=1` and this socket is loopback. Requires listener TLS (`tls.cert`/`tls.key`; without it the `SANDHI_BIND` socket is already plaintext, so setting this fails startup) and must differ from `SANDHI_BIND`. Both sockets share one admission budget, one per-IP table, and one graceful drain. Credential-bearing modes never permit a non-loopback plaintext socket.
+
+| `SANDHI_ALLOW_LOOPBACK_HTTP`
+| `0` (also when unset)
+| Exact `1` deliberately permits loopback-only HTTP for tests or same-host TLS termination. Tokens, OIDC, optional admin tokens and client-credentials registries otherwise require listener TLS with no plaintext companion. Other values fail startup. This never admits wildcard, LAN or IPv4-mapped IPv6 sockets; forwarding headers do not prove TLS.
 
 | `SANDHI_CONFIG`
 | _(unset)_
@@ -288,8 +292,9 @@ keys. Set it now — steps 2–4 depend on it.
 
 [CAUTION]
 ====
-Plain HTTP is appropriate only for loopback or a trusted hop behind a TLS terminator. A
-non-loopback plaintext listener warns at startup because virtual keys are bearer credentials.
+Authenticated standalone listeners require TLS. Only explicit `SANDHI_ALLOW_LOOPBACK_HTTP=1`
+permits loopback HTTP for disposable tests or a same-host TLS terminator. LAN and wildcard
+plaintext sockets are refused even with that exception. The credential-free starter is unchanged.
 ====
 
 === Optional listener TLS
@@ -320,19 +325,30 @@ cargo run -p sandhi-proxy --bin sandhi-proxy
 The certificate file may contain a leaf-first chain. The key may be PKCS#1, PKCS#8, or SEC1 PEM.
 Sandhi validates the complete pair before accepting traffic and serves `https://` when it is valid;
 an incomplete, unreadable, malformed, or mismatched pair fails startup. Without the `tls` object,
-the listener remains byte-compatible plain HTTP. Certificate reload without interrupting existing
+only the credential-free starter or the explicit loopback exception may serve HTTP. Certificate reload without interrupting existing
 streams is tracked separately; restart the process to replace the identity in this phase.
+
+==== Upgrade credential-bearing HTTP deployments
+
+Earlier sources warned about plaintext listeners. The 0.18 candidate now refuses them by
+default for token/OIDC mode, an optional admin token, or a client-credentials registry.
+Configure `tls.cert`/`tls.key`, remove `SANDHI_HTTP_BIND`, and update clients to the verified
+HTTPS URL before restarting. Do not disable authentication to restore an old HTTP route.
+For same-host TLS termination only, bind the backend to `127.0.0.1` or `::1` and explicitly
+set `SANDHI_ALLOW_LOOPBACK_HTTP=1`; keep client-facing HTTPS and access controls at the terminator.
+An HTTP hop over the LAN is not eligible for the exception.
 
 ==== Dual-scheme serving: HTTP and HTTPS in one process
 
 With TLS enabled, `SANDHI_HTTP_BIND` opens a second, **plaintext** listener alongside it — for
-trusted-network clients (LAN devices, simple tools) that cannot do HTTPS:
+explicit loopback tests or a same-host TLS terminator:
 
 [source,bash]
 ----
 SANDHI_CONFIG=/etc/sandhi/config.json \
 SANDHI_BIND=0.0.0.0:18788 \
-SANDHI_HTTP_BIND=0.0.0.0:18789 \
+SANDHI_HTTP_BIND=127.0.0.1:18789 \
+SANDHI_ALLOW_LOOPBACK_HTTP=1 \
 cargo run -p sandhi-proxy --bin sandhi-proxy
 ----
 
@@ -345,9 +361,9 @@ see TD-0017 D7.
 
 [CAUTION]
 ====
-Virtual keys are bearer credentials. A non-loopback `SANDHI_HTTP_BIND` warns at startup: keys and
-prompts cross that port in cleartext, so restrict it to the trusted network segment or front it
-with a TLS terminator.
+Virtual keys are bearer credentials. Authenticated modes refuse every non-loopback plaintext
+companion. An explicit loopback exception does not authenticate a forwarding proxy or prevent
+other local processes from connecting; protect that local boundary separately.
 ====
 
 === Optional reviewed desired state

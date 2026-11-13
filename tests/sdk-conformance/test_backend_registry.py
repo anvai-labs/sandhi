@@ -193,7 +193,7 @@ class Gateway:
     def start(self, **overrides):
         env = {key: value for key, value in os.environ.items()
                if not key.startswith(("SANDHI_", "SENTINELPASS_"))}
-        env.update(SANDHI_AUTH_MODE="tokens", SANDHI_BIND=f"127.0.0.1:{_free_port()}",
+        env.update(SANDHI_AUTH_MODE="tokens", SANDHI_ALLOW_LOOPBACK_HTTP="1", SANDHI_BIND=f"127.0.0.1:{_free_port()}",
                    SANDHI_ADMIN_TOKEN=ADMIN, SANDHI_STORE=str(self.database),
                    SANDHI_CONFIG=str(self.config), SANDHI_VAULT_BACKEND="credstore",
                    SANDHI_CREDENTIALS_DIR=str(self.credentials), SANDHI_SHUTDOWN_QUIESCE_MS="0")

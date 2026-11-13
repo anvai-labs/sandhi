@@ -193,7 +193,7 @@ def broker(broker_binary, tmp_path, request):
     env.update({"XDG_CONFIG_HOME": str(tmp_path / "config"),
                 "SANDHI_SENTINELPASS_TOKEN_FILE": str(token_dir / "ipc.token"),
                 "SANDHI_STORE": str(tmp_path / "usage.db"), "SANDHI_CONFIG": str(config),
-                "SANDHI_AUTH_MODE": "tokens", "SANDHI_BIND": f"127.0.0.1:{port}", "SANDHI_ADMIN_TOKEN": "broker-test-admin",
+                "SANDHI_AUTH_MODE": "tokens", "SANDHI_ALLOW_LOOPBACK_HTTP": "1", "SANDHI_BIND": f"127.0.0.1:{port}", "SANDHI_ADMIN_TOKEN": "broker-test-admin",
                 "SANDHI_VAULT_BACKEND": options.get("backend", "sentinelpass"), "SANDHI_SENTINELPASS_SOCKET": daemon.path,
                 "SANDHI_SENTINELPASS_TIMEOUT_MS": "250",
                 "SENTINELPASS_CLIENT_TOKEN": options.get("token", "write-token"),

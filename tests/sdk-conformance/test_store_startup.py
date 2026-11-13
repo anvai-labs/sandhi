@@ -34,7 +34,7 @@ def test_authentication_startup_is_explicit_and_fails_before_state_changes(store
     env = {k: v for k, v in os.environ.items() if not k.startswith(("SANDHI_", "SENTINELPASS_"))}
     bind = f"127.0.0.1:{_free_port()}"
     database = tmp_path / "must-not-open.db"
-    env.update(SANDHI_BIND=bind, SANDHI_STORE=str(database))
+    env.update(SANDHI_BIND=bind, SANDHI_STORE=str(database), SANDHI_ALLOW_LOOPBACK_HTTP="1")
     if mode is not None:
         env["SANDHI_AUTH_MODE"] = mode
     if config:
@@ -87,7 +87,7 @@ def store_process(store_startup_binary, gated_provider, tmp_path):
     def launch(store=None, *, shards=1):
         env = {key: value for key, value in os.environ.items()
                if not key.startswith(("SANDHI_", "SENTINELPASS_"))}
-        env.update(SANDHI_AUTH_MODE="tokens", SANDHI_BIND=f"127.0.0.1:{_free_port()}",
+        env.update(SANDHI_AUTH_MODE="tokens", SANDHI_ALLOW_LOOPBACK_HTTP="1", SANDHI_BIND=f"127.0.0.1:{_free_port()}",
                    SANDHI_ADMIN_TOKEN="store-startup-admin",
                    SANDHI_VAULT_BACKEND="store-fixture-unavailable",
                    SANDHI_OPENAI_KEY=REAL_OPENAI_KEY, SANDHI_OPENAI_BASE=gated_provider.base,
