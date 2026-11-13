@@ -236,9 +236,9 @@ authorization URLs out of screenshots, logs and support reports.
 
 ## Live development service
 
-A credential-free HTTPS check at **2026-11-13 14:35 UTC**, after the reviewed
-development upgrade, observed the following contract. Local acceptance and
-public transport qualification remain separate.
+HTTPS checks on **2026-11-13 UTC**, after the reviewed development upgrade,
+qualified the actual Sandhi and broker client profiles below. Public transport,
+client registration and successful login remain separate facts.
 
 | `https://id.anvaiops.dev` discovery | Observed |
 | --- | --- |
@@ -248,14 +248,21 @@ public transport qualification remain separate.
 | Token authentication | `none`, `client_secret_basic` |
 | Introspection endpoint | Advertised `https://id.anvaiops.dev/oauth2/introspect` |
 | Introspection authentication | Advertised `client_secret_basic` |
-| Public introspection transport | Credential-free POST returned **403**; origin/edge acceptance remains open |
+| Actual Sandhi/broker introspection transport | Their declared client user agents receive **401 / no-store** for anonymous and invalid-Basic requests on both development issuers |
+| Actual Sandhi startup | Public discovery/JWKS with normal TLS trust passed; mode remains OIDC, with no starter access |
+| Unregistered consumer control | Missing bearer returns **401**; a synthetic, unregistered Basic consumer returns **503**, without model dispatch |
+| Generic Python user-agent probe | Edge **403**; this does not describe the tested clients' transport |
 | Sandhi/Victor live client integration | **Not qualified**; dedicated registrations and end-to-end acceptance remain open |
 
 The previous schema-67 deployment lacked introspection discovery. The reviewed
 schema-70 upgrade now advertises it, preserving existing issuer configuration,
 key custody and identity/admission rows. Its private backup remains on the host.
-Do not treat advertised metadata as proof that machine requests traverse the
-public edge or that a Sandhi registration works.
+The actual clients already identify themselves as `sandhi-oidc/0.18.0` and
+`anvai-gateway-pkce-example/1`; no browser impersonation or edge-policy change
+was used. The broker also validated public discovery, S256 and its advertised
+resource grant. No real owner/client credentials were used in these public
+checks. Successful real-account login still needs the supported owner/passkey
+registration ceremony; the local integration above does not establish it.
 [Inspect public discovery](https://id.anvaiops.dev/.well-known/openid-configuration)
 before any future rollout.
 
