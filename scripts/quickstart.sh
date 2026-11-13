@@ -1,159 +1,134 @@
 #!/usr/bin/env bash
-# Opinionated, minimal-resource launch for a single-node Sandhi proxy.
-#
-# Explicit local token compatibility: SANDHI_AUTH_MODE=tokens ./scripts/quickstart.sh
-#   - builds the release binaries if missing (smaller/faster than debug)
-#   - sets up persistent state under ~/.sandhi (admin token, SQLite usage store)
-#   - starts sandhi-proxy in the background if not already running
-#   - registers every provider listed in ~/.sandhi/providers.json (auto-created with a
-#     single local Ollama entry on first run if the file doesn't exist yet)
-#
-# Point a provider at a different machine by editing providers.json — e.g. Ollama
-# running on another host in your fleet:
-#   { "provider": "ollama", "label": "dataserver3", "base_url": "http://192.168.1.89:11434" }
-# Multiple entries for the same provider (different "label") coexist fine; route different
-# workflows to different hosts via the credential_id (e.g. "ollama:dataserver3") a vkey mints against.
-#
-# Config (env, all optional):
-#   SANDHI_HOME       state dir                         default: ~/.sandhi
-#   SANDHI_BIND       proxy listen address               default: 127.0.0.1:8787
-#   SANDHI_DASHBOARD_PUBLIC  1 = dashboard readable without a token (still LAN/localhost only)
-#                                                         default: 1 (single-node dev trust)
-#
-# Usage: quickstart.sh [status|stop]
+# Local single-node starter: no client authentication or identity-provider dependency.
+# Optional protected profile: SANDHI_AUTH_MODE=tokens ./scripts/quickstart.sh
+# Provider credentials/state remain under the private SANDHI_HOME, never in this script.
 set -euo pipefail
+umask 077
 
 SANDHI_HOME="${SANDHI_HOME:-$HOME/.sandhi}"
 BIND="${SANDHI_BIND:-127.0.0.1:8787}"
-DASHBOARD_PUBLIC="${SANDHI_DASHBOARD_PUBLIC:-1}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROXY_BIN="$REPO_ROOT/target/release/sandhi-proxy"
 CLI_BIN="$REPO_ROOT/target/release/sandhi"
 STORE="$SANDHI_HOME/usage.db"
 TOKEN_FILE="$SANDHI_HOME/admin_token"
+MODE_FILE="$SANDHI_HOME/auth_mode"
 PID_FILE="$SANDHI_HOME/proxy.pid"
 BIND_FILE="$SANDHI_HOME/bind"
 LOG_FILE="$SANDHI_HOME/proxy.log"
 PROVIDERS_FILE="$SANDHI_HOME/providers.json"
-
-# status/stop need the bind address a prior `start` actually used, not whatever SANDHI_BIND
-# happens to be set to on THIS invocation — read it back if the caller didn't override it.
-if [ -f "$BIND_FILE" ] && [ -z "${SANDHI_BIND:-}" ]; then
-  BIND="$(cat "$BIND_FILE")"
-fi
-
+if [ -f "$BIND_FILE" ] && [ -z "${SANDHI_BIND:-}" ]; then BIND="$(cat "$BIND_FILE")"; fi
 log() { printf '%s\n' "$*"; }
-
-is_running() {
-  [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null
-}
-
+is_running() { [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; }
 cmd="${1:-start}"
-
 if [ "$cmd" = "stop" ]; then
-  if is_running; then
-    pid="$(cat "$PID_FILE")"
-    kill "$pid" && rm -f "$PID_FILE"
-    log "stopped (was pid $pid)"
-  else
-    log "not running"
-  fi
+  if is_running; then kill "$(cat "$PID_FILE")"; rm -f "$PID_FILE"; log "stopped"; else log "not running"; fi
   exit 0
 fi
-
 if [ "$cmd" = "status" ]; then
-  if is_running; then
-    log "running, pid $(cat "$PID_FILE"), bind $BIND, store $STORE"
-  else
-    log "not running"
-  fi
+  if is_running; then log "running, pid $(cat "$PID_FILE"), bind $BIND, store $STORE"; else log "not running"; fi
   exit 0
 fi
-
-if [ "$cmd" != "start" ]; then
-  log "usage: $0 [start|status|stop]"; exit 1
+if [ "$cmd" != "start" ]; then log "usage: $0 [start|status|stop]"; exit 1; fi
+# Preserve an existing protected quickstart installation. A fresh home defaults to none.
+if [ "${SANDHI_AUTH_MODE+x}" = x ]; then MODE="$SANDHI_AUTH_MODE"
+elif [ "${SANDHI_OIDC_CONFIG+x}" = x ]; then MODE=oidc
+elif [ -f "$MODE_FILE" ]; then MODE="$(cat "$MODE_FILE")"
+elif [ -f "$TOKEN_FILE" ]; then MODE=tokens
+else MODE=none
 fi
-if [ "${SANDHI_AUTH_MODE:-oidc}" != "tokens" ]; then
-  log "This local bootstrap requires explicit SANDHI_AUTH_MODE=tokens."
-  log "For default SSO deployment, configure SANDHI_OIDC_CONFIG and follow docs/operator/oidc-sso.md."
-  exit 1
+case "$MODE" in
+  none|tokens) ;;
+  oidc) log "For OIDC, configure the issuer and use docs/operator/oidc-sso.md; this local bootstrap supports none or tokens."; exit 1 ;;
+  *) log "SANDHI_AUTH_MODE must be none, tokens or oidc."; exit 1 ;;
+esac
+if [ "$MODE" = none ] && [ "${SANDHI_OIDC_CONFIG+x}" = x ]; then
+  log "OIDC configuration conflicts with explicit no-auth mode; choose the intended mode."; exit 1
 fi
-
 mkdir -p "$SANDHI_HOME"
-
-# --- 1. binaries: release build only — smaller and faster than debug, and this is meant to
-# run continuously in the background, not be iterated on. -------------------------------------
-if [ ! -x "$PROXY_BIN" ] || [ ! -x "$CLI_BIN" ]; then
-  log "building release binaries (first run only, ~1-2 min)..."
-  (cd "$REPO_ROOT" && cargo build --release -p sandhi-proxy --bin sandhi-proxy --bin sandhi)
+EXPECTED_VERSION="$(python3 -c 'import sys,tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["workspace"]["package"]["version"])' "$REPO_ROOT/Cargo.toml")"
+if [ ! -x "$PROXY_BIN" ] || [ ! -x "$CLI_BIN" ] \
+  || [ "$("$PROXY_BIN" --version 2>/dev/null || true)" != "sandhi-proxy $EXPECTED_VERSION" ] \
+  || [ "$("$CLI_BIN" --version 2>/dev/null || true)" != "sandhi $EXPECTED_VERSION" ]; then
+  log "building release binaries..."
+  (cd "$REPO_ROOT" && cargo build --release --locked -p sandhi-proxy --features sentinelpass-ipc,policy-onnx --bin sandhi-proxy --bin sandhi)
 fi
-
-# --- 2. persistent identity: admin token + durable SQLite store, both idempotent -------------
-if [ ! -f "$TOKEN_FILE" ]; then
-  openssl rand -hex 24 > "$TOKEN_FILE"
-  chmod 600 "$TOKEN_FILE"
-  log "generated admin token -> $TOKEN_FILE"
+# Token auth is optional. An explicitly supplied admin token can protect the control plane
+# even in none mode. Otherwise no secret is generated or needed by the fresh starter.
+if [ "$MODE" = tokens ] && [ "${SANDHI_ADMIN_TOKEN+x}" != x ]; then
+  if [ ! -f "$TOKEN_FILE" ]; then openssl rand -hex 24 > "$TOKEN_FILE"; chmod 600 "$TOKEN_FILE"; fi
+  SANDHI_ADMIN_TOKEN="$(cat "$TOKEN_FILE")"; export SANDHI_ADMIN_TOKEN
 fi
-ADMIN_TOKEN="$(cat "$TOKEN_FILE")"
-
-# --- 3. start the proxy if not already running ------------------------------------------------
-if is_running; then
-  log "proxy already running (pid $(cat "$PID_FILE"))"
+if [ "${SANDHI_ADMIN_TOKEN+x}" = x ] && [ -z "$SANDHI_ADMIN_TOKEN" ]; then
+  log "An explicitly configured admin token must not be empty."; exit 1
+fi
+if is_running; then log "proxy already running (restart to change authentication mode)"
 else
-  SANDHI_BIND="$BIND" \
-  SANDHI_STORE="$STORE" \
-  SANDHI_ADMIN_TOKEN="$ADMIN_TOKEN" \
-  SANDHI_DASHBOARD_PUBLIC="$DASHBOARD_PUBLIC" \
+  # Keep the selected credential backend; auth mode does not move or replace secrets.
+  SANDHI_AUTH_MODE="$MODE" SANDHI_BIND="$BIND" SANDHI_STORE="$STORE" \
+  SANDHI_DASHBOARD_PUBLIC="${SANDHI_DASHBOARD_PUBLIC:-0}" \
     "$PROXY_BIN" > "$LOG_FILE" 2>&1 &
-  echo $! > "$PID_FILE"
-  echo "$BIND" > "$BIND_FILE"
-  # Wait for the listener rather than a fixed sleep — first boot can take a beat.
-  for _ in $(seq 1 30); do
-    curl -sf -o /dev/null "http://$BIND/dashboard" 2>/dev/null && break
+  echo $! > "$PID_FILE"; echo "$BIND" > "$BIND_FILE"
+  for _ in $(seq 1 50); do
+    curl -sf -o /dev/null "http://$BIND/readyz" 2>/dev/null && break
     sleep 0.3
   done
-  if ! curl -sf -o /dev/null "http://$BIND/dashboard" 2>/dev/null; then
-    log "proxy did not come up — check $LOG_FILE"; exit 1
+  if ! curl -sf -o /dev/null "http://$BIND/readyz" 2>/dev/null; then
+    log "proxy did not become ready; check $LOG_FILE"; exit 1
   fi
-  log "started proxy, pid $(cat "$PID_FILE"), listening on http://$BIND"
+  printf '%s\n' "$MODE" > "$MODE_FILE"
 fi
-
-# --- 4. provider bootstrap: opinionated default (one local, keyless Ollama) on first run,
-# otherwise register whatever is listed in providers.json. Idempotent — already-registered
-# credential_ids are skipped rather than re-added. --------------------------------------------
 if [ ! -f "$PROVIDERS_FILE" ]; then
-  cat > "$PROVIDERS_FILE" <<'EOF'
+  cat > "$PROVIDERS_FILE" <<'PROVIDERS'
 [
   { "provider": "ollama", "label": "default", "base_url": "http://localhost:11434", "secret": "" }
 ]
-EOF
-  log "wrote default providers config -> $PROVIDERS_FILE (edit this to add remote hosts)"
+PROVIDERS
+  log "wrote $PROVIDERS_FILE; edit it to configure other backends"
 fi
-
-existing="$(curl -sf -H "Authorization: Bearer $ADMIN_TOKEN" "http://$BIND/admin/keys" \
-  | python3 -c 'import json,sys; print(",".join(k["credential_id"] for k in json.load(sys.stdin).get("keys", [])))' 2>/dev/null || echo "")"
-
-python3 - "$PROVIDERS_FILE" <<'PYEOF' | while IFS=$'\t' read -r provider label base_url secret; do
-import json, sys
-with open(sys.argv[1]) as f:
-    for entry in json.load(f):
-        print(entry["provider"], entry.get("label", "default"), entry.get("base_url", ""), entry.get("secret", ""), sep="\t")
-PYEOF
-  cred_id="$provider:$label"
-  if printf '%s' "$existing" | grep -qx "$cred_id" 2>/dev/null || printf '%s\n' "${existing//,/$'\n'}" | grep -qx "$cred_id"; then
-    log "credential $cred_id already registered, skipping"
-    continue
-  fi
-  resp="$(printf '%s' "$secret" | curl -sf -X POST "http://$BIND/admin/keys" \
-    -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
-    -d "$(python3 -c "import json,sys; print(json.dumps({'provider':sys.argv[1],'label':sys.argv[2],'base_url':sys.argv[3] or None,'secret':sys.stdin.read()}))" "$provider" "$label" "$base_url")")"
-  log "registered $cred_id -> $base_url"
-done
-
+# Secrets are read inside this process and HTTP request bodies, never interpolated into
+# command-line arguments or printed. Disable ambient HTTP proxies for this owned admin call.
+python3 - "$PROVIDERS_FILE" "$BIND" "$MODE" "$EXPECTED_VERSION" <<'PYBOOT'
+import json, os, sys, urllib.request
+path, bind, expected_mode, expected_version = sys.argv[1:]
+base = "http://" + bind
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+headers = {"Content-Type": "application/json"}
+if "SANDHI_ADMIN_TOKEN" in os.environ:
+    headers["Authorization"] = "Bearer " + os.environ["SANDHI_ADMIN_TOKEN"]
+def request(method, route, value=None):
+    body = None if value is None else json.dumps(value).encode()
+    with opener.open(urllib.request.Request(base + route, data=body, headers=headers, method=method), timeout=15) as response:
+        return json.load(response)
+try:
+    if request("GET", "/version")["package_version"] != expected_version:
+        raise ValueError("running gateway version differs; stop the old writer before upgrading")
+    if request("GET", "/auth/session")["mode"] != expected_mode:
+        raise ValueError("running gateway mode differs; restart before changing authentication")
+    existing = {item["credential_id"] for item in request("GET", "/admin/keys").get("keys", [])}
+    with open(path) as source:
+        entries = json.load(source)
+    for item in entries:
+        provider, label = item["provider"], item.get("label", "default")
+        credential_id = provider + ":" + label
+        if credential_id not in existing:
+            request("POST", "/admin/keys", {"provider": provider, "label": label,
+                "base_url": item.get("base_url") or None, "secret": item.get("secret", "")})
+            print("registered " + credential_id)
+except (OSError, ValueError, KeyError, TypeError):
+    raise SystemExit("Gateway bootstrap failed; check mode, private provider configuration and gateway logs.") from None
+PYBOOT
 log ""
-log "Sandhi is up:"
-log "  dashboard:    http://$BIND/dashboard"
-log "  admin token:  $TOKEN_FILE (paste into the dashboard's token field to unlock actions)"
-log "  providers:    $PROVIDERS_FILE (edit + re-run this script to add more, including remote hosts)"
-log "  mint a key:   $CLI_BIN --admin-token \"\$(cat $TOKEN_FILE)\" keys share ollama:default --subject myagent"
-log "  stop:         $0 stop"
+log "Sandhi is ready at http://$BIND/dashboard"
+log "  client authentication: $MODE"
+if [ "${SANDHI_ADMIN_TOKEN+x}" = x ]; then
+  log "  operator actions use the configured admin token"
+else
+  log "  no authentication: all clients share the starter identity and budget"
+fi
+log "  providers: $PROVIDERS_FILE"
+log "  configure a default route or SANDHI_STARTER_UPSTREAM when using multiple backends"
+log "  stop: $0 stop"

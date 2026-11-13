@@ -1,9 +1,16 @@
 # Operator console
 
-Status: prepared 0.17.0 source candidate; not a published release. Open `/dashboard` on your gateway. The
+Status: 0.18.0 source candidate; not a published release. Open `/dashboard` on your gateway. The
 console uses the gateway's existing APIs and serves local assets; no separate
 frontend build or service is required. Production identity and TLS configuration
 follow the [identity guide](oidc-sso.md).
+
+![Local starter dashboard with shared access and synthetic token usage](../assets/identity/starter-dashboard.png)
+
+*Real browser capture from a disposable local gateway running the 0.18 starter
+candidate. Browser checks exercised navigation, reads and a budget write without
+client credentials. The model usage is synthetic; this capture does not establish
+OIDC login, public deployment or live-provider cache behavior.*
 
 ![Operator console overview with synthetic token and attribution data](../assets/operator-console/overview-canonical-synthetic.png)
 
@@ -124,7 +131,11 @@ Administrators already have diagnostics permission. Every API request remains
 authorized by the server, including CSRF checks for cookie-authorized mutations
 and diagnostic POSTs.
 
-Explicit token compatibility mode presents an Admin token field. The submitted
+The 0.18 starter displays **Shared starter access**, with no login prompt. All
+callers share its identity and budget. Configuring an operator admin token protects
+dashboard administration separately from unauthenticated starter inference.
+
+Token mode and a token-protected starter present an Admin token field. The submitted
 token stays in memory and is sent only to the same gateway. Editing/clearing it,
 signing out or expiring the SSO session cancels reads and removes protected data
 and one-time secrets. Reload does not recover a token from browser storage.

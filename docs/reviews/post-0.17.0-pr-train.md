@@ -6,6 +6,27 @@ later reviewed promotion. They do not silently alter the frozen 0.17.0 source.
 Update the row when a candidate, review, CI, merge or release milestone changes;
 link the actual evidence before marking it complete.
 
+## Current 0.18 access and publication checkpoint
+
+The owner selected a credential-free local starter, with optional token and OIDC
+profiles. The authenticated public development integration is qualified in
+dependency order before the Sandhi → official SDK → Victor release train.
+
+| Gate | Current evidence | Remaining |
+| --- | --- | --- |
+| Starter and durable execution | Baseline: 1,322 Rust and 61 startup/recovery tests passed. Independent review reproduced a missing inference browser-origin fence. The corrected artifact passed 31 starter HTTP cases and an independent 51-case attack/legitimate-client matrix, with zero model dispatch for hostile requests | Final snapshot, exact committed review and public CI |
+| Victor Agent interoperability | Corrected gateway and reviewed Victor source passed 16 actual tool-loop cases plus three Anvai resource-token session cases with the optimized IDM and official SDK 0.17.1 | Official SDK 0.18 adoption after publication |
+| Dashboard and documentation | Three starter browser cases, 12 script security regressions and actual Anvai browser SSO passed. Admin/operator/viewer/unassigned roles, TLS/cookies/CSRF/logout and replay refusals qualified; actual local screenshots included | Final docs checks and exact committed review |
+| IDM source | Current Anvai Identity source includes introspection, explicit consumer registration and schema 70 | Qualify optimized deployment artifact |
+| Public development IDM | Reviewed optimized artifact and schema 70 deployed; existing data/custody hashes preserved. Public HTTPS discovery now advertises Basic introspection | Public machine endpoint returned 403; qualify edge transport, dedicated clients and end-to-end flows |
+| Deployment tooling | Narrow replacement path reviewed; nine guards and synthetic 67→70/catalog/backup checks passed. Actual-host artifact/configuration preflight and private backup integrity passed before migration | Complete public acceptance and merge the reviewed operations PR |
+| Publication | Sandhi 0.17.1 remains published; 0.18 and Victor 0.29 remain candidates | Sandhi release/artifact verification, then Victor official-SDK qualification and release |
+
+The development upgrade uses a private backup kept on the existing host and
+compares existing data and custody hashes there. No live identity database is
+exported to local test fixtures. Full rollback rehearsal was waived for this
+development endpoint; failures remain closed while corrected forward.
+
 ## Release boundary
 
 The reviewed 0.17.0 main source is
@@ -75,7 +96,7 @@ records all eight dispositions.
 | Release smoke fixture | **Merged to corrective main**; release tooling | Private durable ledger and empty credential store; actual binary smoke passes. The actual smoke also runs in ordinary CI so this startup contract is tested before tags. Reviewed `ed5b0fea` is integrated; the actual-binary smoke passed public PR and promotion CI. Published 0.17.1 includes this correction; exact-main and all-target verification passed. |
 | Current Chat stream finality | **Merged to corrective main**; accounting | Standard and terminal-choice totals followed by new output must remain partial/unresolved. Preserve harmless identical-total idempotence, both budget holds and one physical send. Reviewed backport `60316e1` and full PR/promotion CI passed. Published 0.17.1 includes this correction; exact-main and all-target verification passed. |
 | 0.17.1 correction | **Published; all four targets verified**; release coordination | Exact reviewed main `10caae8`, immutable tag, successful release attempt 2 and independent final verifier are complete. Failed 0.17.0 tag remains immutable. Victor's exact binding pin, published-wheel qualification, reviewed consumer merge and all five post-merge workflows passed; its package publication remains separate. |
-| Generic OIDC guide | **Merged through #457**; documentation | Provider-neutral requirements, Kanidm example and [one local co-design walkthrough](../operator/oidc-sso.md#local-co-design-victor-sandhi-and-anvaiops-development-idm) separate demonstrated behavior from the public development host's missing introspection metadata. Independent review, docs CI and publication passed; no live service configuration changed. |
+| Generic OIDC guide | **Merged through #457**; documentation | Provider-neutral requirements and [one local co-design walkthrough](../operator/oidc-sso.md#local-co-design-victor-sandhi-and-anvaiops-development-idm) separate demonstrated behavior from the public development host's missing introspection metadata. Independent review, docs CI and publication passed; no live service configuration changed. |
 
 ## Three-project identity co-design
 

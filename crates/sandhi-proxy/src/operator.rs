@@ -250,7 +250,7 @@ pub(crate) async fn version_capabilities(
                 "unavailable"
             },
             "alerts": state.alerts.is_some(),
-            "admin_api": state.oidc.is_some() || state.admin_token.is_some(),
+            "admin_api": state.oidc.is_some() || state.admin_token.is_some() || crate::starter::enabled(&state),
             // TD-0012: per-vkey token bucket, in-memory (N replicas multiply it).
             "rate_limits": true,
             // Compiled only with the otel-otlp feature AND initialized at startup.
@@ -276,6 +276,22 @@ pub(crate) async fn require_access(
     if let Some(oidc) = &state.oidc {
         return oidc.authorize(headers, permission, mutation).await;
     }
+    if state.auth_mode == crate::auth::AuthMode::Oidc {
+        return Err(err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "OIDC authority unavailable",
+        ));
+    }
+    if crate::starter::enabled(state) && !crate::starter::control_allowed(state, headers, mutation)
+    {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "starter control request requires a trusted Host and same origin",
+        ));
+    }
+    if crate::starter::enabled(state) && state.admin_token.is_none() {
+        return Ok(());
+    }
     require_admin(state, headers)
 }
 
@@ -290,6 +306,17 @@ pub(crate) fn require_admin(state: &ProxyState, headers: &HeaderMap) -> Result<(
             "admin API not configured (set SANDHI_ADMIN_TOKEN)",
         ));
     };
+    if expected.is_empty()
+        || !expected.is_ascii()
+        || expected
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "invalid admin token configuration",
+        ));
+    }
     let presented = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())

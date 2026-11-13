@@ -94,24 +94,34 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def validate_admin_token(token: object) -> str:
+    if (not isinstance(token, str) or len(token) < 32
+            or any(not 33 <= ord(char) <= 126 for char in token)):
+        raise ValueError("strong configured admin credential required")
+    return token
+
+
+def read_admin_token(path: Path) -> str:
+    # A configured file is distinct from an omitted optional credential.
+    return validate_admin_token(read_private_json(path).get("admin_token"))
+
+
 class AdminClient:
-    def __init__(self, url: str, token: str):
+    def __init__(self, url: str, token: str | None = None):
         self.url = validate_gateway(url)
-        if not isinstance(token, str) or len(token) < 32:
-            raise ValueError("strong admin credential required")
-        self.token = token
+        self.token = validate_admin_token(token) if token is not None else None
         self.opener = urllib.request.build_opener(
             urllib.request.ProxyHandler({}), NoRedirect()
         )
 
     def post(self, path: str, data: dict) -> dict:
+        headers = {"Content-Type": "application/json"}
+        if self.token is not None:
+            headers["Authorization"] = "Bearer " + self.token
         req = urllib.request.Request(
             self.url + path,
             data=json.dumps(data).encode(),
-            headers={
-                "Authorization": "Bearer " + self.token,
-                "Content-Type": "application/json",
-            },
+            headers=headers,
             method="POST",
         )
         try:
@@ -150,9 +160,8 @@ def main() -> int:
     parser.add_argument("--gateway", default="http://127.0.0.1:18789")
     parser.add_argument(
         "--admin-file",
-        required=True,
         type=Path,
-        help="private JSON containing admin_token",
+        help="optional private admin_token JSON for a protected operator API",
     )
     parser.add_argument(
         "--auth-file", type=Path, default=Path.home() / ".codex/auth.json"
@@ -168,7 +177,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--client",
-        help="compatibility token-mode client only; OIDC clients use /auth/keys",
+        help="optional token-profile client; the no-auth starter does not require a client key",
     )
     parser.add_argument(
         "--client-file",
@@ -196,7 +205,7 @@ def main() -> int:
         )
     try:
         client = AdminClient(
-            args.gateway, read_private_json(args.admin_file)["admin_token"]
+            args.gateway, read_admin_token(args.admin_file) if args.admin_file else None
         )
         publish(client, args.auth_file, args.account, args.label)
         if args.client:

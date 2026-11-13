@@ -29,6 +29,28 @@ const MAX_TOKEN_BYTES: usize = 16384;
 const MAX_RESPONSE_BYTES: usize = 262144;
 const LOGIN_TTL: Duration = Duration::from_secs(300);
 const SESSION_TTL: i64 = 3600;
+
+/// Inbound client authentication; provider credentials remain server-owned in every mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthMode {
+    None,
+    Tokens,
+    Oidc,
+}
+
+impl AuthMode {
+    /// Explicit authentication errors never fall back to the shared starter.
+    pub fn select(value: Option<&str>, oidc_configured: bool) -> Result<Self, &'static str> {
+        match (value, oidc_configured) {
+            (None, false) | (Some("none"), false) => Ok(Self::None),
+            (None, true) | (Some("oidc"), true) => Ok(Self::Oidc),
+            (Some("tokens"), _) => Ok(Self::Tokens),
+            (Some("none"), true) => Err("SANDHI_AUTH_MODE=none conflicts with SANDHI_OIDC_CONFIG"),
+            (Some("oidc"), false) => Err("OIDC mode requires SANDHI_OIDC_CONFIG"),
+            _ => Err("SANDHI_AUTH_MODE must be none, tokens or oidc"),
+        }
+    }
+}
 type Client = CoreClient<
     EndpointSet,
     EndpointNotSet,
@@ -1086,6 +1108,25 @@ pub(crate) async fn session_status(
     headers: HeaderMap,
 ) -> Response {
     let Some(oidc) = &state.oidc else {
+        if crate::starter::enabled(&state) {
+            let open = state.admin_token.is_none();
+            let permissions: Vec<Permission> = if open {
+                vec![
+                    Permission::Read,
+                    Permission::Operate,
+                    Permission::Admin,
+                    Permission::Diagnostics,
+                ]
+            } else {
+                vec![]
+            };
+            return Json(json!({"mode":"none","inference_mode":"none", "operator_mode":if open {"none"} else {"tokens"},
+                "authenticated":false,"permissions":permissions,
+                "starter":{"key_id":crate::starter::KEY_ID,"subject":crate::starter::SUBJECT,"budget_scope":crate::starter::BUDGET_SCOPE,"shared":true}})).into_response();
+        }
+        if state.auth_mode == AuthMode::Oidc {
+            return unavailable();
+        }
         return Json(json!({"mode":"tokens"})).into_response();
     };
     match oidc.session(&headers) {

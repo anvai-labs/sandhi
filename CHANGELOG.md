@@ -19,7 +19,29 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
-## [0.17.1] — Release candidate
+## [0.18.0] — Source candidate, not published
+
+- Default the standalone gateway to a credential-free loopback starter with one
+  server-owned identity and shared budget. Durable paired accounting, source
+  validation and cache ownership remain enforced. Tokens and OIDC are optional;
+  invalid configured authentication never selects starter access. An existing
+  OIDC configuration without a mode continues to select OIDC.
+- Separate starter inference access from optional operator-token protection.
+  The dashboard identifies shared starter access and presents navigation and
+  management controls according to the selected server profile.
+- Add an explicit OIDC access-token resource audience, independent of Sandhi's
+  browser/client identity. Qualify Anvai Identity, Sandhi and Victor together;
+  local acceptance and public development deployment are separate gates.
+- Add typed `output.reasoning` with chat contract minor 14, retaining source
+  evidence and explicit translation refusal. Rust output struct literals must
+  supply the new optional field. Wire schema v1 remains unchanged.
+- Make compatible vendor endpoint profiles explicit, retain catalog aliases as
+  discovery metadata, and pin the optional ONNX runtime to `2.0.0-rc.15`.
+  Cache-read reporting remains neutral evidence, not a savings claim.
+- Require public Linux and macOS release-feature binary builds and actual binary
+  smoke checks in CI before tagging. See the [0.18 upgrade guide](docs/releases/v0.18.0.md).
+
+## [0.17.1] — Published 2026-11-13
 
 - Correct the isolated binary smoke to supply a private ordinary-file durable
   ledger and an empty credential store. CI runs the actual built binaries through
@@ -31,7 +53,8 @@ A partly published release remains incomplete even when some artifacts are avail
   prevented all registry writes; the corrected version requires a new reviewed
   promotion, green exact-main CI and all-target artifact verification.
 - Coordinate Victor's exact dependency with `sandhi-gateway==0.17.1` and verify the
-  published binding before consumer adoption. Publication remains pending.
+  published binding before consumer adoption. All four distribution targets were
+  independently verified; the npm verification retry did not republish packages.
 
 ## [0.17.0] — Unpublished source tag, 2026-11-13
 

@@ -57,6 +57,12 @@ def dashboard(proxy_binary, upstream, tmp_path, request):
         "SANDHI_GEMINI_BASE": upstream.base_url,
         "SANDHI_CONFIG": str(config),
     })
+    if "auth_mode" in options:
+        if options["auth_mode"] is None:
+            env.pop("SANDHI_AUTH_MODE")
+        else:
+            env["SANDHI_AUTH_MODE"] = options["auth_mode"]
+        env["SANDHI_STARTER_UPSTREAM"] = "openai"
     if options.get("admin", True):
         env["SANDHI_ADMIN_TOKEN"] = ADMIN_TOKEN
     assert options.get("store", True), "the gateway requires a durable store"
@@ -79,7 +85,7 @@ def dashboard(proxy_binary, upstream, tmp_path, request):
         config.write_text(json.dumps({"tls": {
             "cert": str(authority.certificate), "key": str(authority.key),
         }}))
-        env.pop("SANDHI_AUTH_MODE")  # Exercise the shipped SSO default.
+        env.pop("SANDHI_AUTH_MODE")  # An explicit OIDC config opts in without a separate mode setting.
         env["SANDHI_OIDC_CONFIG"] = str(policy)
     for option, variable in [("usage_capacity", "SANDHI_USAGE_BUFFER_CAPACITY"),
                              ("alert_capacity", "SANDHI_ALERT_BUFFER_CAPACITY")]:
@@ -694,3 +700,47 @@ def test_usage_evidence_respects_separate_sso_diagnostics_permission(page, dashb
     expect(page.locator("#usage")).to_have_attribute("data-state", "locked")
     expect(page.locator("#request-evidence")).to_have_attribute("data-state", "locked")
     assert "gpt-mock" not in page.locator("body").text_content()
+
+
+@pytest.mark.parametrize("dashboard", [{"auth_mode": None, "admin": False},
+                                       {"auth_mode": "none", "admin": False}], indirect=True)
+def test_starter_dashboard_loads_and_operates_without_a_credential(page, dashboard):
+    management = []
+    page.on("request", lambda req: management.append(req) if "/admin/" in req.url else None)
+    page.goto(dashboard.base + "/dashboard")
+    expect(page.locator("#usage")).to_have_attribute("data-state", "ready")
+    expect(page.locator("#execution")).to_contain_text("Readiness confirmed")
+    expect(page.locator("#token-form")).to_be_hidden()
+    expect(page.locator("#sso-box")).to_be_hidden()
+    expect(page.locator("#workspace-role")).to_contain_text("Shared starter access")
+    expect(page.locator("#auth-status")).to_contain_text("one starter identity and budget")
+    nav = page.get_by_role("navigation", name="Dashboard sections")
+    nav.get_by_role("link", name="Budgets", exact=True).click()
+    page.get_by_text("Set a budget", exact=True).click()
+    page.get_by_label("Scope", exact=True).fill("starter:shared:v1")
+    page.get_by_label("Limit (tokens)").fill("700")
+    page.get_by_role("button", name="Set budget", exact=True).click()
+    expect(page.locator("#budgets")).to_contain_text("starter:shared:v1")
+    for name in ("Backends & routes", "Keys & credentials", "Routing & cache guide", "Overview"):
+        nav.get_by_role("link", name=name, exact=True).click()
+    assert management and all("authorization" not in req.headers for req in management)
+    assert page.evaluate("sessionStorage.length + localStorage.length") == 0
+    if directory := os.environ.get("SANDHI_DOCS_SCREENSHOTS"):
+        destination = Path(directory)
+        destination.mkdir(mode=0o700, parents=True, exist_ok=True)
+        page.set_viewport_size({"width": 1360, "height": 1000})
+        page.screenshot(path=str(destination / "starter-dashboard.png"))
+
+
+@pytest.mark.parametrize("dashboard", [{"auth_mode": "none"}], indirect=True)
+def test_starter_can_protect_operator_actions_without_authenticating_inference(page, dashboard):
+    page.goto(dashboard.base + "/dashboard")
+    expect(page.locator("#usage")).to_have_attribute("data-state", "locked")
+    expect(page.locator("#token-form")).to_be_visible()
+    expect(page.locator("#sso-box")).to_be_hidden()
+    expect(page.locator("#auth-status")).to_contain_text("Inference needs no authentication")
+    page.get_by_label("Admin token", exact=True).fill(ADMIN_TOKEN)
+    page.get_by_role("button", name="Use token", exact=True).click()
+    expect(page.locator("#usage")).to_have_attribute("data-state", "ready")
+    page.get_by_label("Admin token", exact=True).fill("")
+    expect(page.locator("#usage")).to_have_attribute("data-state", "locked")

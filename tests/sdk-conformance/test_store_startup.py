@@ -26,8 +26,10 @@ def store_startup_binary(proxy_binary, tmp_path_factory):
     return executable
 
 
-@pytest.mark.parametrize("mode,config", [(None, None), ("oidc", None),
-                                         (None, "missing"), (None, "invalid"), ("typo", None)])
+@pytest.mark.parametrize("mode,config", [("oidc", None),
+                                         (None, "missing"), (None, "invalid"), ("typo", None),
+                                         ("none", "missing"), ("none", "invalid"), ("", None),
+                                         (None, "empty"), ("oidc", "empty"), ("none", "empty")])
 def test_authentication_startup_is_explicit_and_fails_before_state_changes(store_startup_binary, tmp_path, mode, config):
     env = {k: v for k, v in os.environ.items() if not k.startswith(("SANDHI_", "SENTINELPASS_"))}
     bind = f"127.0.0.1:{_free_port()}"
@@ -39,7 +41,7 @@ def test_authentication_startup_is_explicit_and_fails_before_state_changes(store
         path = tmp_path / "oidc.json"
         if config == "invalid":
             path.write_text("{not valid JSON")
-        env["SANDHI_OIDC_CONFIG"] = str(path)
+        env["SANDHI_OIDC_CONFIG"] = "" if config == "empty" else str(path)
     result = subprocess.run([str(store_startup_binary)], env=env, cwd=tmp_path,
                             capture_output=True, text=True, timeout=10)
     assert result.returncode == 1, result.stderr
@@ -60,28 +62,23 @@ def test_informational_flags_precede_authentication_configuration(store_startup_
     assert "sandhi" in result.stdout.lower()
 
 
-@pytest.mark.parametrize("mode", [None, "oidc"])
-def test_legacy_quickstart_requires_explicit_token_profile(tmp_path, mode):
-    # No build/provider action may precede the compatibility decision.
-    scripts = tmp_path / "scripts"
-    scripts.mkdir()
-    script = scripts / "quickstart.sh"
-    shutil.copy2(REPO_ROOT / "scripts/quickstart.sh", script)
-    binaries = tmp_path / "target/release"
-    binaries.mkdir(parents=True)
-    for name in ("sandhi", "sandhi-proxy"):
-        binary = binaries / name
-        binary.write_text("#!/bin/sh\nexit 99\n")
-        binary.chmod(0o700)
+@pytest.mark.parametrize("variable,value", [
+    ("SANDHI_ADMIN_TOKEN", ""), ("SANDHI_ADMIN_TOKEN", "   "),
+    ("SANDHI_ADMIN_TOKEN", "has whitespace"), ("SANDHI_ADMIN_TOKEN", "has\ncontrol"),
+    ("SANDHI_AUTH_MODE", " "),
+    pytest.param("SANDHI_AUTH_MODE", b"\xff", marks=pytest.mark.skipif(os.name != "posix", reason="POSIX byte environment")),
+    pytest.param("SANDHI_ADMIN_TOKEN", b"\xff", marks=pytest.mark.skipif(os.name != "posix", reason="POSIX byte environment")),
+])
+def test_explicit_invalid_authentication_values_never_open_starter_or_operator(store_startup_binary, tmp_path, variable, value):
     env = {k: v for k, v in os.environ.items() if not k.startswith(("SANDHI_", "SENTINELPASS_"))}
-    state = tmp_path / "private-state"
-    env["SANDHI_HOME"] = str(state)
-    if mode is not None:
-        env["SANDHI_AUTH_MODE"] = mode
-    result = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True, timeout=15)
+    database = tmp_path / "must-not-open.db"
+    env.update(SANDHI_STORE=str(database), SANDHI_BIND=f"127.0.0.1:{_free_port()}")
+    env[variable] = value
+    result = subprocess.run([str(store_startup_binary)], env=env, cwd=tmp_path,
+                            capture_output=True, text=True, timeout=8)
     assert result.returncode == 1
-    assert "SANDHI_AUTH_MODE=tokens" in result.stdout + result.stderr
-    assert not state.exists()
+    assert variable in result.stderr
+    assert not database.exists()
 
 
 @pytest.fixture

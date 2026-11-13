@@ -1,435 +1,283 @@
-# OIDC provider setup, SSO and migration
+# Optional authentication and local Anvai Identity integration
 
-The standalone `sandhi-proxy` defaults to `SANDHI_AUTH_MODE=oidc`. It refuses to start
-without valid OIDC configuration and verified HTTPS discovery. `--help` and `--version`
-work without service configuration. Embedded `ProxyState::new` retains its existing
-behavior; embedders opt into OIDC explicitly.
+**Sandhi 0.18 release candidate.** The new starter has no client authentication.
+Token and OIDC profiles are optional. Published 0.17.1 retains its earlier startup
+behavior and does not include the resource-audience override described here.
+
+## Choose an access mode
+
+| Profile | Configuration | Client experience | Accounting identity |
+| --- | --- | --- | --- |
+| Starter — default | No auth mode or OIDC configuration | No key or login prompt; default listener is `127.0.0.1:8787` | One shared starter identity and budget |
+| Tokens | `SANDHI_AUTH_MODE=tokens` | Scoped virtual key; optional separate operator token | Server-bound virtual-key subject/group |
+| OIDC | `SANDHI_AUTH_MODE=oidc` and `SANDHI_OIDC_CONFIG` | Browser SSO or short-lived resource access token | Verified issuer/subject and configured grant |
+
+- An OIDC configuration supplied without a mode is an explicit OIDC opt-in.
+- Invalid configured authentication stops startup; it never selects a weaker profile.
+- A starter can set `SANDHI_ADMIN_TOKEN` to protect operator actions while leaving inference unauthenticated.
+- All profiles retain the original durable ledger, both budget legs, cache rules and source accounting.
+- Starter callers share one trust realm. This is not per-user or tenant isolation. An explicit non-loopback bind makes that access available on the selected network.
+
+For a local starter, use `scripts/quickstart.sh`. Provider credentials and model
+configuration are separate from client authentication.
+
+## Dependency order for the public development integration
+
+The public development issuer is `https://id.anvaiops.dev`. Public accessibility
+requires the same authentication, TLS and authorization checks as other shared
+deployments. The credential-free starter is for the separate local demonstration.
+
+| Gate | Required evidence before proceeding |
+| --- | --- |
+| Identity source | Reviewed discovery, introspection, resource grants and revocation; local acceptance |
+| Development deployment | Exact artifact/configuration provenance, private backup and verified upgrade; valid HTTPS and matching issuer |
+| Client registration | Separate Victor origin and Sandhi consumer; exact callbacks, audience and consumer ACL |
+| Sandhi | Startup discovery, browser roles, agent grants, expiry/revocation refusals and durable usage joins |
+| Victor | Actual login/token lifecycle and successful Agent/tool loop through the qualified gateway |
+| Release | Sandhi artifacts verified first; Victor adopts that published SDK before its release |
+
+- Require an authenticated Sandhi profile on the public test route; restrict direct model access independently.
+- Keep signing keys, client secrets, token files and backups private. Capture only redacted test evidence.
+- Preserve the intended tenant, existing accounts and recovery access; do not substitute another issuer.
+- A missing capability blocks the next gate. Never guess an introspection URL or downgrade authentication.
+
+## Local co-design: Victor, Sandhi and AnvaiOps development IDM
+
+![Locally tested identity, Agent and gateway flow](../assets/identity/local-codesign.svg)
+
+| Component | Responsibility |
+| --- | --- |
+| Anvai Identity | HTTPS login, consent, PKCE, issuance receipts, resource grants and live revocation |
+| Victor | Originating OAuth client; private token-file credential; real Agent/tool execution |
+| Sandhi | Separate introspection consumer; resource-audience and subject/grant checks; durable accounting |
+| Model backend | Synthetic loopback model for repeatable protocol and usage assertions |
+
+### Verified local contract
+
+| Check | Evidence |
+| --- | --- |
+| Operator setup | Supported owner review → passkey approval → apply; resource and consumer ACLs |
+| Positive flow | Real HTTPS login/PKCE, two actual Agent requests and a successful read-tool result |
+| Credential lifecycle | Rotation between requests; introspection and revocation checks |
+| Receipt provenance | Actual wire bearer hashes and returned request IDs joined to IDM issuance receipts and Sandhi's original ledger |
+| Refusals | UserInfo token, ID token, wrong resource, private-file expiry, signed-token expiry and logout |
+| Scope | Disposable local state and synthetic provider; not a live-service deployment |
+
+### Browser SSO and role enforcement
+
+![Sandhi budgets after actual Anvai Identity browser login](../assets/identity/oidc-dashboard.png)
+
+*Actual local browser capture after verified HTTPS login and a successful budget
+write. The account and budget are synthetic. This is a working local integration,
+not a screenshot from the public development tenant.*
+
+| Local browser profile | Read budget | Write budget | Read configuration | Cookie-only inference |
+| --- | --- | --- | --- | --- |
+| Admin | 200 | 200 | 200 | 401 |
+| Operator | 200 | 200 | 403 | 401 |
+| Viewer | 200 | 403 | 403 | 401 |
+| Unassigned subject | No dashboard session | Denied | Denied | No inference grant |
+
+The run verified actual PKCE/callback processing, Secure/HttpOnly/host-only
+cookies, exact-origin/CSRF refusals, mixed-credential refusal, logout and rejection
+of the captured session cookie after logout. TLS verification stayed enabled.
+Its optimized IDM artifact matches the development upgrade candidate; the Sandhi
+artifact includes the reviewed starter browser-origin correction.
+
+Run the paired browser fixture from its reviewed Anvai Identity checkout:
+
+```sh
+IDM_TEST_BINARY=/path/to/qualified/idm \
+SANDHI_OIDC_TEST_BINARY=/path/to/qualified/sandhi-proxy \
+IDM_SANDHI_BROWSER_PROOF=/private/new-browser-proof \
+python tests/integration_sandhi_operator_browser.py
+```
+
+### Agent tool-loop accounting
+
+| Neutral units | Request 1 | Request 2 |
+| --- | ---: | ---: |
+| Physical model attempts | 1 | 1 |
+| Fresh input | 2 | 2 |
+| Cache read | 6 | 6 |
+| Cache creation | 2 | 2 |
+| Output | 4 | 4 |
+| Paired settled total | **14** | **14** |
+
+The total is **28 token units**. Cache categories are already included; do not add
+them again or interpret this fixture as a price, savings or cache-hit guarantee.
+
+### Reproduce the integration
+
+Use the paired Anvai Identity integration fixture, its built binary, Docker and
+the documented fixture prerequisites. The driver allocates local ports and private
+state; it does not adopt an existing database or modify system DNS.
+
+```sh
+IDM_GATEWAY_FIXTURE=/path/to/anvai-identity/tests/integration_gateway_introspection.py \
+IDM_TEST_BINARY=/path/to/qualified/idm \
+SANDHI_OIDC_TEST_BINARY=/path/to/qualified/sandhi-proxy \
+VICTOR_IDM_EVIDENCE_FILE=/private/local-identity-evidence.json \
+python -m pytest tests/integration/providers/test_sandhi_idm_gateway_session.py -q --no-cov
+```
+
+Run this from the coordinated Victor checkout with its qualified Sandhi SDK.
+The fixture uses its own CA and hostname mapping; HTTPS verification remains on.
+See the [progress ledger](../reviews/post-0.17.0-pr-train.md#three-project-identity-co-design)
+for source, published-artifact, CI and deployment status. Earlier SDK 0.17.0
+snapshots are historical; subsequent local runs used the official 0.17.1 SDK with
+the Sandhi 0.18 source candidate and the patched, remote-aligned IDM candidate.
 
 ## OAuth client identity and access-token resource audience
 
-The post-release audience candidate adds optional `access_token_audience` to
-`oidc.json`. Omit it to preserve the existing behavior: introspected access tokens
-must target `client_id`. When configured, it is the exact intended Sandhi resource
-audience, for example `https://sandhi.example.com/resource`. Values must be 1–512
-UTF-8 bytes with no whitespace, controls or `*`; explicit null is rejected. Sandhi
-does not trim, normalize, fetch or interpret wildcards in this value.
-
-`client_id` still identifies Sandhi's OAuth application for browser ID-token
-verification, authorization/code exchange and introspection client authentication.
-An ID token addressed to the resource audience does not become a valid browser
-login. An access token addressed only to the browser client does not qualify when
-a different resource audience is configured. Audience arrays must contain only
-strings and include the exact selected access-token audience.
-
-For confidential introspection, Sandhi sends its own `client_id` in both the form
-and HTTP Basic authentication, with `token` and `token_type_hint=access_token`.
-The introspection response's `client_id` can identify the originating Victor
-client; it is not Sandhi's consuming client identity or an authorization grant.
-The issuer must authenticate access-token purpose and current authority before
-reporting `active: true`. A signed JWT or matching audience alone is insufficient.
-All issuer, subject, expiry, token-type, group and explicit Sandhi grant checks
-remain required. Do not forward a Victor-service audience token to Sandhi.
-
-Victor's existing private token-file credential pins the same issuer, resource
-audience and subject and reloads the broker result for each request. Its metadata
-does not verify the token: Sandhi still introspects it. This candidate does not
-implement a Victor login/refresh broker, migrate any issuer or qualify a live IDM
-deployment. See [the audience decision](../adr/0045-access-token-resource-audience.md).
-
-## Choose a compatible OIDC provider
-
-Sandhi uses OIDC and OAuth contracts, not a required identity product. Kanidm is
-one example below. Register Sandhi as its own application with your provider;
-provider discovery alone does not establish that its access tokens are compatible.
-
-| Setting or contract | Required Sandhi behavior |
+| Identity | Meaning |
 | --- | --- |
-| Issuer | An exact HTTPS issuer, including any tenant/client path. Discovery's `issuer` must match `oidc.json`; a hostname, discovery URL and issuer are different values. |
-| Discovery | Sandhi appends `/.well-known/openid-configuration` to the issuer after trimming a trailing slash for that request. Configure `issuer`, not the complete discovery URL. |
-| Authority endpoints | Discovery must advertise HTTPS `authorization_endpoint`, `token_endpoint`, `jwks_uri` and `introspection_endpoint`, all on the issuer's origin. If group policy uses UserInfo, that endpoint must also be on the issuer origin. |
-| Browser application | Authorization-code flow, advertised S256 PKCE, and an exact external HTTPS redirect `https://YOUR_GATEWAY/auth/callback`; no wildcard callback. ES256 and RS256 ID-token signatures are supported. |
-| Client registration | Set the assigned `client_id`. A public client needs no application secret; a confidential client names a private environment variable with `client_secret_env`. Never put its secret in the JSON file. |
-| Scopes | Sandhi requests `openid` automatically. Request only additional scopes admitted for this application, such as `profile`; requesting a scope does not grant a Sandhi role or inference permission. |
-| Audience | The configured `client_id` remains the ID-token audience. Introspected access tokens must target `access_token_audience` when configured, otherwise `client_id`. Tokens intended for another service do not qualify. |
-| Introspection | Bearer access tokens are introspected for each request. Discovery must explicitly advertise `introspection_endpoint_auth_methods_supported`; supported methods are `none` and `client_secret_basic`. Token-endpoint methods do not substitute for introspection methods. |
-| Introspection result | Require `active: true`, exact `iss`, `aud` equal to or containing the selected access-token audience (only strings are allowed in audience arrays), nonempty `sub`, future `exp`, bearer `token_type`, and a valid `nbf` when present. A signed JWT access token still needs this introspection path. |
+| Victor origin client | Requests the resource token; may appear as `client_id` in introspection |
+| Sandhi consumer `client_id` | Authenticates Sandhi's introspection request; remains the browser ID-token audience |
+| `access_token_audience` | Exact resource identifier intended for Sandhi; defaults to consumer `client_id` only when omitted |
+| Verified subject | Stable `sub` under the configured issuer; not an email, display name or caller header |
 
-For introspection, Sandhi selects `client_secret_basic` when a secret is configured
-and the provider advertises it; otherwise it uses an advertised `none`. Missing or
-unsupported methods fail startup. This is Sandhi's supported profile, not a claim
-that every compliant OIDC provider exposes token introspection. ID-token verification
-also checks the signature, issuer, audience, expiry, browser nonce and access-token
-hash when supplied.
-
-Get the issuer from your provider's application/tenant registration, then inspect
-its public discovery document over verified HTTPS. Verify advertised JWKS and the
-contracts above before registering accounts or changing a running gateway. Do not
-invent endpoint paths, rewrite discovery metadata or disable TLS verification to
-make an unsupported provider appear compatible. See [OIDC Discovery](https://openid.net/specs/openid-connect-discovery-1_0.html),
-[OAuth metadata](https://www.rfc-editor.org/rfc/rfc8414.html) and
-[token introspection](https://www.rfc-editor.org/rfc/rfc7662.html).
+Keep origin and consumer registrations separate. ID tokens and dashboard cookies
+cannot substitute for agent resource tokens. Audience strings are compared exactly;
+blank values, wildcards, whitespace and control characters are rejected.
 
 ## Configure Sandhi
 
-Create a private `oidc.json`. Subject keys are the verified OIDC `sub` under that
-issuer, not display names, email addresses or caller headers. A subject may be an
-opaque string rather than a UUID. Replace every example value; the example issuer
-below is a placeholder, not a live service:
+1. Register the origin client, the confidential Sandhi consumer, the resource audience and consumer ACL in Anvai Identity using the owner review/passkey/apply path.
+2. Use the generated client IDs and verified subject. Keep the consumer secret in a private environment source.
+3. Create private `oidc.json`; configure listener TLS and use the registered HTTPS callback.
 
 ```json
 {
-  "issuer": "https://idp.example.com/YOUR_TENANT",
-  "client_id": "sandhi",
-  "redirect_url": "https://gateway.example.com/auth/callback",
+  "issuer": "https://id.localhost:9443",
+  "client_id": "GENERATED_SANDHI_CONSUMER_ID",
+  "client_secret_env": "SANDHI_OIDC_CLIENT_SECRET",
+  "access_token_audience": "https://sandhi.local/resource",
+  "redirect_url": "https://gateway.localhost:8787/auth/callback",
+  "ca_file": "/private/local-idm-ca.pem",
   "scopes": ["profile"],
   "subjects": {
-    "VERIFIED_OPERATOR_SUBJECT": {"role": "admin"},
-    "VERIFIED_AGENT_SUBJECT": {
+    "VERIFIED_SUBJECT": {
+      "role": "admin",
       "grants": {
-        "local": {
-          "upstream": "inferflux:local",
-          "models": ["qwen3-coder-30b", "qwen2.5-coder-14b"],
-          "group": "multiagent-validation"
-        },
-        "cloud": {"upstream": "zai:cloud", "models": ["glm-5.3"], "group": "multiagent-validation"}
+        "coding": {"upstream": "route/default", "models": ["coding"]}
       }
     }
   }
 }
 ```
 
-For an internal CA add `"ca_file": "/run/identity/public-ca.pem"`. This adds trust for
-the IdP without disabling chain or hostname verification. To use a confidential client
-add `"client_secret_env": "SANDHI_OIDC_CLIENT_SECRET"`. No secrets belong in committed JSON.
+These ports and registration values are illustrative; the automated fixture
+allocates its own. Match the callback, CA, client IDs and route/model to the actual
+local registration. The JSON is not a configuration for the public development host.
 
 ```sh
-SANDHI_OIDC_CONFIG=/run/sandhi/oidc.json \
-SANDHI_CONFIG=/run/sandhi/config.json \
-SANDHI_STORE=/var/lib/sandhi/usage.db sandhi-proxy
+SANDHI_AUTH_MODE=oidc \
+SANDHI_OIDC_CONFIG=/private/oidc.json \
+SANDHI_CONFIG=/private/listener-and-routes.json \
+SANDHI_STORE=/private/original-usage.db sandhi-proxy
 ```
 
-Configure listener TLS in `SANDHI_CONFIG` (`tls.cert` and `tls.key`) or terminate TLS at
-a trusted reverse proxy with a private backend connection. The configured callback must
-match the browser's external HTTPS origin. Do not expose a plaintext backend across an
-untrusted network. Forward `/auth/*`, `/dashboard*`, and `/admin/*` on the same origin.
-OIDC configuration grants access; provider credentials still live in the existing vault
-or explicitly configured provider environment. Register credentials through an administrator
-session or declarative provider configuration before inference.
+Provider credentials remain in the configured vault or provider environment. OIDC
+setup does not provision them or move existing spend to a new database.
 
-## Provider examples
+## Choose a compatible OIDC provider
 
-### Kanidm
-
-Use a dedicated client and access groups; do not reuse another application's
-registration. For a public client, no application secret is needed:
-
-```sh
-kanidm system oauth2 create-public sandhi 'Sandhi Gateway' https://gateway.example.com/dashboard
-kanidm system oauth2 add-redirect-url sandhi https://gateway.example.com/auth/callback
-kanidm system oauth2 enable-strict-redirect-url sandhi
-kanidm group create sandhi_users
-kanidm system oauth2 update-scope-map sandhi sandhi_users openid profile
-kanidm group add-members sandhi_users YOUR_ACCOUNT
-```
-
-Kanidm's issuer is client-specific: `https://IDP/oauth2/openid/sandhi`.
-Check that registration's discovery for S256, a supported signing algorithm and
-explicit introspection authentication methods. A public Sandhi client requires
-advertised `none` introspection authentication; a confidential client can use
-`client_secret_basic` with `client_secret_env` in the configuration above. Login-client
-authentication and introspection authentication are selected independently.
-
-Use the issuer returned by that client's discovery document, rather than the
-placeholder issuer in the generic JSON. A Kanidm account UUID can be obtained with
-`kanidm person get YOUR_ACCOUNT -o json`; verify it belongs to the intended issuer.
-For the example access group, `kanidm group add-members sandhi_users YOUR_ACCOUNT`
-admits that account to this application. Subject-to-role binding in Sandhi is still
-separate. Check commands against your installed [Kanidm administration version](https://kanidm.github.io/kanidm/stable/integrations/oauth2.html).
-
-### AnvaiOps development IDM: discovery checked, integration not qualified
-
-A credential-free HTTPS check on **2026-11-13 UTC** returned discovery from
-[`https://id.anvaiops.dev/.well-known/openid-configuration`](https://id.anvaiops.dev/.well-known/openid-configuration)
-with the exact issuer **`https://id.anvaiops.dev`**. The advertised public JWKS
-endpoint also returned successfully. This is the development host, not the
-historical Kanidm issuer recorded in [the migration snapshot](identity-groups.md).
-
-| Public metadata | Observed value |
+| Required contract | Sandhi checks |
 | --- | --- |
-| `issuer` | `https://id.anvaiops.dev` |
-| `authorization_endpoint` | `https://id.anvaiops.dev/oauth2/authorize` |
-| `token_endpoint` | `https://id.anvaiops.dev/oauth2/token` |
-| `jwks_uri` | `https://id.anvaiops.dev/oauth2/jwks` |
-| Code flow / PKCE / signing | `code` / `S256` / `RS256` |
-| `token_endpoint_auth_methods_supported` | `none`, `client_secret_basic` |
-| `introspection_endpoint` | Absent |
-| `introspection_endpoint_auth_methods_supported` | Absent |
+| HTTPS discovery and JWKS | Exact issuer; trusted CA and hostname; no guessed endpoints |
+| Code flow | `code`, S256 PKCE, supported token authentication and RS256/ES256 signing |
+| Introspection metadata | Advertised endpoint **and** advertised authentication methods; `none` or `client_secret_basic` |
+| Access-token result | Active, exact issuer, intended audience, subject, bearer type, future expiry and valid `nbf` when present |
+| Confidential consumer | Configured secret plus advertised Basic introspection support |
 
-**This discovery does not currently satisfy Sandhi's startup profile.** The absent
-introspection endpoint and its authentication metadata are required even when the
-initial goal is browser login. Do not append a guessed introspection URL or switch
-authentication modes as a fallback. A compatible, advertised introspection contract
-and a dedicated Sandhi registration must be provided and qualified before using
-this issuer with Sandhi. The check established no Sandhi client ID, callback,
-account admission, role binding, token audience or end-to-end login. No credentials
-were used, client registrations changed or deployments migrated. Recheck public
-metadata and the intended tenant issuer before future setup; do not silently
-substitute a production or another tenant's issuer.
-
-## Local co-design: Victor, Sandhi and AnvaiOps development IDM
-
-**Demonstrated locally with source candidates; not deployed to the public development
-host.** The published Sandhi **0.17.1 does not contain `access_token_audience`**.
-The combined **0.18.0 source train is unreleased**. This example explains the
-candidate contract above without treating local acceptance as a live setup recipe.
-
-The three components have separate responsibilities. IDM owns login, current
-resource grants and token revocation. Victor is the originating OAuth client and
-owns its private token-file credential. Sandhi is a distinct consuming OAuth
-client: it authenticates introspection as itself, checks the intended resource
-and applies its own subject/grant and durable accounting rules. Provider credentials
-remain server-side at Sandhi.
-
-```mermaid
-sequenceDiagram
-    participant O as Operator / owner
-    participant I as Local development IDM
-    participant V as Victor origin client
-    participant S as Sandhi consumer client
-    participant M as Synthetic model backend
-    O->>I: Review registration, approve with passkey, apply resource ACLs
-    V->>I: HTTPS code + S256 PKCE, login and consent
-    I->>I: Record token issuance receipt
-    I-->>V: Short-lived resource token
-    V->>S: Request 1: Bearer resource token
-    S->>I: Introspect as Sandhi client
-    I-->>S: Active, intended resource, current subject authority
-    S->>M: One physical attempt
-    M-->>S: Read-tool call and source usage
-    S-->>V: Tool call with paired receipt settling 14 tokens
-    V->>V: Execute read tool and retain successful tool result
-    V->>I: Acquire rotated resource token
-    V->>S: Request 2: tool-result conversation
-    S->>I: Introspect again as Sandhi client
-    I-->>S: Current authority
-    S->>M: One physical attempt
-    M-->>S: Final answer and source usage
-    S-->>V: Answer with paired receipt settling 14 tokens
-    O->>I: Revoke local login / authority
-    V->>S: Attempt with revoked token
-    S->>I: Introspect current authority
-    I-->>S: Inactive
-    S-->>V: Refuse before model dispatch
-```
-
-Use distinct illustrative registrations such as `victor-origin` and
-`sandhi-consumer`, with `https://sandhi.example.com/resource` as the explicit
-resource audience. These are placeholders, not deployed registrations. In Sandhi's
-candidate configuration, `client_id` is `sandhi-consumer` and
-`access_token_audience` is that resource string. IDM's introspection response may
-name `victor-origin` as the issuing client; that does not replace Sandhi's Basic
-or form client identity, nor grant inference by itself. Browser ID tokens remain
-addressed to Sandhi's OAuth client and cannot substitute for resource access tokens.
-
-The local run used the supported owner registration path, including review,
-passkey approval and apply, rather than editing token claims or bypassing resource
-ACLs. It exercised real HTTPS login, consent, PKCE, token issuance receipts,
-per-request introspection, rotation and live revocation in the disposable local
-IDM process. A real Victor Agent completed a read-tool loop against a synthetic
-loopback model backend. Actual Authorization-bearing requests and returned Sandhi
-request IDs were joined to IDM issuance receipts and durable execution/usage
-records; the transcript included a matching successful tool result.
-
-| Observed result | Request 1 | Request 2 |
-| --- | ---: | ---: |
-| Physical model attempts | 1 | 1 |
-| Fresh input tokens | 2 | 2 |
-| Cache-read tokens | 6 | 6 |
-| Cache-creation tokens | 2 | 2 |
-| Output tokens | 4 | 4 |
-| Paired settled tokens | 14 | 14 |
-
-The two receipts total **28 neutral tokens**, not a price or savings estimate.
-The cache split is already part of each 14-token total; it is not added again.
-Six refusal controls covered UserInfo-purpose tokens, ID tokens, the wrong
-resource, private token-file expiry, signed-token expiry and logout/revocation.
-The demonstrated two successful calls made two physical model attempts.
-
-The final local acceptance repeated this flow with the **official published SDK
-0.17.1**, the reviewed combined **Sandhi 0.18.0 source candidate**, and the IDM
-registration candidate aligned to its actual remote baseline. All three acceptance
-tests passed, including actual wire/receipt joins, successful tool execution and
-six refusal controls. Native module and server binary hashes bind the run to those
-artifacts; a reported version alone is not provenance. The earlier SDK 0.17.0
-candidate evidence remains historical. Separate published-0.17.1 gateway checks
-also passed eight Agent/tool-loop cases; that released server does not gain the
-candidate audience feature. Victor's reviewed consumer merge and all five exact
-post-merge workflows passed. The IDM source merge and both exact post-merge
-checks passed too; deployment still requires separate acceptance. Evidence is in the
-[progress ledger](../reviews/post-0.17.0-pr-train.md#three-project-identity-co-design).
-The public `id.anvaiops.dev` discovery still lacks required introspection metadata;
-the [live-host compatibility gap](#anvaiops-development-idm-discovery-checked-integration-not-qualified)
-remains. No live client registration, tenant, credential or deployment was changed.
+Token-endpoint authentication methods do not stand in for introspection methods.
+A signed JWT still goes through Sandhi's configured introspection path. The local
+Anvai Identity fixture exercises this contract; another provider needs its own
+qualification. References: [OIDC Discovery](https://openid.net/specs/openid-connect-discovery-1_0.html)
+and [token introspection](https://www.rfc-editor.org/rfc/rfc7662.html).
 
 ## Roles and agent access
 
-| Role | Allowed operations |
-|---|---|
-| `viewer` | Usage, run queries and masked operational metadata |
-| `operator` | Viewer operations plus budget and alert changes |
-| `admin` | Operator operations plus credentials, virtual keys, configuration and diagnostics |
+These roles apply to the OIDC profile. Starter access has a shared operator context,
+not an authenticated OIDC role.
 
-Roles are deployment-wide, not tenant isolation. A successful login grants no implicit
-role. Subject bindings are server configuration and require restart; IdP groups control
-client admission but are not automatically synchronized to Sandhi roles.
+| Role | Permission |
+| --- | --- |
+| `viewer` | Usage, run queries and masked metadata |
+| `operator` | Viewer reads plus budgets and alerts |
+| `admin` | Credentials, keys, configuration and diagnostics |
+| Dedicated agent grant | Explicit upstream/models, attribution and budget policy; independent of dashboard role |
 
 ### Onboard a human dashboard user
 
-Two independent permissions are required: the identity provider must admit the account
-to the Sandhi application, and Sandhi must bind its verified subject to a role. A working
-administrator test login does not establish access for another account.
+1. Admit the verified subject to the dedicated application in Anvai Identity.
+2. Add its subject binding in private `SANDHI_OIDC_CONFIG`, preserving existing administrators and grants.
+3. Restart through the service manager with the original ledger; existing browser sessions expire.
+4. Sign in through `/dashboard`; verify one allowed read and one forbidden action for that role.
 
-1. Obtain the account's stable subject from the provider's verified account/claim
-   tooling. Confirm the intended account under the exact configured issuer before
-   granting access. Do not trust a username, email address, group name or an
-   unverified token payload as the subject binding. The [Kanidm example](#kanidm)
-   gives its UUID lookup command.
-2. Admit the account to the dedicated Sandhi application using the provider's
-   assignment, access group or scope policy. Read back the assignment and subject.
-   Do not alter another application's registration or assume an IdP group grants
-   a Sandhi role automatically. Use the deployment's existing group policy where
-   explicitly configured; see [identity and group boundaries](identity-groups.md).
-3. Back up the private file referenced by `SANDHI_OIDC_CONFIG`, then add an entry to its
-   existing `subjects` object. Preserve the issuer, client, callback, CA, existing
-   administrators and agent grants. For read-only dashboard access, the entry is:
-
-   ```json
-   "VERIFIED_PERSON_SUBJECT": {"role": "viewer"}
-   ```
-
-   This is a JSON object entry, not a replacement configuration file. Choose
-   `"operator"` for budget/alert management or `"admin"` for full gateway administration.
-   These choices use the role table above; none implicitly grants model inference.
-   Keep both the configuration and its backup private, for example mode `0600`.
-4. Restart the gateway instance that reads that file, using the deployment's service
-   manager. Verify its binary/version and readiness. A restart invalidates existing
-   Sandhi browser sessions; preserve the usage database, vault and rollback files.
-5. Start a new login from `/dashboard`. Verify the displayed role and an authorized
-   read. A viewer must still be denied budget changes, credentials and configuration.
-   Confirm the intended human account, not only a separate test administrator.
+Example subject entry: `"VERIFIED_SUBJECT": {"role": "viewer"}`.
+It is an object entry, not a replacement configuration file. Bindings are
+deployment-wide; they do not create tenant isolation or model-inference grants.
 
 ### Change roles and recover access
 
-In 0.9.1, role and inference-grant changes require deployment configuration access and
-a restart. There is **no dashboard role editor or administrative API for OIDC subject
-bindings**. The admin role's configuration permission does not rewrite
-`SANDHI_OIDC_CONFIG`. Use the same subject entry to change `viewer`, `operator` or `admin`;
-do not add a second identity registry, share the administrator's password, or switch to
-token mode to bypass a failed login. Keep an authorized deployment recovery path and
-the prior private configuration before changing the account used to administer Sandhi.
+| Operation | Supported path |
+| --- | --- |
+| Change role/grant | Update the private subject binding and restart; no dashboard role editor |
+| Diagnostics automation | Explicit `allow_diagnostics: true`; bounded reads, no budget or credential writes |
+| Browser mutation | Verified session, exact Origin and CSRF proof |
+| Agent request | Short-lived access token; per-request introspection; never an ID token or browser cookie |
+| Login failure | Check issuer, subject, assignment and grant; do not downgrade authentication or replay an old authorization URL |
 
-An IdP page saying **Access Denied** with an operation ID can occur after successful
-authentication but before the callback. Have an authorized IdP administrator correlate
-that ID with server audit logs. A requested-scope denial with no available scopes means
-the account needs the Sandhi application's mapped access group. Do not widen global
-scopes or disable TLS verification. After correcting membership, start a fresh login
-from the dashboard instead of replaying the old authorization URL.
+Browser sessions use Secure, HttpOnly, SameSite=Lax cookies. Logout ends the Sandhi
+session, not other applications' sessions. Keep credentials, cookies and complete
+authorization URLs out of screenshots, logs and support reports.
 
-If the callback reaches Sandhi but access is denied, check the verified issuer/subject
-binding and required permission. A viewer's denial on an administrative operation is
-expected. If startup/readiness fails, investigate that separately; a longer browser
-timeout or a different role does not repair an unavailable gateway. Never put passwords,
-access tokens, browser cookies or complete authorization URLs in support reports.
+## Live development service
 
-For automated accounting, explicitly give a dedicated subject `"role": "viewer"`
-and `"allow_diagnostics": true`. This adds only the bounded read-only C4
-`POST /admin/usage/diagnostics` permission; it grants no budget writes, credential
-management, configuration access or inference. The flag defaults to false and does
-not change existing viewer/operator access. Admin retains its existing access.
-Session metadata advertises `diagnostics` only for explicit opt-in; the existing
-`admin` permission continues to imply diagnostics, preserving default responses.
-`allow_diagnostics` alone grants diagnostics without other viewer reads. The
-permission is deployment-wide: it does not restrict queries to that subject's runs.
-Cookie-authenticated diagnostic POSTs still require exact Origin and CSRF proof;
-automation uses a separately issued OAuth access token, never a browser cookie.
-This requires 0.9.0 or later: 0.8.0 binaries reject the new field. Explicit
-token compatibility mode still requires its existing admin token for diagnostics.
+A credential-free HTTPS check at **2026-11-13 14:35 UTC**, after the reviewed
+development upgrade, observed the following contract. Local acceptance and
+public transport qualification remain separate.
 
-Open `/dashboard` and select **Sign in with SSO**. Tokens stay server-side. Browser
-sessions use Secure, HttpOnly, SameSite=Lax `__Host-` cookies. Writes require both a CSRF
-proof and the exact configured Origin. **Sign out** invalidates this Sandhi session; it
-does not sign the user out of the identity provider or other applications.
+| `https://id.anvaiops.dev` discovery | Observed |
+| --- | --- |
+| Issuer | Exact `https://id.anvaiops.dev` |
+| Authorization / token / JWKS | Advertised and public JWKS reachable |
+| Code flow / PKCE / signing | `code` / `S256` / `RS256` |
+| Token authentication | `none`, `client_secret_basic` |
+| Introspection endpoint | Advertised `https://id.anvaiops.dev/oauth2/introspect` |
+| Introspection authentication | Advertised `client_secret_basic` |
+| Public introspection transport | Credential-free POST returned **403**; origin/edge acceptance remains open |
+| Sandhi/Victor live client integration | **Not qualified**; dedicated registrations and end-to-end acceptance remain open |
 
-Dashboard section links jump to usage, configuration, access, budgets, alerts and run
-lookup. Keyboard users can use **Skip to overview** and focus each attribution table
-to scroll it horizontally on narrow screens. Cache reporting details remain visible
-separately from the larger token totals; reporting coverage is not a cache hit rate.
-The dashboard follows the system light/dark preference and reduced-motion setting.
-
-Agent clients supply a short-lived OAuth **access token** in their SDK credential field.
-ID tokens and dashboard cookies cannot authorize inference. With multiple configured
-grants, send `x-sandhi-grant: local` or `cloud`; a single grant needs no selector. The
-selected grant enters the same model allowlist, attribution, rate, budget and metering
-path as virtual keys. Caller credentials are never forwarded to upstream providers.
-Upstream authentication is independent: ZAI retains its provider credential, and an
-InferFlux deployment may use its separately configured OIDC or API-key profile.
+The previous schema-67 deployment lacked introspection discovery. The reviewed
+schema-70 upgrade now advertises it, preserving existing issuer configuration,
+key custody and identity/admission rows. Its private backup remains on the host.
+Do not treat advertised metadata as proof that machine requests traverse the
+public edge or that a Sandhi registration works.
+[Inspect public discovery](https://id.anvaiops.dev/.well-known/openid-configuration)
+before any future rollout.
 
 ## Migrate and verify
 
 ### Optional gateway and authentication are separate choices
 
-Choose the request route explicitly in the consuming application. Direct access means
-Victor calls the provider itself; gateway access means it calls Sandhi. Disabling the
-gateway must not disable authentication on InferFlux or another selected provider.
+| Request route | Profile | Sandhi enforcement |
+| --- | --- | --- |
+| Through Sandhi | Starter, token or OIDC | Durable metering, budgets and cache policy remain active |
+| Direct to provider | Provider's configured authentication | Sandhi cannot account for or enforce these calls |
 
-| Deployment | Request route | Authentication and enforcement |
-|---|---|---|
-| Managed multiagent deployment | Through Sandhi | OIDC by default; Sandhi grants, metering and budgets apply |
-| Authorized direct development or diagnosis | Direct to InferFlux/provider | Provider authentication still required; Sandhi cannot meter or enforce these calls |
-| Explicit compatibility deployment | Either route | Scoped API/virtual keys configured for that route; never selected automatically after an OIDC error |
-
-If a deployment requires Sandhi's budgets or audit trail, restrict direct origin access
-to the gateway identity/network and separately authorized operators. An unrestricted
-direct route would bypass those controls even with valid user authentication. Never
-silently reroute a failed gateway request or retry it with weaker credentials.
-
-Keep route selection, model selection and identity separate in the client UX. Show the
-selected endpoint and whether Sandhi metering is active; distinguish gateway connection
-failure, identity-provider unavailability, expired login, forbidden access and model
-readiness. Browser users sign in once through SSO; unattended agents use a dedicated
-service identity and short-lived OAuth access tokens through the provider's supported
-client/service-account flow. For example, Kanidm offers service-account token exchange;
-keep any bootstrap credential private. A provider's machine-token flow and resulting
-introspection claims require separate qualification. This does not eliminate upstream
-provider credentials such as ZAI's API key.
-
-Each service validates its own intended token audience. A token issued for Sandhi must
-not simply be forwarded to InferFlux. Upstream token acquisition, renewal and exchange
-need separate acceptance; the current gateway does not implement those automatically.
-
-References: [OAuth security best practices](https://www.rfc-editor.org/rfc/rfc9700.html)
-and [Kanidm service accounts](https://kanidm.github.io/kanidm/stable/accounts/service_accounts.html).
+A failed gateway/OIDC request never authorizes direct-provider fallback or a retry
+with weaker credentials. Upstream provider authentication remains independent.
 
 ### Deployment sequence
 
-1. Preserve the current binary, private configuration, provider credentials and SQLite
-   state. Stop the old writer before replacing its live database; never clear shared cache.
-2. Register the dedicated client and bind known subjects. Validate the candidate on an
-   isolated listener and disposable or backed-up state first.
-3. Verify login, roles, budget writes, expiry and logout through the external HTTPS URL.
-   Test actual agent access and confirm provider/model, request/session and usage joins.
-4. Replace the service with the reviewed release and its explicit configuration. Check
-   `sandhi --version`, `sandhi-proxy --version` and `/version.package_version` agree.
+1. Preserve the binary, private configuration, provider credentials and complete original SQLite store.
+2. Choose the profile explicitly for managed deployments; test on an isolated listener with private local state first.
+3. Verify readiness, identity/role where configured, one real Agent request and the joined source/usage receipt.
+4. Test denial, expiry, cancellation and restart before replacing the existing writer.
 
-For retained virtual-key/admin-token deployments, set `SANDHI_AUTH_MODE=tokens`
-explicitly. This mode keeps the legacy API and dashboard token UI; it is never selected
-after an OIDC error. `scripts/quickstart.sh` is only this local compatibility bootstrap.
-`SANDHI_ADMIN_TOKEN` and `SANDHI_DASHBOARD_PUBLIC` do not bypass OIDC authorization.
-
-Login attempts and sessions are in-memory and bounded (1,024 pending logins, 4,096 active
-sessions, 16 simultaneous authority operations). Pending login expires after five minutes;
-sessions expire at the earlier of ID-token expiry or one hour and disappear on restart.
-Authority requests have ten-second deadlines and 256 KiB response limits. Distributed
-sessions, refresh tokens, backchannel logout and automatic IdP role synchronization are
-not implemented. An IdP outage fails closed; already issued browser sessions remain valid
-until their local expiry or logout.
+Pending logins and browser sessions are bounded and process-local; restart removes
+them. Distributed sessions, refresh tokens, backchannel logout and automatic IdP
+role synchronization are outside the current implementation.
