@@ -491,6 +491,14 @@ pub fn decode_anthropic_response(
             .unwrap_or(requested_model)
             .into(),
         output: AssistantOutputV1 {
+            // Native delivery preserves unprojectable envelopes. Only the existing
+            // portable validator can establish a canonical display projection.
+            reasoning: crate::buffered_fidelity::validate(
+                sandhi_core::EndpointFamilyV1::AnthropicMessages,
+                &body,
+            )
+            .ok()
+            .flatten(),
             content: (!text.is_empty()).then_some(MessageContent::Text(text)),
             tool_calls,
             refusal: None,

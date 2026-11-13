@@ -1999,6 +1999,14 @@ pub fn decode_openai_response(
             .unwrap_or(requested_model)
             .into(),
         output: AssistantOutputV1 {
+            // Native delivery preserves unprojectable envelopes. Only the existing
+            // portable validator can establish a canonical display projection.
+            reasoning: crate::buffered_fidelity::validate(
+                sandhi_core::EndpointFamilyV1::OpenaiChatCompletions,
+                &body,
+            )
+            .ok()
+            .flatten(),
             content,
             tool_calls,
             refusal: message

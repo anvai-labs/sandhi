@@ -339,7 +339,7 @@ test("persistent typed provider completes and streams neutral documents", async 
       body: JSON.stringify({
         id: "r1",
         model: "gpt-test",
-        choices: [{ message: { content: "hello" }, finish_reason: "stop" }],
+        choices: [{ message: { content: "hello", reasoning_content: "summary" }, finish_reason: "stop" }],
         usage: {
           prompt_tokens: 10,
           completion_tokens: 3,
@@ -366,11 +366,15 @@ test("persistent typed provider completes and streams neutral documents", async 
     );
     const request = JSON.stringify({
       schema_version: "1",
+      include_native_response: false,
       model: "gpt-test",
       messages: [{ role: "user", content: "hi" }],
     });
     const response = JSON.parse(await provider.completeJson(request));
     assert.equal(response.output.content, "hello");
+    assert.equal(response.output.reasoning, "summary");
+    assert.equal(response.extensions.reasoning, "summary");
+    assert.equal(response.extensions.openai, undefined);
     assert.equal(response.usage.tokens_in, 6);
     assert.deepEqual(response.usage.cache_read_observation, {
       status: "reported", source: "origin_usage",

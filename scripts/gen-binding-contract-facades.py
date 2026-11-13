@@ -237,6 +237,7 @@ class UsageAggregateV1(TypedDict):
     billable_tokens: int
     latency: NotRequired[LatencySummary]
 class AssistantOutputV1(TypedDict):
+    reasoning: NotRequired[str]
     content: NotRequired[MessageContent]
     tool_calls: NotRequired[list[ToolCallV1]]
     refusal: NotRequired[str]
@@ -391,7 +392,7 @@ export interface UsageAggregateV1 {{
   cache_read_coverage?: CacheReadCoverage
   billable_tokens: number; latency?: LatencySummary
 }}
-export interface AssistantOutputV1 {{ content?: MessageContent; tool_calls?: ToolCallV1[]; refusal?: string }}
+export interface AssistantOutputV1 {{ reasoning?: string; content?: MessageContent; tool_calls?: ToolCallV1[]; refusal?: string }}
 export interface ChatResponseV1 {{
   schema_version: "1"; id?: string; model: string; output: AssistantOutputV1
   finish_reason?: FinishReasonV1; usage: UsageV2; extensions?: Record<string, JsonValue>
