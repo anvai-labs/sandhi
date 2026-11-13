@@ -1,14 +1,15 @@
 # OIDC RSA advisory applicability
 
-Assessment date: 2026-09-28. Reassessment required before 2026-10-22, on dependency
+Assessment date: 2026-11-13. Reassessment required before 2026-11-18, on dependency
 or adapter drift, or before introducing another RSA/OIDC consumer. This is an
 explicit non-applicability assessment, not a fix for the dependency vulnerability.
 
 [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071.html) remains
-unpatched in rsa 0.9.10 and the current 0.10 prerelease. Its private-key timing
+unpatched in the locked rsa 0.9.10. RustSec lists >=0.10.0 as patched,
+which is outside openidconnect 4.1.0's RSA dependency range. Its private-key timing
 attack does not apply to the reviewed production operation:
 
-1. Sandhi's auth adapter calls `openidconnect` 4.0.1 ID-token verification.
+1. Sandhi's auth adapter calls `openidconnect` 4.1.0 ID-token verification.
 2. That library's `core/crypto.rs::verify_rsa_signature` constructs `RsaPublicKey`
    from the public JWKS modulus/exponent and invokes public-key verification.
 3. rsa's `pkcs1v15::verify` uses public exponentiation. No production private RSA
@@ -32,8 +33,9 @@ session permission projection only. ID-token verification, production public-key
 RSA operations, test-only private signing and dependency manifests/locks are
 unchanged. The existing expiry remains 2026-10-22; it was not extended.
 
-`deny.toml` exempts only advisories carrying a reviewed record on this page:
-this one and the sibling [crypto-bigint assessment](oidc-crypto-bigint-advisory.md).
+`deny.toml` exempts only this RSA advisory. The sibling
+[crypto-bigint assessment](oidc-crypto-bigint-advisory.md) records dependency
+remediation and no longer carries an ignore.
 Every other vulnerability and yanked-crate failure remains fatal. A patched maintained
 dependency should replace this exception when available. Replacing the OIDC protocol
 library with custom claim
@@ -76,9 +78,11 @@ review window now runs to 2026-11-18 (24 days, prior convention). A sibling
 assessment for RUSTSEC-2026-0387 (crypto-bigint via p384, same adapter and
 threat model) lives in [oidc-crypto-bigint-advisory.md](oidc-crypto-bigint-advisory.md).
 
-The 2026-11-13 audience candidate changes configuration validation and the
-introspection response's expected access-token audience only. Browser signature
-verification, OAuth client authentication, dependency locks and private-key
-operation reachability are unchanged. The source-bound JSON record carries the
-new adapter checksum; its expiry remains **2026-11-18**. This is not advisory
-remediation or a claim that a different dependency version is covered.
+The 2026-11-13 OIDC 4.1.0 candidate review compared upstream RSA verification
+operations with 4.0.1. The public-key-only production operation and unchanged
+auth adapter remain the basis of the scoped exception; this dependency update
+does not remediate RSA. The record now binds the new OIDC checksum and retains
+the existing 2026-11-18 deadline. Independent exact-source review and security
+CI remain required before adoption.
+
+The postrelease integration binds this review to the exact adapter with the explicit resource-audience selector. This changes introspection audience matching only; independent combined-source reassessment is required before adoption.

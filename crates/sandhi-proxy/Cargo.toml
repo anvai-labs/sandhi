@@ -44,7 +44,7 @@ base64 = "0.22"
 # Binary-only emergency termination and isolated C-exit-handler regression tests.
 libc = "0.2"
 ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, features = ["std", "load-dynamic", "api-26"] }
-openidconnect = { version = "4.0.1", default-features = false, features = ["reqwest", "rustls-tls"] }
+openidconnect = { version = "4.1.0", default-features = false, features = ["reqwest", "rustls-tls"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 sandhi-core = { path = "../sandhi-core", version = "0.17.1" }
@@ -116,7 +116,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 [dev-dependencies]
 rusqlite = { version = "0.41", features = ["bundled"] }
 tempfile = "3"
-p256 = { version = "0.13", features = ["ecdsa"] }
+p256 = { version = "0.14", features = ["ecdsa"] }
 rsa = { version = "0.9", features = ["pem"] }
 tower = { version = "0.5", features = ["limit", "util"] }
 wiremock = "0.6"
