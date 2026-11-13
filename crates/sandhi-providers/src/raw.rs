@@ -1785,6 +1785,81 @@ data: [DONE]\n\n";
     }
 
     #[tokio::test]
+    async fn qualified_chat_final_fence_preserves_raw_bytes_and_partial_source_counts() {
+        use futures_util::StreamExt;
+        use sandhi_core::{usage::OpenAiStreamUsageProfile as P, UsageCompleteness};
+        for profile in [P::Standard, P::TerminalChunk] {
+            for fault in ["progress", "duplicate_content", "identical"] {
+                let server = MockServer::start().await;
+                let mut first = serde_json::json!({"object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}});
+                if profile == P::TerminalChunk {
+                    first["choices"] =
+                        serde_json::json!([{"index":0,"delta":{},"finish_reason":"stop"}]);
+                }
+                let mut later = first.clone();
+                if fault != "identical" {
+                    later["choices"] = serde_json::json!([{"index":0,"delta":{"content":"late"},"finish_reason":"stop"}]);
+                    if fault == "progress" {
+                        later.as_object_mut().unwrap().remove("usage");
+                        later["choices"][0]["finish_reason"] = Value::Null;
+                    }
+                }
+                let wire = format!("data: {first}\n\ndata: {later}\n\ndata: [DONE]\n\n");
+                Mock::given(method("POST"))
+                    .respond_with(
+                        ResponseTemplate::new(200).set_body_raw(wire.clone(), "text/event-stream"),
+                    )
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                let forwarder =
+                    RawForwarder::new(ProviderFamily::OpenAiCompat, server.uri(), "synthetic")
+                        .with_openai_stream_usage_profile(profile);
+                let response = forwarder
+                    .forward_stream_qualified_with_headers(
+                        "/v1/chat/completions",
+                        Bytes::from_static(br#"{"model":"fixture","stream":true}"#),
+                        None,
+                        None,
+                        &HeaderMap::new(),
+                    )
+                    .await
+                    .unwrap();
+                let chunks: Vec<_> = response.stream.collect().await;
+                let bytes: Vec<_> = chunks
+                    .into_iter()
+                    .flat_map(|chunk| chunk.unwrap().to_vec())
+                    .collect();
+                assert_eq!(bytes, wire.as_bytes());
+                let evidence = response.observation.evidence();
+                assert_eq!(
+                    evidence.snapshot.qualification_error.is_none(),
+                    fault == "identical"
+                );
+                assert_eq!(
+                    evidence.snapshot.outcome,
+                    Some(if fault == "identical" {
+                        crate::AttemptOutcome::Success
+                    } else {
+                        crate::AttemptOutcome::IncompleteStream
+                    })
+                );
+                let usage = evidence.usage.unwrap();
+                assert_eq!((usage.tokens_in, usage.tokens_out), (10, 4));
+                assert_eq!(
+                    usage.completeness,
+                    if fault == "identical" {
+                        UsageCompleteness::Final
+                    } else {
+                        UsageCompleteness::Partial
+                    }
+                );
+                assert_eq!(server.received_requests().await.unwrap().len(), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn qualified_stream_rejects_unsupported_requests_before_dispatch() {
         let server = MockServer::start().await;
         let (context, receiver) = crate::AttemptContext::channel("not-dispatched", 4).unwrap();
