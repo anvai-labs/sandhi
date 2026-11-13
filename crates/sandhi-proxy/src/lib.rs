@@ -3808,7 +3808,12 @@ fn inference_credential<'a>(
             dialect,
             StatusCode::UNAUTHORIZED,
             &format!(
-                "missing virtual key: send it as {}",
+                "missing {}: send it as {}",
+                if state.oidc.is_some() {
+                    "access token"
+                } else {
+                    "virtual key"
+                },
                 dialect.credential_hint()
             ),
         )

@@ -68,7 +68,15 @@ function refreshTokenState() {
   dotEl.classList.toggle("on", on);
   dotEl.title = authMode === "none" ? "Shared starter access; authentication is off"
     : on ? "Each request is authorized by the server" : "No operator credential supplied";
-  document.querySelectorAll("[data-needs-token]").forEach(b => b.disabled = !permits(actionPermissions[b.dataset.action] || "admin") || b.dataset.revoked === "true");
+  document.querySelectorAll("[data-needs-token]").forEach(b => b.disabled = !permits(actionPermissions[b.dataset.action] || "admin") || b.dataset.revoked === "true"
+    || (b.dataset.action === "mintVkey" && inferenceAuthMode !== "tokens"));
+  document.getElementById("vkey-auth-status").textContent = inferenceAuthMode === "tokens"
+    ? "Ordinary virtual keys authenticate inference in token mode."
+    : inferenceAuthMode === "oidc"
+      ? "Ordinary virtual-key authentication is inactive in OIDC mode. Use OIDC access tokens; delegated keys require an explicit policy."
+      : inferenceAuthMode === "none"
+        ? "Inference authentication is off. Ordinary virtual keys do not restrict the shared starter."
+        : "Loading the inference access profile.";
   document.getElementById("token-form").hidden = authMode !== "tokens";
   document.getElementById("sso-box").hidden = authMode !== "oidc";
   document.getElementById("sso-login").hidden = !!ssoSession?.subject;
@@ -463,6 +471,7 @@ async function revokeCred(provider, label) {
   toast(`Credential disabled locally; secret cleanup: ${result.secret_deletion || "unknown"}. Broker grant and provider key unchanged.`, true); loadKeys();
 }
 async function mintVkey() {
+  if (inferenceAuthMode !== "tokens") { toast("Ordinary virtual keys are available only in token mode.", false); return; }
   const models = document.getElementById("v-models").value.trim();
   const rate = document.getElementById("v-rate").value;
   const body = {
