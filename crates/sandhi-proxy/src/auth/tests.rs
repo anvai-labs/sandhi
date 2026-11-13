@@ -369,8 +369,10 @@ impl Authority {
     fn issue_es256(&self, code: &str, nonce: &str) -> String {
         use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
         use p256::ecdsa::{signature::Signer, Signature, SigningKey};
-        let key = SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
-        let point = key.verifying_key().to_encoded_point(false);
+        // Fixed synthetic fixture key, never a deployment credential. Align the
+        // signing fixture with the verifier's patched 0.14 curve family.
+        let key = SigningKey::from_slice(&[1u8; 32]).unwrap();
+        let point = key.verifying_key().to_sec1_point(false);
         let jwk = json!({"kty":"EC","crv":"P-256","alg":"ES256","use":"sig",
             "x":URL_SAFE_NO_PAD.encode(point.x().unwrap()),"y":URL_SAFE_NO_PAD.encode(point.y().unwrap())});
         self.state.lock().unwrap().jwks = json!({"keys":[jwk]});

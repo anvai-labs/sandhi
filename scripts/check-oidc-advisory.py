@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail closed when the reviewed OIDC advisory non-applicability assumptions drift.
+"""Fail closed when the reviewed OIDC exception or remediation assumptions drift.
 
 This binds a human-readable operation review to dependency/source identity. It is
 not a call-graph proof, and source patterns alone do not establish non-applicability.
@@ -16,6 +16,21 @@ RECORDS = [
     "docs/security/oidc-rsa-advisory.json",
     "docs/security/oidc-crypto-bigint-advisory.json",
 ]
+
+
+def patched_bigint(version):
+    try:
+        parts = tuple(int(part) for part in version.split("."))
+    except (AttributeError, ValueError):
+        return False
+    return len(parts) == 3 and parts >= (0, 7, 6)
+
+
+def check_exceptions(root, records):
+    expected = [r["advisory"] for r in records if r["status"] == "not_affected_under_reviewed_usage"]
+    ignored = tomllib.loads((root / "deny.toml").read_text())["advisories"].get("ignore", [])
+    if ignored != expected:
+        raise ValueError("advisory ignores must match only the active scoped exceptions")
 
 
 def check_graph(metadata, expected_present):
@@ -45,13 +60,15 @@ def check_graph(metadata, expected_present):
     if len(consumers) != 1:
         raise ValueError("additional production RSA consumer")
     oidc = packages[next(iter(consumers))]
-    if oidc["name"] != "openidconnect" or oidc["version"] != "4.0.1":
+    if oidc["name"] != "openidconnect" or oidc["version"] != "4.1.0":
         raise ValueError("production RSA consumer changed")
     oidc_parents = parents.get(oidc["id"], set())
     if len(oidc_parents) != 1 or packages[next(iter(oidc_parents))]["name"] != "sandhi-proxy":
         raise ValueError("additional production OIDC consumer")
     if len(bigint) != 1:
         raise ValueError("reviewed crypto-bigint dependency route changed")
+    if not patched_bigint(packages[bigint[0]]["version"]):
+        raise ValueError("crypto-bigint regressed below the advisory's patched floor")
     # RUSTSEC-2026-0387 containment: crypto-bigint must reach the workspace
     # ONLY through openidconnect. Enforced as a disconnect test — walking the
     # transitive production-consumer edges with openidconnect removed must not
@@ -87,6 +104,12 @@ def check_record(root, record, today=None):
     today = today or dt.datetime.now(dt.timezone.utc).date()
     if not dt.date.fromisoformat(record["reviewed_on"]) <= today < dt.date.fromisoformat(record["expires_on"]):
         raise ValueError(f"{record['advisory']} assessment expired or future-dated")
+    statuses = {"RUSTSEC-2023-0071": "not_affected_under_reviewed_usage",
+                "RUSTSEC-2026-0387": "remediated_in_locked_graph"}
+    if statuses.get(record["advisory"]) != record["status"]:
+        raise ValueError("unsupported advisory review status")
+    if record["advisory"] == "RUSTSEC-2026-0387" and not patched_bigint(record["packages"]["crypto-bigint"]["version"]):
+        raise ValueError("crypto-bigint record does not establish a patched dependency")
     locked = tomllib.loads((root / "Cargo.lock").read_text())["package"]
     for name, expected in record["packages"].items():
         found = [p for p in locked if p["name"] == name]
@@ -106,6 +129,7 @@ def check_record(root, record, today=None):
 
 def main():
     records = [json.loads((ROOT / path).read_text()) for path in RECORDS]
+    check_exceptions(ROOT, records)
     for record in records:
         check_record(ROOT, record)
     for manifest, expected_present in [("Cargo.toml", True),
@@ -115,7 +139,7 @@ def main():
             check=True, capture_output=True, text=True)
         check_graph(json.loads(result.stdout), expected_present)
     advisories = ", ".join(record["advisory"] for record in records)
-    print(f"{advisories} non-applicability assumptions match the reviewed records")
+    print(f"{advisories} scoped exception/remediation assumptions match the reviewed records")
 
 
 if __name__ == "__main__":
