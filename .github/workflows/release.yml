@@ -91,7 +91,7 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: |
-          cargo build --release --features sentinelpass-ipc,policy-onnx --target "$TARGET" --bin sandhi-proxy --bin sandhi
+          cargo build --release --locked --features sentinelpass-ipc,policy-onnx --target "$TARGET" --bin sandhi-proxy --bin sandhi
           python3 .release-controls/scripts/smoke-release-binaries.py --binary-dir "target/$TARGET/release" --expected-version "$RELEASE_VERSION"
           mkdir dist-binaries
           tar -czf "dist-binaries/sandhi-proxy-$RELEASE_TAG-$TARGET.tar.gz" -C "target/$TARGET/release" sandhi-proxy sandhi -C "$GITHUB_WORKSPACE" scripts/sensitive_policy.py crates/sandhi-proxy/assets/sensitive-text-v1 docs/operator/sensitive-policy.md

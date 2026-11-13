@@ -195,7 +195,7 @@ docs/td/                             # implementation designs and phase status
 docs/README.md                       # documentation map + current status index
 ```
 
-Configure [OIDC SSO](docs/operator/oidc-sso.md) and run the proxy with the required original
+Choose an [access profile](docs/operator/oidc-sso.md) and run the proxy with the required original
 `SANDHI_STORE=usage.db` file and one ledger shard; remove `SANDHI_BUFFERED_ACCOUNTING`.
 Follow the [0.17.0 upgrade checklist](docs/releases/v0.17.0.md) before reusing an installation.
 The proxy persists observations separately from paired receipts and serves a self-hosted
@@ -207,12 +207,15 @@ routing are workspace candidates tracked in TD-0034.
 
 ## Operating it
 
-Standalone deployments default to OIDC SSO with explicit viewer, operator and administrator
-roles. Missing or invalid authentication configuration prevents startup. Follow the
-[SSO setup and migration guide](docs/operator/oidc-sso.md).
+The 0.18 source candidate defaults to a credential-free local starter on
+`127.0.0.1:8787`. Callers share one accounting identity and budget. Tokens and
+OIDC are optional profiles; invalid configured authentication prevents startup.
+Use an authenticated profile for the public development integration. Follow the
+[access profiles and Anvai Identity integration guide](docs/operator/oidc-sso.md).
 
-For an explicitly selected local Ollama/token compatibility instance with persistent state,
-run `SANDHI_AUTH_MODE=tokens ./scripts/quickstart.sh`. For the
+For a fresh local Ollama starter with persistent state, run `./scripts/quickstart.sh`.
+Select scoped virtual keys with `SANDHI_AUTH_MODE=tokens ./scripts/quickstart.sh`.
+Existing quickstart token profiles remain selected. For the
 complete production-facing flow—listener/TLS configuration, credential registration, virtual-key
 minting, budgets, client setup, metrics, OTLP, security, and troubleshooting—use the
 [proxy operator guide](docs/operator/proxy-guide.adoc). `GET /version` exposes public contract

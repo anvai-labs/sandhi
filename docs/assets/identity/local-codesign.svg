@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="370" viewBox="0 0 920 370" role="img" aria-labelledby="title desc">
+<title id="title">Locally tested Anvai Identity, Victor and Sandhi flow</title>
+<desc id="desc">Anvai Identity issues resource access tokens to Victor. Sandhi introspects each token before one model attempt. Two requests settle two fourteen-token receipts. This is a local fixture, not a live deployment.</desc>
+<defs><marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="4" orient="auto"><path d="M0 0L8 4L0 8" fill="none" stroke="#0f766e" stroke-width="1.5"/></marker></defs>
+<rect width="920" height="370" rx="16" fill="#f8fafc"/>
+<g font-family="Inter,system-ui,sans-serif" fill="#0f172a">
+<text x="28" y="35" font-size="20" font-weight="700">Local OIDC co-design · actual identity and Agent flow</text>
+<g fill="#ffffff" stroke="#cbd5e1"><rect x="28" y="88" width="184" height="88" rx="10"/><rect x="254" y="88" width="184" height="88" rx="10"/><rect x="480" y="88" width="184" height="88" rx="10"/><rect x="706" y="88" width="184" height="88" rx="10"/></g>
+<g font-size="17" font-weight="700" text-anchor="middle"><text x="120" y="122">Anvai Identity</text><text x="346" y="122">Victor Agent</text><text x="572" y="122">Sandhi gateway</text><text x="798" y="122">Test model</text></g>
+<g font-size="13" text-anchor="middle" fill="#475569"><text x="120" y="148">Local HTTPS issuer</text><text x="346" y="148">Originating OAuth client</text><text x="572" y="148">Separate consumer client</text><text x="798" y="148">Synthetic backend</text></g>
+<g stroke="#0f766e" stroke-width="2" fill="none" marker-end="url(#arrow)"><path d="M212 132H248"/><path d="M438 132H474"/><path d="M664 132H700"/><path d="M572 88V67H120V82"/><path d="M798 176V220H578V182"/></g>
+<g font-size="12" text-anchor="middle" fill="#0f766e"><text x="231" y="201">Resource token</text><text x="456" y="201">Compatible API</text><text x="682" y="201">One attempt</text><text x="346" y="60">Introspection on every request · current grant and revocation</text><text x="720" y="239">Source usage returned</text></g>
+<g fill="#ecfdf5" stroke="#99f6e4"><rect x="28" y="263" width="410" height="65" rx="9"/><rect x="480" y="263" width="410" height="65" rx="9"/></g>
+<g font-size="15" text-anchor="middle"><text x="233" y="290" font-weight="600">Login + PKCE + owner-approved registration</text><text x="233" y="312">Real read tool · rotation · six refusal controls</text><text x="685" y="290" font-weight="600">2 requests → 2 receipts → 14 + 14 neutral tokens</text><text x="685" y="312">Fresh / cache read / cache write / output stay disjoint</text></g>
+<text x="28" y="352" font-size="12" fill="#475569">LOCAL FIXTURE · No live tenant, client registration or deployment changed · Token units are not a price estimate</text>
+</g></svg>

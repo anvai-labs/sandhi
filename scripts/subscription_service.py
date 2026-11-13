@@ -9,6 +9,49 @@ from pathlib import Path
 import time
 
 
+def auth_mode(config):
+    mode = config.get("auth_mode", "oidc" if "oidc_config" in config else "none")
+    if mode not in ("none", "oidc", "tokens"):
+        raise ValueError("auth_mode must be none, oidc or tokens")
+    if mode == "none" and "oidc_config" in config:
+        raise ValueError("OIDC configuration conflicts with no-auth mode")
+    if mode == "oidc" and not config.get("oidc_config"):
+        raise ValueError("OIDC configuration is required; no authentication fallback")
+    return mode
+
+
+def operator_token(lease, state, mode):
+    path = state / "admin.json"
+    if mode == "tokens" or path.exists() or path.is_symlink():
+        token = lease.read_private_json(path)["admin_token"]
+        if not isinstance(token, str) or len(token) < 32:
+            raise ValueError("strong configured admin credential required")
+        return token
+    return None
+
+
+def client_environment(entry, config, inherited):
+    gateway = entry.get("gateway")
+    if not isinstance(gateway, dict) or set(gateway) - {"url", "virtual_key", "auth_mode"}:
+        raise ValueError("unsupported gateway client configuration")
+    url = gateway.get("url")
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError("gateway URL is required")
+    mode = gateway.get("auth_mode", "tokens" if "virtual_key" in gateway else "none")
+    if mode not in ("none", "tokens"):
+        raise ValueError("use a Victor OIDC profile for OIDC clients")
+    if mode == "none" and "virtual_key" in gateway:
+        raise ValueError("no-auth client conflicts with configured credentials")
+    token = gateway.get("virtual_key")
+    if mode == "tokens" and (not isinstance(token, str) or not token.strip()):
+        raise ValueError("configured gateway virtual key must not be empty")
+    env = {key: value for key, value in inherited.items() if not key.startswith("SANDHI_GATEWAY_")}
+    env.update(SANDHI_GATEWAY_URL=url, PYTHONPATH=config["victor_worktree"])
+    if mode == "tokens":
+        env["SANDHI_GATEWAY_VIRTUAL_KEY_OPENAI"] = token
+    return env
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=["gateway", "publisher", "victor"])
@@ -22,16 +65,8 @@ def main():
     spec.loader.exec_module(lease)
     config = lease.read_private_json(args.state / "service.json")
     if args.mode == "gateway":
-        mode = config.get("auth_mode", "oidc")
-        if mode not in ("oidc", "tokens"):
-            raise SystemExit("auth_mode must be explicitly oidc or tokens")
-        if mode == "oidc" and not config.get("oidc_config"):
-            raise SystemExit("OIDC configuration is required; no token-mode fallback")
-        secret = (
-            lease.read_private_json(args.state / "admin.json")["admin_token"]
-            if mode == "tokens"
-            else None
-        )
+        mode = auth_mode(config)
+        secret = operator_token(lease, args.state, mode) if mode != "oidc" else None
         # Do not inherit upstream API-key shortcuts from the operator's shell.
         env = {
             k: os.environ[k]
@@ -49,14 +84,14 @@ def main():
         )
         if mode == "oidc":
             env["SANDHI_OIDC_CONFIG"] = config["oidc_config"]
-        else:
+        elif secret is not None:
             env["SANDHI_ADMIN_TOKEN"] = secret
         os.umask(0o077)
         os.execve(str(args.state / "sandhi-proxy"), ["sandhi-proxy"], env)
     elif args.mode == "publisher":
         client = lease.AdminClient(
             config["gateway"],
-            lease.read_private_json(args.state / "admin.json")["admin_token"],
+            operator_token(lease, args.state, auth_mode(config)),
         )
         while True:
             try:
@@ -76,15 +111,7 @@ def main():
         if not args.client.replace("-", "").isalnum():
             parser.error("invalid client name")
         entry = lease.read_private_json(args.state / (args.client + ".json"))
-        env = dict(os.environ)
-        for key in list(env):
-            if key.startswith("SANDHI_GATEWAY_"):
-                del env[key]
-        env.update(
-            SANDHI_GATEWAY_URL=entry["gateway"]["url"],
-            SANDHI_GATEWAY_VIRTUAL_KEY_OPENAI=entry["gateway"]["virtual_key"],
-            PYTHONPATH=config["victor_worktree"],
-        )
+        env = client_environment(entry, config, os.environ)
         command = [config["python"], "-m", "victor"] + remaining
         os.execve(config["python"], command, env)
 

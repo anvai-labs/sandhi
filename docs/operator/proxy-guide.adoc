@@ -24,12 +24,14 @@ plane — nothing here involves dollars.
 
 == How it fits
 
-Standalone deployments default to OIDC SSO. Follow link:oidc-sso.md[SSO setup and migration]
+The 0.18 source candidate defaults to a credential-free loopback starter with
+one shared identity and budget. Tokens and OIDC are optional profiles. Follow
+link:oidc-sso.md[access profiles and Anvai Identity integration]
 for browser login, role assignment and short-lived agent access tokens. The virtual-key
 bootstrap examples below require explicitly selecting `SANDHI_AUTH_MODE=tokens`; they do not
 override an OIDC failure or grant access to an OIDC deployment.
 
-Sandhi sits between your callers and the real provider. Callers authenticate with a
+In the token profile below, Sandhi sits between your callers and the real provider. Callers authenticate with a
 per-user *virtual key*; Sandhi holds the *real* upstream key server-side, forwards the
 request, meters it as the bytes pass through, and reconciles the caller's budget.
 

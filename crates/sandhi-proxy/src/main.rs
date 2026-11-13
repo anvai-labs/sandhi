@@ -102,29 +102,92 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
         .with_writer(std::io::stderr)
         .init();
 
-    // SSO is the standalone default. Compatibility is deliberate and never a recovery path.
-    let oidc = match std::env::var("SANDHI_AUTH_MODE")
-        .unwrap_or_else(|_| "oidc".into())
-        .as_str()
-    {
-        "oidc" => {
-            let Some(path) = std::env::var_os("SANDHI_OIDC_CONFIG") else {
-                eprintln!("sandhi-proxy: OIDC mode requires SANDHI_OIDC_CONFIG; select SANDHI_AUTH_MODE=tokens explicitly for compatibility");
-                return 1;
-            };
-            match sandhi_proxy::auth::Oidc::from_file(std::path::Path::new(&path)).await {
-                Ok(oidc) => Some(Arc::new(oidc)),
-                Err(error) => {
-                    eprintln!("sandhi-proxy: OIDC configuration error: {error}");
-                    return 1;
-                }
-            }
-        }
-        "tokens" => None,
-        _ => {
-            eprintln!("sandhi-proxy: SANDHI_AUTH_MODE must be oidc or tokens");
+    // No infrastructure is required for the shared starter. Supplying OIDC
+    // configuration selects OIDC; explicit errors never become unauthenticated.
+    let auth_value = match std::env::var("SANDHI_AUTH_MODE") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(_) => {
+            eprintln!("sandhi-proxy: invalid SANDHI_AUTH_MODE");
             return 1;
         }
+    };
+    let oidc_path = std::env::var_os("SANDHI_OIDC_CONFIG");
+    let auth_mode =
+        match sandhi_proxy::auth::AuthMode::select(auth_value.as_deref(), oidc_path.is_some()) {
+            Ok(mode) => mode,
+            Err(error) => {
+                eprintln!("sandhi-proxy: {error}");
+                return 1;
+            }
+        };
+    let admin_token = match std::env::var("SANDHI_ADMIN_TOKEN") {
+        Err(std::env::VarError::NotPresent) => None,
+        Ok(value)
+            if !value.is_empty()
+                && value.len() <= 16384
+                && value.is_ascii()
+                && !value.chars().any(|c| c.is_whitespace() || c.is_control()) =>
+        {
+            Some(value)
+        }
+        _ => {
+            eprintln!("sandhi-proxy: SANDHI_ADMIN_TOKEN must be a nonempty printable token without whitespace");
+            return 1;
+        }
+    };
+    let starter_upstream = match std::env::var("SANDHI_STARTER_UPSTREAM") {
+        Err(std::env::VarError::NotPresent) => None,
+        Ok(value)
+            if !value.is_empty()
+                && value.len() <= 512
+                && !value.chars().any(|c| c.is_whitespace() || c.is_control()) =>
+        {
+            Some(value)
+        }
+        _ => {
+            eprintln!("sandhi-proxy: invalid SANDHI_STARTER_UPSTREAM");
+            return 1;
+        }
+    };
+    let starter_rate_limit_per_min = match std::env::var("SANDHI_STARTER_RATE_LIMIT_PER_MIN") {
+        Err(std::env::VarError::NotPresent) => None,
+        Ok(value) => match value.parse::<u32>() {
+            Ok(n) if n > 0 => Some(n),
+            _ => {
+                eprintln!("sandhi-proxy: invalid SANDHI_STARTER_RATE_LIMIT_PER_MIN");
+                return 1;
+            }
+        },
+        _ => {
+            eprintln!("sandhi-proxy: invalid SANDHI_STARTER_RATE_LIMIT_PER_MIN");
+            return 1;
+        }
+    };
+    let addr: SocketAddr = match std::env::var("SANDHI_BIND")
+        .unwrap_or_else(|_| "127.0.0.1:8787".into())
+        .parse()
+    {
+        Ok(addr) => addr,
+        Err(_) => {
+            eprintln!("sandhi-proxy: SANDHI_BIND must be a valid socket address");
+            return 1;
+        }
+    };
+    let oidc = if auth_mode == sandhi_proxy::auth::AuthMode::Oidc {
+        match sandhi_proxy::auth::Oidc::from_file(std::path::Path::new(
+            oidc_path.as_ref().expect("validated OIDC configuration"),
+        ))
+        .await
+        {
+            Ok(oidc) => Some(Arc::new(oidc)),
+            Err(error) => {
+                eprintln!("sandhi-proxy: OIDC configuration error: {error}");
+                return 1;
+            }
+        }
+    } else {
+        None
     };
 
     // The shipped enforcement ledger and request limiter are deliberately single-node. Refuse a
@@ -186,14 +249,18 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
                 None,
             ),
         );
-        keys.insert(VirtualKey {
-            id: "vk_openai_demo".into(),
-            subject_id: Some("demo".into()),
-            group_id: Some("demo".into()),
-            upstream_ref: "openai".into(),
-            ..Default::default()
-        });
-        eprintln!("sandhi-proxy: registered openai upstream + vk_openai_demo");
+        if auth_mode == sandhi_proxy::auth::AuthMode::Tokens {
+            keys.insert(VirtualKey {
+                id: "vk_openai_demo".into(),
+                subject_id: Some("demo".into()),
+                group_id: Some("demo".into()),
+                upstream_ref: "openai".into(),
+                ..Default::default()
+            });
+            eprintln!("sandhi-proxy: registered openai upstream + vk_openai_demo");
+        } else {
+            eprintln!("sandhi-proxy: registered openai upstream");
+        }
     }
     if let Ok(key) = std::env::var("SANDHI_INFERFLUX_KEY") {
         let base = std::env::var("SANDHI_INFERFLUX_BASE")
@@ -211,14 +278,18 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
                 None,
             ),
         );
-        keys.insert(VirtualKey {
-            id: "vk_inferflux_demo".into(),
-            subject_id: Some("demo".into()),
-            group_id: Some("demo".into()),
-            upstream_ref: "inferflux".into(),
-            ..Default::default()
-        });
-        eprintln!("sandhi-proxy: registered inferflux upstream + vk_inferflux_demo");
+        if auth_mode == sandhi_proxy::auth::AuthMode::Tokens {
+            keys.insert(VirtualKey {
+                id: "vk_inferflux_demo".into(),
+                subject_id: Some("demo".into()),
+                group_id: Some("demo".into()),
+                upstream_ref: "inferflux".into(),
+                ..Default::default()
+            });
+            eprintln!("sandhi-proxy: registered inferflux upstream + vk_inferflux_demo");
+        } else {
+            eprintln!("sandhi-proxy: registered inferflux upstream");
+        }
     }
     if let Ok(key) = std::env::var("SANDHI_ANTHROPIC_KEY") {
         // Symmetric with SANDHI_OPENAI_BASE. Without an override the Anthropic upstream could
@@ -239,14 +310,18 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
                 None,
             ),
         );
-        keys.insert(VirtualKey {
-            id: "vk_anthropic_demo".into(),
-            subject_id: Some("demo".into()),
-            group_id: Some("demo".into()),
-            upstream_ref: "anthropic".into(),
-            ..Default::default()
-        });
-        eprintln!("sandhi-proxy: registered anthropic upstream + vk_anthropic_demo");
+        if auth_mode == sandhi_proxy::auth::AuthMode::Tokens {
+            keys.insert(VirtualKey {
+                id: "vk_anthropic_demo".into(),
+                subject_id: Some("demo".into()),
+                group_id: Some("demo".into()),
+                upstream_ref: "anthropic".into(),
+                ..Default::default()
+            });
+            eprintln!("sandhi-proxy: registered anthropic upstream + vk_anthropic_demo");
+        } else {
+            eprintln!("sandhi-proxy: registered anthropic upstream");
+        }
     }
 
     if let Ok(key) = std::env::var("SANDHI_GEMINI_KEY") {
@@ -265,14 +340,18 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
                 None,
             ),
         );
-        keys.insert(VirtualKey {
-            id: "vk_gemini_demo".into(),
-            subject_id: Some("demo".into()),
-            group_id: Some("demo".into()),
-            upstream_ref: "gemini".into(),
-            ..Default::default()
-        });
-        eprintln!("sandhi-proxy: registered gemini upstream + vk_gemini_demo");
+        if auth_mode == sandhi_proxy::auth::AuthMode::Tokens {
+            keys.insert(VirtualKey {
+                id: "vk_gemini_demo".into(),
+                subject_id: Some("demo".into()),
+                group_id: Some("demo".into()),
+                upstream_ref: "gemini".into(),
+                ..Default::default()
+            });
+            eprintln!("sandhi-proxy: registered gemini upstream + vk_gemini_demo");
+        } else {
+            eprintln!("sandhi-proxy: registered gemini upstream");
+        }
     }
 
     // Required same-file durable usage store and dashboard.
@@ -365,7 +444,6 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
     let ledger = ProxyLedger::durable(store_path.as_deref().expect("validated durable path"), 1)
         .unwrap_or_else(|_| startup_store_fatal("ledger"));
 
-    let admin_token = std::env::var("SANDHI_ADMIN_TOKEN").ok();
     let config_path = std::env::var("SANDHI_CONFIG")
         .ok()
         .map(std::path::PathBuf::from);
@@ -380,10 +458,23 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
             std::process::exit(1);
         }
     };
+    // Dual-scheme serving (TD-0017 D7): TLS keeps the primary SANDHI_BIND socket;
+    // SANDHI_HTTP_BIND opts an explicit plaintext companion listener in for
+    // trusted-network clients that cannot speak HTTPS. Both listeners then share
+    // one process, one admission budget, and one drain.
+    let http_addr = match http_bind_from_env(tls.is_some(), addr) {
+        Ok(http_addr) => http_addr,
+        Err(error) => {
+            eprintln!("sandhi-proxy: {error}");
+            return 1;
+        }
+    };
+
     let public_url = std::env::var("SANDHI_PUBLIC_URL").unwrap_or_else(|_| {
         format!(
-            "{}://localhost:8787",
-            if tls.is_some() { "https" } else { "http" }
+            "{}://{}",
+            if tls.is_some() { "https" } else { "http" },
+            addr
         )
     });
     if admin_token.is_some() {
@@ -449,6 +540,10 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
     state.alert_writer = buffered_alert_store.clone();
     state.alerts = alerts;
     state.admin_token = admin_token;
+    state.auth_mode = auth_mode;
+    state.starter_upstream = starter_upstream;
+    state.starter_rate_limit_per_min = starter_rate_limit_per_min;
+    state.starter_control_origins = control_origins(addr, tls.is_some(), http_addr);
     state.oidc = oidc;
     if (std::env::var_os("SANDHI_POLICY_WORKERS").is_some()
         || std::env::var_os("SANDHI_POLICY_ONNX").is_some()
@@ -586,7 +681,8 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
     // usage aggregates, masked vkey metadata) stay open. That is the documented single-node dev
     // trust posture, but it must not be silent when a real store is configured — surface it loudly
     // rather than fail-closed (which would break every dev who sets SANDHI_STORE without a token).
-    if state.oidc.is_none()
+    if state.auth_mode == sandhi_proxy::auth::AuthMode::Tokens
+        && state.oidc.is_none()
         && state.store.is_some()
         && state.admin_token.is_none()
         && !state.dashboard_public
@@ -607,6 +703,12 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
     // Scope 5: attach the OTLP recorder (None unless feature-on + configured). Its guard is
     // explicitly dropped below while the process-wide shutdown deadline still applies.
     state.otel = otel_recorder;
+    if auth_mode == sandhi_proxy::auth::AuthMode::None {
+        eprintln!("sandhi-proxy: shared starter enabled; all inference uses one server-owned principal and durable budget scope starter:shared:v1");
+        if !addr.ip().is_loopback() {
+            eprintln!("sandhi-proxy: WARNING: unauthenticated shared starter explicitly bound to a non-loopback address; reachable callers share its authority and budget");
+        }
+    }
     let state = Arc::new(state);
     {
         let config = sandhi_proxy::settlement::buffered::Config::new(
@@ -638,23 +740,6 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
                 .await;
             }
         })
-    };
-
-    let addr: SocketAddr = std::env::var("SANDHI_BIND")
-        .unwrap_or_else(|_| "127.0.0.1:8787".into())
-        .parse()
-        .expect("SANDHI_BIND must be a valid socket address");
-
-    // Dual-scheme serving (TD-0017 D7): TLS keeps the primary SANDHI_BIND socket;
-    // SANDHI_HTTP_BIND opts an explicit plaintext companion listener in for
-    // trusted-network clients that cannot speak HTTPS. Both listeners then share
-    // one process, one admission budget, and one drain.
-    let http_addr = match http_bind_from_env(tls.is_some(), addr) {
-        Ok(http_addr) => http_addr,
-        Err(error) => {
-            eprintln!("sandhi-proxy: {error}");
-            return 1;
-        }
     };
 
     if let Some(warning) = plaintext_bind_warning(addr, tls.is_some()) {
@@ -1091,6 +1176,22 @@ fn rehydrate_providers_from_vault(
             providers.insert(entry.credential_id(), handle);
         }
     }
+}
+
+/// Listener-owned origins; arbitrary request Host values never become authority.
+fn control_origins(addr: SocketAddr, tls: bool, http_addr: Option<SocketAddr>) -> Vec<String> {
+    let mut origins = Vec::new();
+    for (addr, scheme) in std::iter::once((addr, if tls { "https" } else { "http" }))
+        .chain(http_addr.map(|addr| (addr, "http")))
+    {
+        origins.push(format!("{scheme}://{addr}"));
+        if addr.ip().is_loopback() {
+            for host in ["localhost", "127.0.0.1", "[::1]"] {
+                origins.push(format!("{scheme}://{host}:{}", addr.port()));
+            }
+        }
+    }
+    origins
 }
 
 #[cfg(test)]
