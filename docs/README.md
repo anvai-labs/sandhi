@@ -23,18 +23,19 @@ mistaken for shipped behavior.
 | How do I operate the dashboard? | [Operator console](operator/dashboard.md): navigable workspaces, routing inventory, token reuse and bounded usage evidence |
 | How do I configure backends and logical models? | [Backend operator guide](operator/backends.md); fixed and logical routes, compatible affinity, cache declarations and credential references |
 | How do embedded clients select compatible endpoint usage conventions? | [Shared endpoint profiles](adr/0039-shared-embedded-endpoint-profiles.md) and [explicit gateway peer](adr/0041-explicit-gateway-peer-contract.md): client dialect, source convention and one server cache compiler |
-| What store and execution contract does HTTP require? | [Mandatory durable owner](adr/0043-mandatory-durable-http-execution.md) and [0.17.0 upgrade](releases/v0.17.0.md): original file/shard1, removed flag, paired holds and shared serving lifecycle |
+| What store and execution contract does HTTP require? | [Mandatory durable owner](adr/0043-mandatory-durable-http-execution.md) and [0.17.1 upgrade](releases/v0.17.1.md): original file/shard1, removed flag, paired holds and shared serving lifecycle |
 | What authorizes native continuation? | [Source-issued native ownership](adr/0044-native-reference-ownership.md) and [backend operator guide](operator/backends.md#native-reference-ownership): same-ledger proof, original deadlines and no caller-ID adoption |
 | How do buffered calls preserve source accounting and tool fields? | [Shared buffered qualification](adr/0040-shared-buffered-source-qualification.md): ordinary/accounted source semantics, terminal-only Codex aggregation and deterministic refusal |
 | Does the routing goal include native Gemini clients? | Yes; [Gemini inventory and fidelity gaps](reviews/gemini-router-cache-inventory-2026-11-11.md) and the four-ingress matrix in TD-0034 |
 | What is the public data contract? | Rust types in `sandhi-core`; generated JSON Schemas in [`../schemas/`](../schemas/) |
-| What changed in a release? | [0.17.1 corrective candidate](releases/v0.17.1.md), [0.17.0 unpublished checkpoint](releases/v0.17.0.md), [0.15.0 release evidence](releases/v0.15.0.md), [0.14.0 release and adoption gates](releases/v0.14.0.md), [0.13.0 release](releases/v0.13.0.md), [0.12.0 release evidence](releases/v0.12.0.md), [CHANGELOG](../CHANGELOG.md) and [release guide](../RELEASING.md) |
+| What changed in a release? | [0.17.1 published corrective release](releases/v0.17.1.md), [0.17.0 unpublished checkpoint](releases/v0.17.0.md), [0.15.0 release evidence](releases/v0.15.0.md), [0.14.0 release and adoption gates](releases/v0.14.0.md), [0.13.0 release](releases/v0.13.0.md), [0.12.0 release evidence](releases/v0.12.0.md), [CHANGELOG](../CHANGELOG.md) and [release guide](../RELEASING.md) |
 | How do sibling repositories integrate? | [`upstream/`](upstream/) snapshots; these are non-normative and may be historical |
 | What product evolution is proposed and how is it tracked? | [TD-0026 delivery plan](td/TD-0026-gateway-product-evolution.md), [product specification](product/gateway-vision-and-requirements.md), and [2026-09-04 review](reviews/gateway-review-2026-09-04.md); proposals, not shipped claims |
 | What evidence gates the M1 checkpoint? | [Workload and acceptance](product/m1-acceptance.md); UA01 accepts engineering evidence for this release and defers hands-on usability until before production |
 | Which acceptance decisions remain, and why? | [M1 decision packet](product/m1-acceptance-decisions.md); automated evidence, operating-limit choices and a focused user-review script |
 | What is the release state? | [Published releases](https://github.com/anvai-labs/sandhi/releases) and [CHANGELOG](../CHANGELOG.md); [release safeguards](product/release-safeguards.md) records the historical v0.7.0 milestone, not the current installed version |
 | Which PRs remain after the 0.17.0 audit? | [Development PR progress](reviews/post-0.17.0-pr-train.md): disposition, owner lane, qualification and next merge/release gate for all eight audited PRs |
+| How do Victor, Sandhi and the development IDM work together? | [Local OIDC co-design and measured tool loop](operator/oidc-sso.md#local-co-design-victor-sandhi-and-anvaiops-development-idm): distinct client/resource identities, two joined settlements, and live-service limits |
 | What is the three-way co-design state? | [TD-0027](td/TD-0027-three-way-origin-codesign.md) and [delivery review](reviews/three-way-release-review-2026-09-16.md); original lanes integrated, cross-repository release follow-through in progress |
 | What adversarial checks cover the first checkpoint? | [2026-09-05 checkpoint review](reviews/checkpoint-adversarial-review-2026-09-05.md); findings, corrections and remaining integration gates |
 
@@ -67,7 +68,7 @@ Sandhi is an L7 AI usage gateway and provider-transport library, not a general L
 - The current [HTTP execution contract](operator/buffered-accounting.md) requires
   the original single file-backed paired owner for every generation operation. See [attempt accounting and evidence](product/attempt-accounting-and-evidence.md)
   for historical phase evidence. Current serving/recovery and upgrade requirements are in
-  [0.17.0](releases/v0.17.0.md), ADR-0043 and ADR-0044; unsupported external lifecycle work
+  [0.17.1](releases/v0.17.1.md), ADR-0043 and ADR-0044; unsupported external lifecycle work
   remains separate.
 
 The rationale and the evidence gate for changing this scope live in

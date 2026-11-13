@@ -176,9 +176,94 @@ were used, client registrations changed or deployments migrated. Recheck public
 metadata and the intended tenant issuer before future setup; do not silently
 substitute a production or another tenant's issuer.
 
-### Local candidate qualification is separate from the live host
+## Local co-design: Victor, Sandhi and AnvaiOps development IDM
 
-The isolated local Sandhi, Victor and IDM candidates have exercised actual HTTPS code/PKCE resource-token exchange, per-request introspection, token rotation and joined durable usage receipts. Wrong-purpose, wrong-resource, expiry and logout controls refused access. The local IDM fixture used supported owner registration and resource ACLs; these tests used synthetic credentials and disposable state. They did not deploy or change `id.anvaiops.dev`, and do not qualify a live tenant or production migration. The live discovery limitations above remain distinct from this local candidate evidence.
+**Demonstrated locally with source candidates; not deployed to the public development
+host.** The published Sandhi **0.17.1 does not contain `access_token_audience`**.
+The combined **0.18.0 source train is unreleased**. This example explains the
+candidate contract above without treating local acceptance as a live setup recipe.
+
+The three components have separate responsibilities. IDM owns login, current
+resource grants and token revocation. Victor is the originating OAuth client and
+owns its private token-file credential. Sandhi is a distinct consuming OAuth
+client: it authenticates introspection as itself, checks the intended resource
+and applies its own subject/grant and durable accounting rules. Provider credentials
+remain server-side at Sandhi.
+
+```mermaid
+sequenceDiagram
+    participant O as Operator / owner
+    participant I as Local development IDM
+    participant V as Victor origin client
+    participant S as Sandhi consumer client
+    participant M as Synthetic model backend
+    O->>I: Review registration, approve with passkey, apply resource ACLs
+    V->>I: HTTPS code + S256 PKCE, login and consent
+    I->>I: Record token issuance receipt
+    I-->>V: Short-lived resource token
+    V->>S: Request 1: Bearer resource token
+    S->>I: Introspect as Sandhi client
+    I-->>S: Active, intended resource, current subject authority
+    S->>M: One physical attempt
+    M-->>S: Read-tool call and source usage
+    S-->>V: Tool call; paired receipt settles 14 tokens
+    V->>V: Execute read tool; retain successful tool result
+    V->>I: Acquire rotated resource token
+    V->>S: Request 2: tool-result conversation
+    S->>I: Introspect again as Sandhi client
+    I-->>S: Current authority
+    S->>M: One physical attempt
+    M-->>S: Final answer and source usage
+    S-->>V: Answer; paired receipt settles 14 tokens
+    O->>I: Revoke local login / authority
+    V->>S: Attempt with revoked token
+    S->>I: Introspect current authority
+    I-->>S: Inactive
+    S-->>V: Refuse before model dispatch
+```
+
+Use distinct illustrative registrations such as `victor-origin` and
+`sandhi-consumer`, with `https://sandhi.example.com/resource` as the explicit
+resource audience. These are placeholders, not deployed registrations. In Sandhi's
+candidate configuration, `client_id` is `sandhi-consumer` and
+`access_token_audience` is that resource string. IDM's introspection response may
+name `victor-origin` as the issuing client; that does not replace Sandhi's Basic
+or form client identity, nor grant inference by itself. Browser ID tokens remain
+addressed to Sandhi's OAuth client and cannot substitute for resource access tokens.
+
+The local run used the supported owner registration path, including review,
+passkey approval and apply, rather than editing token claims or bypassing resource
+ACLs. It exercised real HTTPS login, consent, PKCE, token issuance receipts,
+per-request introspection, rotation and live revocation in the disposable local
+IDM process. A real Victor Agent completed a read-tool loop against a synthetic
+loopback model backend. Actual Authorization-bearing requests and returned Sandhi
+request IDs were joined to IDM issuance receipts and durable execution/usage
+records; the transcript included a matching successful tool result.
+
+| Observed result | Request 1 | Request 2 |
+| --- | ---: | ---: |
+| Physical model attempts | 1 | 1 |
+| Fresh input tokens | 2 | 2 |
+| Cache-read tokens | 6 | 6 |
+| Cache-creation tokens | 2 | 2 |
+| Output tokens | 4 | 4 |
+| Paired settled tokens | 14 | 14 |
+
+The two receipts total **28 neutral tokens**, not a price or savings estimate.
+The cache split is already part of each 14-token total; it is not added again.
+Six refusal controls covered UserInfo-purpose tokens, ID tokens, the wrong
+resource, private token-file expiry, signed-token expiry and logout/revocation.
+The demonstrated two successful calls made two physical model attempts.
+
+This acceptance used a local Sandhi audience candidate, the supported local IDM
+registration candidate and a Victor source candidate with **SDK 0.17.0**. It is
+**not published-wheel qualification for 0.17.1**, an execution of the final combined
+0.18.0 source, or proof of a deployed identity integration. IDM remote-base alignment and fresh qualification before PR/CI, final combined-source
+acceptance, and published-wheel consumer adoption remain separate gates in the
+[progress ledger](../reviews/post-0.17.0-pr-train.md#three-project-identity-co-design).
+The public `id.anvaiops.dev` discovery still lacks required introspection metadata;
+the [live-host compatibility gap](#anvaiops-development-idm-discovery-checked-integration-not-qualified)
+remains. No live client registration, tenant, credential or deployment was changed.
 
 ## Roles and agent access
 
