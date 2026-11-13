@@ -167,11 +167,14 @@ impl RawForwarder {
         {
             return Ok(C::MessagesImplicitCache);
         }
-        if self.family == ProviderFamily::OpenAiCompat
-            && self.openai_stream_usage_profile
-                == sandhi_core::usage::OpenAiStreamUsageProfile::TerminalChunk
-        {
-            return Ok(C::ChatTerminal);
+        if self.family == ProviderFamily::OpenAiCompat {
+            use sandhi_core::usage::OpenAiStreamUsageProfile as P;
+            return Ok(match self.openai_stream_usage_profile {
+                P::Standard => C::ChatStandard,
+                P::TerminalChunk => C::ChatTerminal,
+                P::ZaiFinalChoice => C::ChatZaiFinalChoice,
+                P::DeepSeekFinalChoice => C::ChatDeepseekFinalChoice,
+            });
         }
         C::standard(self.family.endpoint_family())
     }
