@@ -387,18 +387,16 @@ pub fn qualify_openai_stream_usage_for_profile(
         && choices[0].get("delta").is_some_and(Value::is_object)
         && valid_reason
         && (profile != OpenAiStreamUsageProfile::DeepSeekFinalChoice
-            || ["content", "reasoning_content", "tool_calls"]
-                .iter()
-                .all(|field| {
-                    choices[0]["delta"].get(*field).is_none_or(|value| {
-                        value.is_null()
-                            || if *field == "tool_calls" {
-                                value.as_array().is_some_and(Vec::is_empty)
-                            } else {
-                                value.as_str().is_some_and(str::is_empty)
-                            }
-                    })
-                }));
+            || choices[0]["delta"].as_object().is_some_and(|delta| {
+                delta.iter().all(|(field, value)| match field.as_str() {
+                    "content" | "reasoning_content" | "reasoning" | "refusal" => {
+                        value.is_null() || value.as_str().is_some_and(str::is_empty)
+                    }
+                    "tool_calls" => value.is_null() || value.as_array().is_some_and(Vec::is_empty),
+                    "role" => value.is_null() || value.as_str() == Some("assistant"),
+                    _ => false,
+                })
+            }));
     let requires_terminal_choice = matches!(
         profile,
         OpenAiStreamUsageProfile::ZaiFinalChoice | OpenAiStreamUsageProfile::DeepSeekFinalChoice

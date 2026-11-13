@@ -520,6 +520,19 @@ impl OpenAiStreamUsageObserver {
             self.done = true;
             return Ok(());
         }
+        if self.usage.is_some()
+            && matches!(
+                self.openai_usage_profile,
+                OpenAiStreamUsageProfile::ZaiFinalChoice
+                    | OpenAiStreamUsageProfile::DeepSeekFinalChoice
+            )
+        {
+            // These profiles declare one final choice. More data before [DONE]
+            // invalidates qualification without erasing the first source totals.
+            return Err(StreamObservationError::InvalidUsage(
+                StreamUsageError::NonFinalUsage,
+            ));
+        }
         let event = sandhi_core::policy::strict_json(&self.data)
             .map_err(|_| StreamObservationError::InvalidJson)?;
         self.observe_gateway_failure(&event);

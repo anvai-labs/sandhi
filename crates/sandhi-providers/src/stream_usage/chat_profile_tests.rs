@@ -224,3 +224,77 @@ fn vendor_profiles_preserve_strict_counters_and_terminal_envelopes() {
         }
     }
 }
+
+#[test]
+fn deepseek_terminal_delta_rejects_alias_content_unknowns_and_invalid_roles() {
+    use sandhi_core::usage::qualify_openai_stream_usage_for_profile as qualify;
+    let event: Value =
+        serde_json::from_str(terminal(4).trim().strip_prefix("data: ").unwrap()).unwrap();
+    let profile = OpenAiStreamUsageProfile::DeepSeekFinalChoice;
+    for field in ["content", "reasoning_content", "reasoning", "refusal"] {
+        for value in [json!("late"), json!([]), json!({}), json!(false), json!(1)] {
+            let mut bad = event.clone();
+            bad["choices"][0]["delta"][field] = value;
+            assert_eq!(
+                qualify(&bad, profile),
+                Err(StreamUsageError::NonFinalUsage),
+                "{field}"
+            );
+        }
+        for value in [Value::Null, json!("")] {
+            let mut good = event.clone();
+            good["choices"][0]["delta"][field] = value;
+            assert!(qualify(&good, profile).unwrap().is_some());
+        }
+    }
+    for (field, values) in [
+        (
+            "tool_calls",
+            vec![json!([{}]), json!(""), json!({}), json!(true)],
+        ),
+        ("role", vec![json!("user"), json!(""), json!(3), json!([])]),
+        (
+            "unknown",
+            vec![Value::Null, json!(""), json!([]), json!({}), json!("late")],
+        ),
+    ] {
+        for value in values {
+            let mut bad = event.clone();
+            bad["choices"][0]["delta"][field] = value;
+            assert_eq!(
+                qualify(&bad, profile),
+                Err(StreamUsageError::NonFinalUsage),
+                "{field}"
+            );
+        }
+    }
+    for value in [Value::Null, json!("assistant")] {
+        let mut good = event.clone();
+        good["choices"][0]["delta"]["role"] = value;
+        assert!(qualify(&good, profile).unwrap().is_some());
+    }
+}
+
+#[test]
+fn vendor_final_choice_fences_all_later_data_before_done_and_keeps_first_totals() {
+    for profile in [
+        OpenAiStreamUsageProfile::ZaiFinalChoice,
+        OpenAiStreamUsageProfile::DeepSeekFinalChoice,
+    ] {
+        for next in [
+            "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"late\"},\"finish_reason\":null}]}\n\n".to_string(),
+            terminal(4),
+            terminal(4).replace("\"content\":\"\"", "\"reasoning\":\"late\""),
+        ] {
+            let mut observed = ProtocolStreamUsageObserver::for_endpoint_with_openai_usage_profile(
+                EndpointFamilyV1::OpenaiChatCompletions,profile).unwrap();
+            observed.push(terminal(4).as_bytes()).unwrap();
+            assert!(observed.push(format!("{next}data: [DONE]\n\n").as_bytes()).is_err());
+            let counts = observed.canonical_usage().unwrap();
+            assert_eq!((counts.tokens_in,counts.tokens_out,counts.cache_read_tokens,counts.cache_creation_tokens),(2,4,6,2));
+            assert_eq!(counts.completeness, UsageCompleteness::Partial);
+            assert!(!observed.is_done());
+            assert!(observed.finish().is_err());
+        }
+    }
+}

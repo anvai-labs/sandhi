@@ -9,7 +9,7 @@ import pytest
 import sandhi_gateway as sg
 
 
-def wire(protocol):
+def wire(protocol, profile="standard"):
     if protocol == "chat_completions":
         values = [
             {
@@ -30,6 +30,11 @@ def wire(protocol):
                 },
             }
         ]
+        if profile == "deepseek_final_choice_usage":
+            terminal = values[0]
+            progress = {**terminal, "choices": [{"index": 0, "delta": {"content": "ok"}, "finish_reason": None}], "usage": None}
+            terminal["choices"][0]["delta"] = {}
+            values.insert(0, progress)
         tail = "data: [DONE]\n\n"
     elif protocol == "responses":
         values = [
@@ -128,6 +133,8 @@ def wire(protocol):
     "protocol,profile,provider,auth_scheme",
     [
         ("chat_completions", "openai_terminal_chunk_usage", "anthropic", "bearer"),
+        ("chat_completions", "zai_final_choice_usage", "custom-zai", "bearer"),
+        ("chat_completions", "deepseek_final_choice_usage", "custom-deepseek", "bearer"),
         (
             "anthropic_messages",
             "anthropic_implicit_cache",
@@ -142,7 +149,7 @@ def test_explicit_profile_uses_actual_protocol_and_retains_disjoint_counts(
     protocol, profile, provider, auth_scheme
 ):
     seen = []
-    body = wire(protocol)
+    body = wire(protocol, profile)
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):

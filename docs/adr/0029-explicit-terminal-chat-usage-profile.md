@@ -65,8 +65,12 @@ omitted `object`, but rejects explicit null or incorrect objects. Its reasons ar
 stop, length, tool_calls, sensitive, model_context_window_exceeded and network_error.
 DeepSeek requires the usual chunk object and permits stop, length, tool_calls,
 content_filter, insufficient_system_resource and aborted. Its terminal delta must
-carry no new content, reasoning_content or tool_calls: absent, null and empty
-values qualify, while nonempty or malformed values do not.
+carry no new content, reasoning_content, reasoning, refusal or tool_calls: absent,
+null and correctly typed empty values qualify. Role metadata may be null or
+assistant; all unknown terminal delta keys and malformed values are refused.
+After either vendor profile accepts its sole final usage choice, only `[DONE]`
+may follow. Further data, including duplicate totals, invalidates qualification
+and retains the first source measurement as partial evidence.
 
 The reason sets follow the primary [ZAI Chat reference](https://docs.z.ai/api-reference/llm/chat-completion)
 and [DeepSeek Chat reference](https://api-docs.deepseek.com/api/create-chat-completion/),

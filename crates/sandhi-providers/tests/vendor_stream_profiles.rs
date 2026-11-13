@@ -11,7 +11,7 @@ async fn explicit_vendor_profiles_preserve_raw_wire_and_typed_counts_without_rep
         ("zai_final_choice_usage", true),
         ("deepseek_final_choice_usage", false),
     ] {
-        for mode in ["raw", "portable", "native", "standard"] {
+        for mode in ["raw", "raw_postfinal", "portable", "native", "standard"] {
             let server = MockServer::start().await;
             let mut content = json!({"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"reply"},"finish_reason":null}]});
             let mut terminal = json!({"object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14,"prompt_tokens_details":{"cached_tokens":6,"cache_write_tokens":2},"completion_tokens_details":{"reasoning_tokens":0}}});
@@ -19,7 +19,12 @@ async fn explicit_vendor_profiles_preserve_raw_wire_and_typed_counts_without_rep
                 content.as_object_mut().unwrap().remove("object");
                 terminal.as_object_mut().unwrap().remove("object");
             }
-            let wire = format!("data: {content}\n\ndata: {terminal}\n\ndata: [DONE]\n\n");
+            let extra = if mode == "raw_postfinal" {
+                format!("data: {content}\n\n")
+            } else {
+                String::new()
+            };
+            let wire = format!("data: {content}\n\ndata: {terminal}\n\n{extra}data: [DONE]\n\n");
             Mock::given(method("POST"))
                 .respond_with(
                     ResponseTemplate::new(200).set_body_raw(wire.clone(), "text/event-stream"),
@@ -60,7 +65,7 @@ async fn explicit_vendor_profiles_preserve_raw_wire_and_typed_counts_without_rep
                 .handle;
             let (context, receiver) =
                 AttemptContext::single_attempt("vendor-profile", "f".repeat(64)).unwrap();
-            if mode == "raw" {
+            if mode.starts_with("raw") {
                 let response = handle
                     .raw_forwarder()
                     .unwrap()
@@ -87,11 +92,22 @@ async fn explicit_vendor_profiles_preserve_raw_wire_and_typed_counts_without_rep
                     .flat_map(|chunk| chunk.unwrap().to_vec())
                     .collect();
                 assert_eq!(bytes, wire.as_bytes());
-                assert!(response
-                    .observation
-                    .snapshot()
-                    .qualification_error
-                    .is_none());
+                assert_eq!(
+                    response
+                        .observation
+                        .snapshot()
+                        .qualification_error
+                        .is_some(),
+                    mode == "raw_postfinal"
+                );
+                assert_eq!(
+                    response.observation.evidence().usage.unwrap().completeness,
+                    if mode == "raw_postfinal" {
+                        UsageCompleteness::Partial
+                    } else {
+                        UsageCompleteness::Final
+                    }
+                );
                 assert_eq!(response.observation.snapshot().usage.unwrap().tokens_out, 4);
             } else {
                 let request: ChatRequestV1 = serde_json::from_value(json!({"model":"fixture","max_output_tokens":64,"include_native_stream":mode=="native","messages":[{"role":"user","content":"hello"}]})).unwrap();
