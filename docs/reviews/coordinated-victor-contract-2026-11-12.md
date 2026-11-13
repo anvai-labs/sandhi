@@ -102,8 +102,7 @@ fixture now emits a separate totals event with `choices: []`; the standard
 qualifier stays strict and explicit terminal-choice profiles remain separate.
 All 27 affected ordinary vendor SDK cases pass after that fixture-only correction.
 This is combined evidence, not a claim that the retained full run was green.
-The six distinct frozen gateway copies in that full run share SHA-256
-`ed4561990c992ea6f9d4d0f1dd65837a57be0cb0303a404b2fbd39ced9d9c05f`.
+The six immutable gateway snapshots were verified to contain identical bytes.
 
 The previously pushed `bbd9a60` checkpoint's
 [public CI](https://github.com/anvai-labs/sandhi/actions/runs/43242145694) completed

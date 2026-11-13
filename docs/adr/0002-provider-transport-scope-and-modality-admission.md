@@ -6,9 +6,9 @@ Date: 2026-07-20
 
 Accepted. Refines **ADR-0001** (which established `sandhi-providers` as the unified provider
 transport). Ratifies the boundary decision that came out of a first-principles design review of
-the deferred **embedding modality** (PR #13, closed). Sibling context: ProximaDB **ADR-067** /
-**TD-SANDHI-1**, AnvaiOps **ADR-0047 D1** and **ADR-0020 D1** (the "don't build shared infra
-ahead of ≥2 consumers" doctrine).
+the deferred **embedding modality** (PR #13, closed). New shared transport requires
+concrete demand from at least two consumers; adopting an existing modality does
+not create a new admission requirement.
 
 ## Context
 
@@ -52,8 +52,8 @@ client" and does not belong here — a consumer can write that itself in ~40 lin
 
 > **Scope of this ADR — read before §2.** This ADR gates **adding a *new modality*** (a second
 > API family, e.g. embeddings) into `sandhi-providers`. It does **not** gate a consumer
-> **adopting the *existing* chat modality** — that is precisely what the crate exists for, and
-> AnvaiOps **ADR-0047 D10 / D10a** endorses it (phased, same-language first). So ProximaDB (Rust)
+> **adopting the *existing* chat modality** — that is precisely what the crate exists for.
+> Integration is phased and same-language first. ProximaDB (Rust)
 > linking `sandhi-providers` for chat transport is *not* subject to the §2 ≥2-consumer bar; the
 > chat modality already has multiple intended consumers by design. §2's bar applies only to
 > *widening* the crate's surface with a new modality.

@@ -8,21 +8,9 @@
     "broader_release": "not assessed or approved"
   },
   "artifacts": {
-    "binary": {
-      "path": "/tmp/sandhi-reliability-acceptance/binary/sandhi-proxy",
-      "sha256": "62a271b679f248c41de4d13ad4b2bfed5f447766ffb658b9b75b7ed98b0d7862",
-      "persistent_parent_copy": "/tmp/sandhi-cohesive-frozen/sandhi-proxy",
-      "parent_cargo_artifact_sha256": "21079a9b7d410fe53d7c4a0a763dd0a42bb305ce98438a9106eb94989b5f326c",
-      "preservation_note": "Original pytest434 path disappeared before private copying. Parent reproduced exact original SHA through Cargo and supplied persistent0555copy; copied bytes independently reverified."
-    },
     "wheel": {
-      "path": "/tmp/sandhi-cohesive-final-wheels/sandhi_gateway-0.17.0-cp311-abi3-manylinux_2_34_x86_64.whl",
-      "sha256": "4e049eb7f876cd387c5c3343b88efd073e879d09adb9cb6cf3d962af5274c7bb",
       "loaded": {
-        "python": "3.12.2 | packaged by conda-forge | (main, Feb 16 2024, 20:50:58) [GCC 12.3.0]",
-        "module": "/tmp/sandhi-reliability-acceptance-venv/lib/python3.12/site-packages/sandhi_gateway/__init__.py",
-        "extension": "/tmp/sandhi-reliability-acceptance-venv/lib/python3.12/site-packages/sandhi_gateway/sandhi_gateway.abi3.so",
-        "extension_sha256": "955898638e6d0eae493dcc6c24f5185c7e1d1aa2216831e6d1e8a00b919b5a05"
+        "python": "3.12.2 | packaged by conda-forge | (main, Feb 16 2024, 20:50:58) [GCC 12.3.0]"
       }
     }
   },
@@ -40,7 +28,6 @@
       "any_process_wait_timeout": false,
       "max_tracked_signal_to_exit_observed_seconds": 1.3172657419927418,
       "historical_cell_current": {
-        "pid": 3400768,
         "timeout": 6,
         "wait_elapsed": 1.316185650008265,
         "returncode": 124,
@@ -76,13 +63,6 @@
     "bindings/python/tests/test_private_ca.py": true,
     "tests/sdk-conformance/test_shutdown.py": true
   },
-  "private_build": {
-    "source": "/tmp/sandhi-terminal-eof-review",
-    "target": "/tmp/sandhi-terminal-eof-target",
-    "production_rust_and_crate_manifests_match_current_root": true,
-    "production_rust_inventory_sha256": "f6cd06be74f9510342cea9d6e229d084faa0d987b7a620ecc202f825bf8a07de",
-    "root_shared_target_untouched": true
-  },
   "historical_evidence": {
     "native_report": "docs/reviews/python-native-tls-exit-2026-11-12.md",
     "native_artifact": "docs/reviews/artifacts/python-native-tls-exit-2026-11-12.json",
@@ -95,49 +75,16 @@
     "shutdown_original": "existing6s wait exceeded, eventual124; absent original occurrence binary hash and native stack;563pass1fail3skip",
     "prior_100_GDB": "docs/reviews/artifacts/python-native-exit-debugger-probes-2026-11-12.json; different earlier wheel/timing, nonreproduction only"
   },
-  "logs": {
-    "shutdown": {
-      "path": "/tmp/sandhi-reliability-acceptance/shutdown.log",
-      "sha256": "2c8f4e31c4c6987916225d2d4d71213477bd7ab406c62510d5980bc6ba66e2df"
-    },
-    "native": {
-      "path": "/tmp/sandhi-reliability-acceptance/native.log",
-      "sha256": "a2a1522fd3c21f1175004882a9bfc9b743ea7bb3fbf3838e42c8927e84d826e2"
-    },
-    "public_serving": {
-      "path": "/tmp/sandhi-reliability-acceptance/serving-lifecycle.log",
-      "sha256": "212b845722a8037e2386f8ad9082e0e312f46603b239895aea6b0e20ff6c94c8"
-    },
-    "watchdog": {
-      "path": "/tmp/sandhi-reliability-acceptance/watchdog.log",
-      "sha256": "67822b48482ea05e5f02745f62ada37ae465b69b0d4a6a9a0e4ced4e30f4d2b8"
-    },
-    "shutdown_joins": {
-      "path": "/tmp/sandhi-reliability-acceptance/shutdown-joins.json",
-      "sha256": "23945a8ddab5f0616149f618c47fc1c979ef3b9a7a7aaefb1dcd1c779d85e7a8"
-    },
-    "shutdown_process_timings": {
-      "path": "/tmp/sandhi-reliability-acceptance/shutdown-process-events.jsonl",
-      "sha256": "b183b7fec8b6ffaafb4deda51715233683ffa5019d5c2bfbad0a9167d23de994"
-    },
-    "shutdown_collection": {
-      "path": "/tmp/sandhi-reliability-acceptance/shutdown-collection.log",
-      "sha256": "1868c8a182c048317358deb61afbcca76362899c6352106862809b206888f57d"
-    },
-    "native_provenance": {
-      "path": "/tmp/sandhi-reliability-acceptance/native-provenance.json",
-      "sha256": "8e9da9944152e04ee2da75fb21e1eaf8aa9d835b2c1e7e46e734a1d5034b74f7"
-    },
-    "shutdown_provenance": {
-      "path": "/tmp/sandhi-reliability-acceptance/shutdown-provenance.json",
-      "sha256": "326f03eda56f02592aee9523232d1eae1f1661fe841e326f9a42539eb95fb5fe"
-    }
-  },
   "limits": [
     "Linux x86_64 and this Python3.12/runtime only; not cross-platform reliability qualification.",
     "Current passes qualify explicit current artifact contracts; they neither establish the original cause nor prove failure impossible.",
     "Native children use a minimal private environment and current wheel, not an exact recreation of the lost historical process environment.",
     "Shutdown fixture override avoids builds and adds bounded timing-only process observation, which can alter scheduling.",
     "No deployment, merge, registry publication, full-goal or broad accounting reliability clearance."
-  ]
+  ],
+  "publication": {
+    "form": "sanitized summary",
+    "redactions": "Private artifact locations and fingerprints, process identifiers and observed correlation values are omitted or aliased. Numerical results and useful public source/version references are retained.",
+    "original_records": "Unmodified operational records and original hashes are retained privately; this derivative is not a raw capture."
+  }
 }

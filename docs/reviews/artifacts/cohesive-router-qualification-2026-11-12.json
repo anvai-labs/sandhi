@@ -1,10 +1,5 @@
 {
   "schema_version": 1,
-  "gateway_binary_sha256": "62a271b679f248c41de4d13ad4b2bfed5f447766ffb658b9b75b7ed98b0d7862",
-  "report_sha256": {
-    "sandhi-cohesive-glm-live.json": "30c91967f5192fd46b6370d729fa111beb5c75c0e78c48d56b7ac0eab06d96c8",
-    "sandhi-cohesive-glm-messages-portable.json": "7c7229054d867dc3501cfa87f46864623c660467ec282774d8c89e33482500f4"
-  },
   "portable_matrix": {
     "cells": 48,
     "succeeded": 48,
@@ -48,12 +43,16 @@
       "chat": 0,
       "messages": 12,
       "responses": 0
-    },
-    "errors": []
+    }
   },
   "limits": [
     "Reported cache reads do not prove a guaranteed cold-to-warm cache hit or USD savings.",
     "Default Messages portable projection refuses nonrepresentable output; exact rejected source field was not retained.",
     "No live Codex, first-party Anthropic subscription or native Gemini backend qualification is established."
-  ]
+  ],
+  "publication": {
+    "form": "sanitized summary",
+    "redactions": "Private artifact locations and fingerprints, process identifiers and observed correlation values are omitted or aliased. Numerical results and useful public source/version references are retained.",
+    "original_records": "Unmodified operational records and original hashes are retained privately; this derivative is not a raw capture."
+  }
 }

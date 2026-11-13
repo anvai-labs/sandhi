@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
-  "run_id": "member-joint-e7a3f553602c",
+  "run_id": "example-correlation-017",
   "started_at": "2026-09-19T04:29:28.787939+00:00",
-  "source_capture": "victor-member-capture-63ad80a3f502",
-  "source_session_id": "victor-member-capture-63ad80a3f502-executor_b5219fc5",
+  "source_capture": "example-correlation-413",
+  "source_session_id": "example-correlation-414",
   "model": "qwen3-coder-30b",
   "session_mapping": {
-    "direct": "member-joint-e7a3f553602c-direct",
-    "gateway": "member-joint-e7a3f553602c-gateway"
+    "direct": "example-correlation-018",
+    "gateway": "example-correlation-024"
   },
   "passed": true,
   "order": "For each original ordinal: direct then gateway; each arm retains original order",
@@ -20,10 +20,9 @@
     {
       "ordinal": 0,
       "arm": "direct",
-      "payload_sha256": "9423293c2a1cb7abf506469008868bfb325598ce7d354a33071e772bfb2a65b3",
-      "session_id": "member-joint-e7a3f553602c-direct",
-      "echoed_request_id": "member-joint-e7a3f553602c-direct-000",
-      "response_id": "chatcmpl-1789792172026-400",
+      "session_id": "example-correlation-018",
+      "echoed_request_id": "example-correlation-019",
+      "response_id": "example-correlation-007",
       "http_status": 200,
       "usage": {
         "completion_tokens": 197,
@@ -40,10 +39,9 @@
     {
       "ordinal": 0,
       "arm": "gateway",
-      "payload_sha256": "9423293c2a1cb7abf506469008868bfb325598ce7d354a33071e772bfb2a65b3",
-      "session_id": "member-joint-e7a3f553602c-gateway",
-      "echoed_request_id": "req_1789792172033_0",
-      "response_id": "chatcmpl-1789792175235-401",
+      "session_id": "example-correlation-024",
+      "echoed_request_id": "example-correlation-025",
+      "response_id": "example-correlation-008",
       "http_status": 200,
       "usage": {
         "completion_tokens": 197,
@@ -60,10 +58,9 @@
     {
       "ordinal": 1,
       "arm": "direct",
-      "payload_sha256": "d363af0edbf984cea139b248978309c66e1b2fabe4d7b9a8ad168a0cb748d43a",
-      "session_id": "member-joint-e7a3f553602c-direct",
-      "echoed_request_id": "member-joint-e7a3f553602c-direct-001",
-      "response_id": "chatcmpl-1789792177812-402",
+      "session_id": "example-correlation-018",
+      "echoed_request_id": "example-correlation-020",
+      "response_id": "example-correlation-009",
       "http_status": 200,
       "usage": {
         "completion_tokens": 140,
@@ -80,10 +77,9 @@
     {
       "ordinal": 1,
       "arm": "gateway",
-      "payload_sha256": "d363af0edbf984cea139b248978309c66e1b2fabe4d7b9a8ad168a0cb748d43a",
-      "session_id": "member-joint-e7a3f553602c-gateway",
-      "echoed_request_id": "req_1789792177822_1",
-      "response_id": "chatcmpl-1789792180365-403",
+      "session_id": "example-correlation-024",
+      "echoed_request_id": "example-correlation-026",
+      "response_id": "example-correlation-010",
       "http_status": 200,
       "usage": {
         "completion_tokens": 140,
@@ -100,10 +96,9 @@
     {
       "ordinal": 2,
       "arm": "direct",
-      "payload_sha256": "e46c0379b2a2df46f782369ea8dcda75c0dd05b6d8ee12ae58599b00876b6c1f",
-      "session_id": "member-joint-e7a3f553602c-direct",
-      "echoed_request_id": "member-joint-e7a3f553602c-direct-002",
-      "response_id": "chatcmpl-1789792181799-404",
+      "session_id": "example-correlation-018",
+      "echoed_request_id": "example-correlation-021",
+      "response_id": "example-correlation-011",
       "http_status": 200,
       "usage": {
         "completion_tokens": 37,
@@ -120,10 +115,9 @@
     {
       "ordinal": 2,
       "arm": "gateway",
-      "payload_sha256": "e46c0379b2a2df46f782369ea8dcda75c0dd05b6d8ee12ae58599b00876b6c1f",
-      "session_id": "member-joint-e7a3f553602c-gateway",
-      "echoed_request_id": "req_1789792181807_2",
-      "response_id": "chatcmpl-1789792184126-405",
+      "session_id": "example-correlation-024",
+      "echoed_request_id": "example-correlation-027",
+      "response_id": "example-correlation-012",
       "http_status": 200,
       "usage": {
         "completion_tokens": 105,
@@ -140,10 +134,9 @@
     {
       "ordinal": 3,
       "arm": "direct",
-      "payload_sha256": "ed4481d21d8ca19fba60475af03af9ec8c02104e0b74a4cafccf8d17b26f7a23",
-      "session_id": "member-joint-e7a3f553602c-direct",
-      "echoed_request_id": "member-joint-e7a3f553602c-direct-003",
-      "response_id": "chatcmpl-1789792187018-406",
+      "session_id": "example-correlation-018",
+      "echoed_request_id": "example-correlation-022",
+      "response_id": "example-correlation-013",
       "http_status": 200,
       "usage": {
         "completion_tokens": 126,
@@ -160,10 +153,9 @@
     {
       "ordinal": 3,
       "arm": "gateway",
-      "payload_sha256": "ed4481d21d8ca19fba60475af03af9ec8c02104e0b74a4cafccf8d17b26f7a23",
-      "session_id": "member-joint-e7a3f553602c-gateway",
-      "echoed_request_id": "req_1789792187037_3",
-      "response_id": "chatcmpl-1789792188495-407",
+      "session_id": "example-correlation-024",
+      "echoed_request_id": "example-correlation-028",
+      "response_id": "example-correlation-014",
       "http_status": 200,
       "usage": {
         "completion_tokens": 18,
@@ -180,10 +172,9 @@
     {
       "ordinal": 4,
       "arm": "direct",
-      "payload_sha256": "a44e65c8a25ea714aab3177d3d0a8b0ab7a55465b00bb17b81e549451d8cab6c",
-      "session_id": "member-joint-e7a3f553602c-direct",
-      "echoed_request_id": "member-joint-e7a3f553602c-direct-004",
-      "response_id": "chatcmpl-1789792190437-408",
+      "session_id": "example-correlation-018",
+      "echoed_request_id": "example-correlation-023",
+      "response_id": "example-correlation-015",
       "http_status": 200,
       "usage": {
         "completion_tokens": 25,
@@ -200,10 +191,9 @@
     {
       "ordinal": 4,
       "arm": "gateway",
-      "payload_sha256": "a44e65c8a25ea714aab3177d3d0a8b0ab7a55465b00bb17b81e549451d8cab6c",
-      "session_id": "member-joint-e7a3f553602c-gateway",
-      "echoed_request_id": "req_1789792190445_4",
-      "response_id": "chatcmpl-1789792192650-409",
+      "session_id": "example-correlation-024",
+      "echoed_request_id": "example-correlation-029",
+      "response_id": "example-correlation-016",
       "http_status": 200,
       "usage": {
         "completion_tokens": 45,
@@ -229,5 +219,10 @@
     "kind": "empty_static_catalog",
     "upstream_route_independently_verified": true,
     "model_readiness_source": "direct origin /v1/models; not gateway discovery"
+  },
+  "publication": {
+    "form": "sanitized summary",
+    "redactions": "Private artifact locations and fingerprints, process identifiers and observed correlation values are omitted or aliased. Numerical results and useful public source/version references are retained.",
+    "original_records": "Unmodified operational records and original hashes are retained privately; this derivative is not a raw capture."
   }
 }

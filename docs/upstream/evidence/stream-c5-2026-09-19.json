@@ -1,6 +1,6 @@
 {
   "passed": true,
-  "run_id": "req_stream_overlap_e6eeb367a55a",
+  "run_id": "example-correlation-408",
   "source": "c5d4eb89f71dcfb3064b974d63b88c4ce88f42a1",
   "origin_port": 8081,
   "gateway_port": 18797,
@@ -9,9 +9,6 @@
   "overall_budget_seconds": 180,
   "request_phase_budget_seconds": 160,
   "scope": "Bounded complete gateway SSE and measured same/different-session submitted-request overlap; delivered-content overlap is optional. No cache-hit requirement, historical attribution, completion-tokenizer correctness, cold-cache or GPU-kernel-concurrency claim.",
-  "origin_pid": 2254917,
-  "inferflux_binary_sha256": "312f49e63dae7609dd804e3b74aa4a4b2dd06b72aebf8aa6a322ed619e974de6",
-  "sandhi_binary_sha256": "ac5ace8bcc767c5e99646dd7429d4bbb962880dbbc383a022b1fa04f753ecb80",
   "accepted_run_id": 35431794400,
   "model_before": {
     "id": "qwen3-coder-30b",
@@ -36,9 +33,9 @@
   "c4": {
     "rows": [
       {
-        "request_id": "req_1789820017959_4",
-        "session_id": "req_stream_overlap_e6eeb367a55a_different_0",
-        "run_id": "req_stream_overlap_e6eeb367a55a",
+        "request_id": "example-correlation-034",
+        "session_id": "example-correlation-409",
+        "run_id": "example-correlation-408",
         "step_id": "different_0",
         "model": "qwen3-coder-30b",
         "tokens_in": 24,
@@ -51,9 +48,9 @@
         }
       },
       {
-        "request_id": "req_1789820017955_3",
-        "session_id": "req_stream_overlap_e6eeb367a55a_different_1",
-        "run_id": "req_stream_overlap_e6eeb367a55a",
+        "request_id": "example-correlation-033",
+        "session_id": "example-correlation-410",
+        "run_id": "example-correlation-408",
         "step_id": "different_1",
         "model": "qwen3-coder-30b",
         "tokens_in": 24,
@@ -66,9 +63,9 @@
         }
       },
       {
-        "request_id": "req_1789820006847_2",
-        "session_id": "req_stream_overlap_e6eeb367a55a_same",
-        "run_id": "req_stream_overlap_e6eeb367a55a",
+        "request_id": "example-correlation-032",
+        "session_id": "example-correlation-411",
+        "run_id": "example-correlation-408",
         "step_id": "same_1",
         "model": "qwen3-coder-30b",
         "tokens_in": 24,
@@ -81,9 +78,9 @@
         }
       },
       {
-        "request_id": "req_1789820006843_1",
-        "session_id": "req_stream_overlap_e6eeb367a55a_same",
-        "run_id": "req_stream_overlap_e6eeb367a55a",
+        "request_id": "example-correlation-031",
+        "session_id": "example-correlation-411",
+        "run_id": "example-correlation-408",
         "step_id": "same_0",
         "model": "qwen3-coder-30b",
         "tokens_in": 24,
@@ -96,9 +93,9 @@
         }
       },
       {
-        "request_id": "req_1789819996896_0",
-        "session_id": "req_stream_overlap_e6eeb367a55a_single",
-        "run_id": "req_stream_overlap_e6eeb367a55a",
+        "request_id": "example-correlation-030",
+        "session_id": "example-correlation-412",
+        "run_id": "example-correlation-408",
         "step_id": "single",
         "model": "qwen3-coder-30b",
         "tokens_in": 24,
@@ -127,9 +124,9 @@
   },
   "sqlite_rows": [
     {
-      "request_id": "req_1789819996896_0",
-      "session_id": "req_stream_overlap_e6eeb367a55a_single",
-      "run_id": "req_stream_overlap_e6eeb367a55a",
+      "request_id": "example-correlation-030",
+      "session_id": "example-correlation-412",
+      "run_id": "example-correlation-408",
       "step_id": "single",
       "model": "qwen3-coder-30b",
       "tokens_in": 24,
@@ -142,9 +139,9 @@
       }
     },
     {
-      "request_id": "req_1789820006843_1",
-      "session_id": "req_stream_overlap_e6eeb367a55a_same",
-      "run_id": "req_stream_overlap_e6eeb367a55a",
+      "request_id": "example-correlation-031",
+      "session_id": "example-correlation-411",
+      "run_id": "example-correlation-408",
       "step_id": "same_0",
       "model": "qwen3-coder-30b",
       "tokens_in": 24,
@@ -157,9 +154,9 @@
       }
     },
     {
-      "request_id": "req_1789820006847_2",
-      "session_id": "req_stream_overlap_e6eeb367a55a_same",
-      "run_id": "req_stream_overlap_e6eeb367a55a",
+      "request_id": "example-correlation-032",
+      "session_id": "example-correlation-411",
+      "run_id": "example-correlation-408",
       "step_id": "same_1",
       "model": "qwen3-coder-30b",
       "tokens_in": 24,
@@ -172,9 +169,9 @@
       }
     },
     {
-      "request_id": "req_1789820017955_3",
-      "session_id": "req_stream_overlap_e6eeb367a55a_different_1",
-      "run_id": "req_stream_overlap_e6eeb367a55a",
+      "request_id": "example-correlation-033",
+      "session_id": "example-correlation-410",
+      "run_id": "example-correlation-408",
       "step_id": "different_1",
       "model": "qwen3-coder-30b",
       "tokens_in": 24,
@@ -187,9 +184,9 @@
       }
     },
     {
-      "request_id": "req_1789820017959_4",
-      "session_id": "req_stream_overlap_e6eeb367a55a_different_0",
-      "run_id": "req_stream_overlap_e6eeb367a55a",
+      "request_id": "example-correlation-034",
+      "session_id": "example-correlation-409",
+      "run_id": "example-correlation-408",
       "step_id": "different_0",
       "model": "qwen3-coder-30b",
       "tokens_in": 24,
@@ -225,13 +222,12 @@
     "session_handles_enabled": false
   },
   "backend_diagnostics": {
-    "available": [],
     "unavailable_request_ids": [
-      "req_1789819996896_0",
-      "req_1789820006843_1",
-      "req_1789820006847_2",
-      "req_1789820017959_4",
-      "req_1789820017955_3"
+      "example-correlation-030",
+      "example-correlation-031",
+      "example-correlation-032",
+      "example-correlation-034",
+      "example-correlation-033"
     ],
     "scope": "Optional bounded evidence; diagnostic budget64 may already be exhausted. Missing evidence is not zero reuse."
   },
@@ -240,13 +236,13 @@
   "records": [
     {
       "step_id": "different_0",
-      "session_id": "req_stream_overlap_e6eeb367a55a_different_0",
+      "session_id": "example-correlation-409",
       "max_tokens": 64,
       "sent_ms": 21267.582,
       "sent_complete_ms": 21267.949,
       "headers_ms": 21281.319,
       "http_status": 200,
-      "request_id": "req_1789820017959_4",
+      "request_id": "example-correlation-034",
       "first_content_ms": 26755.235,
       "finish_ms": 30996.7,
       "usage": {
@@ -266,13 +262,13 @@
     },
     {
       "step_id": "different_1",
-      "session_id": "req_stream_overlap_e6eeb367a55a_different_1",
+      "session_id": "example-correlation-410",
       "max_tokens": 64,
       "sent_ms": 21267.72,
       "sent_complete_ms": 21268.004,
       "headers_ms": 21277.57,
       "http_status": 200,
-      "request_id": "req_1789820017955_3",
+      "request_id": "example-correlation-033",
       "first_content_ms": 21794.772,
       "finish_ms": 26237.16,
       "usage": {
@@ -292,13 +288,13 @@
     },
     {
       "step_id": "same_0",
-      "session_id": "req_stream_overlap_e6eeb367a55a_same",
+      "session_id": "example-correlation-411",
       "max_tokens": 64,
       "sent_ms": 10153.721,
       "sent_complete_ms": 10154.262,
       "headers_ms": 10165.201,
       "http_status": 200,
-      "request_id": "req_1789820006843_1",
+      "request_id": "example-correlation-031",
       "first_content_ms": 10786.997,
       "finish_ms": 16210.048,
       "usage": {
@@ -318,13 +314,13 @@
     },
     {
       "step_id": "same_1",
-      "session_id": "req_stream_overlap_e6eeb367a55a_same",
+      "session_id": "example-correlation-411",
       "max_tokens": 64,
       "sent_ms": 10153.878,
       "sent_complete_ms": 10154.129,
       "headers_ms": 10168.86,
       "http_status": 200,
-      "request_id": "req_1789820006847_2",
+      "request_id": "example-correlation-032",
       "first_content_ms": 16837.791,
       "finish_ms": 21266.801,
       "usage": {
@@ -344,13 +340,13 @@
     },
     {
       "step_id": "single",
-      "session_id": "req_stream_overlap_e6eeb367a55a_single",
+      "session_id": "example-correlation-412",
       "max_tokens": 32,
       "sent_ms": 211.05,
       "sent_complete_ms": 211.171,
       "headers_ms": 218.574,
       "http_status": 200,
-      "request_id": "req_1789819996896_0",
+      "request_id": "example-correlation-030",
       "first_content_ms": 7116.341,
       "finish_ms": 10152.959,
       "usage": {
@@ -369,5 +365,10 @@
       "done_seen": true
     }
   ],
-  "elapsed_ms": 32124.189
+  "elapsed_ms": 32124.189,
+  "publication": {
+    "form": "sanitized summary",
+    "redactions": "Private artifact locations and fingerprints, process identifiers and observed correlation values are omitted or aliased. Numerical results and useful public source/version references are retained.",
+    "original_records": "Unmodified operational records and original hashes are retained privately; this derivative is not a raw capture."
+  }
 }

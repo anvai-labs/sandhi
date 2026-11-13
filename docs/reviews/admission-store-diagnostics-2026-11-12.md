@@ -26,7 +26,7 @@ boundaries clear the prior admission marker.
 - The full workspace passed **1,223 tests**, with six opt-in ignores across
   52 suites. Default and ONNX/SentinelPass all-target Clippy, formatting and strict
   MkDocs passed. The [artifact](artifacts/admission-store-diagnostics-2026-11-12.json)
-  records source/log hashes and the test-only assertion timing distinction.
+  records the test-only assertion timing distinction and measured results.
 
 The spontaneous stall did **not** recur in this run. These controlled fixtures
 qualify diagnostic behavior, not the cause of the previous admission or terminal

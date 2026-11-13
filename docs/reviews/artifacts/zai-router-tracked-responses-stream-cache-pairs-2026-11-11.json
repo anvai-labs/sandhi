@@ -19,7 +19,6 @@
   "endpoint_profiles": {
     "responses": "standard"
   },
-  "harness_sha256": "1772106e8f2524face6d401d0dad0af7e0142c6fbacef5b9482034c85c8d636e",
   "cache_pairs": true,
   "cells": [
     {
@@ -29,8 +28,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "responses-responses-1-0",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 3781,
@@ -57,8 +54,6 @@
       "repeat": 1,
       "status": "ok",
       "step_id": "responses-responses-1-1",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 3781,
@@ -79,7 +74,6 @@
       "usage_rows_observed": 2
     }
   ],
-  "gateway_binary_sha256": "181b57b3ac860679995897e093728e086450302c1f42cf33b6a946c8320d4e5f",
   "usage_events": [
     {
       "backend": "external",
@@ -94,7 +88,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 18,
-      "request_id": "req_1794450244046_0",
+      "request_id": "example-correlation-300",
       "step_id": "responses-responses-1-0",
       "time_to_first_token_ms": 2125,
       "time_to_first_token_source": "boundary",
@@ -114,7 +108,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 16,
-      "request_id": "req_1794450246799_1",
+      "request_id": "example-correlation-301",
       "step_id": "responses-responses-1-1",
       "time_to_first_token_ms": 1903,
       "time_to_first_token_source": "boundary",
@@ -124,9 +118,7 @@
   ],
   "executions": [
     {
-      "request_id": "req_1794450244046_0",
-      "execution_id": "30d8e4ed5cb2184041262bd7abec6955447cfe5d691b89ab9f46dd28593b14e7",
-      "attempt_id": "8e3c4c401eb6b0d147943d1a04b3172699394bacc709ce6dcd6b3e4b24f9b1e3",
+      "request_id": "example-correlation-300",
       "authorized_at": 1794450244,
       "frozen_charge": 3813,
       "primary_scope": "group:zai-qualification",
@@ -137,7 +129,6 @@
       "upstream_actual": 3813,
       "upstream_settled": 1,
       "upstream_settled_at": 1794450246,
-      "receipt_id": "76868c5dc1c6e37f7761367127cdecb83640e05aefeb8562ce83104d3a5ad4f9",
       "charged_tokens": 3813,
       "receipt_settled_at": 1794450246,
       "context": {
@@ -175,7 +166,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "8e3c4c401eb6b0d147943d1a04b3172699394bacc709ce6dcd6b3e4b24f9b1e3",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794450244060,
         "terminal": {
@@ -210,9 +200,7 @@
       }
     },
     {
-      "request_id": "req_1794450246799_1",
-      "execution_id": "870e8f4a4f72fd7287038bb8f34649c6da5db1be0796ca372ecf042028cbf811",
-      "attempt_id": "0ce9a2d4baf6f82fd0d099bac3a9a2aa6ff523278e88147b7853b6089000c0bf",
+      "request_id": "example-correlation-301",
       "authorized_at": 1794450246,
       "frozen_charge": 3811,
       "primary_scope": "group:zai-qualification",
@@ -223,7 +211,6 @@
       "upstream_actual": 3811,
       "upstream_settled": 1,
       "upstream_settled_at": 1794450249,
-      "receipt_id": "fc519efaacebd983bc23fad6e0ad95a0eba6da37e84a0b9146bef1ec50b655a4",
       "charged_tokens": 3811,
       "receipt_settled_at": 1794450249,
       "context": {
@@ -261,7 +248,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "0ce9a2d4baf6f82fd0d099bac3a9a2aa6ff523278e88147b7853b6089000c0bf",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794450246814,
         "terminal": {
@@ -306,7 +292,6 @@
     "budget_settlement_outbox": 2
   },
   "gateway_exit_code": 0,
-  "accounting_diagnostics": [],
   "finished_at": "2026-11-12T02:24:09.261652+00:00",
   "verification": {
     "cells": 2,
@@ -318,7 +303,11 @@
       "chat": 0,
       "messages": 0,
       "responses": 1
-    },
-    "errors": []
+    }
+  },
+  "publication": {
+    "form": "sanitized summary",
+    "redactions": "Private artifact locations and fingerprints, process identifiers and observed correlation values are omitted or aliased. Numerical results and useful public source/version references are retained. Generated provider text and reasoning transcripts are omitted.",
+    "original_records": "Unmodified operational records and original hashes are retained privately; this derivative is not a raw capture."
   }
 }

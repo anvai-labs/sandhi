@@ -244,7 +244,7 @@ Digests and identities are placeholders, and production limits need measurements
   "policy_id": "restricted-egress",
   "revision": 1,
   "bindings": [{
-    "issuer": "https://id.anvaiops.com/oauth2/openid/sandhi",
+    "issuer": "https://identity.example.com/oauth2/openid/sandhi",
     "groups": ["sandhi_agents"],
     "grants": ["subscription"]
   }],

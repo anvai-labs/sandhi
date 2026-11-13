@@ -1,14 +1,14 @@
 # Sandhi cache accounting and dashboard co-design handoff
 
 Status: **Dated investigation snapshot; Sandhi C1–C4 merged, joint replay C5 open.** Owner: Sandhi.
-Companion: /home/vsingh/code/inferflux/docs/planning/SANDHI_CACHE_CODESIGN_HANDOFF_2026-09-18.md.
+Companion project: [InferFlux](https://github.com/anvai-labs/inferflux).
 
 Execution tracking: [TD-0028](../td/TD-0028-cache-accounting-availability.md).
 The first regression increment preserves the sanitized non-stream usage projections;
 its constructed SSE replay is not a live streaming capture. Contract, dashboard,
 diagnostic-export and joint live gates remain separate. The investigation below is
 a dated snapshot, not an assertion that those checkouts still serve the same source.
-Current execution status and the originating-Mac replay handoff are recorded in TD-0028;
+The implementation and qualification boundaries are recorded in TD-0028;
 the historical missing-field behavior and checkout identities below are not current
 implementation/deployment claims.
 
@@ -66,38 +66,20 @@ probe adds one read(path:string) function; the JSON and logprob probes independe
 set response_format={type:json_object} or logprobs=true. Do not clear a shared cache
 to force a cold sample; use a unique prefix and record warm/cold provenance.
 
-## Rig and gateway identity
+## Qualification environment
 
-- Serving checkout: /home/vsingh/code/inferflux-worktrees/fix-victor-codesign,
-  commit aea7a24d035fd386ce24db4f8cc68710b4b11543; inferfluxd PID 554660 at investigation.
-- Main InferFlux checkout: /home/vsingh/code/inferflux at
-  591170f019d61e43fb17b454cfb9e05defc7e46f. Do not assume this is the running source.
-- qwen3-coder-30b: ready, llama_cpp_rocm, explicit backend fallback=false.
-  Active config config/server.rocm.qwen3coder30b.yaml; context environment 65536,
-  max_parallel_sequences=2 (config comment: 32768 context per sequence).
-- Optional session_handles is omitted from the active YAML; no INFERFLUX_SESSION_*
-  environment override was present. Confirm resolved runtime configuration before
-  proposing session-affinity tuning. Do not conflate global prefix reuse with session leases.
-- Mac gateway: http://127.0.0.1:18788, dashboard /dashboard; upstream InferFlux via
-  SSH tunnel 127.0.0.1:18080 → aiserver1:8080. These loopback addresses are on the Mac,
-  not on aiserver1. ZAI upstream is https://api.z.ai/api/coding/paas/v4.
-- Running Sandhi binary was built from 9762463b7f7aa5853caf65889deafb5fb9d4a24c,
-  PR https://github.com/anvai-labs/sandhi/pull/265 (JSON Content-Type fix; CI green,
-  review required at time of handoff). Remote Sandhi checkout is
-  /home/vsingh/code/sandhi at 48c0c1f2ebcc96e93bfda1ec906739859ef8132e.
-- State on Mac: /Users/vijaysingh/code/codingagent/var/sandhi-zai/usage.db and proxy.log.
-  Credential files are private; do not copy admin tokens, virtual keys, or vault secrets.
-- The optional CPU model lfm2.5-8b-a1b-edge was loaded with default=false for the
-  Victor WS-F battery, then unloaded and its temporary Sandhi key revoked. Qwen
-  remains available. These cache probes only used Qwen. The separate artifact
-  battery/report is https://github.com/anvai-labs/victor/pull/1118.
-- Credential-free wire/SQLite evidence is available on this host at
-  /tmp/sandhi-inferflux-cache-evidence-2026-09-18.json (6 plain + 12 path probes).
-- Post-battery Sandhi stop/start restored the retained credentials; real Qwen and
-  ZAI completions both succeeded through the restarted gateway. Victor WS-E is
-  merged: https://github.com/anvai-labs/victor/pull/1115.
-- Gateway request accounting/session IDs are available. Neither the rig config nor
-  this gateway setup has an OTEL collector enabled; do not call it a distributed trace.
+The controlled comparison used the same ready InferFlux model directly and through
+Sandhi, with separate provider/model attribution. Runtime configuration, source
+and executable provenance were verified during qualification; deployment-specific
+addresses, process identifiers and private artifact locations are retained by the
+maintainers rather than serving as setup instructions.
+
+Public source and consumer changes remain traceable through
+[Sandhi #265](https://github.com/anvai-labs/sandhi/pull/265) and
+[Victor #1115](https://github.com/anvai-labs/victor/pull/1115).
+A separate model battery is recorded in
+[Victor #1118](https://github.com/anvai-labs/victor/pull/1118).
+This comparison did not qualify a distributed tracing deployment.
 
 ## Proven limits and unresolved original symptom
 

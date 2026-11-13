@@ -1,7 +1,7 @@
 # TD-0031: Non-interactive client-credentials grant
 
 **Status:** Implemented (this change) · **Mode:** `tokens` (OIDC-mode counterpart noted below)
-**Driver:** homelab clients (message-hub triage, victor serve) authenticate to the LAN
+**Driver:** self-hosted automation clients authenticate to the LAN
 gateway with long-lived static virtual keys. Static keys go stale on rotation
 (observed 2026-09-29: profile keys outlived the gateway's key store → every
 inference call 401/502'd until an operator noticed), and the only non-interactive

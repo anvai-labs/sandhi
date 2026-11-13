@@ -405,7 +405,7 @@ certification of Anthropic, OpenAI Platform or subscription cache behavior.
   lost OpenAI write category; dropped Responses shorthand user item; rejection
   of a native non-function Responses tool; and automatic Anthropic cache markers
   disappearing when an unrelated native bucket is supplied (two comparison calls).
-  Probe script: `/tmp/sandhi_review_probe.py`. It adds no permanent regression tests.
+  The maintainer probe was temporary; it adds no permanent regression tests.
 
 Relevant prior design work to continue:
 [ADR-0004](../adr/0004-two-plane-proxy-and-enforcement-boundary.md),

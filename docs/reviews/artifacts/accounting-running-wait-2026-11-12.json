@@ -3,11 +3,10 @@
   "source_commit": "eec5eaab7706d11852f229f5e9046ae23f24781d",
   "command": "cargo test --workspace",
   "concurrent_work": "Full current-provider-SDK conformance run in another process, with the same stable source.",
-  "log_sha256": "12c6d93322f8ef8de0b7bbc9d2d17a672273de5ea6a99e8938896c85008ed76c",
   "failures": [
     {
       "test": "owned_buffered_back_leg_never_races_its_primary_settle",
-      "request_id": "req_1794491696669_303",
+      "request_id": "example-correlation-395",
       "call_ordinal": 170,
       "http_status": 502,
       "retryable": false,
@@ -37,7 +36,7 @@
   ],
   "wait_traces": [
     {
-      "request_id": "req_1794491696669_303",
+      "request_id": "example-correlation-395",
       "transition": "terminal_settlement",
       "wait_ms": 2000,
       "wait_started_us": 91,
@@ -52,7 +51,7 @@
       "interrupted": false
     },
     {
-      "request_id": "req_1794491696670_304",
+      "request_id": "example-correlation-396",
       "transition": "terminal_settlement",
       "wait_ms": 2000,
       "wait_started_us": 74,
@@ -72,5 +71,10 @@
     "The outcome after the HTTP waiter stopped is not established.",
     "Four separate queued admission timeouts in this run belong to the deliberately controlled late-admission test and are not spontaneous failures."
   ],
-  "disposition": "Unresolved reliability/merge gate. Preserve the failure; no deadline increase, inferred zero, inference replay or blind rerun."
+  "disposition": "Unresolved reliability/merge gate. Preserve the failure; no deadline increase, inferred zero, inference replay or blind rerun.",
+  "publication": {
+    "form": "sanitized summary",
+    "redactions": "Private artifact locations and fingerprints, process identifiers and observed correlation values are omitted or aliased. Numerical results and useful public source/version references are retained.",
+    "original_records": "Unmodified operational records and original hashes are retained privately; this derivative is not a raw capture."
+  }
 }

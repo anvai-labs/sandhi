@@ -953,38 +953,25 @@ This is source-level synthetic buffered acceptance. Actual IdP/released-binary
 qualification, managed tracked deployment, streaming ownership, broader lifecycle
 and full actual-member C5 remain distinct gates.
 
-### Isolated released-binary OIDC qualification (2026-10-10)
+### Historical released-binary OIDC qualification
 
-New evidence qualifies the official macOS 0.12.0 gateway with the deployed
-AnvaiIdentity policy and existing local credential references. A private loopback
-TLS candidate used an online SQLite backup containing 1,071 historical events,
-tracked buffered accounting and a bound Block budget. The managed gateway, its
-configuration and historical rows remained unchanged; it still uses default
-accounting. No credentials were transferred and no shared cache was cleared.
+An isolated check of the official macOS 0.12.0 gateway used verified HTTPS,
+separate inference and accounting identities, buffered accounting and a Block
+budget. This is a curated summary; private deployment configuration and original
+runtime identifiers are not setup instructions.
 
-| Route | Request ID | Fresh input / output / cache read | Receipt charge |
-|---|---|---|---|
-| InferFlux `qwen3-coder-30b` | `req_1791638904926_0` | 14 / 1 / 0 | 15 |
-| InferFlux `qwen2.5-coder-14b` | `req_1791638905151_1` | 14 / 1 / 0 | 15 |
-| ZAI `glm-5.3` | `req_1791638905788_2` | 18 / 3 / 0 | 21 |
+| Example call | Provider/model | Fresh input / output / cache read | Receipt charge |
+| --- | --- | --- | --- |
+| 1 | InferFlux `qwen3-coder-30b` | 14 / 1 / 0 | 15 |
+| 2 | InferFlux `qwen2.5-coder-14b` | 14 / 1 / 0 | 15 |
+| 3 | ZAI `glm-5.3` | 18 / 3 / 0 | 21 |
 
-- Binary SHA-256: `b138480cd96f4c5a1d830a1f9bf1615ba5dd7519362531323d1c37619ed00e34`.
-- Issuer: `https://id.anvaiops.com/oauth2/openid/sandhi`; member and accounting
-  observer use separate credentials through Victor's existing OAuth helper.
-- All three responses are HTTP 200 with nonempty content. Wire/SQLite/run/receipt
-  joins verify request, member, group, model and distinct session/run IDs; dashboard
-  deltas match 3 calls, 46 fresh-input, 5 output and 0 cache-read tokens. Reporting
-  coverage is explicit for all three; receipts sum to 51 tokens.
-- Gateway buffered deadline remains 120 seconds; client timeout is 125 seconds.
-  No inference retries. Clean candidate shutdown exits 0; database integrity and
-  copied historical events remain intact.
-- Retained local evidence: `var/sandhi-oidc-recovery-2026-10-10/` in the originating
-  Victor checkout, including the reviewed harness and private candidate database.
-  Two initial helper-import failures occurred before any server launch or call.
+All three calls returned nonempty successful responses. Wire, persisted events,
+run lookup and receipts reconciled to 46 fresh-input, five output and zero
+cache-read tokens: 51 neutral tokens total. Reporting coverage was explicit for
+all three calls. Clean shutdown and database integrity checks passed.
 
-This is a simple new provider smoke, not actual-member evidence, live crash
-recovery, a managed tracked-mode cutover or C5. Zero reported cache does not prove
-zero executed reuse. Streaming, tokenizer/session-lifecycle correctness and broad
-failure acceptance remain open. The managed streaming route must not be switched globally to tracked mode before
-released streaming lifecycle acceptance. The development-source extension above
-does not retroactively qualify the 0.12.0 binary used for this evidence.
+This provider smoke did not qualify streaming lifecycle, live crash recovery,
+managed deployment or broad mixed-team acceptance. Zero reported cache does not
+prove zero executed reuse. Later source improvements do not retroactively change
+the older released binary's acceptance scope.

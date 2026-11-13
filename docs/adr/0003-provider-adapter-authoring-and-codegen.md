@@ -131,6 +131,6 @@ and this scoping keeps that surface minimal and pinned to exactly what is billed
 - [ADR-0001](0001-sandhi-architecture-and-wire-contract.md) — architecture, adapter/decorator patterns
 - [ADR-0002](0002-provider-transport-scope-and-modality-admission.md) — chat-only scope + modality gate
 - [TD-0001](../td/TD-0001-provider-adapter-qa-and-codegen.md) — implementation + QA tracker for this ADR
-- AnvaiOps ADR-0047 D9/D10 (cache/KV affinity, unified transport), ADR-0020 D3/D4 (measure≠bill, full usage breakdown), ADR-0028 (byte-vs-JSON cost)
+- [Sandhi architecture](0001-sandhi-architecture-and-wire-contract.md): unified transport, cache affinity and the neutral-measurement boundary.
 - Tooling: `oxidecomputer/progenitor` (OpenAPI 3.0 client), `oxidecomputer/typify` (JSON Schema → serde types)
 - Ecosystem: Anthropic's acquisition of Stainless and wind-down of the hosted SDK generator (May 2026); Anthropic has no officially published OpenAPI spec (community spec only)

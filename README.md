@@ -169,7 +169,7 @@ This projection excludes credential fields, attribution, arbitrary metadata, pro
 response bodies, but identifiers/model strings can still be sensitive: it is **not anonymized**.
 Active streams may not yet have a persisted row; missing rows do not prove no traffic, and
 cache reporting does not prove backend reuse. See [ADR-0011](docs/adr/0011-bounded-persisted-usage-diagnostics.md)
-for the evidence and privacy boundaries. This feature is in the unreleased development line.
+for the evidence and privacy boundaries. Check the operator guide against your installed release.
 
 ## Where it fits
 
@@ -177,8 +177,8 @@ Sandhi is part of the **anvai-labs** family, alongside
 [Victor](https://github.com/anvai-labs/victor) (agent framework) and
 [ProximaDB](https://github.com/anvai-labs/proximaDB) (context database). It is the OSS
 *mechanism*; commercial pricing, billing authority, SSO/RBAC governance, and managed
-dashboards-at-scale live in the AnvaiOps control plane — the open-core split is recorded in
-AnvaiOps ADR-0047.
+dashboards-at-scale belong to downstream control-plane integrations. The public
+[architecture decision](docs/adr/0001-sandhi-architecture-and-wire-contract.md) defines this boundary.
 
 ## Layout
 

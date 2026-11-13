@@ -1,8 +1,6 @@
 {
   "evidence_kind": "live_direct_ffi_stream_profiles",
   "source_parent": "a74a8f14a326ba93d745887a22007d9b9080682f",
-  "factory_sha256": "fa763a65fde4ed94dc01f29c32f8b6bca5f76a87d9ac1f5be55a0eaec8464ce4",
-  "wheel_sha256": "e9d39f602ec3916ac3c0aa63e8499af146a0ac1afcb40cec1b919864e372f211",
   "limits": [
     "Two tiny direct streaming calls; no gateway or receipt joins.",
     "No cold/warm, savings, full cache lifecycle or subscription qualification.",
@@ -57,5 +55,10 @@
       },
       "event_count": 7
     }
-  ]
+  ],
+  "publication": {
+    "form": "sanitized summary",
+    "redactions": "Private artifact locations and fingerprints, process identifiers and observed correlation values are omitted or aliased. Numerical results and useful public source/version references are retained.",
+    "original_records": "Unmodified operational records and original hashes are retained privately; this derivative is not a raw capture."
+  }
 }

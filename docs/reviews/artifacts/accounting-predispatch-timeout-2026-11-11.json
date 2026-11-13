@@ -1,15 +1,19 @@
 {
   "scope": "synthetic current default-workspace reliability recurrence",
   "command": "RUST_LOG=sandhi_proxy=warn cargo test --workspace",
-  "original_log_sha256": "a806cbc48626d1de90b2c315d05e7e67600b0e439fa6aa067794a7adc11514fb",
-  "failure": "---- owned_buffered_back_leg_never_races_its_primary_settle stdout ----\n\nthread 'owned_buffered_back_leg_never_races_its_primary_settle' (3599962) panicked at crates/sandhi-proxy/tests/proxy.rs:4575:13:\ncall 93: 502 Bad Gateway, failed_request_id=req_1794458455035_206, {\"error\":{\"code\":\"invalid_request\",\"http_status\":502,\"message\":\"accounting unresolved; upstream may have completed; do not automatically retry\",\"retryable\":false}}, retained=1, upstream_calls=92, last_successful_or_failed_observation=Some(UsageEvent { schema_version: \"1\", request_id: \"req_1794458454978_205\", occurred_at: \"2026-11-12T04:40:55.004578785Z\", provider: \"openai\", model: \"gpt-4o-mini\", backend: External, virtual_key_id: Some(\"vk_demo\"), subject_id: Some(\"alice\"), group_id: Some(\"platform\"), route: Some(\"/v1/chat/completions\"), session_id: None, idempotency_key: None, run_id: None, step_id: None, parent_id: None, trace_context: None, tokens_in: 10, tokens_out: 2, cache_creation_tokens: 0, cache_read_tokens: 0, cache_read_observation: Some(CacheReadObservation { status: Absent, source: OriginUsage }), usage_completeness: Final, usage_basis: ProviderReported, attempts: 1, outcome: Some(\"success\"), upstream_request_id: None, gpu_seconds: None, duration_ms: Some(1), duration_source: Some(Boundary), time_to_first_token_ms: None, time_to_first_token_source: None, reasoning_tokens: None, reasoning_included: Some(true) })\n\n\nfailures:\n    owned_buffered_back_leg_never_races_its_primary_settle\n\ntest result: FAILED. 81 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.62s",
-  "matched_warning": "2026-11-12T04:40:57.036821Z WARN sandhi_proxy::settlement::buffered: tracked admission unresolved request_id=req_1794458455035_206 reason=\"wait_timeout\"",
+  "failure": "example-correlation-003",
+  "matched_warning": "example-correlation-006",
   "proven_facts": {
     "failed_call": 93,
-    "failed_request_id": "req_1794458455035_206",
+    "failed_request_id": "example-correlation-335",
     "origin_calls": 92,
-    "last_observation_request_id": "req_1794458454978_205",
+    "last_observation_request_id": "example-correlation-334",
     "accounting_wait_seconds": 2
   },
-  "interpretation": "The failed call timed out during admission and had no origin send. The displayed final10/2 event belongs to the prior successful call. The evidence does not identify whether worker scheduling, ledger contention, synchronous SQLite/IO latency or another cause consumed the wait. No inference replay or deadline relaxation was added."
+  "interpretation": "The failed call timed out during admission and had no origin send. The displayed final10/2 event belongs to the prior successful call. The evidence does not identify whether worker scheduling, ledger contention, synchronous SQLite/IO latency or another cause consumed the wait. No inference replay or deadline relaxation was added.",
+  "publication": {
+    "form": "sanitized summary",
+    "redactions": "Private artifact locations and fingerprints, process identifiers and observed correlation values are omitted or aliased. Numerical results and useful public source/version references are retained.",
+    "original_records": "Unmodified operational records and original hashes are retained privately; this derivative is not a raw capture."
+  }
 }

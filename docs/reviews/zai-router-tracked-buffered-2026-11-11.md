@@ -108,15 +108,13 @@ records the binary/harness hashes, endpoint/profile declarations and SDK version
 and verifies actual correlated SQL evidence before export. Offline source tests
 also corrupt receipt amounts, scope, identity, usage and inventory to verify refusal.
 
-| Artifact | SHA-256 |
+| Sanitized public summary | SHA-256 |
 | --- | --- |
-| [Final tracked matrix](artifacts/zai-router-tracked-buffered-cache-pairs-2026-11-11.json) | `5737699a1e433773e54e5d78eb523fa11412661b5f3c37d6cd14bd8d684cbe1f` |
-| [Initial profile failure](artifacts/zai-router-tracked-buffered-cache-pairs-initial-failure-2026-11-11.json) | `70f0757ca78eda3ebbabe3dda2ff4b692e7e4d34eeacf3b60978893ef434e33c` |
-| [Native usage diagnostic](artifacts/zai-router-messages-usage-diagnostic-2026-11-11.json) | `7919c65df6a2d4c815da46355c79212ca6539fe0cb9b99f149f63bd803db28a0` |
-| [Retained accounting-response failure](artifacts/zai-router-tracked-buffered-cache-pairs-settlement-response-failure-2026-11-11.json) | `4b3c4bb960a3195d2c6a7ab77741f3bfba8c056d2b639b113883d3d0a50866c2` |
+| [Final tracked matrix](artifacts/zai-router-tracked-buffered-cache-pairs-2026-11-11.json) | `760c76df298907ed66097554e473235bba74c56b68c9ed8d78615877bef21588` |
+| [Initial profile failure](artifacts/zai-router-tracked-buffered-cache-pairs-initial-failure-2026-11-11.json) | `c891cd35ed17cd79b9e1c491ca274e5f6a11a4f137da751ec0f010cd3dbb2c34` |
+| [Native usage diagnostic](artifacts/zai-router-messages-usage-diagnostic-2026-11-11.json) | `0a746d3605f78e6ab97f99cb23bba428981f50f984dd9780b04d7faed3d21f25` |
+| [Retained accounting-response failure](artifacts/zai-router-tracked-buffered-cache-pairs-settlement-response-failure-2026-11-11.json) | `47123026b8621079014ff1b26ccabfe73aa663bf087b06e8ccf1f7a2460940ad` |
 
-Final gateway binary SHA-256:
-`f08fc912396ecc36dbb62f828e3a0c9c822e28c1c53886b775144f9c9ca9faac`.
 SDKs: OpenAI 2.18.0, Anthropic 0.79.0, google-genai 1.75.0.
 
 ## Limits
