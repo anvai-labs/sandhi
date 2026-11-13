@@ -198,6 +198,30 @@ this target, pass `--pypi-platforms linux-x86_64,macos-arm64,windows-amd64` expl
 Adding this build does not backfill already-published package versions; downstream
 consumers need a new Sandhi release and dependency-pin update.
 
+Native-platform qualification is also part of ordinary, nonpublishing PR/push CI:
+
+| Artifact | Public runner | Runtime qualification |
+| --- | --- | --- |
+| macOS ARM64 Python wheel | `macos-latest` | CPython 3.11, 3.12 and 3.13, one locked release build per interpreter |
+| Windows x86_64 Python wheel | `windows-latest` | CPython 3.11, 3.12 and 3.13, one locked release build per interpreter |
+| macOS ARM64 Node addon | `macos-latest` | Native ARM64 Node 24, locked release build and full binding suite |
+
+Both new jobs are dependencies of `CI Success`. The Python job checks the actual runtime and Rust
+compiler host before building, then requires `cp311-abi3` with native ARM64 macOS or `win_amd64`
+tags in both the filename and wheel metadata. A new virtual environment outside the checkout
+installs exactly that wheel, uses the pinned binding test requirements, and runs the full binding
+suite with Python isolation enabled. The installed extension must match the built wheel's SHA-256
+before and after the suite. The Node job checks the actual runtime/compiler architecture, confirms
+that the generated loader opens the built local ARM64 addon, and runs the complete Node binding
+suite. Reports and built Python wheels remain CI artifacts; these jobs have no publication step.
+A runner label alone never establishes CPU architecture: if `macos-latest` supplies a different
+host, qualification fails rather than silently testing an x86 build.
+
+Offline workflow guards and Linux probe tests qualify the harness only. macOS/Windows acceptance
+requires successful jobs on those actual public platforms for the reviewed source. This CI addition
+does not diagnose or close the retained Python TLS child SIGSEGV or shutdown-deadline reliability
+gates, and it does not grant release publication authority.
+
 The verifier distinguishes `MISSING`, `INVALID` and `UNAVAILABLE`, retries within bounded limits,
 checks declared wheel/platform coverage and npm dependencies, and streams GitHub archives to check
 reported size and available SHA-256 digests. Registry metadata and archive checks are **not** an
