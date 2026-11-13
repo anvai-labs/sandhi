@@ -319,3 +319,37 @@ fn endpoint_configuration_is_strict_and_defaults_only_the_profile() {
     )
     .is_err());
 }
+
+#[test]
+fn vendor_profiles_require_explicit_chat_endpoint_and_static_credentials() {
+    for profile in [
+        BackendProfile::ZaiFinalChoiceUsage,
+        BackendProfile::DeepseekFinalChoiceUsage,
+    ] {
+        for family in [
+            EndpointFamilyV1::OpenaiChatCompletions,
+            EndpointFamilyV1::OpenaiResponses,
+            EndpointFamilyV1::AnthropicMessages,
+        ] {
+            for scheme in [CredentialScheme::ApiKey, CredentialScheme::Oauth] {
+                let result = build_provider_handle_for_endpoint(
+                    &ProviderRuntime::new(),
+                    "custom-label",
+                    None,
+                    "synthetic",
+                    scheme,
+                    None,
+                    BackendEndpoint {
+                        endpoint_family: family,
+                        endpoint_profile: profile,
+                    },
+                );
+                assert_eq!(
+                    result.is_some(),
+                    family == EndpointFamilyV1::OpenaiChatCompletions
+                        && scheme == CredentialScheme::ApiKey
+                );
+            }
+        }
+    }
+}

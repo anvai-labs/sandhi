@@ -31,6 +31,7 @@ mod reference_ownership;
 mod routing;
 mod serving;
 pub mod settlement;
+mod starter;
 pub mod streaming;
 mod text_endpoints;
 pub mod topology;
@@ -298,8 +299,16 @@ pub struct ProxyState {
     pub vkeys: Option<Arc<VirtualKeyStore>>,
     /// Builds typed upstream handles from vault-resolved credentials.
     pub runtime: ProviderRuntime,
-    /// Admin-API bearer token (distinct from virtual keys). `None` disables the admin API.
+    /// Optional operator bearer (distinct from inference credentials). Without one,
+    /// None mode opens the guarded starter control plane; Tokens keeps admin disabled.
     pub admin_token: Option<String>,
+    /// Standalone defaults to the shared starter; library construction retains token mode.
+    pub auth_mode: auth::AuthMode,
+    /// An explicit server-owned provider/backend/route reference for starter calls.
+    pub starter_upstream: Option<String>,
+    pub starter_rate_limit_per_min: Option<u32>,
+    /// Listener/public origins accepted by the unauthenticated local control plane.
+    pub starter_control_origins: Vec<String>,
     /// Explicit OIDC authority. When set, legacy token/public gates cannot bypass it.
     pub oidc: Option<Arc<auth::Oidc>>,
     /// Operator-set budgets (scope → spec). The live [`ProxyLedger`] enforces them; this map is the
@@ -413,6 +422,10 @@ impl ProxyState {
             vkeys: None,
             runtime: ProviderRuntime::new(),
             admin_token: None,
+            auth_mode: auth::AuthMode::Tokens,
+            starter_upstream: None,
+            starter_rate_limit_per_min: None,
+            starter_control_origins: Vec::new(),
             oidc: None,
             budgets: Mutex::new(HashMap::new()),
             public_url: "http://localhost:8787".into(),
@@ -1755,6 +1768,15 @@ async fn require_dashboard_access(state: &ProxyState, headers: &HeaderMap) -> Re
     if let Some(oidc) = &state.oidc {
         return oidc.authorize(headers, auth::Permission::Read, false).await;
     }
+    if state.auth_mode == auth::AuthMode::Oidc {
+        return Err(error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "OIDC authority unavailable",
+        ));
+    }
+    if starter::enabled(state) {
+        return operator::require_access(state, headers, auth::Permission::Read, false).await;
+    }
     if state.dashboard_public || state.admin_token.is_none() {
         return Ok(());
     }
@@ -2230,22 +2252,13 @@ async fn resolve_for_discovery(
     dialect: IngressDialect,
     headers: &HeaderMap,
 ) -> Result<(VirtualKey, Option<ProviderHandle>), Response> {
-    let Some(token) = dialect.extract_credential(headers) else {
-        return Err(ingress_error(
-            dialect,
-            StatusCode::UNAUTHORIZED,
-            &format!(
-                "missing virtual key: send it as {}",
-                dialect.credential_hint()
-            ),
-        ));
-    };
+    let token = inference_credential(state, dialect, headers)?;
     let vk = match resolve_virtual_key(state, token, headers).await {
         VirtualKeyResolution::Denied(status) => {
             return Err(ingress_error(
                 dialect,
                 status,
-                "OIDC inference authorization failed",
+                inference_denial_message(state),
             ))
         }
         VirtualKeyResolution::Found(vk, _, _) => *vk,
@@ -2458,26 +2471,15 @@ async fn handle_with_policy_receipt(
     //    paths). Resolve the live key store by exact token (legacy/demo path, where the id
     //    doubles as the token) then by its hash (operator-minted path, where only the hash is
     //    the lookup key — the plaintext is never retained).
-    let Some(vk_token) = dialect.extract_credential(&headers) else {
-        // TD-0010 D2 (auth slice): render in the caller's dialect and NAME ITS OWN SCHEME. The
-        // flat `{"error":"missing bearer virtual key"}` this used to return was unparseable by
-        // two of the three SDKs and told an Anthropic or Gemini client to send a header its
-        // vendor never documents. The dialect is already known here — it is a parameter — so
-        // there is no ordering problem to solve at these call sites.
-        return ingress_error(
-            dialect,
-            StatusCode::UNAUTHORIZED,
-            &format!(
-                "missing virtual key: send it as {}",
-                dialect.credential_hint()
-            ),
-        );
+    let vk_token = match inference_credential(&state, dialect, &headers) {
+        Ok(token) => token,
+        Err(response) => return response,
     };
     let (vk, rate_identity, policy_identity) = match resolve_virtual_key(&state, vk_token, &headers)
         .await
     {
         VirtualKeyResolution::Denied(status) => {
-            return ingress_error(dialect, status, "OIDC inference authorization failed")
+            return ingress_error(dialect, status, inference_denial_message(&state))
         }
         VirtualKeyResolution::Found(vk, rate_identity, identity) => (*vk, rate_identity, identity),
         VirtualKeyResolution::Expired => {
@@ -3695,21 +3697,15 @@ async fn handle_count_tokens(
     // Hold the admission slot for the handler's duration, like every unary
     // handler (parse + policy work run under it); it is released at return and
     // counting never dispatches, so no generation slot is held upstream.
-    let Some(vk_token) = dialect.extract_credential(&headers) else {
-        return ingress_error(
-            dialect,
-            StatusCode::UNAUTHORIZED,
-            &format!(
-                "missing virtual key: send it as {}",
-                dialect.credential_hint()
-            ),
-        );
+    let vk_token = match inference_credential(&state, dialect, &headers) {
+        Ok(token) => token,
+        Err(response) => return response,
     };
     let (vk, rate_identity, policy_identity) = match resolve_virtual_key(&state, vk_token, &headers)
         .await
     {
         VirtualKeyResolution::Denied(status) => {
-            return ingress_error(dialect, status, "OIDC inference authorization failed")
+            return ingress_error(dialect, status, inference_denial_message(&state))
         }
         VirtualKeyResolution::Found(vk, rate_identity, identity) => (*vk, rate_identity, identity),
         VirtualKeyResolution::Expired => {
@@ -3768,6 +3764,53 @@ async fn handle_count_tokens(
     }
 }
 
+fn inference_denial_message(state: &ProxyState) -> &'static str {
+    if starter::enabled(state) {
+        "starter requires an available, unambiguous server-owned upstream and shared-principal admission"
+    } else {
+        "OIDC inference authorization failed"
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn inference_credential<'a>(
+    state: &ProxyState,
+    dialect: IngressDialect,
+    headers: &'a HeaderMap,
+) -> Result<&'a str, Response> {
+    if state.oidc.is_none() && state.auth_mode == auth::AuthMode::Oidc {
+        return Err(ingress_error(
+            dialect,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "OIDC authority unavailable",
+        ));
+    }
+    if starter::enabled(state) {
+        // A keyless listener must reject foreign browser origins and DNS
+        // rebinding before discovery, token estimation or generation admission.
+        // All ingress families share this gate; neutral agents need no browser
+        // headers, but their Host must still name this configured listener.
+        if !starter::control_allowed(state, headers, true) {
+            return Err(ingress_error(
+                dialect,
+                StatusCode::FORBIDDEN,
+                "starter request origin is not permitted",
+            ));
+        }
+        return Ok("");
+    }
+    dialect.extract_credential(headers).ok_or_else(|| {
+        ingress_error(
+            dialect,
+            StatusCode::UNAUTHORIZED,
+            &format!(
+                "missing virtual key: send it as {}",
+                dialect.credential_hint()
+            ),
+        )
+    })
+}
+
 /// Resolve a presented virtual-key token: exact (legacy demo) then by hash (operator-minted).
 /// Filters out expired keys.
 async fn resolve_virtual_key(
@@ -3794,12 +3837,31 @@ async fn resolve_virtual_key(
             Err(r) => VirtualKeyResolution::Denied(r.status()),
         };
     }
+    if starter::enabled(state) {
+        return match starter::principal(state, headers).await {
+            Ok(vk) => VirtualKeyResolution::Found(
+                Box::new(vk.clone()),
+                vk.id.clone(),
+                sandhi_core::policy::Identity {
+                    subject: vk.subject_id.clone(),
+                    ..Default::default()
+                },
+            ),
+            Err(status) => VirtualKeyResolution::Denied(status),
+        };
+    }
+    if state.auth_mode == auth::AuthMode::Oidc {
+        return VirtualKeyResolution::Denied(StatusCode::SERVICE_UNAVAILABLE);
+    }
     let vk = state
         .keys
         .resolve(token)
         .or_else(|| state.keys.resolve(&hash_secret(token)));
     match vk {
         Some(vk) => {
+            if vk.id == starter::KEY_ID {
+                return VirtualKeyResolution::NotFound;
+            }
             if vk.is_expired(&now_rfc3339()) {
                 VirtualKeyResolution::Expired
             } else {

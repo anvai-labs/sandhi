@@ -149,7 +149,8 @@ enum BackendsAction {
         credential_ref: String,
         #[arg(long)]
         endpoint_family: String,
-        /// standard, chatgpt_codex, anthropic_implicit_cache, or openai_terminal_chunk_usage.
+        /// standard, chatgpt_codex, anthropic_implicit_cache, openai_terminal_chunk_usage,
+        /// zai_final_choice_usage, or deepseek_final_choice_usage.
         #[arg(long, default_value = "standard")]
         endpoint_profile: String,
         #[arg(long)]
@@ -556,14 +557,11 @@ fn main() -> ExitCode {
         }
     };
 
-    let Some(token) = cli.admin_token.clone() else {
-        eprintln!("error: --admin-token (or SANDHI_ADMIN_TOKEN) is required");
-        return ExitCode::from(2);
-    };
+    let token = cli.admin_token.as_deref();
 
     if let Command::Diagnose(args) = &cli.command {
         return match diagnostic_request(&cli.admin_url, args)
-            .and_then(|request| execute_diagnostic(&request, &token))
+            .and_then(|request| execute_diagnostic(&request, token))
         {
             Ok(response) => {
                 print_json(&response);
@@ -580,7 +578,7 @@ fn main() -> ExitCode {
     let command = fill_secret_from_stdin(cli.command);
 
     let req = admin_request(&cli.admin_url, &command);
-    let response = match execute(&req, &token) {
+    let response = match execute(&req, token) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("error: {e}");
@@ -626,19 +624,20 @@ fn fill_secret_from_stdin(mut command: Command) -> Command {
     command
 }
 
-fn execute(req: &AdminRequest, token: &str) -> Result<Value, String> {
+fn execute(req: &AdminRequest, token: Option<&str>) -> Result<Value, String> {
     let client = reqwest::blocking::Client::builder()
         // Redirects must not forward the admin bearer token to an unrelated host
         // (same policy as execute_diagnostic below).
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| format!("http client: {e}"))?;
-    let mut builder = client
-        .request(
-            req.method.parse().map_err(|e| format!("method: {e}"))?,
-            &req.path,
-        )
-        .bearer_auth(token);
+    let mut builder = client.request(
+        req.method.parse().map_err(|e| format!("method: {e}"))?,
+        &req.path,
+    );
+    if let Some(token) = token {
+        builder = builder.bearer_auth(token);
+    }
     if let Some(body) = &req.body {
         builder = builder
             .header("content-type", "application/json")
@@ -694,20 +693,21 @@ fn read_diagnostic_response(reader: impl Read) -> Result<Value, &'static str> {
     Ok(value)
 }
 
-fn execute_diagnostic(req: &AdminRequest, token: &str) -> Result<Value, &'static str> {
+fn execute_diagnostic(req: &AdminRequest, token: Option<&str>) -> Result<Value, &'static str> {
     let client = reqwest::blocking::Client::builder()
         // Redirects must not forward the selector to an unrelated endpoint.
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|_| "could not initialize diagnostic client")?;
-    let response = client
+    let mut request = client
         .post(&req.path)
-        .bearer_auth(token)
         .header("content-type", "application/json")
-        .body(req.body.clone().ok_or("invalid diagnostic request")?)
-        .send()
-        .map_err(|_| "diagnostic request failed")?;
+        .body(req.body.clone().ok_or("invalid diagnostic request")?);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().map_err(|_| "diagnostic request failed")?;
     if !response.status().is_success() {
         // Never read or relay an error body, including JSON with no `error` key.
         return Err("diagnostic request rejected");

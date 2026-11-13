@@ -43,13 +43,19 @@ const tokenEl = document.getElementById("admin-token");
 const dotEl = document.getElementById("token-dot");
 let activeToken = "";
 let authMode = "loading";
+let inferenceAuthMode = "loading";
+let starterPermissions = [];
 let ssoSession = null;
 let expiryTimer;
 const actionPermissions = { lookupRun: "read", lookupEvidence: "diagnostics", ackAlert: "operate", setBudget: "operate" };
 function permits(permission) {
+  if (authMode === "none") return starterPermissions.includes(permission);
   return authMode === "tokens" ? !!activeToken : !!ssoSession?.permissions?.includes(permission);
 }
-function signedIn() { return authMode === "tokens" ? !!activeToken : !!ssoSession?.subject; }
+function signedIn() {
+  if (authMode === "none") return starterPermissions.includes("read");
+  return authMode === "tokens" ? !!activeToken : !!ssoSession?.subject;
+}
 
 let authRevision = 0;
 const pending = new Set();
@@ -60,7 +66,8 @@ try { sessionStorage.removeItem("sandhi_admin_token"); } catch { /* Storage may 
 function refreshTokenState() {
   const on = signedIn();
   dotEl.classList.toggle("on", on);
-  dotEl.title = on ? "Token supplied; each request is authorized by the server" : "No token supplied";
+  dotEl.title = authMode === "none" ? "Shared starter access; authentication is off"
+    : on ? "Each request is authorized by the server" : "No operator credential supplied";
   document.querySelectorAll("[data-needs-token]").forEach(b => b.disabled = !permits(actionPermissions[b.dataset.action] || "admin") || b.dataset.revoked === "true");
   document.getElementById("token-form").hidden = authMode !== "tokens";
   document.getElementById("sso-box").hidden = authMode !== "oidc";
@@ -68,8 +75,13 @@ function refreshTokenState() {
   document.getElementById("sso-logout").hidden = !ssoSession?.subject;
   if (authMode === "oidc") document.getElementById("auth-status").textContent = ssoSession?.subject
     ? `${ssoSession.subject} — ${ssoSession.role}` : "Sign in with SSO to view protected data.";
+  if (authMode === "none") document.getElementById("auth-status").textContent =
+    "Authentication is off. Requests share one starter identity and budget.";
+  else if (authMode === "tokens" && inferenceAuthMode === "none") document.getElementById("auth-status").textContent =
+    "Inference needs no authentication. Operator actions require the configured admin token.";
   document.getElementById("workspace-role").textContent = on
-    ? (authMode === "oidc" ? ssoSession.role : "Token supplied") : "No operator session";
+    ? (authMode === "none" ? "Shared starter access" : authMode === "oidc" ? ssoSession.role : "Token supplied")
+    : "No operator session";
 }
 function resetAuth(token) {
   activeToken = token;
@@ -83,10 +95,11 @@ function resetAuth(token) {
   for (const id of ["execution", "usage", "keys", "budgets", "alerts", "config", "policy", "run-tree", "backends", "routes", "topology", "request-evidence"]) {
     const el = document.getElementById(id);
     el.replaceChildren();
-    el.dataset.state = "locked";
+    el.dataset.state = authMode === "none" ? "loading" : "locked";
     el.setAttribute("aria-busy", "false");
     const message = document.createElement("p");
-    message.textContent = authMode === "oidc" ? "Sign in with SSO to view protected data." : "Select Use token to load protected data, or Refresh for public data.";
+    message.textContent = authMode === "none" ? "Refresh to load shared starter data."
+      : authMode === "oidc" ? "Sign in with SSO to view protected data." : "Select Use token to load protected data, or Refresh for public data.";
     el.append(message);
   }
   document.querySelectorAll("[data-sensitive]").forEach(el => el.replaceChildren());
@@ -713,12 +726,24 @@ function lookupEvidence() {
 
 async function refreshIdentity() {
   const status = await requestJSON("GET", "/auth/session");
-  if (!["oidc", "tokens"].includes(status.mode)) throw new ApiError(502, "Invalid authentication mode");
+  if (!["none", "oidc", "tokens"].includes(status.mode)) throw new ApiError(502, "Invalid authentication mode");
+  const operatorMode = status.mode === "none" ? status.operator_mode : status.mode;
+  if (status.mode === "none" && (!["none", "tokens"].includes(operatorMode)
+      || status.authenticated !== false || !Array.isArray(status.permissions)
+      || status.permissions.some(p => !["read", "operate", "admin", "diagnostics"].includes(p)))) {
+    throw new ApiError(502, "Invalid starter access response");
+  }
   if (status.mode === "oidc" && status.subject && (!Array.isArray(status.permissions) || typeof status.csrf !== "string" || !Number.isSafeInteger(status.expires_at))) {
     throw new ApiError(502, "Invalid session response");
   }
-  const changed = authMode !== status.mode || ssoSession?.subject !== status.subject || ssoSession?.csrf !== status.csrf;
-  authMode = status.mode;
+  const nextSubject = status.mode === "oidc" ? status.subject : undefined;
+  const nextCsrf = status.mode === "oidc" ? status.csrf : undefined;
+  const changed = authMode !== operatorMode || inferenceAuthMode !== status.mode
+    || ssoSession?.subject !== nextSubject || ssoSession?.csrf !== nextCsrf;
+  inferenceAuthMode = status.mode;
+  authMode = operatorMode;
+  starterPermissions = status.mode === "none" && operatorMode === "none" ? status.permissions : [];
+  if (operatorMode === "none") tokenEl.value = "";
   ssoSession = status.mode === "oidc" && status.subject ? status : null;
   if (changed) resetAuth("");
   clearTimeout(expiryTimer);
@@ -732,7 +757,7 @@ async function refreshAll() {
     // A cancelled check belongs to its old authentication session. It must not
     // clear a newer token/session or cancel the newer session's pending reads.
     if (revision !== authRevision) return;
-    ssoSession = null; resetAuth("");
+    ssoSession = null; starterPermissions = []; authMode = "loading"; inferenceAuthMode = "loading"; resetAuth("");
     document.getElementById("auth-status").textContent = "Access verification unavailable. Retry with Refresh.";
     return;
   }

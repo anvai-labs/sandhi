@@ -56,6 +56,8 @@ pub(crate) fn resolve(
         BackendProfile::AnthropicImplicitCache
             if family == ProviderFamily::Anthropic && scheme != CredentialScheme::Oauth => {}
         BackendProfile::OpenaiTerminalChunkUsage
+        | BackendProfile::ZaiFinalChoiceUsage
+        | BackendProfile::DeepseekFinalChoiceUsage
             if family == ProviderFamily::OpenAiCompat && scheme != CredentialScheme::Oauth => {}
         _ => return None,
     }

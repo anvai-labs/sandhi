@@ -56,6 +56,13 @@
             }
           ]
         },
+        "reasoning": {
+          "description": "Validated provider-supplied display reasoning or summary text, separate from the answer. This is not an opaque replay token, signature, or execution authority (minor 14). Native envelopes that cannot be safely projected leave this field absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "refusal": {
           "type": [
             "string",

@@ -102,6 +102,7 @@ nav:
       - "ADR-0042: Provider identity and budget namespaces": adr/0042-provider-identity-and-budget-namespace.md
       - Mandatory durable HTTP execution: adr/0043-mandatory-durable-http-execution.md
       - "ADR-0044: Native reference ownership": adr/0044-native-reference-ownership.md
+      - "ADR-0045: Access-token resource audience": adr/0045-access-token-resource-audience.md
       - Qualified Responses streams: adr/0026-qualified-responses-stream-accounting.md
       - Qualified Codex accounting: adr/0027-qualified-codex-buffered-accounting.md
       - Qualified translated streams: adr/0028-qualified-translated-stream-accounting.md
@@ -115,8 +116,10 @@ nav:
       - Buffered output fidelity and source token evidence: adr/0034-buffered-source-evidence-and-output-fidelity.md
       - Cache reporting: adr/0010-cache-read-reporting-availability.md
   - Project:
-      - Version 0.17.1 candidate: releases/v0.17.1.md
+      - Version 0.18 source candidate: releases/v0.18.0.md
+      - Version 0.17.1 published: releases/v0.17.1.md
       - Version 0.17.0 unpublished checkpoint: releases/v0.17.0.md
+      - Development PR progress: reviews/post-0.17.0-pr-train.md
       - Version 0.14.0: releases/v0.14.0.md
       - Version 0.13.0: releases/v0.13.0.md
       - Version 0.12.0: releases/v0.12.0.md

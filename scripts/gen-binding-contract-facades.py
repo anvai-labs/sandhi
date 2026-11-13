@@ -237,6 +237,7 @@ class UsageAggregateV1(TypedDict):
     billable_tokens: int
     latency: NotRequired[LatencySummary]
 class AssistantOutputV1(TypedDict):
+    reasoning: NotRequired[str]
     content: NotRequired[MessageContent]
     tool_calls: NotRequired[list[ToolCallV1]]
     refusal: NotRequired[str]
@@ -287,7 +288,7 @@ class ProviderRuntime:
     runtime rule (TD-0008 operating rule 5).
     """
 
-    def provider(self, provider: str, model: str, api_key: str, *, base_url: str | None = ..., headers_json: str | None = ..., max_retries: int | None = ..., timeout_secs: float | None = ..., stream_idle_timeout_secs: float | None = ..., auth_scheme: Literal["api_key", "bearer"] | None = ..., protocol: Literal["chat_completions", "responses", "chatgpt_responses", "anthropic_messages", "gemini_generate_content", "cohere_chat", "ollama_chat"] | None = ..., stream_setup_timeout_secs: float | None = ..., endpoint_profile: Literal["standard", "chatgpt_codex", "anthropic_implicit_cache", "openai_terminal_chunk_usage"] | None = ..., peer_role: Literal["provider", "sandhi_gateway_v1"] | None = ...) -> TypedProvider: ...
+    def provider(self, provider: str, model: str, api_key: str, *, base_url: str | None = ..., headers_json: str | None = ..., max_retries: int | None = ..., timeout_secs: float | None = ..., stream_idle_timeout_secs: float | None = ..., auth_scheme: Literal["api_key", "bearer"] | None = ..., protocol: Literal["chat_completions", "responses", "chatgpt_responses", "anthropic_messages", "gemini_generate_content", "cohere_chat", "ollama_chat"] | None = ..., stream_setup_timeout_secs: float | None = ..., endpoint_profile: Literal["standard", "chatgpt_codex", "anthropic_implicit_cache", "openai_terminal_chunk_usage", "zai_final_choice_usage", "deepseek_final_choice_usage"] | None = ..., peer_role: Literal["provider", "sandhi_gateway_v1"] | None = ...) -> TypedProvider: ...
     def openai_compat(self, provider: str, base_url: str, api_key: str, *, headers_json: str | None = ..., max_retries: int | None = ..., timeout_secs: float | None = ..., stream_idle_timeout_secs: float | None = ..., stream_setup_timeout_secs: float | None = ...) -> TypedProvider: ...
     def openai_responses(self, provider: str, base_url: str, bearer_token: str, *, headers_json: str | None = ..., max_retries: int | None = ..., timeout_secs: float | None = ..., stream_idle_timeout_secs: float | None = ..., stream_setup_timeout_secs: float | None = ...) -> TypedProvider: ...
 
@@ -391,7 +392,7 @@ export interface UsageAggregateV1 {{
   cache_read_coverage?: CacheReadCoverage
   billable_tokens: number; latency?: LatencySummary
 }}
-export interface AssistantOutputV1 {{ content?: MessageContent; tool_calls?: ToolCallV1[]; refusal?: string }}
+export interface AssistantOutputV1 {{ reasoning?: string; content?: MessageContent; tool_calls?: ToolCallV1[]; refusal?: string }}
 export interface ChatResponseV1 {{
   schema_version: "1"; id?: string; model: string; output: AssistantOutputV1
   finish_reason?: FinishReasonV1; usage: UsageV2; extensions?: Record<string, JsonValue>

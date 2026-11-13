@@ -29,6 +29,28 @@ const MAX_TOKEN_BYTES: usize = 16384;
 const MAX_RESPONSE_BYTES: usize = 262144;
 const LOGIN_TTL: Duration = Duration::from_secs(300);
 const SESSION_TTL: i64 = 3600;
+
+/// Inbound client authentication; provider credentials remain server-owned in every mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthMode {
+    None,
+    Tokens,
+    Oidc,
+}
+
+impl AuthMode {
+    /// Explicit authentication errors never fall back to the shared starter.
+    pub fn select(value: Option<&str>, oidc_configured: bool) -> Result<Self, &'static str> {
+        match (value, oidc_configured) {
+            (None, false) | (Some("none"), false) => Ok(Self::None),
+            (None, true) | (Some("oidc"), true) => Ok(Self::Oidc),
+            (Some("tokens"), _) => Ok(Self::Tokens),
+            (Some("none"), true) => Err("SANDHI_AUTH_MODE=none conflicts with SANDHI_OIDC_CONFIG"),
+            (Some("oidc"), false) => Err("OIDC mode requires SANDHI_OIDC_CONFIG"),
+            _ => Err("SANDHI_AUTH_MODE must be none, tokens or oidc"),
+        }
+    }
+}
 type Client = CoreClient<
     EndpointSet,
     EndpointNotSet,
@@ -93,6 +115,13 @@ pub enum GroupSource {
 pub struct Config {
     pub issuer: String,
     pub client_id: String,
+    /// Access-token resource audience; omission preserves the OAuth client audience.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_access_token_audience"
+    )]
+    pub access_token_audience: Option<String>,
     pub redirect_url: String,
     pub ca_file: Option<PathBuf>,
     pub client_secret_env: Option<String>,
@@ -111,8 +140,25 @@ pub struct Config {
     #[serde(default)]
     pub max_subject_key_ttl_seconds: u32,
 }
+
+fn deserialize_access_token_audience<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    // Only omission selects the legacy default; an explicit null is not an audience.
+    String::deserialize(deserializer).map(Some)
+}
+
 impl Config {
     pub fn validate(&self) -> Result<(), String> {
+        if self.access_token_audience.as_ref().is_some_and(|audience| {
+            audience.is_empty()
+                || audience.len() > 512
+                || audience
+                    .chars()
+                    .any(|c| c.is_whitespace() || c.is_control() || c == '*')
+        }) {
+            return Err("access_token_audience must be an exact nonblank string of at most 512 bytes without whitespace, controls or wildcards".into());
+        }
         if self.max_subject_key_ttl_seconds > 31_536_000 {
             return Err("subject key lifetime must not exceed one year".into());
         }
@@ -692,9 +738,14 @@ impl Oidc {
     }
     fn introspection_subject(&self, v: &Value) -> Option<String> {
         let aud = &v["aud"];
-        let audience = aud.as_str() == Some(self.config.client_id.as_str())
+        let expected_audience = self
+            .config
+            .access_token_audience
+            .as_deref()
+            .unwrap_or(&self.config.client_id);
+        let audience = aud.as_str() == Some(expected_audience)
             || aud.as_array().is_some_and(|a| {
-                a.iter().all(Value::is_string) && a.iter().any(|a| a == &self.config.client_id)
+                a.iter().all(Value::is_string) && a.iter().any(|a| a == expected_audience)
             });
         let sub = v["sub"].as_str()?;
         if v["active"] != true
@@ -1057,6 +1108,25 @@ pub(crate) async fn session_status(
     headers: HeaderMap,
 ) -> Response {
     let Some(oidc) = &state.oidc else {
+        if crate::starter::enabled(&state) {
+            let open = state.admin_token.is_none();
+            let permissions: Vec<Permission> = if open {
+                vec![
+                    Permission::Read,
+                    Permission::Operate,
+                    Permission::Admin,
+                    Permission::Diagnostics,
+                ]
+            } else {
+                vec![]
+            };
+            return Json(json!({"mode":"none","inference_mode":"none", "operator_mode":if open {"none"} else {"tokens"},
+                "authenticated":false,"permissions":permissions,
+                "starter":{"key_id":crate::starter::KEY_ID,"subject":crate::starter::SUBJECT,"budget_scope":crate::starter::BUDGET_SCOPE,"shared":true}})).into_response();
+        }
+        if state.auth_mode == AuthMode::Oidc {
+            return unavailable();
+        }
         return Json(json!({"mode":"tokens"})).into_response();
     };
     match oidc.session(&headers) {

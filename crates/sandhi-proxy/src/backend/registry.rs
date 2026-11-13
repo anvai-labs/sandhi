@@ -106,6 +106,8 @@ fn bind(handle: ProviderHandle, record: &BackendRecord, entry: &VaultEntry) -> P
                 BackendProfile::ChatGptCodex => "chatgpt_codex",
                 BackendProfile::AnthropicImplicitCache => "anthropic_implicit_cache",
                 BackendProfile::OpenaiTerminalChunkUsage => "openai_terminal_chunk_usage",
+                BackendProfile::ZaiFinalChoiceUsage => "zai_final_choice_usage",
+                BackendProfile::DeepseekFinalChoiceUsage => "deepseek_final_choice_usage",
             }
             .into(),
             models: definition.models.clone(),
