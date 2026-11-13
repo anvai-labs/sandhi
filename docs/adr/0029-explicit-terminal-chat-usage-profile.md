@@ -50,3 +50,37 @@ exercise configuration through execution and paired settlement. Live results
 remain endpoint/model/checkpoint specific; see the retained negative and corrected
 matrix evidence in TD-0034. They do not establish OpenAI Platform behavior or
 Codex subscription acceptance.
+
+## Explicit vendor final-choice profiles (2026-11-13)
+
+The proposed catalog-selected profiles in PR #362 are replaced by endpoint
+contracts `zai_final_choice_usage` and `deepseek_final_choice_usage`. These require
+Chat Completions and static credentials, just like the generic terminal profile;
+provider names, catalog membership and URLs never select a usage contract.
+
+Both require one index-zero terminal choice and retain the existing strict
+counter, cache-conservation, framing, conflict and completion checks. Unlike the
+generic profile, neither accepts an empty-choices usage event. ZAI permits an
+omitted `object`, but rejects explicit null or incorrect objects. Its reasons are
+stop, length, tool_calls, sensitive, model_context_window_exceeded and network_error.
+DeepSeek requires the usual chunk object and permits stop, length, tool_calls,
+content_filter, insufficient_system_resource and aborted. Its terminal delta must
+carry no new content, reasoning_content, reasoning, refusal or tool_calls: absent,
+null and correctly typed empty values qualify. Role metadata may be null or
+assistant; all unknown terminal delta keys and malformed values are refused.
+After either vendor profile accepts its sole final usage choice, only `[DONE]`
+may follow. Further data, including duplicate totals, invalidates qualification
+and retains the first source measurement as partial evidence.
+
+The reason sets follow the primary [ZAI Chat reference](https://docs.z.ai/api-reference/llm/chat-completion)
+and [DeepSeek Chat reference](https://api-docs.deepseek.com/api/create-chat-completion/),
+reviewed 2026-11-13. DeepSeek documents the final usage-bearing choice as carrying
+no new content. ZAI's absent-object admission preserves the earlier proposed
+compatible envelope; this review does not claim a fresh live-provider probe.
+
+Configuration reaches the shared factory, proxy reconstruction and transparent
+source observer. Distinct `v1-chat-zai-final-choice` and
+`v1-chat-deepseek-final-choice` usage conventions retain the exact interpretation
+when composing trusted gateway peers. Older peers reject unknown conventions;
+they must not silently substitute generic terminal qualification. No credential
+authority, replay, count inference, settlement shortcut or new retry owner is added.

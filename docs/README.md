@@ -116,7 +116,7 @@ TD-0028 keeps its merge/deployment gates separate from the remaining diagnostic 
 | [0026](adr/0026-qualified-responses-stream-accounting.md) | Bounded source-qualified Responses streaming, partial progress and original token evidence |
 | [0027](adr/0027-qualified-codex-buffered-accounting.md) | Constrained Codex SSE aggregation, original deadlines and source usage independent of delivery |
 | [0028](adr/0028-qualified-translated-stream-accounting.md) | Qualified native/portable streaming with source-owned paired accounting and bounded projection |
-| [0029](adr/0029-explicit-terminal-chat-usage-profile.md) | Explicit terminal-choice Chat usage convention; strict standard qualifier and binding fences retained |
+| [0029](adr/0029-explicit-terminal-chat-usage-profile.md) | Explicit generic and vendor final-choice Chat usage conventions; strict standard qualifier and binding fences retained |
 | [0039](adr/0039-shared-embedded-endpoint-profiles.md) | Shared embedded endpoint factory/profiles; gateway peers use an independent declared client dialect |
 | [0040](adr/0040-shared-buffered-source-qualification.md) | Shared strict buffered source usage and portable/native fidelity; no measured zero from absence |
 | [0041](adr/0041-explicit-gateway-peer-contract.md) | Explicit immediate peer role, server-owned emitted counts convention and one cache compiler |

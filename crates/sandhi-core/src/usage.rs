@@ -311,6 +311,10 @@ pub enum OpenAiStreamUsageProfile {
     Standard,
     /// One index-zero terminal choice may carry request-total usage.
     TerminalChunk,
+    /// Explicit ZAI final-choice contract; permits an absent chunk object.
+    ZaiFinalChoice,
+    /// Explicit DeepSeek final-choice contract; terminal delta carries no new content.
+    DeepSeekFinalChoice,
 }
 
 /// Qualify the request-total usage event from OpenAI Chat's `include_usage` stream.
@@ -333,9 +337,9 @@ pub fn qualify_openai_stream_usage_for_profile(
     event: &Value,
     profile: OpenAiStreamUsageProfile,
 ) -> Result<Option<ParsedUsage>, StreamUsageError> {
-    if event.get("object").and_then(Value::as_str) != Some("chat.completion.chunk")
-        || event.get("error").is_some()
-    {
+    let valid_object = event.get("object").and_then(Value::as_str) == Some("chat.completion.chunk")
+        || (profile == OpenAiStreamUsageProfile::ZaiFinalChoice && event.get("object").is_none());
+    if !valid_object || event.get("error").is_some() {
         return Err(StreamUsageError::InvalidChunk);
     }
     let choices = event
@@ -345,15 +349,59 @@ pub fn qualify_openai_stream_usage_for_profile(
     if event.get("usage").is_none_or(Value::is_null) {
         return Ok(None);
     }
-    let terminal_choice = profile == OpenAiStreamUsageProfile::TerminalChunk
-        && choices.len() == 1
+    let reason = choices
+        .first()
+        .and_then(|choice| choice.get("finish_reason"))
+        .and_then(Value::as_str);
+    let valid_reason = match profile {
+        OpenAiStreamUsageProfile::Standard => false,
+        OpenAiStreamUsageProfile::TerminalChunk => matches!(
+            reason,
+            Some("stop" | "length" | "tool_calls" | "function_call" | "content_filter")
+        ),
+        OpenAiStreamUsageProfile::ZaiFinalChoice => matches!(
+            reason,
+            Some(
+                "stop"
+                    | "length"
+                    | "tool_calls"
+                    | "sensitive"
+                    | "model_context_window_exceeded"
+                    | "network_error"
+            )
+        ),
+        OpenAiStreamUsageProfile::DeepSeekFinalChoice => matches!(
+            reason,
+            Some(
+                "stop"
+                    | "length"
+                    | "tool_calls"
+                    | "content_filter"
+                    | "insufficient_system_resource"
+                    | "aborted"
+            )
+        ),
+    };
+    let terminal_choice = choices.len() == 1
         && choices[0].get("index").and_then(Value::as_u64) == Some(0)
         && choices[0].get("delta").is_some_and(Value::is_object)
-        && matches!(
-            choices[0].get("finish_reason").and_then(Value::as_str),
-            Some("stop" | "length" | "tool_calls" | "function_call" | "content_filter")
-        );
-    if !choices.is_empty() && !terminal_choice {
+        && valid_reason
+        && (profile != OpenAiStreamUsageProfile::DeepSeekFinalChoice
+            || choices[0]["delta"].as_object().is_some_and(|delta| {
+                delta.iter().all(|(field, value)| match field.as_str() {
+                    "content" | "reasoning_content" | "reasoning" | "refusal" => {
+                        value.is_null() || value.as_str().is_some_and(str::is_empty)
+                    }
+                    "tool_calls" => value.is_null() || value.as_array().is_some_and(Vec::is_empty),
+                    "role" => value.is_null() || value.as_str() == Some("assistant"),
+                    _ => false,
+                })
+            }));
+    let requires_terminal_choice = matches!(
+        profile,
+        OpenAiStreamUsageProfile::ZaiFinalChoice | OpenAiStreamUsageProfile::DeepSeekFinalChoice
+    );
+    if (requires_terminal_choice || !choices.is_empty()) && !terminal_choice {
         return Err(StreamUsageError::NonFinalUsage);
     }
     validate_openai_buffered_usage(event).map_err(StreamUsageError::InvalidUsage)?;

@@ -30,6 +30,8 @@ impl std::str::FromStr for PeerRoleV1 {
 pub enum UsageConventionV1 {
     ChatStandard,
     ChatTerminal,
+    ChatZaiFinalChoice,
+    ChatDeepseekFinalChoice,
     MessagesStandard,
     MessagesImplicitCache,
     ResponsesStandard,
@@ -42,6 +44,8 @@ impl UsageConventionV1 {
         match self {
             Self::ChatStandard => "v1-chat-standard",
             Self::ChatTerminal => "v1-chat-terminal",
+            Self::ChatZaiFinalChoice => "v1-chat-zai-final-choice",
+            Self::ChatDeepseekFinalChoice => "v1-chat-deepseek-final-choice",
             Self::MessagesStandard => "v1-messages-standard",
             Self::MessagesImplicitCache => "v1-messages-implicit-cache",
             Self::ResponsesStandard => "v1-responses-standard",
@@ -52,7 +56,10 @@ impl UsageConventionV1 {
     }
     pub const fn family(self) -> EndpointFamilyV1 {
         match self {
-            Self::ChatStandard | Self::ChatTerminal => EndpointFamilyV1::OpenaiChatCompletions,
+            Self::ChatStandard
+            | Self::ChatTerminal
+            | Self::ChatZaiFinalChoice
+            | Self::ChatDeepseekFinalChoice => EndpointFamilyV1::OpenaiChatCompletions,
             Self::MessagesStandard | Self::MessagesImplicitCache => {
                 EndpointFamilyV1::AnthropicMessages
             }
@@ -82,6 +89,8 @@ impl UsageConventionV1 {
     pub const fn chat_profile(self) -> OpenAiStreamUsageProfile {
         match self {
             Self::ChatTerminal => OpenAiStreamUsageProfile::TerminalChunk,
+            Self::ChatZaiFinalChoice => OpenAiStreamUsageProfile::ZaiFinalChoice,
+            Self::ChatDeepseekFinalChoice => OpenAiStreamUsageProfile::DeepSeekFinalChoice,
             _ => OpenAiStreamUsageProfile::Standard,
         }
     }
@@ -92,6 +101,8 @@ impl std::str::FromStr for UsageConventionV1 {
         match value {
             "v1-chat-standard" => Ok(Self::ChatStandard),
             "v1-chat-terminal" => Ok(Self::ChatTerminal),
+            "v1-chat-zai-final-choice" => Ok(Self::ChatZaiFinalChoice),
+            "v1-chat-deepseek-final-choice" => Ok(Self::ChatDeepseekFinalChoice),
             "v1-messages-standard" => Ok(Self::MessagesStandard),
             "v1-messages-implicit-cache" => Ok(Self::MessagesImplicitCache),
             "v1-responses-standard" => Ok(Self::ResponsesStandard),

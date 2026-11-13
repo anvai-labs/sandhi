@@ -145,6 +145,14 @@ on transparent and translated tracked streams and survives restart. Changing the
 profile invalidates an established route binding instead of switching it silently.
 See [the placement contract](../adr/0029-explicit-terminal-chat-usage-profile.md).
 
+`zai_final_choice_usage` and `deepseek_final_choice_usage` explicitly select the
+vendor final-choice envelopes described in that contract. Both require a sole
+terminal choice and validated source counters. ZAI permits an omitted chunk
+object and its documented terminal reasons; DeepSeek requires an empty terminal
+content/reasoning/tool delta and its own reason set. A provider label never
+selects either profile. No live-provider qualification is implied by selecting it.
+
+
 ```bash
 sandhi backends set coding-chat --provider coding-models --credential-ref coding:default \
   --endpoint-family openai_chat_completions --endpoint-profile openai_terminal_chunk_usage \
