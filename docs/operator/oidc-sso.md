@@ -1,8 +1,14 @@
-# Optional authentication and local Anvai Identity integration
+# Optional authentication and Anvai Identity integration
 
 **Sandhi 0.18 release candidate.** The new starter has no client authentication.
 Token and OIDC profiles are optional. Published 0.17.1 retains its earlier startup
 behavior and does not include the resource-audience override described here.
+
+!!! success "Verified native Agent access through Sandhi's optional OIDC profile"
+    OAuth code/S256, authoritative HTTPS OpenID UserInfo and resource-token
+    access supported a real Victor read-tool loop through the protected gateway. See the
+    [28-token accounting and scope](#public-development-issuer-verified-agent-flow).
+    Dashboard browser SSO retains its separately qualified local fixture below.
 
 ## Choose an access mode
 
@@ -40,6 +46,66 @@ deployments. The credential-free starter is for the separate local demonstration
 - Keep signing keys, client secrets, token files and backups private. Capture only redacted test evidence.
 - Preserve the intended tenant, existing accounts and recovery access; do not substitute another issuer.
 - A missing capability blocks the next gate. Never guess an introspection URL or downgrade authentication.
+
+## Public development issuer: verified Agent flow
+
+Verified on **2026-11-13 UTC** with the existing `https://id.anvaiops.dev`
+issuer, a protected loopback gateway and a synthetic model backend.
+
+```mermaid
+sequenceDiagram
+    participant P as Public PKCE client
+    participant I as Public Anvai Identity
+    participant V as Victor Agent
+    participant S as Protected Sandhi
+    participant M as Synthetic model
+    P->>I: OAuth code + S256, HTTPS OpenID UserInfo and resource grant
+    I-->>P: Resource token, 300-second lifetime
+    P->>V: Private token file, mode 0600
+    loop Two Agent requests using the same resource token
+        V->>S: Bearer token and conversation
+        S->>I: Introspect as a separate confidential consumer
+        I-->>S: Active token and intended resource authority
+        S->>M: One physical attempt
+        M-->>S: Original source usage
+        S-->>V: Response and 14-token paired receipt
+    end
+```
+
+| Verified boundary | Observed result |
+| --- | --- |
+| Registration | Genuine owner/passkey approval; public native Victor origin and a distinct confidential Sandhi introspection consumer |
+| Identity | Public OAuth code/S256 PKCE and authoritative HTTPS OpenID UserInfo; subject matched the owner-authorized registration |
+| Resource | Custom advertised resource-access grant, `online_gateway`, `gateway.access`, 300 seconds; audience `https://localhost:43168` |
+| Gateway route | Protected loopback **HTTP** listener; the audience URI is a resource identifier |
+| Client credential | One resource token in a private `0600` file, reused for both calls |
+| Agent | Real Victor read tool returned content matching the owned test file |
+| Provenance | Both actual wire bearer hashes and returned request IDs joined to durable execution records and the matching live issuer issuance receipt |
+
+| Synthetic source units | Request 1 | Request 2 | Total |
+| --- | ---: | ---: | ---: |
+| Physical model attempts | 1 | 1 | **2** |
+| Fresh input tokens | 2 | 2 | 4 |
+| Cache-read tokens | 6 | 6 | 12 |
+| Cache-creation tokens | 2 | 2 | 4 |
+| Output tokens | 4 | 4 | 8 |
+| Paired settled tokens | **14** | **14** | **28** |
+
+The cache categories are included in each 14-token total. Synthetic counts test
+accounting conservation; provider cache reuse, pricing and savings were not measured.
+
+| Acceptance scope | Boundary |
+| --- | --- |
+| Qualified stack | Reviewed Victor source, official published SDK **0.17.1**, and Sandhi **0.18 source candidate** |
+| Sandhi authority | Disposable local administrator binding and a fixture-only inference grant were explicit; `gateway.access` conferred no dashboard or AnvaiOps role |
+| Live coverage | Two successful requests; no additional live expiry, ACL-removal or revocation controls were performed |
+| Separate local evidence | Browser SSO/roles and lifecycle refusals below retain their own fixture provenance |
+| Unqualified behavior | Automatic refresh/renewal, live gateway browser SSO, HTTPS gateway serving and paid-provider traffic |
+
+No Cloudflare policy change was required for the actual client profiles. The
+`gateway.access` consent label is a separately tracked display correction; the
+registered purpose and issued scope were verified. Source and artifact provenance
+is recorded in the [progress ledger](../reviews/post-0.17.0-pr-train.md#public-issuer-agent-acceptance).
 
 ## Local co-design: Victor, Sandhi and AnvaiOps development IDM
 
@@ -252,7 +318,7 @@ client registration and successful login remain separate facts.
 | Actual Sandhi startup | Public discovery/JWKS with normal TLS trust passed; mode remains OIDC, with no starter access |
 | Unregistered consumer control | Missing bearer returns **401**; a synthetic, unregistered Basic consumer returns **503**, without model dispatch |
 | Generic Python user-agent probe | Edge **403**; this does not describe the tested clients' transport |
-| Sandhi/Victor live client integration | **Not qualified**; dedicated registrations and end-to-end acceptance remain open |
+| Sandhi/Victor public-issuer Agent flow | **Passed** with owner-approved distinct clients, a protected local source gateway and synthetic backend; two joined 14-token settlements |
 
 The previous schema-67 deployment lacked introspection discovery. The reviewed
 schema-70 upgrade now advertises it, preserving existing issuer configuration,
@@ -260,9 +326,10 @@ key custody and identity/admission rows. Its private backup remains on the host.
 The actual clients already identify themselves as `sandhi-oidc/0.18.0` and
 `anvai-gateway-pkce-example/1`; no browser impersonation or edge-policy change
 was used. The broker also validated public discovery, S256 and its advertised
-resource grant. No real owner/client credentials were used in these public
-checks. Successful real-account login still needs the supported owner/passkey
-registration ceremony; the local integration above does not establish it.
+resource grant. Those transport probes used no real owner/client credentials.
+The subsequent [public-issuer Agent run](#public-development-issuer-verified-agent-flow)
+completed the supported owner/passkey registration and native login path. Live
+gateway browser SSO and broader live lifecycle controls remain separate acceptance.
 [Inspect public discovery](https://id.anvaiops.dev/.well-known/openid-configuration)
 before any future rollout.
 
