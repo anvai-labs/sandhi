@@ -263,8 +263,9 @@ six refusal controls. Native module and server binary hashes bind the run to tho
 artifacts; a reported version alone is not provenance. The earlier SDK 0.17.0
 candidate evidence remains historical. Separate published-0.17.1 gateway checks
 also passed eight Agent/tool-loop cases; that released server does not gain the
-candidate audience feature. Reviewed consumer adoption, hosted CI and deployment
-remain separate gates in the
+candidate audience feature. Victor's reviewed consumer merge and all five exact
+post-merge workflows passed. The IDM source merge and both exact post-merge
+checks passed too; deployment still requires separate acceptance. Evidence is in the
 [progress ledger](../reviews/post-0.17.0-pr-train.md#three-project-identity-co-design).
 The public `id.anvaiops.dev` discovery still lacks required introspection metadata;
 the [live-host compatibility gap](#anvaiops-development-idm-discovery-checked-integration-not-qualified)
