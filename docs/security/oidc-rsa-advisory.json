@@ -4,20 +4,18 @@
   "reviewed_on": "2026-11-13",
   "expires_on": "2026-11-18",
   "adapter": "crates/sandhi-proxy/src/auth.rs",
+  "adapter_sha256": "45794265a6bf3d9bfec2022791e575fcf0bcc623cba0f6457db611ca513040f0",
   "packages": {
     "openidconnect": {
       "version": "4.1.0",
-      "source": "registry+https://github.com/rust-lang/crates.io-index"
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "checksum": "df0d098a59353679624d406825940139e2b2d554a52b64c9fb1b1bc42a11fe5c"
     },
     "rsa": {
       "version": "0.9.10",
-      "source": "registry+https://github.com/rust-lang/crates.io-index"
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "checksum": "b8573f03f5883dcaebdfcf4725caa1ecb9c15b2ef50c43a07b816e06799bb12d"
     }
   },
-  "note": "2026-11-13 OIDC 4.1.0 source/graph reassessment: auth.rs is unchanged. Compared upstream 4.0.1 and 4.1.0 core/crypto.rs verification operations: RSA still constructs RsaPublicKey from public JWKS and verifies PKCS#1/PSS signatures, with no production private signing/decryption or client assertion. rsa remains 0.9.10 and is not remediated by this upgrade; RustSec now lists >=0.10.0 as patched, outside this OIDC dependency range. Sole production consumer remains openidconnect under sandhi-proxy; neither binding graph includes RSA. The synthetic test-only private key remains disposable. Existing 2026-11-18 expiry is unchanged; independent review is required before adoption. Integration reassessment source combines the explicit resource-audience selector with OIDC 4.1.0; the selector changes only exact introspection audience matching, without adding signing, decryption, client assertions, or a cryptographic consumer. Independent exact-source review is required before adoption. 2026-11-13 optional inbound authentication amendment: independently reviewed the frozen auth.rs change adding only AuthMode selection and unauthenticated session metadata. Configured OIDC still takes precedence; invalid or unavailable selected OIDC is refused rather than falling back. Production token exchange, ID-token verification, introspection client authentication and JWKS/public-key operations are unchanged. The starter principal adds no private RSA signing/decryption, JWE, client assertion or additional cryptographic consumer. Locked openidconnect 4.1.0/rsa 0.9.10 and patched crypto-bigint graph checks passed for proxy and both binding workspaces. This updates only the reviewed adapter fingerprint/applicability note, not vulnerability status, ignore policy or the existing 2026-11-18 expiry. Full combined-source release review and tests remain separate.",
-  "publication": {
-    "form": "sanitized summary",
-    "redactions": "Private operational fingerprints are omitted; measured results and public source/version references remain.",
-    "original_records": "Original operational records are retained privately; this derivative is not a raw capture."
-  }
+  "note": "2026-11-13 OIDC 4.1.0 source/graph reassessment: auth.rs is unchanged. Compared upstream 4.0.1 and 4.1.0 core/crypto.rs verification operations: RSA still constructs RsaPublicKey from public JWKS and verifies PKCS#1/PSS signatures, with no production private signing/decryption or client assertion. rsa remains 0.9.10 and is not remediated by this upgrade; RustSec now lists >=0.10.0 as patched, outside this OIDC dependency range. Sole production consumer remains openidconnect under sandhi-proxy; neither binding graph includes RSA. The synthetic test-only private key remains disposable. Existing 2026-11-18 expiry is unchanged; independent review is required before adoption. Integration reassessment source combines the explicit resource-audience selector with OIDC 4.1.0; the selector changes only exact introspection audience matching, without adding signing, decryption, client assertions, or a cryptographic consumer. Independent exact-source review is required before adoption. 2026-11-13 optional inbound authentication amendment: independently reviewed the frozen auth.rs change adding only AuthMode selection and unauthenticated session metadata. Configured OIDC still takes precedence; invalid or unavailable selected OIDC is refused rather than falling back. Production token exchange, ID-token verification, introspection client authentication and JWKS/public-key operations are unchanged. The starter principal adds no private RSA signing/decryption, JWE, client assertion or additional cryptographic consumer. Locked openidconnect 4.1.0/rsa 0.9.10 and patched crypto-bigint graph checks passed for proxy and both binding workspaces. This updates only the reviewed adapter fingerprint/applicability note, not vulnerability status, ignore policy or the existing 2026-11-18 expiry. Full combined-source release review and tests remain separate."
 }
