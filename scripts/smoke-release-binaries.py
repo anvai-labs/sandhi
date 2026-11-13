@@ -49,6 +49,7 @@ def isolated_environment(directory, port):
         "SANDHI_VAULT_BACKEND": "credstore",
         "SANDHI_CREDENTIALS_DIR": str(directory / "credentials"),
         "SANDHI_AUTH_MODE": "tokens",
+        "SANDHI_ALLOW_LOOPBACK_HTTP": "1",  # Explicit disposable loopback fixture.
         "SANDHI_BIND": f"127.0.0.1:{port}",
         "SANDHI_LOG": "off",
         "SANDHI_SHUTDOWN_GRACE_SECS": "3",

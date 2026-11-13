@@ -13,13 +13,11 @@ Chat and Responses coding backends, with two calls per cell. SDK retries were ze
 | Source profiles | Chat: `openai_terminal_chunk_usage`; Responses: `standard` |
 | Cache observations | 15 calls reported reads: eight Chat, seven Responses |
 | Shutdown | Gateway exit 0, complete accounting inventory |
-| Artifact SHA-256 | `773deec2bcecece1bf42dab2e5ff8c7adb1bcd28133f81d6ca2b247d6dcb23a2` |
 
 The [sanitized report](artifacts/zai-router-tracked-translated-streams-qualified-2026-11-11.json)
-records the gateway binary/harness hashes, exact endpoint/model selections, SDK
+records endpoint/model selections, SDK
 versions, source counters, physical attempts and paired settlements. It identifies
-`glm-5.3`, OpenAI 2.18.0, Anthropic 0.79.0 and google-genai 1.75.0. The producer
-binary hash is `438d6ef7e44a05a4404bef26fda2e9f7537abfe1e76eb3c890bfc7082e01ed58`.
+`glm-5.3`, OpenAI 2.18.0, Anthropic 0.79.0 and google-genai 1.75.0.
 This is unreleased source evidence, not qualification of a deployed service.
 
 ```mermaid

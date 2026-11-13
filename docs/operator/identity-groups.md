@@ -1,29 +1,15 @@
 # Identity, groups and delegated agent credentials
 
-!!! note "Historical migration snapshot"
-    The deployment details below describe the original Kanidm migration investigation,
-    not a live check of today's identity service or gateway. Verify current discovery,
-    registration and installed configuration before applying them. Sandhi's trust
-    boundary is verified OIDC issuer and subject, not a particular identity product.
-
-The migration investigation verified the Kanidm domain and origin as `id.anvaiops.com` and
-`https://id.anvaiops.com`. Its existing Sandhi discovery document advertises
-`https://id.anvaiops.com/oauth2/openid/sandhi`, client `sandhi`. This is the intended
-authority for that migration. At the time, the gateway had the older
-`https://sso.singh.local:8443/oauth2/openid/sandhi` configuration; it has not been
-silently switched. A realm reset invalidated old signing-key provenance.
-
-Issuer is part of identity. Verify the current registration's public/confidential
-class, exact callback, scopes, group claims and current subject UUIDs before
-switching the gateway. An existing client must not be deleted/recreated merely
-because old credentials fail. New issuer trust is an explicit migration, never
-an availability fallback. Both authority URLs must not be treated as aliases.
+Sandhi binds authority to a verified OIDC issuer and subject. Configure the exact
+issuer, registered client, callback, scopes and verified subject values for your
+identity provider. Issuer changes are deliberate migrations; authentication errors
+must never select another issuer or a weaker authentication profile.
 
 ## Ownership
 
 | Concern | Authority |
 | --- | --- |
-| Accounts, login, MFA, membership, account disabling | Existing Kanidm/OIDC provider |
+| Accounts, login, MFA, membership, account disabling | Configured OIDC provider |
 | Identity key | Verified `(issuer, sub)`; never email or caller headers |
 | Group-to-role and group-to-inference rules | Sandhi's server-side OIDC configuration |
 | Agent credentials | Sandhi virtual-key store, linked to verified owner and grant |
@@ -55,7 +41,7 @@ rather than depending on hash-map or membership order.
     "sandhi-subscription-owner": {
       "grants": {
         "subscription": {
-          "upstream": "openai:victor-subscription-20260926",
+          "upstream": "openai:subscription-account",
           "models": ["gpt-6-astra"],
           "group": "subscription-owner",
           "budget_scope": "group:subscription-owner",
@@ -71,7 +57,7 @@ Merge this shape with the existing issuer/client/callback/CA configuration; it
 is not a complete replacement file. The subscription-owner group must represent
 the authorized account owner and their clients, not unrelated users sharing an
 entitlement. `operator` may manage budgets and alerts but cannot mutate credentials
-or infer without a grant. Group management stays in Kanidm. Configuration changes
+or infer without a grant. Group management stays in the identity provider. Configuration changes
 currently require a controlled gateway restart.
 
 `group_source=introspection` (default) reads the named claim from an active,
@@ -82,19 +68,15 @@ Only the configured group claim is consumed; UserInfo cannot replace issuer,
 audience, subject or expiry. Arrays of bounded strings are required; malformed
 claims fail closed. Missing membership grants no group-derived authority.
 
-Kanidm supports custom claims mapped from groups, with an array join strategy.
-Before enabling a binding, verify the claim in the actual UserInfo response for
-the actual human/workload identity. Discovery and an administrator's login are
-not evidence that another account has this claim. See
-[Kanidm custom claim maps](https://kanidm.github.io/kanidm/stable/integrations/oauth2/custom_claims.html).
-On September 27, both replacement brokers completed real public-HTTPS token
-exchange, introspection and UserInfo checks against `id.anvaiops.com`. The member
-has only `sandhi_agents`; accounting has only `sandhi_viewers`. The restored
-service accounts have new UUIDs, recorded in the private DS3 identity mapping.
-Do not alias their workload subjects to a human identity or reuse old UUIDs.
-The previously invalid bootstrap tokens remain unsuitable for the new authority.
-Membership removal/freshness and browser callback acceptance remain deployment
-gates; successful group issuance alone does not establish them.
+Configure the identity provider to release the chosen group claim as an array.
+Verify it in the actual UserInfo response for the intended human or workload
+identity. Discovery and an administrator's login do not establish another
+account's claim release.
+
+Verify the actual member or workload identity and its current claims before
+enabling access. Do not alias workload subjects to human identities. Qualify
+membership removal and browser callbacks separately; successful claim issuance
+alone does not establish either behavior.
 
 ## Delegated virtual keys
 
@@ -206,7 +188,7 @@ stale tokens, private-file permissions, symlinks, identity pinning, redacted
 acquisition failures, and member-agent credential propagation. Existing signed
 OIDC login, CSRF, roles, discovery and direct-provider suites remain regression gates.
 
-Deployment must additionally verify actual Kanidm group claims, member removal,
+Deployment must additionally verify actual provider group claims, member removal,
 agent key renewal, restart, and operator recovery against the configured issuer.
 The source changes are a reviewable candidate, not evidence of a live migration.
 Opt-in prompt inspection and metadata audit now have a [candidate MVP](policy-evaluation.md).
@@ -214,31 +196,14 @@ Redaction, richer audit workflows and group administration UI remain deferred. A
 permissions remain distinct from model access; no group grants arbitrary tools.
 
 
-### Current authority migration gate
+### Authority migration checks
 
-The active DS3 domain/origin and public discovery agree on `id.anvaiops.com`.
-Both administrator accounts were recovered through Kanidm's supported local
-recovery command, verified with fresh authenticated logins and exact built-in
-account UUIDs, then atomically reconciled into owner-only DS3 credential files.
-Private prior-file backups and sanitized receipts were retained. No realm reset
-or wholesale client re-registration occurred.
-
-The existing `sandhi` public client and PKCE remain intact. Its callback is still
-`https://sso.singh.local:8444/auth/callback`: this is the gateway hostname, not the
-IdP issuer, and needs browser acceptance before changing it. Missing broker
-service accounts were recreated with explicit new identities and least-privilege
-group memberships; custom `sandhi_groups` array claims were restored. Read-only
-30-day bootstrap credentials feed brokers returning 15-minute OIDC access tokens.
-Those bootstrap credentials need supervised rotation; they are not nonexpiring.
-
-The real public path initially rejected the default Python User-Agent via
-Cloudflare Browser Integrity Check. A truthful application User-Agent resolved
-it without weakening TLS or Cloudflare rules. Sandhi now identifies its OIDC
-HTTP client too; a red/green test covers all authority requests.
-
-These checks repair identity issuance. The pre-existing gateway still uses the
-old issuer configuration; no running gateway has been replaced. Stage the new
-issuer and exact UUIDs together, verify acceptance and rollback, then cut over.
+- Verify the intended issuer and its advertised HTTPS endpoints.
+- Preserve client registrations and bind verified subjects explicitly.
+- Qualify login, role admission, group claims, removal, expiry and recovery before
+  changing a managed deployment.
+- Configure each HTTP client to identify itself accurately; transport failures do
+  not justify disabling TLS or changing authentication modes.
 
 ### Extensible content policy
 

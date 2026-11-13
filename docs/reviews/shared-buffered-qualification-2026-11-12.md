@@ -27,7 +27,7 @@ reported zero, without adding them to their inclusive parents again.
 
 The Python suite includes 140 local HTTP cases covering five source paths, native
 and portable delivery, usage refusal, deterministic malformed-output refusal and
-known function fields. Candidate wheel/addon and log hashes are recorded in the
+known function fields. Measured results and scope are recorded in the
 [sanitized artifact](artifacts/shared-buffered-qualification-2026-11-12.json).
 These are synthetic source-contract tests, not live cache-lifecycle evidence.
 

@@ -139,7 +139,7 @@ def shutdown_gateway(proxy_binary, gated_provider, tmp_path):
         env = {k: v for k, v in os.environ.items()
                if not k.startswith(("SANDHI_", "SENTINELPASS_"))}
         env.update({
-            "SANDHI_AUTH_MODE": "tokens", "SANDHI_BIND": f"127.0.0.1:{port}",
+            "SANDHI_AUTH_MODE": "tokens", "SANDHI_ALLOW_LOOPBACK_HTTP": "1", "SANDHI_BIND": f"127.0.0.1:{port}",
             "SANDHI_OPENAI_KEY": REAL_OPENAI_KEY,
             "SANDHI_OPENAI_BASE": gated_provider.base,
             "SANDHI_ADMIN_TOKEN": "shutdown-test-admin",

@@ -12,7 +12,7 @@ def _environment(tmp_path, store):
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8",
-           "SANDHI_AUTH_MODE": "tokens", "SANDHI_BIND": f"127.0.0.1:{port}",
+           "SANDHI_AUTH_MODE": "tokens", "SANDHI_ALLOW_LOOPBACK_HTTP": "1", "SANDHI_BIND": f"127.0.0.1:{port}",
            "SANDHI_VAULT_BACKEND": "accounting-fixture-unavailable",
            "SANDHI_ADMIN_TOKEN": "synthetic-accounting-admin", "SANDHI_LOG": "warn"}
     if store is not None:

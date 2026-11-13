@@ -75,7 +75,7 @@ nav:
   - Operate:
       - Operator console: operator/dashboard.md
       - Backends and cache configuration: operator/backends.md
-      - Identity and access: operator/oidc-sso.md
+      - Authentication and service policy: operator/oidc-sso.md
       - Identity groups: operator/identity-groups.md
       - Durable execution and recovery: operator/buffered-accounting.md
       - Accounting wait diagnostics: operator/accounting-wait-diagnostics.md

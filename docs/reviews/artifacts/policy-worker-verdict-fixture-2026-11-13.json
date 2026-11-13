@@ -17,7 +17,6 @@
     "expected_status": 403,
     "exact_cause": "unproven; controlled deadline miss reproduces the failure mode"
   },
-  "fixture_patch_sha256": "cb16b9469df624f6b80f10848877f7f85ab5eef6739b0f4419ecfd80eaebe42f",
   "controlled_probe": {
     "normal_response_delay_ms": 350,
     "baseline_status": 503,
@@ -79,12 +78,10 @@
     "ignored": 1,
     "seconds": 1.63
   },
-  "docs_patch_sha256": "a4a0a3f07ca2360d221a6e020a2bd8f43ff402dd7883a0e15cf21fe611907454",
-  "original_production_gateway_sha256": "b43a641becc32535fcece302c94a0a8016bc68a1c5a9e14b950f3632810561fd",
   "runtime_qualification_preserved": "Production source unchanged from locally qualified1300Rust/717Sentinel/48liveGLM/8Victor and public735SDK/nativeallpass; corrective exact-tip public CI required.",
-  "evidence_sha256": {
-    "sandhi-policy-integrated-default.log": "8295e0049a1c1095dd679c6bcb467244373bcedd99e6ae3569c66b1dd78169ae",
-    "sandhi-policy-integrated-otel.log": "03435a17beabc831025caa8776a6da2aef5e1d13fd3f4781e06e06756e70f078",
-    "sandhi-180-public-sdk.log": "6fc9798650a3da216efe9cfa4fb329ce438698addbd7c3ad16dbfbea6f01d533"
+  "publication": {
+    "form": "sanitized summary",
+    "redactions": "Private artifact locations and fingerprints, process identifiers and observed correlation values are omitted or aliased. Numerical results and useful public source/version references are retained.",
+    "original_records": "Unmodified operational records and original hashes are retained privately; this derivative is not a raw capture."
   }
 }

@@ -2,19 +2,6 @@
   "evidence_kind": "integrated_cohesive_operator_ui_and_docs",
   "source_parent": "397d5372d50bc082e77a438864ec06c7983671cf",
   "author_source_base": "e02773ebf9e9583b0bcc1e8a4d2045aa3d9ee50d",
-  "changed_files_sha256": {
-    "CHANGELOG.md": "dd58b6bec666c5575a4746149fb549254d1ed258b8cd6d7c2f22e4ef91e07ed4",
-    "README.md": "f61b3816ce9cbb3103dee66f933123b519545446d803dbbf06acc4a0bf7bea5e",
-    "crates/sandhi-proxy/src/dashboard/dashboard.css": "7f1a390539a7160d651cf494c7a157e5ce472a29456515af5c3e98d658b03954",
-    "crates/sandhi-proxy/src/dashboard/dashboard.js": "c689f0f5fcb7cdb6f429fe22be89171ecd0df43e2eab13b1946010cac4f11c64",
-    "crates/sandhi-proxy/src/dashboard/index.html": "368256e7adbf037315a2e3bf93d4784a5b3df5947f018d8d6b673657e1df8032",
-    "docs/index.md": "54a27a061aec81b506a0c4ecf00fdbe0acfb0014bec48f3769eb9f5f5c849f9d",
-    "docs/operator/dashboard.md": "b0ec16aff7b681cbea15af1d30d792bca6696bd138c4b5af0c34757e38bb1287",
-    "docs/product/cache-aware-routing.md": "db7bcc633e9a16cee88cf45bcc9bb7d45745de48dd73981fa00e550afd7975df",
-    "tests/sdk-conformance/test_dashboard.py": "e8cb59c30f6b8bf9c613e0ccf8b77c6a4bf80f986e960d7094a5fef84f97f1af",
-    "docs/assets/operator-console/overview-synthetic.png": "288664c1ad4e9035208281ce514392f01f945058b29534376a9eca9e2bc5d363",
-    "docs/assets/operator-console/guide-synthetic.png": "04787296708a35a9b15318d5ded98c3e47ddd07d4177986177fb24d6f7a80ea4"
-  },
   "validation": {
     "integrated_actual_gateway_browser_suite": {
       "passed": 49,
@@ -33,28 +20,15 @@
     "javascript_syntax": "passed",
     "independent_preview_review": "Mobile390px keyboard/focus/back/reload,320pxdark/reduced-motion,nooverflow,credentialempty and external-link-rel checks passed; finalexacttipreviewseparate."
   },
-  "sha256": {
-    "integrated_browser_log": "dea10b33f14a0a84c080c7eed6d2b547915f94c4b70ea02a5cc2861855a42b3a",
-    "final_wording_browser_log": "8f19cd505b31f269be95725bbb0b1f2f94f0c8a2c3df4a4ada899a3c45b529fa",
-    "author_evidence": "2886e674ca24c01ce89b1aa48cf240923f3e1a2bcedb483fd5764c05c2c48638"
-  },
   "restored_synthetic_preview": {
     "evidence_kind": "synthetic_operator_preview",
     "source_base": "397d5372d50bc082e77a438864ec06c7983671cf",
-    "binary_sha256": "a8301d1b3b39c3679c15364e39c9ccf8b6f1b0f67e25e101c3b94275e5b46d0a",
-    "asset_sha256": {
-      "index.html": "368256e7adbf037315a2e3bf93d4784a5b3df5947f018d8d6b673657e1df8032",
-      "dashboard.js": "c689f0f5fcb7cdb6f429fe22be89171ecd0df43e2eab13b1946010cac4f11c64",
-      "dashboard.css": "7f1a390539a7160d651cf494c7a157e5ce472a29456515af5c3e98d658b03954"
-    },
     "synthetic_source_requests": 1,
     "admin_token_configured": false,
     "limits": [
       "Synthetic loopback provider and observations only; no live provider or settlement qualification.",
       "No runtime admin credential present in browser or screenshots."
-    ],
-    "build_fixture_provenance_sha256": "0c767d8a7546097926a8d11e31dcf74d67f5e1b1cb3cc5d37f9eff1a43ae5457",
-    "source_inventory_sha256": "615e9ec2e0953e460a6b8c146c1c716ce63499fd8800fb44de6e3fac3f2bc221"
+    ]
   },
   "final_agentbrowser_checks": {
     "desktop_width": 1440,
@@ -62,8 +36,7 @@
     "mobile_admin_token_empty": true,
     "mobile_document_overflow": false,
     "guide_active": true,
-    "documentation_images_refreshed_from_final_preview": true,
-    "guide_mobile_png_sha256": "e6b9af20ce3f9c79f9f167c392197365656d9abe34290cddd40bd5fb421c2246"
+    "documentation_images_refreshed_from_final_preview": true
   },
   "arithmetic_audit": {
     "summary_and_run_tree": "Existing neutral event/category sum and reasoning-overlap logic; historical rows retain magnitude fallback where flag absent.",
@@ -72,8 +45,7 @@
     "client_wire": "May combine/omit source categories, including Gemini cache writes; authoritative source evidence remains separate."
   },
   "retained_fixture_failure": {
-    "author_initial_suite": "48 passed1 failed; added test selected a nonexistent run; corrected synthetic fixture seeds a real call, focused1 then full49 passed.",
-    "log_sha256": "3c54bf48020dccef5195a221b3ff55a5684c795e90db0587a1b4025d3fedd553"
+    "author_initial_suite": "48 passed1 failed; added test selected a nonexistent run; corrected synthetic fixture seeds a real call, focused1 then full49 passed."
   },
   "limits": [
     "49 integrated functional cases preceded final review-only historical-overlap wording correction; final3affected browser cases and AgentBrowser served-byte/screenshot checks cover that correction.",
@@ -81,5 +53,10 @@
     "Prepared0.17.0/0.29.0 remain unpublished; no deployment, publication or merge.",
     "Gateway-peer/default/provider-budget identity/cache/state/reliability/package gates remain open; guide explicitly does not claim universal coverage.",
     "Preview provenance records observed bytes; no hermetic compiler read-set or reproducibility assertion."
-  ]
+  ],
+  "publication": {
+    "form": "sanitized summary",
+    "redactions": "Private artifact locations and fingerprints, process identifiers and observed correlation values are omitted or aliased. Numerical results and useful public source/version references are retained.",
+    "original_records": "Unmodified operational records and original hashes are retained privately; this derivative is not a raw capture."
+  }
 }

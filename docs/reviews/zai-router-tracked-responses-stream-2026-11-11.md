@@ -33,11 +33,9 @@ The gateway exited zero with no accounting diagnostics. Credentials and temporar
 configuration were removed with the disposable gateway; the retained report was
 checked for absence of the configured credential.
 
-Evidence: [redacted report](artifacts/zai-router-tracked-responses-stream-cache-pairs-2026-11-11.json).
+Evidence: [sanitized qualification summary](artifacts/zai-router-tracked-responses-stream-cache-pairs-2026-11-11.json).
 Finished at `2026-11-12T02:24:09Z` (November 11 locally).
 
-- Report SHA-256: `50cb12ed7ba8869d0cd811a203ae65ae9d4953078d92cf48642e10456177812d`.
-- Gateway SHA-256: `181b57b3ac860679995897e093728e086450302c1f42cf33b6a946c8320d4e5f`.
 - Source contract: [ADR-0026](../adr/0026-qualified-responses-stream-accounting.md).
 
 The parser, response owner and seven real process/SDK cases separately cover

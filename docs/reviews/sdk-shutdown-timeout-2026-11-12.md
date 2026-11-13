@@ -1,5 +1,7 @@
 # SDK shutdown timeout with retained unknown usage
 
+*Request identifiers are aliases; recorded measurements are unchanged.*
+
 The M5v vendor SDK/dashboard/CPU-origin run finished **563 passed, one failed,
 three skipped**. The failed cell was
 `test_tracked_binary_correlation_and_shutdown[streaming-unresolved-tls]`.
@@ -10,14 +12,12 @@ green SDK qualification. The failure traceback shows that the process had return
 124 by traceback rendering/teardown; it does not establish a permanent hang or
 capture the later exit timestamp.
 
-The [sanitized artifact](artifacts/sdk-shutdown-timeout-2026-11-12.json) pins the
-full log and observed stderr hash. Six identical copied binaries belong to separate
-backend fixtures; the shutdown test launched the session fixture's shared target
-binary, whose occurrence-time executable hash was not captured. The
-original pytest temporary stderr/database directory was no longer present during
-the later audit; the sanitized join and chronology were exported before cleanup.
+The [sanitized qualification summary](artifacts/sdk-shutdown-timeout-2026-11-12.json)
+records the observed outcome and its limits. The original shutdown executable was
+not pinned; verified copies belonging to separate backend fixtures and later
+snapshots cannot retroactively establish that occurrence's executable identity.
 Request
-`req_1794506155941_0` joins to its original execution, physical attempt, terminal
+`example-request-1` joins to its original execution, physical attempt, terminal
 observation and both reservations:
 
 | Evidence | Observed result |

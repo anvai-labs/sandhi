@@ -6,7 +6,7 @@ the isolated child printed the expected `transport_error` for a hostname mismatc
 then exited with signal 11 (`returncode=-11`) rather than normal termination.
 Stderr was empty; that run captured no native stack. The
 [sanitized artifact](artifacts/python-native-tls-exit-2026-11-12.json) pins the
-candidate/control wheel and log hashes.
+candidate/control outcomes and qualification limits.
 
 This is failed native-process evidence. It does not establish that TLS verification
 accepted the invalid hostname, or identify a cause in buffered accounting. The
@@ -42,7 +42,7 @@ no sleeps, forced collection, manual runtime shutdown or OS trust changes were
 introduced.
 
 The [sanitized probe artifact](artifacts/python-native-exit-debugger-probes-2026-11-12.json)
-pins wheel, extension, interpreter, harness and result hashes. Stable temporary
+summarizes interpreter, harness and measured results. Stable temporary
 native logs retain debugger events outside pytest rotation. No crash recurred, so
 there is no occurrence-specific crash stack or core. Debugger, markers, environment
 and module isolation alter timing relative to the failing full suite. These probes

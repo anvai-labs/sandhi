@@ -6,7 +6,7 @@
   "command": "cargo test --workspace",
   "test": "owned_buffered_back_leg_never_races_its_primary_settle",
   "failedCall": 174,
-  "failedRequestId": "req_1794468930018_293",
+  "failedRequestId": "example-correlation-361",
   "httpStatus": 502,
   "accountingWarning": {
     "stage": "tracked dispatch authorization unresolved",
@@ -16,7 +16,7 @@
   "originCalls": 173,
   "retained": 1,
   "lastUsageEvent": {
-    "requestId": "req_1794468929993_292",
+    "requestId": "example-correlation-360",
     "completeness": "final",
     "freshInput": 10,
     "output": 2
@@ -29,5 +29,10 @@
     "resolution from any subsequent passing run"
   ],
   "productionDeadlineChanged": false,
-  "containsCredentialsOrProviderContent": false
+  "containsCredentialsOrProviderContent": false,
+  "publication": {
+    "form": "sanitized summary",
+    "redactions": "Private artifact locations and fingerprints, process identifiers and observed correlation values are omitted or aliased. Numerical results and useful public source/version references are retained.",
+    "original_records": "Unmodified operational records and original hashes are retained privately; this derivative is not a raw capture."
+  }
 }

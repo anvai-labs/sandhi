@@ -38,9 +38,9 @@ dispatch. Pricing and billing belong to downstream systems.
 
 - **Connect with identity**
 
-    Use OIDC for standalone access. Keep provider credentials at the gateway.
+    Choose token credentials or optional OIDC. Keep provider credentials at the gateway.
 
-    [Configure SSO →](operator/oidc-sso.md)
+    [Choose an access profile →](operator/oidc-sso.md)
 
 - **Control access and capacity**
 
@@ -56,16 +56,12 @@ dispatch. Pricing and billing belong to downstream systems.
 
 </div>
 
-!!! info "Cache routing is a development candidate"
-    Sandhi **0.17.0** and Victor **0.29.0** are prepared, unpublished source versions.
-    Explicit backend/cache policy and strict source qualification are implemented;
-    live Z.AI evidence belongs to its recorded endpoint/source configuration.
-    The current candidate also separates provider labels from immutable budget
-    scopes, requires one durable HTTP execution owner and records supported same-owner
-    source-issued native proofs on that ledger. Exact-source public CI, packaging,
-    deployment and broader external-resource/provider lifecycle acceptance remain in
-    [TD-0034](td/TD-0034-protocol-neutral-router-cache-accounting.md). A docs build
-    does not release or deploy these changes.
+!!! info "Published baseline and source documentation"
+    Sandhi **0.17.1** is published. This development site also describes the
+    **0.18 source candidate** and coordinated Victor **0.29.0** integration.
+    Check [release notes](releases/v0.17.1.md) before configuring an installed
+    version. Live qualification applies to its recorded endpoint and source;
+    documentation, source integration and deployment acceptance are separate.
 
 ## One request, two responsibilities
 
@@ -97,9 +93,10 @@ flowchart LR
 
 ## Earlier release evidence and adoption gates
 
-The [published 0.14.0 release](releases/v0.14.0.md) includes Codex transport fixes,
-opt-in Rust allowance arithmetic and Rustls security repairs. Every artifact target
-is verified; consumer adoption and managed deployment remain separate gates.
+The [published 0.17.1 release](releases/v0.17.1.md) includes the protocol router,
+cache intent and durable execution foundation. Artifact verification, consumer
+adoption and managed deployment are separate gates. Earlier version-specific
+changes remain in the [0.14.0 release notes](releases/v0.14.0.md).
 
 !!! info "Current source: one durable HTTP execution contract"
     The current source requires the original `SANDHI_STORE` path and one ledger

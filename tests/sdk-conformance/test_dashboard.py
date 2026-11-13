@@ -50,7 +50,7 @@ def dashboard(proxy_binary, upstream, tmp_path, request):
     port = _free_port()
     env = {k: v for k, v in os.environ.items() if not k.startswith(("SANDHI_", "SENTINELPASS_"))}
     env.update({
-        "SANDHI_AUTH_MODE": "tokens", "SANDHI_BIND": f"127.0.0.1:{port}",
+        "SANDHI_AUTH_MODE": "tokens", "SANDHI_ALLOW_LOOPBACK_HTTP": "1", "SANDHI_BIND": f"127.0.0.1:{port}",
         "SANDHI_OPENAI_KEY": REAL_OPENAI_KEY,
         "SANDHI_OPENAI_BASE": upstream.base_url,
         "SANDHI_GEMINI_KEY": REAL_GEMINI_KEY,
@@ -744,3 +744,146 @@ def test_starter_can_protect_operator_actions_without_authenticating_inference(p
     expect(page.locator("#usage")).to_have_attribute("data-state", "ready")
     page.get_by_label("Admin token", exact=True).fill("")
     expect(page.locator("#usage")).to_have_attribute("data-state", "locked")
+
+
+@pytest.mark.parametrize("dashboard", [{}, {"oidc": True}, {"auth_mode": "none", "admin": False},
+                                       {"auth_mode": "none"}],
+                         ids=["tokens", "oidc", "starter", "starter-protected-operator"], indirect=True)
+@pytest.mark.parametrize("page", [{"tls": True}], indirect=True)
+def test_ordinary_key_mint_matches_inference_auth_not_operator_access(page, dashboard, request):
+    options = request.node.callspec.params["dashboard"]
+    minted = []
+    page.on("request", lambda req: minted.append(req.url) if req.url.endswith("/admin/keys/share") else None)
+    page.goto(dashboard.base + "/dashboard")
+    if options.get("oidc"):
+        page.get_by_role("link", name="Sign in with SSO").click()
+    elif options.get("admin", True):
+        page.get_by_label("Admin token", exact=True).fill(ADMIN_TOKEN)
+        page.get_by_role("button", name="Use token", exact=True).click()
+    expect(page.locator("#usage")).to_have_attribute("data-state", "ready")
+    page.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name="Keys & credentials", exact=True).click()
+    # Provider credential management remains available to the same administrator.
+    page.get_by_text("Add a credential", exact=True).click()
+    expect(page.locator('[data-action="addCredential"]')).to_be_enabled()
+    page.get_by_text("Mint a virtual key", exact=True).click()
+    mint = page.locator('[data-action="mintVkey"]')
+    if not options:
+        expect(page.locator("#vkey-auth-status")).to_contain_text("authenticate inference in token mode")
+        expect(mint).to_be_enabled()
+        page.get_by_label("Upstream", exact=True).fill("openai")
+        page.get_by_label("Models (csv)", exact=True).fill("gpt-mock")
+        with page.expect_response(lambda response: response.url.endswith("/admin/keys/share")) as result:
+            mint.click()
+        assert result.value.status == 200
+        expect(page.locator("#v-result")).to_contain_text("Minted")
+        assert len(minted) == 1
+    else:
+        expect(page.locator("#vkey-auth-status")).to_contain_text(
+            "inactive in OIDC mode" if options.get("oidc") else "do not restrict the shared starter")
+        expect(mint).to_be_disabled()
+        # The action itself is guarded too; a stale UI handler cannot issue an
+        # inactive ordinary key after the inference profile changes.
+        page.evaluate("mintVkey()")
+        expect(page.locator("#toasts")).to_contain_text("only in token mode")
+        assert minted == []
+
+
+@pytest.mark.parametrize("allow_delegated_keys", [False, True], ids=["default-oidc", "delegation-opt-in"])
+@pytest.mark.parametrize("page", [{"tls": True}], indirect=True)
+def test_persisted_ordinary_key_cannot_bypass_oidc(
+    proxy_binary, upstream, tmp_path, oidc_authority, page, allow_delegated_keys,
+):
+    """A key that worked before restart must not bypass the new OIDC authority."""
+    from contextlib import contextmanager
+
+    database = tmp_path / "persisted.db"
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"tls": {"cert": str(oidc_authority.certificate),
+                                          "key": str(oidc_authority.key)}}))
+    verify = ssl.create_default_context(cafile=oidc_authority.certificate)
+    body = {"model": "gpt-mock", "messages": [{"role": "user", "content": "ping"}]}
+    bearer = lambda token: {"Authorization": f"Bearer {token}"}
+
+    @contextmanager
+    def running(oidc):
+        port = _free_port()
+        base = f"https://localhost:{port}"
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("SANDHI_", "SENTINELPASS_"))}
+        env.update(SANDHI_BIND=f"127.0.0.1:{port}", SANDHI_AUTH_MODE="tokens",
+                   SANDHI_ADMIN_TOKEN=ADMIN_TOKEN, SANDHI_STORE=str(database),
+                   SANDHI_CONFIG=str(config), SANDHI_OPENAI_KEY=REAL_OPENAI_KEY,
+                   SANDHI_OPENAI_BASE=upstream.base_url, SANDHI_LEDGER_SHARDS="1")
+        if oidc:
+            oidc_authority.redirect = base + "/auth/callback"
+            policy = tmp_path / "policy.json"
+            policy.write_text(json.dumps({
+                "issuer": oidc_authority.issuer, "client_id": "sandhi-browser",
+                "redirect_url": oidc_authority.redirect, "ca_file": str(oidc_authority.certificate),
+                "allow_delegated_keys": allow_delegated_keys,
+                "max_subject_key_ttl_seconds": 300 if allow_delegated_keys else 0,
+                "subjects": {"admin": {"role": "admin", "grants": {
+                    "fixture": {"upstream": "openai", "models": ["gpt-mock"]}}}},
+            }))
+            env["SANDHI_AUTH_MODE"] = "oidc"
+            env["SANDHI_OIDC_CONFIG"] = str(policy)
+        proc = subprocess.Popen([str(proxy_binary)], env=env, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.PIPE)
+        try:
+            with httpx.Client(base_url=base, timeout=5, verify=verify) as client:
+                deadline = time.monotonic() + 15
+                while True:
+                    assert proc.poll() is None, proc.stderr.read().decode()
+                    try:
+                        if client.get("/healthz").status_code == 200:
+                            break
+                    except httpx.TransportError:
+                        pass
+                    assert time.monotonic() < deadline, "gateway startup timed out"
+                    time.sleep(0.05)
+                yield client, base
+        finally:
+            proc.terminate()
+            try:
+                proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate(timeout=5)
+
+    with running(False) as (client, _):
+        response = client.post("/admin/keys/share", headers=bearer(ADMIN_TOKEN),
+                               json={"upstream": "openai", "models": ["gpt-mock"]})
+        assert response.status_code == 200, response.text
+        ordinary_key = response.json()["virtual_key"]
+        response = client.post("/v1/chat/completions", headers=bearer(ordinary_key), json=body)
+        assert response.status_code == 200, response.text
+        missing = client.post("/v1/chat/completions", json=body)
+        assert missing.status_code == 401 and "missing virtual key" in missing.text
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM virtual_keys").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM oidc_key_delegations").fetchone()[0] == 0
+    before = len(upstream.requests)
+    with running(True) as (client, base):
+        for token in (ordinary_key, VK_OPENAI, ADMIN_TOKEN):
+            response = client.post("/v1/chat/completions", headers=bearer(token), json=body)
+            assert response.status_code == 401, response.text
+        missing = client.post("/v1/chat/completions", json=body)
+        assert missing.status_code == 401
+        assert "missing access token" in missing.text and "virtual key" not in missing.text
+        assert "Authorization" in missing.text
+        assert len(upstream.requests) == before
+        response = client.post("/v1/chat/completions", headers=bearer("fixture-access"), json=body)
+        assert response.status_code == 200, response.text
+        assert len(upstream.requests) == before + 1
+        # Use an actual verified browser session, rather than a fabricated cookie.
+        page.goto(base + "/dashboard")
+        page.get_by_role("link", name="Sign in with SSO").click()
+        expect(page.locator("#usage")).to_have_attribute("data-state", "ready")
+        cookie = next(c for c in page.context.cookies() if c["name"] == "__Host-sandhi-session")
+        mixed = {**bearer("fixture-access"), "Cookie": f"{cookie['name']}={cookie['value']}"}
+        response = client.post("/v1/chat/completions", headers=mixed, json=body)
+        assert response.status_code == 401, response.text
+        oidc_authority.introspection_status = 503
+        for token, expected in (("fixture-access", 503), (ordinary_key, 401), (ADMIN_TOKEN, 503)):
+            response = client.post("/v1/chat/completions", headers=bearer(token), json=body)
+            assert response.status_code == expected, response.text
+        assert len(upstream.requests) == before + 1

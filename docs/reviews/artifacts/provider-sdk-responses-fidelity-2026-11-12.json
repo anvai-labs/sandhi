@@ -12,34 +12,26 @@
   "passed": 564,
   "skipped": 3,
   "duration_seconds": 744.37,
-  "log_sha256": "4873f40a17465a1ae78237243c9a4141e5e8cfff9369890efa404f7b24833561",
-  "gateway_binary_sha256": "79583541e09ddde0c44c9837c02723a2ddc97487b225dc1e94041194c35eeeca",
   "distinct_gateway_fixture_copies": 6,
   "current_alias_resolves_to_fixture": 5,
   "fixture_copies": [
     {
-      "fixture": 0,
-      "sha256": "79583541e09ddde0c44c9837c02723a2ddc97487b225dc1e94041194c35eeeca"
+      "fixture": 0
     },
     {
-      "fixture": 1,
-      "sha256": "79583541e09ddde0c44c9837c02723a2ddc97487b225dc1e94041194c35eeeca"
+      "fixture": 1
     },
     {
-      "fixture": 2,
-      "sha256": "79583541e09ddde0c44c9837c02723a2ddc97487b225dc1e94041194c35eeeca"
+      "fixture": 2
     },
     {
-      "fixture": 3,
-      "sha256": "79583541e09ddde0c44c9837c02723a2ddc97487b225dc1e94041194c35eeeca"
+      "fixture": 3
     },
     {
-      "fixture": 4,
-      "sha256": "79583541e09ddde0c44c9837c02723a2ddc97487b225dc1e94041194c35eeeca"
+      "fixture": 4
     },
     {
-      "fixture": 5,
-      "sha256": "79583541e09ddde0c44c9837c02723a2ddc97487b225dc1e94041194c35eeeca"
+      "fixture": 5
     }
   ],
   "inferflux_source": "bfdf32c00ccf40c7af73b86df2eedabc20a7ae85",
@@ -54,5 +46,10 @@
     "Synthetic protocol and pinned CPU-origin evidence, not live subscription or Google issuer qualification.",
     "Three opt-in cases skipped.",
     "The separate final-source Rust workspace run failed two accounting-terminal cases; this passing SDK run does not resolve them."
-  ]
+  ],
+  "publication": {
+    "form": "sanitized summary",
+    "redactions": "Private artifact locations and fingerprints, process identifiers and observed correlation values are omitted or aliased. Numerical results and useful public source/version references are retained.",
+    "original_records": "Unmodified operational records and original hashes are retained privately; this derivative is not a raw capture."
+  }
 }

@@ -1,7 +1,8 @@
 # Policy MVP: local inspection before provider dispatch
 
-Status: implemented candidate on the subscription-gateway worktree. Opt-in,
-startup-only configuration; not a claim of production rollout or comprehensive DLP.
+Configure optional local inspection to audit, block or quarantine supported request
+content before provider dispatch. Policy is loaded at startup; this feature is
+not comprehensive data-loss prevention or a production deployment certification.
 
 Set `SANDHI_POLICY_CONFIG` to a JSON policy file and keep `SANDHI_STORE` set to a
 private durable SQLite file. An invalid policy, unknown evaluator or unavailable
@@ -166,7 +167,7 @@ budget facility; content-policy alerts need a later durable outbox.
 registration, failures, coverage, deadlines, store persistence and real router
 zero-call denials. Full workspace fmt/Clippy/coverage and codegen remain gates.
 The message-hub script `docs/validation/policy-live-acceptance.py` runs the solution
-policy with real Kanidm identities against an isolated gateway and synthetic
+policy with a historical identity-provider fixture against an isolated gateway and synthetic
 provider. It also verifies short/durable keys, directory-evidence requirements,
 private metadata receipts and restart/revocation. It never uses a real LLM or
 restarts the production gateway.

@@ -861,7 +861,11 @@ fn require_execution_owner(state: &Arc<ProxyState>) -> std::io::Result<()> {
     initialize_execution(state).map_err(std::io::Error::other)
 }
 
-/// Bind and serve until shutdown.
+/// Bind and serve plaintext until shutdown.
+///
+/// The embedder owns transport security. This API does not read the standalone
+/// TLS/loopback exception environment; use the TLS serving counterpart for
+/// credential-bearing listeners outside a protected local termination boundary.
 ///
 /// Delegates to [`serve_with_shutdown_timeout`] with a never-resolving
 /// shutdown, so embedders on this path get the SAME connection-level
@@ -3804,7 +3808,12 @@ fn inference_credential<'a>(
             dialect,
             StatusCode::UNAUTHORIZED,
             &format!(
-                "missing virtual key: send it as {}",
+                "missing {}: send it as {}",
+                if state.oidc.is_some() {
+                    "access token"
+                } else {
+                    "virtual key"
+                },
                 dialect.credential_hint()
             ),
         )

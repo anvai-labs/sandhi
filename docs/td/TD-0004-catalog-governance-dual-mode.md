@@ -12,7 +12,7 @@
 - **First consumer:** Victor
 - **Started:** 2026-07-23
 - **Related:** TD-0002 (typed provider runtime), TD-0003 (operator surface — keys/budgets/attribution),
-  Victor **ADR-018** (Sandhi adoption), Victor **FEP-0020** (usage gateway), AnvaiOps **ADR-0047**
+  Victor **ADR-018** (Sandhi adoption), Victor **FEP-0020** (usage gateway), [Sandhi architecture](../adr/0001-sandhi-architecture-and-wire-contract.md)
   (OSS/commercial open-core line), ProximaDB ADR-067 (sibling consumer)
 
 ## Decision
@@ -35,7 +35,7 @@ named here (transport, metering, keys, budgets, attribution) is already Sandhi's
    (TD-0002: Sandhi owns wire facts; Victor owns model policy).
 2. **Measure vs. price (unchanged, from TD-0003).** Sandhi measures in **neutral tokens** and
    attributes; it does **not** price. `$`/tier/SKU/invoicing stays the downstream commercial layer
-   (AnvaiOps ADR-0047 D4). The catalog therefore carries **no pricing** fields.
+   (the public Sandhi architecture contract). The catalog therefore carries **no pricing** fields.
 
 ## DeepSeek catalog refresh (2026-11-13)
 
@@ -347,7 +347,7 @@ W1b/W2/W3 — its falsifications (soft-cap reservation, durabilize-first, byte-i
   catalog *data*; Victor owns catalog *policy* (selection/exposure/UX)."
 - **Victor FEP-0020** (L247-249) — same revision; add a § reference to this TD as authoritative for the
   catalog contract.
-- **AnvaiOps ADR-0047** — note the catalog-data line moved into the OSS core (still no pricing).
+- [Sandhi architecture](../adr/0001-sandhi-architecture-and-wire-contract.md) — note the catalog-data line moved into the OSS core (still no pricing).
 
 ## Open questions
 

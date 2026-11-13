@@ -22,8 +22,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "chat-chat-0-0",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "The user wants a Python identity function named `identity`. An identity function returns its input unchanged. They want only the code returned.\n\nThe simplest form:\n\n```python\ndef identity(x):\n    return x\n```\n\nShould I make it more general with type hints? A generic version could be:\n\n```python\ndef identity(x):\n    return x\n```\n\nThat's the standard, simple answer. Keep it minimal since they asked for \"only the code.\"",
       "usage": [
         {
           "completion_tokens": 106,
@@ -50,8 +48,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "chat-chat-1-0",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "The user wants a Python identity function named `identity`. An identity function returns its argument unchanged. They want only the code returned.",
       "usage": [
         {
           "completion_tokens": 40,
@@ -78,8 +74,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "chat-messages-0-0",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "cache_creation_input_tokens": 0,
@@ -101,8 +95,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "chat-messages-1-0",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "The user wants a Python identity function named `identity` that returns its argument. This is a very simple function. They want only the code returned.",
       "usage": [
         {
           "input_tokens": 0,
@@ -129,8 +121,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "chat-gemini-0-0",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "candidates_token_count": 14,
@@ -152,8 +142,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "chat-gemini-1-0",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "candidates_token_count": 14,
@@ -175,8 +163,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "chat-responses-0-0",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 25,
@@ -202,8 +188,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "chat-responses-1-0",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 25,
@@ -229,14 +213,11 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "messages-chat-0-0",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "completion_tokens": 39,
           "prompt_tokens": 25,
           "total_tokens": 64,
-          "completion_tokens_details": {},
           "prompt_tokens_details": {
             "cached_tokens": 0
           }
@@ -267,8 +248,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "messages-messages-0-0",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "The user wants a Python identity function named `identity`. An identity function returns its argument unchanged. They want only the code, so I should just provide the code without explanation.\n\nThe simplest version:\n\n```python\ndef identity(x):\n    return x\n```\n\nShould I use type hints? A more complete version might be:\n\n```python\ndef identity(x):\n    return x\n```\n\nOr with generics:\n\n```python\nfrom typing import TypeVar\n\nT = TypeVar('T')\n\ndef identity(x: T) -> T:\n    return x\n```\n\nBut the user asked for something simple. \"Return only the code\" suggests they want minimal output. The simplest, cleanest answer:\n\n```python\ndef identity(x):\n    return x\n```\n\nThat's the standard identity function. I'll return just that.",
       "usage": [
         {
           "cache_read_input_tokens": 0,
@@ -293,8 +272,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "messages-messages-1-0",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "The user wants a Python identity function named `identity`. An identity function returns its argument unchanged. They want only the code, no explanations.\n\nThe simplest form:\n\n```python\ndef identity(x):\n    return x\n```\n\nShould I make it accept multiple arguments? The classic identity function takes one argument and returns it. Some versions use `*args` to return args as a tuple, but the standard identity function is single-argument.\n\nThey said \"Return only the code\" \u2014 so just output the code, minimal or no explanation. I'll provide just the code block.",
       "usage": [
         {
           "input_tokens": 0,
@@ -323,8 +300,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "messages-gemini-0-0",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "candidates_token_count": 146,
@@ -345,8 +320,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "messages-gemini-1-0",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "candidates_token_count": 100,
@@ -367,8 +340,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "messages-responses-0-0",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 25,
@@ -394,8 +365,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "messages-responses-1-0",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 25,
@@ -421,8 +390,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "responses-chat-0-0",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "completion_tokens": 39,
@@ -449,8 +416,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "responses-chat-1-0",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "completion_tokens": 87,
@@ -477,8 +442,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "responses-messages-0-0",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "cache_creation_input_tokens": 0,
@@ -500,8 +463,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "responses-messages-1-0",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 0,
@@ -528,8 +489,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "responses-gemini-0-0",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "candidates_token_count": 14,
@@ -551,8 +510,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "responses-gemini-1-0",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "candidates_token_count": 14,
@@ -574,8 +531,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "responses-responses-0-0",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 25,
@@ -602,8 +557,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "responses-responses-1-0",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 25,
@@ -624,7 +577,6 @@
       "usage_rows_observed": 24
     }
   ],
-  "gateway_binary_sha256": "ac59e78e1ce5fe1592ece6193f35c5794e27b0edc57adde74660c026e7272165",
   "usage_events": [
     {
       "backend": "external",
@@ -639,7 +591,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 92,
-      "request_id": "req_1794432767049_0",
+      "request_id": "example-correlation-131",
       "step_id": "chat-chat-0-0",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
@@ -659,7 +611,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 26,
-      "request_id": "req_1794432769480_1",
+      "request_id": "example-correlation-133",
       "step_id": "chat-chat-1-0",
       "time_to_first_token_ms": 942,
       "time_to_first_token_source": "boundary",
@@ -679,7 +631,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 26,
-      "request_id": "req_1794432770957_2",
+      "request_id": "example-correlation-135",
       "step_id": "chat-messages-0-0",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
@@ -699,7 +651,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 30,
-      "request_id": "req_1794432772879_3",
+      "request_id": "example-correlation-137",
       "step_id": "chat-messages-1-0",
       "time_to_first_token_ms": 1248,
       "time_to_first_token_source": "boundary",
@@ -719,7 +671,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 94,
-      "request_id": "req_1794432774660_4",
+      "request_id": "example-correlation-138",
       "step_id": "chat-gemini-0-0",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
@@ -739,7 +691,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 88,
-      "request_id": "req_1794432778038_5",
+      "request_id": "example-correlation-140",
       "step_id": "chat-gemini-1-0",
       "time_to_first_token_ms": 1509,
       "time_to_first_token_source": "boundary",
@@ -759,7 +711,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 64,
-      "request_id": "req_1794432780359_6",
+      "request_id": "example-correlation-142",
       "step_id": "chat-responses-0-0",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
@@ -779,7 +731,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 25,
-      "request_id": "req_1794432782665_7",
+      "request_id": "example-correlation-144",
       "step_id": "chat-responses-1-0",
       "time_to_first_token_ms": 906,
       "time_to_first_token_source": "boundary",
@@ -799,7 +751,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794432784109_8",
+      "request_id": "example-correlation-146",
       "step_id": "messages-chat-0-0",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
@@ -819,7 +771,7 @@
       "provider": "anthropic",
       "reasoning_included": null,
       "reasoning_tokens": null,
-      "request_id": "req_1794432785936_9",
+      "request_id": "example-correlation-148",
       "step_id": "messages-chat-1-0",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
@@ -839,7 +791,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794432876082_10",
+      "request_id": "example-correlation-186",
       "step_id": "messages-messages-0-0",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
@@ -859,7 +811,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794432879712_11",
+      "request_id": "example-correlation-190",
       "step_id": "messages-messages-1-0",
       "time_to_first_token_ms": 934,
       "time_to_first_token_source": "boundary",
@@ -879,7 +831,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794432881953_12",
+      "request_id": "example-correlation-191",
       "step_id": "messages-gemini-0-0",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
@@ -899,7 +851,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794432884802_13",
+      "request_id": "example-correlation-192",
       "step_id": "messages-gemini-1-0",
       "time_to_first_token_ms": 898,
       "time_to_first_token_source": "boundary",
@@ -919,7 +871,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794432887028_14",
+      "request_id": "example-correlation-193",
       "step_id": "messages-responses-0-0",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
@@ -939,7 +891,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794432889533_15",
+      "request_id": "example-correlation-194",
       "step_id": "messages-responses-1-0",
       "time_to_first_token_ms": 1227,
       "time_to_first_token_source": "boundary",
@@ -959,7 +911,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 25,
-      "request_id": "req_1794432891997_16",
+      "request_id": "example-correlation-195",
       "step_id": "responses-chat-0-0",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
@@ -979,7 +931,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 73,
-      "request_id": "req_1794432893752_17",
+      "request_id": "example-correlation-196",
       "step_id": "responses-chat-1-0",
       "time_to_first_token_ms": 1490,
       "time_to_first_token_source": "boundary",
@@ -999,7 +951,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 84,
-      "request_id": "req_1794432896191_18",
+      "request_id": "example-correlation-197",
       "step_id": "responses-messages-0-0",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
@@ -1019,7 +971,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 82,
-      "request_id": "req_1794432898138_19",
+      "request_id": "example-correlation-198",
       "step_id": "responses-messages-1-0",
       "time_to_first_token_ms": 781,
       "time_to_first_token_source": "boundary",
@@ -1039,7 +991,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 76,
-      "request_id": "req_1794432900023_20",
+      "request_id": "example-correlation-199",
       "step_id": "responses-gemini-0-0",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
@@ -1059,7 +1011,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 32,
-      "request_id": "req_1794432901851_21",
+      "request_id": "example-correlation-200",
       "step_id": "responses-gemini-1-0",
       "time_to_first_token_ms": 810,
       "time_to_first_token_source": "boundary",
@@ -1079,7 +1031,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 88,
-      "request_id": "req_1794432903308_22",
+      "request_id": "example-correlation-201",
       "step_id": "responses-responses-0-0",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
@@ -1099,7 +1051,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 133,
-      "request_id": "req_1794432905512_23",
+      "request_id": "example-correlation-202",
       "step_id": "responses-responses-1-0",
       "time_to_first_token_ms": 882,
       "time_to_first_token_source": "boundary",
@@ -1122,5 +1074,10 @@
     "errors": [
       "messages-chat-1-0: error"
     ]
+  },
+  "publication": {
+    "form": "sanitized summary",
+    "redactions": "Private artifact locations and fingerprints, process identifiers and observed correlation values are omitted or aliased. Numerical results and useful public source/version references are retained. Generated provider text and reasoning transcripts are omitted.",
+    "original_records": "Unmodified operational records and original hashes are retained privately; this derivative is not a raw capture."
   }
 }

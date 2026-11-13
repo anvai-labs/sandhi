@@ -1,10 +1,12 @@
 # Local terminal-settlement wait: worker running without publication
 
+*Request identifiers are aliases; recorded measurements are unchanged.*
+
 The corrected Responses source `eec5eaa` reproduced two failures in a full
 `cargo test --workspace` run while the current-SDK suite ran in another process.
 This run is not green. The
 [sanitized artifact](artifacts/accounting-running-wait-2026-11-12.json)
-retains the command, log hash, failed assertions and timing records.
+retains the command, failed assertions and timing records.
 
 `owned_buffered_back_leg_never_races_its_primary_settle` returned 502 on call 170
 with automatic retry forbidden, one retained accounting job and a final usage
@@ -42,7 +44,7 @@ for the current marker meanings and limits.
 A workspace run of the M5t working candidate on parent `a74a8f1` reproduced the
 back-leg test failure at call 128. The
 [separate artifact](artifacts/accounting-admission-wait-2026-11-12.json) pins the
-log and source-diff hashes. Request `req_1794503158593_254` returned a non-retryable
+observed timing and failure. Request `example-request-2` returned a non-retryable
 502 with one retained job. Its admission worker started after 45 microseconds,
 remained in `reserve_call` for about 2 seconds, and had no publication timestamp
 when the unchanged HTTP wait expired. No outer-lock busy result or retry backoff
@@ -50,7 +52,7 @@ was observed. This trace is inside the store reserve call; it still cannot
 distinguish inner shard acquisition, SQLite statements, commit I/O or scheduling.
 
 The 127 upstream calls belong to preceding requests. The printed final usage
-event belongs to `req_1794503158374_253`, not the failed admission. Do not assign
+event belongs to `example-request-1`, not the failed admission. Do not assign
 that event or a receipt to request 254. This occurrence precedes dispatch and
 does not establish the cause of the earlier terminal-settlement stalls. The
 run is failed evidence; it is not a green workspace qualification. Further

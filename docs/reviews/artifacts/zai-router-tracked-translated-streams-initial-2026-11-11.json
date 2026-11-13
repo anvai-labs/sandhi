@@ -20,7 +20,6 @@
     "chat": "standard",
     "responses": "standard"
   },
-  "harness_sha256": "5720ba8206fac9ed64092c3dc7f86b86504253eeb0f37cf93c4d8500000acedb",
   "cache_pairs": true,
   "cells": [
     {
@@ -30,8 +29,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "chat-chat-1-0",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "The user provides a synthetic reference module with a bunch of fixture functions, then asks: \"Write a Python identity function named identity. Return only the code.\"\n\nSo they want a function named `identity` that returns its input value. Just return the code.",
       "usage": [
         {
           "completion_tokens": 65,
@@ -58,8 +55,6 @@
       "repeat": 1,
       "status": "ok",
       "step_id": "chat-chat-1-1",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "The user wants a Python identity function named `identity`. Just return the code.",
       "usage": [
         {
           "completion_tokens": 30,
@@ -158,8 +153,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "responses-chat-1-0",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "",
       "usage": [
         {
           "completion_tokens": 105,
@@ -186,8 +179,6 @@
       "repeat": 1,
       "status": "ok",
       "step_id": "responses-chat-1-1",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "",
       "usage": [
         {
           "completion_tokens": 80,
@@ -214,8 +205,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "responses-messages-1-0",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 0,
@@ -248,8 +237,6 @@
       "repeat": 1,
       "status": "ok",
       "step_id": "responses-messages-1-1",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 0,
@@ -282,8 +269,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "responses-gemini-1-0",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "",
       "usage": [
         {
           "cached_content_token_count": 3776,
@@ -306,8 +291,6 @@
       "repeat": 1,
       "status": "ok",
       "step_id": "responses-gemini-1-1",
-      "text": "```python\ndef identity(value): return value\n```",
-      "reasoning": "",
       "usage": [
         {
           "cached_content_token_count": 3776,
@@ -330,8 +313,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "responses-responses-1-0",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 3781,
@@ -358,8 +339,6 @@
       "repeat": 1,
       "status": "ok",
       "step_id": "responses-responses-1-1",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 3781,
@@ -380,7 +359,6 @@
       "usage_rows_observed": 16
     }
   ],
-  "gateway_binary_sha256": "f9f76b46828b72b41bfa34f031d26db5b84659095d80d10f9d2cd403e4dba2bc",
   "usage_events": [
     {
       "backend": "external",
@@ -395,7 +373,7 @@
       "provider": "zai",
       "reasoning_included": null,
       "reasoning_tokens": null,
-      "request_id": "req_1794457214338_0",
+      "request_id": "example-correlation-302",
       "step_id": "chat-chat-1-0",
       "time_to_first_token_ms": 1860,
       "time_to_first_token_source": "boundary",
@@ -415,7 +393,7 @@
       "provider": "zai",
       "reasoning_included": null,
       "reasoning_tokens": null,
-      "request_id": "req_1794457217097_1",
+      "request_id": "example-correlation-303",
       "step_id": "chat-chat-1-1",
       "time_to_first_token_ms": 1974,
       "time_to_first_token_source": "boundary",
@@ -435,7 +413,7 @@
       "provider": "zai",
       "reasoning_included": null,
       "reasoning_tokens": null,
-      "request_id": "req_1794457219170_2",
+      "request_id": "example-correlation-304",
       "step_id": "chat-messages-1-0",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
@@ -455,7 +433,7 @@
       "provider": "zai",
       "reasoning_included": null,
       "reasoning_tokens": null,
-      "request_id": "req_1794457224549_3",
+      "request_id": "example-correlation-305",
       "step_id": "chat-messages-1-1",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
@@ -475,7 +453,7 @@
       "provider": "zai",
       "reasoning_included": null,
       "reasoning_tokens": null,
-      "request_id": "req_1794457226920_4",
+      "request_id": "example-correlation-306",
       "step_id": "chat-gemini-1-0",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
@@ -495,7 +473,7 @@
       "provider": "zai",
       "reasoning_included": null,
       "reasoning_tokens": null,
-      "request_id": "req_1794457230025_5",
+      "request_id": "example-correlation-307",
       "step_id": "chat-gemini-1-1",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
@@ -515,7 +493,7 @@
       "provider": "zai",
       "reasoning_included": null,
       "reasoning_tokens": null,
-      "request_id": "req_1794457233237_6",
+      "request_id": "example-correlation-308",
       "step_id": "chat-responses-1-0",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
@@ -535,7 +513,7 @@
       "provider": "zai",
       "reasoning_included": null,
       "reasoning_tokens": null,
-      "request_id": "req_1794457235681_7",
+      "request_id": "example-correlation-309",
       "step_id": "chat-responses-1-1",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
@@ -555,7 +533,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 91,
-      "request_id": "req_1794457237905_8",
+      "request_id": "example-correlation-310",
       "step_id": "responses-chat-1-0",
       "time_to_first_token_ms": 1672,
       "time_to_first_token_source": "boundary",
@@ -575,7 +553,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 66,
-      "request_id": "req_1794457241204_9",
+      "request_id": "example-correlation-311",
       "step_id": "responses-chat-1-1",
       "time_to_first_token_ms": 1756,
       "time_to_first_token_source": "boundary",
@@ -595,7 +573,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 37,
-      "request_id": "req_1794457243773_10",
+      "request_id": "example-correlation-312",
       "step_id": "responses-messages-1-0",
       "time_to_first_token_ms": 937,
       "time_to_first_token_source": "boundary",
@@ -615,7 +593,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 21,
-      "request_id": "req_1794457245543_11",
+      "request_id": "example-correlation-313",
       "step_id": "responses-messages-1-1",
       "time_to_first_token_ms": 1037,
       "time_to_first_token_source": "boundary",
@@ -635,7 +613,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 16,
-      "request_id": "req_1794457247097_12",
+      "request_id": "example-correlation-314",
       "step_id": "responses-gemini-1-0",
       "time_to_first_token_ms": 1112,
       "time_to_first_token_source": "boundary",
@@ -655,7 +633,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 65,
-      "request_id": "req_1794457248579_13",
+      "request_id": "example-correlation-315",
       "step_id": "responses-gemini-1-1",
       "time_to_first_token_ms": 875,
       "time_to_first_token_source": "boundary",
@@ -675,7 +653,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 25,
-      "request_id": "req_1794457250515_14",
+      "request_id": "example-correlation-316",
       "step_id": "responses-responses-1-0",
       "time_to_first_token_ms": 998,
       "time_to_first_token_source": "boundary",
@@ -695,7 +673,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 24,
-      "request_id": "req_1794457251997_15",
+      "request_id": "example-correlation-317",
       "step_id": "responses-responses-1-1",
       "time_to_first_token_ms": 1683,
       "time_to_first_token_source": "boundary",
@@ -705,9 +683,7 @@
   ],
   "executions": [
     {
-      "request_id": "req_1794457214338_0",
-      "execution_id": "c0c4985f7ddb784f093c410a3d62af9519f9209bd6ddb7500fe0008215dc1eef",
-      "attempt_id": "c44cde50f1e9db22cbf65089d7e5595cd6981b2ca02073a69bc2bd5d1d177e77",
+      "request_id": "example-correlation-302",
       "authorized_at": 1794457214,
       "frozen_charge": null,
       "primary_scope": "group:zai-qualification",
@@ -756,7 +732,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "c44cde50f1e9db22cbf65089d7e5595cd6981b2ca02073a69bc2bd5d1d177e77",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794457214361,
         "terminal": {
@@ -785,9 +760,7 @@
       }
     },
     {
-      "request_id": "req_1794457217097_1",
-      "execution_id": "d4aa8a2acb3c81b1ed306de5b7d5126326824a188b2861e1c7fa005bcaad2956",
-      "attempt_id": "3863b5146cbc9a89645bb0cfdb7db48c51a9642422aba034f16add72ab16ecf4",
+      "request_id": "example-correlation-303",
       "authorized_at": 1794457217,
       "frozen_charge": null,
       "primary_scope": "group:zai-qualification",
@@ -836,7 +809,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "3863b5146cbc9a89645bb0cfdb7db48c51a9642422aba034f16add72ab16ecf4",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794457217117,
         "terminal": {
@@ -865,9 +837,7 @@
       }
     },
     {
-      "request_id": "req_1794457219170_2",
-      "execution_id": "ff5663d13623115507cad84275aafd08d9c1c5b341ec070d0ade0a0acaffa551",
-      "attempt_id": "a05dee355dd0e09e0dfac14457bb1ab6c84d18688aea35aefb44f0f783507ee5",
+      "request_id": "example-correlation-304",
       "authorized_at": 1794457219,
       "frozen_charge": null,
       "primary_scope": "group:zai-qualification",
@@ -916,7 +886,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "a05dee355dd0e09e0dfac14457bb1ab6c84d18688aea35aefb44f0f783507ee5",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794457219206,
         "terminal": {
@@ -940,9 +909,7 @@
       }
     },
     {
-      "request_id": "req_1794457224549_3",
-      "execution_id": "de4af7318b1ae80450dbf28e52e668f37eed0cdd2eb0acff78b7573f6dc2b1c1",
-      "attempt_id": "62546004d9c864c1a50156b9a2e5dab373fb39feb6cabc419cf9e54bf806a076",
+      "request_id": "example-correlation-305",
       "authorized_at": 1794457224,
       "frozen_charge": null,
       "primary_scope": "group:zai-qualification",
@@ -991,7 +958,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "62546004d9c864c1a50156b9a2e5dab373fb39feb6cabc419cf9e54bf806a076",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794457224574,
         "terminal": {
@@ -1015,9 +981,7 @@
       }
     },
     {
-      "request_id": "req_1794457226920_4",
-      "execution_id": "224b977e16989e6a54303759ca78b837d840ec60862438faa018f52d2ff26c3d",
-      "attempt_id": "46eb30ec59bc3e690ee12efe6593193c6a715e821c90b5f2897a20b85e9a8602",
+      "request_id": "example-correlation-306",
       "authorized_at": 1794457226,
       "frozen_charge": null,
       "primary_scope": "group:zai-qualification",
@@ -1066,7 +1030,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "46eb30ec59bc3e690ee12efe6593193c6a715e821c90b5f2897a20b85e9a8602",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794457226944,
         "terminal": {
@@ -1090,9 +1053,7 @@
       }
     },
     {
-      "request_id": "req_1794457230025_5",
-      "execution_id": "be4efecc65e3bbec8880e2e444a77f63b1545cfa792b02b829d9574ec2cf09a8",
-      "attempt_id": "42f52138f01482e15f3cb5ee035fb76e585f0374c9d94333987c06d7e8faea9d",
+      "request_id": "example-correlation-307",
       "authorized_at": 1794457230,
       "frozen_charge": null,
       "primary_scope": "group:zai-qualification",
@@ -1141,7 +1102,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "42f52138f01482e15f3cb5ee035fb76e585f0374c9d94333987c06d7e8faea9d",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794457230054,
         "terminal": {
@@ -1165,9 +1125,7 @@
       }
     },
     {
-      "request_id": "req_1794457233237_6",
-      "execution_id": "e814ffef25d9445847a25bc24034cbaf0a7069ed5721e34e366164bc9e67003f",
-      "attempt_id": "9f5aef183e1e88ede4cc9e5fcceefeb6c33876a4f6f3db41fca006be91c1ca8c",
+      "request_id": "example-correlation-308",
       "authorized_at": 1794457233,
       "frozen_charge": null,
       "primary_scope": "group:zai-qualification",
@@ -1216,7 +1174,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "9f5aef183e1e88ede4cc9e5fcceefeb6c33876a4f6f3db41fca006be91c1ca8c",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794457233275,
         "terminal": {
@@ -1240,9 +1197,7 @@
       }
     },
     {
-      "request_id": "req_1794457235681_7",
-      "execution_id": "cc93dae3cd495ebb7dbd680fe65e2939c0ed6bae1ef787c7f767b28e2128c458",
-      "attempt_id": "e71125d2b34caf740661cc7d9d24264e243916e0e1382f1edf9151db6073db11",
+      "request_id": "example-correlation-309",
       "authorized_at": 1794457235,
       "frozen_charge": null,
       "primary_scope": "group:zai-qualification",
@@ -1291,7 +1246,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "e71125d2b34caf740661cc7d9d24264e243916e0e1382f1edf9151db6073db11",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794457235758,
         "terminal": {
@@ -1315,9 +1269,7 @@
       }
     },
     {
-      "request_id": "req_1794457237905_8",
-      "execution_id": "cd165cdf84f4aeee134482858527467c44115861a87deb2ab92d73572a6a84d9",
-      "attempt_id": "e284872ac5359b3790ee7e4c6da01045626124f631110b999f296eb503aa9662",
+      "request_id": "example-correlation-310",
       "authorized_at": 1794457237,
       "frozen_charge": 3886,
       "primary_scope": "group:zai-qualification",
@@ -1328,7 +1280,6 @@
       "upstream_actual": 3886,
       "upstream_settled": 1,
       "upstream_settled_at": 1794457241,
-      "receipt_id": "bb66e351b6f672b71d3230ec1ef4e518509e2f04bb4f58ee8d113fafedc0dfcb",
       "charged_tokens": 3886,
       "receipt_settled_at": 1794457241,
       "context": {
@@ -1366,7 +1317,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "e284872ac5359b3790ee7e4c6da01045626124f631110b999f296eb503aa9662",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794457237938,
         "terminal": {
@@ -1401,9 +1351,7 @@
       }
     },
     {
-      "request_id": "req_1794457241204_9",
-      "execution_id": "555263288594c194cb11fda0ce798e13e60b96eb59ce744240178834e053fc24",
-      "attempt_id": "a40d2e5b2f9f782e21a9c024a31228829cd23dcc664028b8c10980b9d5d299b9",
+      "request_id": "example-correlation-311",
       "authorized_at": 1794457241,
       "frozen_charge": 3861,
       "primary_scope": "group:zai-qualification",
@@ -1414,7 +1362,6 @@
       "upstream_actual": 3861,
       "upstream_settled": 1,
       "upstream_settled_at": 1794457243,
-      "receipt_id": "f41b81d2c16f572027044cb269262bb093ba2f6fd517775b65750ba51c907b5b",
       "charged_tokens": 3861,
       "receipt_settled_at": 1794457243,
       "context": {
@@ -1452,7 +1399,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "a40d2e5b2f9f782e21a9c024a31228829cd23dcc664028b8c10980b9d5d299b9",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794457241255,
         "terminal": {
@@ -1487,9 +1433,7 @@
       }
     },
     {
-      "request_id": "req_1794457243773_10",
-      "execution_id": "0ddf9fbb849bd2f1f94c1b89d222750ffcd1d1d6caded792e5888ba5d63f296f",
-      "attempt_id": "1535aa9ff4f705d8164a70f36c1f04c398d662c2fe0a49a2bfcaa8de28248831",
+      "request_id": "example-correlation-312",
       "authorized_at": 1794457243,
       "frozen_charge": 3832,
       "primary_scope": "group:zai-qualification",
@@ -1500,7 +1444,6 @@
       "upstream_actual": 3832,
       "upstream_settled": 1,
       "upstream_settled_at": 1794457245,
-      "receipt_id": "092d33861f6f99970913947d80a0fed992d28b9d9f869e33276a1b0b4973d62f",
       "charged_tokens": 3832,
       "receipt_settled_at": 1794457245,
       "context": {
@@ -1538,7 +1481,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "1535aa9ff4f705d8164a70f36c1f04c398d662c2fe0a49a2bfcaa8de28248831",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794457243821,
         "terminal": {
@@ -1573,9 +1515,7 @@
       }
     },
     {
-      "request_id": "req_1794457245543_11",
-      "execution_id": "e31b43d20399b57e1d555a04e350f82856d62129523193e7026a0a4fb4f663ed",
-      "attempt_id": "efe4dbd95b503267238de15c042c1891424cf3dcfa2d88162aeec4737af368b5",
+      "request_id": "example-correlation-313",
       "authorized_at": 1794457245,
       "frozen_charge": 3816,
       "primary_scope": "group:zai-qualification",
@@ -1586,7 +1526,6 @@
       "upstream_actual": 3816,
       "upstream_settled": 1,
       "upstream_settled_at": 1794457247,
-      "receipt_id": "517b7df4c1750510e5a99a4de952b73064303380b309e5dd84a08a64d04af4c4",
       "charged_tokens": 3816,
       "receipt_settled_at": 1794457247,
       "context": {
@@ -1624,7 +1563,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "efe4dbd95b503267238de15c042c1891424cf3dcfa2d88162aeec4737af368b5",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794457245576,
         "terminal": {
@@ -1659,9 +1597,7 @@
       }
     },
     {
-      "request_id": "req_1794457247097_12",
-      "execution_id": "7a69379c063dcaf78d167dfe9f446e98c341782af45cfe4a81711e81af31f3da",
-      "attempt_id": "f5f1535f325d2d92d012658eccc26bc4221b530d69460e98d39207d44eaa44bd",
+      "request_id": "example-correlation-314",
       "authorized_at": 1794457247,
       "frozen_charge": 3811,
       "primary_scope": "group:zai-qualification",
@@ -1672,7 +1608,6 @@
       "upstream_actual": 3811,
       "upstream_settled": 1,
       "upstream_settled_at": 1794457248,
-      "receipt_id": "18f904c9284c3d3d8e23f111eadd1705147757ac60a06e7b65e5cc1fa055614a",
       "charged_tokens": 3811,
       "receipt_settled_at": 1794457248,
       "context": {
@@ -1710,7 +1645,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "f5f1535f325d2d92d012658eccc26bc4221b530d69460e98d39207d44eaa44bd",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794457247120,
         "terminal": {
@@ -1745,9 +1679,7 @@
       }
     },
     {
-      "request_id": "req_1794457248579_13",
-      "execution_id": "0628bc9b824999938c9b85cf037b2aadf430c602bed7aa120e88fffbcb7dc8ac",
-      "attempt_id": "211edba0a97721257762e5891770896e0972321cbadb82ff331c5395502a0fe7",
+      "request_id": "example-correlation-315",
       "authorized_at": 1794457248,
       "frozen_charge": 3859,
       "primary_scope": "group:zai-qualification",
@@ -1758,7 +1690,6 @@
       "upstream_actual": 3859,
       "upstream_settled": 1,
       "upstream_settled_at": 1794457250,
-      "receipt_id": "7a779988461be0728c5d55836197d1e610b331a9a10a321984629c5891016e22",
       "charged_tokens": 3859,
       "receipt_settled_at": 1794457250,
       "context": {
@@ -1796,7 +1727,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "211edba0a97721257762e5891770896e0972321cbadb82ff331c5395502a0fe7",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794457248601,
         "terminal": {
@@ -1831,9 +1761,7 @@
       }
     },
     {
-      "request_id": "req_1794457250515_14",
-      "execution_id": "107f8f05987a9b0a5af444dad8a58b7586195321ba413532f2d95ee84df30156",
-      "attempt_id": "692f86b858b5c6e14854cdbcc9893da5412315494378df1cf6aa3ca54d8c0ac9",
+      "request_id": "example-correlation-316",
       "authorized_at": 1794457250,
       "frozen_charge": 3820,
       "primary_scope": "group:zai-qualification",
@@ -1844,7 +1772,6 @@
       "upstream_actual": 3820,
       "upstream_settled": 1,
       "upstream_settled_at": 1794457251,
-      "receipt_id": "f43eebc0536f2d504a6bf2544867614b307a2f0609102711e7db5120ff54ff89",
       "charged_tokens": 3820,
       "receipt_settled_at": 1794457251,
       "context": {
@@ -1882,7 +1809,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "692f86b858b5c6e14854cdbcc9893da5412315494378df1cf6aa3ca54d8c0ac9",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794457250525,
         "terminal": {
@@ -1917,9 +1843,7 @@
       }
     },
     {
-      "request_id": "req_1794457251997_15",
-      "execution_id": "4058f2f37fe9081d5a134cfbc01463a71e68914d772c01b3960422d4f72e6e7f",
-      "attempt_id": "22c9036048c2f558b7ef07508c8360b7dc5f1a3924bc4418610b1f4f4a2c4ca0",
+      "request_id": "example-correlation-317",
       "authorized_at": 1794457252,
       "frozen_charge": 3819,
       "primary_scope": "group:zai-qualification",
@@ -1930,7 +1854,6 @@
       "upstream_actual": 3819,
       "upstream_settled": 1,
       "upstream_settled_at": 1794457254,
-      "receipt_id": "381cec6a83937572e113d516dce28a3d2636cf822696c26eab1bb79f3389b190",
       "charged_tokens": 3819,
       "receipt_settled_at": 1794457254,
       "context": {
@@ -1968,7 +1891,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "22c9036048c2f558b7ef07508c8360b7dc5f1a3924bc4418610b1f4f4a2c4ca0",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794457252006,
         "terminal": {
@@ -2015,35 +1937,35 @@
   "gateway_exit_code": 124,
   "accounting_diagnostics": [
     {
-      "request_id": "req_1794457214338_0",
+      "request_id": "example-correlation-302",
       "reason": "unresolved_observation"
     },
     {
-      "request_id": "req_1794457217097_1",
+      "request_id": "example-correlation-303",
       "reason": "unresolved_observation"
     },
     {
-      "request_id": "req_1794457219170_2",
+      "request_id": "example-correlation-304",
       "reason": "unresolved_observation"
     },
     {
-      "request_id": "req_1794457224549_3",
+      "request_id": "example-correlation-305",
       "reason": "unresolved_observation"
     },
     {
-      "request_id": "req_1794457226920_4",
+      "request_id": "example-correlation-306",
       "reason": "unresolved_observation"
     },
     {
-      "request_id": "req_1794457230025_5",
+      "request_id": "example-correlation-307",
       "reason": "unresolved_observation"
     },
     {
-      "request_id": "req_1794457233237_6",
+      "request_id": "example-correlation-308",
       "reason": "unresolved_observation"
     },
     {
-      "request_id": "req_1794457235681_7",
+      "request_id": "example-correlation-309",
       "reason": "unresolved_observation"
     }
   ],
@@ -2081,5 +2003,10 @@
       "chat-responses-1-0: tracked evidence invalid (missing or duplicate attempt/receipt identity)",
       "chat-responses-1-1: tracked evidence invalid (missing or duplicate attempt/receipt identity)"
     ]
+  },
+  "publication": {
+    "form": "sanitized summary",
+    "redactions": "Private artifact locations and fingerprints, process identifiers and observed correlation values are omitted or aliased. Numerical results and useful public source/version references are retained. Generated provider text and reasoning transcripts are omitted.",
+    "original_records": "Unmodified operational records and original hashes are retained privately; this derivative is not a raw capture."
   }
 }

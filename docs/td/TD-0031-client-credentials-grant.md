@@ -1,7 +1,7 @@
 # TD-0031: Non-interactive client-credentials grant
 
 **Status:** Implemented (this change) · **Mode:** `tokens` (OIDC-mode counterpart noted below)
-**Driver:** homelab clients (message-hub triage, victor serve) authenticate to the LAN
+**Driver:** self-hosted automation clients authenticate to the LAN
 gateway with long-lived static virtual keys. Static keys go stale on rotation
 (observed 2026-09-29: profile keys outlived the gateway's key store → every
 inference call 401/502'd until an operator noticed), and the only non-interactive
@@ -28,9 +28,9 @@ too much authority for a routine client refresh.
   tables; rotation = edit + restart, matching every other static config.
 - **No new crypto**: opaque CSPRNG secrets + hash-only persistence +
   constant-time compare. No JWT signing — that would add a new RSA/JWT use
-  site under the oidc-rsa-advisory guard. In true OIDC mode the IdP remains
-  the token issuer (Kanidm service-account exchange, TD-0029); this endpoint
-  is the tokens-mode counterpart.
+  site under the oidc-rsa-advisory guard. In OIDC mode the configured identity
+  provider remains the token issuer; use its qualified workload flow (TD-0029).
+  This endpoint is the tokens-mode counterpart.
 
 ## Hardening
 

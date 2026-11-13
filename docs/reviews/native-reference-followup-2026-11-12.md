@@ -26,7 +26,7 @@ Issuance cleanup still deletes at most 256 expired rows atomically. Up to 128 de
 
 ## Validation and limits
 
-The [artifact](artifacts/native-reference-followup-2026-11-12.json) records source/log hashes and exact focused results. Store tests include the independently reproduced 1,000-expired-row counterexample, atomic rollback and full-owner-quota progress. HTTP tests cover both delivery modes, public serving/restart, read-only/malformed storage, cross-dialect selected references, inactive buckets, canonical-input preservation, explicit/default output bounds, count-only, established-session fencing and fidelity status preservation. Source accounting and zero-send/lease assertions remain in the earlier ownership matrices.
+The [artifact](artifacts/native-reference-followup-2026-11-12.json) records exact focused results and the public source context. Store tests include the independently reproduced 1,000-expired-row counterexample, atomic rollback and full-owner-quota progress. HTTP tests cover both delivery modes, public serving/restart, read-only/malformed storage, cross-dialect selected references, inactive buckets, canonical-input preservation, explicit/default output bounds, count-only, established-session fencing and fidelity status preservation. Source accounting and zero-send/lease assertions remain in the earlier ownership matrices.
 
 An initial provider-unit attempt lacked sandbox permission to bind localhost fixtures; its socket failures are retained separately from the network-enabled result. A feature-check invocation used an invalid feature spelling and is likewise retained as an invocation error. Neither is classified as a product regression or a passing check.
 

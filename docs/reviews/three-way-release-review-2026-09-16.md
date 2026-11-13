@@ -1,8 +1,8 @@
 # Three-way co-design: cumulative adversarial review and delivery gates
 
 Review scope: InferFlux producer → Sandhi proxy/typed binding → Victor consumption and pricing,
-including S1-S5's cumulative diff against Sandhi main. This is a same-session code/behavior
-review, not itself an independent reviewer attestation. Subsequent independent reviews and
+including S1-S5's cumulative diff against Sandhi main. This bounded source/behavior
+review is separate from an independent reviewer attestation. Subsequent independent reviews and
 remote evidence are recorded below. No claim of loaded-model or GPU validation from CPU tests.
 
 ## Release inventory at review start
@@ -13,14 +13,10 @@ remote evidence are recorded below. No claim of loaded-model or GPU validation f
 | Sandhi | develop `aea3b56`; main `39d2998` | v0.6.1 | S1-S5 not promoted or published |
 | Victor | #1066 `3b5aa2b0d` is in main and v0.9.4 | v0.9.4 | Package still pins sandhi-gateway 0.5.0 |
 
-The earlier TD “Complete” meant integration, not delivery. Owner approved Sandhi v0.7.0 on
-all four target groups, InferFlux v0.3.0, and Victor v0.9.5 after green gates. A subsequent
-rebase-first investigation prepared a broader v0.10.0 candidate, but the owner's final scope
-decision explicitly selects a **focused Victor v0.9.5 cut from main `4e4e0d640`**, excluding
-unrelated develop changes. Superseded Victor #1104/#1106 are closed and their branches retained;
-their source reviews remain historical, not approval to include that scope. Further merges
-require the second account's approving review; no admin review bypass is authorized.
-No immutable tag is moved.
+This is a historical qualification record from September 2026. Its integration
+and publication statuses describe that checkpoint; use current release notes for
+installation and compatibility. Reviewed scope remains distinct from unrelated
+consumer changes, and published tags remain immutable.
 
 ## Current delivery checkpoint (2026-09-17)
 
@@ -118,7 +114,7 @@ tags. It is an unsigned local process guard, not a GitHub approval or tamper-pro
 - Strengthened exact-pin SDK origin suite: 16 passed, both think-tag and harmony fixtures.
 - Victor targeted semantics/transport/conformance/parser/stream tests: 158 passed before the
   real-probe-discovered Pydantic fix; expanded tests and three-way probe are release gates below.
-- Candidate Python wheel built from this worktree; installed in isolated `/tmp/codesign-review-venv`.
+- Candidate Python wheel built from the reviewed source; installed in an isolated virtual environment.
 - Actual Victor policy → candidate binding → proxy → pinned InferFlux probe: 2 passed, covering
   buffered and streamed calls for both reasoning families, inclusion flags, provenance, and auth.
 

@@ -1,6 +1,8 @@
 # OpenAI subscription gateway: Victor / sandhi co-design
 
-Status: implemented on the subscription-gateway branches; release promotion remains gated.
+Use this profile to keep a supported subscription access lease at Sandhi while
+Victor sends gateway credentials. Version and provider acceptance remain bounded
+by the [protocol and credential matrix](product/protocol-and-credential-matrix.md).
 
 ## Ownership and request path
 

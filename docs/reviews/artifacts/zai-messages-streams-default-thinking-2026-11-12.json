@@ -19,7 +19,6 @@
   "endpoint_profiles": {
     "messages": "anthropic_implicit_cache"
   },
-  "harness_sha256": "c353b10868231915803368ca832ba05ac7d408d84080e2de155c9baa23e4d0a0",
   "cache_pairs": true,
   "cells": [
     {
@@ -53,8 +52,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "messages-messages-1-0",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "The user wants a Python identity function named `identity`. Return only the code.",
       "usage": [
         {
           "input_tokens": 0,
@@ -83,8 +80,6 @@
       "repeat": 1,
       "status": "ok",
       "step_id": "messages-messages-1-1",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "The user wants an identity function named `identity` that returns the value passed to it. This is a trivial request.",
       "usage": [
         {
           "input_tokens": 0,
@@ -155,7 +150,6 @@
       "usage_rows_observed": 8
     }
   ],
-  "gateway_binary_sha256": "189aac89230b76b36494e23e396760e678d9c6ef155bdc300f6e28b918a445b2",
   "usage_events": [
     {
       "backend": "external",
@@ -170,7 +164,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794463329511_0",
+      "request_id": "example-correlation-336",
       "step_id": "messages-chat-1-0",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
@@ -190,7 +184,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794463333613_1",
+      "request_id": "example-correlation-337",
       "step_id": "messages-chat-1-1",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
@@ -210,7 +204,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794463335594_2",
+      "request_id": "example-correlation-338",
       "step_id": "messages-messages-1-0",
       "time_to_first_token_ms": 1220,
       "time_to_first_token_source": "boundary",
@@ -230,7 +224,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794463337232_3",
+      "request_id": "example-correlation-339",
       "step_id": "messages-messages-1-1",
       "time_to_first_token_ms": 2292,
       "time_to_first_token_source": "boundary",
@@ -250,7 +244,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794463339904_4",
+      "request_id": "example-correlation-340",
       "step_id": "messages-gemini-1-0",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
@@ -270,7 +264,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794463347443_5",
+      "request_id": "example-correlation-341",
       "step_id": "messages-gemini-1-1",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
@@ -290,7 +284,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794463350105_6",
+      "request_id": "example-correlation-342",
       "step_id": "messages-responses-1-0",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
@@ -310,7 +304,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794463352912_7",
+      "request_id": "example-correlation-343",
       "step_id": "messages-responses-1-1",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
@@ -320,9 +314,7 @@
   ],
   "executions": [
     {
-      "request_id": "req_1794463329511_0",
-      "execution_id": "f072b6d0b1f6c6aba03d97c7c33e91da71822fc5f794b6b8654ec3dde2174985",
-      "attempt_id": "43eabb0d40be44e0e65335ecda54900d2439a7eca9539e61ef6358ae005c92a4",
+      "request_id": "example-correlation-336",
       "authorized_at": 1794463329,
       "frozen_charge": 0,
       "primary_scope": "group:zai-qualification",
@@ -371,7 +363,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "43eabb0d40be44e0e65335ecda54900d2439a7eca9539e61ef6358ae005c92a4",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794463329536,
         "terminal": {
@@ -401,9 +392,7 @@
       }
     },
     {
-      "request_id": "req_1794463333613_1",
-      "execution_id": "77dcbc6e319dd33223ee14818d8329755debbbe8e000d92f1b65bd5712162675",
-      "attempt_id": "78eda120fd695c9fe73bcb4fc49bedf48ac52b2999b07b98a30258c458a83650",
+      "request_id": "example-correlation-337",
       "authorized_at": 1794463333,
       "frozen_charge": 0,
       "primary_scope": "group:zai-qualification",
@@ -452,7 +441,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "78eda120fd695c9fe73bcb4fc49bedf48ac52b2999b07b98a30258c458a83650",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794463333637,
         "terminal": {
@@ -482,9 +470,7 @@
       }
     },
     {
-      "request_id": "req_1794463335594_2",
-      "execution_id": "cc06b9829656c4a60dc993a022f2b1931c506c73576f77ca725730072867929f",
-      "attempt_id": "32a3b69218c978986b5ce58fa5b110dbb5f7507f621a2e791c99051f30d1165d",
+      "request_id": "example-correlation-338",
       "authorized_at": 1794463335,
       "frozen_charge": 3811,
       "primary_scope": "group:zai-qualification",
@@ -495,7 +481,6 @@
       "upstream_actual": 3811,
       "upstream_settled": 1,
       "upstream_settled_at": 1794463337,
-      "receipt_id": "615a6b978090cafba7ab7ff1413a7e1ab6339e11d2a0baed6de4cd7be23d0178",
       "charged_tokens": 3811,
       "receipt_settled_at": 1794463337,
       "context": {
@@ -533,7 +518,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "32a3b69218c978986b5ce58fa5b110dbb5f7507f621a2e791c99051f30d1165d",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794463335603,
         "terminal": {
@@ -567,9 +551,7 @@
       }
     },
     {
-      "request_id": "req_1794463337232_3",
-      "execution_id": "6c4e6ad4aaa707750744018aedf9fad5a49e7603e508f5f57b027391f199ee48",
-      "attempt_id": "8188aa13c4ce6b13c9cad22c9d8df34662eac2b4b2e245dce05d01da6cdb9320",
+      "request_id": "example-correlation-339",
       "authorized_at": 1794463337,
       "frozen_charge": 3819,
       "primary_scope": "group:zai-qualification",
@@ -580,7 +562,6 @@
       "upstream_actual": 3819,
       "upstream_settled": 1,
       "upstream_settled_at": 1794463339,
-      "receipt_id": "4ae914fc5c45b8bae1e03ee7ebda5176968aaef3ca316442389a6437bbe4d0f1",
       "charged_tokens": 3819,
       "receipt_settled_at": 1794463339,
       "context": {
@@ -618,7 +599,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "8188aa13c4ce6b13c9cad22c9d8df34662eac2b4b2e245dce05d01da6cdb9320",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794463337240,
         "terminal": {
@@ -652,9 +632,7 @@
       }
     },
     {
-      "request_id": "req_1794463339904_4",
-      "execution_id": "62e9dda2a6387b96bc662f982e4da380f31409e47803482c2c55926f9ffad1f1",
-      "attempt_id": "d3198d12caefe17a8eefd40a92c32c6fec21aa7befc1641126a3309d11080910",
+      "request_id": "example-correlation-340",
       "authorized_at": 1794463339,
       "frozen_charge": 0,
       "primary_scope": "group:zai-qualification",
@@ -703,7 +681,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "d3198d12caefe17a8eefd40a92c32c6fec21aa7befc1641126a3309d11080910",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794463339927,
         "terminal": {
@@ -733,9 +710,7 @@
       }
     },
     {
-      "request_id": "req_1794463347443_5",
-      "execution_id": "280b62bfbe002ee7b27a82fd375e140f4d622ec781a1c244f877470fc2f34426",
-      "attempt_id": "f9ed7ef0bc3f5f12e63d05b07dd72084cf945a82136013291ca5301ac5691195",
+      "request_id": "example-correlation-341",
       "authorized_at": 1794463347,
       "frozen_charge": 0,
       "primary_scope": "group:zai-qualification",
@@ -784,7 +759,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "f9ed7ef0bc3f5f12e63d05b07dd72084cf945a82136013291ca5301ac5691195",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794463347467,
         "terminal": {
@@ -814,9 +788,7 @@
       }
     },
     {
-      "request_id": "req_1794463350105_6",
-      "execution_id": "7375a224a3e0b4f2c8a77bffa128137b04a9a3c19f9716e5ba2a941c0f40e2b1",
-      "attempt_id": "314db2b6f340d64418b0e6afa223d500a827310ad8d8b1e7910c663bfacc4159",
+      "request_id": "example-correlation-342",
       "authorized_at": 1794463350,
       "frozen_charge": 0,
       "primary_scope": "group:zai-qualification",
@@ -865,7 +837,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "314db2b6f340d64418b0e6afa223d500a827310ad8d8b1e7910c663bfacc4159",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794463350130,
         "terminal": {
@@ -895,9 +866,7 @@
       }
     },
     {
-      "request_id": "req_1794463352912_7",
-      "execution_id": "42e17aee8f1d733961823b9bab02b1946620a122344e03e657ee277ea629505b",
-      "attempt_id": "0a2704b704c0d8b53c697a9ecd0a849355e072d19bb511987b958f3ca0cd892d",
+      "request_id": "example-correlation-343",
       "authorized_at": 1794463352,
       "frozen_charge": 0,
       "primary_scope": "group:zai-qualification",
@@ -946,7 +915,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "0a2704b704c0d8b53c697a9ecd0a849355e072d19bb511987b958f3ca0cd892d",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794463352936,
         "terminal": {
@@ -988,27 +956,27 @@
   "gateway_exit_code": 124,
   "accounting_diagnostics": [
     {
-      "request_id": "req_1794463329511_0",
+      "request_id": "example-correlation-336",
       "reason": "unresolved_observation"
     },
     {
-      "request_id": "req_1794463333613_1",
+      "request_id": "example-correlation-337",
       "reason": "unresolved_observation"
     },
     {
-      "request_id": "req_1794463339904_4",
+      "request_id": "example-correlation-340",
       "reason": "unresolved_observation"
     },
     {
-      "request_id": "req_1794463347443_5",
+      "request_id": "example-correlation-341",
       "reason": "unresolved_observation"
     },
     {
-      "request_id": "req_1794463350105_6",
+      "request_id": "example-correlation-342",
       "reason": "unresolved_observation"
     },
     {
-      "request_id": "req_1794463352912_7",
+      "request_id": "example-correlation-343",
       "reason": "unresolved_observation"
     }
   ],
@@ -1040,5 +1008,10 @@
       "messages-responses-1-0: tracked evidence invalid (missing or duplicate attempt/receipt identity)",
       "messages-responses-1-1: tracked evidence invalid (missing or duplicate attempt/receipt identity)"
     ]
+  },
+  "publication": {
+    "form": "sanitized summary",
+    "redactions": "Private artifact locations and fingerprints, process identifiers and observed correlation values are omitted or aliased. Numerical results and useful public source/version references are retained. Generated provider text and reasoning transcripts are omitted.",
+    "original_records": "Unmodified operational records and original hashes are retained privately; this derivative is not a raw capture."
   }
 }

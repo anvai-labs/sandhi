@@ -19,7 +19,6 @@
     "CI failed before evaluator/provider call-count assertions or receipt checks; those counts are not established for the public failure.",
     "A controlled delayed valid evaluator reproduces the status mismatch, but does not establish the CI cause."
   ],
-  "failed_log_sha256": "c32f198298dbb343e2342f2afc4014c8e8152a9d3605a665c2d30421582b6463",
   "runners": [
     {
       "job": "lint-title",
@@ -133,5 +132,10 @@
         "ubuntu-24.04"
       ]
     }
-  ]
+  ],
+  "publication": {
+    "form": "sanitized summary",
+    "redactions": "Private artifact locations and fingerprints, process identifiers and observed correlation values are omitted or aliased. Numerical results and useful public source/version references are retained.",
+    "original_records": "Unmodified operational records and original hashes are retained privately; this derivative is not a raw capture."
+  }
 }

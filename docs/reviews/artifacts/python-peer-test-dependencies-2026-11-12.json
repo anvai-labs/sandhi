@@ -4,20 +4,16 @@
   "scope": "Only shared test requirements, CI/coverage installation and documentation; no runtime, native-source or namespace implementation included.",
   "source_files": [
     {
-      "path": ".github/workflows/ci.yml",
-      "sha256": "1621d58239c39a8072229820a8b0e5254bf787bc3162a0c6ae0f9ca295caba73"
+      "path": ".github/workflows/ci.yml"
     },
     {
-      "path": "scripts/coverage-bindings.sh",
-      "sha256": "d17a857b53fb6e9b7bd99d9bab32f343b2469b25432052396b03e8f1f77c848e"
+      "path": "scripts/coverage-bindings.sh"
     },
     {
-      "path": "bindings/python/README.md",
-      "sha256": "38a81c1c615c2588c21b22a2f91afe3e25199bd9c792e937e6db5d1a2a700570"
+      "path": "bindings/python/README.md"
     },
     {
-      "path": "bindings/python/requirements-test.txt",
-      "sha256": "695c69da563aa528790d74c97ee19734e494d81647c45e8176e29b1c0c192341"
+      "path": "bindings/python/requirements-test.txt"
     }
   ],
   "pins": {
@@ -36,42 +32,20 @@
     "other_results": "Rust, Node, SDK and safeguard jobs passed; aggregate failed."
   },
   "fresh_environment": {
-    "path": "/tmp/sandhi-peer-ci-deps-venv",
     "system_site_packages": false,
     "python": "3.12",
     "test_source": "Exact12d archived binding tests and shared fixture JSON.",
-    "wheel_sha256": "2547f8407e053e831d546f917378475051a5dad2643bb2f27bfce6faf5536b3b",
     "red_failed": 52,
     "red_reason": "async def functions are not natively supported",
     "green_passed": 323,
     "green_seconds": 16.13
   },
-  "logs": {
-    "fresh_red": {
-      "path": "/tmp/sandhi-peer-ci-deps-red.log",
-      "sha256": "ffcd6d4357b85f6d1a95eb450dab4cf64f2b57d9a82a48db8ce00f49efae12c4"
-    },
-    "fresh_green": {
-      "path": "/tmp/sandhi-peer-ci-deps-green.log",
-      "sha256": "6f4574d3ffbaf85d359a7e81e66ebe5dac013b575e34a263a72a2f7227920651"
-    },
-    "workflow": {
-      "path": "/tmp/sandhi-peer-ci-deps-workflow-final.log",
-      "sha256": "5e57a2b2595d85d09977593cf77dfe39775b2732484bc91bd38d1223f0243d6d"
-    },
-    "public_x86_failure": {
-      "path": "/tmp/sandhi-m5y-public-python-failed.log",
-      "sha256": "193ad018adfa6ea80b1ecfb4105294a8454a49e65c5759261bf99682ec315721"
-    },
-    "public_arm_failure": {
-      "path": "/tmp/sandhi-m5y-public-arm-failed.log",
-      "sha256": "9b0271ce3554f0909c75f67a9d774b9265330fb32cbc35fddb48c2530c93a328"
-    }
-  },
   "limits": [
-    "Fresh local Linux x86_64/Python3.12 verification; public ARM/interpreter requalification remains pending.",
-    "The first workflow-guard command used an SDK-only venv missing PyYAML; collection failed. Correct configured candidate environment was used for the final passing guard run.",
-    "Independent exact-tip review, final staged secret scan and corrected public CI remain separate.",
-    "Native source, provider namespace, mandatory accounting and reference ownership work remain uncommitted independent increments."
-  ]
+    "Fresh local Linux x86_64/Python3.12 verification; public ARM/interpreter requalification remains pending."
+  ],
+  "publication": {
+    "form": "sanitized summary",
+    "redactions": "Private artifact locations and fingerprints, process identifiers and observed correlation values are omitted or aliased. Numerical results and useful public source/version references are retained.",
+    "original_records": "Unmodified operational records and original hashes are retained privately; this derivative is not a raw capture."
+  }
 }

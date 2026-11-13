@@ -15,13 +15,11 @@
   },
   "denied_path_checks": "passed: unauthorized and exhausted budget did not dispatch",
   "elapsed_seconds": 66.28154768998502,
-  "full_report_canonical_sha256": "eba3703293b22586f094cc69510da29e5f738701804b6a439d1eb71940e679ce",
   "host": {
     "affinity_cpus": 16,
     "binary_profile_and_features": "caller-supplied binary; not inferred from filename",
     "binary_revision": "8ae84019d7dd5919ea5d242a31c67befa6ff0a4c",
     "binary_revision_verified": false,
-    "binary_sha256": "6fd2fc285b203e3eac6dd87fc84d02d464e01c9669f346b7fbce582b50077ace",
     "cgroup_cpu_max": null,
     "cgroup_memory_max": null,
     "cpu_model": "AMD Ryzen 9 7950X 16-Core Processor",
@@ -52,7 +50,6 @@
       "completed": 128,
       "completed_per_second": 178.40358857786586,
       "elapsed_seconds": 0.7174743569921702,
-      "errors": {},
       "first_content_ms": {
         "mean": 41.54089559460772,
         "p50": 43.568772030994296,
@@ -61,7 +58,6 @@
         "samples": 128
       },
       "fixed_arrival_rate": null,
-      "generator_rejected": [],
       "lane": "provider-sse",
       "latency_ms": {
         "mean": 44.215439408617385,
@@ -149,9 +145,7 @@
       "completed": 128,
       "completed_per_second": 49.24207254024795,
       "elapsed_seconds": 2.5994031809968874,
-      "errors": {},
       "fixed_arrival_rate": 50.0,
-      "generator_rejected": [],
       "lane": "translation-unary",
       "latency_ms": {
         "mean": 40.41629422181359,
@@ -239,9 +233,7 @@
       "completed": 128,
       "completed_per_second": 143.66862107008004,
       "elapsed_seconds": 0.8909391560009681,
-      "errors": {},
       "fixed_arrival_rate": null,
-      "generator_rejected": [],
       "lane": "transparent-unary",
       "latency_ms": {
         "mean": 53.95368846075144,
@@ -329,9 +321,7 @@
       "completed": 128,
       "completed_per_second": 146.0136086638457,
       "elapsed_seconds": 0.8766306180041283,
-      "errors": {},
       "fixed_arrival_rate": null,
-      "generator_rejected": [],
       "lane": "translation-unary",
       "latency_ms": {
         "mean": 53.17152287943827,
@@ -419,7 +409,6 @@
       "completed": 128,
       "completed_per_second": 49.33474065949443,
       "elapsed_seconds": 2.5945205810130574,
-      "errors": {},
       "first_content_ms": {
         "mean": 48.25281478042598,
         "p50": 48.91213803784922,
@@ -428,7 +417,6 @@
         "samples": 128
       },
       "fixed_arrival_rate": 50.0,
-      "generator_rejected": [],
       "lane": "translation-sse",
       "latency_ms": {
         "mean": 52.959718638703634,
@@ -510,7 +498,6 @@
       "completed": 128,
       "completed_per_second": 49.56080221897928,
       "elapsed_seconds": 2.582686200970784,
-      "errors": {},
       "first_content_ms": {
         "mean": 43.12255329477921,
         "p50": 44.58651499589905,
@@ -519,7 +506,6 @@
         "samples": 128
       },
       "fixed_arrival_rate": 50.0,
-      "generator_rejected": [],
       "lane": "provider-sse",
       "latency_ms": {
         "mean": 44.115963562489924,
@@ -607,9 +593,7 @@
       "completed": 128,
       "completed_per_second": 49.32490678327724,
       "elapsed_seconds": 2.5950378489797004,
-      "errors": {},
       "fixed_arrival_rate": 50.0,
-      "generator_rejected": [],
       "lane": "transparent-unary",
       "latency_ms": {
         "mean": 39.02171431536772,
@@ -691,9 +675,7 @@
       "completed": 128,
       "completed_per_second": 49.485484782781604,
       "elapsed_seconds": 2.586617076944094,
-      "errors": {},
       "fixed_arrival_rate": 50.0,
-      "generator_rejected": [],
       "lane": "provider-unary",
       "latency_ms": {
         "mean": 29.276668927195715,
@@ -781,7 +763,6 @@
       "completed": 128,
       "completed_per_second": 49.406344099523665,
       "elapsed_seconds": 2.5907604040112346,
-      "errors": {},
       "first_content_ms": {
         "mean": 49.42073951406201,
         "p50": 49.439667025581,
@@ -790,7 +771,6 @@
         "samples": 128
       },
       "fixed_arrival_rate": 50.0,
-      "generator_rejected": [],
       "lane": "transparent-sse",
       "latency_ms": {
         "mean": 50.573101669669995,
@@ -878,7 +858,6 @@
       "completed": 128,
       "completed_per_second": 135.74387878177646,
       "elapsed_seconds": 0.9429522800492123,
-      "errors": {},
       "first_content_ms": {
         "mean": 54.01379626982816,
         "p50": 55.08103600004688,
@@ -887,7 +866,6 @@
         "samples": 128
       },
       "fixed_arrival_rate": null,
-      "generator_rejected": [],
       "lane": "transparent-sse",
       "latency_ms": {
         "mean": 57.184193396551564,
@@ -975,7 +953,6 @@
       "completed": 128,
       "completed_per_second": 130.07458610669218,
       "elapsed_seconds": 0.9840507960179821,
-      "errors": {},
       "first_content_ms": {
         "mean": 51.087832611301565,
         "p50": 52.14296601479873,
@@ -984,7 +961,6 @@
         "samples": 128
       },
       "fixed_arrival_rate": null,
-      "generator_rejected": [],
       "lane": "translation-sse",
       "latency_ms": {
         "mean": 59.62617023533312,
@@ -1066,9 +1042,7 @@
       "completed": 128,
       "completed_per_second": 124.38507239549183,
       "elapsed_seconds": 1.0290623909677379,
-      "errors": {},
       "fixed_arrival_rate": null,
-      "generator_rejected": [],
       "lane": "provider-unary",
       "latency_ms": {
         "mean": 49.67161944568943,
@@ -1156,9 +1130,7 @@
       "completed": 128,
       "completed_per_second": 135.127405819691,
       "elapsed_seconds": 0.9472541800350882,
-      "errors": {},
       "fixed_arrival_rate": null,
-      "generator_rejected": [],
       "lane": "transparent-unary",
       "latency_ms": {
         "mean": 55.278581293350726,
@@ -1240,7 +1212,6 @@
       "completed": 128,
       "completed_per_second": 49.533422154550784,
       "elapsed_seconds": 2.5841138050309382,
-      "errors": {},
       "first_content_ms": {
         "mean": 41.92282046778928,
         "p50": 42.67047200119123,
@@ -1249,7 +1220,6 @@
         "samples": 128
       },
       "fixed_arrival_rate": 50.0,
-      "generator_rejected": [],
       "lane": "provider-sse",
       "latency_ms": {
         "mean": 42.91191784295734,
@@ -1337,7 +1307,6 @@
       "completed": 128,
       "completed_per_second": 133.8613005707182,
       "elapsed_seconds": 0.9562136289896443,
-      "errors": {},
       "first_content_ms": {
         "mean": 54.444027846329845,
         "p50": 55.72582199238241,
@@ -1346,7 +1315,6 @@
         "samples": 128
       },
       "fixed_arrival_rate": null,
-      "generator_rejected": [],
       "lane": "transparent-sse",
       "latency_ms": {
         "mean": 57.698889753282856,
@@ -1434,7 +1402,6 @@
       "completed": 128,
       "completed_per_second": 131.73995694760134,
       "elapsed_seconds": 0.9716110659646802,
-      "errors": {},
       "first_content_ms": {
         "mean": 50.27165739784323,
         "p50": 51.53523595072329,
@@ -1443,7 +1410,6 @@
         "samples": 128
       },
       "fixed_arrival_rate": null,
-      "generator_rejected": [],
       "lane": "translation-sse",
       "latency_ms": {
         "mean": 58.5143861690085,
@@ -1525,9 +1491,7 @@
       "completed": 128,
       "completed_per_second": 185.2061229597004,
       "elapsed_seconds": 0.691121859010309,
-      "errors": {},
       "fixed_arrival_rate": null,
-      "generator_rejected": [],
       "lane": "provider-unary",
       "latency_ms": {
         "mean": 42.11485851556063,
@@ -1609,9 +1573,7 @@
       "completed": 128,
       "completed_per_second": 49.552618615584066,
       "elapsed_seconds": 2.5831127309938893,
-      "errors": {},
       "fixed_arrival_rate": 50.0,
-      "generator_rejected": [],
       "lane": "provider-unary",
       "latency_ms": {
         "mean": 29.27573113947801,
@@ -1693,7 +1655,6 @@
       "completed": 128,
       "completed_per_second": 121.23271136846121,
       "elapsed_seconds": 1.0558206490240991,
-      "errors": {},
       "first_content_ms": {
         "mean": 49.40431300792625,
         "p50": 43.59013895737007,
@@ -1702,7 +1663,6 @@
         "samples": 128
       },
       "fixed_arrival_rate": null,
-      "generator_rejected": [],
       "lane": "provider-sse",
       "latency_ms": {
         "mean": 52.05119921811274,
@@ -1790,9 +1750,7 @@
       "completed": 128,
       "completed_per_second": 49.61863791353554,
       "elapsed_seconds": 2.579675810993649,
-      "errors": {},
       "fixed_arrival_rate": 50.0,
-      "generator_rejected": [],
       "lane": "translation-unary",
       "latency_ms": {
         "mean": 38.9293126895609,
@@ -1880,7 +1838,6 @@
       "completed": 128,
       "completed_per_second": 49.39447338198499,
       "elapsed_seconds": 2.591383028018754,
-      "errors": {},
       "first_content_ms": {
         "mean": 52.18065343933631,
         "p50": 49.68816501786932,
@@ -1889,7 +1846,6 @@
         "samples": 128
       },
       "fixed_arrival_rate": 50.0,
-      "generator_rejected": [],
       "lane": "transparent-sse",
       "latency_ms": {
         "mean": 53.98985683632418,
@@ -1977,7 +1933,6 @@
       "completed": 128,
       "completed_per_second": 49.31423585040422,
       "elapsed_seconds": 2.5955993800307624,
-      "errors": {},
       "first_content_ms": {
         "mean": 47.40273288643948,
         "p50": 48.316931002773345,
@@ -1986,7 +1941,6 @@
         "samples": 128
       },
       "fixed_arrival_rate": 50.0,
-      "generator_rejected": [],
       "lane": "translation-sse",
       "latency_ms": {
         "mean": 51.61233016906408,
@@ -2074,9 +2028,7 @@
       "completed": 128,
       "completed_per_second": 49.39641679024165,
       "elapsed_seconds": 2.5912810749723576,
-      "errors": {},
       "fixed_arrival_rate": 50.0,
-      "generator_rejected": [],
       "lane": "transparent-unary",
       "latency_ms": {
         "mean": 37.76984601563527,
@@ -2164,9 +2116,7 @@
       "completed": 128,
       "completed_per_second": 140.5109948653019,
       "elapsed_seconds": 0.9109607409918681,
-      "errors": {},
       "fixed_arrival_rate": null,
-      "generator_rejected": [],
       "lane": "translation-unary",
       "latency_ms": {
         "mean": 55.17860892405224,
@@ -2248,9 +2198,7 @@
       "completed": 128,
       "completed_per_second": 49.53536930387205,
       "elapsed_seconds": 2.5840122280060314,
-      "errors": {},
       "fixed_arrival_rate": 50.0,
-      "generator_rejected": [],
       "lane": "provider-unary",
       "latency_ms": {
         "mean": 29.32304742626002,
@@ -2332,7 +2280,6 @@
       "completed": 128,
       "completed_per_second": 49.4822775425437,
       "elapsed_seconds": 2.586784730956424,
-      "errors": {},
       "first_content_ms": {
         "mean": 42.42423264258832,
         "p50": 44.44167797919363,
@@ -2341,7 +2288,6 @@
         "samples": 128
       },
       "fixed_arrival_rate": 50.0,
-      "generator_rejected": [],
       "lane": "provider-sse",
       "latency_ms": {
         "mean": 43.425508943983004,
@@ -2429,7 +2375,6 @@
       "completed": 128,
       "completed_per_second": 134.06186545286107,
       "elapsed_seconds": 0.9547830739757046,
-      "errors": {},
       "first_content_ms": {
         "mean": 50.453579395252746,
         "p50": 51.74871801864356,
@@ -2438,7 +2383,6 @@
         "samples": 128
       },
       "fixed_arrival_rate": null,
-      "generator_rejected": [],
       "lane": "translation-sse",
       "latency_ms": {
         "mean": 57.9754028831303,
@@ -2526,7 +2470,6 @@
       "completed": 128,
       "completed_per_second": 49.323206515764625,
       "elapsed_seconds": 2.5951273050159216,
-      "errors": {},
       "first_content_ms": {
         "mean": 49.79518017853479,
         "p50": 49.509355041664094,
@@ -2535,7 +2478,6 @@
         "samples": 128
       },
       "fixed_arrival_rate": 50.0,
-      "generator_rejected": [],
       "lane": "transparent-sse",
       "latency_ms": {
         "mean": 50.963040713668306,
@@ -2623,7 +2565,6 @@
       "completed": 128,
       "completed_per_second": 128.00932304661532,
       "elapsed_seconds": 0.9999271690030582,
-      "errors": {},
       "first_content_ms": {
         "mean": 56.59983463328899,
         "p50": 58.3937470219098,
@@ -2632,7 +2573,6 @@
         "samples": 128
       },
       "fixed_arrival_rate": null,
-      "generator_rejected": [],
       "lane": "transparent-sse",
       "latency_ms": {
         "mean": 60.450418473919854,
@@ -2720,9 +2660,7 @@
       "completed": 128,
       "completed_per_second": 147.15251321832991,
       "elapsed_seconds": 0.8698458300204948,
-      "errors": {},
       "fixed_arrival_rate": null,
-      "generator_rejected": [],
       "lane": "translation-unary",
       "latency_ms": {
         "mean": 52.390564249435556,
@@ -2810,7 +2748,6 @@
       "completed": 128,
       "completed_per_second": 49.36918276067248,
       "elapsed_seconds": 2.5927105299779214,
-      "errors": {},
       "first_content_ms": {
         "mean": 46.63053980675613,
         "p50": 46.953689015936106,
@@ -2819,7 +2756,6 @@
         "samples": 128
       },
       "fixed_arrival_rate": 50.0,
-      "generator_rejected": [],
       "lane": "translation-sse",
       "latency_ms": {
         "mean": 50.91286563583708,
@@ -2907,9 +2843,7 @@
       "completed": 128,
       "completed_per_second": 49.709882619638535,
       "elapsed_seconds": 2.5749407010152936,
-      "errors": {},
       "fixed_arrival_rate": 50.0,
-      "generator_rejected": [],
       "lane": "translation-unary",
       "latency_ms": {
         "mean": 39.092593357054284,
@@ -2997,9 +2931,7 @@
       "completed": 128,
       "completed_per_second": 49.78056152945619,
       "elapsed_seconds": 2.571284775971435,
-      "errors": {},
       "fixed_arrival_rate": 50.0,
-      "generator_rejected": [],
       "lane": "transparent-unary",
       "latency_ms": {
         "mean": 37.78378316337694,
@@ -3081,9 +3013,7 @@
       "completed": 128,
       "completed_per_second": 188.57838197766733,
       "elapsed_seconds": 0.6787628500023857,
-      "errors": {},
       "fixed_arrival_rate": null,
-      "generator_rejected": [],
       "lane": "provider-unary",
       "latency_ms": {
         "mean": 41.88535726734699,
@@ -3171,9 +3101,7 @@
       "completed": 128,
       "completed_per_second": 135.7989639668682,
       "elapsed_seconds": 0.9425697830156423,
-      "errors": {},
       "fixed_arrival_rate": null,
-      "generator_rejected": [],
       "lane": "transparent-unary",
       "latency_ms": {
         "mean": 56.63310662293952,
@@ -3255,7 +3183,6 @@
       "completed": 128,
       "completed_per_second": 121.23117447632505,
       "elapsed_seconds": 1.0558340340503491,
-      "errors": {},
       "first_content_ms": {
         "mean": 49.416490462590446,
         "p50": 43.518491031136364,
@@ -3264,7 +3191,6 @@
         "samples": 128
       },
       "fixed_arrival_rate": null,
-      "generator_rejected": [],
       "lane": "provider-sse",
       "latency_ms": {
         "mean": 52.20010315088075,
@@ -3443,5 +3369,10 @@
     }
   ],
   "request_samples_omitted": true,
-  "scope": "initial M1 loopback workload acceptance"
+  "scope": "initial M1 loopback workload acceptance",
+  "publication": {
+    "form": "sanitized summary",
+    "redactions": "Private artifact locations and fingerprints, process identifiers and observed correlation values are omitted or aliased. Numerical results and useful public source/version references are retained.",
+    "original_records": "Unmodified operational records and original hashes are retained privately; this derivative is not a raw capture."
+  }
 }

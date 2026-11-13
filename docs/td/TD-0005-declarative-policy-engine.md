@@ -40,7 +40,7 @@ requirements for later phases, not claims about current runtime behavior.
 Sandhi is the authoritative enforcement point when it holds the provider
 credential. Victor can use the same contract for local previews, but a client
 preview, client-supplied score or client-supplied policy cannot authorize egress.
-Kanidm owns directory membership. Sandhi maps verified identities to grants and
+The configured identity provider owns directory membership. Sandhi maps verified identities to grants and
 policy bindings; it does not become another password/group directory.
 
 The proposed request path is:
@@ -244,7 +244,7 @@ Digests and identities are placeholders, and production limits need measurements
   "policy_id": "restricted-egress",
   "revision": 1,
   "bindings": [{
-    "issuer": "https://id.anvaiops.com/oauth2/openid/sandhi",
+    "issuer": "https://identity.example.com/oauth2/openid/sandhi",
     "groups": ["sandhi_agents"],
     "grants": ["subscription"]
   }],
@@ -303,7 +303,7 @@ representative prompt sizes and concurrent load. The example 200 ms is a design
 budget, not a measured guarantee. Identity TDD passing does not establish these
 policy gates. The MVP now has red/green core, proxy, store and client-denial
 coverage; the full workspace passed 778 tests (three live-provider tests ignored)
-with 90.09% line coverage. Real Kanidm → isolated gateway → synthetic provider
-acceptance, including Victor's rebuilt Python binding, passed 26 named checks.
+with 90.09% line coverage. Acceptance with a historical identity-provider fixture, an isolated gateway and
+a synthetic provider, including Victor's rebuilt Python binding, passed 26 named checks.
 Observed engine time in that functional smoke is not a load or p99 guarantee.
 The remaining phases above still require their own implementation and evidence.

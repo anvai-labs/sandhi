@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Local single-node starter: no client authentication or identity-provider dependency.
-# Optional protected profile: SANDHI_AUTH_MODE=tokens ./scripts/quickstart.sh
+# Optional loopback test profile: SANDHI_AUTH_MODE=tokens SANDHI_ALLOW_LOOPBACK_HTTP=1 ./scripts/quickstart.sh
 # Provider credentials/state remain under the private SANDHI_HOME, never in this script.
 set -euo pipefail
 umask 077
 
 SANDHI_HOME="${SANDHI_HOME:-$HOME/.sandhi}"
-BIND="${SANDHI_BIND:-127.0.0.1:8787}"
+BIND="${SANDHI_BIND-127.0.0.1:8787}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROXY_BIN="$REPO_ROOT/target/release/sandhi-proxy"
 CLI_BIN="$REPO_ROOT/target/release/sandhi"
@@ -17,7 +17,7 @@ PID_FILE="$SANDHI_HOME/proxy.pid"
 BIND_FILE="$SANDHI_HOME/bind"
 LOG_FILE="$SANDHI_HOME/proxy.log"
 PROVIDERS_FILE="$SANDHI_HOME/providers.json"
-if [ -f "$BIND_FILE" ] && [ -z "${SANDHI_BIND:-}" ]; then BIND="$(cat "$BIND_FILE")"; fi
+if [ -f "$BIND_FILE" ] && [ "${SANDHI_BIND+x}" != x ]; then BIND="$(cat "$BIND_FILE")"; fi
 log() { printf '%s\n' "$*"; }
 is_running() { [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; }
 cmd="${1:-start}"
@@ -30,6 +30,33 @@ if [ "$cmd" = "status" ]; then
   exit 0
 fi
 if [ "$cmd" != "start" ]; then log "usage: $0 [start|status|stop]"; exit 1; fi
+# This helper bootstraps provider secrets over HTTP, even in starter mode.
+# Reject unsafe destinations before builds, state writes or reuse of a live PID.
+case "${SANDHI_ALLOW_LOOPBACK_HTTP-0}" in
+  0|1) ;;
+  *) log "SANDHI_ALLOW_LOOPBACK_HTTP must be unset, 0 or 1."; exit 1 ;;
+esac
+python3 - "$BIND" <<'PYBIND'
+import ipaddress, sys
+try:
+    raw = sys.argv[1]
+    if raw.startswith("["):
+        host, separator, port = raw[1:].partition("]:")
+        if not separator or "]" in host or ":" not in host:
+            raise ValueError()
+        address = ipaddress.IPv6Address(host)
+        allowed = address == ipaddress.IPv6Address("::1") and "%" not in host
+    else:
+        host, separator, port = raw.rpartition(":")
+        if not separator:
+            raise ValueError()
+        address = ipaddress.IPv4Address(host)
+        allowed = address.is_loopback
+    if not allowed or not port.isascii() or not port.isdecimal() or not 1 <= int(port) <= 65535:
+        raise ValueError()
+except (ValueError, IndexError):
+    raise SystemExit("Quickstart requires a literal loopback IP and a valid port; use the TLS operator guide for network access.") from None
+PYBIND
 # Preserve an existing protected quickstart installation. A fresh home defaults to none.
 if [ "${SANDHI_AUTH_MODE+x}" = x ]; then MODE="$SANDHI_AUTH_MODE"
 elif [ "${SANDHI_OIDC_CONFIG+x}" = x ]; then MODE=oidc
@@ -44,6 +71,11 @@ case "$MODE" in
 esac
 if [ "$MODE" = none ] && [ "${SANDHI_OIDC_CONFIG+x}" = x ]; then
   log "OIDC configuration conflicts with explicit no-auth mode; choose the intended mode."; exit 1
+fi
+# This helper speaks HTTP. Never silently exempt a credential-bearing profile from TLS.
+if { [ "$MODE" = tokens ] || [ "${SANDHI_ADMIN_TOKEN+x}" = x ]; } && [ "${SANDHI_ALLOW_LOOPBACK_HTTP:-0}" != 1 ]; then
+  log "Protected listeners require TLS. For this loopback-only HTTP test helper, explicitly set SANDHI_ALLOW_LOOPBACK_HTTP=1; use the operator guide for HTTPS."
+  exit 1
 fi
 mkdir -p "$SANDHI_HOME"
 EXPECTED_VERSION="$(python3 -c 'import sys,tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["workspace"]["package"]["version"])' "$REPO_ROOT/Cargo.toml")"

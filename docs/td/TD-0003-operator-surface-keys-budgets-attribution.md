@@ -27,7 +27,7 @@ certification and cached credential lifecycle remain separate gates.
 
 ## Design boundary (load-bearing)
 
-**Sandhi measures in neutral tokens and attributes; it does not price.** Dollars / SKU / tier pricing is a *downstream commercial layer* (AnvaiOps, ADR-0047 D3) that consumes Sandhi's usage stream. This is already the stated contract of `sandhi-core` (`budget.rs`: "neutral tokens, not dollars"; `event.rs`: "no dollars, no tier/SKU names"). Therefore:
+**Sandhi measures in neutral tokens and attributes; it does not price.** Dollars / SKU / tier pricing is a *downstream commercial layer* (for example a control-plane pricing service) that consumes Sandhi's usage stream. This is already the stated contract of `sandhi-core` (`budget.rs`: "neutral tokens, not dollars"; `event.rs`: "no dollars, no tier/SKU names"). Therefore:
 
 - **In scope:** key vault, virtual keys, token budgets + enforcement + alerts, token attribution (by key / user / group / provider / session / model), and the operator CLI + admin REST API + dashboard to operate all of it.
 - **Out of scope:** $ / token pricing, invoicing, tier/SKU naming. Sandhi exposes the *attributed token usage* the commercial layer prices over; it never stores or computes dollars.
