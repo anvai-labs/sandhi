@@ -75,3 +75,10 @@ rustls 0.23.45→0.23.46 bump, and crates unrelated to the RSA/OIDC path. The
 review window now runs to 2026-11-18 (24 days, prior convention). A sibling
 assessment for RUSTSEC-2026-0387 (crypto-bigint via p384, same adapter and
 threat model) lives in [oidc-crypto-bigint-advisory.md](oidc-crypto-bigint-advisory.md).
+
+The 2026-11-13 audience candidate changes configuration validation and the
+introspection response's expected access-token audience only. Browser signature
+verification, OAuth client authentication, dependency locks and private-key
+operation reachability are unchanged. The source-bound JSON record carries the
+new adapter checksum; its expiry remains **2026-11-18**. This is not advisory
+remediation or a claim that a different dependency version is covered.

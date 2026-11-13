@@ -5,6 +5,37 @@ without valid OIDC configuration and verified HTTPS discovery. `--help` and `--v
 work without service configuration. Embedded `ProxyState::new` retains its existing
 behavior; embedders opt into OIDC explicitly.
 
+## OAuth client identity and access-token resource audience
+
+The post-release audience candidate adds optional `access_token_audience` to
+`oidc.json`. Omit it to preserve the existing behavior: introspected access tokens
+must target `client_id`. When configured, it is the exact intended Sandhi resource
+audience, for example `https://sandhi.example.com/resource`. Values must be 1–512
+UTF-8 bytes with no whitespace, controls or `*`; explicit null is rejected. Sandhi
+does not trim, normalize, fetch or interpret wildcards in this value.
+
+`client_id` still identifies Sandhi's OAuth application for browser ID-token
+verification, authorization/code exchange and introspection client authentication.
+An ID token addressed to the resource audience does not become a valid browser
+login. An access token addressed only to the browser client does not qualify when
+a different resource audience is configured. Audience arrays must contain only
+strings and include the exact selected access-token audience.
+
+For confidential introspection, Sandhi sends its own `client_id` in both the form
+and HTTP Basic authentication, with `token` and `token_type_hint=access_token`.
+The introspection response's `client_id` can identify the originating Victor
+client; it is not Sandhi's consuming client identity or an authorization grant.
+The issuer must authenticate access-token purpose and current authority before
+reporting `active: true`. A signed JWT or matching audience alone is insufficient.
+All issuer, subject, expiry, token-type, group and explicit Sandhi grant checks
+remain required. Do not forward a Victor-service audience token to Sandhi.
+
+Victor's existing private token-file credential pins the same issuer, resource
+audience and subject and reloads the broker result for each request. Its metadata
+does not verify the token: Sandhi still introspects it. This candidate does not
+implement a Victor login/refresh broker, migrate any issuer or qualify a live IDM
+deployment. See [the audience decision](../adr/0045-access-token-resource-audience.md).
+
 ## Configure the identity provider
 
 Register a dedicated OAuth client with authorization-code flow, S256 PKCE and an exact

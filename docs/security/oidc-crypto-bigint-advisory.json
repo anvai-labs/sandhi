@@ -1,10 +1,10 @@
 {
   "advisory": "RUSTSEC-2026-0387",
   "status": "not_affected_under_reviewed_usage",
-  "reviewed_on": "2026-11-09",
+  "reviewed_on": "2026-11-13",
   "expires_on": "2026-11-18",
   "adapter": "crates/sandhi-proxy/src/auth.rs",
-  "adapter_sha256": "3fd0ab9aa58d6937efaad52ef9ad1b6d9f1173baac14fd78f3517e73b6123175",
+  "adapter_sha256": "2f8c16e0c488e27ae063dd5c378dc56a24adf5147b8559658cc3cbf4684044ed",
   "packages": {
     "openidconnect": {
       "version": "4.0.1",
@@ -37,5 +37,5 @@
       "checksum": "0dc92fb57ca44df6db8059111ab3af99a63d5d0f8375d9972e319a379c6bab76"
     }
   },
-  "note": "2026-11-09 reassessment: auth.rs added ADR-0015 budget scope validation (rejects grants using reserved upstream: prefix) — config validation only, no change to OIDC/private-key operation path. Prior adapter checksum cb14a0b19712dca2c3d9c733f177f66d5577aa3c5b43d60dc61d32ef1239fbb0. 2026-10-25 initial assessment: crypto-bigint 0.5.5 reaches the workspace only transitively through the RustCrypto curve family (crypto-bigint is consumed by elliptic-curve 0.13.8, reached via p256 0.13.2 / p384 0.13.1 / primeorder 0.13.6) under openidconnect 4.0.1, and only for OIDC ECDSA (P-256 and P-384) signature verification in crates/sandhi-proxy/src/auth.rs. RUSTSEC-2026-0387 is timing variability in integer operations intended to be constant-time; exploitation requires high-resolution timing observation of the gateway's token-verification path by an attacker positioned on the trust boundary \u2014 the same reviewed-usage threat model and adapter as RUSTSEC-2023-0071 (docs/security/oidc-rsa-advisory.json). No patched in-range upgrade exists: the advisory's fix requires crypto-bigint >=0.7.6, which needs elliptic-curve >=0.14 / p384 >=0.14, while openidconnect 4.0.1 (latest published) pins the 0.13 curve family. Reassess when openidconnect ships a 0.14-compatible release; the record expires in 24 days regardless."
+  "note": "2026-11-13 scoped source reassessment: optional access_token_audience separates introspected resource aud from OAuth client_id; omitted configuration preserves client_id. Browser signature verification, code exchange, introspection client authentication, dependency locks and private-key operation reachability are unchanged. No advisory remediation is claimed and expiry remains 2026-11-18. Prior adapter checksum 3fd0ab9aa58d6937efaad52ef9ad1b6d9f1173baac14fd78f3517e73b6123175. 2026-11-09 reassessment: auth.rs added ADR-0015 budget scope validation (rejects grants using reserved upstream: prefix) \u2014 config validation only, no change to OIDC/private-key operation path. Prior adapter checksum cb14a0b19712dca2c3d9c733f177f66d5577aa3c5b43d60dc61d32ef1239fbb0. 2026-10-25 initial assessment: crypto-bigint 0.5.5 reaches the workspace only transitively through the RustCrypto curve family (crypto-bigint is consumed by elliptic-curve 0.13.8, reached via p256 0.13.2 / p384 0.13.1 / primeorder 0.13.6) under openidconnect 4.0.1, and only for OIDC ECDSA (P-256 and P-384) signature verification in crates/sandhi-proxy/src/auth.rs. RUSTSEC-2026-0387 is timing variability in integer operations intended to be constant-time; exploitation requires high-resolution timing observation of the gateway's token-verification path by an attacker positioned on the trust boundary \u2014 the same reviewed-usage threat model and adapter as RUSTSEC-2023-0071 (docs/security/oidc-rsa-advisory.json). No patched in-range upgrade exists: the advisory's fix requires crypto-bigint >=0.7.6, which needs elliptic-curve >=0.14 / p384 >=0.14, while openidconnect 4.0.1 (latest published) pins the 0.13 curve family. Reassess when openidconnect ships a 0.14-compatible release; the record expires in 24 days regardless."
 }

@@ -29,13 +29,21 @@ production operation:
    same reviewed-usage threat model as
    [RUSTSEC-2023-0071](oidc-rsa-advisory.md), sharing the same adapter.
 
-No patched in-range upgrade exists: the advisory's fix requires crypto-bigint
->=0.7.6, which requires the 0.14 curve family (elliptic-curve / p384 >=0.14),
-while openidconnect 4.0.1 (the latest published release) pins the 0.13 family.
-Reassess when openidconnect ships a 0.14 curve-family release — the correct
-resolution is the dependency bump, not a renewed ignore.
+The locked openidconnect 4.0.1 pins the 0.13 curve family. The advisory's fix
+requires crypto-bigint >=0.7.6 and the 0.14 curve family (elliptic-curve / p384
+>=0.14). Newer dependency candidates require their own graph and operation
+reassessment; this record does not claim 4.0.1 is still the latest release or
+qualify an upgrade. The resolution path is a qualified dependency change, not a
+renewed ignore.
 
 The [machine-readable record](oidc-crypto-bigint-advisory.json) pins the
 reviewed packages/checksums and the auth adapter, and is enforced by the same
 CI gate (`scripts/check-oidc-advisory.py`) that runs before cargo-deny. Do not
 regenerate the record mechanically to make a failed check pass.
+
+The 2026-11-13 audience candidate changes configuration validation and the
+introspection response's expected access-token audience only. Browser signature
+verification, OAuth client authentication, dependency locks and private-key
+operation reachability are unchanged. The source-bound JSON record carries the
+new adapter checksum; its expiry remains **2026-11-18**. This is not advisory
+remediation or a claim that a different dependency version is covered.
