@@ -29,6 +29,13 @@ A partly published release remains incomplete even when some artifacts are avail
 - Separate starter inference access from optional operator-token protection.
   The dashboard identifies shared starter access and presents navigation and
   management controls according to the selected server profile.
+- Require TLS for standalone token/OIDC listeners and credential-bearing starter
+  configurations. Deliberate same-host testing or TLS termination requires
+  `SANDHI_ALLOW_LOOPBACK_HTTP=1` and literal loopback sockets; LAN and wildcard
+  plaintext listeners are refused.
+- Align dashboard virtual-key mint controls with the selected inference profile.
+  OIDC mode continues to reject ordinary keys retained from token mode; delegated
+  keys require explicit policy and remain disabled by default.
 - Add an explicit OIDC access-token resource audience, independent of Sandhi's
   browser/client identity. Qualify Anvai Identity, Sandhi and Victor together;
   local acceptance and public development deployment are separate gates.
