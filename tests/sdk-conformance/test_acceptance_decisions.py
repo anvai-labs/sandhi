@@ -130,7 +130,8 @@ def register(page, upstream, *, label="default"):
         page.get_by_role("button", name="Add", exact=True).click()
     response = completed.value
     sent = response.request.post_data_json
-    assert set(sent) == {"provider", "label", "base_url"}, "reference form must never send a secret"
+    assert set(sent) == {"provider", "label", "base_url", "scheme"}, "reference form must never send a secret"
+    assert sent["scheme"] == "api_key", "reference onboarding must retain the selected API authentication scheme"
     assert sent["provider"] == "openai" and sent["label"] == label
     return response
 

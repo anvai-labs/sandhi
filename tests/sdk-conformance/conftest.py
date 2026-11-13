@@ -167,7 +167,12 @@ def _anthropic_messages_body(streaming: bool) -> str:
                     "content": [],
                     "stop_reason": None,
                     "stop_sequence": None,
-                    "usage": {"input_tokens": 11, "output_tokens": 0},
+                    "usage": {
+                        "input_tokens": 11,
+                        "output_tokens": 0,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 4,
+                    },
                 },
             },
         ),
@@ -302,19 +307,21 @@ def cli_binary(tmp_path_factory) -> Path:
 
 
 @pytest.fixture(scope="session")
-def proxy(proxy_binary: Path, upstream: MockUpstream):
+def proxy(proxy_binary: Path, upstream: MockUpstream, tmp_path_factory):
     """A live proxy whose upstreams point at the mock, exactly as an operator would configure it."""
     port = _free_port()
-    env = {
-        **os.environ,
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith(("SANDHI_", "SENTINELPASS_"))}
+    env.update({
         "SANDHI_AUTH_MODE": "tokens", "SANDHI_BIND": f"127.0.0.1:{port}",
+        "SANDHI_STORE": str(tmp_path_factory.mktemp("proxy-store") / "usage.db"),
         "SANDHI_OPENAI_KEY": REAL_OPENAI_KEY,
         "SANDHI_OPENAI_BASE": upstream.base_url,
         "SANDHI_ANTHROPIC_KEY": REAL_ANTHROPIC_KEY,
         "SANDHI_ANTHROPIC_BASE": upstream.base_url,
         "SANDHI_GEMINI_KEY": REAL_GEMINI_KEY,
         "SANDHI_GEMINI_BASE": upstream.base_url,
-    }
+    })
     proc = subprocess.Popen(
         [str(proxy_binary)],
         cwd=REPO_ROOT,

@@ -8,6 +8,7 @@ pub mod backends;
 pub mod diagnostics;
 pub mod ledger;
 pub mod profiles;
+pub mod references;
 pub mod routes;
 pub mod sharded;
 pub use sharded::ShardedLedger;

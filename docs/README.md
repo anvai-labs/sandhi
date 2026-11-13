@@ -48,8 +48,9 @@ Sandhi is an L7 AI usage gateway and provider-transport library, not a general L
   and Gemini. Cohere and Ollama are available as upstream codecs but do not have proxy ingress
   dialects.
 - Eligible same-family proxy calls use the transparent metering plane; cross-family calls use the
-  neutral chat contract and may lose explicitly provider-specific extensions. A hard-capped chat call
-  with no explicit output limit uses translation to inject a bound. Plaintext completions
+  neutral chat contract and may lose explicitly provider-specific extensions. A chat call without an explicit
+  output limit uses canonical encoding to inject the operator-owned default under
+  both Block and Warn policies. Plaintext completions
   instead receive an explicit max_tokens=16 default and remain on their native route.
 - The listener is deliberately HTTP/1.1-only. It supports plain HTTP for loopback/trusted hops and
   opt-in TLS termination. HTTP/2, HTTP/3, raw TCP forwarding, and WebSocket sessions are not shipped.
@@ -60,7 +61,8 @@ Sandhi is an L7 AI usage gateway and provider-transport library, not a general L
 - Budget admission uses estimates, not strict total-token bounds. Reasoning inclusion is explicit
   in contract minor 7; see [metering semantics, compatibility and guarantees](product/metering-and-budget-guarantees.md).
 - W05a provides an opt-in store primitive for atomic settlement receipts and delivery claims;
-  the opt-in [HTTP accounting mode](operator/buffered-accounting.md) now uses canonical terminal settlement. See [attempt accounting and evidence](product/attempt-accounting-and-evidence.md)
+  the current [HTTP execution contract](operator/buffered-accounting.md) requires
+  the original single file-backed paired owner for every generation operation. See [attempt accounting and evidence](product/attempt-accounting-and-evidence.md)
   for the remaining transport, recovery, export and consumer-review gates.
 
 The rationale and the evidence gate for changing this scope live in

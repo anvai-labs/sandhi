@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "gateway_binary_sha256": "62a271b679f248c41de4d13ad4b2bfed5f447766ffb658b9b75b7ed98b0d7862",
+  "report_sha256": {
+    "sandhi-cohesive-glm-live.json": "30c91967f5192fd46b6370d729fa111beb5c75c0e78c48d56b7ac0eab06d96c8",
+    "sandhi-cohesive-glm-messages-portable.json": "7c7229054d867dc3501cfa87f46864623c660467ec282774d8c89e33482500f4"
+  },
+  "portable_matrix": {
+    "cells": 48,
+    "succeeded": 48,
+    "distinct_combinations": 24,
+    "messages_thinking": "disabled",
+    "cache_profile": "native_only / preserve_native"
+  },
+  "default_thinking_run": {
+    "cells": 48,
+    "durable_observations": 48,
+    "sdk_usage_matches": 36,
+    "tracked_evidence_matches": 48,
+    "correlation": "step_id",
+    "positive_reported_cache_reads": {
+      "chat": 15,
+      "messages": 3,
+      "responses": 15
+    },
+    "errors": [
+      "messages-chat-0-0: error",
+      "messages-chat-0-1: error",
+      "messages-chat-1-0: error",
+      "messages-chat-1-1: error",
+      "messages-gemini-0-0: error",
+      "messages-gemini-0-1: error",
+      "messages-gemini-1-0: error",
+      "messages-gemini-1-1: error",
+      "messages-responses-0-0: error",
+      "messages-responses-0-1: error",
+      "messages-responses-1-0: error",
+      "messages-responses-1-1: error"
+    ]
+  },
+  "explicit_disabled_messages_run": {
+    "cells": 16,
+    "durable_observations": 16,
+    "sdk_usage_matches": 16,
+    "tracked_evidence_matches": 16,
+    "correlation": "step_id",
+    "positive_reported_cache_reads": {
+      "chat": 0,
+      "messages": 12,
+      "responses": 0
+    },
+    "errors": []
+  },
+  "limits": [
+    "Reported cache reads do not prove a guaranteed cold-to-warm cache hit or USD savings.",
+    "Default Messages portable projection refuses nonrepresentable output; exact rejected source field was not retained.",
+    "No live Codex, first-party Anthropic subscription or native Gemini backend qualification is established."
+  ]
+}

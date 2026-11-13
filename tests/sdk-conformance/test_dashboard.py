@@ -59,10 +59,9 @@ def dashboard(proxy_binary, upstream, tmp_path, request):
     })
     if options.get("admin", True):
         env["SANDHI_ADMIN_TOKEN"] = ADMIN_TOKEN
-    if options.get("store", True):
-        env["SANDHI_STORE"] = str(database)
-    if options.get("tracked"):
-        env["SANDHI_BUFFERED_ACCOUNTING"] = "tracked"
+    assert options.get("store", True), "the gateway requires a durable store"
+    env["SANDHI_STORE"] = str(database)
+    env["SANDHI_LEDGER_SHARDS"] = "1"
     if options.get("public"):
         env["SANDHI_DASHBOARD_PUBLIC"] = "1"
     authority = request.getfixturevalue("oidc_authority") if options.get("oidc") else None
@@ -74,7 +73,7 @@ def dashboard(proxy_binary, upstream, tmp_path, request):
             "redirect_url": authority.redirect, "ca_file": str(authority.certificate),
             "subjects": {role: {"role": role, "allow_diagnostics": options.get("diagnostics", False), "grants": {
                 "fixture": {"upstream": "openai", "models": ["gpt-mock"],
-                            **({"group": "dashboard"} if options.get("tracked") else {})}
+                            **({"group": "dashboard"} if options.get("scoped_budget") else {})}
             } if role == "admin" else {}} for role in ("viewer", "operator", "admin")},
         }))
         config.write_text(json.dumps({"tls": {
@@ -105,27 +104,26 @@ def dashboard(proxy_binary, upstream, tmp_path, request):
                 if time.monotonic() >= deadline:
                     pytest.fail("dashboard proxy startup timed out")
                 time.sleep(0.05)
-            if options.get("store", True):
-                if options.get("admin", True):
-                    response = client.post("/admin/budget", headers=server.headers, json={
-                        "scope": "group:dashboard", "limit_tokens": 10000,
-                        "policy": "block" if options.get("tracked") else "warn", "window": "total",
-                    })
-                    assert response.status_code == 200, response.text
-                response = client.post("/v1/chat/completions", headers={
-                    **(server.headers if authority else {"Authorization": f"Bearer {VK_OPENAI}"}),
-                    **({"x-sandhi-session": "sso-session", "x-sandhi-run-id": "sso-run",
-                        "x-sandhi-step-id": "seed"} if options.get("tracked") else {}),
-                }, json={
-                    "model": "gpt-mock", "messages": [{"role": "user", "content": "ping"}],
-                    **({"max_tokens": 10} if options.get("tracked") else {}),
+            if options.get("admin", True):
+                response = client.post("/admin/budget", headers=server.headers, json={
+                    "scope": "group:dashboard", "limit_tokens": 10000,
+                    "policy": "block" if options.get("scoped_budget") else "warn", "window": "total",
                 })
                 assert response.status_code == 200, response.text
-                server.seed_request_id = response.headers.get("x-sandhi-request-id")
-                # The production observer is buffered; wait for the seeded call to be queryable.
-                while client.get("/dashboard/api/usage", headers=server.headers).json()["total"]["calls"] != 1:
-                    assert time.monotonic() < deadline, "usage never persisted"
-                    time.sleep(0.05)
+            response = client.post("/v1/chat/completions", headers={
+                **(server.headers if authority else {"Authorization": f"Bearer {VK_OPENAI}"}),
+                **({"x-sandhi-session": "sso-session", "x-sandhi-run-id": "sso-run",
+                    "x-sandhi-step-id": "seed"} if options.get("scoped_budget") else {}),
+            }, json={
+                "model": "gpt-mock", "messages": [{"role": "user", "content": "ping"}],
+                **({"max_tokens": 10} if options.get("scoped_budget") else {}),
+            })
+            assert response.status_code == 200, response.text
+            server.seed_request_id = response.headers.get("x-sandhi-request-id")
+            # The production observer is buffered; wait for the seeded call to be queryable.
+            while client.get("/dashboard/api/usage", headers=server.headers).json()["total"]["calls"] != 1:
+                assert time.monotonic() < deadline, "usage never persisted"
+                time.sleep(0.05)
         yield server
     finally:
         proc.terminate()
@@ -178,7 +176,7 @@ def hold_authenticated_request(page, dashboard, path):
     return held
 
 
-@pytest.mark.parametrize("dashboard", [{"oidc": True, "tracked": True}], indirect=True)
+@pytest.mark.parametrize("dashboard", [{"oidc": True, "scoped_budget": True}], indirect=True)
 @pytest.mark.parametrize("denial", ["bearer", "model", "attribution"])
 def test_tracked_oidc_accounting_and_pre_admission_denials(
     dashboard, oidc_authority, upstream, denial,
@@ -231,8 +229,8 @@ def test_tracked_oidc_accounting_and_pre_admission_denials(
     assert len(upstream.requests) == dashboard.origin_requests_before + 1
 
 
-@pytest.mark.parametrize("dashboard", [{"oidc": True}, {"oidc": True, "tracked": True}],
-                         ids=["legacy", "tracked"], indirect=True)
+@pytest.mark.parametrize("dashboard", [{"oidc": True}, {"oidc": True, "scoped_budget": True}],
+                         ids=["default-budget", "scoped-budget"], indirect=True)
 @pytest.mark.parametrize("page", [{"tls": True}], indirect=True)
 @pytest.mark.parametrize("role", ["viewer", "operator", "admin"])
 def test_sso_browser_roles_cookie_mutations_and_logout(page, dashboard, oidc_authority, role):
@@ -363,12 +361,13 @@ def test_public_reads_remain_available_but_admin_actions_are_locked(page, dashbo
     expect(page.get_by_role("button", name="Set budget", exact=True)).to_be_disabled()
 
 
-@pytest.mark.parametrize("dashboard", [{"store": False}], indirect=True)
-def test_missing_store_is_not_zero_usage(page, dashboard):
+def test_failed_store_is_not_zero_usage(page, dashboard):
+    with sqlite3.connect(dashboard.database) as connection:
+        connection.execute("DROP TABLE usage_events")
     page.goto(dashboard.base + "/dashboard")
     page.get_by_label("Admin token", exact=True).fill(ADMIN_TOKEN)
     page.get_by_role("button", name="Use token", exact=True).click()
-    expect(page.locator("#usage")).to_have_attribute("data-state", "unconfigured")
+    expect(page.locator("#usage")).to_have_attribute("data-state", "unavailable")
     assert page.locator("#cards").count() == 0
 
 

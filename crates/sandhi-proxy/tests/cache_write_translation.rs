@@ -1,4 +1,5 @@
 //! Cache categories must survive each client dialect, backend profile and delivery mode.
+mod support;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use axum::{
@@ -7,7 +8,7 @@ use axum::{
 };
 use sandhi_core::{InMemorySink, KeyStore, Policy, Sink, UsageEvent, VirtualKey, Window};
 use sandhi_providers::ProviderRuntime;
-use sandhi_proxy::{build_app, ProxyLedger, ProxyState};
+use sandhi_proxy::build_app;
 use sandhi_store::{
     diagnostics::{DiagnosticQuery, DiagnosticSelector},
     SqliteStore,
@@ -144,13 +145,13 @@ async fn exercise(backend: Backend, dialect: &str, stream: bool) {
         memory: InMemorySink::new(),
         store: SqliteStore::in_memory().unwrap(),
     });
-    let mut ledger = ProxyLedger::in_memory();
+    let mut ledger = support::Ledger::new();
     for scope in ["group:cache", "upstream:openai"] {
         ledger
             .set_budget(scope, Some(10000), Window::Total, Policy::Block)
             .unwrap();
     }
-    let mut state = ProxyState::new(
+    let mut state = support::state(
         keys,
         ledger,
         capture.clone(),

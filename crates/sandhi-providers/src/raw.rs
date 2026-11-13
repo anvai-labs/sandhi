@@ -485,11 +485,26 @@ impl RawForwarder {
                     .as_ref()
                     .ok_or(sandhi_core::usage::BufferedUsageError::InvalidResponse)
                     .and_then(|value| {
-                        sandhi_core::usage::qualify_buffered_usage_with_profile(
-                            self.family.endpoint_family(),
-                            self.anthropic_usage_profile,
-                            value,
-                        )
+                        if self.family == ProviderFamily::OpenAiCompat
+                            && matches!(
+                                path,
+                                "/completions"
+                                    | "/v1/completions"
+                                    | "/embeddings"
+                                    | "/v1/embeddings"
+                            )
+                        {
+                            sandhi_core::usage::qualify_openai_plaintext_usage(
+                                value,
+                                path.ends_with("/embeddings"),
+                            )
+                        } else {
+                            sandhi_core::usage::qualify_buffered_usage_with_profile(
+                                self.family.endpoint_family(),
+                                self.anthropic_usage_profile,
+                                value,
+                            )
+                        }
                     })
             } else {
                 Ok(usage.into())
@@ -501,6 +516,14 @@ impl RawForwarder {
                 }
                 usage
             });
+            let observed_usage = if qualify {
+                usage
+                    .as_ref()
+                    .ok()
+                    .map(sandhi_core::usage::ParsedUsage::from)
+            } else {
+                observed_usage
+            };
             Ok((
                 crate::QualifiedCompletion {
                     response: raw,
@@ -588,6 +611,9 @@ impl RawForwarder {
             (ProviderFamily::OpenAiCompat, "/v1/chat/completions" | "/chat/completions") => {
                 sandhi_core::EndpointFamilyV1::OpenaiChatCompletions
             }
+            (ProviderFamily::OpenAiCompat, "/v1/completions" | "/completions") => {
+                sandhi_core::EndpointFamilyV1::OpenaiChatCompletions
+            }
             (ProviderFamily::OpenAiResponses, "/v1/responses" | "/responses") => {
                 sandhi_core::EndpointFamilyV1::OpenaiResponses
             }
@@ -616,7 +642,18 @@ impl RawForwarder {
                 "qualified streaming requires synchronous stream delivery".into(),
             ));
         }
-        let observer =
+        let observer = if self.family == ProviderFamily::OpenAiCompat
+            && matches!(path, "/v1/completions" | "/completions")
+        {
+            if self.openai_stream_usage_profile
+                != sandhi_core::usage::OpenAiStreamUsageProfile::Standard
+            {
+                return Err(ProviderError::InvalidRequest(
+                    "text operation does not support a Chat-specific source profile".into(),
+                ));
+            }
+            crate::stream_usage::ProtocolStreamUsageObserver::for_text_completion()
+        } else {
             crate::stream_usage::ProtocolStreamUsageObserver::for_endpoint_with_usage_profiles(
                 endpoint,
                 self.openai_stream_usage_profile,
@@ -624,7 +661,8 @@ impl RawForwarder {
             )
             .map_err(|_| {
                 ProviderError::InvalidRequest("stream usage profile does not match endpoint".into())
-            })?;
+            })?
+        };
         let (response, guard, idle) = self
             .setup_stream(path, body, session, correlation, call_headers)
             .await?;
@@ -894,7 +932,15 @@ fn with_idle_timeout<T: Send + 'static>(
 fn qualified_buffered_path(family: ProviderFamily, path: &str) -> bool {
     match family {
         ProviderFamily::OpenAiCompat => {
-            matches!(path, "/chat/completions" | "/v1/chat/completions")
+            matches!(
+                path,
+                "/chat/completions"
+                    | "/v1/chat/completions"
+                    | "/completions"
+                    | "/v1/completions"
+                    | "/embeddings"
+                    | "/v1/embeddings"
+            )
         }
         ProviderFamily::OpenAiResponses => matches!(path, "/responses" | "/v1/responses"),
         ProviderFamily::Anthropic => matches!(path, "/messages" | "/v1/messages"),

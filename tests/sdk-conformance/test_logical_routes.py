@@ -160,7 +160,7 @@ def test_tracked_route_context_and_original_charge_survive_restart_and_rotation(
     origin, received = backend_origin
     with gateway(tmp_path, backend_binaries) as instance:
         instance.stop()
-        instance.start(SANDHI_BUFFERED_ACCOUNTING="tracked", SANDHI_CACHE_READ_WEIGHT="1000")
+        instance.start(SANDHI_CACHE_READ_WEIGHT="1000")
         instance.provision(origin, "context-original-fixture")
         policy = tmp_path / "cache.json"
         policy.write_text(json.dumps({"default_intent": {"mode": "auto"},
@@ -210,7 +210,7 @@ def test_tracked_route_context_and_original_charge_survive_restart_and_rotation(
         instance.stop()  # close the reaped process's private log pipe
         with sqlite3.connect(instance.database) as connection:
             connection.execute("DROP TRIGGER block_receipt")
-        instance.start(SANDHI_BUFFERED_ACCOUNTING="tracked", SANDHI_CACHE_READ_WEIGHT="10000")
+        instance.start(SANDHI_CACHE_READ_WEIGHT="10000")
         instance.provision(origin, "context-replacement-fixture")
         deadline = time.monotonic() + 10
         while True:

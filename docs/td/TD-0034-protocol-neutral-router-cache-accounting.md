@@ -1,6 +1,6 @@
 # TD-0034: Protocol-neutral routing, cache control and execution accounting
 
-- **Status:** Active goal; incremental implementation in progress, 2026-11-11.
+- **Status:** Active goal; integrated candidate qualification and review, 2026-11-12.
 - **Authority:** User requested goal mode, objectives, constraints and autonomous
   execution of the router/cache/accounting solution on 2026-11-11.
 - **Baseline:** [Inventory and first fixes](../reviews/router-cache-inventory-2026-11-11.md).
@@ -1979,3 +1979,30 @@ separate in-progress increments. Native Cohere/Ollama source qualification must
 preserve prior HTTP behavior through that cutover. Broader cache/state/media/agent/
 subscription, retained reliability and supported packaging gates remain open;
 these passing synthetic checks do not complete M3–M6 or the overall goal.
+
+
+### M5z and integrated candidate — mandatory ownership and cohesive qualification
+
+The pushed `ce70fdc` increment preserves immutable budget namespaces and qualifies
+native Cohere/Ollama sources and actual Gemini SDK image inputs. Pushed `6918368`
+adds native packaging CI; all 21 required public-hosted jobs passed.
+
+The [integrated qualification report](../reviews/cohesive-router-qualification-2026-11-12.md)
+records mandatory standalone durable execution, library recovery/shutdown ownership,
+issuer-bound native state, effective selected-payload authorization, bounded stream
+framing, operator UI/docs and final bindings/consumer qualification. It includes
+live GLM cache/usage evidence across all 24 client/backend/delivery combinations,
+with explicit thinking disabled for portable Messages output. Initial fidelity
+refusals and their source charges are retained separately.
+
+The full SDK run and narrow corrected reruns, actual agent loops and browser tests
+are local evidence. Exact final-commit review, secret scanning and new public CI
+remain gates; historical reliability findings and external credential/publication
+prerequisites are not silently erased by fresh passes. The goal remains open.
+
+Current candidate Linux reliability acceptance now passes separately from historical
+cause attribution: unchanged bounded shutdown tests, library supervision, watchdog
+and ordinary Python TLS child-process checks all pass. The final Rust rerun has
+1,289 passes and no failures. See the integrated report for artifact pins and exact
+limits. The older incidents remain discoverable and unexplained; no universal
+native-crash or scheduling guarantee is inferred.

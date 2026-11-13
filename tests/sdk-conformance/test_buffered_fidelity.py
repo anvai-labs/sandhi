@@ -112,12 +112,12 @@ def test_buffered_sdk_fidelity_refusals_preserve_source_counts_and_both_settleme
 @pytest.mark.parametrize("family,ingress", [
     (family, ingress) for family in FAMILIES for ingress in FAMILIES[:3] if family != ingress
 ])
-def test_legacy_deterministic_output_refusal_does_not_retry_sdk_inference(
+def test_deterministic_output_refusal_does_not_retry_sdk_inference(
     tmp_path, backend_binaries, qualified_origin, family, ingress,
 ):
     origin, calls, control = qualified_origin
     control["response_override"] = source_response(family, True)
-    with tracked_gateway(tmp_path, backend_binaries, origin, family, accounting="off") as (instance, token):
+    with tracked_gateway(tmp_path, backend_binaries, origin, family) as (instance, token):
         error_type = anthropic.APIStatusError if ingress == FAMILIES[1] else openai.APIStatusError
         with pytest.raises(error_type) as caught:
             call_with_reasoning(instance, token, ingress)
@@ -152,7 +152,7 @@ def test_refused_buffered_projection_recovers_original_receipt_without_inference
         instance.stop()
         with sqlite3.connect(instance.database) as connection:
             connection.execute("DROP TRIGGER fail_projection_receipt")
-        instance.start(SANDHI_BUFFERED_ACCOUNTING="tracked", SANDHI_CACHE_READ_WEIGHT="10000")
+        instance.start(SANDHI_CACHE_READ_WEIGHT="10000")
         deadline = time.monotonic() + 5
         while True:
             with sqlite3.connect(instance.database) as connection:

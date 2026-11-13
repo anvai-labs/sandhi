@@ -4,6 +4,7 @@
 
 #[path = "proxy/qualified_codex.rs"]
 mod qualified_codex;
+mod support;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,7 +24,7 @@ use sandhi_proxy::{build_app, ProxyLedger, ProxyState, TlsConfig};
 fn state_with(
     upstream_uri: String,
     sink: Arc<InMemorySink>,
-    ledger: ProxyLedger,
+    ledger: impl Into<support::Ledger>,
 ) -> Arc<ProxyState> {
     let keys = KeyStore::new();
     keys.insert(VirtualKey {
@@ -47,7 +48,7 @@ fn state_with(
             None,
         ),
     );
-    Arc::new(ProxyState::new(keys, ledger, sink, providers, None))
+    Arc::new(support::state(keys, ledger, sink, providers, None))
 }
 
 const TEST_TLS_CERT: &[u8] = include_bytes!("fixtures/tls/localhost-cert.pem");
@@ -60,8 +61,8 @@ const TEST_TLS_KEY: &[u8] = include_bytes!("fixtures/tls/localhost-key.pem");
 async fn tls_listener_serves_full_requests_and_complete_sse_streams() {
     let upstream = MockServer::start().await;
     let sse = concat!(
-        "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
-        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2}}\n\n",
+        "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n",
+        "data: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2}}\n\n",
         "data: [DONE]\n\n"
     );
     Mock::given(method("POST"))
@@ -78,7 +79,7 @@ async fn tls_listener_serves_full_requests_and_complete_sse_streams() {
     let mut state = Arc::try_unwrap(state_with(
         upstream.uri(),
         sink.clone(),
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
     ))
     .ok()
     .expect("test owns the only ProxyState reference");
@@ -137,7 +138,7 @@ async fn tls_listener_serves_full_requests_and_complete_sse_streams() {
         .json(&serde_json::json!({
             "model": "gpt-4o",
             "messages": [{"role": "user", "content": "hi"}],
-            "stream": true
+            "max_tokens":64, "stream": true
         }))
         .send()
         .await
@@ -174,8 +175,8 @@ async fn tls_listener_serves_full_requests_and_complete_sse_streams() {
 async fn dual_scheme_listeners_share_admission_and_meter_identically() {
     let upstream = MockServer::start().await;
     let sse = concat!(
-        "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
-        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2}}\n\n",
+        "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n",
+        "data: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2}}\n\n",
         "data: [DONE]\n\n"
     );
     Mock::given(method("POST"))
@@ -192,7 +193,7 @@ async fn dual_scheme_listeners_share_admission_and_meter_identically() {
     let mut state = Arc::try_unwrap(state_with(
         upstream.uri(),
         sink.clone(),
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
     ))
     .ok()
     .expect("test owns the only ProxyState reference");
@@ -272,7 +273,7 @@ async fn dual_scheme_listeners_share_admission_and_meter_identically() {
         .json(&serde_json::json!({
             "model": "gpt-4o",
             "messages": [{"role": "user", "content": "hi"}],
-            "stream": true
+            "max_tokens":64, "stream": true
         }))
         .send()
         .await
@@ -327,7 +328,7 @@ async fn complete_attributes_meters_and_records_budget() {
         .await;
 
     let sink = Arc::new(InMemorySink::new());
-    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    let state = state_with(upstream.uri(), sink.clone(), support::Ledger::new());
     let app = build_app(state.clone());
 
     let req = Request::builder()
@@ -382,7 +383,7 @@ async fn cache_read_weight_discounts_budget_enforcement_not_raw_usage() {
         .await;
 
     let sink = Arc::new(InMemorySink::new());
-    let mut state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    let mut state = state_with(upstream.uri(), sink.clone(), support::Ledger::new());
     Arc::get_mut(&mut state)
         .expect("test owns the only Arc ref")
         .cache_read_weight_bp = 1_000;
@@ -413,7 +414,7 @@ async fn cache_read_weight_discounts_budget_enforcement_not_raw_usage() {
 #[tokio::test]
 async fn version_endpoint_is_unauthenticated_and_reports_the_contract() {
     let sink = Arc::new(InMemorySink::new());
-    let state = state_with("http://127.0.0.1:1".into(), sink, ProxyLedger::in_memory());
+    let state = state_with("http://127.0.0.1:1".into(), sink, support::Ledger::new());
     let app = build_app(state);
 
     let response = app
@@ -455,9 +456,9 @@ async fn config_preview_and_apply_acknowledge_startup_only_sections() {
     // security-relevant section. Both responses carry the acknowledgement, and it reads
     // "not configured" when the section is absent.
     let keys = KeyStore::new();
-    let mut state = ProxyState::new(
+    let mut state = support::state(
         keys,
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         Arc::new(InMemorySink::new()),
         HashMap::new(),
         None,
@@ -537,7 +538,10 @@ async fn config_preview_and_apply_acknowledge_startup_only_sections() {
         preview["streaming_deadlines"]["activation"],
         "restart required"
     );
-    assert!(preview["streaming_deadlines"]["active"].is_null());
+    assert_eq!(
+        preview["streaming_deadlines"]["active"]["default"]["limits"]["body_ms"],
+        180000
+    );
     assert_eq!(
         preview["streaming_deadlines"]["desired"]["default"]["limits"]["body_ms"],
         2000
@@ -563,8 +567,9 @@ async fn config_preview_and_apply_acknowledge_startup_only_sections() {
     .unwrap();
     assert_eq!(preview["tls"], "not configured");
     assert!(
-        preview.get("buffered_deadlines").is_none() && preview.get("streaming_deadlines").is_none(),
-        "absent policy leaves default response unchanged"
+        preview.get("buffered_deadlines").is_none()
+            && preview["streaming_deadlines"]["active"]["default"]["limits"]["body_ms"] == 180000,
+        "configured defaults remain visible after removing a desired override"
     );
     let _ = std::fs::remove_file(&cfg_path);
 }
@@ -585,7 +590,7 @@ async fn route_deadlines_enforce_authorized_model_in_both_planes_without_replay(
         let mut state = Arc::try_unwrap(state_with(
             upstream.uri(),
             sink.clone(),
-            ProxyLedger::in_memory(),
+            support::Ledger::new(),
         ))
         .ok()
         .unwrap();
@@ -631,7 +636,9 @@ async fn route_deadlines_enforce_authorized_model_in_both_planes_without_replay(
                 app.clone().oneshot(call("short", translated)),
                 app.clone().oneshot(call("long", translated))
             );
-            assert_eq!(short.unwrap().status(), StatusCode::GATEWAY_TIMEOUT);
+            let short = short.unwrap();
+            assert_eq!(short.status(), StatusCode::BAD_GATEWAY);
+            assert_eq!(short.headers()["x-should-retry"], "false");
             let long = long.unwrap();
             assert_eq!(long.status(), StatusCode::OK);
             // Drain the body so streaming accounting completes, even for the intentionally
@@ -670,7 +677,7 @@ async fn route_deadlines_enforce_authorized_model_in_both_planes_without_replay(
         let mut state = Arc::try_unwrap(state_with(
             upstream.uri(),
             rejected_sink.clone(),
-            ProxyLedger::in_memory(),
+            support::Ledger::new(),
         ))
         .ok()
         .unwrap();
@@ -682,22 +689,37 @@ async fn route_deadlines_enforce_authorized_model_in_both_planes_without_replay(
             state.streaming_deadlines=sandhi_proxy::deadlines::streaming_from_json(r#"{"streaming_deadlines":{"ceiling_ms":840000,"default":{"setup_ms":1000,"idle_ms":1000,"body_ms":839000}}}"#).unwrap();
         }
         let state = Arc::new(state);
-        assert_eq!(
-            build_app(state.clone())
-                .oneshot(call("long", false))
+        let response = build_app(state.clone())
+            .oneshot(call("long", false))
+            .await
+            .unwrap();
+        if streaming {
+            // The paired owner reserves a lease covering this declared bounded
+            // lifetime; the intentionally non-SSE source remains unqualified.
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
-                .unwrap()
-                .status(),
-            StatusCode::SERVICE_UNAVAILABLE
+                .is_err());
+        } else {
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        assert_eq!(
+            upstream.received_requests().await.unwrap().len(),
+            if streaming { 5 } else { 4 }
         );
-        assert_eq!(upstream.received_requests().await.unwrap().len(), 4);
-        assert!(rejected_sink.events().is_empty());
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            state.lifecycle.wait_idle(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rejected_sink.events().len(), usize::from(streaming));
         assert_eq!(state.lifecycle.active_operations(), 0);
 
         let mut custom = Arc::try_unwrap(state_with(
             upstream.uri(),
             rejected_sink,
-            ProxyLedger::in_memory(),
+            support::Ledger::new(),
         ))
         .ok()
         .unwrap();
@@ -731,9 +753,9 @@ async fn admin_version_reports_capabilities_behind_the_gate() {
     // the capability detail is operator information (D5/R2).
     // Admin-gated: a fresh state with an admin token set (state_with has none).
     let keys = KeyStore::new();
-    let mut admin_state = ProxyState::new(
+    let mut admin_state = support::state(
         keys,
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         Arc::new(InMemorySink::new()),
         HashMap::new(),
         None,
@@ -775,7 +797,8 @@ async fn admin_version_reports_capabilities_behind_the_gate() {
     let caps = &value["capabilities"];
     assert_eq!(caps["transparent_plane"], true);
     assert_eq!(caps["rate_limits"], true);
-    assert_eq!(caps["durable_ledger"], false); // no SANDHI_STORE in this state
+    assert_eq!(caps["durable_ledger"], true); // initialized actual durable ledger
+    assert_eq!(caps["execution_accounting"], "paired_durable_v1");
     assert_eq!(caps["otel_export"], false); // no recorder attached
 }
 
@@ -796,7 +819,7 @@ async fn every_response_carries_the_contract_version_header_including_errors() {
         .await;
 
     let sink = Arc::new(InMemorySink::new());
-    let state = state_with(upstream.uri(), sink, ProxyLedger::in_memory());
+    let state = state_with(upstream.uri(), sink, support::Ledger::new());
     let app = build_app(state);
 
     // Success path.
@@ -843,117 +866,32 @@ async fn every_response_carries_the_contract_version_header_including_errors() {
 // ───────────────────────── Idempotent metering (TD-0021 P4) ─────────────────────────
 
 #[tokio::test]
-async fn same_idempotency_key_inside_the_window_meters_once() {
-    // D1 acceptance: two requests with the same (virtual_key_id, idempotency-key)
-    // inside the window produce ONE lease and ONE usage event — the repeat reuses
-    // the original settlement. The proxy needs a DURABLE ledger for dedup; the
-    // state_with default is in-memory (which correctly counts, D3).
+async fn idempotency_keys_refuse_before_dispatch_without_invented_replay_guarantees() {
     let upstream = MockServer::start().await;
-    let resp = serde_json::json!({
-        "choices": [{ "message": { "content": "hi" } }],
-        "usage": { "prompt_tokens": 10, "completion_tokens": 2 }
-    });
-    Mock::given(method("POST"))
-        .and(path("/chat/completions"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(resp))
-        .mount(&upstream)
-        .await;
-
-    // Durable ledger in a temp file → dedup active.
-    let dir = std::env::temp_dir().join(format!("sandhi-p4-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let store_path = dir.join("usage.db");
-
     let sink = Arc::new(InMemorySink::new());
-    let keys2 = KeyStore::new();
-    keys2.insert(VirtualKey {
-        id: "vk_demo".into(),
-        subject_id: Some("alice".into()),
-        group_id: Some("platform".into()),
-        upstream_ref: "up1".into(),
-        ..Default::default()
-    });
-    let mut providers2 = HashMap::new();
-    providers2.insert(
-        "up1".into(),
-        ProviderRuntime::new().openai_compat(
-            "openai",
-            upstream.uri(),
-            "REAL-KEY",
-            Default::default(),
-            Some(0),
-            None,
-            None,
-            None,
-        ),
-    );
-    let ledger2 = ProxyLedger::durable(store_path.to_str().unwrap(), 1).expect("ledger reopen");
-    let state = Arc::new(ProxyState::new(
-        keys2,
-        ledger2,
-        sink.clone(),
-        providers2,
-        None,
-    ));
-    let app = build_app(state);
-
-    for _ in 0..2 {
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/chat/completions")
-                    .header("authorization", "Bearer vk_demo")
-                    .header("content-type", "application/json")
-                    .header("idempotency-key", "retry-1")
-                    .body(Body::from(r#"{"model":"gpt-x","messages":[]}"#))
-                    .unwrap(),
-            )
-            .await
+    let state = state_with(upstream.uri(), sink.clone(), support::Ledger::new());
+    let app = build_app(state.clone());
+    for key in ["retry-1", "retry-1", "retry-2"] {
+        let request = Request::post("/v1/chat/completions")
+            .header("authorization", "Bearer vk_demo")
+            .header("idempotency-key", key)
+            .body(Body::from(
+                r#"{"model":"gpt-x","messages":[],"max_tokens":8}"#,
+            ))
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let _ = axum::body::to_bytes(response.into_body(), usize::MAX).await;
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
-
-    // ONE usage event: the repeat's duplicate event was dropped (the logical
-    // call metered once; the retry's own lease still settled — physical call).
-    let events = sink.events();
-    assert_eq!(
-        events.len(),
-        1,
-        "TD-0021 P4 D1: one lease, one event for a repeated (vkey, idempotency-key)"
-    );
-
-    // A DIFFERENT key is a new logical call.
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/chat/completions")
-                .header("authorization", "Bearer vk_demo")
-                .header("content-type", "application/json")
-                .header("idempotency-key", "retry-2")
-                .body(Body::from(r#"{"model":"gpt-x","messages":[]}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let _ = axum::body::to_bytes(response.into_body(), usize::MAX).await;
-    assert_eq!(
-        sink.events().len(),
-        2,
-        "a different key is a new logical call"
-    );
-
-    std::fs::remove_dir_all(&dir).ok();
+    assert!(sink.events().is_empty());
+    assert!(upstream.received_requests().await.unwrap().is_empty());
+    let ledger = state.ledger.lock().unwrap();
+    assert_eq!(ledger.reserved("group:platform"), 0);
+    assert_eq!(ledger.reserved("upstream:openai"), 0);
 }
 
 #[tokio::test]
-async fn in_memory_ledger_counts_repeats_d3_fail_toward_counting() {
-    // D3: dedup unavailable (volatile arm) → count the call. The measurement is
-    // never lost to uncertainty.
+async fn repeated_independent_calls_have_separate_receipts_and_events() {
+    // Caller correlation cannot deduplicate two physical inference calls.
     let upstream = MockServer::start().await;
     let resp = serde_json::json!({
         "choices": [{ "message": { "content": "hi" } }],
@@ -966,7 +904,7 @@ async fn in_memory_ledger_counts_repeats_d3_fail_toward_counting() {
         .await;
 
     let sink = Arc::new(InMemorySink::new());
-    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    let state = state_with(upstream.uri(), sink.clone(), support::Ledger::new());
     let app = build_app(state);
 
     for _ in 0..2 {
@@ -978,7 +916,6 @@ async fn in_memory_ledger_counts_repeats_d3_fail_toward_counting() {
                     .uri("/v1/chat/completions")
                     .header("authorization", "Bearer vk_demo")
                     .header("content-type", "application/json")
-                    .header("idempotency-key", "retry-1")
                     .body(Body::from(r#"{"model":"gpt-x","messages":[]}"#))
                     .unwrap(),
             )
@@ -988,7 +925,7 @@ async fn in_memory_ledger_counts_repeats_d3_fail_toward_counting() {
         let _ = axum::body::to_bytes(response.into_body(), usize::MAX).await;
     }
 
-    assert_eq!(sink.events().len(), 2, "volatile arm counts (D3)");
+    assert_eq!(sink.events().len(), 2, "each physical inference is counted");
 }
 
 /// A proxy fronting a mocked **Anthropic** upstream that answers `/v1/messages` once.
@@ -999,7 +936,7 @@ async fn anthropic_state(upstream: &MockServer, sink: Arc<InMemorySink>) -> Arc<
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "id":"msg_1","type":"message","role":"assistant","model":"claude-test",
             "content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn",
-            "usage":{"input_tokens":7,"output_tokens":3,"cache_read_input_tokens":2}
+            "usage":{"input_tokens":7,"output_tokens":3,"cache_read_input_tokens":2,"cache_creation_input_tokens":0}
         })))
         .mount(upstream)
         .await;
@@ -1026,9 +963,9 @@ async fn anthropic_state(upstream: &MockServer, sink: Arc<InMemorySink>) -> Arc<
             None,
         ),
     );
-    Arc::new(ProxyState::new(
+    Arc::new(support::state(
         keys,
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         sink,
         providers,
         None,
@@ -1119,7 +1056,7 @@ async fn openai_ingress_rejects_x_api_key() {
     let state = state_with(
         "http://127.0.0.1:1".into(),
         sink.clone(),
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
     );
 
     let response = build_app(state)
@@ -1152,7 +1089,7 @@ async fn missing_or_malformed_credential_is_401_on_every_ingress_path() {
             let state = state_with(
                 "http://127.0.0.1:1".into(),
                 sink.clone(),
-                ProxyLedger::in_memory(),
+                support::Ledger::new(),
             );
             let mut request = Request::builder().method("POST").uri(uri);
             if let Some((name, value)) = credential {
@@ -1237,9 +1174,9 @@ async fn responses_ingress_same_family_forwards_transparently() {
         ),
     );
     let sink = Arc::new(InMemorySink::new());
-    let state = Arc::new(ProxyState::new(
+    let state = Arc::new(support::state(
         keys,
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         sink.clone(),
         providers,
         None,
@@ -1289,9 +1226,9 @@ async fn responses_ingress_same_family_forwards_transparently() {
 // carries the neutral session key to the upstream's KV/prefix-cache lease layer.
 
 const INFERFLUX_SSE: &str = concat!(
-    "data: {\"choices\":[{\"delta\":{\"content\":\"Hello \"},\"finish_reason\":null,\"index\":0}]}\n\n",
-    "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0}]}\n\n",
-    "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":250,\"total_tokens\":1250}}\n\n",
+    "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"Hello \"},\"finish_reason\":null,\"index\":0}]}\n\n",
+    "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0}]}\n\n",
+    "data: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":250,\"total_tokens\":1250}}\n\n",
     "data: [DONE]\n\n"
 );
 
@@ -1329,9 +1266,9 @@ async fn inferflux_state(upstream: &MockServer, sink: Arc<InMemorySink>) -> Arc<
             None,
         ),
     );
-    Arc::new(ProxyState::new(
+    Arc::new(support::state(
         keys,
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         sink,
         providers,
         None,
@@ -1354,7 +1291,7 @@ async fn inferflux_transparent_stream_forwards_verbatim_and_injects_session_head
                 // The neutral conversation key the proxy maps onto x-inferflux-session-id.
                 .header("x-sandhi-session", "conv_1")
                 .body(Body::from(
-                    r#"{"model":"llama3-8b","messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+                    r#"{"model":"llama3-8b","messages":[{"role":"user","content":"hi"}],"max_tokens":64,"stream":true}"#,
                 ))
                 .unwrap(),
         )
@@ -1422,9 +1359,9 @@ async fn correlation_id_sent_upstream_equals_the_events_request_id() {
         ),
     );
     let sink = Arc::new(InMemorySink::new());
-    let state = Arc::new(ProxyState::new(
+    let state = Arc::new(support::state(
         keys,
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         sink.clone(),
         providers,
         None,
@@ -1505,9 +1442,9 @@ async fn translation_plane_correlation_and_caller_traceparent_reach_the_upstream
         ),
     );
     let sink = Arc::new(InMemorySink::new());
-    let state = Arc::new(ProxyState::new(
+    let state = Arc::new(support::state(
         keys,
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         sink.clone(),
         providers,
         None,
@@ -1591,9 +1528,9 @@ async fn transparent_plane_correlation_id_equals_the_events_request_id() {
         ),
     );
     let sink = Arc::new(InMemorySink::new());
-    let state = Arc::new(ProxyState::new(
+    let state = Arc::new(support::state(
         keys,
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         sink.clone(),
         providers,
         None,
@@ -1644,7 +1581,7 @@ async fn providers_without_a_declared_correlation_header_send_none() {
         .await;
 
     let sink = Arc::new(InMemorySink::new());
-    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    let state = state_with(upstream.uri(), sink.clone(), support::Ledger::new());
     let response = build_app(state)
         .oneshot(
             Request::builder()
@@ -1703,9 +1640,9 @@ async fn inferflux_attribution_never_reaches_the_upstream() {
             None,
         ),
     );
-    let state = Arc::new(ProxyState::new(
+    let state = Arc::new(support::state(
         keys,
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         sink.clone(),
         providers,
         None,
@@ -1800,7 +1737,7 @@ async fn openai_user_field_derives_the_session_identity() {
         .await;
 
     let sink = Arc::new(InMemorySink::new());
-    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    let state = state_with(upstream.uri(), sink.clone(), support::Ledger::new());
     let response = build_app(state)
         .oneshot(
             Request::builder()
@@ -1834,7 +1771,7 @@ async fn explicit_session_header_wins_over_derived_body_signals() {
         .await;
 
     let sink = Arc::new(InMemorySink::new());
-    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    let state = state_with(upstream.uri(), sink.clone(), support::Ledger::new());
     let response = build_app(state)
         .oneshot(
             Request::builder()
@@ -1873,7 +1810,7 @@ async fn stable_prefix_hash_groups_agent_conversations_without_explicit_identity
         .await;
 
     let sink = Arc::new(InMemorySink::new());
-    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    let state = state_with(upstream.uri(), sink.clone(), support::Ledger::new());
     let app = build_app(state);
     for content in ["first turn", "second turn"] {
         let body = format!(
@@ -1943,9 +1880,9 @@ async fn derived_sessions_are_scoped_by_virtual_key() {
             None,
         ),
     );
-    let app = build_app(Arc::new(ProxyState::new(
+    let app = build_app(Arc::new(support::state(
         keys,
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         sink.clone(),
         providers,
         None,
@@ -2015,9 +1952,9 @@ async fn inferflux_affinity_header_fires_for_a_derived_session_too() {
         ),
     );
     let sink = Arc::new(InMemorySink::new());
-    let state = Arc::new(ProxyState::new(
+    let state = Arc::new(support::state(
         keys,
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         sink.clone(),
         providers,
         None,
@@ -2062,7 +1999,7 @@ async fn block_capped_scope_with_unbounded_output_is_not_passed_through() {
         .await;
 
     let sink = Arc::new(InMemorySink::new());
-    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    let state = state_with(upstream.uri(), sink.clone(), support::Ledger::new());
     state
         .ledger
         .lock()
@@ -2113,7 +2050,7 @@ async fn unknown_virtual_key_is_401() {
     let state = state_with(
         "http://127.0.0.1:1".into(),
         sink.clone(),
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
     );
     let app = build_app(state);
 
@@ -2137,7 +2074,7 @@ async fn spoofed_attribution_headers_are_rejected_for_a_bound_key() {
     // cross cache namespaces. Fail-loud 403, before any lease or usage event.
     let upstream = MockServer::start().await; // no mounts: reaching it would 404
     let sink = Arc::new(InMemorySink::new());
-    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    let state = state_with(upstream.uri(), sink.clone(), support::Ledger::new());
     let app = build_app(state.clone());
 
     let req = Request::builder()
@@ -2171,7 +2108,7 @@ async fn matching_attribution_headers_are_admitted() {
         .mount(&upstream)
         .await;
     let sink = Arc::new(InMemorySink::new());
-    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    let state = state_with(upstream.uri(), sink.clone(), support::Ledger::new());
     let app = build_app(state);
 
     let req = Request::builder()
@@ -2218,9 +2155,9 @@ async fn attribution_headers_on_an_unbound_key_are_rejected() {
         ),
     );
     let sink = Arc::new(InMemorySink::new());
-    let state = Arc::new(ProxyState::new(
+    let state = Arc::new(support::state(
         keys,
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         sink.clone(),
         providers,
         None,
@@ -2244,7 +2181,7 @@ async fn attribution_headers_on_an_unbound_key_are_rejected() {
 #[tokio::test]
 async fn exhausted_budget_is_429_before_calling_upstream() {
     let sink = Arc::new(InMemorySink::new());
-    let mut ledger = ProxyLedger::in_memory();
+    let mut ledger = support::Ledger::new();
     // A tiny hard cap: the conservative ceiling of any real request (input estimate + the default
     // output ceiling) can't fit, so admission is refused before the upstream is ever called
     // (ADR-0005 D1 — the ceiling is the gate, not a lower-bound estimate).
@@ -2285,7 +2222,7 @@ async fn upstream_budget_settles_spend_into_the_provider_scope() {
         .await;
 
     let sink = Arc::new(InMemorySink::new());
-    let state = state_with(upstream.uri(), sink, ProxyLedger::in_memory());
+    let state = state_with(upstream.uri(), sink, support::Ledger::new());
     // The back-leg cap lives on the resolved provider's slug ("up1" runs the openai
     // compatible runtime, slug `openai`).
     state
@@ -2328,7 +2265,7 @@ async fn upstream_budget_settles_spend_into_the_provider_scope() {
 async fn exhausted_upstream_budget_is_429_before_calling_upstream() {
     let upstream = MockServer::start().await;
     let sink = Arc::new(InMemorySink::new());
-    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    let state = state_with(upstream.uri(), sink.clone(), support::Ledger::new());
     // Tiny back-leg cap: the conservative ceiling of any real request cannot fit, so
     // admission refuses before the front-leg lease survives or the upstream is reached.
     state
@@ -2359,9 +2296,9 @@ async fn exhausted_upstream_budget_is_429_before_calling_upstream() {
 async fn streaming_passes_through_and_emits_usage() {
     let upstream = MockServer::start().await;
     let sse = concat!(
-        "data: {\"choices\":[{\"delta\":{\"content\":\"he\"}}]}\n\n",
-        "data: {\"choices\":[{\"delta\":{\"content\":\"llo\"}}]}\n\n",
-        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"prompt_tokens_details\":{\"cached_tokens\":4}}}\n\n",
+        "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"he\"}}]}\n\n",
+        "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"llo\"}}]}\n\n",
+        "data: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"prompt_tokens_details\":{\"cached_tokens\":4}}}\n\n",
         "data: [DONE]\n\n"
     );
     Mock::given(method("POST"))
@@ -2381,7 +2318,7 @@ async fn streaming_passes_through_and_emits_usage() {
         .await;
 
     let sink = Arc::new(InMemorySink::new());
-    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    let state = state_with(upstream.uri(), sink.clone(), support::Ledger::new());
     let app = build_app(state.clone());
 
     let req = Request::builder()
@@ -2389,7 +2326,7 @@ async fn streaming_passes_through_and_emits_usage() {
         .uri("/v1/chat/completions")
         .header("authorization", "Bearer vk_demo")
         .body(Body::from(
-            r#"{"model":"gpt-x","messages":[],"stream":true}"#,
+            r#"{"model":"gpt-x","messages":[],"max_tokens":64,"stream":true}"#,
         ))
         .unwrap();
 
@@ -2445,9 +2382,9 @@ async fn dashboard_reports_aggregates_from_the_store() {
     store.emit(&ev("alice", 100, 20));
     store.emit(&ev("bob", 50, 10));
 
-    let state = Arc::new(ProxyState::new(
+    let state = Arc::new(support::state(
         KeyStore::new(),
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         store.clone(),
         HashMap::new(),
         Some(store.clone()),
@@ -2515,7 +2452,7 @@ impl ChatProvider for AlwaysTimeout {
 }
 
 #[tokio::test]
-async fn upstream_timeout_maps_to_504() {
+async fn unqualified_custom_transport_refuses_before_accounting_admission() {
     let sink = Arc::new(InMemorySink::new());
     let keys = KeyStore::new();
     keys.insert(VirtualKey {
@@ -2527,9 +2464,9 @@ async fn upstream_timeout_maps_to_504() {
     });
     let mut providers: HashMap<String, ProviderHandle> = HashMap::new();
     providers.insert("up1".into(), ProviderHandle::new(Arc::new(AlwaysTimeout)));
-    let state = Arc::new(ProxyState::new(
+    let state = Arc::new(support::state(
         keys,
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         sink.clone(),
         providers,
         None,
@@ -2545,18 +2482,11 @@ async fn upstream_timeout_maps_to_504() {
         .unwrap();
 
     let response = app.oneshot(req).await.unwrap();
-    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
-    assert_eq!(
-        sink.events().len(),
-        1,
-        "failed calls retain an outcome observation"
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        sink.events().is_empty(),
+        "unqualified custom transports refuse before admission"
     );
-    assert_eq!(sink.events()[0].billable_tokens(), 0);
-    assert_eq!(
-        sink.events()[0].usage_completeness,
-        sandhi_core::UsageCompleteness::Unavailable
-    );
-    assert_eq!(sink.events()[0].outcome.as_deref(), Some("error"));
 }
 
 #[tokio::test]
@@ -2576,7 +2506,7 @@ data: [DONE]\n\n";
         .await;
 
     let sink = Arc::new(InMemorySink::new());
-    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    let state = state_with(upstream.uri(), sink.clone(), support::Ledger::new());
     let app = build_app(state);
 
     let req = Request::builder()
@@ -2625,7 +2555,7 @@ async fn ceiling_reservation_rejects_unbounded_but_admits_bounded_output() {
         .mount(&upstream)
         .await;
 
-    let mut ledger = ProxyLedger::in_memory();
+    let mut ledger = support::Ledger::new();
     ledger
         .set_budget("group:platform", Some(100), Window::Total, Policy::Block)
         .unwrap();
@@ -2674,7 +2604,7 @@ async fn ceiling_reservation_rejects_unbounded_but_admits_bounded_output() {
 
 #[tokio::test]
 async fn neutral_identity_headers_flow_onto_the_usage_event() {
-    // ADR-0005 D7: idempotency + agent cost-tree + trace linkage ride as neutral metadata.
+    // Agent cost-tree and trace linkage remain neutral correlation metadata.
     let upstream = MockServer::start().await;
     let resp = serde_json::json!({
         "id":"c","object":"chat.completion","model":"gpt-x",
@@ -2688,7 +2618,7 @@ async fn neutral_identity_headers_flow_onto_the_usage_event() {
         .await;
 
     let sink = Arc::new(InMemorySink::new());
-    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    let state = state_with(upstream.uri(), sink.clone(), support::Ledger::new());
     let app = build_app(state);
 
     let req = Request::builder()
@@ -2696,7 +2626,6 @@ async fn neutral_identity_headers_flow_onto_the_usage_event() {
         .uri("/v1/chat/completions")
         .header("authorization", "Bearer vk_demo")
         .header("content-type", "application/json")
-        .header("idempotency-key", "idem-123")
         .header("traceparent", "00-abcabc-def-01")
         .header("x-sandhi-run-id", "run-9")
         .body(Body::from(r#"{"model":"gpt-x","messages":[]}"#))
@@ -2706,7 +2635,7 @@ async fn neutral_identity_headers_flow_onto_the_usage_event() {
 
     let events = sink.events();
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].idempotency_key.as_deref(), Some("idem-123"));
+    assert_eq!(events[0].idempotency_key, None);
     assert_eq!(events[0].trace_context.as_deref(), Some("00-abcabc-def-01"));
     assert_eq!(events[0].run_id.as_deref(), Some("run-9"));
 }
@@ -2752,9 +2681,9 @@ async fn cross_family_ingress_routes_through_the_typed_translation_plane() {
         ),
     );
     let sink = Arc::new(InMemorySink::new());
-    let state = Arc::new(ProxyState::new(
+    let state = Arc::new(support::state(
         keys,
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         sink.clone(),
         providers,
         None,
@@ -2827,9 +2756,9 @@ async fn discovery_lists_only_the_models_the_key_permits() {
             None,
         ),
     );
-    let state = Arc::new(ProxyState::new(
+    let state = Arc::new(support::state(
         keys,
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         sink,
         providers,
         None,
@@ -2918,9 +2847,9 @@ async fn upstream_failures_are_rendered_in_the_callers_dialect() {
             ..Default::default()
         });
     }
-    let state = Arc::new(ProxyState::new(
+    let state = Arc::new(support::state(
         keys,
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         Arc::new(InMemorySink::default()),
         HashMap::new(),
         None,
@@ -2996,7 +2925,7 @@ async fn metrics_endpoint_reflects_traffic_and_is_gated() {
         .await;
 
     let sink = Arc::new(InMemorySink::default());
-    let state = state_with(upstream.uri(), Arc::clone(&sink), ProxyLedger::in_memory());
+    let state = state_with(upstream.uri(), Arc::clone(&sink), support::Ledger::new());
 
     // Drive one call so the registry has something in it.
     let app = build_app(Arc::clone(&state));
@@ -3033,9 +2962,9 @@ async fn metrics_endpoint_reflects_traffic_and_is_gated() {
         .unwrap();
     let text = String::from_utf8(body.to_vec()).unwrap();
 
-    // The call is counted, with the transparent plane (OpenAI ingress -> OpenAI upstream).
+    // An omitted output bound is encoded through the selected canonical path.
     assert!(text.contains("sandhi_requests_total{"), "{text}");
-    assert!(text.contains("plane=\"transparent\""), "{text}");
+    assert!(text.contains("plane=\"translation\""), "{text}");
     assert!(text.contains("dialect=\"openai\""), "{text}");
     // Tokens are recorded per kind, and `billable` is the settled 40 fresh + 60 cache-read + 20 out.
     assert!(text.contains("kind=\"cache_read\"} 60"), "{text}");
@@ -3056,9 +2985,9 @@ async fn metrics_endpoint_reflects_traffic_and_is_gated() {
     }
 
     // With an admin token configured the endpoint requires it — the dashboard's gate (D5).
-    let mut gated = ProxyState::new(
+    let mut gated = support::state(
         KeyStore::new(),
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         Arc::new(InMemorySink::default()),
         HashMap::new(),
         None,
@@ -3138,9 +3067,9 @@ async fn rate_limited_requests_are_refused_without_consuming_budget() {
     let sink = Arc::new(InMemorySink::default());
     // Coerce to the trait object the state holds, keeping the concrete handle for assertions.
     let sink_for_state: Arc<dyn sandhi_core::Sink> = sink.clone();
-    let state = Arc::new(ProxyState::new(
+    let state = Arc::new(support::state(
         keys,
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         sink_for_state,
         providers,
         None,
@@ -3244,7 +3173,7 @@ async fn a_key_without_a_limit_is_never_rate_limited() {
         .mount(&upstream)
         .await;
     let sink = Arc::new(InMemorySink::default());
-    let state = state_with(upstream.uri(), Arc::clone(&sink), ProxyLedger::in_memory());
+    let state = state_with(upstream.uri(), Arc::clone(&sink), support::Ledger::new());
 
     for i in 0..25 {
         let response = build_app(Arc::clone(&state))
@@ -3323,6 +3252,9 @@ fn paced_anthropic_frames() -> Vec<String> {
         "type": "message_start",
         "message": {
             "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "content": [],
             "model": "claude-test",
             "usage": {
                 "input_tokens": PACED_FRAMES_INPUT,
@@ -3368,9 +3300,9 @@ fn paced_anthropic_state(upstream_uri: String, sink: Arc<InMemorySink>) -> Arc<P
             None,
         ),
     );
-    Arc::new(ProxyState::new(
+    Arc::new(support::state(
         keys,
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         sink,
         providers,
         None,
@@ -3384,7 +3316,7 @@ fn paced_anthropic_state(upstream_uri: String, sink: Arc<InMemorySink>) -> Arc<P
 ///
 /// Reverting the `usage_running` plumbing makes this assert ~1 against an expected 7168.
 #[tokio::test]
-async fn a_disconnect_after_message_start_settles_the_reported_cache_split() {
+async fn a_disconnect_after_message_start_retains_reported_partial_without_settlement() {
     use futures_util::StreamExt;
 
     let uri = paced_sse_upstream(paced_anthropic_frames());
@@ -3426,10 +3358,16 @@ async fn a_disconnect_after_message_start_settles_the_reported_cache_split() {
     // `RequestAccounting`, which finalizes.
     drop(body);
 
-    let expected = PACED_FRAMES_INPUT + PACED_FRAMES_CACHE_CREATION + PACED_FRAMES_CACHE_READ;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        state.lifecycle.wait_idle(),
+    )
+    .await
+    .unwrap();
+    let expected = 0;
     let spent = state.ledger.lock().unwrap().spent("group:platform");
     assert!(
-        spent >= expected,
+        spent == expected,
         "a disconnect after message_start must settle the reported {expected} tokens, not a byte \
          guess — settled {spent}"
     );
@@ -3444,7 +3382,7 @@ async fn a_disconnect_after_message_start_settles_the_reported_cache_split() {
     );
     assert_eq!(
         events[0].usage_basis,
-        sandhi_core::UsageBasis::Estimated,
+        sandhi_core::UsageBasis::ProviderReported,
         "input and cache are real here, but output was estimated — the call must not present as \
          a clean measurement"
     );
@@ -3470,7 +3408,7 @@ async fn a_disconnect_after_message_start_settles_the_reported_cache_split() {
 /// estimate, so a fully-delivered response settled `0`: a metering hole that needs no disconnect
 /// and no bad intent to trigger.
 #[tokio::test]
-async fn a_stream_whose_usage_is_never_reported_still_settles_what_it_accrued() {
+async fn a_stream_without_reported_usage_retains_liability_without_invented_charge() {
     let upstream = MockServer::start().await;
     let sse = concat!(
         "data: {\"choices\":[{\"delta\":{\"content\":\"a fully delivered response\"}}]}\n\n",
@@ -3488,7 +3426,7 @@ async fn a_stream_whose_usage_is_never_reported_still_settles_what_it_accrued() 
         .await;
 
     let sink = Arc::new(InMemorySink::new());
-    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    let state = state_with(upstream.uri(), sink.clone(), support::Ledger::new());
     let app = build_app(state.clone());
 
     let req = Request::builder()
@@ -3502,53 +3440,28 @@ async fn a_stream_whose_usage_is_never_reported_still_settles_what_it_accrued() 
 
     let response = app.oneshot(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+    assert!(axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
-        .unwrap();
-    assert!(
-        String::from_utf8_lossy(&body).contains("[DONE]"),
-        "forwarded"
-    );
-
-    let spent = state.ledger.lock().unwrap().spent("group:platform");
-    assert!(
-        spent > 0,
-        "a delivered response whose usage was never reported must still settle the accrued \
-         estimate — settling 0 is a metering hole that needs no disconnect to exploit"
-    );
-
-    // And it must be labelled an estimate, not passed off as a measured call.
+        .is_err());
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        state.lifecycle.wait_idle(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(state.ledger.lock().unwrap().spent("group:platform"), 0);
+    assert!(state.ledger.lock().unwrap().reserved("group:platform") > 0);
     let events = sink.events();
     assert_eq!(events.len(), 1);
     assert_eq!(
         events[0].usage_completeness,
-        sandhi_core::UsageCompleteness::Partial,
-        "an unreported stream is not a finalized measurement"
+        sandhi_core::UsageCompleteness::Unavailable
     );
-    assert_eq!(
-        events[0].usage_basis,
-        sandhi_core::UsageBasis::Estimated,
-        "nothing here was measured — the event must say so"
-    );
-
-    // The operator-facing signal: how much settled spend was guessed (TD-0013 P3).
-    let metrics = state.metrics.render();
-    assert!(
-        metrics.contains("sandhi_estimated_tokens_total{"),
-        "an operator must be able to measure estimated spend, not just find it per-event"
-    );
-    for forbidden in [
-        "subject_id",
-        "session_id",
-        "virtual_key_id",
-        "vk_demo",
-        "alice",
-    ] {
-        assert!(
-            !metrics.contains(forbidden),
-            "{forbidden} must never become a metric label (TD-0011 D2)"
-        );
-    }
+    assert_eq!(events[0].tokens_out, 0);
+    assert!(!state
+        .metrics
+        .render()
+        .contains("sandhi_estimated_tokens_total{"));
 }
 
 /// TD-0013 D6 — a measured usage above the reserved ceiling is settled in full, and counted.
@@ -3576,7 +3489,7 @@ async fn a_settle_above_the_ceiling_is_recorded_in_full_and_counted() {
         .await;
 
     let sink = Arc::new(InMemorySink::new());
-    let state = state_with(upstream.uri(), sink.clone(), ProxyLedger::in_memory());
+    let state = state_with(upstream.uri(), sink.clone(), support::Ledger::new());
     state
         .ledger
         .lock()
@@ -3668,7 +3581,7 @@ async fn hanging_sse_upstream() -> String {
 async fn open_streams_hold_admission_slots_until_the_body_completes() {
     let upstream_uri = hanging_sse_upstream().await;
     let sink = Arc::new(InMemorySink::new());
-    let mut inner = ProxyState::new(
+    let mut inner = support::state(
         {
             let keys = KeyStore::new();
             keys.insert(VirtualKey {
@@ -3680,7 +3593,7 @@ async fn open_streams_hold_admission_slots_until_the_body_completes() {
             });
             keys
         },
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         sink,
         {
             let mut providers = HashMap::new();
@@ -3820,7 +3733,7 @@ async fn open_streams_hold_admission_slots_until_the_body_completes() {
 async fn translation_plane_streams_hold_admission_slots_too() {
     let upstream_uri = hanging_sse_upstream().await;
     let sink = Arc::new(InMemorySink::new());
-    let mut inner = ProxyState::new(
+    let mut inner = support::state(
         {
             let keys = KeyStore::new();
             keys.insert(VirtualKey {
@@ -3832,7 +3745,7 @@ async fn translation_plane_streams_hold_admission_slots_too() {
             });
             keys
         },
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         sink,
         {
             let mut providers = HashMap::new();
@@ -4010,7 +3923,7 @@ async fn serve_with_limits(
     tokio::sync::oneshot::Sender<()>,
 ) {
     let sink = Arc::new(InMemorySink::new());
-    let mut inner = ProxyState::new(
+    let mut inner = support::state(
         {
             let keys = KeyStore::new();
             keys.insert(VirtualKey {
@@ -4022,7 +3935,7 @@ async fn serve_with_limits(
             });
             keys
         },
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         sink,
         {
             let mut providers = HashMap::new();
@@ -4383,12 +4296,9 @@ fn owned_state_with_stream_limits(
             sandhi_store::ShardedLedger::open_sharded(path.to_str().unwrap(), 1).unwrap(),
         ),
     );
-    if let Some(limits) = limits {
-        Arc::get_mut(&mut state).unwrap().streaming_deadlines = Some(
-            serde_json::from_value(serde_json::json!({"ceiling_ms":10000,"default":limits}))
-                .unwrap(),
-        );
-    }
+    Arc::get_mut(&mut state).unwrap().streaming_deadlines = limits.map(|limits| {
+        serde_json::from_value(serde_json::json!({"ceiling_ms":10000,"default":limits})).unwrap()
+    });
     sandhi_proxy::settlement::buffered::enable(
         &state,
         sandhi_proxy::settlement::buffered::Config::new(
@@ -4881,14 +4791,7 @@ async fn owned_buffered_deadline_is_installed_inside_spawn_for_both_planes() {
 
 #[tokio::test]
 async fn owned_buffered_unsupported_shapes_refuse_before_admission() {
-    for case in [
-        "stream",
-        "unbounded",
-        "dedup",
-        "retry",
-        "stream_native_retries",
-        "stream_retry",
-    ] {
+    for case in ["dedup", "retry", "stream_retry_native", "stream_retry"] {
         let upstream = MockServer::start().await;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("owned.db");
@@ -4922,7 +4825,7 @@ async fn owned_buffered_unsupported_shapes_refuse_before_admission() {
                 ),
             );
         }
-        if case == "stream_native_retries" {
+        if case == "stream_retry_native" {
             state.providers.lock().unwrap().insert(
                 "up1".into(),
                 ProviderRuntime::new().cohere(
@@ -5503,7 +5406,7 @@ async fn anthropic_policy_state(upstream: &MockServer, sink: Arc<InMemorySink>) 
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "id":"msg_1","type":"message","role":"assistant","model":"claude-test",
             "content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn",
-            "usage":{"input_tokens":7,"output_tokens":3}
+            "usage":{"input_tokens":7,"output_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}
         })))
         .mount(upstream)
         .await;
@@ -5544,7 +5447,7 @@ async fn anthropic_policy_state(upstream: &MockServer, sink: Arc<InMemorySink>) 
     let audit = tempfile::tempdir().expect("tempdir");
     let store = sandhi_store::policy::PolicyAuditStore::open(&audit.path().join("audit.db"), 1024)
         .expect("audit store");
-    let mut state = ProxyState::new(keys, ProxyLedger::in_memory(), sink, providers, None);
+    let mut state = support::state(keys, support::Ledger::new(), sink, providers, None);
     // Generous deadline floor: these tests assert the gate's verdict (forward /
     // block / fail-closed), not its timing. The 200 ms document deadline is
     // wall-clock and a loaded CI runner can miss it on spawn_blocking
@@ -5659,7 +5562,7 @@ async fn per_credential_user_agent_reaches_the_upstream() {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "id":"msg_1","type":"message","role":"assistant","model":"claude-test",
             "content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn",
-            "usage":{"input_tokens":3,"output_tokens":1}
+            "usage":{"input_tokens":3,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}
         })))
         .mount(&upstream)
         .await;
@@ -5685,9 +5588,9 @@ async fn per_credential_user_agent_reaches_the_upstream() {
     let mut providers = HashMap::new();
     providers.insert("up1".into(), handle);
     let sink = Arc::new(InMemorySink::new());
-    let state = Arc::new(ProxyState::new(
+    let state = Arc::new(support::state(
         keys,
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         sink,
         providers,
         None,
@@ -5749,9 +5652,9 @@ async fn per_credential_user_agent_reaches_openai_compat_upstream() {
     let mut providers = HashMap::new();
     providers.insert("up1".into(), handle);
     let sink = Arc::new(InMemorySink::new());
-    let state = Arc::new(ProxyState::new(
+    let state = Arc::new(support::state(
         keys,
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         sink,
         providers,
         None,
@@ -5807,7 +5710,7 @@ async fn count_tokens_endpoints_answer_without_dispatch() {
     let state = state_with(
         "http://127.0.0.1:1".into(),
         sink.clone(),
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
     );
     let app = build_app(state);
 
@@ -5859,7 +5762,7 @@ async fn count_tokens_endpoints_answer_without_dispatch() {
 #[tokio::test]
 async fn count_tokens_enforces_auth() {
     let sink = Arc::new(InMemorySink::new());
-    let state = state_with("http://127.0.0.1:1".into(), sink, ProxyLedger::in_memory());
+    let state = state_with("http://127.0.0.1:1".into(), sink, support::Ledger::new());
     let app = build_app(state);
 
     let response = app
@@ -5913,9 +5816,9 @@ async fn count_tokens_enforces_allowlist_and_rate_limit() {
             None,
         ),
     );
-    let state = Arc::new(ProxyState::new(
+    let state = Arc::new(support::state(
         keys,
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         sink,
         providers,
         None,
@@ -5994,9 +5897,9 @@ async fn translated_openai_traffic_keeps_its_ingress_route_label() {
             None,
         ),
     );
-    let state = Arc::new(ProxyState::new(
+    let state = Arc::new(support::state(
         keys,
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         sink.clone(),
         providers,
         None,

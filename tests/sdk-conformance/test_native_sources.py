@@ -236,7 +236,7 @@ def gateway(tmp_path, binaries, source, family):
     )
     try:
         instance.start(
-            SANDHI_BUFFERED_ACCOUNTING="tracked", SANDHI_SHUTDOWN_GRACE_SECS="1"
+            SANDHI_SHUTDOWN_GRACE_SECS="1"
         )
         instance.provision(source, "synthetic-native-key")
         instance.cli(
@@ -424,7 +424,7 @@ def test_native_source_real_sdk_matrix_joins_original_source_attempt_and_paired_
         # Restart uses persisted native endpoint binding and never replays the first call.
         instance.stop()
         instance.start(
-            SANDHI_BUFFERED_ACCOUNTING="tracked", SANDHI_SHUTDOWN_GRACE_SECS="1"
+            SANDHI_SHUTDOWN_GRACE_SECS="1"
         )
         assert len(calls) == 1
         row, context, usage, charge = evidence(instance.database)

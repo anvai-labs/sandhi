@@ -153,7 +153,8 @@ def test_owned_fixture_refuses_missing_or_ambiguous_artifacts_even_when_stale_fi
         module.backend_binaries.__wrapped__(tmp_path_factory)
 
 
-def test_example_kind_is_selected_independently_of_same_named_binary(tmp_path):
+@pytest.mark.parametrize("kind", ["example", "test"])
+def test_executable_kind_is_selected_independently_of_same_named_binary(tmp_path, kind):
     name = "sdk_broker_transport"
     records = [
         {
@@ -162,12 +163,12 @@ def test_example_kind_is_selected_independently_of_same_named_binary(tmp_path):
             "executable": str(tmp_path / kind / name),
             "features": [],
         }
-        for kind in ("bin", "example")
+        for kind in ("bin", "example", "test")
     ]
     output = "\n".join(map(json.dumps, records))
-    assert source_provenance.binary_artifact(output, name, kind="example")[
+    assert source_provenance.binary_artifact(output, name, kind=kind)[
         "executable"
-    ] == str(tmp_path / "example" / name)
+    ] == str(tmp_path / kind / name)
     assert source_provenance.binary_artifact(output, name)["executable"] == str(
         tmp_path / "bin" / name
     )

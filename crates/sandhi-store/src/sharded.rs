@@ -165,6 +165,21 @@ impl ShardedLedger {
             .settle_with_evidence_durable(scope, reservation_id, charged_tokens)
     }
 
+    /// Open only native-reference metadata on this validated original ledger's
+    /// actual connection path. No caller-selected second database or ledger.
+    pub fn open_native_reference_store(
+        &self,
+    ) -> Result<crate::references::ReferenceStore, &'static str> {
+        let ledger = self
+            .tracked_ledger()
+            .map_err(|_| "native references require the original single file-backed ledger")?;
+        let path = ledger
+            .reference_store_path()
+            .ok_or("native references require the original single file-backed ledger")?;
+        crate::references::ReferenceStore::open(&path)
+            .map_err(|_| "native reference storage unavailable")
+    }
+
     /// Validate tracked operation topology without reopening or replacing the ledger.
     pub fn validate_tracked_durable(&self) -> Result<(), EvidenceError> {
         drop(self.tracked_ledger()?);

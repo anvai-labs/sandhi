@@ -200,7 +200,8 @@ def binary_artifact(output: str, name: str, *, kind: str = "bin") -> dict:
     assert kind in {
         "bin",
         "example",
-    }, "only binary and example executable targets are supported"
+        "test",
+    }, "only binary, example and test executable targets are supported"
     matches = []
     for line in output.splitlines():
         if not line.startswith("{"):

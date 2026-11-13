@@ -104,7 +104,9 @@ Profiles default to `standard`; `anthropic_implicit_cache` is an explicit Messag
 convention. `responses` and `gemini_generate_content` select those wire families.
 Profiles describe the immediate source, stay out of model request bodies and grant
 no credential authority. See [shared endpoint profiles](../../docs/adr/0039-shared-embedded-endpoint-profiles.md)
-for family constraints and the remaining gateway second-hop qualification gate.
+for family constraints. For a gateway second hop, select the explicit
+[gateway peer contract](../../docs/adr/0041-explicit-gateway-peer-contract.md)
+and its client protocol rather than a source endpoint profile.
 
 Prepared 0.17.0 buffered calls share strict source usage qualification with
 accounted calls for Chat, Messages, Responses and Gemini. Codex uses the qualified

@@ -144,8 +144,11 @@ impl ChatProvider for TypedOpenAiResponses {
     fn qualified_buffered_without_raw(&self) -> bool {
         self.profile == OpenAiResponsesProfile::ChatGptCodex
     }
+    fn execution_request(&self, request: &ChatRequestV1) -> Result<Value, ProviderError> {
+        self.qualified_request(request)
+    }
     fn preflight_request(&self, request: &ChatRequestV1) -> Result<(), ProviderError> {
-        encode_responses_request_for_profile(request, self.profile).map(|_| ())
+        self.execution_request(request).map(|_| ())
     }
     fn preflight_qualified_buffered(&self, request: &ChatRequestV1) -> Result<(), ProviderError> {
         self.qualified_request(request).map(|_| ())

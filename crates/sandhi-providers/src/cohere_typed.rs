@@ -27,7 +27,7 @@ impl TypedCohere {
         attempt_context: Option<crate::AttemptContext>,
     ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
         request.validate().map_err(ProviderError::InvalidRequest)?;
-        let body = encode_cohere_request(&request)?;
+        let body = self.execution_request(&request)?;
         let response = self
             .raw
             .complete(provider_request_observed(
@@ -68,7 +68,7 @@ impl TypedCohere {
         attempt_context: Option<crate::AttemptContext>,
     ) -> Result<ChatEventStream, ProviderError> {
         request.validate().map_err(ProviderError::InvalidRequest)?;
-        let body = encode_cohere_request(&request)?;
+        let body = self.execution_request(&request)?;
         let source = self
             .raw
             .stream_qualified(
@@ -115,8 +115,11 @@ impl ChatProvider for TypedCohere {
     ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
         self.complete_inner(request, headers, Some(context)).await
     }
+    fn execution_request(&self, request: &ChatRequestV1) -> Result<Value, ProviderError> {
+        encode_cohere_request(request)
+    }
     fn preflight_request(&self, request: &ChatRequestV1) -> Result<(), ProviderError> {
-        encode_cohere_request(request).map(|_| ())
+        self.execution_request(request).map(|_| ())
     }
     fn slug(&self) -> &str {
         "cohere"

@@ -195,6 +195,13 @@ pub trait ChatProvider: Send + Sync {
             "request preflight is unsupported by this typed provider".into(),
         ))
     }
+    /// Exact pure backend/profile encoder used for HTTP execution inspection.
+    /// Unsupported custom providers cannot claim an uninspectable HTTP payload.
+    fn execution_request(&self, _request: &ChatRequestV1) -> Result<Value, ProviderError> {
+        Err(ProviderError::InvalidRequest(
+            "execution request inspection is unsupported by this typed provider".into(),
+        ))
+    }
     /// Additional synchronous-operation checks for tracked buffered admission.
     /// Capability remains factory-owned; this default grants no tracked support.
     fn preflight_qualified_buffered(&self, request: &ChatRequestV1) -> Result<(), ProviderError> {
@@ -452,10 +459,22 @@ impl ProviderHandle {
         self.check_credential().is_ok()
     }
 
+    /// HTTP issuer ownership may use the Codex account-only identity only with
+    /// its current lease fence. Preserve the legacy routing digest separately.
+    pub fn reference_credential_is_current(&self) -> bool {
+        self.credential_is_current()
+            && (!self.credential_account_fenced || self.has_account_fenced_credential())
+    }
+
     /// Trusted gateway composition only. Inventory and wire contracts must never
     /// expose this private credential-derived value directly.
     pub fn routing_credential_fingerprint(&self) -> Option<&str> {
         self.credential_identity.as_deref()
+    }
+
+    /// Expiry ceiling for server-owned native issuer proofs; no secret material.
+    pub fn reference_credential_expiry(&self) -> Option<u64> {
+        self.credential_expires_at
     }
 
     pub fn has_account_fenced_credential(&self) -> bool {
@@ -631,6 +650,23 @@ impl ProviderHandle {
         request.validate().map_err(ProviderError::InvalidRequest)?;
         self.inner
             .preflight_request(&self.prepare_cache_request(request.clone())?)
+    }
+
+    /// Encode the final selected request without transport or recompiling an
+    /// already frozen cache plan. Uses the actual factory-owned codec/profile.
+    pub fn encode_execution_request(
+        &self,
+        request: &ChatRequestV1,
+    ) -> Result<Value, ProviderError> {
+        self.check_credential()?;
+        if !self.permits_model(&request.model) {
+            return Err(ProviderError::InvalidRequest(
+                "model is not declared for this backend".into(),
+            ));
+        }
+        request.validate().map_err(ProviderError::InvalidRequest)?;
+        self.inner
+            .execution_request(&self.prepare_cache_request(request.clone())?)
     }
 
     /// Validate a supported tracked buffered operation before taking either lease.
@@ -890,7 +926,7 @@ fn private_credential_identity(config: &ProviderTransportConfig) -> String {
             )
         })
         .collect();
-    // A constrained Codex lease has a verified account header; access-token renewal
+    // A constrained Codex lease has an operator-configured account header; access-token renewal
     // within that account need not masquerade as an account switch. Generic API
     // credentials have no such proof, so their actual secret remains part of the hash.
     let credential = if config.openai_responses_profile == OpenAiResponsesProfile::ChatGptCodex {
@@ -1509,8 +1545,11 @@ impl ChatProvider for TypedOpenAiCompat {
         self.stream_inner(request, headers, Some(context)).await
     }
 
+    fn execution_request(&self, request: &ChatRequestV1) -> Result<Value, ProviderError> {
+        encode_openai_request_for_peer(request, self.raw.peer_role())
+    }
     fn preflight_request(&self, request: &ChatRequestV1) -> Result<(), ProviderError> {
-        encode_openai_request_for_peer(request, self.raw.peer_role()).map(|_| ())
+        self.execution_request(request).map(|_| ())
     }
     fn allows_cache_synthesis(&self) -> bool {
         true
@@ -1593,7 +1632,7 @@ impl TypedOpenAiCompat {
         request.validate().map_err(ProviderError::InvalidRequest)?;
         let req = provider_request_observed(
             &request,
-            encode_openai_request_for_peer(&request, self.raw.peer_role())?,
+            self.execution_request(&request)?,
             call_headers,
             attempt_context,
         );
@@ -1647,7 +1686,7 @@ impl TypedOpenAiCompat {
             .stream_qualified(
                 provider_request_observed(
                     &request,
-                    encode_openai_request_for_peer(&request, self.raw.peer_role())?,
+                    self.execution_request(&request)?,
                     call_headers,
                     attempt_context,
                 ),
@@ -3284,7 +3323,7 @@ mod tests {
         ));
         for (family, path, body) in [
             (ProviderFamily::Anthropic, "/v1/chat/completions", "{}"),
-            (ProviderFamily::OpenAiCompat, "/v1/embeddings", "{}"),
+            (ProviderFamily::OpenAiCompat, "/v1/images/generations", "{}"),
             (
                 ProviderFamily::OpenAiCompat,
                 "/v1/chat/completions",

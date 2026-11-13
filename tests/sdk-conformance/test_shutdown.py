@@ -122,11 +122,11 @@ def gated_provider():
 @pytest.fixture
 def shutdown_gateway(proxy_binary, gated_provider, tmp_path):
     @contextmanager
-    def launch(*, tls=False, grace=5, quiesce=1800, max_connections=64, tracked=False):
+    def launch(*, tls=False, grace=5, quiesce=1800, max_connections=64, explicit_deadlines=False):
         port = _free_port()
         database = tmp_path / "shutdown.db"
         config = {"providers": [], "vkeys": [], "budgets": [], "alerts": []}
-        if tracked:
+        if explicit_deadlines:
             config["streaming_deadlines"] = STREAMING_DEADLINES
         if tls:
             fixtures = REPO_ROOT / "crates/sandhi-proxy/tests/fixtures/tls"
@@ -150,8 +150,6 @@ def shutdown_gateway(proxy_binary, gated_provider, tmp_path):
             "SANDHI_SHUTDOWN_GRACE_SECS": str(grace),
             "SANDHI_SHUTDOWN_QUIESCE_MS": str(quiesce),
         })
-        if tracked:
-            env["SANDHI_BUFFERED_ACCOUNTING"] = "tracked"
         base = f"{'https' if tls else 'http'}://127.0.0.1:{port}"
         # A file avoids stderr pipe backpressure contaminating the deadline test.
         with (tmp_path / "shutdown.stderr").open("wb") as log:
@@ -403,7 +401,7 @@ def test_tracked_binary_correlation_and_shutdown(
     gated_provider.release.set()
     certificate = REPO_ROOT / "crates/sandhi-proxy/tests/fixtures/tls/localhost-cert.pem"
     verify = ssl.create_default_context(cafile=certificate) if tls else True
-    with shutdown_gateway(tracked=True, tls=tls) as (process, base, database, _port):
+    with shutdown_gateway(explicit_deadlines=True, tls=tls) as (process, base, database, _port):
         with httpx.Client(base_url=base, timeout=5, verify=verify) as client:
             with client.stream("POST", "/v1/chat/completions", headers=CLIENT,
                                json={**BODY, "max_tokens": 10, "stream": streaming}) as response:

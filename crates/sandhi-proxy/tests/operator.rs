@@ -5,6 +5,7 @@
 //! `/v1/*` → attributed + budget-enforced → revoke rejects. No live API keys; upstreams are
 //! wiremock mocks. No dollars anywhere (measure-vs-price boundary).
 
+mod support;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -38,9 +39,9 @@ fn admin_state() -> Arc<ProxyState> {
     // The sink IS the durable store, exactly as the proxy wires it in production, so emitted
     // usage events are queryable through the admin usage API.
     let sink: Arc<dyn Sink> = store.clone();
-    let mut state = ProxyState::new(
+    let mut state = support::state(
         KeyStore::new(),
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         sink,
         HashMap::new(),
         Some(store),
@@ -78,6 +79,43 @@ async fn body_json(response: axum::response::Response) -> Value {
     serde_json::from_slice(&bytes).unwrap_or(Value::Null)
 }
 
+/// Accounting capability follows the validated execution owner, never telemetry storage.
+#[tokio::test]
+async fn accounting_capability_requires_the_initialized_durable_owner() {
+    for (durable, usage_store) in [(true, false), (false, true)] {
+        let store = usage_store.then(|| Arc::new(SqliteStore::in_memory().unwrap()));
+        let ledger = if durable {
+            support::Ledger::new()
+        } else {
+            ProxyLedger::in_memory().into()
+        };
+        let mut state = support::state(
+            KeyStore::new(),
+            ledger,
+            Arc::new(InMemorySink::new()) as Arc<dyn Sink>,
+            HashMap::new(),
+            store,
+        );
+        state.admin_token = Some(TOKEN.into());
+        let app = build_app(Arc::new(state));
+        let response = app
+            .oneshot(req("GET", "/admin/version", Some(TOKEN), None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_json(response).await;
+        assert_eq!(body["capabilities"]["durable_ledger"], durable);
+        assert_eq!(
+            body["capabilities"]["execution_accounting"],
+            if durable {
+                "paired_durable_v1"
+            } else {
+                "unavailable"
+            }
+        );
+    }
+}
+
 // --- Admin auth -------------------------------------------------------------
 
 #[tokio::test]
@@ -108,9 +146,9 @@ async fn admin_routes_require_the_admin_token() {
 #[tokio::test]
 async fn admin_disabled_when_no_token_configured() {
     let store = Arc::new(SqliteStore::in_memory().unwrap());
-    let state = ProxyState::new(
+    let state = support::state(
         KeyStore::new(),
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         Arc::new(InMemorySink::new()) as Arc<dyn Sink>,
         HashMap::new(),
         Some(store),
@@ -597,7 +635,7 @@ async fn upstream_scope_round_trips_budget_set_rehydration_and_usage() {
     let store = Arc::new(SqliteStore::in_memory().unwrap());
     let sink: Arc<dyn Sink> = store.clone();
     // Durable ledger: only it persists budgets, so only it can prove rehydration.
-    let mut state = ProxyState::new(
+    let mut state = support::state(
         KeyStore::new(),
         ProxyLedger::durable(":memory:", 1).unwrap(),
         sink,
@@ -804,9 +842,9 @@ async fn run_cost_tree_endpoint_serves_the_run_tree() {
 #[tokio::test]
 async fn run_cost_tree_endpoint_requires_a_store() {
     // Admin token configured but no durable store → 503, mirroring /admin/usage.
-    let mut state = ProxyState::new(
+    let mut state = support::state(
         KeyStore::new(),
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         Arc::new(sandhi_core::InMemorySink::new()),
         HashMap::new(),
         None,
@@ -1302,9 +1340,9 @@ async fn dashboard_usage_endpoint_now_includes_by_model() {
 #[tokio::test]
 async fn dashboard_endpoints_404_when_store_unconfigured() {
     // A bare ProxyState (no vault/vkeys/alerts/store) mirrors a proxy started without SANDHI_STORE.
-    let state = ProxyState::new(
+    let state = support::state(
         KeyStore::new(),
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         Arc::new(InMemorySink::new()) as Arc<dyn Sink>,
         HashMap::new(),
         None,
@@ -1406,9 +1444,9 @@ async fn dashboard_stays_open_without_admin_token() {
     // No admin token configured → nothing to present; single-node dev trust (unchanged).
     let store = Arc::new(SqliteStore::in_memory().unwrap());
     let sink: Arc<dyn Sink> = store.clone();
-    let state = ProxyState::new(
+    let state = support::state(
         KeyStore::new(),
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         sink,
         HashMap::new(),
         Some(store),

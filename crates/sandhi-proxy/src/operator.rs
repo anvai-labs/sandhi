@@ -231,6 +231,10 @@ pub(crate) async fn version_capabilities(
     if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Read, false).await {
         return r;
     }
+    // The owner is installed only after validating the supplied single file-backed
+    // ledger. A usage store alone proves neither execution ownership nor topology.
+    // This is a configured contract fact, not a live database-health probe.
+    let execution_accounting = state.buffered_accounting.get().is_some();
     let body = serde_json::json!({
         "wire_contract_version": sandhi_core::UsageEvent::SCHEMA_VERSION,
         "chat_contract_version": sandhi_core::CHAT_SCHEMA_VERSION_V1,
@@ -239,8 +243,12 @@ pub(crate) async fn version_capabilities(
         "capabilities": {
             // The two-plane proxy is structural (ADR-0004 D1), not optional.
             "transparent_plane": true,
-            // Durable + crash-safe when SANDHI_STORE is set; volatile otherwise.
-            "durable_ledger": state.store.is_some(),
+            "durable_ledger": execution_accounting,
+            "execution_accounting": if execution_accounting {
+                "paired_durable_v1"
+            } else {
+                "unavailable"
+            },
             "alerts": state.alerts.is_some(),
             "admin_api": state.oidc.is_some() || state.admin_token.is_some(),
             // TD-0012: per-vkey token bucket, in-memory (N replicas multiply it).

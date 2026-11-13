@@ -35,6 +35,7 @@ pub(crate) struct Selected {
     pub plan: DispatchPlan,
     record: RouteRecord,
     pin: Option<Pin>,
+    established: bool,
 }
 
 fn failure(error: Error) -> Response {
@@ -115,6 +116,7 @@ fn available(provider: &ProviderHandle, target: &Target) -> bool {
 
 #[derive(Clone, Copy)]
 pub(crate) enum TrackedDelivery {
+    Counting,
     Buffered,
     Streaming,
 }
@@ -203,6 +205,7 @@ pub(crate) async fn select(
         // Invoke the actual codec/profile, including compiled cache controls. A
         // declared family alone does not prove support for every request option.
         let compatible = match tracked {
+            Some(TrackedDelivery::Counting) => true,
             Some(TrackedDelivery::Buffered) => provider.preflight_owned_buffered(request).is_ok(),
             Some(TrackedDelivery::Streaming) => {
                 state.streaming_deadlines.is_some()
@@ -263,6 +266,7 @@ pub(crate) async fn select(
         endpoint_profile: binding.endpoint_profile.clone(),
         binding_sha256: binding_sha256.clone(),
     };
+    let established = pin.is_some();
     let pin = if record.definition.affinity == Affinity::Session {
         Some(Pin {
             namespace: scope,
@@ -281,10 +285,17 @@ pub(crate) async fn select(
         plan,
         record,
         pin,
+        established,
     })
 }
 
 impl Selected {
+    pub(crate) fn require_stateful_session(&self) -> Result<(), &'static str> {
+        if self.record.definition.affinity != Affinity::Session || !self.established {
+            return Err("provider-bound state requires an established compatible routing session");
+        }
+        Ok(())
+    }
     pub async fn confirm(&self, state: &ProxyState) -> Result<(), &'static str> {
         let store = state
             .routes

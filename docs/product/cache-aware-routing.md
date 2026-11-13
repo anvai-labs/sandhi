@@ -8,8 +8,9 @@ and [embedded ONNX evaluation](../operator/embedded-onnx.md).
 !!! info "Prepared source release; qualification remains endpoint-specific"
     Sandhi **0.17.0** and Victor **0.29.0** are prepared, unpublished source versions.
     Four client dialects and explicit backend profiles are implemented. Coordinated
-    gateway peering, the accounting-default migration, broader cache lifecycle and
-    subscription acceptance, and retained reliability failures remain
+    gateway peering, immutable budget namespaces and mandatory durable HTTP
+    execution are current implementation candidates. Integrated acceptance,
+    packaging, broader cache lifecycle and retained reliability work remain
     [release gates](../td/TD-0034-protocol-neutral-router-cache-accounting.md).
     A passing docs build or a configured backend does not qualify a deployment.
 
@@ -25,7 +26,7 @@ request path and terms as this guide:
 | What context may be reused? | Declared cache policy and compatible native controls | Eligible placement, lifetime and namespace rules; not transferable KV state |
 | What content may leave? | Content policy | Configured rules/evaluator coverage before source dispatch |
 | Which work was measured? | Overview, Run explorer and Usage evidence | Observed normalized token units and available correlation; not proof of per-request settlement |
-| What was settled? | Tracked accounting's original source/attempt/receipt join | Qualified source measurement and its committed charge, when tracked execution is enabled |
+| What was settled? | Tracked accounting's original source/attempt/receipt join | Qualified source measurement and its committed charge under the initialized durable owner; usage telemetry alone is insufficient |
 
 [Shared buffered qualification](../reviews/shared-buffered-qualification-2026-11-12.md)
 and [qualified translated streams](../adr/0028-qualified-translated-stream-accounting.md)
@@ -69,14 +70,17 @@ flowchart TB
     D --> E["Provider inference and cache"]
     E --> F["Original source evidence<br/>Fresh · Read · Write · Output · Reasoning overlap"]
     F --> G["Compatible client response<br/>Wire format may combine categories"]
-    F --> H["Tracked source ledger and receipts<br/>When enabled; pricing remains downstream"]
+    F --> H["Original paired source receipt<br/>Required durable owner; pricing remains downstream"]
 ```
 
 ## Client protocol and backend protocol are independent
 
 An OpenAI, Anthropic or Gemini agent can call a configured backend through its
 usual SDK. Backend identity, endpoint family/profile and credential reference are
-separate settings. An OpenAI-shaped endpoint does not automatically inherit
+separate settings. Budget authority is the immutable stored
+`upstream_budget_scope`, not a provider label or inferred family bucket. The
+[capability matrix](protocol-and-credential-matrix.md) distinguishes implemented
+source contracts from endpoint-specific live evidence. An OpenAI-shaped endpoint does not automatically inherit
 OpenAI Platform's cache features.
 
 | Client API | Gateway ingress | Live Z.AI backend qualification |
@@ -90,6 +94,12 @@ The [live report](../reviews/zai-router-live-2026-11-11.md) retains failed probe
 the accounting defect they found, the fix and subsequent evidence. Z.AI's Responses
 endpoint uses the standard API-key profile. It does not qualify ChatGPT/Codex or
 Anthropic subscription credentials, native Gemini backends or Gemini Interactions.
+
+The same paired owner also preserves native OpenAI-compatible
+[Text Completions and Embeddings](../operator/text-endpoints.md). Embeddings are
+input-only operations; they do not reuse a missing generative output count as zero.
+Cohere and Ollama are qualified backend families behind the four chat ingress
+APIs; they do not add native proxy ingress dialects.
 
 ## Cache marker placement: what becomes reusable?
 

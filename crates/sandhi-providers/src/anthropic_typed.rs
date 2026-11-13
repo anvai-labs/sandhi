@@ -35,7 +35,7 @@ impl TypedAnthropic {
         attempt_context: Option<crate::AttemptContext>,
     ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
         request.validate().map_err(ProviderError::InvalidRequest)?;
-        let body = encode_anthropic_request_for_peer(&request, self.raw.peer_role())?;
+        let body = self.execution_request(&request)?;
         let response = self
             .raw
             .complete(provider_request_observed(
@@ -109,8 +109,11 @@ impl ChatProvider for TypedAnthropic {
     ) -> Result<ChatEventStream, ProviderError> {
         self.stream_inner(request, headers, Some(context)).await
     }
+    fn execution_request(&self, request: &ChatRequestV1) -> Result<Value, ProviderError> {
+        encode_anthropic_request_for_peer(request, self.raw.peer_role())
+    }
     fn preflight_request(&self, request: &ChatRequestV1) -> Result<(), ProviderError> {
-        encode_anthropic_request_for_peer(request, self.raw.peer_role()).map(|_| ())
+        self.execution_request(request).map(|_| ())
     }
     fn allows_cache_synthesis(&self) -> bool {
         true

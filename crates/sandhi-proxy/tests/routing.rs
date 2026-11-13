@@ -1,4 +1,5 @@
 //! Logical aliases must dispatch only to operator-owned target/model pairs.
+mod support;
 use axum::{
     body::{to_bytes, Body},
     http::{Request, StatusCode},
@@ -220,7 +221,7 @@ fn state(
             ..Default::default()
         });
     }
-    let mut ledger = ProxyLedger::in_memory();
+    let mut ledger = support::Ledger::new();
     for scope in ["vk:vk_one", "vk:vk_two", "upstream:fixture"] {
         ledger
             .set_budget(scope, Some(100_000), Window::Total, Policy::Block)
@@ -237,7 +238,7 @@ fn state(
             .unwrap();
     }
     let sink = Arc::new(InMemorySink::new());
-    let mut state = ProxyState::new(
+    let mut state = support::state(
         keys,
         ledger,
         sink.clone(),

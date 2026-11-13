@@ -69,6 +69,7 @@ nav:
   - Start here: index.md
   - Efficiency and control:
       - Cache-aware routing and tokens: product/cache-aware-routing.md
+      - Protocol and credential matrix: product/protocol-and-credential-matrix.md
       - Local ONNX evaluation: operator/embedded-onnx.md
       - Sensitive-text egress policy: operator/sensitive-policy.md
   - Operate:
@@ -76,7 +77,7 @@ nav:
       - Backends and cache configuration: operator/backends.md
       - Identity and access: operator/oidc-sso.md
       - Identity groups: operator/identity-groups.md
-      - Buffered accounting: operator/buffered-accounting.md
+      - Durable execution and recovery: operator/buffered-accounting.md
       - Accounting wait diagnostics: operator/accounting-wait-diagnostics.md
       - Buffered deadlines: operator/buffered-deadlines.md
       - Streaming deadlines: operator/streaming-deadlines.md
@@ -99,6 +100,8 @@ nav:
       - Shared buffered source qualification: adr/0040-shared-buffered-source-qualification.md
       - Explicit gateway peer contract: adr/0041-explicit-gateway-peer-contract.md
       - "ADR-0042: Provider identity and budget namespaces": adr/0042-provider-identity-and-budget-namespace.md
+      - Mandatory durable HTTP execution: adr/0043-mandatory-durable-http-execution.md
+      - "ADR-0044: Native reference ownership": adr/0044-native-reference-ownership.md
       - Qualified Responses streams: adr/0026-qualified-responses-stream-accounting.md
       - Qualified Codex accounting: adr/0027-qualified-codex-buffered-accounting.md
       - Qualified translated streams: adr/0028-qualified-translated-stream-accounting.md

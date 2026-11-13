@@ -25,6 +25,7 @@ mod native_chat;
 mod responses;
 #[cfg(test)]
 mod responses_tests;
+mod text_completion;
 
 // Bound the extra copy when a caller supplies an arbitrarily large HTTP chunk.
 const INPUT_SLICE_BYTES: usize = 8192;
@@ -67,6 +68,7 @@ pub enum StreamObservationError {
 /// one initial BOM, multiline data and ordinary message events are supported. EOF
 /// never dispatches a partial event. This is not an EventSource/reconnection client.
 pub struct OpenAiStreamUsageObserver {
+    text_completion: Option<text_completion::TextCompletion>,
     gateway_peer: bool,
     gateway_failure: Option<crate::GatewayFailure>,
     splitter: LineSplitter,
@@ -107,6 +109,13 @@ impl Default for OpenAiStreamUsageObserver {
 impl OpenAiStreamUsageObserver {
     pub fn new() -> Self {
         Self::with_limit(MAX_STREAM_LINE_BYTES)
+    }
+
+    /// Strict source observation for the authorized native Text Completion path.
+    pub fn for_text_completion() -> Self {
+        let mut observer = Self::new();
+        observer.text_completion = Some(text_completion::TextCompletion::default());
+        observer
     }
 
     pub fn for_endpoint(endpoint: EndpointFamilyV1) -> Result<Self, StreamObservationError> {
@@ -157,6 +166,7 @@ impl OpenAiStreamUsageObserver {
 
     fn with_limit(limit: usize) -> Self {
         Self {
+            text_completion: None,
             gateway_peer: false,
             gateway_failure: None,
             splitter: LineSplitter::new_sse(limit),
@@ -504,6 +514,9 @@ impl OpenAiStreamUsageObserver {
             return Err(StreamObservationError::UnexpectedEventType);
         }
         if self.data == b"[DONE]" {
+            if let Some(text) = &self.text_completion {
+                text.finish()?;
+            }
             self.done = true;
             return Ok(());
         }
@@ -511,6 +524,13 @@ impl OpenAiStreamUsageObserver {
             .map_err(|_| StreamObservationError::InvalidJson)?;
         self.observe_gateway_failure(&event);
         self.observe_cache(&event);
+        if let Some(text) = &mut self.text_completion {
+            if let Some(usage) = text.event(&event)? {
+                self.usage = Some((&usage).into());
+                self.canonical_usage = Some(usage);
+            }
+            return Ok(());
+        }
         if let Some(next) =
             qualify_openai_stream_usage_for_profile(&event, self.openai_usage_profile)
                 .map_err(StreamObservationError::InvalidUsage)?

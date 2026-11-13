@@ -27,7 +27,9 @@ pub mod policy_workers;
 mod preparation;
 pub mod profiles;
 pub mod ratelimit;
+mod reference_ownership;
 mod routing;
+mod serving;
 pub mod settlement;
 pub mod streaming;
 mod text_endpoints;
@@ -46,6 +48,7 @@ pub use operator::{
     rehydrate_budgets, rehydrate_live_keys,
 };
 pub use persistence::BufferedAlertStore;
+pub use serving::is_incomplete_shutdown;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -67,12 +70,13 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 use tower::{Layer, Service as TowerService};
 
+#[cfg(test)]
 use time::OffsetDateTime;
 
 use sandhi_core::{
-    AlertRegistry, Backend, ChatRequestV1, FinishReasonV1, KeyStore, LatencySource, ParsedUsage,
-    Policy, RequestMetadataV1, Reservation, Sink, UsageBasis, UsageCompleteness, UsageEvent,
-    UsageV2, VirtualKey,
+    AlertRegistry, Backend, ChatRequestV1, FinishReasonV1, KeyStore, LatencySource,
+    RequestMetadataV1, Reservation, Sink, UsageBasis, UsageCompleteness, UsageEvent, UsageV2,
+    VirtualKey,
 };
 use sandhi_providers::{
     token_estimate::baseline_estimate, ProviderError, ProviderFamily, ProviderHandle,
@@ -257,17 +261,17 @@ pub struct ProxyState {
     pub topology: Option<Arc<topology::TopologyFile>>,
     /// Validated startup-only buffered transport policy; absent preserves transport defaults.
     pub buffered_deadlines: Option<deadlines::BufferedDeadlines>,
+    /// Operator-owned output default when a generation client omits a limit.
+    pub default_max_output_tokens: u64,
     /// Startup-only, per-authorized-route streaming setup/idle/body limits.
     pub streaming_deadlines: Option<deadlines::StreamingDeadlines>,
-    /// Opt-in body lifetime owner for built-in streaming transports (no standalone configuration yet).
-    pub stream_body_lifetime: Option<streaming::StreamBodyLifetime>,
     /// One-shot lifecycle; dispatch authorization stops atomically at shutdown cutoff.
     pub lifecycle: Arc<lifecycle::Lifecycle>,
     /// Same-port probe window, included in the total grace and clamped to leave drain time.
     pub shutdown_quiesce: Duration,
     pub keys: KeyStore,
-    /// The enforcement ledger (ADR-0005 lease model): durable [`SqliteLedger`](sandhi_store::SqliteLedger)
-    /// when `SANDHI_STORE` is set, else volatile in-memory. See [`ProxyLedger`].
+    /// The original enforcement ledger. HTTP execution requires its validated
+    /// single file-backed durable arm; read-only operator states may use memory.
     pub ledger: Mutex<ProxyLedger>,
     pub sink: Arc<dyn Sink>,
     /// `upstream_ref` → a persistent typed provider handle (real key baked in). Interior-mutable:
@@ -392,8 +396,8 @@ impl ProxyState {
             topology: None,
             lifecycle: Arc::new(lifecycle::Lifecycle::new()),
             buffered_deadlines: None,
-            streaming_deadlines: None,
-            stream_body_lifetime: None,
+            default_max_output_tokens: DEFAULT_OUTPUT_CEILING,
+            streaming_deadlines: Some(deadlines::StreamingDeadlines::default()),
             shutdown_quiesce: Duration::from_secs(1),
             keys,
             ledger: Mutex::new(ledger),
@@ -723,7 +727,11 @@ fn ingress_routes(state: &Arc<ProxyState>) -> axum::Router<Arc<ProxyState>> {
         ))
 }
 
+/// Assemble the application. A valid existing durable ledger initializes the
+/// canonical owner; unsupported/read-only states retain probes/operator routes
+/// but generation refuses and readiness stays unavailable.
 pub fn build_app(state: Arc<ProxyState>) -> Router {
+    let _ = initialize_execution(&state);
     let max_request_body_bytes = state.max_request_body_bytes;
     let ai_routes = ingress_routes(&state);
     // TD-0021 P2 (D4/R3): every response — success AND error, including ingress errors —
@@ -825,6 +833,21 @@ pub fn build_app(state: Arc<ProxyState>) -> Router {
         .with_state(state)
 }
 
+/// Finalize generation ownership against the supplied original ledger. This
+/// never opens, replaces, migrates or creates another ledger.
+pub fn initialize_execution(state: &Arc<ProxyState>) -> Result<(), &'static str> {
+    if !(1..=1_000_000).contains(&state.default_max_output_tokens) {
+        return Err("invalid configured output default");
+    }
+    if state.buffered_accounting.get().is_some() {
+        return Ok(());
+    }
+    settlement::buffered::enable(state, settlement::buffered::Config::default())
+}
+fn require_execution_owner(state: &Arc<ProxyState>) -> std::io::Result<()> {
+    initialize_execution(state).map_err(std::io::Error::other)
+}
+
 /// Bind and serve until shutdown.
 ///
 /// Delegates to [`serve_with_shutdown_timeout`] with a never-resolving
@@ -858,6 +881,13 @@ where
 /// a bounded quiesce interval under the existing connection limits, then accepts stop. At the
 /// original deadline connections are cancelled. Blocking cleanup can outlive cancellation:
 /// a timeout is reported, not a claim of completed settlement or forced embedder process exit.
+///
+/// Serving owns periodic recovery of the original durable ledger, including ready terminal
+/// records after restart without another HTTP request. Shutdown stops recovery and checks the
+/// bounded final inventory. Unknown liabilities return an error classified by
+/// [`is_incomplete_shutdown`]; they are never released or replayed. Dropping this future signals
+/// its owned supervisor to perform the same bounded drain, provided the host keeps Tokio running.
+/// The host must await this function to observe cleanup errors; cancellation cannot return one.
 pub async fn serve_with_shutdown_timeout<F>(
     state: Arc<ProxyState>,
     addr: SocketAddr,
@@ -867,6 +897,7 @@ pub async fn serve_with_shutdown_timeout<F>(
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
+    require_execution_owner(&state)?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     serve_scheme_listeners_with_shutdown(
         state,
@@ -893,6 +924,7 @@ pub async fn serve_with_tls_shutdown_timeout<F>(
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
+    require_execution_owner(&state)?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     serve_scheme_listeners_with_shutdown(
         state,
@@ -928,6 +960,7 @@ pub async fn serve_with_http_and_tls_shutdown_timeout<F>(
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
+    require_execution_owner(&state)?;
     let tls_listener = tokio::net::TcpListener::bind(tls_addr).await?;
     let http_listener = tokio::net::TcpListener::bind(http_addr).await?;
     serve_scheme_listeners_with_shutdown(
@@ -990,8 +1023,7 @@ where
         listeners.plaintext.is_some() || listeners.tls.is_some(),
         "serving requires at least one listener"
     );
-    let policy = ConnectionPolicy::from_state(&state);
-    serve_router_listener_with_shutdown(build_app(state), listeners, shutdown, grace, policy).await
+    serving::supervise(state, listeners, shutdown, grace).await
 }
 
 /// Serve until `shutdown` resolves, with TD-0014 P3 connection-level defence:
@@ -1425,21 +1457,23 @@ mod drain_contract_tests {
     use sandhi_core::{InMemorySink, KeyStore};
     use tower::ServiceExt;
 
-    fn state() -> (Arc<ProxyState>, Arc<InMemorySink>) {
+    fn state() -> (Arc<ProxyState>, Arc<InMemorySink>, tempfile::TempDir) {
+        let directory = tempfile::tempdir().unwrap();
         let sink = Arc::new(InMemorySink::new());
         let state = Arc::new(ProxyState::new(
             KeyStore::new(),
-            ProxyLedger::in_memory(),
+            ProxyLedger::durable(directory.path().join("original.db").to_str().unwrap(), 1)
+                .unwrap(),
             sink.clone(),
             HashMap::new(),
             None,
         ));
-        (state, sink)
+        (state, sink, directory)
     }
 
     #[tokio::test]
     async fn readiness_is_distinct_from_liveness_and_all_dialects_reject_drain() {
-        let (state, sink) = state();
+        let (state, sink, _directory) = state();
         let app = build_app(state.clone());
         let ready = app
             .clone()
@@ -1491,7 +1525,7 @@ mod drain_contract_tests {
 
     #[tokio::test]
     async fn shutdown_metrics_preserve_auth_and_report_owned_work() {
-        let (mut state, _) = state();
+        let (mut state, _, _directory) = state();
         Arc::get_mut(&mut state).unwrap().admin_token = Some("test-admin".into());
         let app = build_app(state.clone());
         let operation = state.lifecycle.try_operation().unwrap();
@@ -1529,70 +1563,6 @@ mod drain_contract_tests {
         assert!(elapsed >= 0.0);
         drop(operation);
         assert_eq!(state.lifecycle.active_operations(), 0);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn abandoned_blocking_reservation_rolls_back_without_usage() {
-        let (state, sink) = state();
-        // Hold the ledger before spawning admission, deterministically keeping its blocking
-        // worker alive after the HTTP-side future disappears. No runtime worker holds this lock.
-        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let holder_state = state.clone();
-        let holder = std::thread::spawn(move || {
-            let _ledger = holder_state.ledger.lock().unwrap();
-            locked_tx.send(()).unwrap();
-            release_rx.recv().unwrap();
-        });
-        locked_rx.await.unwrap();
-        let request_state = state.clone();
-        let request = tokio::spawn(async move {
-            reserve_budget(&request_state, "scope", 100, Policy::Block).await
-        });
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while state.lifecycle.active_operations() == 0 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        request.abort();
-        assert!(matches!(request.await, Err(error) if error.is_cancelled()));
-        assert_eq!(
-            state.lifecycle.active_operations(),
-            1,
-            "detached reservation still owns its guard"
-        );
-        release_tx.send(()).unwrap();
-        tokio::time::timeout(Duration::from_secs(2), state.lifecycle.wait_idle())
-            .await
-            .unwrap();
-        holder.join().unwrap();
-        let ledger = state.ledger.lock().unwrap();
-        assert_eq!(
-            ledger.reserved("scope"),
-            0,
-            "lost task output must roll back its lease"
-        );
-        assert_eq!(ledger.spent("scope"), 0);
-        assert!(sink.is_empty(), "undispatched work emits no usage event");
-    }
-
-    #[tokio::test]
-    async fn completed_reservation_without_dispatch_is_rolled_back_at_cutoff() {
-        let (state, sink) = state();
-        let pending = reserve_budget(&state, "scope", 100, Policy::Block)
-            .await
-            .unwrap();
-        assert!(matches!(pending.admission, Some(Admission::Leased(_))));
-        assert_eq!(state.ledger.lock().unwrap().reserved("scope"), 100);
-        state.lifecycle.begin_quiesce(Duration::from_secs(1));
-        assert!(state.lifecycle.try_operation().is_none());
-        assert_eq!(state.lifecycle.active_operations(), 1);
-        drop(pending);
-        assert_eq!(state.lifecycle.active_operations(), 0);
-        assert_eq!(state.ledger.lock().unwrap().reserved("scope"), 0);
-        assert!(sink.is_empty());
     }
 }
 
@@ -1662,90 +1632,52 @@ mod request_body_limit_tests {
 #[cfg(test)]
 mod request_admission_tests {
     use super::*;
-    use async_trait::async_trait;
     use axum::http::Request;
-    use sandhi_core::{ChatResponseV1, ChatStreamEventV1, InMemorySink, KeyStore};
-    use sandhi_providers::{ChatEventStream, ChatProvider};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tower::ServiceExt;
-
-    struct StuckProvider {
-        calls: AtomicUsize,
-        entered: tokio::sync::Notify,
-    }
-
-    #[async_trait]
-    impl ChatProvider for StuckProvider {
-        fn slug(&self) -> &str {
-            "stuck"
-        }
-
-        async fn complete(
-            &self,
-            _request: ChatRequestV1,
-            _call_headers: axum::http::HeaderMap,
-        ) -> Result<ChatResponseV1, ProviderError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            self.entered.notify_one();
-            std::future::pending().await
-        }
-
-        async fn stream(
-            &self,
-            _request: ChatRequestV1,
-            _call_headers: axum::http::HeaderMap,
-        ) -> Result<ChatEventStream, ProviderError> {
-            let stream =
-                futures_util::stream::pending::<Result<ChatStreamEventV1, ProviderError>>();
-            Ok(Box::pin(stream))
-        }
-    }
-
-    fn request() -> Request<Body> {
-        Request::builder()
-            .method("POST")
-            .uri("/v1/chat/completions")
-            .header("authorization", "Bearer vk-test")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                r#"{"model":"model","messages":[{"role":"user","content":"hi"}]}"#,
-            ))
-            .unwrap()
-    }
-
     #[tokio::test]
     async fn concurrency_boundary_precedes_body_extraction_and_dispatch() {
-        let keys = KeyStore::new();
-        keys.insert(VirtualKey {
-            id: "vk-test".into(),
-            upstream_ref: "stuck".into(),
-            ..Default::default()
-        });
-        let provider = Arc::new(StuckProvider {
-            calls: AtomicUsize::new(0),
-            entered: tokio::sync::Notify::new(),
-        });
-        let mut providers = HashMap::new();
-        providers.insert("stuck".into(), ProviderHandle::new(provider.clone()));
-        let mut state = ProxyState::new(
-            keys,
-            ProxyLedger::in_memory(),
-            Arc::new(InMemorySink::new()),
-            providers,
-            None,
-        );
-        state.max_in_flight_ai_requests = 1;
-        let app = build_app(Arc::new(state));
-
-        let first = tokio::spawn(app.clone().oneshot(request()));
-        provider.entered.notified().await;
-        let second = tokio::spawn(app.oneshot(request()));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let body_polls = Arc::new(AtomicUsize::new(0));
+        let handler_entered = entered.clone();
+        let handler_calls = calls.clone();
+        // A middleware unit probe, not a proxy generation/accounting alternative.
+        let app = Router::new()
+            .route(
+                "/__admission_probe",
+                post(
+                    move |Extension(permit): Extension<Arc<AdmissionPermit>>, _bytes: Bytes| {
+                        let entered = handler_entered.clone();
+                        let calls = handler_calls.clone();
+                        async move {
+                            let _permit = permit;
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            entered.notify_one();
+                            std::future::pending::<StatusCode>().await
+                        }
+                    },
+                ),
+            )
+            .layer(AdmissionLayer::new(
+                1,
+                Arc::new(lifecycle::Lifecycle::new()),
+            ));
+        let request = |body| Request::post("/__admission_probe").body(body).unwrap();
+        let first = tokio::spawn(app.clone().oneshot(request(Body::from("first"))));
+        entered.notified().await;
+        let polls = body_polls.clone();
+        let second_body = Body::from_stream(futures_util::stream::once(async move {
+            polls.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, std::io::Error>(Bytes::from_static(b"second"))
+        }));
+        let second = tokio::spawn(app.oneshot(request(second_body)));
         tokio::time::sleep(Duration::from_millis(25)).await;
-
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(
-            provider.calls.load(Ordering::SeqCst),
-            1,
-            "the queued request must not reach decode/dispatch while the permit is held"
+            body_polls.load(Ordering::SeqCst),
+            0,
+            "queued request cannot extract its body before admission"
         );
         first.abort();
         second.abort();
@@ -2145,7 +2077,9 @@ async fn handle_responses(
 
 /// `GET /metrics` — Prometheus text exposition (TD-0011 P2).
 async fn readiness(State(state): State<Arc<ProxyState>>) -> Response {
-    let (status, body) = if state.lifecycle.is_running() {
+    let (status, body) = if state.buffered_accounting.get().is_none() {
+        (StatusCode::SERVICE_UNAVAILABLE, "execution_not_initialized")
+    } else if state.lifecycle.is_running() {
         (StatusCode::OK, "ready")
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, "draining")
@@ -2471,6 +2405,7 @@ async fn handle(
     gemini_route: Option<GeminiRoute>,
 ) -> Response {
     let receipt = Arc::new(Mutex::new(None));
+    let references = Arc::new(Mutex::new(None));
     let mut response = handle_with_policy_receipt(
         state,
         permit,
@@ -2479,8 +2414,14 @@ async fn handle(
         dialect,
         gemini_route,
         receipt.clone(),
+        references.clone(),
     )
     .await;
+    let reference_context = references
+        .lock()
+        .expect("reference context poisoned")
+        .take();
+    response = reference_ownership::protect(response, reference_context).await;
     if let Some(id) = receipt.lock().expect("policy receipt poisoned").as_ref() {
         response.headers_mut().insert(
             "x-sandhi-policy-receipt",
@@ -2490,6 +2431,7 @@ async fn handle(
     response
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_with_policy_receipt(
     state: Arc<ProxyState>,
     permit: Arc<AdmissionPermit>,
@@ -2498,11 +2440,19 @@ async fn handle_with_policy_receipt(
     dialect: IngressDialect,
     mut gemini_route: Option<GeminiRoute>,
     policy_receipt: Arc<Mutex<Option<String>>>,
+    references: Arc<Mutex<Option<reference_ownership::Context>>>,
 ) -> Response {
     // Body extraction may have spanned shutdown even after semaphore admission succeeded.
     if !state.lifecycle.is_running() {
         return draining_error(dialect);
     }
+    let Some(owned) = state.buffered_accounting.get().cloned() else {
+        return settlement::buffered::no_automatic_retry(ingress_error(
+            dialect,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "durable execution owner is not initialized",
+        ));
+    };
     // 1. Virtual key, presented the way this dialect's own SDK presents a credential
     //    (TD-0010 D1 — `x-api-key` on `/v1/messages`, `Authorization: Bearer` on the OpenAI
     //    paths). Resolve the live key store by exact token (legacy/demo path, where the id
@@ -2546,15 +2496,16 @@ async fn handle_with_policy_receipt(
 
     let preparation::PreparedRequest {
         vk,
+        reference_context,
+        defaulted_output,
         provider,
-        mut request,
+        request,
         body,
         wants_stream,
         raw_text_route,
         transparent_eligible,
         buffered_deadline,
         streaming_deadline,
-        body_lifetime,
         routing,
     } = match preparation::prepare(
         preparation::PreparationContext::from(state.as_ref()),
@@ -2575,6 +2526,7 @@ async fn handle_with_policy_receipt(
         Ok(prepared) => prepared,
         Err(response) => return response,
     };
+    *references.lock().expect("reference context poisoned") = reference_context;
     if let Some(plan) = &routing {
         if let Some(route) = &mut gemini_route {
             route.model = plan.actual_model.clone();
@@ -2589,7 +2541,6 @@ async fn handle_with_policy_receipt(
     // Reserve an estimated liability, not a proven token bound. Concurrent usage and
     // separate reasoning can exceed reservations/caps; settlement records measured usage.
     let scope = budget_scope(&vk);
-    let policy = scope_policy(&state, &scope);
     // A scope is "capped" (for output-bounding) only under a `Block` policy: `Warn` never rejects,
     // so we do not shrink the client's request. An output maximum reduces exposure when the
     // client omitted it; it does not make the estimated total a strict cap (TD-0026 W03).
@@ -2612,243 +2563,49 @@ async fn handle_with_policy_receipt(
             )
         })
         .unwrap_or_else(|_| baseline_estimate(input_len));
+    let output_max = request.max_output_tokens;
     let (ceiling, effective_max) = reservation_ceiling(&request, estimated_input);
-    // Preserve the canonical back-leg namespace independently of diagnostic identity.
-    // Registered bindings restore their immutable historical scope; no per-model hierarchy.
+    // Preserve the canonical budget namespace independently of diagnostic identity.
     let upstream_scope = provider.upstream_budget_scope().to_owned();
-    if let Some(owned) = state.buffered_accounting.get() {
-        // The tracked owner atomically admits and links both budget legs in the
-        // original ledger. No independently reclaimable upstream lease precedes it.
-        return settlement::buffered::handle(
-            Arc::clone(&state),
-            Arc::clone(owned),
-            provider,
-            settlement::Selection {
-                upstream_ref: vk.upstream_ref.clone(),
-                routing,
-            },
-            request,
-            body,
-            dialect,
-            permit,
-            wants_stream,
-            transparent_eligible,
-            scope,
-            policy,
-            ceiling,
-            effective_max,
-            input_len,
-            upstream_scope,
-            buffered_deadline.map(|d| d.duration()),
-            streaming_deadline,
-        )
-        .await;
-    }
-    // SQLite's transaction remains a synchronous correctness boundary, but it runs on Tokio's
-    // blocking pool so its busy timeout never parks an async scheduler worker.
-    let Some(mut pending) = reserve_budget(&state, &scope, ceiling, policy).await else {
-        return draining_error(dialect);
-    };
-    // Refusal still belongs to pending admission: drop rolls back the lease without
-    // fabricating usage for an upstream call that never happened.
-    let stream_dispatch_deadline = streaming_deadline.map(|policy| policy.transport());
-    let dispatch_deadline = buffered_deadline
-        .map(|effective| sandhi_providers::BufferedDeadline::new(effective.duration()));
-    if let (Some(deadline), Some(Admission::Leased(lease))) =
-        (buffered_deadline, pending.admission.as_ref())
-    {
-        if !deadline.fits_lease(lease.expires_at, time::OffsetDateTime::now_utc()) {
-            return ingress_error(
-                dialect,
-                StatusCode::SERVICE_UNAVAILABLE,
-                "insufficient reservation lifetime for configured buffered deadline",
-            );
-        }
-    }
-    if let (true, Some(lifetime), Some(Admission::Leased(lease))) =
-        (wants_stream, body_lifetime, pending.admission.as_ref())
-    {
-        if !deadlines::fits_lease(
-            streaming_deadline.map_or(lifetime.duration(), |policy| policy.dispatch_duration()),
-            lease.expires_at,
-            time::OffsetDateTime::now_utc(),
-        ) {
-            return ingress_error(
-                dialect,
-                StatusCode::SERVICE_UNAVAILABLE,
-                "insufficient reservation lifetime for configured stream body lifetime",
-            );
-        }
-    }
-    // Final dispatch authorization shares the cutoff lock. A pending reservation owns its
-    // rollback until this point, including if the blocking result outlives its HTTP caller.
-    let Some(operation) = state.lifecycle.try_operation() else {
-        return draining_error(dialect);
-    };
-    let capped = pending.capped;
-    // A front denial is already determined at reserve time — refuse BEFORE the back-leg
-    // reserve so a front denial never costs a back lease (ADR-0015 D2). `pending` still owns
-    // the outcome, but a `Denied` admission carries no lease, so its eventual `Drop` is a
-    // no-op.
-    if matches!(pending.admission, Some(Admission::Denied)) {
-        // A denial is the one enforcement outcome an operator must be able to see without
-        // reading the sink; `scope` is an operator-set budget name, not caller-supplied.
-        tracing::warn!(
-            scope = %scope,
-            ceiling,
-            provider = provider.slug(),
-            "reservation denied: budget exhausted"
-        );
-        // Labelled by POLICY, never by scope: a scope may be `vk:<id>`, which is per-key and
-        // therefore unbounded (TD-0011 D2).
-        state.metrics.record_denied(match policy {
-            Policy::Block => "block",
-            Policy::Warn => "warn",
-        });
-        return ingress_error(dialect, StatusCode::TOO_MANY_REQUESTS, "budget exhausted");
-    }
-    // Back-leg admission (ADR-0015): the SAME ceiling against `upstream:{provider}`, reserved
-    // while `pending` still owns the front lease — a cancellation of this future (client
-    // disconnect, drain) or a refusal below rolls the front lease back through
-    // `PendingAdmission`'s Drop, so no bare `Admission` ever outlives its rollback protection.
-    // The hold releases the back lease exactly once on every path between here and
-    // `RequestAccounting`, which settles it with the same actual at finalize.
-    let upstream_reservation =
-        match reserve_upstream_budget(&state, &upstream_scope, ceiling, dialect).await {
-            Ok(reservation) => reservation,
-            // Draining, or the upstream scope refused: `pending`'s Drop releases the front lease.
-            Err(response) => return response,
-        };
-    let admission = pending.admission.take().expect("owned admission result");
-    drop(pending);
-    let mut upstream_hold = UpstreamHold::new(Arc::clone(&state), upstream_reservation);
-    let inject_output_bound = capped && request.max_output_tokens.is_none();
-    if inject_output_bound {
-        request.max_output_tokens = Some(effective_max);
-    }
-    // A Block cap is an enforcement boundary. When the client left output unbounded we inject
-    // `effective_max` above — but only the translation plane re-encodes `request`, so only it can
-    // carry that bound to the upstream (`max_tokens`). The transparent plane forwards the raw body
-    // verbatim and would stream unbounded output past the cap (ADR-0005 D1). So a capped,
-    // otherwise-same-family call with unbounded output must NOT take the transparent plane.
-    let transparent = transparent_eligible && !inject_output_bound;
-    let plane = if transparent {
-        metrics::Plane::Transparent
-    } else {
-        metrics::Plane::Translation
-    };
-    let reservation = match admission {
-        Admission::Leased(reservation) => Some(reservation),
-        // Fail-open (Warn on a backend error): admit without a lease; the usage event still emits.
-        Admission::Unmetered => {
-            // ADR-0005 D6. Admitting unmetered is correct under a Warn policy but must never be
-            // invisible: without this, a ledger outage looks like normal traffic.
-            tracing::warn!(scope = %scope, "admitted WITHOUT a lease (fail-open)");
-            state.metrics.record_admitted_unmetered();
-            None
-        }
-        // Checked before the back-leg reserve above, so a front denial can never reach here
-        // holding a back lease.
-        Admission::Denied => unreachable!("front denial refuses before the back-leg reserve"),
-    };
-
-    let mut accounting = RequestAccounting::new(
+    let mut response = settlement::buffered::handle(
         Arc::clone(&state),
+        owned,
+        provider,
+        settlement::Selection {
+            upstream_ref: vk.upstream_ref.clone(),
+            routing,
+        },
+        request,
+        body,
+        dialect,
+        permit,
+        wants_stream,
+        transparent_eligible,
         scope,
-        reservation,
-        provider.slug().into(),
-        &request,
-        dialect_label(dialect),
-        plane,
-    );
-    accounting.routing = routing;
-    accounting.stream_body_lifetime = body_lifetime;
-    accounting.input_len = input_len;
-    accounting.operation = Some(operation);
-    // Legacy back-leg ownership moves into per-call accounting and settles under
-    // the same lock as its primary. Tracked paired admission returned above.
-    let upstream_reservation = upstream_hold.take();
-    accounting.with_upstream_budget(upstream_scope, upstream_reservation);
-    // TD-0021 P4 (D1): the METER records the LOGICAL call once — a repeat of a settled
-    // `(vkey, idempotency-key)` inside the window has its duplicate usage event dropped
-    // (the original stands). ENFORCEMENT still counts the physical call: the retry really
-    // consumed upstream tokens, so its lease settles into spent too. Meter counts logical
-    // calls, enforcement counts physical calls — both true, both visible. The client's
-    // retry still happens upstream (this is not response caching). Unavailable/expired
-    // dedup falls through to counting (D3) — the measurement is never lost to uncertainty.
-    if let Some(idem_key) = request.metadata.idempotency_key.clone() {
-        accounting.dedup = Some((
-            request.metadata.virtual_key_id.clone().unwrap_or_default(),
-            idem_key,
-        ));
-    }
-    // TD-0011 D6: which plane served the call is the ADR-0004 adoption signal — how much traffic
-    // still re-encodes. Bounded fields only (D2): provider slug and model, never subject/session.
-    tracing::debug!(
-        provider = provider.slug(),
-        model = %request.model,
-        plane = if transparent { "transparent" } else { "translation" },
-        stream = wants_stream,
-        "plane selected"
-    );
-    let full_error_detail = state.error_detail_full;
-    let dispatch = async move {
-        match (transparent, wants_stream) {
-            (true, true) => {
-                transparent_stream_response(
-                    provider,
-                    body,
-                    request.metadata.session_id.clone(),
-                    dialect,
-                    accounting,
-                    full_error_detail,
-                    gemini_route,
-                    permit,
-                )
-                .await
-            }
-            (true, false) => {
-                transparent_complete_response(
-                    provider,
-                    body,
-                    request.metadata.session_id.clone(),
-                    dialect,
-                    accounting,
-                    full_error_detail,
-                    gemini_route,
-                    permit,
-                )
-                .await
-            }
-            (false, true) => {
-                stream_response(
-                    provider,
-                    request,
-                    dialect,
-                    accounting,
-                    full_error_detail,
-                    permit,
-                )
-                .await
-            }
-            (false, false) => {
-                complete_response(
-                    provider,
-                    request,
-                    dialect,
-                    accounting,
-                    full_error_detail,
-                    permit,
-                )
-                .await
-            }
+        ceiling,
+        effective_max,
+        input_len,
+        upstream_scope,
+        buffered_deadline.map(|d| d.duration()),
+        streaming_deadline,
+    )
+    .await;
+    if defaulted_output {
+        response.headers_mut().insert(
+            "x-sandhi-output-limit-source",
+            axum::http::HeaderValue::from_static("operator_default"),
+        );
+        if let Some(maximum) = output_max {
+            response.headers_mut().insert(
+                "x-sandhi-output-max",
+                maximum
+                    .to_string()
+                    .parse()
+                    .expect("validated numeric output limit"),
+            );
         }
-    };
-    match (dispatch_deadline, stream_dispatch_deadline) {
-        (Some(deadline), _) => deadline.scope(dispatch).await,
-        (_, Some(deadline)) => deadline.scope(dispatch).await,
-        _ => dispatch.await,
     }
+    response
 }
 
 /// Ingress dialect → a bounded metric label (TD-0011 D2). Four values, fixed by the code.
@@ -2928,6 +2685,9 @@ pub(crate) fn stamp_usage_convention(
     native: bool,
 ) -> Response {
     response
+        .extensions_mut()
+        .insert(reference_ownership::NativeEmission(native));
+    response
         .headers_mut()
         .remove(sandhi_core::USAGE_CONVENTION_HEADER);
     if response.status().is_success() {
@@ -2992,7 +2752,7 @@ async fn transparent_complete_response(
     let _permit = permit;
     let Some(forwarder) = provider.raw_forwarder() else {
         accounting.set_outcome("error");
-        accounting.finalize();
+        let _ = accounting.finalize_owned().await;
         return ingress_error(
             dialect,
             StatusCode::BAD_GATEWAY,
@@ -3004,37 +2764,24 @@ async fn transparent_complete_response(
     // virtual key) is key-authoritative metering input consumed by `usage_event`, never
     // forwarded (ADR-0001 §4).
     let call_headers = accounting.per_call_wire_headers();
-    let observed_forwarder = accounting.owned.as_ref().map(|owned| {
-        forwarder.clone().with_metered_attempt_context(
-            provider.slug(),
-            Some(accounting.model.clone()),
-            owned.attempts.context.clone(),
-        )
-    });
-    let forwarder = observed_forwarder.as_ref().unwrap_or(forwarder);
-    let response = if accounting.owned.is_some() {
-        forwarder
-            .forward_qualified_with_headers(
-                &upstream_path(provider.family(), gemini.as_ref(), dialect),
-                body,
-                session.as_deref(),
-                Some(accounting.request_id.as_str()),
-                &call_headers,
-            )
-            .await
-            .map(|r| (r.response, r.usage))
-    } else {
-        forwarder
-            .forward_metered_with_headers(
-                &upstream_path(provider.family(), gemini.as_ref(), dialect),
-                body,
-                session.as_deref(),
-                Some(accounting.request_id.as_str()),
-                &call_headers,
-            )
-            .await
-            .map(|(raw, usage)| (raw, Ok(usage)))
+    let Some(owned) = accounting.owned.as_ref() else {
+        return settlement::buffered::accounting_error(dialect, &accounting.request_id);
     };
+    let observed_forwarder = forwarder.clone().with_metered_attempt_context(
+        provider.slug(),
+        Some(accounting.model.clone()),
+        owned.attempts.context.clone(),
+    );
+    let response = observed_forwarder
+        .forward_qualified_with_headers(
+            &upstream_path(provider.family(), gemini.as_ref(), dialect),
+            body,
+            session.as_deref(),
+            Some(accounting.request_id.as_str()),
+            &call_headers,
+        )
+        .await
+        .map(|r| (r.response, r.usage));
     match response {
         Ok((raw, usage)) => {
             let qualified = usage.is_ok();
@@ -3071,337 +2818,27 @@ async fn transparent_stream_response(
     body: Bytes,
     session: Option<String>,
     dialect: IngressDialect,
-    mut accounting: RequestAccounting,
+    accounting: RequestAccounting,
     full_error_detail: bool,
     gemini: Option<GeminiRoute>,
     permit: Arc<AdmissionPermit>,
 ) -> Response {
-    if accounting.owned.is_some() {
-        return streaming::qualified_response(
-            provider,
-            body,
-            session,
-            dialect,
-            accounting,
-            full_error_detail,
-            gemini,
-            permit,
-        )
-        .await;
-    }
-    let started = std::time::Instant::now();
-    let Some(forwarder) = provider.raw_forwarder() else {
-        accounting.set_outcome("error");
-        accounting.finalize();
-        return ingress_error(
-            dialect,
-            StatusCode::BAD_GATEWAY,
-            "transparent plane requires a raw forwarder",
-        );
-    };
-    // Only the neutral conversation key crosses this seam (ADR-0008 D3): it maps onto the
-    // catalog-declared vendor affinity header when one exists. Attribution is metering
-    // input, never forwarded (ADR-0001 §4).
-    let call_headers = accounting.per_call_wire_headers();
-    let raw = match forwarder
-        .forward_stream_metered_with_headers(
-            &upstream_path(provider.family(), gemini.as_ref(), dialect),
-            body,
-            session.as_deref(),
-            Some(accounting.request_id.as_str()),
-            &call_headers,
-        )
-        .await
-    {
-        Ok(raw) => raw,
-        Err(err) => {
-            accounting.set_outcome("error");
-            accounting.finalize();
-            return provider_error(&err, dialect, provider.slug(), full_error_detail);
-        }
-    };
-    let mut upstream = raw.stream;
-
-    let body_stream = streaming::body(accounting, permit, None, move |accounting| {
-        Box::pin(async_stream::stream! {
-            let mut seen_usage = false;
-            let mut delta_bytes: u64 = 0;
-            let mut boundary_ttft_ms: Option<u64> = None;
-            let mut cache_read_observation = None;
-            while let Some(item) = upstream.next().await {
-                match item {
-                    Ok(chunk) => {
-                        sandhi_core::merge_cache_read_observation(&mut cache_read_observation, chunk.cache_read_observation);
-                        // A coalesced first chunk can carry both content and protocol-terminal
-                        // usage. Capture boundary timing before either accounting branch.
-                        if !chunk.data.is_empty() {
-                            boundary_ttft_ms.get_or_insert_with(|| elapsed_ms(started));
-                        }
-                        if let Some(parsed) = chunk.usage {
-                            // Terminal frame: the finalized, source-measured usage.
-                            let mut usage: UsageV2 = parsed.into();
-                            usage.cache_read_observation = cache_read_observation;
-                            reconcile_boundary_duration(&mut usage, elapsed_ms(started));
-                            reconcile_boundary_ttft(&mut usage, boundary_ttft_ms);
-                            usage.completeness = UsageCompleteness::Final;
-                            usage.outcome.get_or_insert_with(|| "success".into());
-                            accounting.observe(&usage);
-                            seen_usage = true;
-                        } else if !chunk.data.is_empty() {
-                            // Running Partial so a disconnect settles accrued spend. `usage_running`
-                            // carries whatever the family has already announced — for Anthropic that
-                            // is input plus the full cache split from `message_start`, which is the
-                            // dominant term on a cached prompt and used to be settled as zero
-                            // (TD-0013 D4).
-                            delta_bytes = delta_bytes.saturating_add(chunk.data.len() as u64);
-                            if !seen_usage {
-                                let mut usage = partial_usage(chunk.usage_running, delta_bytes);
-                                usage.cache_read_observation = cache_read_observation;
-                                accounting.observe(&usage);
-                            }
-                        }
-                        // Observation-only terminal frames must reach the meter without turning
-                        // missing numeric usage into a finalized zero-token measurement.
-                        if let Some(usage) = accounting.usage.as_mut() {
-                            usage.cache_read_observation = cache_read_observation;
-                        } else if cache_read_observation.is_some() {
-                            accounting.observe(&UsageV2 { cache_read_observation, ..UsageV2::default() });
-                        }
-                        if !chunk.data.is_empty() {
-                            yield Ok::<Bytes, std::io::Error>(chunk.data);
-                        }
-                    }
-                    Err(_) => {
-                        accounting.set_outcome("error");
-                        break;
-                    }
-                }
-            }
-            if accounting.outcome != "error" {
-                accounting.set_outcome("success");
-            } else if accounting.stream_body_lifetime.is_some() {
-                // The owner must distinguish failed upstream EOF before scheduling a tail.
-                // Leave legacy pull-driven wire behavior unchanged when the policy is absent.
-                yield Err(std::io::Error::other("upstream stream failed"));
-            }
-        })
-    });
-
-    let headers = sandhi_providers::raw::filter_response_headers(&raw.headers);
-    let mut builder = Response::builder().status(raw.status);
-    for (name, value) in headers.iter() {
-        builder = builder.header(name, value);
-    }
-    if !headers.contains_key("content-type") {
-        builder = builder.header("content-type", "text/event-stream");
-    }
-    stamp_usage_convention(
-        builder.body(body_stream).expect("valid streaming response"),
-        &provider,
+    streaming::qualified_response(
+        provider,
+        body,
+        session,
         dialect,
-        true,
+        accounting,
+        full_error_detail,
+        gemini,
+        permit,
     )
+    .await
 }
 
-/// The enforcement policy configured for a scope (from the operator budgets map). Drives D6
-/// fail-open/closed and whether the scope is a hard `Block` cap. Unset → `Block` (the safe default).
-fn scope_policy(state: &ProxyState, scope: &str) -> Policy {
-    state
-        .budgets
-        .lock()
-        .ok()
-        .and_then(|budgets| budgets.get(scope).map(|spec| Policy::parse(&spec.policy)))
-        .unwrap_or(Policy::Block)
-}
-
-/// Reserve a ceiling lease for one in-flight call (ADR-0005 D1). A poisoned ledger lock is treated
-/// as a backend failure and resolved by D6: `Warn` fails open (unmetered admit), `Block` fails
-/// closed (deny).
-async fn reserve_budget(
-    state: &Arc<ProxyState>,
-    scope: &str,
-    ceiling: u64,
-    policy: Policy,
-) -> Option<PendingAdmission> {
-    let operation = state.lifecycle.try_operation()?;
-    let worker_state = Arc::clone(state);
-    let scope = scope.to_string();
-    let work = tokio::task::spawn_blocking(move || {
-        let (capped, admission) = match worker_state.ledger.lock() {
-            Ok(mut ledger) => {
-                if worker_state.lifecycle.is_running() {
-                    let capped = policy == Policy::Block && ledger.limit(&scope).is_some();
-                    (
-                        capped,
-                        ledger.reserve(&scope, ceiling, OffsetDateTime::now_utc(), policy),
-                    )
-                } else {
-                    (false, Admission::Denied)
-                }
-            }
-            Err(_) => (false, ledger_failure_admission(policy)),
-        };
-        PendingAdmission {
-            state: worker_state,
-            capped,
-            admission: Some(admission),
-            _operation: operation,
-        }
-    });
-    tokio::select! {
-        biased;
-        _ = state.lifecycle.cancelled() => None,
-        result = work => match result {
-            Ok(result) => Some(result),
-            Err(error) => {
-                tracing::error!(%error, "budget admission blocking task failed");
-                Some(PendingAdmission { state: state.clone(), capped: false,
-                    admission: Some(ledger_failure_admission(policy)),
-                    _operation: state.lifecycle.try_operation()? })
-            }
-        },
-    }
-}
-
-/// Roll back a reservation that never reached dispatch, even if the JoinHandle receiver was
-/// cancelled while SQLite work continued. No model call took place, so no usage event is emitted.
-struct PendingAdmission {
-    state: Arc<ProxyState>,
-    capped: bool,
-    admission: Option<Admission>,
-    _operation: lifecycle::OperationGuard,
-}
-
-impl Drop for PendingAdmission {
-    fn drop(&mut self) {
-        if let Some(Admission::Leased(reservation)) = self.admission.take() {
-            blocking_section(|| {
-                if let Ok(mut ledger) = self.state.ledger.lock() {
-                    ledger.settle(&reservation, 0);
-                }
-            });
-        }
-    }
-}
-
-fn ledger_failure_admission(policy: Policy) -> Admission {
-    match policy {
-        Policy::Warn => Admission::Unmetered,
-        Policy::Block => Admission::Denied,
-    }
-}
-
-/// Reserve the back-leg scope (`upstream:{provider}`, ADR-0015) with the SAME ceiling as the
-/// front scope. The LEGACY caller invokes this while its front-scope `PendingAdmission` still
-/// owns the front lease — a cancellation or `Err` return rolls it back through that Drop —
-/// and only after the front-denial check, so a front denial short-circuits without ever
-/// taking a back lease. The BUFFERED caller invokes it before its own admission machinery
-/// runs, so it holds no front lease here at all.
-///
-/// Ownership transfer on success: the returned `Option<Reservation>` (with the scope string)
-/// moves into an `UpstreamHold` in the caller, then into `RequestAccounting`, which settles it
-/// with the same actual at finalize — the helper never settles.
-///
-/// `Ok(None)` is the D6 fail-open admit (`Warn` upstream scope on a ledger backend error):
-/// admitted unmetered — logged and counted, never silent. `Err` covers gateway draining and an
-/// exhausted `Block` upstream scope; both render the enclosed dialect-shaped response. No lease
-/// was taken on `Err`, so the caller returns it without any back-leg cleanup of its own.
-#[allow(clippy::result_large_err)] // axum::Response is intentionally large; this is the idiomatic shape.
-async fn reserve_upstream_budget(
-    state: &Arc<ProxyState>,
-    upstream_scope: &str,
-    ceiling: u64,
-    dialect: IngressDialect,
-) -> Result<Option<Reservation>, Response> {
-    let policy = scope_policy(state, upstream_scope);
-    let Some(mut pending) = reserve_budget(state, upstream_scope, ceiling, policy).await else {
-        return Err(draining_error(dialect));
-    };
-    match pending.admission.take() {
-        Some(Admission::Leased(reservation)) => Ok(Some(reservation)),
-        Some(Admission::Unmetered) => {
-            tracing::warn!(
-                scope = %upstream_scope,
-                "upstream scope admitted WITHOUT a lease (fail-open)"
-            );
-            state.metrics.record_admitted_unmetered();
-            Ok(None)
-        }
-        Some(Admission::Denied) => {
-            // An exhausted back-leg cap is an operator-visible enforcement outcome, exactly
-            // like a front denial.
-            tracing::warn!(
-                scope = %upstream_scope,
-                ceiling,
-                "reservation denied: upstream budget exhausted"
-            );
-            // Labelled by POLICY, never by scope: a scope may be `vk:<id>`, which is per-key
-            // and therefore unbounded (TD-0011 D2).
-            state.metrics.record_denied(match policy {
-                Policy::Block => "block",
-                Policy::Warn => "warn",
-            });
-            Err(ingress_error(
-                dialect,
-                StatusCode::TOO_MANY_REQUESTS,
-                "budget exhausted",
-            ))
-        }
-        // `reserve_budget` always yields an admission once it returns a `PendingAdmission`
-        // (the blocking result or the D6 fallback); `None` would mean cancelled mid-task.
-        None => Err(draining_error(dialect)),
-    }
-}
-
-/// RAII hold over the back-leg lease between upstream admission and `RequestAccounting`
-/// construction (ADR-0015). Every early-return path in between releases the lease exactly
-/// once, mirroring [`PendingAdmission`]'s rollback (ADR-0005 D2) — settle 0, blocking, under
-/// the ledger lock.
-pub(crate) struct UpstreamHold {
-    state: Arc<ProxyState>,
-    reservation: Option<Reservation>,
-}
-
-impl UpstreamHold {
-    pub(crate) fn new(state: Arc<ProxyState>, reservation: Option<Reservation>) -> Self {
-        Self { state, reservation }
-    }
-
-    /// Hand the lease to the per-call accounting, which settles it at finalize. After this the
-    /// hold is empty and its `Drop` is a no-op.
-    pub(crate) fn take(&mut self) -> Option<Reservation> {
-        self.reservation.take()
-    }
-}
-
-impl Drop for UpstreamHold {
-    fn drop(&mut self) {
-        if let Some(reservation) = self.reservation.take() {
-            blocking_section(|| {
-                if let Ok(mut ledger) = self.state.ledger.lock() {
-                    ledger.settle(&reservation, 0);
-                }
-            });
-        }
-    }
-}
-
-/// Mark a synchronous correctness operation as blocking when running on Tokio's multithreaded
-/// runtime. Tests and embedders using a current-thread/no Tokio runtime execute inline instead;
-/// `block_in_place` would panic there.
-fn blocking_section<T>(operation: impl FnOnce() -> T) -> T {
-    let multithreaded = tokio::runtime::Handle::try_current()
-        .map(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
-        .unwrap_or(false);
-    if multithreaded {
-        tokio::task::block_in_place(operation)
-    } else {
-        operation()
-    }
-}
-
-/// Owns the reservation and guarantees one terminal usage observation even when an HTTP body is
-/// abandoned. Counts are always measured; an unavailable observation releases the reservation.
+/// Carries the existing execution owner through response delivery and one
+/// terminal observation. Unavailable usage retains durable liability; Drop never
+/// releases an unknown execution or invents a settlement.
 struct RequestAccounting {
     routing: Option<routing::DispatchPlan>,
     owned: Option<settlement::buffered::Accounting>,
@@ -3412,23 +2849,15 @@ struct RequestAccounting {
     state: Arc<ProxyState>,
     stream_body_lifetime: Option<streaming::StreamBodyLifetime>,
     scope: String,
-    /// The held lease to settle by id (ADR-0005 D2). `None` when the scope admitted fail-open with
-    /// no durable lease (D6) — nothing to settle.
+    /// The original paired primary reservation; absent before durable admission.
     reservation: Option<Reservation>,
     /// Back-leg scope (`upstream:{provider}`, ADR-0015) this call was also admitted against.
     /// `None` when the call never took a back-leg lease (count-tokens, embedders, tests).
     upstream_scope: Option<String>,
-    /// The back-leg lease, settled with the SAME actual as the primary at finalize (ADR-0015).
-    /// `None` for tracked paired executions (owned by SQL), fail-open or no lease.
-    upstream_reservation: Option<Reservation>,
     provider: String,
     model: String,
     /// UTF-8 request-body length paired with the final event for estimate calibration.
     input_len: usize,
-    /// TD-0021 P4: when the call carried an `idempotency-key` AND this proxy already
-    /// settled that `(vkey, key)` inside the window, the repeat is the SAME logical call
-    /// — reusing the original settlement, metered once (D1). `None` otherwise.
-    dedup: Option<(String, String)>,
     /// Sandhi's id for THIS call, minted at admission (not lazily at event assembly) so it can
     /// be sent upstream on the vendor's declared correlation header and then become the usage
     /// event's `request_id` — one string correlating the upstream's logs and sandhi's event
@@ -3476,16 +2905,14 @@ impl RequestAccounting {
             routing: None,
             stream_observation: None,
             operation: None,
-            stream_body_lifetime: state.stream_body_lifetime,
+            stream_body_lifetime: None,
             state,
             scope,
             reservation,
             upstream_scope: None,
-            upstream_reservation: None,
             provider,
             model: request.model.clone(),
             input_len: 0,
-            dedup: None,
             request_id: next_request_id(),
             metadata: request.metadata.clone(),
             usage: None,
@@ -3497,13 +2924,6 @@ impl RequestAccounting {
             otel_span,
             finish_reason: None,
         }
-    }
-
-    /// Attach the back-leg scope + lease (ADR-0015). Builder-style, so the four existing
-    /// `new(...)` call sites without an upstream budget stay untouched.
-    fn with_upstream_budget(&mut self, scope: String, reservation: Option<Reservation>) {
-        self.upstream_scope = Some(scope);
-        self.upstream_reservation = reservation;
     }
 
     /// The bounded label set for this call (TD-0011 D2).
@@ -3523,11 +2943,6 @@ impl RequestAccounting {
 
     fn set_outcome(&mut self, outcome: &'static str) {
         self.outcome = outcome;
-    }
-
-    /// Whether this call's ledger was the volatile in-memory arm (dedup unavailable).
-    fn reservation_is_volatile(&self) -> bool {
-        matches!(self.state.ledger.lock().map(|l| l.is_volatile()), Ok(true))
     }
 
     /// Per-call wire headers for both forwarding planes (TD-0022 D1, caller-owned injection):
@@ -3585,48 +3000,7 @@ impl RequestAccounting {
         }
     }
 
-    fn finalize(&mut self) {
-        if self.finalized {
-            return;
-        }
-        self.finalized = true;
-        // An abandoned owned operation retains its intent/terminal evidence. Drop is
-        // never authority for legacy zero settlement or another inference attempt.
-        if self.owned.is_some() {
-            return;
-        }
-        let mut usage = self.usage.take().unwrap_or_default();
-        if usage.outcome.is_none() {
-            usage.outcome = Some(self.outcome.into());
-        }
-        let measured = matches!(
-            usage.completeness,
-            UsageCompleteness::Final | UsageCompleteness::Partial
-        );
-        // Settle against the operator-configured cache-read-weighted billable (10,000 bp =
-        // the neutral `billable()`, ADR-0005 D4) so the ledger and the emitted usage event
-        // count the same quantity. An unmeasured (failed / cancelled) call settles `0`,
-        // which releases the lease without recording spend.
-        let cache_read_bp = self.state.cache_read_weight_bp;
-        let actual = if measured {
-            sandhi_core::billable_weighted(&usage, cache_read_bp)
-        } else {
-            0
-        };
-        // TD-0013 D6: the settled quantity is the measured one, even when it exceeds the ceiling
-        // the call was admitted against — but the overshoot is counted.
-        //
-        // Clamping was the obvious move and is wrong. A ceiling is built from `input_estimate`,
-        // which is bytes/4 of the request; a provider's tokenization of the same prompt can exceed
-        // it (notably for scripts averaging ~3 bytes/char). Clamping would silently discard the
-        // difference — recreating, one layer down, exactly the defect this TD exists to remove.
-        //
-        // You cannot simultaneously guarantee "spend never exceeds the cap" and "a real
-        // measurement is never lost", once the provider can report more than was reserved.
-        // Sandhi's product is the measurement, and the count feeds a downstream ledger it must not
-        // lie to; later reservations are refused once committed spend consumes the cap, but
-        // every already-admitted call can contribute excess. So: record the truth, and make the
-        // under-reservation visible instead of paying for it in silence.
+    fn emit_usage(&mut self, usage: &UsageV2, actual: u64, canonical: bool) {
         if let Some(reservation) = &self.reservation {
             if actual > reservation.ceiling {
                 self.state
@@ -3634,84 +3008,8 @@ impl RequestAccounting {
                     .observe_settle_overshoot(actual - reservation.ceiling);
             }
         }
-        // Settle the lease by id (idempotent, ADR-0005 D2), then capture the post-settle spent for
-        // the alert subsystem. Alerts evaluate only on a measured call. The back-leg lease
-        // (ADR-0015) settles under the same lock with the SAME actual — one call, one quantity,
-        // charged to both scopes. No second overshoot observation: overshoot is a property of the
-        // call and is already counted once, on the primary scope.
-        let mut dedup_reused = false;
-        let (spent_after, upstream_spent_after) = blocking_section(|| {
-            let mut spent_after: Option<u64> = None;
-            let mut upstream_spent_after: Option<u64> = None;
-            if let Ok(mut ledger) = self.state.ledger.lock() {
-                // TD-0021 P4 (D1): settle-then-record under one lock. A repeat arriving
-                // between this call's admission and settlement finds the record only after
-                // it exists — the insert is the linearization point.
-                if let Some(reservation) = &self.reservation {
-                    ledger.settle(reservation, actual);
-                }
-                if let Some(reservation) = &self.upstream_reservation {
-                    ledger.settle(reservation, actual);
-                }
-                if let Some((vkey, idem_key)) = &self.dedup {
-                    if ledger.seen(vkey, idem_key).is_some() {
-                        dedup_reused = true;
-                    } else {
-                        let reservation_id = self.reservation.as_ref().map_or(0, |r| r.id);
-                        ledger.record(vkey, idem_key, reservation_id, actual);
-                    }
-                }
-                if measured {
-                    spent_after = Some(ledger.spent(&self.scope));
-                    if let Some(scope) = &self.upstream_scope {
-                        upstream_spent_after = Some(ledger.spent(scope));
-                    }
-                }
-            }
-            (spent_after, upstream_spent_after)
-        });
-        if dedup_reused {
-            // D1: the repeat is the same LOGICAL call — its usage event is a duplicate
-            // and is DROPPED here (the original event stands). Visible, never silent.
-            tracing::debug!("idempotent retry metered against the original logical call");
-            self.state.metrics.record_idempotent_replay();
-            self.finalized = true;
-            return;
-        }
-        if self.dedup.is_some() && self.reservation_is_volatile() {
-            // D3's acceptance criterion: a counted fallback is a METRIC, not just a
-            // log line. (The volatile arm cannot dedup; the call counts.)
-            self.state.metrics.record_idempotent_fallback();
-        }
-        // P2: evaluate threshold alerts against the settled spend (best-effort — never breaks the
-        // request). The configured limit comes from the budgets metadata map so a `Warn` scope (no
-        // hard cap in the in-memory ledger) still has a threshold to measure against.
-        if let Some(spent) = spent_after {
-            let limit = self
-                .state
-                .budgets
-                .lock()
-                .ok()
-                .and_then(|budgets| budgets.get(&self.scope).map(|spec| spec.limit_tokens));
-            self.fire_alerts(&self.scope, spent, limit);
-        }
-        // ADR-0015: the upstream scope alerts against its own configured threshold, reusing the
-        // same helper and budget-metadata lookup as the primary scope.
-        if let (Some(scope), Some(spent)) = (&self.upstream_scope, upstream_spent_after) {
-            let limit = self
-                .state
-                .budgets
-                .lock()
-                .ok()
-                .and_then(|budgets| budgets.get(scope).map(|spec| spec.limit_tokens));
-            self.fire_alerts(scope, spent, limit);
-        }
-        self.emit_usage(&usage, actual, false);
-    }
-
-    fn emit_usage(&mut self, usage: &UsageV2, actual: u64, canonical: bool) {
-        // Legacy quantities follow settlement. In tracked mode these are measured
-        // observations, independent of confirmed spend; the receipt is authoritative.
+        // These quantities are measured observations, independent of confirmed
+        // spend; only the paired durable receipt is authoritative.
         // Recovery never re-emits observations.
         self.state.metrics.observe_call(
             &self.metric_labels(),
@@ -3755,10 +3053,43 @@ impl RequestAccounting {
         self.state.sink.emit(&event);
     }
 
+    async fn alert_after_settlement(&mut self, wait: Duration) {
+        if self.state.alerts.is_none() {
+            return;
+        }
+        let Some(operation) = self.state.lifecycle.try_operation() else {
+            return;
+        };
+        let state = self.state.clone();
+        let mut scopes = vec![self.scope.clone()];
+        if let Some(scope) = &self.upstream_scope {
+            scopes.push(scope.clone());
+        }
+        let work = tokio::task::spawn_blocking(move || {
+            let _operation = operation;
+            let ledger = state.ledger.lock().ok()?;
+            let budgets = state.budgets.lock().ok()?;
+            Some(
+                scopes
+                    .into_iter()
+                    .map(|scope| {
+                        let spent = ledger.spent(&scope);
+                        let limit = budgets.get(&scope).map(|budget| budget.limit_tokens);
+                        (scope, spent, limit)
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        });
+        if let Ok(Ok(Some(rows))) = tokio::time::timeout(wait, work).await {
+            for (scope, spent, limit) in rows {
+                self.fire_alerts(&scope, spent, limit);
+            }
+        }
+    }
+
     async fn finalize_owned(&mut self) -> bool {
         let Some(mut owned) = self.owned.take() else {
-            self.finalize();
-            return true;
+            return false;
         };
         self.finalized = true;
         streaming::capture_terminal(self);
@@ -3804,7 +3135,6 @@ impl RequestAccounting {
         // Both linked leases belong to the durable execution. The canonical
         // settlement transaction charges both or neither; refusal/cancellation
         // leaves unknown liability held instead of invoking legacy settle(0).
-        debug_assert!(self.upstream_reservation.is_none());
         let pending = owned
             .execution
             .into_settlement(usage.clone())
@@ -3841,7 +3171,10 @@ impl RequestAccounting {
         match ticket.take() {
             Some(settlement::jobs::Outcome::Settlement(settlement::Attempt::Committed {
                 ..
-            })) => true,
+            })) => {
+                self.alert_after_settlement(owned.wait).await;
+                true
+            }
             outcome => {
                 let reason = match outcome {
                     Some(settlement::jobs::Outcome::Settlement(
@@ -3853,12 +3186,6 @@ impl RequestAccounting {
                 false
             }
         }
-    }
-}
-
-impl Drop for RequestAccounting {
-    fn drop(&mut self) {
-        self.finalize();
     }
 }
 
@@ -3879,30 +3206,23 @@ async fn complete_response(
     permit: Arc<AdmissionPermit>,
 ) -> Response {
     let started = std::time::Instant::now();
-    let tracked = accounting.owned.is_some();
     let _permit = permit; // unary: held by the handler future, which is the whole call
     let correlation = accounting.per_call_wire_headers();
-    let result = if let Some(owned) = &accounting.owned {
-        provider
-            .complete_with_qualified_usage_and_attempts(
-                request,
-                correlation,
-                owned.attempts.context.clone(),
-            )
-            .await
-            .map(|r| (r.response, r.usage))
-    } else {
-        provider.complete_with(request, correlation).await.map(|r| {
-            let usage = r.usage.clone();
-            (r, Ok(usage))
-        })
+    let Some(owned) = accounting.owned.as_ref() else {
+        return settlement::buffered::accounting_error(dialect, &accounting.request_id);
     };
+    let result = provider
+        .complete_with_qualified_usage_and_attempts(
+            request,
+            correlation,
+            owned.attempts.context.clone(),
+        )
+        .await
+        .map(|r| (r.response, r.usage));
     match result {
         Ok((mut response, usage)) => {
             let qualified = usage.is_ok();
-            if accounting.owned.is_some() {
-                response.usage = usage.unwrap_or_else(unqualified_buffered_usage);
-            }
+            response.usage = usage.unwrap_or_else(unqualified_buffered_usage);
             if qualified {
                 response.usage.completeness = UsageCompleteness::Final;
             }
@@ -3942,11 +3262,7 @@ async fn complete_response(
                 return settlement::buffered::accounting_error(dialect, &accounting.request_id);
             }
             let response = provider_error(&error, dialect, provider.slug(), full_error_detail);
-            if tracked {
-                settlement::buffered::no_automatic_retry(response)
-            } else {
-                response
-            }
+            settlement::buffered::no_automatic_retry(response)
         }
     }
 }
@@ -3960,32 +3276,27 @@ async fn stream_response(
     permit: Arc<AdmissionPermit>,
 ) -> Response {
     let native_stream = request.include_native_stream;
-    let tracked_translation = accounting.owned.is_some() && !native_stream;
+    let tracked_translation = !native_stream;
     let correlation = accounting.per_call_wire_headers();
-    let upstream = if let Some(owned) = &accounting.owned {
-        provider
-            .stream_with_qualified_usage_and_attempts(
-                request,
-                correlation,
-                owned.attempts.context.clone(),
-            )
-            .await
-    } else {
-        provider.stream_with(request, correlation).await
+    let Some(owned) = accounting.owned.as_ref() else {
+        return settlement::buffered::accounting_error(dialect, &accounting.request_id);
     };
+    let upstream = provider
+        .stream_with_qualified_usage_and_attempts(
+            request,
+            correlation,
+            owned.attempts.context.clone(),
+        )
+        .await;
     let mut upstream = match upstream {
         Ok(s) => s,
         Err(error) => {
             accounting.set_outcome("error");
-            let tracked = accounting.owned.is_some();
             if !accounting.finalize_owned().await {
                 return settlement::buffered::accounting_error(dialect, &accounting.request_id);
             }
             let response = provider_error(&error, dialect, provider.slug(), full_error_detail);
-            if tracked {
-                return settlement::buffered::no_automatic_retry(response);
-            }
-            return response;
+            return settlement::buffered::no_automatic_retry(response);
         }
     };
 
@@ -3998,15 +3309,11 @@ async fn stream_response(
             // Stateful per-stream egress encoder: Anthropic's content-block
             // lifecycle and Gemini's whole-part tool calls need cross-event state.
             let mut stream_encoder = StreamEventEncoder::new(dialect);
-            // What the family has reported so far, for families that report before the end
-            // (TD-0013 D3). `None` for a terminal-only family, for the whole stream.
-            let mut running_reported: Option<ParsedUsage> = None;
             let mut cache_read_observation = None;
             // A non-final `Usage` event is accounting-only and must not reach the client (TD-0013 D7):
             // the ingress wire shape is a TD-0010 parity guarantee, and a metering improvement that
             // adds frames to a caller's stream has broken something more important than it fixed.
             let mut accounting_only;
-            let mut delta_out_bytes: u64 = 0;
             let mut native_error_sent = false;
             let mut pending_finish = None;
             let mut projection_bytes = 0usize;
@@ -4040,22 +3347,14 @@ async fn stream_response(
                             {
                                 // Progress, not a verdict: it must not supersede the terminal frame.
                                 sandhi_core::merge_cache_read_observation(&mut cache_read_observation, usage.cache_read_observation);
-                                if usage.completeness != UsageCompleteness::Unavailable || usage.cache_read_observation.and_then(sandhi_core::CacheReadObservation::validated).is_none() {
-                                    running_reported = Some(reported_parts(usage));
-                                }
+                                accounting.observe(usage);
                                 accounting_only = true;
                             }
                             sandhi_core::ChatStreamEventV1::Usage { usage } => {
                                 sandhi_core::merge_cache_read_observation(&mut cache_read_observation, usage.cache_read_observation);
-                                // Terminal, authoritative usage — replaces any running partial estimate.
+                                // Terminal, authoritative usage — replaces earlier source progress.
                                 accounting.observe(usage);
                                 last_usage = Some(usage.clone());
-                            }
-                            sandhi_core::ChatStreamEventV1::TextDelta { delta }
-                            | sandhi_core::ChatStreamEventV1::ReasoningDelta { delta }
-                            | sandhi_core::ChatStreamEventV1::RefusalDelta { delta }
-                            | sandhi_core::ChatStreamEventV1::ToolCallArgumentsDelta { delta, .. } => {
-                                delta_out_bytes = delta_out_bytes.saturating_add(delta.len() as u64);
                             }
                             sandhi_core::ChatStreamEventV1::Error { .. } => {
                                 accounting.set_outcome("error");
@@ -4066,17 +3365,7 @@ async fn stream_response(
                             }
                             _ => {}
                         }
-                        // ADR-0005 D1: hold a running `Partial` until the terminal usage arrives, so a
-                        // mid-stream disconnect (which fires the Drop finalizer, not the code below)
-                        // settles the accumulated spend instead of releasing to zero — closing the
-                        // open-stream / read-a-lot / disconnect metering-evasion hole. Per-category:
-                        // real numbers where the family has reported them, the byte estimate only for
-                        // output and only as far as it must (TD-0013 D4). The terminal frame overrides.
-                        if last_usage.is_none() {
-                            let mut usage = partial_usage(running_reported, delta_out_bytes);
-                            usage.cache_read_observation = cache_read_observation;
-                            accounting.observe(&usage);
-                        } else if let Some(usage) = accounting.usage.as_mut() {
+                        if let Some(usage) = accounting.usage.as_mut() {
                             usage.cache_read_observation = cache_read_observation;
                         }
                         if accounting_only {
@@ -4149,9 +3438,8 @@ async fn stream_response(
                         }
                     }
                 }
-            } else if accounting.stream_body_lifetime.is_some() {
-                // The owner must distinguish failed upstream EOF before scheduling a tail.
-                // Leave legacy pull-driven wire behavior unchanged when the policy is absent.
+            } else {
+                // Failed source EOF can never schedule a success tail.
                 Err(std::io::Error::other("upstream stream failed"))?;
             }
         })
@@ -4202,90 +3490,6 @@ fn reservation_ceiling(request: &ChatRequestV1, estimated_input: u64) -> (u64, u
 fn header_str(headers: &HeaderMap, name: &str) -> Option<String> {
     let value = headers.get(name)?.to_str().ok()?.trim();
     (!value.is_empty()).then(|| value.to_string())
-}
-
-/// The running `Partial` usage for a stream that has not delivered its terminal frame, used to
-/// settle an interrupted stream (ADR-0005 D1) rather than releasing the reservation to zero.
-///
-/// Only reached when a stream ends early — a client disconnect or a mid-stream transport error. The
-/// provider's terminal frame carries the real numbers and a `Final` observation always supersedes
-/// this.
-///
-/// **The fallback is per-category, not per-call** (TD-0013 D4). `reported` is whatever the family
-/// has actually announced so far ([`StreamChunk::usage_running`]), and it is used wherever it
-/// exists:
-///
-/// - **Input, cache-creation and cache-read are taken or zero — never estimated.** No byte count
-///   observed on the *response* can stand in for the tokenization of a prompt, and inventing one
-///   would make Sandhi a second meter disagreeing with the provider. Anthropic announces all three
-///   on `message_start`, before a single content byte, so for that family they are exact here.
-/// - **Output is `max(reported, byte estimate)`.** Anthropic's `message_delta` lags the text it
-///   describes, so between `message_start` and the first delta the reported output is legitimately
-///   `0` while real output has flowed. Taking the max never settles below the byte-only behaviour
-///   this replaced.
-///
-/// **The byte factor is 4 bytes per token, and its bias depends on the plane.** On the transparent
-/// plane the bytes are wire bytes — SSE framing, JSON punctuation and field names included — so the
-/// estimate runs *above* the true count, which is the safe direction for enforcement. On the typed
-/// plane the caller counts *decoded* delta strings, which is near-neutral for English and a
-/// substantial **under**-count for scripts averaging ~3 bytes/char (e.g. CJK). The result is tagged
-/// [`UsageCompleteness::Partial`] either way, so a consumer can always tell an interrupted call
-/// from a completed one.
-///
-/// For the families that report nothing until the end (OpenAI Chat and Responses, Cohere, Ollama)
-/// `reported` is `None` and the estimate stands alone. That is a policy call, not an accuracy one:
-/// settling zero would be the honest measurement and would let a caller stream-and-abort
-/// repeatedly for free.
-/// Narrow a typed `Usage` event back to the raw per-category counts.
-///
-/// The typed plane carries `UsageV2` while the transparent plane carries [`ParsedUsage`]; reducing
-/// to the latter lets both planes share one fallback rule (TD-0013 D4) rather than growing two that
-/// can drift. Only the categories a family reports mid-stream survive the narrowing, which is
-/// exactly the set the fallback is allowed to use.
-fn reported_parts(usage: &UsageV2) -> ParsedUsage {
-    ParsedUsage {
-        tokens_in: usage.tokens_in,
-        tokens_out: usage.tokens_out,
-        cache_creation_tokens: usage.cache_creation_tokens,
-        cache_read_tokens: usage.cache_read_tokens,
-        cache_read_observation: usage.cache_read_observation,
-        reasoning_tokens: usage.reasoning_tokens.unwrap_or(0),
-        reasoning_included: usage.reasoning_included,
-        duration_ms: None,
-        time_to_first_token_ms: None,
-    }
-}
-
-fn partial_usage(reported: Option<ParsedUsage>, delta_out_bytes: u64) -> UsageV2 {
-    let estimated_out = delta_out_bytes.saturating_add(3) / 4;
-    let Some(reported) = reported else {
-        return UsageV2 {
-            tokens_out: estimated_out,
-            completeness: UsageCompleteness::Partial,
-            basis: UsageBasis::Estimated,
-            ..UsageV2::default()
-        };
-    };
-    UsageV2 {
-        tokens_in: reported.tokens_in,
-        cache_creation_tokens: reported.cache_creation_tokens,
-        cache_read_tokens: reported.cache_read_tokens,
-        cache_read_observation: reported.cache_read_observation,
-        tokens_out: reported.tokens_out.max(estimated_out),
-        reasoning_tokens: (reported.reasoning_tokens > 0).then_some(reported.reasoning_tokens),
-        reasoning_included: reported.reasoning_included,
-        completeness: UsageCompleteness::Partial,
-        // `Estimated` means "at least one category came from the byte fallback" — so the label
-        // tracks whether the estimate actually contributed, not merely whether one was available.
-        // A disconnect after `message_delta`, where every category is the provider's, is a real
-        // measurement of an incomplete call and must not be tarred as a guess.
-        basis: if estimated_out > reported.tokens_out {
-            UsageBasis::Estimated
-        } else {
-            UsageBasis::ProviderReported
-        },
-        ..UsageV2::default()
-    }
 }
 
 fn sse_frame(event: Option<&str>, value: &Value) -> String {
@@ -4822,168 +4026,6 @@ mod header_egress_tests {
 }
 
 #[cfg(test)]
-mod partial_accounting_tests {
-    use super::*;
-
-    /// The counts a real Anthropic `message_start` announces before any content streams —
-    /// the numbers taken verbatim from `tests/fixtures/anthropic/stream_cache_split.sse`.
-    const AT_MESSAGE_START: ParsedUsage = ParsedUsage {
-        reasoning_included: Some(true),
-        tokens_in: 1024,
-        tokens_out: 0,
-        cache_creation_tokens: 2048,
-        cache_read_tokens: 4096,
-        cache_read_observation: None,
-        reasoning_tokens: 0,
-        duration_ms: None,
-        time_to_first_token_ms: None,
-    };
-
-    /// The audit flagged this factor as unverified. It is an estimate by construction; what must be
-    /// true is that it is tagged as one and biased in the safe direction.
-    #[test]
-    fn the_byte_estimate_is_marked_partial_and_biased_high() {
-        // Roughly a small SSE frame's worth of wire bytes, with nothing reported (the
-        // terminal-only families: OpenAI Chat and Responses, Cohere, Ollama).
-        let usage = partial_usage(None, 400);
-        assert_eq!(
-            usage.completeness,
-            UsageCompleteness::Partial,
-            "an estimate must never be indistinguishable from a measured call"
-        );
-        assert_eq!(usage.tokens_out, 100, "4 wire bytes per token");
-        // Wire bytes include SSE framing and JSON punctuation, so on the transparent plane the
-        // estimate exceeds the true token count — over-consuming an abandoned stream's budget
-        // rather than leaking capacity that was genuinely used.
-        assert!(
-            usage.tokens_out >= 400 / 4,
-            "the estimate must not round below the byte-derived floor"
-        );
-        // Nothing is invented on the input side: with nothing reported, a disconnect says nothing
-        // about prompt tokens, and guessing would make Sandhi a second meter.
-        assert_eq!(usage.tokens_in, 0);
-        assert_eq!(usage.cache_read_tokens, 0);
-    }
-
-    #[test]
-    fn an_empty_stream_estimates_nothing() {
-        let usage = partial_usage(None, 0);
-        assert_eq!(
-            usage.tokens_out, 0,
-            "no bytes delivered means no output to charge"
-        );
-    }
-
-    /// The defect TD-0013 exists to fix. Anthropic announces input and the whole cache split on
-    /// `message_start`, before a single content byte — so at a disconnect there those numbers are
-    /// exact, and the old byte-only fallback recorded all three as zero.
-    #[test]
-    fn reported_input_and_cache_are_settled_not_estimated_away() {
-        // A disconnect right after `message_start`: 40 bytes of output have flowed, nothing more.
-        let usage = partial_usage(Some(AT_MESSAGE_START), 40);
-
-        assert_eq!(usage.tokens_in, 1024, "reported input must survive");
-        assert_eq!(usage.cache_creation_tokens, 2048);
-        assert_eq!(usage.cache_read_tokens, 4096);
-
-        // `billable()` counts all four categories (ADR-0005 D4). The byte-only fallback would have
-        // settled 10 here; the real exposure is three orders of magnitude larger, which is what
-        // made this an evasion vector rather than a rounding error.
-        let billed = sandhi_core::billable(&usage);
-        assert_eq!(billed, 1024 + 2048 + 4096 + 10);
-        assert!(
-            billed > 100 * (40 / 4),
-            "settling the byte estimate alone would discard the dominant term"
-        );
-    }
-
-    /// `max`, not "reported wins": Anthropic's `message_delta` lags the text it describes, so
-    /// between `message_start` and the first delta the reported output is legitimately 0 while real
-    /// output has flowed. Taking the reported value alone would settle *less* than the byte-only
-    /// fallback this replaced — a regression disguised as an accuracy fix.
-    #[test]
-    fn output_never_settles_below_the_byte_floor() {
-        let usage = partial_usage(Some(AT_MESSAGE_START), 400);
-        assert_eq!(
-            usage.tokens_out, 100,
-            "reported output of 0 must not erase 400 bytes of streamed text"
-        );
-
-        // Once the provider does report output, and it exceeds the byte guess, the real number
-        // wins — the estimate is a floor, never a ceiling.
-        let after_delta = ParsedUsage {
-            tokens_out: 256,
-            ..AT_MESSAGE_START
-        };
-        assert_eq!(partial_usage(Some(after_delta), 400).tokens_out, 256);
-    }
-
-    /// D5 — the label tracks whether the estimate actually contributed, not merely whether one
-    /// was available. Laundering a guess into an authoritative-looking number is the failure mode
-    /// this field exists to prevent; so is tarring a real measurement as a guess.
-    #[test]
-    fn basis_distinguishes_a_measurement_from_a_guess() {
-        // Nothing reported: the output number is purely byte-derived.
-        assert_eq!(
-            partial_usage(None, 400).basis,
-            UsageBasis::Estimated,
-            "a byte-derived count must never present as provider-reported"
-        );
-
-        // Reported input and cache, but output still estimated (the message_start window).
-        assert_eq!(
-            partial_usage(Some(AT_MESSAGE_START), 400).basis,
-            UsageBasis::Estimated
-        );
-
-        // Every category reported, and the provider's output exceeds the byte floor: this is a
-        // real measurement of an incomplete call, not a guess.
-        let after_delta = ParsedUsage {
-            tokens_out: 4_000,
-            ..AT_MESSAGE_START
-        };
-        let usage = partial_usage(Some(after_delta), 400);
-        assert_eq!(usage.basis, UsageBasis::ProviderReported);
-        assert_eq!(
-            usage.completeness,
-            UsageCompleteness::Partial,
-            "still incomplete — `basis` and `completeness` are independent axes"
-        );
-    }
-
-    /// The default must match what every pre-TD-0013 code path actually did, or adding the field
-    /// silently relabels historical events.
-    #[test]
-    fn the_default_basis_is_provider_reported() {
-        assert_eq!(UsageV2::default().basis, UsageBasis::ProviderReported);
-        assert_eq!(
-            sandhi_core::UsageEvent::new("r", "t", "p", "m", Backend::External).usage_basis,
-            UsageBasis::ProviderReported
-        );
-    }
-
-    /// The narrowing that lets both planes share one fallback rule must not silently drop a
-    /// category, or the typed plane would quietly meter less than the transparent one.
-    #[test]
-    fn narrowing_a_typed_usage_preserves_every_category() {
-        let typed = UsageV2 {
-            tokens_in: 11,
-            tokens_out: 22,
-            cache_creation_tokens: 33,
-            cache_read_tokens: 44,
-            reasoning_tokens: Some(55),
-            ..UsageV2::default()
-        };
-        let parts = reported_parts(&typed);
-        assert_eq!(parts.tokens_in, 11);
-        assert_eq!(parts.tokens_out, 22);
-        assert_eq!(parts.cache_creation_tokens, 33);
-        assert_eq!(parts.cache_read_tokens, 44);
-        assert_eq!(parts.reasoning_tokens, 55);
-    }
-}
-
-#[cfg(test)]
 mod token_calibration_wiring_tests {
     use super::*;
     use sandhi_core::InMemorySink;
@@ -5024,7 +4066,8 @@ mod token_calibration_wiring_tests {
             ..Default::default()
         });
         accounting.set_outcome("success");
-        accounting.finalize();
+        let usage = accounting.usage.take().unwrap();
+        accounting.emit_usage(&usage, sandhi_core::billable(&usage), false);
     }
 
     #[test]
@@ -5049,7 +4092,7 @@ mod token_calibration_wiring_tests {
                 "openai",
                 metrics::Plane::Transparent,
             );
-            accounting.with_upstream_budget("upstream:inferflux".into(), None);
+            accounting.upstream_scope = Some("upstream:inferflux".into());
             accounting.input_len = 300;
             accounting.observe(&UsageV2 {
                 tokens_in: 100,
@@ -5057,7 +4100,8 @@ mod token_calibration_wiring_tests {
                 completeness: UsageCompleteness::Final,
                 ..Default::default()
             });
-            accounting.finalize();
+            let usage = accounting.usage.take().unwrap();
+            accounting.emit_usage(&usage, sandhi_core::billable(&usage), false);
         }
         assert_eq!(
             state
@@ -5210,7 +4254,8 @@ mod otel_wiring_tests {
         // complete_response / the stream `Finish` event set this on the typed plane.
         acc.finish_reason = Some(FinishReasonV1::Stop);
         acc.set_outcome("success");
-        acc.finalize();
+        let usage = acc.usage.take().unwrap();
+        acc.emit_usage(&usage, sandhi_core::billable(&usage), false);
         drop(acc);
 
         let spans = exporter.get_finished_spans().expect("span exported");
@@ -5518,7 +4563,7 @@ mod connection_policy_tests {
     }
 }
 #[test]
-fn reasoning_survives_event_and_partial_conversion() {
+fn reasoning_survives_event_conversion() {
     for thoughts in [25, 40, 90] {
         let usage = UsageV2 {
             tokens_in: 70,
@@ -5530,34 +4575,34 @@ fn reasoning_survives_event_and_partial_conversion() {
         };
         let event = usage_event("gemini", "m", &RequestMetadataV1::default(), &usage, None);
         assert_eq!(event.billable_tokens(), 140 + thoughts);
-        let partial = partial_usage(Some(reported_parts(&usage)), 0);
-        assert_eq!(sandhi_core::billable(&partial), 140 + thoughts);
-        assert_eq!(partial.reasoning_included, Some(false));
     }
 }
 
 #[cfg(test)]
 mod upstream_budget_tests {
-    //! ADR-0015: back-leg (`upstream:{provider}`) budget admission and settlement. The same
-    //! call holds TWO leases — the front scope (`group:`/`vk:`/custom) and the resolved
-    //! upstream's per-provider scope — both reserved at the same ceiling and both settled with
-    //! the same measured actual.
-
     use super::*;
-    use async_trait::async_trait;
     use axum::http::Request;
-    use sandhi_core::{ChatResponseV1, InMemorySink, KeyStore, Window};
-    use sandhi_providers::{ChatEventStream, ChatProvider};
+    use sandhi_core::{InMemorySink, Policy, Window};
     use tower::ServiceExt;
-
-    const FRONT_SCOPE: &str = "group:platform";
-    const UPSTREAM_SCOPE: &str = "upstream:echo";
-
-    fn state_with_echo(
+    use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+    const FRONT: &str = "group:platform";
+    const BACK: &str = "upstream:echo";
+    struct Fixture {
+        state: Arc<ProxyState>,
+        origin: MockServer,
         sink: Arc<InMemorySink>,
-        ledger: ProxyLedger,
-        tokens: (u64, u64),
-    ) -> Arc<ProxyState> {
+        path: std::path::PathBuf,
+        _directory: tempfile::TempDir,
+    }
+    async fn fixture(primary: (u64, Policy), upstream: (u64, Policy), delay: Duration) -> Fixture {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("original.db");
+        let origin = MockServer::start().await;
+        Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_delay(delay).set_body_json(json!({
+            "id":"fixture","object":"chat.completion","model":"model",
+            "choices":[{"index":0,"message":{"role":"assistant","content":"reply"},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":40,"completion_tokens":20,"total_tokens":60,"prompt_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"completion_tokens_details":{"reasoning_tokens":0}}
+        }))).mount(&origin).await;
         let keys = KeyStore::new();
         keys.insert(VirtualKey {
             id: "vk-test".into(),
@@ -5565,313 +4610,200 @@ mod upstream_budget_tests {
             upstream_ref: "echo".into(),
             ..Default::default()
         });
-        let provider: Arc<dyn ChatProvider> = Arc::new(EchoProvider {
-            tokens_in: tokens.0,
-            tokens_out: tokens.1,
-        });
-        let mut providers = HashMap::new();
-        providers.insert("echo".into(), ProviderHandle::new(provider));
-        Arc::new(ProxyState::new(keys, ledger, sink, providers, None))
+        let provider = ProviderRuntime::new().openai_compat(
+            "echo",
+            format!("{}/v1", origin.uri()),
+            "synthetic",
+            Default::default(),
+            Some(0),
+            Some(5.0),
+            Some(2.0),
+            Some(2.0),
+        );
+        let mut ledger = ProxyLedger::durable(path.to_str().unwrap(), 1).unwrap();
+        ledger
+            .set_budget(FRONT, Some(primary.0), Window::Total, primary.1)
+            .unwrap();
+        ledger
+            .set_budget(BACK, Some(upstream.0), Window::Total, upstream.1)
+            .unwrap();
+        let sink = Arc::new(InMemorySink::new());
+        let mut state = ProxyState::new(
+            keys,
+            ledger,
+            sink.clone(),
+            HashMap::from([("echo".into(), provider)]),
+            None,
+        );
+        state.alerts = Some(Arc::new(Mutex::new(AlertRegistry::default())));
+        operator::rehydrate_budgets(&state.ledger.lock().unwrap(), &state.budgets);
+        Fixture {
+            state: Arc::new(state),
+            origin,
+            sink,
+            path,
+            _directory: directory,
+        }
     }
-
-    fn capped_echo_request(max_tokens: u64) -> Request<Body> {
-        Request::builder()
-            .method("POST")
-            .uri("/v1/chat/completions")
+    fn request() -> Request<Body> {
+        Request::post("/v1/chat/completions")
             .header("authorization", "Bearer vk-test")
             .header("content-type", "application/json")
             .body(Body::from(
-                format!(r#"{{"model":"model","messages":[{{"role":"user","content":"hi"}}],"max_tokens":{max_tokens}}}"#),
+                r#"{"model":"model","messages":[{"role":"user","content":"hi"}],"max_tokens":40}"#,
             ))
             .unwrap()
     }
-
-    /// A provider that answers immediately with a measured usage observation, so the full
-    /// request path reaches finalize and both leases settle.
-    struct EchoProvider {
-        tokens_in: u64,
-        tokens_out: u64,
-    }
-
-    #[async_trait]
-    impl ChatProvider for EchoProvider {
-        fn slug(&self) -> &str {
-            "echo"
-        }
-
-        async fn complete(
-            &self,
-            _request: ChatRequestV1,
-            _call_headers: axum::http::HeaderMap,
-        ) -> Result<ChatResponseV1, ProviderError> {
-            Ok(serde_json::from_value(serde_json::json!({
-                "model": "model",
-                "output": {},
-                "finish_reason": "stop",
-                "usage": {
-                    "tokens_in": self.tokens_in,
-                    "tokens_out": self.tokens_out,
-                    "cache_creation_tokens": 0,
-                    "cache_read_tokens": 0,
-                    "completeness": "final",
-                    "basis": "provider_reported",
-                }
-            }))
-            .expect("fixture decodes"))
-        }
-
-        async fn stream(
-            &self,
-            _request: ChatRequestV1,
-            _call_headers: axum::http::HeaderMap,
-        ) -> Result<ChatEventStream, ProviderError> {
-            Ok(Box::pin(futures_util::stream::pending()))
-        }
-    }
-
-    /// A provider that never answers, holding both leases while admitted (for concurrency
-    /// oversubscription).
-    struct StuckProvider {
-        entered: tokio::sync::Notify,
-    }
-
-    #[async_trait]
-    impl ChatProvider for StuckProvider {
-        fn slug(&self) -> &str {
-            "stuck"
-        }
-
-        async fn complete(
-            &self,
-            _request: ChatRequestV1,
-            _call_headers: axum::http::HeaderMap,
-        ) -> Result<ChatResponseV1, ProviderError> {
-            self.entered.notify_one();
-            std::future::pending().await
-        }
-
-        async fn stream(
-            &self,
-            _request: ChatRequestV1,
-            _call_headers: axum::http::HeaderMap,
-        ) -> Result<ChatEventStream, ProviderError> {
-            Ok(Box::pin(futures_util::stream::pending()))
-        }
-    }
-
-    fn poisoned_ledger_state(policy: &str) -> Arc<ProxyState> {
-        let state = state_with_echo(
-            Arc::new(InMemorySink::new()),
-            ProxyLedger::in_memory(),
-            (40, 20),
-        );
-        state.budgets.lock().unwrap().insert(
-            UPSTREAM_SCOPE.into(),
-            BudgetSpec {
-                scope: UPSTREAM_SCOPE.into(),
-                limit_tokens: 1_000,
-                window: "total".into(),
-                policy: policy.into(),
-            },
-        );
-        // Panic while holding the ledger lock → the mutex is poisoned → every later
-        // `ledger.lock()` is a backend error (the D6 trigger), without a real broken backend.
-        let poison_state = Arc::clone(&state);
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = poison_state.ledger.lock().unwrap();
-            panic!("poison the ledger mutex");
-        }));
-        state
-    }
-
     #[tokio::test]
-    async fn exhausted_upstream_cap_denies_and_releases_the_front_lease() {
-        let sink = Arc::new(InMemorySink::new());
-        let mut ledger = ProxyLedger::in_memory();
-        // Tiny hard cap: every request's conservative ceiling (input estimate + the 40-token
-        // output bound here, ≥ the 4096 default otherwise) cannot fit.
-        ledger
-            .set_budget(UPSTREAM_SCOPE, Some(10), Window::Total, Policy::Block)
-            .unwrap();
-        let state = state_with_echo(sink.clone(), ledger, (40, 20));
-        let app = build_app(state.clone());
-
-        let response = app
-            .oneshot(capped_echo_request(40))
-            .await
-            .expect("request completes");
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-
-        let ledger = state.ledger.lock().unwrap();
-        assert_eq!(
-            ledger.reserved(FRONT_SCOPE),
-            0,
-            "an upstream denial must release the already-held front lease"
-        );
-        assert_eq!(ledger.reserved(UPSTREAM_SCOPE), 0);
-        assert_eq!(ledger.spent(UPSTREAM_SCOPE), 0);
-        assert!(sink.is_empty(), "an undispached call emits no usage event");
-    }
-
-    #[tokio::test]
-    async fn settled_usage_lands_in_both_scopes_with_the_same_actual() {
-        let sink = Arc::new(InMemorySink::new());
-        let mut ledger = ProxyLedger::in_memory();
-        ledger
-            .set_budget(
-                UPSTREAM_SCOPE,
-                Some(1_000_000),
-                Window::Total,
-                Policy::Block,
+    async fn either_hard_cap_refuses_atomically_without_dispatch_or_orphan_holds() {
+        for (primary, upstream) in [(10, 1000), (1000, 10)] {
+            let fixture = fixture(
+                (primary, Policy::Block),
+                (upstream, Policy::Block),
+                Duration::ZERO,
             )
-            .unwrap();
-        ledger
-            .set_budget(FRONT_SCOPE, Some(1_000_000), Window::Total, Policy::Block)
-            .unwrap();
-        let state = state_with_echo(sink.clone(), ledger, (40, 20));
-        let app = build_app(state.clone());
-
-        let response = app
-            .oneshot(capped_echo_request(50))
+            .await;
+            let response = build_app(fixture.state.clone())
+                .oneshot(request())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            assert!(fixture.origin.received_requests().await.unwrap().is_empty());
+            let ledger = fixture.state.ledger.lock().unwrap();
+            assert_eq!((ledger.reserved(FRONT), ledger.reserved(BACK)), (0, 0));
+            assert!(fixture.sink.is_empty());
+        }
+    }
+    #[tokio::test]
+    async fn one_original_receipt_charges_both_scopes_from_qualified_source() {
+        let fixture = fixture((1000, Policy::Block), (1000, Policy::Block), Duration::ZERO).await;
+        let response = build_app(fixture.state.clone())
+            .oneshot(request())
             .await
-            .expect("request completes");
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(sink.len(), 1);
-
-        let ledger = state.ledger.lock().unwrap();
+        assert_eq!(fixture.origin.received_requests().await.unwrap().len(), 1);
+        assert_eq!(fixture.sink.len(), 1);
+        let ledger = fixture.state.ledger.lock().unwrap();
+        assert_eq!((ledger.spent(FRONT), ledger.spent(BACK)), (60, 60));
+        assert_eq!((ledger.reserved(FRONT), ledger.reserved(BACK)), (0, 0));
+        let connection = rusqlite::Connection::open(&fixture.path).unwrap();
+        let (intents,receipts,attempts):(i64,i64,i64)=connection.query_row("SELECT (SELECT count(*) FROM budget_execution_intent),(SELECT count(*) FROM budget_settlement_outbox),(SELECT count(*) FROM budget_physical_attempt)",[],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+        assert_eq!((intents, receipts, attempts), (1, 1, 1));
+    }
+    #[tokio::test]
+    async fn omitted_output_limit_uses_visible_operator_default_on_the_actual_wire() {
+        let mut fixture = fixture(
+            (100_000, Policy::Block),
+            (100_000, Policy::Block),
+            Duration::ZERO,
+        )
+        .await;
+        Arc::get_mut(&mut fixture.state)
+            .unwrap()
+            .default_max_output_tokens = 37;
+        let request = Request::post("/v1/chat/completions")
+            .header("authorization", "Bearer vk-test")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"model":"model","messages":[{"role":"user","content":"hi"}]}"#,
+            ))
+            .unwrap();
+        let response = build_app(fixture.state.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
-            ledger.spent(UPSTREAM_SCOPE),
-            60,
-            "40 in + 20 out, one actual"
+            response.headers()["x-sandhi-output-limit-source"],
+            "operator_default"
         );
-        assert_eq!(
-            ledger.spent(FRONT_SCOPE),
-            60,
-            "the same actual on the front leg"
-        );
-        assert_eq!(ledger.reserved(UPSTREAM_SCOPE), 0, "both leases settle");
-        assert_eq!(ledger.reserved(FRONT_SCOPE), 0);
+        assert_eq!(response.headers()["x-sandhi-output-max"], "37");
+        let requests = fixture.origin.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(body["max_tokens"], 37);
+        assert_eq!(fixture.state.ledger.lock().unwrap().spent(FRONT), 60);
     }
 
     #[tokio::test]
-    async fn front_denial_releases_the_upstream_lease() {
-        let sink = Arc::new(InMemorySink::new());
-        let mut ledger = ProxyLedger::in_memory();
-        // Front cap tiny (denied before dispatch); upstream cap generous (its reserve
-        // succeeds, so the hold IS taken and must be released on the front-denied return).
-        ledger
-            .set_budget(FRONT_SCOPE, Some(10), Window::Total, Policy::Block)
-            .unwrap();
-        ledger
-            .set_budget(
-                UPSTREAM_SCOPE,
-                Some(1_000_000),
-                Window::Total,
-                Policy::Block,
-            )
-            .unwrap();
-        let state = state_with_echo(sink.clone(), ledger, (40, 20));
-        let app = build_app(state.clone());
-
-        let response = app
-            .oneshot(capped_echo_request(40))
-            .await
-            .expect("request completes");
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-
-        let ledger = state.ledger.lock().unwrap();
-        assert_eq!(
-            ledger.reserved(UPSTREAM_SCOPE),
-            0,
-            "a front denial must not leave the back-leg lease held"
-        );
-        assert_eq!(ledger.reserved(FRONT_SCOPE), 0);
-        assert!(sink.is_empty());
-    }
-
-    #[tokio::test]
-    async fn upstream_warn_scope_fails_open_and_block_fails_closed_on_backend_error() {
-        let state = poisoned_ledger_state("warn");
-        let admitted = reserve_upstream_budget(&state, UPSTREAM_SCOPE, 100, IngressDialect::OpenAi)
-            .await
-            .expect("Warn fails open");
-        assert!(
-            admitted.is_none(),
-            "D6 fail-open: admitted unmetered, no lease to settle"
-        );
-
-        let state = poisoned_ledger_state("block");
-        let denied = reserve_upstream_budget(&state, UPSTREAM_SCOPE, 100, IngressDialect::OpenAi)
-            .await
-            .expect_err("Block fails closed with a rendered response");
-        assert_eq!(denied.status(), StatusCode::TOO_MANY_REQUESTS);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn second_in_flight_call_denied_once_the_upstream_lease_exhausts_the_cap() {
-        let keys = KeyStore::new();
-        keys.insert(VirtualKey {
-            id: "vk-test".into(),
-            group_id: Some("platform".into()),
-            upstream_ref: "stuck".into(),
-            ..Default::default()
-        });
-        let stuck = Arc::new(StuckProvider {
-            entered: tokio::sync::Notify::new(),
-        });
-        let mut providers = HashMap::new();
-        providers.insert("stuck".into(), ProviderHandle::new(stuck.clone()));
-        let mut ledger = ProxyLedger::in_memory();
-        // Two concurrent calls at ceiling ≈ input-estimate + 40 cannot both fit under 100.
-        ledger
-            .set_budget("upstream:stuck", Some(100), Window::Total, Policy::Block)
-            .unwrap();
-        let state = Arc::new(ProxyState::new(
-            keys,
-            ledger,
-            Arc::new(InMemorySink::new()),
-            providers,
-            None,
-        ));
-        let app = build_app(state.clone());
-
-        let first = tokio::spawn(app.clone().oneshot(capped_echo_request(40)));
-        stuck.entered.notified().await;
-        let held = {
-            let ledger = state.ledger.lock().unwrap();
-            (
-                ledger.reserved("upstream:stuck"),
-                ledger.reserved(FRONT_SCOPE),
-            )
-        };
-        assert!(held.0 > 0, "the in-flight call holds the back-leg lease");
-        assert_eq!(held.0, held.1, "both leases carry the same ceiling");
-
-        let second = app
-            .oneshot(capped_echo_request(40))
-            .await
-            .expect("request completes");
-        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
-        {
-            let ledger = state.ledger.lock().unwrap();
-            assert_eq!(
-                ledger.reserved("upstream:stuck"),
-                held.0,
-                "the denial must not disturb the in-flight leases"
-            );
-        }
-
-        first.abort();
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                let reserved = state.ledger.lock().unwrap().reserved("upstream:stuck");
-                if reserved == 0 {
-                    break;
+    async fn soft_policy_can_exceed_caps_but_never_bypasses_paired_measurement() {
+        for primary in [Policy::Block, Policy::Warn] {
+            for upstream in [Policy::Block, Policy::Warn] {
+                let fixture = fixture((1, primary), (1, upstream), Duration::ZERO).await;
+                let response = build_app(fixture.state.clone())
+                    .oneshot(request())
+                    .await
+                    .unwrap();
+                if primary == Policy::Warn && upstream == Policy::Warn {
+                    assert_eq!(response.status(), StatusCode::OK);
+                    assert_eq!(fixture.origin.received_requests().await.unwrap().len(), 1);
+                    let ledger = fixture.state.ledger.lock().unwrap();
+                    assert_eq!((ledger.spent(FRONT), ledger.spent(BACK)), (60, 60));
+                } else {
+                    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+                    assert!(fixture.origin.received_requests().await.unwrap().is_empty());
                 }
+            }
+        }
+    }
+    #[tokio::test]
+    async fn both_warn_and_block_refuse_storage_failure_without_model_dispatch() {
+        for policy in [Policy::Block, Policy::Warn] {
+            let fixture = fixture((1000, policy), (1000, policy), Duration::ZERO).await;
+            initialize_execution(&fixture.state).unwrap();
+            let poisoned = fixture.state.clone();
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _guard = poisoned.ledger.lock().unwrap();
+                panic!("synthetic ledger poison")
+            }));
+            let response = build_app(fixture.state.clone())
+                .oneshot(request())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+            assert_eq!(response.headers()["x-should-retry"], "false");
+            assert!(fixture.origin.received_requests().await.unwrap().is_empty());
+            assert!(fixture.sink.is_empty());
+        }
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn in_flight_pair_blocks_a_second_call_and_disconnect_cannot_release_unknown_zero() {
+        let fixture = fixture(
+            (1000, Policy::Block),
+            (100, Policy::Block),
+            Duration::from_millis(400),
+        )
+        .await;
+        let app = build_app(fixture.state.clone());
+        let first = tokio::spawn(app.clone().oneshot(request()));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while fixture.origin.received_requests().await.unwrap().is_empty() {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("aborting the in-flight call releases both leases");
+        .unwrap();
+        let held = {
+            let ledger = fixture.state.ledger.lock().unwrap();
+            (ledger.reserved(FRONT), ledger.reserved(BACK))
+        };
+        assert!(held.0 > 0);
+        assert_eq!(held.0, held.1);
+        assert_eq!(
+            app.oneshot(request()).await.unwrap().status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        first.abort();
+        tokio::time::timeout(Duration::from_secs(3), fixture.state.lifecycle.wait_idle())
+            .await
+            .unwrap();
+        let ledger = fixture.state.ledger.lock().unwrap();
+        assert_eq!((ledger.reserved(FRONT), ledger.reserved(BACK)), (0, 0));
+        assert_eq!(
+            (ledger.spent(FRONT), ledger.spent(BACK)),
+            (60, 60),
+            "owner retains the single source outcome after client disconnect"
+        );
     }
 }

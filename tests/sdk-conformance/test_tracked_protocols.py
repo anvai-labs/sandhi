@@ -211,13 +211,13 @@ def qualified_origin():
 
 
 @contextmanager
-def tracked_gateway(tmp_path, binaries, origin, family, *, endpoint_profile="standard", streaming=False, accounting="tracked"):
+def tracked_gateway(tmp_path, binaries, origin, family, *, endpoint_profile="standard", streaming=False):
     instance = Gateway(tmp_path, binaries)
     if streaming:
         instance.config.write_text(json.dumps({"streaming_deadlines": {"ceiling_ms": 10000,
             "default": {"setup_ms": 2000, "idle_ms": 2000, "body_ms": 5000}}}))
     try:
-        instance.start(SANDHI_BUFFERED_ACCOUNTING=accounting, SANDHI_CACHE_READ_WEIGHT="1000", SANDHI_SHUTDOWN_GRACE_SECS="1")
+        instance.start(SANDHI_CACHE_READ_WEIGHT="1000", SANDHI_SHUTDOWN_GRACE_SECS="1")
         instance.provision(origin, "synthetic-protocol-credential")
         policy = tmp_path / "cache.json"
         policy.write_text(json.dumps({"default_intent": {"mode": "auto"}, "models": {"fixture": {"profile": "implicit_only"}}}))
@@ -407,7 +407,7 @@ def test_tracked_ambiguous_accounting_suppresses_default_sdk_redispatch(
             instance.stop()
             with sqlite3.connect(instance.database) as connection:
                 connection.execute("DROP TRIGGER fail_sdk_receipt")
-            instance.start(SANDHI_BUFFERED_ACCOUNTING="tracked", SANDHI_CACHE_READ_WEIGHT="1000")
+            instance.start(SANDHI_CACHE_READ_WEIGHT="1000")
             deadline = time.monotonic() + 5
             while True:
                 with sqlite3.connect(instance.database) as connection:
@@ -438,7 +438,7 @@ def test_tracked_protocol_receipt_failure_recovers_original_attempt_and_weight_w
         instance.stop()
         with sqlite3.connect(instance.database) as connection:
             connection.execute("DROP TRIGGER fail_receipt")
-        instance.start(SANDHI_BUFFERED_ACCOUNTING="tracked", SANDHI_CACHE_READ_WEIGHT="10000")
+        instance.start(SANDHI_CACHE_READ_WEIGHT="10000")
         deadline = time.monotonic() + 5
         while True:
             with sqlite3.connect(instance.database) as connection:
@@ -508,7 +508,7 @@ def test_tracked_protocol_sigkill_after_acceptance_preserves_unknown_attempt_and
             assert not thread.is_alive()
         assert len(outcomes) == 1 and isinstance(outcomes[0], httpx.TransportError)
         instance.stop()
-        instance.start(SANDHI_BUFFERED_ACCOUNTING="tracked", SANDHI_SHUTDOWN_GRACE_SECS="1")
+        instance.start(SANDHI_SHUTDOWN_GRACE_SECS="1")
         context = json.loads(context_json)
         for scope in ("group:protocol-team", context["upstream_budget_scope"]):
             assert instance.admin("POST", "/admin/budget", json={"scope": scope, "limit_tokens": 1,
@@ -561,12 +561,12 @@ def test_route_selects_current_eligible_target_without_probing_revoked_credentia
         assert evidence(instance.database)[1]["backend"]["id"] == "primary"
 
 
-@pytest.mark.parametrize("mode", ["select_translation", "existing_pin", "unbounded"])
-def test_tracked_responses_stream_preflights_delivery_before_pinning(
+@pytest.mark.parametrize("mode", ["select_translation", "existing_pin", "default_deadlines"])
+def test_responses_stream_selection_uses_configured_or_default_deadlines(
     tmp_path, backend_binaries, qualified_origin, mode,
 ):
     origin, calls, _ = qualified_origin
-    with tracked_gateway(tmp_path, backend_binaries, origin, FAMILIES[2], streaming=mode != "unbounded") as (instance, token):
+    with tracked_gateway(tmp_path, backend_binaries, origin, FAMILIES[2], streaming=mode != "default_deadlines") as (instance, token):
         instance.cli("set", "chat", "--provider", "other-models", "--credential-ref", "openai:default",
                      "--endpoint-family", FAMILIES[0], "--model", "fixture")
         definition = {"id": "protocols", "models": [{"id": "agent", "targets": [
@@ -575,33 +575,21 @@ def test_tracked_responses_stream_preflights_delivery_before_pinning(
         if mode == "existing_pin":
             assert sdk_call(instance, token, FAMILIES[2]) == "reply"
             assert len(calls) == 1 and calls[0][0] == "/chat/completions"
-        with sqlite3.connect(instance.database) as connection:
-            pins = connection.execute("SELECT * FROM route_affinity").fetchall()
-            leases = connection.execute("SELECT * FROM budget_reservation ORDER BY rowid").fetchall()
         with instance.client(token) as client:
             def submit():
                 return list(client.responses.create(model="agent", input="hello", max_output_tokens=64, stream=True,
                     extra_headers={"x-sandhi-session": "protocol-session"}))
-            if mode != "unbounded":
-                events = submit()
-                assert events[-1].type == "response.completed"
-                assert len(calls) == (2 if mode == "existing_pin" else 1)
-                assert all(call[0] == "/chat/completions" for call in calls)
-                with sqlite3.connect(instance.database) as connection:
-                    contexts = [json.loads(row[0]) for row in connection.execute("SELECT context_json FROM budget_execution_context")]
-                    streamed = [context for context in contexts if context["delivery"] == "streaming"]
-                    assert len(streamed) == 1
-                    assert streamed[0]["backend"]["id"] == "chat"
-                    assert streamed[0]["plane"] == "translation"
-                    assert connection.execute("SELECT count(*) FROM budget_settlement_outbox").fetchone() == (len(calls),)
-            else:
-                with pytest.raises(openai.APIStatusError) as refused:
-                    submit()
-                assert refused.value.status_code == 409
-                assert calls == []
-                with sqlite3.connect(instance.database) as connection:
-                    assert connection.execute("SELECT * FROM route_affinity").fetchall() == pins
-                    assert connection.execute("SELECT * FROM budget_reservation ORDER BY rowid").fetchall() == leases
+            events = submit()
+            assert events[-1].type == "response.completed"
+            assert len(calls) == (2 if mode == "existing_pin" else 1)
+            assert all(call[0] == "/chat/completions" for call in calls)
+            with sqlite3.connect(instance.database) as connection:
+                contexts = [json.loads(row[0]) for row in connection.execute("SELECT context_json FROM budget_execution_context")]
+                streamed = [context for context in contexts if context["delivery"] == "streaming"]
+                assert len(streamed) == 1
+                assert streamed[0]["backend"]["id"] == "chat"
+                assert streamed[0]["plane"] == "translation"
+                assert connection.execute("SELECT count(*) FROM budget_settlement_outbox").fetchone() == (len(calls),)
 
 
 def test_tracked_async_route_refuses_without_creating_a_pin_or_lease(tmp_path, backend_binaries, qualified_origin):
@@ -734,7 +722,7 @@ def test_messages_usage_profile_survives_restart_and_revision_change_fences_the_
         assert sdk_call(instance, token, FAMILIES[0]) == "reply"
         first = evidence(instance.database)[0]
         instance.stop()
-        instance.start(SANDHI_BUFFERED_ACCOUNTING="tracked", SANDHI_CACHE_READ_WEIGHT="1000")
+        instance.start(SANDHI_CACHE_READ_WEIGHT="1000")
         assert sdk_call(instance, token, FAMILIES[0]) == "reply"
         instance.cli("set", "primary", "--provider", "models", "--credential-ref", "openai:default",
             "--endpoint-family", "anthropic_messages", "--endpoint-profile", "standard", "--model", "fixture", "--revision", "1")
@@ -938,7 +926,7 @@ def test_terminal_chat_profile_survives_restart_and_profile_change_fences_pin(
         submit()
         first = evidence(instance.database)[0]
         instance.stop()
-        instance.start(SANDHI_BUFFERED_ACCOUNTING="tracked", SANDHI_CACHE_READ_WEIGHT="1000")
+        instance.start(SANDHI_CACHE_READ_WEIGHT="1000")
         submit()
         instance.cli("set", "primary", "--provider", "models", "--credential-ref", "openai:default",
             "--endpoint-family", FAMILIES[0], "--endpoint-profile", "standard", "--model", "fixture", "--revision", "1")
@@ -966,7 +954,7 @@ def test_messages_stream_profile_survives_restart_and_profile_change_fences_pin(
         submit()
         first = evidence(instance.database)[0]
         instance.stop()
-        instance.start(SANDHI_BUFFERED_ACCOUNTING="tracked", SANDHI_CACHE_READ_WEIGHT="1000")
+        instance.start(SANDHI_CACHE_READ_WEIGHT="1000")
         submit()
         instance.cli("set", "primary", "--provider", "models", "--credential-ref", "openai:default",
             "--endpoint-family", FAMILIES[1], "--endpoint-profile", "standard", "--model", "fixture", "--revision", "1")
@@ -1044,7 +1032,7 @@ def test_gemini_source_partial_usage_survives_restart_without_model_replay(
         instance.process.terminate()
         assert instance.process.wait(timeout=5) == 124
         instance.stop()
-        instance.start(SANDHI_BUFFERED_ACCOUNTING="tracked", SANDHI_CACHE_READ_WEIGHT="1000", SANDHI_SHUTDOWN_GRACE_SECS="1")
+        instance.start(SANDHI_CACHE_READ_WEIGHT="1000", SANDHI_SHUTDOWN_GRACE_SECS="1")
         assert evidence(instance.database, outcome="incomplete_stream")[0] == original
         assert len(calls) == 1, "restart/reconciliation cannot execute an inference"
         with sqlite3.connect(instance.database) as connection:

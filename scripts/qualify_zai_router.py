@@ -7,6 +7,7 @@ prompts/results and usage evidence, never credentials. --live is mandatory.
 """
 
 import argparse
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 from importlib.metadata import version
@@ -15,6 +16,7 @@ import os
 import re
 from pathlib import Path
 import secrets
+import shutil
 import socket
 import sqlite3
 import subprocess
@@ -36,6 +38,42 @@ ENDPOINTS = {
 }
 
 
+@contextmanager
+def memory_credentials(credential):
+    """Expose a private ordinary credential file on Linux tmpfs, never disk."""
+    ram = Path("/dev/shm").resolve()
+    try:
+        mounts = Path("/proc/self/mountinfo").read_text().splitlines()
+        is_tmpfs = any(
+            fields[4] == str(ram) and filesystem.split()[0] == "tmpfs"
+            for line in mounts
+            for mount, separator, filesystem in [line.partition(" - ")]
+            if separator
+            for fields in [mount.split()]
+            if len(fields) > 4
+        )
+    except OSError:
+        is_tmpfs = False
+    if not is_tmpfs or not ram.is_dir():
+        raise RuntimeError("Live qualification requires a verified Linux /dev/shm tmpfs credential directory")
+    with tempfile.TemporaryDirectory(prefix="sandhi-zai-credential-", dir=ram) as temporary:
+        directory = Path(temporary)
+        source = directory / "zai__live"
+        descriptor = os.open(source, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w") as output:
+            output.write(credential)
+        yield directory
+
+
+def require_durable_gateway(base, admin_token):
+    """Refuse an older optional-owner binary before issuing any provider call."""
+    response = httpx.get(base + "/admin/version", timeout=15,
+                         headers={"authorization": "Bearer " + admin_token})
+    response.raise_for_status()
+    if response.json().get("capabilities", {}).get("execution_accounting") != "paired_durable_v1":
+        raise RuntimeError("Gateway does not declare initialized paired durable execution")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--live", action="store_true")
@@ -47,7 +85,7 @@ def main():
     parser.add_argument("--verify", type=Path, help="Validate an existing sanitized report without live calls")
     parser.add_argument("--cache-pairs", action="store_true", help="Two identical long-prefix calls per cell")
     parser.add_argument("--cache-profile", choices=["native_only", "implicit_only"], default="native_only")
-    parser.add_argument("--accounting", choices=["legacy", "tracked"], default="legacy")
+    parser.add_argument("--binary", type=Path, help="Explicit candidate sandhi-proxy executable; required for --live")
     parser.add_argument("--delivery", choices=["buffered", "streaming", "both"], default="both")
     parser.add_argument("--logical-route", action="store_true", help="Resolve an authorized alias before dispatch")
     parser.add_argument("--thinking", choices=["default", "disabled"], default="default",
@@ -63,6 +101,9 @@ def main():
         parser.error("--live is required: this consumes provider inference quota")
     if args.output is None:
         parser.error("--output is required for live evidence")
+    if args.binary is None or not args.binary.is_file() or not os.access(args.binary, os.X_OK):
+        parser.error("--binary must select an existing executable candidate")
+    args.binary = args.binary.resolve()
     if any(values and len(set(values)) != len(values) for values in (args.backend, args.client)):
         parser.error("duplicate backend/client selections would repeat inference cells")
     credential = json.loads(args.settings.read_text())["env"]["ANTHROPIC_AUTH_TOKEN"]
@@ -84,30 +125,38 @@ def main():
               "cache_policy": args.cache_profile + (" / auto" if args.cache_profile == "implicit_only" else " / preserve_native"),
               "sdk_versions": {package: version(package) for package in ("openai", "anthropic", "google-genai")},
               "sdk_retries": 0,
-              "accounting": args.accounting, "delivery": args.delivery, "logical_route": args.logical_route,
+              "format_version": 2, "accounting": "paired_durable_v1", "delivery": args.delivery, "logical_route": args.logical_route,
               "thinking": args.thinking,
               "endpoint_profiles": {backend: "anthropic_implicit_cache" if backend == "messages" else "openai_terminal_chunk_usage" if backend == "chat" else "standard"
                                     for backend in args.backend or ENDPOINTS},
               "harness_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-              "cache_pairs": args.cache_pairs, "cells": []}
-    with (ROOT / "target/debug/sandhi-proxy").open("rb") as binary:
+              "cache_pairs": args.cache_pairs, "cells": [],
+              "planned_cells": [
+                  {"backend": backend, "client": client, "stream": stream, "repeat": repeat}
+                  for backend in args.backend or ENDPOINTS
+                  for client in args.client or ["chat", "messages", "gemini", "responses"]
+                  for stream in {"buffered": (False,), "streaming": (True,), "both": (False, True)}[args.delivery]
+                  for repeat in range(2 if args.cache_pairs else 1)
+              ]}
+    with args.binary.open("rb") as binary:
         report["gateway_binary_sha256"] = hashlib.file_digest(binary, "sha256").hexdigest()
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
     def save():
         args.output.write_text(json.dumps(sanitize(report), indent=2) + "\n")
 
-    with tempfile.TemporaryDirectory(prefix="sandhi-zai-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="sandhi-zai-") as temporary, memory_credentials(credential) as credentials:
         directory = Path(temporary)
-        credentials = directory / "credentials"
-        credentials.mkdir(mode=0o700)
-        secret_file = credentials / "zai__live"
-        secret_file.touch(mode=0o600)
-        secret_file.write_text(credential)
+        executable = directory / "sandhi-proxy"
+        shutil.copy2(args.binary, executable)
+        executable.chmod(0o555)
+        with executable.open("rb") as frozen:
+            if hashlib.file_digest(frozen, "sha256").hexdigest() != report["gateway_binary_sha256"]:
+                raise RuntimeError("Candidate executable changed while freezing")
         config = directory / "config.json"
         config.write_text(json.dumps({"streaming_deadlines": {"ceiling_ms": 180000,
             "default": {"setup_ms": 30000, "idle_ms": 30000, "body_ms": 120000}}})
-            if args.accounting == "tracked" and args.delivery != "buffered" else "{}")
+            if args.delivery != "buffered" else "{}")
         database = directory / "gateway.db"
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
@@ -120,12 +169,11 @@ def main():
                            SANDHI_CONFIG=str(config), SANDHI_VAULT_BACKEND="credstore",
                            SANDHI_CREDENTIALS_DIR=str(credentials), SANDHI_SHUTDOWN_QUIESCE_MS="0",
                            RUST_LOG="sandhi_proxy=warn")
-        if args.accounting == "tracked":
-            environment.update(SANDHI_BUFFERED_ACCOUNTING="tracked", SANDHI_SHUTDOWN_GRACE_SECS="3")
+        environment.update(SANDHI_SHUTDOWN_GRACE_SECS="3")
         log_path = directory / "gateway.log"
         log_path.touch(mode=0o600)
         with log_path.open("w") as log:
-            process = subprocess.Popen([str(ROOT / "target/debug/sandhi-proxy")],
+            process = subprocess.Popen([str(executable)],
                                        cwd=directory, env=environment, stdout=log, stderr=log)
             try:
                 for _ in range(200):
@@ -147,6 +195,7 @@ def main():
                         raise RuntimeError(f"{route}: {response.status_code} {response.text}")
                     return response.json()
 
+                require_durable_gateway(base, private[1])
                 admin("/admin/keys/reference", {"provider": "zai", "label": "live", "scheme": "bearer",
                                                "base_url": ENDPOINTS["chat"][1]})
                 for backend in args.backend or ENDPOINTS:
@@ -217,8 +266,7 @@ def main():
                             "duration_ms", "duration_source", "time_to_first_token_ms", "time_to_first_token_source"})
                         report["usage_events"] = [dict(row) for row in connection.execute(
                             "SELECT " + ",".join(selected) + " FROM usage_events ORDER BY rowid")]
-                        if args.accounting == "tracked":
-                            report["executions"], report["accounting_inventory"] = tracked_evidence(connection)
+                        report["executions"], report["accounting_inventory"] = tracked_evidence(connection)
                 report["gateway_exit_code"] = process.returncode
                 # Static reason enums plus generated correlation IDs only. Never
                 # export arbitrary log lines, provider bodies or credentials.
@@ -448,6 +496,19 @@ def verify_report(report):
     """Compare client-visible accounting to drained, correlated storage evidence."""
     cells, rows = report["cells"], report.get("usage_events", [])
     errors, matched = [], 0
+    report_version = report.get("format_version", 1)
+    if type(report_version) is not int or report_version not in (1, 2):
+        errors.append("unsupported qualification report version")
+    if report_version == 2:
+        if report.get("accounting") != "paired_durable_v1":
+            errors.append("current report requires paired durable accounting")
+        if report.get("harness_error") or not report.get("finished_at"):
+            errors.append("current qualification did not finish cleanly")
+        planned = report.get("planned_cells", [])
+        def identity(cell):
+            return tuple(cell.get(key) for key in ("backend", "client", "stream", "repeat"))
+        if not cells or not planned or sorted(map(identity, cells)) != sorted(map(identity, planned)):
+            errors.append("current qualification does not cover its planned inference cells")
     correlated = bool(cells) and all(cell.get("step_id") for cell in cells)
     by_step = {row.get("step_id"): row for row in rows}
     if len(rows) != len(cells):
@@ -487,8 +548,13 @@ def verify_report(report):
                 row["tokens_out"] + ((row.get("reasoning_tokens") or 0) if row.get("reasoning_included") in (False, 0) else 0),)
             if sum(measured[:3]) < (1000 if report.get("cache_pairs") else 1):
                 errors.append(label + ": implausibly empty input measurement for the known synthetic prompt")
-            if (fresh, read, write, output) != measured:
-                errors.append(f"{label}: SDK {(fresh, read, write, output)} != durable {measured}")
+            expected_wire = measured
+            if cell["client"] == "gemini":
+                # Gemini wire usage has no separate cache-write category. The
+                # original source record still retains its fresh/write split.
+                expected_wire = (measured[0] + measured[2], measured[1], 0, measured[3])
+            if (fresh, read, write, output) != expected_wire:
+                errors.append(f"{label}: SDK {(fresh, read, write, output)} != expected source projection {expected_wire}")
             else:
                 matched += 1
             if row["cache_read_status"] == "reported" and row["cache_read_tokens"] > 0:
@@ -496,7 +562,7 @@ def verify_report(report):
         except (KeyError, TypeError) as error:
             errors.append(f"{label}: incomplete usage evidence ({error})")
     tracked = None
-    if report.get("accounting") == "tracked":
+    if report.get("accounting") in ("tracked", "paired_durable_v1"):
         tracked, tracked_errors = verify_tracked(report, by_step)
         errors.extend(tracked_errors)
     return {"cells": len(cells), "durable_observations": len(rows), "sdk_usage_matches": matched,

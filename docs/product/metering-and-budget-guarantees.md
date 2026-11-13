@@ -65,8 +65,12 @@ publish the deferred success. Transparent Gemini bytes remain unchanged.
 ## What budget enforcement actually guarantees
 
 Admission reserves `ceil(ingress_body_bytes / 4) + effective_output_max`, at least one token.
-The output default is injected for a capped Block request that omits an output limit, which
-requires translation. The input term is a heuristic, not a tokenizer or upper-bound proof.
+The current HTTP execution contract injects the operator-owned output default
+when a chat request omits its limit, under both Block and Warn policies. Canonical
+encoding carries the bound to the selected codec; native state is preserved or
+refused. Text Completions retains its explicit native default and aggregate batch
+exposure; Embeddings reserves input only. The input term is a heuristic, not a
+tokenizer or upper-bound proof. See the [durable migration](../operator/buffered-accounting.md).
 
 | Provider/path or request category | Input-bound evidence in Sandhi | Output/reasoning control | Advertised class |
 |---|---|---|---|

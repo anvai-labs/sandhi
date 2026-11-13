@@ -1,4 +1,4 @@
-//! Opt-in buffered HTTP ownership and bounded recovery.
+//! Durable HTTP execution ownership and bounded recovery.
 use crate::ProxyState;
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,6 +8,12 @@ pub struct Config {
     capacity: usize,
     accounting_wait: Duration,
     transport_timeout: Duration,
+}
+impl Default for Config {
+    fn default() -> Self {
+        Self::new(64, Duration::from_secs(2), Duration::from_secs(120))
+            .expect("static durable accounting bounds")
+    }
 }
 impl Config {
     pub fn new(
@@ -37,11 +43,14 @@ pub fn enable(state: &Arc<ProxyState>, config: Config) -> Result<(), &'static st
         config.accounting_wait,
         config.transport_timeout,
     )?;
-    super::with_durable_ledger(&state.ledger, |ledger| ledger.validate_tracked_durable())
-        .map_err(|_| "tracked accounting requires an available single file-backed ledger")?;
+    let native_references=super::with_durable_ledger(&state.ledger, |ledger| {
+        ledger.open_native_reference_store().map_err(|_|sandhi_store::ledger::evidence::EvidenceError::UnsupportedTrackedLedger)
+    }).map_err(|_|"durable execution requires native reference storage on its original single file-backed ledger")?;
     state
         .buffered_accounting
         .set(Arc::new(Buffered {
+            native_references: Arc::new(native_references),
+            native_reference_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             jobs: Jobs::for_proxy(state, config.capacity, config.accounting_wait),
             config,
             recovery: Mutex::new(Recovery::default()),
@@ -60,7 +69,7 @@ use crate::{
     RequestAccounting,
 };
 use axum::{body::Bytes, http::StatusCode, response::Response};
-use sandhi_core::{ChatRequestV1, Policy};
+use sandhi_core::ChatRequestV1;
 use sandhi_providers::ProviderHandle;
 use sandhi_store::ledger::evidence::{RecoveryCursor, RecoveryState, ScopeCursor};
 use std::sync::Mutex;
@@ -82,9 +91,25 @@ struct Recovery {
     unresolved: usize,
 }
 pub(crate) struct Buffered {
+    native_references: Arc<sandhi_store::references::ReferenceStore>,
+    native_reference_slots: Arc<tokio::sync::Semaphore>,
     config: Config,
     jobs: Jobs,
     recovery: Mutex<Recovery>,
+}
+
+pub(crate) fn reference_authority(
+    state: &ProxyState,
+) -> Option<(
+    Arc<sandhi_store::references::ReferenceStore>,
+    Arc<tokio::sync::Semaphore>,
+)> {
+    state.buffered_accounting.get().map(|owner| {
+        (
+            owner.native_references.clone(),
+            owner.native_reference_slots.clone(),
+        )
+    })
 }
 
 pub fn retained(state: &ProxyState) -> usize {
@@ -130,7 +155,6 @@ pub(crate) async fn handle(
     wants_stream: bool,
     transparent_eligible: bool,
     scope: String,
-    policy: Policy,
     ceiling: u64,
     _effective_max: u64,
     input_len: usize,
@@ -138,6 +162,10 @@ pub(crate) async fn handle(
     configured_deadline: Option<Duration>,
     streaming_limits: Option<crate::deadlines::StreamLimits>,
 ) -> Response {
+    let plaintext = matches!(
+        dialect,
+        IngressDialect::Completions | IngressDialect::Embeddings
+    );
     // Both leases are admitted together after validation. A refusal here owns no
     // reservation, and no unknown dispatch can later be released by an RAII back leg.
     if (wants_stream && (streaming_limits.is_none() || !provider.supports_owned_streaming()))
@@ -147,16 +175,32 @@ pub(crate) async fn handle(
                 | IngressDialect::Anthropic
                 | IngressDialect::Responses
                 | IngressDialect::Gemini
+                | IngressDialect::Completions
+                | IngressDialect::Embeddings
         )
         || !provider.supports_owned_buffered()
-        || policy != Policy::Block
         || request.metadata.idempotency_key.is_some()
         || request.max_output_tokens.is_none()
     {
         return ingress_error(dialect, StatusCode::BAD_REQUEST,
-            "tracked accounting requires buffered Chat, Messages, Responses or Gemini with a supported retry-free backend, or bounded streaming from qualified Chat/Messages/Responses/Gemini/Codex backends; Block policy, explicit output limit and no idempotency key are required");
+            "durable execution requires a qualified retry-free backend, synchronous operation, bounded streaming, explicit or operator-default output limit, and no idempotency key; plaintext operations require native OpenAI transport");
     }
-    let preflight = if wants_stream {
+    let preflight = if plaintext {
+        if provider.family() != sandhi_providers::ProviderFamily::OpenAiCompat
+            || !transparent_eligible
+            || provider.raw_forwarder().is_none()
+            || !provider.permits_model(&request.model)
+            || (wants_stream
+                && provider.source_usage_convention()
+                    != Ok(sandhi_core::UsageConventionV1::ChatStandard))
+        {
+            Err(sandhi_providers::ProviderError::InvalidRequest(
+                "plaintext operation requires a qualified native OpenAI transport".into(),
+            ))
+        } else {
+            provider.preflight_request(&request)
+        }
+    } else if wants_stream {
         provider.preflight_owned_streaming(&request)
     } else {
         provider.preflight_owned_buffered(&request)
@@ -197,6 +241,14 @@ pub(crate) async fn handle(
         Ok(context) => context,
         Err(message) => return ingress_error(dialect, StatusCode::BAD_REQUEST, message),
     };
+    // Selection telemetry is independent of admission, dispatch and settlement evidence.
+    tracing::debug!(
+        provider = provider.slug(),
+        model = %request.model,
+        plane = if transparent { "transparent" } else { "translation" },
+        stream = wants_stream,
+        "plane selected"
+    );
     let cache_read_weight_bp = context.accounting_policy.cache_read_weight.basis_points();
     let mut accounting = RequestAccounting::new(
         state.clone(),
@@ -313,7 +365,7 @@ pub(crate) async fn handle(
         accounting.reservation = Some(execution.intent().reservation.clone());
         // The upstream reservation belongs to the durable execution linkage;
         // canonical terminal settlement/recovery handles both in one transaction.
-        accounting.with_upstream_budget(upstream_scope, None);
+        accounting.upstream_scope = Some(upstream_scope);
         accounting.operation = Some(operation);
         let attempts = match super::attempts::Observer::new(&execution) {
             Ok(attempts) => attempts,

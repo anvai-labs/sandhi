@@ -92,7 +92,9 @@ families. Profiles default to `standard`; compatible nonstandard Messages endpoi
 can explicitly select `anthropic_implicit_cache`. Profiles configure the immediate
 source and are never request-body parameters. They do not grant subscription or
 vault authority. See [shared endpoint profiles](../../docs/adr/0039-shared-embedded-endpoint-profiles.md)
-for constraints and the remaining gateway second-hop qualification gate.
+for constraints. For a gateway second hop, use the explicit
+[gateway peer contract](../../docs/adr/0041-explicit-gateway-peer-contract.md);
+provider profiles describe direct upstream sources.
 `runtime.openai_compat()` remains a convenience for custom standard Chat endpoints.
 
 Prepared 0.17.0 buffered calls use the same strict source usage qualification as
@@ -100,7 +102,9 @@ accounted calls for Chat, Messages, Responses and Gemini, including Codex's
 constrained SSE aggregation. Missing/invalid counts or malformed known tool fields
 raise nonretryable `output_projection_error`; they cannot become final zero usage
 or empty executable arguments. Native envelopes retain opaque state; portable
-delivery explicitly refuses unsupported projections. See [buffered qualification](../../docs/adr/0040-shared-buffered-source-qualification.md).
+delivery explicitly refuses unsupported projections. Cohere v2 and Ollama also
+qualify native physical counts: Cohere billed units are not token totals, and
+absent cache fields remain unavailable. See [buffered qualification](../../docs/adr/0040-shared-buffered-source-qualification.md).
 
 Canonical streams may emit accounting-only `usage` events before content or after a
 numeric usage snapshot. When `usage.completeness` is `"unavailable"` and a valid

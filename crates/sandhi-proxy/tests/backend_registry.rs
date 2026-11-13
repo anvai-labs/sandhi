@@ -1,4 +1,5 @@
 //! Real admin -> stored backend -> scoped key -> inference -> rotation/restart/revocation.
+mod support;
 use std::{collections::HashMap, path::Path, sync::Arc};
 
 use axum::{
@@ -7,9 +8,7 @@ use axum::{
 };
 use sandhi_core::{InMemorySink, KeyStore};
 use sandhi_providers::ProviderRuntime;
-use sandhi_proxy::{
-    backend::rehydrate_backends, build_app, rehydrate_live_keys, ProxyLedger, ProxyState,
-};
+use sandhi_proxy::{backend::rehydrate_backends, build_app, rehydrate_live_keys, ProxyState};
 use sandhi_store::{BackendStore, VaultStore, VirtualKeyStore};
 use serde_json::{json, Value};
 use tower::ServiceExt;
@@ -89,9 +88,9 @@ fn state(db: &Path, vault: Arc<VaultStore>) -> Arc<ProxyState> {
     rehydrate_live_keys(&keys, &vkeys);
     let mut providers = HashMap::new();
     rehydrate_backends(&vault, &backends, &ProviderRuntime::new(), &mut providers).unwrap();
-    let mut state = ProxyState::new(
+    let mut state = support::state(
         keys,
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         Arc::new(InMemorySink::new()),
         providers,
         None,

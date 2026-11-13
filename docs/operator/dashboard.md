@@ -5,10 +5,11 @@ console uses the gateway's existing APIs and serves local assets; no separate
 frontend build or service is required. Production identity and TLS configuration
 follow the [identity guide](oidc-sso.md).
 
-![Operator console overview with synthetic token and attribution data](../assets/operator-console/overview-synthetic.png)
+![Operator console overview with synthetic token and attribution data](../assets/operator-console/overview-canonical-synthetic.png)
 
-*Workspace preview captured with AgentBrowser against a disposable local gateway.
-All identities, requests and token counts in this image are synthetic.*
+*AgentBrowser preview of the current assets against synthetic local API responses.
+The disposable UI token, readiness, identities and counts are synthetic. This is
+UI evidence, not gateway authentication, settlement or provider qualification.*
 
 The console is a lightweight navigable application. Its sidebar, browser history
 and fragment links select one workspace at a time. Desktop uses a persistent
@@ -17,8 +18,8 @@ appearance, keyboard navigation and reduced-motion preferences are supported.
 
 | Workspace | Operator task |
 | --- | --- |
-| Overview | Inspect volume, neutral token categories, cache-read reporting coverage, latency and attribution by subject/group/provider/model. Filter attribution rows without changing aggregate totals. |
-| Backends & routes | Inspect backend revisions, endpoint family/profile, declared models/cache capabilities and logical target mappings. Manage definitions through CLI or Configuration. |
+| Overview | Inspect the execution contract/readiness snapshot, volume, neutral token categories, cache-read reporting coverage, latency and attribution by subject/group/provider/model. Filter attribution rows without changing aggregate totals. |
+| Backends & routes | Inspect backend revisions, provider label, immutable budget scope, endpoint family/profile, declared models/cache capabilities and logical target mappings. Manage definitions through CLI or Configuration. |
 | Keys & credentials | Inspect references, mint scoped virtual keys and use supported credential operations. Newly minted secrets have one-time visibility. |
 | Budgets | Inspect scope limits, spent/remaining units and configure supported budget windows/policies. |
 | Alerts | Inspect rules and acknowledge supported notifications. |
@@ -36,15 +37,44 @@ the console. Overview shortcuts and guide actions use the same navigation/histor
 and move keyboard focus to the selected heading. A fragment carries navigation
 only. Do not put credentials in the URL.
 
-![Routing, cache and evidence guide with an illustrative source-versus-wire token split](../assets/operator-console/guide-synthetic.png)
+![Routing, cache and evidence guide with an illustrative source-versus-wire token split](../assets/operator-console/guide-canonical-synthetic.png)
 
 *The guide connects backend inventory, local egress policy and usage evidence.
-The numerical conversion is illustrative; this screenshot contains no admin credential.*
+The numerical conversion and configuration are illustrative; the masked UI token
+is disposable synthetic data.*
 
-![Synthetic backend and logical-route inventory](../assets/operator-console/routing-synthetic.png)
+![Synthetic backend and logical-route inventory](../assets/operator-console/routing-canonical-synthetic.png)
 
-*The routing workspace separates protocol/profile and credential reference from
-logical model mappings. This synthetic inventory is not live-provider evidence.*
+*The routing workspace separates the configured provider label, protocol/profile,
+credential reference and actual immutable budget namespace from logical mappings.
+This synthetic inventory is not live-provider or source-version evidence.*
+
+## Readiness and budget authority
+
+The Overview's **Execution contract** panel joins two independent server facts:
+`GET /admin/version` must return
+`capabilities.execution_accounting == "paired_durable_v1"`, and `GET /readyz`
+must report ready. The capability identifies an initialized configured owner;
+it is not a live SQL-health check. The readiness probe is a lifecycle snapshot,
+not provider health, available budget, cache reuse or a per-request receipt.
+A missing/unknown contract, failed probe or draining lifecycle never becomes a
+ready success. A failed refresh removes prior successful readiness; ordinary
+read-only inventory panels remain available under their existing permissions.
+Changing authentication cancels the probes and clears protected data.
+
+Backends & routes separates configured **provider label**, **protocol/profile**,
+**credential reference**, and the record's immutable **budget authority**. The
+console displays the actual `upstream_budget_scope`, including a retained family
+bucket after a vendor label changes. Missing metadata is **Unavailable**; the UI
+never derives authority from a display name. This field has no edit control.
+
+The Routing & cache guide labels 4,096 output tokens and 30/90/180-second streaming
+limits (240-second ceiling) as **source defaults**, not this server's effective
+policy. Configuration shows active deadline metadata when the server exposes it;
+other overrides remain unknown to the console. These are estimated admission
+controls, not strict physical token guarantees. Bearer API credential onboarding
+does not create a managed consumer subscription grant. Refer to the
+[protocol and credential matrix](../product/protocol-and-credential-matrix.md).
 
 ## Interpret token reuse accurately
 

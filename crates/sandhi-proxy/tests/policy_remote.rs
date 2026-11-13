@@ -1,3 +1,4 @@
+mod support;
 use sandhi_core::policy::{Disposition, Engine, Identity, Registry};
 use sandhi_proxy::policy_remote::register_remotes;
 use serde_json::{json, Value};
@@ -278,7 +279,7 @@ async fn remote_findings_and_failures_hold_zero_provider_calls() {
     };
     use sandhi_core::{InMemorySink, KeyStore, VirtualKey};
     use sandhi_providers::ProviderRuntime;
-    use sandhi_proxy::{build_app, policy::PolicyGate, ProxyLedger, ProxyState};
+    use sandhi_proxy::{build_app, policy::PolicyGate};
     use sandhi_store::policy::PolicyAuditStore;
     use std::collections::HashMap;
     use tower::ServiceExt;
@@ -319,9 +320,9 @@ async fn remote_findings_and_failures_hold_zero_provider_calls() {
             None,
             None,
         );
-        let mut state = ProxyState::new(
+        let mut state = support::state(
             keys,
-            ProxyLedger::in_memory(),
+            support::Ledger::new(),
             Arc::new(InMemorySink::new()),
             HashMap::from([("openai".into(), provider)]),
             None,

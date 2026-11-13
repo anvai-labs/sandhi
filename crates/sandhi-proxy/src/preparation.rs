@@ -11,7 +11,6 @@ use crate::{
     policy::PolicyGate,
     rate_limited_error,
     ratelimit::{self, RateLimiter},
-    streaming::StreamBodyLifetime,
     GeminiRoute, ProxyState,
 };
 use axum::{
@@ -29,7 +28,6 @@ pub(super) struct PreparationContext<'a> {
     count_only: bool,
     buffered_deadlines: Option<&'a BufferedDeadlines>,
     streaming_deadlines: Option<&'a StreamingDeadlines>,
-    stream_body_lifetime: Option<StreamBodyLifetime>,
     rate_limiter: &'a RateLimiter,
     metrics: &'a Metrics,
     policy: Option<&'a PolicyGate>,
@@ -41,7 +39,6 @@ impl<'a> From<&'a ProxyState> for PreparationContext<'a> {
             count_only: false,
             buffered_deadlines: state.buffered_deadlines.as_ref(),
             streaming_deadlines: state.streaming_deadlines.as_ref(),
-            stream_body_lifetime: state.stream_body_lifetime,
             rate_limiter: &state.rate_limiter,
             metrics: &state.metrics,
             policy: state.policy.as_deref(),
@@ -65,6 +62,8 @@ pub(super) struct ResolvedRoute {
 
 pub(super) struct PreparedRequest {
     pub vk: VirtualKey,
+    pub reference_context: Option<crate::reference_ownership::Context>,
+    pub defaulted_output: bool,
     pub provider: ProviderHandle,
     pub request: ChatRequestV1,
     pub body: Bytes,
@@ -73,7 +72,6 @@ pub(super) struct PreparedRequest {
     pub transparent_eligible: bool,
     pub buffered_deadline: Option<EffectiveDeadline>,
     pub streaming_deadline: Option<StreamLimits>,
-    pub body_lifetime: Option<StreamBodyLifetime>,
     pub routing: Option<crate::routing::DispatchPlan>,
 }
 
@@ -187,6 +185,21 @@ pub(super) async fn prepare(
         ));
     }
 
+    let defaulted_output =
+        !context.count_only && !raw_text_route && request.max_output_tokens.is_none();
+    if defaulted_output {
+        if !(1..=1_000_000).contains(&context.state.default_max_output_tokens) {
+            return Err(ingress_error(
+                dialect,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "invalid configured output default",
+            ));
+        }
+        // Candidate encoders (notably Messages) must see the same operator
+        // bound before routing. The selected model's declared clamp follows.
+        request.max_output_tokens = Some(context.state.default_max_output_tokens);
+    }
+
     let selected = if provider.is_none() {
         if raw_text_route {
             return Err(ingress_error(
@@ -200,12 +213,17 @@ pub(super) async fn prepare(
                 context.state,
                 &vk,
                 &mut request,
-                (!context.count_only && context.state.buffered_accounting.get().is_some())
-                    .then_some(if wants_stream {
-                        crate::routing::TrackedDelivery::Streaming
-                    } else {
-                        crate::routing::TrackedDelivery::Buffered
-                    }),
+                if context.count_only {
+                    Some(crate::routing::TrackedDelivery::Counting)
+                } else {
+                    context.state.buffered_accounting.get().map(|_| {
+                        if wants_stream {
+                            crate::routing::TrackedDelivery::Streaming
+                        } else {
+                            crate::routing::TrackedDelivery::Buffered
+                        }
+                    })
+                },
             )
             .await
             .map_err(|message| ingress_error(dialect, StatusCode::CONFLICT, message))?,
@@ -221,6 +239,14 @@ pub(super) async fn prepare(
         (_, Some(provider)) => provider,
         _ => unreachable!("selected logical or fixed backend"),
     };
+    if !context.count_only && !provider.reference_credential_is_current() {
+        return Err(crate::provider_error(
+            &sandhi_providers::ProviderError::Auth,
+            dialect,
+            provider.slug(),
+            false,
+        ));
+    }
     let effective_upstream = selected
         .as_ref()
         .map(|selected| format!("backend/{}", selected.plan.backend_id))
@@ -243,6 +269,26 @@ pub(super) async fn prepare(
         ));
     }
 
+    if defaulted_output {
+        let declared = provider
+            .backend_binding()
+            .and_then(|binding| {
+                binding.models.iter().find(|model| {
+                    model.id.eq_ignore_ascii_case(&request.model)
+                        || model
+                            .aliases
+                            .iter()
+                            .any(|alias| alias.eq_ignore_ascii_case(&request.model))
+                })
+            })
+            .and_then(|model| model.max_output_tokens);
+        request.max_output_tokens = Some(
+            declared.map_or(context.state.default_max_output_tokens, |maximum| {
+                context.state.default_max_output_tokens.min(maximum)
+            }),
+        );
+    }
+
     request
         .native_input_for(provider.family().endpoint_family())
         .map_err(|message| ingress_error(dialect, StatusCode::BAD_REQUEST, &message))?;
@@ -253,7 +299,9 @@ pub(super) async fn prepare(
     request.include_native_stream = wants_stream
         && ingress_family(dialect) == provider.family()
         && provider.supports_native_stream();
-    if !raw_text_route {
+    if context.count_only {
+        // Local estimation never compiles or activates generation cache controls.
+    } else if !raw_text_route {
         request.compiled_cache = provider
             .compile_cache_plan(&request)
             .map_err(|error| ingress_error(dialect, StatusCode::BAD_REQUEST, &error.to_string()))?;
@@ -325,9 +373,7 @@ pub(super) async fn prepare(
     } else {
         None
     };
-    let body_lifetime = streaming_deadline
-        .map(|policy| policy.body_lifetime())
-        .or(context.stream_body_lifetime);
+    let body_lifetime = streaming_deadline.map(|policy| policy.body_lifetime());
     if wants_stream && body_lifetime.is_some() && !provider.supports_streaming_deadlines() {
         return Err(ingress_error(
             dialect,
@@ -345,11 +391,11 @@ pub(super) async fn prepare(
     //
     // Decided here, before enforcement, so the plane is a metric dimension for every outcome —
     // including the calls that get refused below and never reach a provider.
-    let transparent_eligible =
-        ingress_family(dialect) == provider.family() && provider.raw_forwarder().is_some();
-    // Preliminary plane label for the rate-limit metric (a throttled call never reaches a provider,
-    // so its plane is nominal). The handler recomputes the final plane once it knows whether the cap
-    // forces the translation plane.
+    let transparent_eligible = !defaulted_output
+        && ingress_family(dialect) == provider.family()
+        && provider.raw_forwarder().is_some();
+    // Final prepared plane also labels a throttled call that never reaches a provider.
+    // An injected output default has already selected canonical encoding.
     let plane = if transparent_eligible {
         metrics::Plane::Transparent
     } else {
@@ -474,7 +520,40 @@ pub(super) async fn prepare(
         }
     }
 
+    let reference_context = if context.count_only || raw_text_route {
+        None
+    } else {
+        let effective = if transparent_eligible {
+            serde_json::from_slice(&body).expect("prepared native JSON")
+        } else {
+            provider
+                .encode_execution_request(&request)
+                .map_err(|error| {
+                    ingress_error(dialect, StatusCode::BAD_REQUEST, &error.to_string())
+                })?
+        };
+        crate::reference_ownership::prepare_effective(
+            context.state,
+            &vk,
+            &provider,
+            &request,
+            dialect,
+            &effective,
+        )
+        .await
+        .map_err(|error| error.into_response(dialect))?
+        .map(|proof| proof.with_streaming(wants_stream))
+    };
+
     if let Some(selected) = selected.as_ref().filter(|_| !context.count_only) {
+        if reference_context
+            .as_ref()
+            .is_some_and(|proof| proof.has_input_references())
+        {
+            selected
+                .require_stateful_session()
+                .map_err(|message| ingress_error(dialect, StatusCode::CONFLICT, message))?;
+        }
         selected
             .confirm(context.state)
             .await
@@ -482,6 +561,8 @@ pub(super) async fn prepare(
     }
     Ok(PreparedRequest {
         vk,
+        reference_context,
+        defaulted_output,
         provider,
         request,
         body,
@@ -490,7 +571,6 @@ pub(super) async fn prepare(
         transparent_eligible,
         buffered_deadline,
         streaming_deadline,
-        body_lifetime,
         routing: selected.map(|selected| selected.plan),
     })
 }

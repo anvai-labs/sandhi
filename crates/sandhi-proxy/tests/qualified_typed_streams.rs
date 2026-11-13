@@ -607,7 +607,19 @@ async fn translated_stream_cancellation_keeps_source_final_counts_without_anothe
                 tokio::time::timeout(Duration::from_secs(3), state.lifecycle.wait_idle())
                     .await
                     .unwrap();
-                assert!(body.next().await.unwrap().is_err(), "{profile}/{case}");
+                // Complete native events may already be queued before the
+                // terminal transport error; their chunk boundaries are not API semantics.
+                let saw_error = tokio::time::timeout(Duration::from_secs(3), async {
+                    while let Some(chunk) = body.next().await {
+                        if chunk.is_err() {
+                            return true;
+                        }
+                    }
+                    false
+                })
+                .await
+                .unwrap();
+                assert!(saw_error, "{profile}/{case}");
             }
             tokio::time::timeout(Duration::from_secs(3), state.lifecycle.wait_idle())
                 .await

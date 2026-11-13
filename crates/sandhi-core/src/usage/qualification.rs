@@ -387,6 +387,70 @@ pub fn qualify_gemini_progress_usage(response: &Value) -> Result<Option<UsageV2>
     }))
 }
 
+/// Path-selected OpenAI plaintext operations. The embedding operation explicitly
+/// has no output; this must never be applied to a generation response missing usage.
+pub fn qualify_openai_plaintext_usage(response: &Value, embedding: bool) -> Result<UsageV2, Error> {
+    if !response.is_object() || response.get("error").is_some() {
+        return Err(Error::InvalidResponse);
+    }
+    if embedding {
+        if response.get("object").and_then(Value::as_str) != Some("list")
+            || !response
+                .get("data")
+                .and_then(Value::as_array)
+                .is_some_and(|items| {
+                    !items.is_empty()
+                        && items.iter().all(|item| {
+                            item.get("object").and_then(Value::as_str) == Some("embedding")
+                                && item.get("index").and_then(Value::as_u64).is_some()
+                                && item.get("embedding").is_some_and(|value| {
+                                    value.is_string()
+                                        || value
+                                            .as_array()
+                                            .is_some_and(|items| items.iter().all(Value::is_number))
+                                })
+                        })
+                })
+        {
+            return Err(Error::InvalidResponse);
+        }
+        let counters = usage(response, "usage")?;
+        required(counters, "prompt_tokens", "prompt_tokens")?;
+        if optional(counters, "completion_tokens", "completion_tokens")?.is_some_and(|n| n != 0)
+            || counters.get("completion_tokens_details").is_some()
+        {
+            return Err(Error::InconsistentUsage);
+        }
+        // Explicit operation semantics supplies not-applicable output. The
+        // shared strict split/total validator still verifies every reported unit.
+        let mut projected = response.clone();
+        projected["usage"]["completion_tokens"] = Value::from(0);
+        let mut qualified =
+            qualify_buffered_usage(EndpointFamilyV1::OpenaiChatCompletions, &projected)?;
+        qualified.reasoning_included = None;
+        return Ok(qualified);
+    }
+    if response.get("object").and_then(Value::as_str) != Some("text_completion")
+        || !response
+            .get("choices")
+            .and_then(Value::as_array)
+            .is_some_and(|items| {
+                !items.is_empty()
+                    && items.iter().all(|item| {
+                        item.get("index").and_then(Value::as_u64).is_some()
+                            && item.get("text").is_some_and(Value::is_string)
+                            && matches!(
+                                item.get("finish_reason").and_then(Value::as_str),
+                                Some("stop" | "length" | "content_filter")
+                            )
+                    })
+            })
+    {
+        return Err(Error::InvalidResponse);
+    }
+    qualify_buffered_usage(EndpointFamilyV1::OpenaiChatCompletions, response)
+}
+
 /// Qualify provider-reported buffered usage for the selected wire protocol.
 /// Keeps the existing parser's count derivation, preserves reported reasoning zero,
 /// and refuses missing/malformed/inconsistent required evidence. Optional inclusive

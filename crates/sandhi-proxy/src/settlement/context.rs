@@ -79,6 +79,15 @@ impl Selection {
         let value = ExecutionContext {
             version: 1,
             ingress: crate::ingress_family(surface.dialect).endpoint_family(),
+            operation: Some(match surface.dialect {
+                IngressDialect::Completions => {
+                    sandhi_store::ledger::evidence::context::Operation::TextCompletion
+                }
+                IngressDialect::Embeddings => {
+                    sandhi_store::ledger::evidence::context::Operation::Embedding
+                }
+                _ => sandhi_store::ledger::evidence::context::Operation::Chat,
+            }),
             delivery: if surface.streaming {
                 Delivery::Streaming
             } else {

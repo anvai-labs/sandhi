@@ -53,6 +53,15 @@ pub struct AccountingPolicy {
     pub version: u8,
     pub cache_read_weight: Weight,
 }
+/// Frozen server-selected operation. Old contexts retain absent/unknown operation;
+/// missing generated-output counters never become zero merely through migration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Operation {
+    Chat,
+    TextCompletion,
+    Embedding,
+}
 /// No arbitrary extensions, prompt/body, raw identity hint, URL, header or secret.
 /// This is trusted composition data; deserialization does not confer authority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +69,8 @@ pub struct AccountingPolicy {
 pub struct ExecutionContext {
     pub version: u8,
     pub ingress: EndpointFamilyV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<Operation>,
     pub delivery: Delivery,
     pub plane: Plane,
     pub upstream_ref: String,
@@ -90,6 +101,20 @@ impl ExecutionContext {
     pub fn validate(&self) -> Result<(), EvidenceError> {
         let valid = self.version == 1
             && self.accounting_policy.version == 1
+            && self.operation.is_none_or(|operation| match operation {
+                Operation::Chat => true,
+                Operation::TextCompletion => {
+                    self.ingress == EndpointFamilyV1::OpenaiChatCompletions
+                        && self.endpoint_family == EndpointFamilyV1::OpenaiChatCompletions
+                        && self.plane == Plane::Transparent
+                }
+                Operation::Embedding => {
+                    self.ingress == EndpointFamilyV1::OpenaiChatCompletions
+                        && self.endpoint_family == EndpointFamilyV1::OpenaiChatCompletions
+                        && self.plane == Plane::Transparent
+                        && self.delivery == Delivery::Buffered
+                }
+            })
             && label(&self.upstream_ref, 512)
             && label(&self.upstream_budget_scope, 512)
             && label(&self.requested_model, 512)
@@ -321,6 +346,7 @@ mod tests {
         ExecutionContext {
             version: 1,
             ingress: EndpointFamilyV1::AnthropicMessages,
+            operation: None,
             delivery: Delivery::Buffered,
             plane: Plane::Translation,
             upstream_ref: "openai:default".into(),
@@ -356,6 +382,25 @@ mod tests {
             IntentAdmission::Admitted(intent) => Ok(intent),
             _ => panic!("unlimited admission"),
         }
+    }
+    #[test]
+    fn old_context_operation_stays_unknown_and_input_only_operation_is_validated() {
+        let historical = context();
+        let encoded = historical.encode().unwrap();
+        assert!(!encoded.contains("operation"));
+        let mut operation = historical.clone();
+        operation.ingress = EndpointFamilyV1::OpenaiChatCompletions;
+        operation.plane = Plane::Transparent;
+        operation.operation = Some(Operation::Embedding);
+        assert!(operation.validate().is_ok());
+        operation.delivery = Delivery::Streaming;
+        assert!(operation.validate().is_err());
+        operation.operation = Some(Operation::TextCompletion);
+        assert!(operation.validate().is_ok());
+        operation.plane = Plane::Translation;
+        assert!(operation.validate().is_err());
+        let decoded: ExecutionContext = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.operation, None);
     }
     #[test]
     fn terminal_chat_profile_persists_only_for_its_declared_endpoint_family() {

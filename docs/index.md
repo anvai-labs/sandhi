@@ -15,6 +15,13 @@ dispatch. Pricing and billing belong to downstream systems.
 
     [Cache-aware routing and token efficiency →](product/cache-aware-routing.md)
 
+- **Inspect protocol and credential support**
+
+    Choose the client wire API separately from the backend protocol, source
+    qualifier and credential profile. Unsupported native state refuses explicitly.
+
+    [Protocol and credential matrix →](product/protocol-and-credential-matrix.md)
+
 - **Control outgoing content locally**
 
     Apply configured egress rules with optional embedded ONNX evaluation.
@@ -45,7 +52,7 @@ dispatch. Pricing and billing belong to downstream systems.
 
     Separate observed usage from persisted evidence and committed accounting.
 
-    [Explore tracked accounting →](operator/buffered-accounting.md)
+    [Inspect durable execution →](operator/buffered-accounting.md)
 
 </div>
 
@@ -53,8 +60,9 @@ dispatch. Pricing and billing belong to downstream systems.
     Sandhi **0.17.0** and Victor **0.29.0** are prepared, unpublished source versions.
     Explicit backend/cache policy and strict source qualification are implemented;
     live Z.AI evidence belongs to its recorded endpoint/source configuration.
-    Gateway peer coordination, mandatory accounting, provider-label/budget-scope
-    migration and broader lifecycle/subscription acceptance remain in
+    The current candidate also separates provider labels from immutable budget
+    scopes and requires one durable HTTP execution owner. Integrated SDK/public CI,
+    packaging, issuer-bound continuation and broader lifecycle acceptance remain in
     [TD-0034](td/TD-0034-protocol-neutral-router-cache-accounting.md). A docs build
     does not release or deploy these changes.
 
@@ -64,17 +72,19 @@ The console's **Routing & cache guide** (`/dashboard#flow-section`) and the
 [visual cache/token guide](product/cache-aware-routing.md) follow the same operator
 workflow: inspect the client dialect, selected backend/cache policy, local egress
 rules and original source evidence. Client response counters, dashboard observations
-and tracked settlement receipts are separate views of that work.
+and committed source receipts are separate views of that work. The
+[protocol and credential matrix](product/protocol-and-credential-matrix.md) keeps
+client dialects, backend qualification and subscription boundaries distinct.
 
 ```mermaid
 flowchart LR
-    A[Agent or application] --> B[Identity and policy]
-    B --> C[Budget admission]
-    C --> D[Provider transport]
-    D --> E[Model provider]
-    E --> F[Usage observation]
-    F --> G[Accounting ledger]
-    F -. best effort .-> H[Dashboard and telemetry]
+    A[Agent API] --> B[Identity and local egress policy]
+    B --> C[Declared backend and one cache compiler]
+    C --> D[Paired durable admission]
+    D --> E[One source dispatch]
+    E --> F[Qualified source evidence]
+    F --> G[Original paired receipt]
+    F -. best effort .-> H[Dashboard observations]
 ```
 
 | Responsibility | Standalone gateway | In-process library |
@@ -89,6 +99,16 @@ flowchart LR
 The [published 0.14.0 release](releases/v0.14.0.md) includes Codex transport fixes,
 opt-in Rust allowance arithmetic and Rustls security repairs. Every artifact target
 is verified; consumer adoption and managed deployment remain separate gates.
+
+!!! info "Current source: one durable HTTP execution contract"
+    The current source requires the original `SANDHI_STORE` path and one ledger
+    shard for every HTTP generation call. Client/upstream admission and measured
+    settlement share one owner; the permissive execution mode is removed.
+    Pure provider FFI stays ledger free. Follow the
+    [migration and capability check](operator/buffered-accounting.md) and verify
+    `capabilities.execution_accounting == "paired_durable_v1"` on your actual
+    binary before qualification. Current source behavior does not establish
+    publication or managed deployment.
 
 !!! warning "Release verified; managed adoption remains pending"
     Tracked buffered accounting is opt-in in the [published 0.12.0 release](releases/v0.12.0.md).

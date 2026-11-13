@@ -71,7 +71,8 @@ can supply `x-sandhi-session`; it is a conversation hint, not identity authority
 
 Ordinary key rotation, including an externally changed secret detected at reload,
 invalidates the old binding. A constrained Codex lease may retain affinity across
-same-account access-token renewal; its account/profile/expiry fences still apply.
+same-account access-token renewal; its operator-configured account/profile/expiry
+fences still apply. This is not independent cryptographic account verification.
 A pin proves session admission continuity, not provenance of an individual opaque
 ID. `affinity:"none"` supports stateless deterministic selection and refuses
 provider-bound state. Token-count calls do not establish generation pins.
@@ -82,21 +83,24 @@ Existing fixed upstream names retain their meaning and cannot be shadowed.
 See [ADR-0021](../adr/0021-logical-routing-and-compatible-affinity.md) for the
 transaction, concurrency and compatibility rules.
 
-**Accounting boundary:** selected-plan details stay in request memory on the
-default legacy path. Already supported tracked surfaces also persist a bounded
-selection/cache/policy context atomically with admission; see
-[ADR-0022](../adr/0022-durable-execution-context.md). This does not expand tracked
-protocol support or prove a physical send. Persisted legacy usage dimensions do
-not prove the logical route's physical backend/profile. Upstream budget authority is an immutable namespace stored separately from the
-provider label and endpoint family. Existing `upstream:<provider-slug>` scopes
-(including native family slugs) are preserved rather than replaced by backend IDs
-or new vendor labels. Inventory exposes `upstream_budget_scope` read-only. Ordinary
-backend updates and restart cannot change it; see the
-[identity and namespace migration](../reviews/provider-identity-and-budget-namespace-2026-11-12.md). Uniform durable dispatch evidence and recovery are
-M5 work; do not infer them from the route inventory or a successful SDK response.
-New supported tracked admissions also
-[link and settle both budget scopes atomically](../adr/0023-paired-budget-settlement.md),
-retaining unknown liability through expiry/restart.
+**Accounting boundary:** current HTTP generation uses the existing paired durable
+owner. It persists the selected backend/model/cache/policy context atomically with
+admission, then joins qualified source usage and physical-attempt evidence before
+committing the original receipt. A route inventory or successful SDK response does
+not establish those per-request facts. See the [durable execution contract](buffered-accounting.md).
+
+Provider labels, endpoint family/profile, credential references and budget
+authority have separate roles. Inventory exposes the backend record's
+`upstream_budget_scope` read-only; the dashboard shows its exact value or
+**Unavailable**, never a name reconstructed from the provider label. An existing
+`upstream:anthropic` bucket can remain authoritative for a differently named
+Messages vendor. Backend updates and restart preserve this association, existing
+caps/spend/holds and old binding digests. Reassignment needs an explicit migration.
+See [ADR-0042](../adr/0042-provider-identity-and-budget-namespace.md).
+
+New admissions [link and settle both scopes atomically](../adr/0023-paired-budget-settlement.md).
+Unknown usage retains both holds through expiry and restart. Historical rows keep
+their recorded scope and evidence; new source behavior does not backfill them.
 Their [single-attempt transport evidence](../adr/0024-durable-physical-attempt-evidence.md)
 now commits atomically with qualified usage. Authorization alone leaves send status
 unknown. The [M5d buffered matrix](../adr/0025-qualified-buffered-protocol-accounting.md)
@@ -264,6 +268,8 @@ binding requires `--endpoint-family openai_responses --endpoint-profile chatgpt_
 and an existing OAuth lease credential; it retains the fixed Codex URL, account,
 access-only envelope, expiry and constrained translation rules. Generic OAuth or
 an Anthropic subscription lifecycle is not implemented by choosing a family.
+Z.AI Coding Plan's Messages-compatible Bearer API key is separate from first-party
+Claude Pro/Max OAuth. See the [protocol and credential matrix](../product/protocol-and-credential-matrix.md).
 
 Changes require `--revision <current-revision>`. An identical active `set` replay
 without a revision is idempotent; a different definition fails with HTTP 409.
@@ -345,3 +351,13 @@ fixed URL. Configure a separate credential reference for another origin.
 Synthetic Rust and real-process SDK tests cover persistence, rotation, revocation,
 model scoping and CLI/config behavior. They do not qualify live provider caches or
 subscription entitlement.
+
+## Native reference ownership
+
+A backend binding or compatible route pin does not authorize every resource held by its shared provider credential. Native continuation now also requires a durable server-issued proof tied to the authenticated key/subject/group and frozen backend/account/model/profile and applicable credential generation. Same-owner state can survive restart while that proof remains valid. Caller session headers and native IDs never establish ownership by themselves.
+
+Proof is captured from compatible native output before its reference-bearing bytes are forwarded. Independently reissued identical signatures/encrypted blocks get separate owner proofs; a caller cannot adopt another owner's value from input. Ambiguous resource/item ID collisions refuse. Portable rendered IDs confer no provider authority. Existing pre-registry response IDs, encrypted state, cached content, files, vector stores, custom skills and other external resources are unverified unless this server recorded a matching proof. Start a materialized session; external adoption requires a future explicit operator contract. Constrained Codex still refuses server continuation lookups and supports owned materialized encrypted state.
+
+The shared execution owner automatically opens the registry on its actual original single-file ledger before binary or public-library serving can bind. Missing, malformed or read-only storage refuses startup; read-only health/readiness app construction remains available. The effective selected backend payload, including its selected extension bucket, is authorized before pin confirmation or budget admission. Count-only requests acquire no generation default, pin, lease or proof.
+
+The registry retains at most 100,000 entries globally, 4,096 per owner and 128 per operation. Proof lasts at most 24 hours and is capped by key expiry. Ordinary credentials also cap it at the issuing lease expiry. Existing account-fenced Codex renewals preserve proof across access-token rotation only when the actual account/origin/static-header binding remains identical; every new call still requires a current lease. An unleased account-only Codex handle cannot admit HTTP generation. It is not a provider resource TTL. Storage/capacity failures can occur after a successful provider call and return a terminal delivery error; do not automatically retry. Original final accounting or unknown liability remains with the existing execution owner. See [ADR-0044](../adr/0044-native-reference-ownership.md) and the [scoped evidence](../reviews/native-reference-ownership-2026-11-12.md). Quiesce old HTTP writers during this migration and retain the registry with the original database.

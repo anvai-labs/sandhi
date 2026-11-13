@@ -32,6 +32,7 @@ pub(super) fn capture(request: &mut ChatRequestV1, family: EndpointFamilyV1) -> 
             for item in array(body.get("input")) {
                 match item.get("type").and_then(Value::as_str) {
                     Some("reasoning") => mark(Feature::OpaqueState),
+                    Some("item_reference") => mark(Feature::ResourceReference),
                     Some("message") | None if item.get("role").is_some() => {
                         for part in array(item.get("content")) {
                             if contains_file_reference(part) {

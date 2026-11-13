@@ -1,5 +1,6 @@
 //! Synthetic cache wire controls, both planes, neutral accounting and namespace
 //! fences. These tests make no claim about live provider cache hits.
+mod support;
 use axum::{
     body::{to_bytes, Body},
     http::{Request, StatusCode},
@@ -10,8 +11,7 @@ use sandhi_core::{
 };
 use sandhi_providers::{BackendBinding, ProviderHandle, ProviderRuntime};
 use sandhi_proxy::{
-    backend::BackendEndpoint, build_app, build_provider_handle_for_endpoint, ProxyLedger,
-    ProxyState,
+    backend::BackendEndpoint, build_app, build_provider_handle_for_endpoint, ProxyState,
 };
 use sandhi_store::CredentialScheme;
 use serde_json::{json, Value};
@@ -129,14 +129,14 @@ fn state(provider: ProviderHandle) -> (Arc<ProxyState>, Arc<InMemorySink>, Strin
     }
     // Diagnostic identity is not enforcement authority.
     let upstream_scope = provider.upstream_budget_scope().to_owned();
-    let mut ledger = ProxyLedger::in_memory();
+    let mut ledger = support::Ledger::new();
     for scope in ["vk:vk_fixture", "vk:vk_second", &upstream_scope] {
         ledger
             .set_budget(scope, Some(1_000_000), Window::Total, Policy::Block)
             .unwrap();
     }
     let sink = Arc::new(InMemorySink::new());
-    let mut state = ProxyState::new(
+    let mut state = support::state(
         keys,
         ledger,
         sink.clone(),

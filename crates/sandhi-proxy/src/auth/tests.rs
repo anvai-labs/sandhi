@@ -997,6 +997,7 @@ async fn multi_provider_grants_use_existing_accounting_and_correlation_path() {
     use tower::ServiceExt;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+    let directory = tempfile::tempdir().unwrap();
     let authority = Authority::start().await;
     authority.state.lock().unwrap().tokens.insert("agent-access".into(),json!({"active":true,"iss":authority.config.issuer,"aud":"sandhi","sub":"agent-id","exp":unix_now()+300,"token_type":"Bearer"}));
     let mut config = authority.config.clone();
@@ -1033,7 +1034,8 @@ async fn multi_provider_grants_use_existing_accounting_and_correlation_path() {
     }
     let mut state = ProxyState::new(
         sandhi_core::KeyStore::new(),
-        crate::ProxyLedger::in_memory(),
+        crate::ProxyLedger::durable(directory.path().join("original.db").to_str().unwrap(), 1)
+            .unwrap(),
         sink.clone(),
         providers,
         None,
@@ -1121,6 +1123,7 @@ async fn group_grants_and_delegated_keys_share_budget_alerts_and_authority() {
         matchers::{method, path},
         Mock, MockServer, ResponseTemplate,
     };
+    let directory = tempfile::tempdir().unwrap();
     let authority = Authority::start().await;
     for (token, sub, groups) in [
         ("member-access", "member-group-only", json!(["engineering"])),
@@ -1134,10 +1137,11 @@ async fn group_grants_and_delegated_keys_share_budget_alerts_and_authority() {
     document["groups"] = json!({"engineering":{"grants":{"cloud":{"upstream":"openai:subscription","models":["allowed"],"group":"engineering","budget_scope":"group:engineering","rate_limit_per_min":20}}}});
     let config: Config = serde_json::from_value(document).expect("group-based configuration");
     let upstream = MockServer::start().await;
-    Mock::given(method("POST")).and(path("/chat/completions")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"choices":[{"message":{"content":"done"}}],"usage":{"prompt_tokens":50,"completion_tokens":35}}))).expect(2).mount(&upstream).await;
+    Mock::given(method("POST")).and(path("/chat/completions")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":"fixture","model":"allowed","choices":[{"index":0,"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":50,"completion_tokens":35,"total_tokens":85}}))).expect(2).mount(&upstream).await;
     let mut state = ProxyState::new(
         sandhi_core::KeyStore::new(),
-        crate::ProxyLedger::in_memory(),
+        crate::ProxyLedger::durable(directory.path().join("original.db").to_str().unwrap(), 1)
+            .unwrap(),
         Arc::new(sandhi_core::InMemorySink::new()),
         HashMap::from([(
             "openai:subscription".into(),

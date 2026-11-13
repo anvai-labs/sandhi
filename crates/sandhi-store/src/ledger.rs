@@ -51,6 +51,16 @@ pub struct SqliteLedger {
 }
 
 impl SqliteLedger {
+    pub(crate) fn reference_store_path(&self) -> Option<String> {
+        if self.conn.is_readonly("main").ok()? {
+            return None;
+        }
+        self.conn
+            .path()
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+    }
+
     pub(crate) fn is_file_backed(&self) -> bool {
         self.conn.path().is_some_and(|path| !path.is_empty())
     }

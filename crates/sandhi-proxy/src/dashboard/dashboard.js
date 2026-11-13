@@ -80,7 +80,7 @@ function resetAuth(token) {
   pagers.clear();
   usageData = null;
   attributionQuery = "";
-  for (const id of ["usage", "keys", "budgets", "alerts", "config", "policy", "run-tree", "backends", "routes", "topology", "request-evidence"]) {
+  for (const id of ["execution", "usage", "keys", "budgets", "alerts", "config", "policy", "run-tree", "backends", "routes", "topology", "request-evidence"]) {
     const el = document.getElementById(id);
     el.replaceChildren();
     el.dataset.state = "locked";
@@ -179,8 +179,11 @@ async function loadPanel(id, path, render, permission = null, options = {}) {
     if (permission && !permits(permission)) throw new ApiError(signedIn() ? 403 : 401, "Role does not allow this operation");
     const data = await requestJSON(options.method || "GET", path, options.body);
     if (revision !== authRevision || panels.get(id) !== ticket) return;
-    // Validate required fields before treating a response as a successful empty dataset.
-    ticket.html = render(data);
+    // A renderer may join a bounded readiness probe. Recheck identity and panel
+    // generation after every await before publishing protected data.
+    const html = await render(data);
+    if (revision !== authRevision || panels.get(id) !== ticket) return;
+    ticket.html = html;
     ticket.updated = new Date().toLocaleTimeString();
     el.innerHTML = ticket.html;
     el.dataset.state = "ready";
@@ -189,7 +192,7 @@ async function loadPanel(id, path, render, permission = null, options = {}) {
     // only for the stale-data error message below.
   } catch (error) {
     if (revision !== authRevision || panels.get(id) !== ticket) return;
-    const stale = ticket.html && error.status !== 401 && error.status !== 403 && error.status !== 404;
+    const stale = options.retainStale !== false && ticket.html && error.status !== 401 && error.status !== 403 && error.status !== 404;
     el.innerHTML = stale ? ticket.html : "";
     el.dataset.state = stale ? "stale" : error.status === 401 ? "locked" : error.status === 403 ? "forbidden" : error.status === 404 ? "unconfigured" : "unavailable";
     if (!stale) { ticket.html = null; ticket.updated = null; }
@@ -323,6 +326,51 @@ function tokenSplit(t) {
     <p class="hint">Read share describes input accounting, not a percentage cost saving. Cache-write counts are retained separately; this chart does not establish write-field reporting coverage. Output and reasoning follow their own inclusion convention.</p></div>`;
 }
 
+// Readiness is a public, plain-text lifecycle probe, not provider health. Its
+// result never grants authority when the authenticated accounting contract is absent.
+async function executionReadiness() {
+  const revision = authRevision;
+  const controller = new AbortController();
+  pending.add(controller);
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch("/readyz", {
+      credentials: "same-origin", cache: "no-store", redirect: "error", signal: controller.signal,
+    });
+    const text = await response.text();
+    if (revision !== authRevision) throw new DOMException("Authentication changed", "AbortError");
+    if (response.status === 200 && text.trim() === "ready") return "ready";
+    if (response.status === 503 && text.trim() === "draining") return "draining";
+    return "unavailable";
+  } finally {
+    clearTimeout(timeout);
+    pending.delete(controller);
+  }
+}
+async function loadExecution() {
+  return loadPanel("execution", "/admin/version", async data => {
+    const initialized = data.capabilities?.execution_accounting === "paired_durable_v1";
+    let readiness = "unavailable";
+    try { readiness = await executionReadiness(); }
+    catch { /* Unknown probe state never becomes readiness; loadPanel checks auth revision. */ }
+    const ready = initialized && readiness === "ready";
+    const title = ready ? "Readiness confirmed" : readiness === "draining" ? "Draining" : "Readiness unavailable";
+    return `<div class="execution-heading"><div><span class="eyebrow">Execution contract</span><h3>${title}</h3></div>
+      <span class="badge ${ready ? "active" : "revoked"}">${ready ? "Initialized owner · ready" : "Requires attention"}</span></div>
+      <dl class="execution-facts"><div><dt>Durable accounting</dt><dd>${initialized ? "Paired owner initialized" : "Unavailable — contract not confirmed"}</dd></div>
+      <div><dt>Lifecycle probe</dt><dd>${readiness === "ready" ? "Ready" : readiness === "draining" ? "Draining" : "Unavailable"}</dd></div>
+      <div><dt>Settlement authority</dt><dd>Original source evidence + committed receipt</dd></div></dl>
+      <p class="hint">A readiness confirmation requires both facts. A failed probe does not change configured generation policy. Neither fact establishes provider health, budget capacity, cache reuse or settlement for an individual call.</p>
+      <a class="docs-link" href="#flow-section" data-view-link>How admission and evidence fit together →</a>`;
+  }, null, { retainStale: false });
+}
+function budgetAuthority(record) {
+  const scope = record.upstream_budget_scope;
+  return typeof scope === "string" && scope.trim() && !/[\u0000-\u001f\u007f-\u009f]/.test(scope)
+    ? `<code>${esc(scope)}</code><br><span class="hint">Immutable binding</span>`
+    : '<span class="muted">Unavailable</span>';
+}
+
 function backendRow(record) {
   const d = record.definition;
   if (!d || typeof d.id !== "string" || !Array.isArray(d.models) || !d.endpoint) throw new ApiError(502, "Incomplete backend inventory");
@@ -335,15 +383,17 @@ function backendRow(record) {
   }).join("");
   return `<tr><td><strong>${esc(d.id)}</strong><br><span class="muted">revision ${fmt(record.revision)}</span></td>
     <td><span class="badge ${ready ? "active" : "revoked"}">${ready ? "Available" : record.status === "revoked" ? "Revoked" : "Unavailable"}</span></td>
+    <td>${orDash(d.provider)}<br><span class="hint">Configured label</span></td>
     <td>${esc(d.endpoint.endpoint_family)}<br><span class="muted">${esc(d.endpoint.endpoint_profile || "standard")}</span></td>
     <td><code>${esc(d.credential_ref)}</code><br><span class="muted">${d.base_url ? esc(d.base_url) : "Inherited from credential"}</span></td>
+    <td>${budgetAuthority(record)}</td>
     <td>${fmt(d.models.length)} models<br><span class="badge back-leg">${esc(mode)}</span><details><summary>Models &amp; cache policy</summary><ul class="model-list">${detail}</ul><p class="hint">Namespace: ${esc(policy?.namespace || "provider_default")}. Declared capabilities are operator assertions, not live qualification.</p></details></td></tr>`;
 }
 function loadBackends() {
   return loadPanel("backends", "/admin/backends", d => {
     requireFields(d, ["backends"]);
-    return pagedTable("backend-inventory", "Backend endpoints", '<tr><th>Backend</th><th>Status</th><th>Protocol / profile</th><th>Credential / endpoint</th><th>Models / caching</th></tr>', d.backends, backendRow,
-      '<tr><td colspan="5">No explicit backends configured. Register an endpoint with the CLI or declarative configuration.</td></tr>', "backends");
+    return pagedTable("backend-inventory", "Backend endpoints", '<tr><th>Backend</th><th>Status</th><th>Provider label</th><th>Protocol / profile</th><th>Credential / endpoint</th><th>Budget authority</th><th>Models / caching</th></tr>', d.backends, backendRow,
+      '<tr><td colspan="7">No explicit backends configured. Register an endpoint with the CLI or declarative configuration.</td></tr>', "backends");
   }, "read");
 }
 function loadRoutes() {
@@ -420,6 +470,7 @@ async function addCredential() {
   const body = {
     provider: document.getElementById("c-provider").value.trim(),
     label: document.getElementById("c-label").value.trim() || null,
+    scheme: document.getElementById("c-scheme").value,
     base_url: document.getElementById("c-baseurl").value.trim() || null,
     ...(reference ? {} : { secret: document.getElementById("c-secret").value }),
   };
@@ -442,7 +493,7 @@ function budgetsView(d) {
     const limit = b.limit_tokens, spent = b.spent;
     const pct = limit > 0 ? Math.min(100, Math.round(spent * 100 / limit)) : 0;
     const cls = pct >= 100 ? "over" : (pct >= 80 ? "warn" : "");
-    // ADR-0015: `upstream:<provider>` scopes are back-leg caps (gateway→provider), distinct
+    // Persisted `upstream:` scopes are back-leg authority, independent of display labels; distinct
     // from the front-leg `vk:`/`group:` rows — badge them so operators can tell at a glance.
     const backLeg = b.scope.startsWith("upstream:")
       ? ' <span class="badge back-leg" title="back-leg cap on the resolved upstream">back leg</span>'
@@ -686,7 +737,7 @@ async function refreshAll() {
     return;
   }
   const loadRevision = authRevision;
-  return Promise.all([loadUsage(), loadKeys(), loadBudgets(), loadAlerts(), loadConfig(), loadPolicy(), loadTopology(), loadBackends(), loadRoutes()])
+  return Promise.all([loadExecution(), loadUsage(), loadKeys(), loadBudgets(), loadAlerts(), loadConfig(), loadPolicy(), loadTopology(), loadBackends(), loadRoutes()])
     .then(() => {
       if (authRevision !== loadRevision) return;
       const failed = [...document.querySelectorAll("[data-state]")].filter(el => ["unavailable", "stale"].includes(el.dataset.state)

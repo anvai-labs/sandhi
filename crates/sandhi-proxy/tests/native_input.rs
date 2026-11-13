@@ -1,6 +1,7 @@
 //! Native ordered history must survive forced typed execution; incompatible state
 //! must fail before reservation or inference. All origins and state are synthetic.
 
+mod support;
 #[tokio::test]
 async fn codex_native_terminal_state_survives_stream_buffering_and_next_turn() {
     let upstream = MockServer::start().await;
@@ -13,16 +14,20 @@ async fn codex_native_terminal_state_survives_stream_buffering_and_next_turn() {
     let (state, sink) = state(Family::OpenaiResponses, &upstream);
     let mut headers = axum::http::HeaderMap::new();
     headers.insert("chatgpt-account-id", "fixture-account".parse().unwrap());
-    let provider = ProviderRuntime::new().chatgpt_responses(
-        "fixture",
-        upstream.uri(),
-        "fixture-access",
-        headers,
-        Some(0),
-        None,
-        None,
-        None,
-    );
+    let provider = ProviderRuntime::new()
+        .chatgpt_responses(
+            "fixture",
+            upstream.uri(),
+            "fixture-access",
+            headers,
+            Some(0),
+            None,
+            None,
+            None,
+        )
+        .with_credential_expiry(
+            u64::try_from(time::OffsetDateTime::now_utc().unix_timestamp()).unwrap() + 3600,
+        );
     state
         .providers
         .lock()
@@ -31,7 +36,7 @@ async fn codex_native_terminal_state_survives_stream_buffering_and_next_turn() {
     let (status, buffered) = call(
         &state,
         Family::OpenaiResponses,
-        input(Family::OpenaiResponses),
+        materialized_input(Family::OpenaiResponses),
         false,
     )
     .await;
@@ -43,13 +48,8 @@ async fn codex_native_terminal_state_survives_stream_buffering_and_next_turn() {
     );
     let response: Value = serde_json::from_slice(&buffered).unwrap();
     assert_eq!(response["output"][0]["encrypted_content"], "output-opaque");
-    let (status, streamed) = call(
-        &state,
-        Family::OpenaiResponses,
-        input(Family::OpenaiResponses),
-        true,
-    )
-    .await;
+    let continued = input_from_issued(Family::OpenaiResponses, &response);
+    let (status, streamed) = call(&state, Family::OpenaiResponses, continued, true).await;
     assert_eq!(status, StatusCode::OK);
     let wire = String::from_utf8(streamed).unwrap();
     assert!(wire.contains("output-opaque"));
@@ -91,8 +91,7 @@ use axum::{
 use sandhi_core::{EndpointFamilyV1 as Family, InMemorySink, KeyStore, Policy, VirtualKey, Window};
 use sandhi_providers::ProviderRuntime;
 use sandhi_proxy::{
-    backend::BackendEndpoint, build_app, build_provider_handle_for_endpoint, ProxyLedger,
-    ProxyState,
+    backend::BackendEndpoint, build_app, build_provider_handle_for_endpoint, ProxyState,
 };
 use sandhi_store::CredentialScheme;
 use serde_json::{json, Value};
@@ -137,7 +136,13 @@ async fn responses_media_survives_cross_family_translation_in_order() {
     for stream in [false, true] {
         let upstream = MockServer::start().await;
         Mock::given(method("POST"))
-            .respond_with(reply(Family::OpenaiChatCompletions, stream))
+            .respond_with(if stream {
+                ResponseTemplate::new(200).set_body_raw(concat!(
+                    "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
+                    "data: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2}}\n\n",
+                    "data: [DONE]\n\n"
+                ), "text/event-stream")
+            } else { reply(Family::OpenaiChatCompletions, false) })
             .expect(1)
             .mount(&upstream)
             .await;
@@ -262,7 +267,17 @@ async fn responses_nontext_tool_outputs_preserve_native_shape_or_refuse_translat
                     {"role":"user","content":"continue"}]});
                 let (status, body) =
                     call(&state, Family::OpenaiResponses, original.clone(), stream).await;
-                if target == Family::OpenaiResponses {
+                if target == Family::OpenaiResponses
+                    && output
+                        .as_array()
+                        .is_some_and(|parts| parts.iter().any(|part| part.get("file_id").is_some()))
+                {
+                    // Pre-created external files have no caller issuance proof.
+                    assert_eq!(status, StatusCode::FORBIDDEN);
+                    assert!(upstream.received_requests().await.unwrap().is_empty());
+                    assert!(sink.events().is_empty());
+                    assert_eq!(state.ledger.lock().unwrap().reserved("vk:vk_fixture"), 0);
+                } else if target == Family::OpenaiResponses {
                     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
                     let calls = upstream.received_requests().await.unwrap();
                     assert_eq!(calls.len(), 1);
@@ -283,6 +298,42 @@ async fn responses_nontext_tool_outputs_preserve_native_shape_or_refuse_translat
             }
         }
     }
+}
+
+fn materialized_input(family: Family) -> Value {
+    match family {
+        Family::OpenaiChatCompletions | Family::AnthropicMessages => {
+            json!({"model":"fixture","messages":[{"role":"user","content":"hello"}]})
+        }
+        Family::OpenaiResponses => {
+            json!({"model":"fixture","instructions":"Be precise","input":"hello"})
+        }
+        Family::GeminiGenerateContent => {
+            json!({"contents":[{"role":"user","parts":[{"text":"hello"}]}]})
+        }
+        _ => unreachable!(),
+    }
+}
+
+// Continue only with state received from this exact caller's actual first response.
+fn input_from_issued(family: Family, response: &Value) -> Value {
+    let mut original = input(family);
+    match family {
+        Family::OpenaiChatCompletions => {}
+        Family::OpenaiResponses => original["input"][0] = response["output"][0].clone(),
+        Family::AnthropicMessages => {
+            original["messages"][0]["content"][0] = response["content"][0].clone()
+        }
+        Family::GeminiGenerateContent => {
+            let call = original["contents"][0]["parts"][0]["functionCall"].clone();
+            original["contents"][0]["parts"] = json!([
+                response["candidates"][0]["content"]["parts"][0],
+                {"functionCall":call},
+            ]);
+        }
+        _ => unreachable!(),
+    }
+    original
 }
 
 fn input(family: Family) -> Value {
@@ -377,19 +428,22 @@ fn reply(family: Family, stream: bool) -> ResponseTemplate {
     }
     let frames = match family {
         Family::OpenaiChatCompletions => vec![
-            json!({"choices":[{"delta":{"content":"ok","provider_state":"output-opaque"},"finish_reason":"stop"}],
-            "usage":{"prompt_tokens":10,"completion_tokens":2}}),
+            json!({"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"ok","provider_state":"output-opaque"},"finish_reason":"stop"}]}),
+            json!({"object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":2}}),
         ],
         Family::OpenaiResponses => vec![
             json!({"type":"response.output_text.delta","output_index":1,"content_index":0,"item_id":"msg_fixture","delta":"ok"}),
             json!({"type":"response.completed","response":completed}),
         ],
         Family::AnthropicMessages => vec![
-            json!({"type":"message_start","message":{"id":"msg_fixture","model":"fixture","usage":{"input_tokens":10,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}),
+            json!({"type":"message_start","message":{"id":"msg_fixture","type":"message","role":"assistant","content":[],"model":"fixture","usage":{"input_tokens":10,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}),
             json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
             json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}),
-            json!({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"output-signed"}}),
             json!({"type":"content_block_stop","index":0}),
+            json!({"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":"","signature":""}}),
+            json!({"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"native-out"}}),
+            json!({"type":"content_block_delta","index":1,"delta":{"type":"signature_delta","signature":"output-signed"}}),
+            json!({"type":"content_block_stop","index":1}),
             json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}),
             json!({"type":"message_stop"}),
         ],
@@ -425,13 +479,13 @@ fn state(family: Family, upstream: &MockServer) -> (Arc<ProxyState>, Arc<InMemor
         upstream_ref: "fixed".into(),
         ..Default::default()
     });
-    let mut ledger = ProxyLedger::in_memory();
+    let mut ledger = support::Ledger::new();
     ledger
         .set_budget("vk:vk_fixture", Some(100_000), Window::Total, Policy::Block)
         .unwrap();
     let sink = Arc::new(InMemorySink::new());
     (
-        Arc::new(ProxyState::new(
+        Arc::new(support::state(
             keys,
             ledger,
             sink.clone(),
@@ -466,7 +520,7 @@ async fn call(
         status,
         to_bytes(response.into_body(), 100_000)
             .await
-            .unwrap()
+            .unwrap_or_else(|error| panic!("native input {family:?}/{stream}: {error}"))
             .to_vec(),
     )
 }
@@ -482,13 +536,26 @@ async fn native_order_and_cache_boundaries_survive_output_bound_injection() {
         for stream in [false, true] {
             let upstream = MockServer::start().await;
             Mock::given(method("POST"))
-                .and(path(upstream_path(family, stream)))
-                .respond_with(reply(family, stream))
-                .expect(1)
+                .respond_with(move |request: &wiremock::Request| {
+                    let body: Value = request.body_json().unwrap();
+                    let streaming = body["stream"] == true
+                        || request.url.path().ends_with(":streamGenerateContent");
+                    reply(family, streaming)
+                })
+                .expect(2)
                 .mount(&upstream)
                 .await;
             let (state, _) = state(family, &upstream);
-            let original = input(family);
+            let (seed_status, seed_body) =
+                call(&state, family, materialized_input(family), false).await;
+            assert_eq!(
+                seed_status,
+                StatusCode::OK,
+                "{family:?}: {}",
+                String::from_utf8_lossy(&seed_body)
+            );
+            let seed: Value = serde_json::from_slice(&seed_body).unwrap();
+            let original = input_from_issued(family, &seed);
             let (status, body) = call(&state, family, original.clone(), stream).await;
             assert_eq!(
                 status,
@@ -525,9 +592,11 @@ async fn native_order_and_cache_boundaries_survive_output_bound_injection() {
                     assert_eq!(wire.matches("[DONE]").count(), 1, "{wire}");
                 }
             }
-            let sent: Value =
-                serde_json::from_slice(&upstream.received_requests().await.unwrap()[0].body)
-                    .unwrap();
+            let requests = upstream.received_requests().await.unwrap();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0].url.path(), upstream_path(family, false));
+            assert_eq!(requests[1].url.path(), upstream_path(family, stream));
+            let sent: Value = serde_json::from_slice(&requests[1].body).unwrap();
             let fields: &[&str] = match family {
                 Family::OpenaiChatCompletions => &["messages"],
                 Family::OpenaiResponses => &["input", "instructions", "tools"],

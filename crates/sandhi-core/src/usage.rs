@@ -7,10 +7,13 @@ use crate::event::UsageEvent;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+#[cfg(test)]
+mod plaintext_tests;
 mod qualification;
 pub use qualification::{
     qualify_anthropic_progress_usage, qualify_buffered_usage, qualify_buffered_usage_with_profile,
-    qualify_gemini_progress_usage, qualify_responses_progress_usage, AnthropicUsageProfile,
+    qualify_gemini_progress_usage, qualify_openai_plaintext_usage,
+    qualify_responses_progress_usage, AnthropicUsageProfile,
 };
 
 /// The token breakdown parsed from a provider response.

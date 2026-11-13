@@ -18,6 +18,7 @@ struct State {
     deadline: Option<Instant>,
     stopped: Option<Instant>,
     active: usize,
+    serving_started: bool,
 }
 
 /// A single-use lifecycle shared by the listener, request admission and binary coordinator.
@@ -45,6 +46,7 @@ impl Lifecycle {
                 deadline: None,
                 stopped: None,
                 active: 0,
+                serving_started: false,
             }),
             changed: watch::channel(Phase::Running).0,
         }
@@ -58,6 +60,17 @@ impl Lifecycle {
     #[must_use]
     pub fn phase(&self) -> Phase {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).phase
+    }
+
+    /// Claim one serving supervisor only after every required socket binds.
+    /// The lifecycle is single-use; a failed bind never consumes this claim.
+    pub(crate) fn claim_serving(&self) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.phase != Phase::Running || state.serving_started {
+            return false;
+        }
+        state.serving_started = true;
+        true
     }
 
     /// Establish the immutable monotonic shutdown deadline once. Repeated calls never extend it.

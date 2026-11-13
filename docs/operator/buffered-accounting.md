@@ -1,36 +1,44 @@
 # Owned HTTP accounting
 
-!!! warning "Opt-in accounting; lifecycle acceptance remains separate"
-    `SANDHI_BUFFERED_ACCOUNTING=tracked` enables durable buffered HTTP accounting.
-    It is included in the [0.12.0 release scope](../releases/v0.12.0.md); check that
-    page for publication status. A package release does not establish deployment
-    acceptance. Unset or `off` preserves the existing path. Any
-    other value fails startup.
+!!! warning "Mandatory durable HTTP execution — source candidate"
+    The current candidate requires an explicit ordinary-file `SANDHI_STORE` and
+    exactly one ledger shard. Every generation path uses the same durable owner.
+    `SANDHI_BUFFERED_ACCOUNTING` was removed: unset it, including old `tracked`
+    assertions. Any supplied value refuses startup before stores open.
+    This source change is distinct from public packaging, independent review and
+    deployment acceptance. The opt-in behavior in the published
+    [0.12.0 release scope](../releases/v0.12.0.md) remains historical evidence.
 
-The development source also admits **Chat, Messages, Responses and Gemini clients
-streaming from qualified Chat, Messages, standard Responses or constrained Codex backends** when
-tracked accounting and a complete [streaming deadline policy](streaming-deadlines.md)
-are both configured. This extension is not in 0.12.0 and is not deployment acceptance.
-Streaming without that policy remains refused before admission.
+Chat, Messages, Responses and Gemini clients use qualified buffered or streaming
+source transports through the existing paired owner. Standard Chat, Messages,
+Responses, Gemini and constrained Codex sources share the source/attempt/receipt
+contract. Native Cohere/Ollama source qualification is a coordinated gate; their
+pure FFI availability does not itself authorize durable HTTP execution. OpenAI-
+shaped open-weight backends use the qualified Chat source contract.
 
-The current workspace also adds [qualified buffered protocol accounting](../adr/0025-qualified-buffered-protocol-accounting.md):
-Chat, Messages, Responses and Gemini clients can use any of those four standard
-backend protocols through the existing tracked owner. This is an unreleased source
-candidate; the 0.12.0 release's narrower activation remains historical evidence.
-Constrained [Codex buffered aggregation](../adr/0027-qualified-codex-buffered-accounting.md)
-also qualifies through its typed SSE owner. [Translated and Codex tracked streams](../adr/0028-qualified-translated-stream-accounting.md)
-reuse that source evidence and the bounded response owner.
-[Messages source ownership](../adr/0031-qualified-messages-stream-ownership.md) now
-connects both declared cache-usage profiles. Portable output translates across all
-four clients; nonportable signed/native state requires compatible native delivery
-or explicit refusal. [Gemini source streams](../adr/0033-qualified-gemini-stream-ownership.md)
-now use the same owner with a stricter EOF gate: candidate completion and a complete
-final usage frame remain partial until clean HTTP EOF. See
-[qualified Responses streaming](../adr/0026-qualified-responses-stream-accounting.md)
-for partial/final usage and protocol-terminal semantics.
+The standalone process and public serve functions reject unavailable/unsupported
+execution ownership before binding. `build_app` can assemble read-only operator
+states; such a state stays unready and refuses generation before credential or
+route processing. A valid existing single-file ledger initializes its canonical
+owner through the normal builder. No library path creates a replacement ledger.
+Pure provider FFI remains an observer/codec boundary without a SQLite owner.
 
-Keep the existing authentication, TLS, credential and `SANDHI_STORE` configuration.
-This switch grants no permissions and changes no provider credentials.
+Default streams have validated 30-second setup, 90-second idle and 180-second body
+limits under a 240-second ceiling. Explicit
+[streaming deadline policy](streaming-deadlines.md) can refine those bounds.
+Client or delivery cancellation does not prove the provider did not execute.
+
+Keep the existing authentication, TLS, vault and **same store path**. Quiesce older
+writers before upgrading. Limits, windows, Block/Warn policy, settled spend, live
+holds, dedup history and route pins remain on that original file. No old row gains
+invented context, dispatch evidence or receipts. Historical unpaired lease expiry
+keeps its prior semantics; unknown tracked pairs survive expiry and restart.
+Multi-shard deployments require a separately planned offline migration; startup
+refuses them before opening/migrating the ledger. Do not start an older writer on
+a file containing new tracked evidence.
+
+See [the mandatory execution decision](../adr/0043-mandatory-durable-http-execution.md)
+and [buffered source qualification](../adr/0025-qualified-buffered-protocol-accounting.md).
 
 **A translation error can still have measured token usage.** The current source
 captures strict buffered usage before output decoding. Unsupported signed/encrypted
@@ -42,10 +50,10 @@ Plain reasoning presentation does not make provider state portable for replay.
 See [buffered output fidelity and source evidence](../adr/0034-buffered-source-evidence-and-output-fidelity.md).
 
 Deterministic output refusals use `output_projection_error`, HTTP 502 and
-`x-should-retry:false`, including on the legacy accounting path. OpenAI/Anthropic
+`x-should-retry:false`. OpenAI/Anthropic
 SDK defaults then avoid repeating inference for an unsupported format. That header
-does not add source evidence or durable settlement to legacy accounting and cannot
-control connection retries before headers arrive. Canonical source measurements,
+cannot control connection retries before headers arrive and is not inference
+idempotency. Canonical source measurements,
 rather than protocol compatibility defaults for absent reasoning counters, remain
 the accounting authority.
 
@@ -113,11 +121,11 @@ snapshot needed for accounting recovery.
 | Surface | Required in tracked mode | Refused before admission |
 |---|---|---|
 | Ledger | One file-backed ledger, fixed topology | Volatile or sharded ledgers fail startup |
-| Ingress | Buffered Chat, Messages, Responses or Gemini; bounded streams from qualified Chat, Messages, Responses, Gemini or Codex sources | Other dialects; unbounded streams or unqualified source families |
-| Buffered upstream | Built-in retry-free standard Chat, Messages, Responses or Gemini transport; constrained Codex SSE aggregation | Custom transports; other expiring handles without a qualified codec |
-| Streaming upstream | Qualified retry-free Chat, Messages, standard Responses, Gemini or constrained Codex typed source | Custom sources without a strict qualifier |
-| Operations | Synchronous generation | Background/async Responses; logical routes preflight eligibility before pinning |
-| Policy | Explicit output limit and Block policy | Warn, fail-open, retry and logical-idempotency combinations |
+| Ingress | Buffered Chat, Messages, Responses or Gemini; bounded streams from qualified sources; native OpenAI Text Completions and buffered Embeddings | Unbounded streams or unqualified source families |
+| Buffered upstream | Built-in retry-free Chat, Messages, Responses, Gemini, Cohere or Ollama transport; constrained Codex SSE aggregation | Custom transports; other expiring handles without a qualified codec |
+| Streaming upstream | Qualified retry-free Chat, Messages, standard Responses, Gemini, Cohere, Ollama or constrained Codex source | Custom sources without a strict qualifier |
+| Operations | Synchronous generation or input-only embeddings | Background/async Responses; logical routes preflight eligibility before pinning |
+| Policy | Block and Warn with durable paired measurement; explicit or operator-default output limit | Storage-error fail-open, hidden retry and logical-idempotency combinations |
 | Processing plane | Buffered and streaming transparent/translated | No silent downgrade to legacy accounting |
 
 Standard Chat stream totals arrive on empty choices. The explicitly selected
@@ -143,10 +151,30 @@ original buffered whole-call deadline remain bounded. The codec omits the wire
 output limit; the client's limit contributes to gateway admission estimates and
 does not establish a hard upstream token cutoff. See [Codex bounds and evidence](../adr/0027-qualified-codex-buffered-accounting.md).
 
+## Output defaults and soft caps
+
+Clients may omit the output maximum. The operator default is injected before
+admission and sent through canonical encoding to compatible upstreams, preserving
+native request state or refusing it explicitly. A response then carries
+`x-sandhi-output-limit-source: operator_default` and `x-sandhi-output-max` with the
+selected value. Explicit client limits retain their existing meaning; the gateway
+does not guess model/backend capabilities. Victor's ordinary default is also 4096.
+The configured default is a requested output bound, not a guarantee that total
+billable usage fits an estimated reservation. Codex still omits its wire maximum;
+its input/output exposure remains estimated. Measured overshoot is never clipped.
+
+Warn keeps its stored soft cap and permits over-cap work through the same paired
+admission/measurement/receipt path. It does not permit unmetered execution on a
+storage error. Both primary and upstream policies remain authoritative, and
+post-receipt alerts use their reconciled spend. Block/Warn never changes the source
+counts, cache-read weight frozen at admission, or receipt identity.
+
 ## Bounds and configuration
 
 | Bound | Standalone value | Configuration / meaning |
 |---|---|---|
+| Omitted output limit | 4096 tokens | `SANDHI_DEFAULT_MAX_OUTPUT_TOKENS` (1–1,000,000), clamped only to an explicit backend model maximum; see below |
+| Streaming setup / idle / body | 30s / 90s / 180s | Validated 240s ceiling; explicit configured policies can override |
 | Retained owners | 64 | One slot spans the detached HTTP operation |
 | Each accounting wait | 2 seconds | A timed-out wait does not cancel or repeat a possibly committed transition |
 | Transport deadline | 120 seconds | Existing global/endpoint/model buffered policy may override, up to 600 seconds |
@@ -283,3 +311,35 @@ See the [full acceptance record](../product/attempt-accounting-and-evidence.md#t
     client response. The event may be absent after a sink failure. Tracked threshold
     alerts, atomic telemetry export, observation amendments and multi-shard migration
     remain separate work.
+
+Before submitting paid qualification requests, query the authenticated
+`GET /admin/version` endpoint and require
+`capabilities.execution_accounting == "paired_durable_v1"`. This value means the
+existing durable paired-execution owner was initialized against the validated
+single file-backed ledger. `"unavailable"` refuses that claim. The companion
+`durable_ledger` boolean follows the same owner, rather than usage-store presence.
+These are configured contract facts, not a live database-health guarantee. A
+version number or populated usage database alone is insufficient qualification.
+
+## Plaintext operations share the execution owner
+
+`/v1/completions` and `/v1/embeddings` keep their native OpenAI-compatible
+paths and response bytes. They use the same paired admission, physical attempt,
+source qualifier and receipt as chat. Frozen context records `text_completion`
+or `embedding`; old contexts without an operation remain unknown. These
+operations require a declared compatible raw OpenAI backend and never enter a
+chat encoder. Plaintext request cache intent remains unsupported explicitly.
+
+Text reservation includes every prompt and generated alternative (`best_of`),
+including repeated suffix exposure. Its existing omitted `max_tokens` default
+is made explicit as 16 on the native request. Embeddings reserve input only;
+reported input usage and consistent totals are required. Output is inapplicable
+by the frozen embedding operation, rather than an absent generative counter
+being promoted to measured zero. Both float and base64 vectors remain opaque
+response data.
+
+Text streams require the native `text_completion` envelope, finished choices,
+a separate request-total usage event and a complete `[DONE]` event. They share
+the bounded source/body owner. Missing or malformed usage retains both holds,
+including across cancellation and restart; recovery never resends inference.
+A Chat-specific terminal-usage profile cannot authorize a text stream.
