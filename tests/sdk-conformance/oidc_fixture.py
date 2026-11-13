@@ -31,6 +31,7 @@ def oidc_authority():
     authority.lifetime = 300
     authority.codes = {}
     authority.exchanges = 0
+    authority.introspection_status = 200
     authority.access_tokens = {"fixture-access": "admin"}
 
     class Handler(BaseHTTPRequestHandler):
@@ -97,6 +98,8 @@ def oidc_authority():
                                 "id_token": jwt.encode(claims, key, algorithm="RS256",
                                                        headers={"kid": "browser-fixture"})})
             elif self.path == "/introspect":
+                if authority.introspection_status != 200:
+                    return self.send_json({"error": "temporarily_unavailable"}, authority.introspection_status)
                 subject = authority.access_tokens.get(query.get("token"), "admin")
                 self.send_json({"active": query.get("token") in authority.access_tokens,
                                 "iss": authority.issuer, "aud": "sandhi-browser",
