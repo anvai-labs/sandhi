@@ -214,7 +214,10 @@ Use an authenticated profile for the public development integration. Follow the
 [access profiles and Anvai Identity integration guide](docs/operator/oidc-sso.md).
 
 For a fresh local Ollama starter with persistent state, run `./scripts/quickstart.sh`.
-Select scoped virtual keys with `SANDHI_AUTH_MODE=tokens ./scripts/quickstart.sh`.
+For the explicit loopback HTTP test profile, select scoped virtual keys with
+`SANDHI_AUTH_MODE=tokens SANDHI_ALLOW_LOOPBACK_HTTP=1 ./scripts/quickstart.sh`.
+The HTTP-only helper accepts literal loopback addresses; use the TLS operator
+guide for network listeners.
 Existing quickstart token profiles remain selected. For the
 complete production-facing flow—listener/TLS configuration, credential registration, virtual-key
 minting, budgets, client setup, metrics, OTLP, security, and troubleshooting—use the

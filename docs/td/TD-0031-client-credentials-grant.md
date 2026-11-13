@@ -28,9 +28,9 @@ too much authority for a routine client refresh.
   tables; rotation = edit + restart, matching every other static config.
 - **No new crypto**: opaque CSPRNG secrets + hash-only persistence +
   constant-time compare. No JWT signing — that would add a new RSA/JWT use
-  site under the oidc-rsa-advisory guard. In true OIDC mode the IdP remains
-  the token issuer (Kanidm service-account exchange, TD-0029); this endpoint
-  is the tokens-mode counterpart.
+  site under the oidc-rsa-advisory guard. In OIDC mode the configured identity
+  provider remains the token issuer; use its qualified workload flow (TD-0029).
+  This endpoint is the tokens-mode counterpart.
 
 ## Hardening
 
