@@ -19,6 +19,7 @@ struct State {
     stopped: Option<Instant>,
     active: usize,
     serving_started: bool,
+    completion_sealed: bool,
 }
 
 /// A single-use lifecycle shared by the listener, request admission and binary coordinator.
@@ -28,6 +29,43 @@ struct State {
 pub struct Lifecycle {
     state: Mutex<State>,
     changed: watch::Sender<Phase>,
+}
+
+/// Authority for child cleanup of an already prepared response. This is not a
+/// dispatch permit and does not count an inert/unpolled response as active work.
+#[derive(Clone)]
+pub(crate) struct CompletionAuthority {
+    lifecycle: Arc<Lifecycle>,
+}
+
+impl CompletionAuthority {
+    pub(crate) fn deadline(&self, original: Instant) -> Instant {
+        self.lifecycle
+            .deadline()
+            .map_or(original, |at| at.min(original))
+    }
+
+    pub(crate) async fn cancelled(&self) {
+        self.lifecycle.cancelled().await;
+    }
+
+    /// Count actual queued/running cleanup, including work whose waiter drops.
+    /// Admission and the immutable shutdown cutoff share the lifecycle lock.
+    pub(crate) fn operation(&self, original: Instant) -> Option<OperationGuard> {
+        let mut state = self
+            .lifecycle
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let deadline = state.deadline.map_or(original, |at| at.min(original));
+        if state.completion_sealed || state.phase == Phase::Stopped || Instant::now() >= deadline {
+            return None;
+        }
+        state.active += 1;
+        Some(OperationGuard {
+            lifecycle: self.lifecycle.clone(),
+        })
+    }
 }
 
 impl Default for Lifecycle {
@@ -47,6 +85,7 @@ impl Lifecycle {
                 stopped: None,
                 active: 0,
                 serving_started: false,
+                completion_sealed: false,
             }),
             changed: watch::channel(Phase::Running).0,
         }
@@ -97,12 +136,22 @@ impl Lifecycle {
         }
     }
 
+    /// All connection owners have drained or been cancelled. No new proof child
+    /// may race the final idle/inventory check; existing workers retain guards.
+    pub(crate) fn seal_completion(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .completion_sealed = true;
+    }
+
     /// Mark completed cleanup; callers must not call this while admitted work remains.
     pub fn stop(&self) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.phase == Phase::Running || state.active != 0 {
             return;
         }
+        state.completion_sealed = true;
         state.phase = Phase::Stopped;
         state.stopped.get_or_insert_with(Instant::now);
         self.changed.send_replace(state.phase);
@@ -148,6 +197,15 @@ impl Lifecycle {
         }
         state.active += 1;
         Some(OperationGuard {
+            lifecycle: self.clone(),
+        })
+    }
+
+    /// Establish cleanup authority before cutoff, without retaining an active
+    /// operation solely because a host keeps an unpolled response body.
+    pub(crate) fn completion_authority(self: &Arc<Self>) -> Option<CompletionAuthority> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        (state.phase == Phase::Running && !state.completion_sealed).then(|| CompletionAuthority {
             lifecycle: self.clone(),
         })
     }

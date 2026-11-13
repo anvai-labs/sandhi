@@ -84,6 +84,7 @@ async fn same_account_fenced_renewal_continues_after_real_old_lease_expiry_but_e
         &request("model"),
         Family::OpenaiResponses,
         admission_clock,
+        ProofBudget::new(&state, Instant::now() + Duration::from_secs(10)).unwrap(),
     )
     .unwrap();
     assert_eq!(issued.expiry, clock + 400);
@@ -230,6 +231,7 @@ async fn same_account_fenced_renewal_continues_after_real_old_lease_expiry_but_e
         &request("model"),
         Family::OpenaiResponses,
         now(),
+        ProofBudget::new(&state, Instant::now() + Duration::from_secs(10)).unwrap(),
     )
     .unwrap();
     assert_eq!(

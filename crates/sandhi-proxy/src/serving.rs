@@ -127,6 +127,7 @@ where
         )
         .await;
         let deadline = state.lifecycle.begin_quiesce(grace);
+        state.lifecycle.seal_completion();
         let cleaned = async {
             recovery.stop(deadline).await?;
             tokio::time::timeout_at(deadline.into(), state.lifecycle.wait_idle())

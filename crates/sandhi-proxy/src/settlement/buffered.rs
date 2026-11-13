@@ -112,6 +112,31 @@ pub(crate) fn reference_authority(
     })
 }
 
+/// Proof work shares one conservative absolute request budget selected before
+/// authorization; frames and storage retries cannot extend source/delivery bounds.
+pub(crate) fn proof_deadline(
+    state: &ProxyState,
+    started: std::time::Instant,
+    buffered: Option<Duration>,
+    streaming: Option<crate::deadlines::StreamLimits>,
+    wants_stream: bool,
+) -> Result<std::time::Instant, &'static str> {
+    let owner = state
+        .buffered_accounting
+        .get()
+        .ok_or("durable execution owner unavailable")?;
+    let transport = if wants_stream {
+        streaming
+            .ok_or("bounded streaming policy required")?
+            .dispatch_duration()
+    } else {
+        buffered.unwrap_or(owner.config.transport_timeout)
+    };
+    started
+        .checked_add(transport + owner.config.accounting_wait * 3)
+        .ok_or("invalid proof deadline")
+}
+
 pub fn retained(state: &ProxyState) -> usize {
     state
         .buffered_accounting

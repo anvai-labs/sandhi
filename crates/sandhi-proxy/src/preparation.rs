@@ -31,6 +31,7 @@ pub(super) struct PreparationContext<'a> {
     rate_limiter: &'a RateLimiter,
     metrics: &'a Metrics,
     policy: Option<&'a PolicyGate>,
+    started: std::time::Instant,
 }
 impl<'a> From<&'a ProxyState> for PreparationContext<'a> {
     fn from(state: &'a ProxyState) -> Self {
@@ -42,6 +43,7 @@ impl<'a> From<&'a ProxyState> for PreparationContext<'a> {
             rate_limiter: &state.rate_limiter,
             metrics: &state.metrics,
             policy: state.policy.as_deref(),
+            started: std::time::Instant::now(),
         }
     }
 }
@@ -539,6 +541,14 @@ pub(super) async fn prepare(
             &request,
             dialect,
             &effective,
+            crate::settlement::buffered::proof_deadline(
+                context.state,
+                context.started,
+                buffered_deadline.map(|limit| limit.duration()),
+                streaming_deadline,
+                wants_stream,
+            )
+            .map_err(|message| ingress_error(dialect, StatusCode::BAD_REQUEST, message))?,
         )
         .await
         .map_err(|error| error.into_response(dialect))?

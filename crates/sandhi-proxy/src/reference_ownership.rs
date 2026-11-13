@@ -11,7 +11,9 @@ use sandhi_providers::ProviderHandle;
 use sandhi_store::references::{Reference, ReferenceStore, MAX_BATCH, MAX_TTL_SECS};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::{collections::HashSet, sync::Arc};
+#[cfg(test)]
+use std::time::Duration;
+use std::{collections::HashSet, sync::Arc, time::Instant};
 
 #[derive(Clone, Copy)]
 pub(crate) struct NativeEmission(pub bool);
@@ -48,6 +50,59 @@ pub(crate) struct Context {
     family: Family,
     input_references: bool,
     streaming: bool,
+    budget: ProofBudget,
+}
+
+/// One original request budget, never restarted by another frame or a busy DB.
+/// The authority is inert until an actual blocking metadata job is scheduled.
+#[derive(Clone)]
+struct ProofBudget {
+    original: Instant,
+    authority: crate::lifecycle::CompletionAuthority,
+}
+impl ProofBudget {
+    #[cfg(test)]
+    fn test() -> Self {
+        let lifecycle = Arc::new(crate::lifecycle::Lifecycle::new());
+        Self {
+            original: Instant::now() + Duration::from_secs(10),
+            authority: lifecycle.completion_authority().unwrap(),
+        }
+    }
+    fn new(state: &ProxyState, original: Instant) -> Result<Self, &'static str> {
+        if Instant::now() >= original {
+            return Err(failure());
+        }
+        Ok(Self {
+            original,
+            authority: state.lifecycle.completion_authority().ok_or_else(failure)?,
+        })
+    }
+    fn deadline(&self) -> Instant {
+        self.authority.deadline(self.original)
+    }
+    async fn expired(&self) {
+        tokio::select! {
+            _ = tokio::time::sleep_until(self.original.into()) => {},
+            _ = self.authority.cancelled() => tokio::time::sleep_until(self.deadline().into()).await,
+        }
+    }
+    async fn wait<T>(&self, work: tokio::task::JoinHandle<T>) -> Result<T, &'static str> {
+        tokio::select! {
+            biased;
+            _ = self.expired() => {
+                tracing::warn!(reason="deadline_expired", "native reference metadata unavailable");
+                Err(failure())
+            },
+            result = work => {
+                let result = result.map_err(|_| {
+                    tracing::warn!(reason="worker_interrupted", "native reference metadata unavailable");
+                    failure()
+                })?;
+                if Instant::now() >= self.deadline() { Err(failure()) } else { Ok(result) }
+            }
+        }
+    }
 }
 #[derive(Default)]
 struct References {
@@ -314,6 +369,7 @@ impl PreparationError {
 }
 
 /// Runs before a pin is confirmed and before any lease or provider dispatch.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn prepare_effective(
     state: &ProxyState,
     vk: &VirtualKey,
@@ -321,6 +377,7 @@ pub(crate) async fn prepare_effective(
     request: &ChatRequestV1,
     dialect: IngressDialect,
     effective: &Value,
+    original_deadline: Instant,
 ) -> Result<Option<Context>, PreparationError> {
     if !provider.reference_credential_is_current() {
         return Err(PreparationError::Credential);
@@ -354,18 +411,15 @@ pub(crate) async fn prepare_effective(
         };
     }
     let (store, slots) = authority.expect("checked authority");
-    let mut ctx = frozen_context(store, slots, vk, provider, request, family, now())?;
+    let budget = ProofBudget::new(state, original_deadline)?;
+    let mut ctx = frozen_context(store, slots, vk, provider, request, family, now(), budget)?;
     ctx.input_references = !refs.is_empty();
     if !refs.is_empty() {
-        let c = ctx.clone();
-        let permit = c.slots.clone().try_acquire_owned().map_err(|_| failure())?;
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            c.store.authorize(&c.binding, &c.owner, &refs)
+        ctx.storage(move |c| {
+            c.store
+                .authorize_until(&c.binding, &c.owner, &refs, || c.budget.deadline())
         })
-        .await
-        .map_err(|_| failure())?
-        .map_err(|_| failure())?;
+        .await?;
     }
     if ctx.expiry <= now() {
         return Err(PreparationError::Ownership);
@@ -387,7 +441,16 @@ async fn prepare(
         dialect,
         IngressDialect::Embeddings | IngressDialect::Completions
     ) {
-        return prepare_effective(state, vk, provider, request, dialect, &Value::Null).await;
+        return prepare_effective(
+            state,
+            vk,
+            provider,
+            request,
+            dialect,
+            &Value::Null,
+            Instant::now() + Duration::from_secs(10),
+        )
+        .await;
     }
     let effective = provider
         .encode_execution_request(request)
@@ -395,9 +458,19 @@ async fn prepare(
             sandhi_providers::ProviderError::Auth => PreparationError::Credential,
             other => PreparationError::Fidelity(other.to_string()),
         })?;
-    prepare_effective(state, vk, provider, request, dialect, &effective).await
+    prepare_effective(
+        state,
+        vk,
+        provider,
+        request,
+        dialect,
+        &effective,
+        Instant::now() + Duration::from_secs(10),
+    )
+    .await
 }
 
+#[allow(clippy::too_many_arguments)]
 fn frozen_context(
     store: Arc<ReferenceStore>,
     slots: Arc<tokio::sync::Semaphore>,
@@ -406,6 +479,7 @@ fn frozen_context(
     request: &ChatRequestV1,
     family: Family,
     clock: i64,
+    budget: ProofBudget,
 ) -> Result<Context, &'static str> {
     let credential = provider
         .routing_credential_fingerprint()
@@ -466,6 +540,7 @@ fn frozen_context(
         family,
         input_references: false,
         streaming: false,
+        budget,
     })
 }
 
@@ -477,19 +552,41 @@ impl Context {
     pub(crate) fn has_input_references(&self) -> bool {
         self.input_references
     }
+    async fn storage<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(Context) -> Result<T, sandhi_store::references::Error> + Send + 'static,
+    ) -> Result<T, &'static str> {
+        let c = self.clone();
+        let permit = c.slots.clone().try_acquire_owned().map_err(|_| failure())?;
+        let guard = c
+            .budget
+            .authority
+            .operation(c.budget.original)
+            .ok_or_else(failure)?;
+        let work = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let _operation = guard;
+            operation(c)
+        });
+        self.budget.wait(work).await?.map_err(|_| {
+            tracing::warn!(
+                reason = "metadata_refused",
+                "native reference metadata unavailable"
+            );
+            failure()
+        })
+    }
     async fn issue(&self, refs: Vec<Reference>) -> Result<(), &'static str> {
         if refs.is_empty() {
             return Ok(());
         }
-        let c = self.clone();
-        let permit = c.slots.clone().try_acquire_owned().map_err(|_| failure())?;
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            c.store.issue(&c.binding, &c.owner, &refs, c.expiry)
+        self.storage(move |c| {
+            c.store
+                .issue_until(&c.binding, &c.owner, &refs, c.expiry, || {
+                    c.budget.deadline()
+                })
         })
         .await
-        .map_err(|_| failure())?
-        .map_err(|_| failure())
     }
 }
 
@@ -958,6 +1055,7 @@ mod tests {
             family: Family::AnthropicMessages,
             input_references: false,
             streaming: true,
+            budget: ProofBudget::test(),
         };
         let mut delivery = Delivery {
             context: ctx.clone(),
@@ -1229,6 +1327,7 @@ mod binding_tests {
             family: Family::OpenaiResponses,
             input_references: false,
             streaming: false,
+            budget: ProofBudget::test(),
         };
         let response =
             axum::Json(json!({"object":"response","id":"rendered-id","output":[]})).into_response();
@@ -1263,6 +1362,7 @@ mod delivery_failure_tests {
                 family: Family::OpenaiResponses,
                 input_references: false,
                 streaming,
+                budget: ProofBudget::test(),
             };
             let source = json!({"object":"response","id":"resp_issued","output":[]});
             let wire = if streaming {
@@ -1312,6 +1412,7 @@ mod delivery_failure_tests {
                 family: Family::OpenaiResponses,
                 input_references: false,
                 streaming: true,
+                budget: ProofBudget::test(),
             };
             let polls = Arc::new(AtomicUsize::new(0));
             let count = polls.clone();
@@ -1528,3 +1629,6 @@ mod text_endpoint_tests {
 
 #[cfg(test)]
 mod renewal_tests;
+
+#[cfg(test)]
+mod supervision_tests;

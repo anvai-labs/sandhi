@@ -1,6 +1,9 @@
 //! Digest-only issuer proofs. No prompt, native payload, provider ID or credential is stored.
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
-use std::{sync::Mutex, time::Duration};
+use std::{
+    sync::{Mutex, MutexGuard, TryLockError},
+    time::{Duration, Instant},
+};
 
 pub const ENCRYPTED_REASONING: u8 = 3;
 pub const THINKING_SIGNATURE: u8 = 6;
@@ -24,6 +27,12 @@ pub struct Reference {
 }
 #[derive(Debug)]
 pub struct Error;
+
+#[derive(Debug)]
+enum StoreFailure {
+    Unverified,
+    Busy,
+}
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("native reference ownership is unavailable or unverified")
@@ -33,6 +42,18 @@ impl std::error::Error for Error {}
 impl From<rusqlite::Error> for Error {
     fn from(_: rusqlite::Error) -> Self {
         Self
+    }
+}
+impl From<rusqlite::Error> for StoreFailure {
+    fn from(error: rusqlite::Error) -> Self {
+        if matches!(
+            error.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+        ) {
+            Self::Busy
+        } else {
+            Self::Unverified
+        }
     }
 }
 
@@ -48,7 +69,7 @@ fn digest(value: &str) -> bool {
 fn unix_now() -> i64 {
     time::OffsetDateTime::now_utc().unix_timestamp()
 }
-fn validate(binding: &str, owner: &str, refs: &[Reference]) -> Result<(), Error> {
+fn validate(binding: &str, owner: &str, refs: &[Reference]) -> Result<(), StoreFailure> {
     if !digest(binding)
         || !digest(owner)
         || refs.len() > MAX_BATCH
@@ -56,7 +77,7 @@ fn validate(binding: &str, owner: &str, refs: &[Reference]) -> Result<(), Error>
             .iter()
             .any(|r| !(1..=16).contains(&r.kind) || !digest(&r.digest))
     {
-        return Err(Error);
+        return Err(StoreFailure::Unverified);
     }
     Ok(())
 }
@@ -99,6 +120,82 @@ impl ReferenceStore {
     pub fn authorize(&self, binding: &str, owner: &str, refs: &[Reference]) -> Result<(), Error> {
         self.authorize_at(binding, owner, refs, None)
     }
+
+    /// Retry only the identical metadata lookup on transient contention. The
+    /// caller supplies its original deadline, including any later shutdown cut.
+    pub fn authorize_until(
+        &self,
+        binding: &str,
+        owner: &str,
+        refs: &[Reference],
+        deadline: impl Fn() -> Instant,
+    ) -> Result<(), Error> {
+        self.until(&deadline, || {
+            self.authorize_inner(binding, owner, refs, None, Some(&deadline))
+        })
+        .map_err(|_| Error)
+    }
+
+    fn until(
+        &self,
+        deadline: &dyn Fn() -> Instant,
+        mut attempt: impl FnMut() -> Result<(), StoreFailure>,
+    ) -> Result<(), StoreFailure> {
+        let mut contended = false;
+        loop {
+            if Instant::now() >= deadline() {
+                return Err(StoreFailure::Busy);
+            }
+            match attempt() {
+                Err(StoreFailure::Busy) => {
+                    if !contended {
+                        tracing::debug!(
+                            reason = "busy_or_locked",
+                            "retrying identical native reference metadata within original deadline"
+                        );
+                        contended = true;
+                    }
+                    std::thread::sleep(
+                        Duration::from_millis(1)
+                            .min(deadline().saturating_duration_since(Instant::now())),
+                    )
+                }
+                result => return result,
+            }
+        }
+    }
+
+    fn connection(
+        &self,
+        deadline: Option<&dyn Fn() -> Instant>,
+    ) -> Result<MutexGuard<'_, Connection>, StoreFailure> {
+        let conn = if let Some(deadline) = deadline {
+            loop {
+                if Instant::now() >= deadline() {
+                    return Err(StoreFailure::Busy);
+                }
+                match self.conn.try_lock() {
+                    Ok(conn) => break conn,
+                    Err(TryLockError::Poisoned(_)) => return Err(StoreFailure::Unverified),
+                    Err(TryLockError::WouldBlock) => std::thread::sleep(
+                        Duration::from_millis(1)
+                            .min(deadline().saturating_duration_since(Instant::now())),
+                    ),
+                }
+            }
+        } else {
+            self.conn.lock().map_err(|_| StoreFailure::Unverified)?
+        };
+        // A busy handler cannot observe a newly established shutdown deadline.
+        // Deadline-aware operations instead retry outside SQLite's writer wait.
+        conn.busy_timeout(if deadline.is_some() {
+            Duration::ZERO
+        } else {
+            Duration::from_millis(100)
+        })?;
+        Ok(conn)
+    }
+
     fn authorize_at(
         &self,
         binding: &str,
@@ -106,8 +203,19 @@ impl ReferenceStore {
         refs: &[Reference],
         clock: Option<i64>,
     ) -> Result<(), Error> {
+        self.authorize_inner(binding, owner, refs, clock, None)
+            .map_err(|_| Error)
+    }
+    fn authorize_inner(
+        &self,
+        binding: &str,
+        owner: &str,
+        refs: &[Reference],
+        clock: Option<i64>,
+        deadline: Option<&dyn Fn() -> Instant>,
+    ) -> Result<(), StoreFailure> {
         validate(binding, owner, refs)?;
-        let conn = self.conn.lock().map_err(|_| Error)?;
+        let conn = self.connection(deadline)?;
         for r in refs {
             let row: Option<(String,i64)> = conn.query_row(
                 "SELECT owner,expires_at FROM issued_native_references WHERE binding=?1 AND kind=?2 AND reference_digest=?3 AND owner=?4",
@@ -115,7 +223,7 @@ impl ReferenceStore {
             if !row.is_some_and(|(scope, expiry)| {
                 scope == owner && expiry > clock.unwrap_or_else(unix_now)
             }) {
-                return Err(Error);
+                return Err(StoreFailure::Unverified);
             }
         }
         Ok(())
@@ -131,6 +239,22 @@ impl ReferenceStore {
     ) -> Result<(), Error> {
         self.issue_at(binding, owner, refs, None, expires_at)
     }
+
+    /// Contention retries never change the owner, reference batch or expiry and
+    /// never expose bytes before the original atomic proof transaction commits.
+    pub fn issue_until(
+        &self,
+        binding: &str,
+        owner: &str,
+        refs: &[Reference],
+        expires_at: i64,
+        deadline: impl Fn() -> Instant,
+    ) -> Result<(), Error> {
+        self.until(&deadline, || {
+            self.issue_inner(binding, owner, refs, None, expires_at, Some(&deadline))
+        })
+        .map_err(|_| Error)
+    }
     fn issue_at(
         &self,
         binding: &str,
@@ -139,12 +263,25 @@ impl ReferenceStore {
         clock: Option<i64>,
         expires_at: i64,
     ) -> Result<(), Error> {
+        self.issue_inner(binding, owner, refs, clock, expires_at, None)
+            .map_err(|_| Error)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn issue_inner(
+        &self,
+        binding: &str,
+        owner: &str,
+        refs: &[Reference],
+        clock: Option<i64>,
+        expires_at: i64,
+        deadline: Option<&dyn Fn() -> Instant>,
+    ) -> Result<(), StoreFailure> {
         validate(binding, owner, refs)?;
-        let mut conn = self.conn.lock().map_err(|_| Error)?;
+        let mut conn = self.connection(deadline)?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let now = clock.unwrap_or_else(unix_now);
         if expires_at <= now || expires_at > now.saturating_add(MAX_TTL_SECS) {
-            return Err(Error);
+            return Err(StoreFailure::Unverified);
         }
         // Cleanup is bounded; capacity failure is fail closed, never an unbounded sweep.
         // Reserve half the cleanup budget for this owner so a global backlog
@@ -181,11 +318,11 @@ impl ReferenceStore {
                 .as_ref()
                 .is_some_and(|(old_owner, _)| old_owner != owner)
             {
-                return Err(Error);
+                return Err(StoreFailure::Unverified);
             }
             if previous.is_none() {
                 if total >= MAX_ROWS || owned >= MAX_OWNER_ROWS {
-                    return Err(Error);
+                    return Err(StoreFailure::Unverified);
                 }
                 total += 1;
                 owned += 1;
@@ -196,6 +333,9 @@ impl ReferenceStore {
                 expires_at=MAX(issued_native_references.expires_at,excluded.expires_at)",
                 params![binding, r.kind, r.digest, owner, expires_at],
             )?;
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline()) {
+            return Err(StoreFailure::Busy);
         }
         tx.commit()?;
         Ok(())
@@ -544,5 +684,52 @@ mod targeted_expiry_tests {
             .unwrap(),
             MAX_OWNER_ROWS + 1000 - 128
         );
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    use std::sync::{mpsc, Arc};
+    #[test]
+    fn queued_metadata_does_not_block_forever_on_the_connection_mutex_or_create_late_proof() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("original.db");
+        let store = Arc::new(ReferenceStore::open(path.to_str().unwrap()).unwrap());
+        let held = store.conn.lock().unwrap();
+        let worker = store.clone();
+        let (tx, rx) = mpsc::channel();
+        let join = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_millis(40);
+            let result = worker.issue_until(
+                &"a".repeat(64),
+                &"b".repeat(64),
+                &[Reference {
+                    kind: 1,
+                    digest: "c".repeat(64),
+                }],
+                unix_now() + 60,
+                || deadline,
+            );
+            tx.send(result.is_err()).unwrap();
+        });
+        let bounded = rx.recv_timeout(Duration::from_secs(1));
+        drop(held);
+        join.join().unwrap();
+        assert_eq!(
+            bounded,
+            Ok(true),
+            "a queued mutex wait must observe the original deadline"
+        );
+        assert!(store
+            .authorize(
+                &"a".repeat(64),
+                &"b".repeat(64),
+                &[Reference {
+                    kind: 1,
+                    digest: "c".repeat(64)
+                }]
+            )
+            .is_err());
     }
 }

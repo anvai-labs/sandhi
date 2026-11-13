@@ -2006,3 +2006,16 @@ and ordinary Python TLS child-process checks all pass. The final Rust rerun has
 1,289 passes and no failures. See the integrated report for artifact pins and exact
 limits. The older incidents remain discoverable and unexplained; no universal
 native-crash or scheduling guarantee is inferred.
+
+
+### Release follow-up — owned native proof work
+
+The user authorized a Sandhi 0.17.0 release conditional on full verification.
+Public CI for `641ff49` passed native platforms and 735 SDK tests, but failed the
+SentinelPass native continuation test and aggregate. No release was triggered.
+The [proof-work correction](../reviews/native-proof-work-2026-11-13.md) records
+controlled contention, the cancellation/lifecycle regression and bounded owned
+metadata work. Corrected local workspace/feature/live checks pass; independent
+exact-commit review and new public CI remain required before protected promotion
+and all-target publication. The 0.17 changelog and upgrade checklist now explain
+the mandatory cutover. This does not assert publication or close historical causes.

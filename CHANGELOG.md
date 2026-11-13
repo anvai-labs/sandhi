@@ -19,178 +19,146 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
-Prepared package version: **0.17.0**. This version is not yet released.
+## [0.17.0] — 2026-11-13
 
-### Migration
+### Upgrade and compatibility
 
-- Coordinate the stricter execution contract with Victor **0.29.0**, pinned to
-  `sandhi-gateway==0.17.0`. The four admitted ordinary typed stream families use the same source observer
-  and portable/native fidelity rules as accounted streams. Physical handles
-  must disable retries; meaningful state that cannot be projected is refused.
-  A validated terminal protocol and source counters replace permissive EOF
-  completion. See [ADR-0038](docs/adr/0038-coordinated-victor-contract-migration.md)
-  for remaining migration and qualification gates. Wire schema v1 is unchanged.
-- Ordinary buffered Chat, Messages, Responses and Gemini calls also share strict
-  source qualification; constrained Codex uses its existing qualified SSE owner.
-  Missing or invalid usage cannot become measured final zero. Completed malformed
-  responses refuse without replay, and native/portable generation outcomes remain
-  separate from physical HTTP success. See [ADR-0040](docs/adr/0040-shared-buffered-source-qualification.md).
-- The prepared Victor consumer omits gateway idempotency headers while preserving
-  attribution and retry-free transport. Gateway peer/counts/cache coordination,
-  mandatory accounting and provider-label/budget-scope migration remain release
-  gates. Broader cache/state/subscription and packaging acceptance remains separate;
-  retained native-exit, shutdown and accounting failures are not cleared by passing
-  follow-up probes.
+- **HTTP generation now requires durable accounting.** Set `SANDHI_STORE` to the
+  **same existing ordinary file** and leave `SANDHI_LEDGER_SHARDS` unset or set
+  exactly `1`. In-memory/URI stores and unsupported shard counts refuse startup
+  before stores open. Remove `SANDHI_BUFFERED_ACCOUNTING` entirely: every supplied
+  value, including `tracked` or `off`, is rejected. There is no permissive HTTP
+  execution branch. Quiesce old writers and back up the complete store before
+  upgrading; multi-shard installations require an explicit offline migration.
+- Preserve existing caps, windows, Block/Warn policies, settled spend, live holds,
+  deduplication history and compatible route pins on that original ledger. New
+  paired evidence does not backfill old rows or rename upstream scopes. Unknown
+  tracked usage remains held through expiry/restart; historical unpaired expiry
+  retains its previous semantics. Do not downgrade an old writer onto new tracked
+  evidence. See the [upgrade checklist](docs/releases/v0.17.0.md).
+- Upgrade the sole coordinated consumer to Victor **0.29.0**, with the exact
+  `sandhi-gateway==0.17.0` dependency. Ordinary typed buffered and streaming calls
+  now use the same strict source validation and native/portable fidelity rules as
+  accounted calls. Physical handles are retry-free; unrepresentable state and
+  invalid terminal usage refuse instead of silently completing or replaying.
+  Package version **0.17.0** communicates this semantic migration. Usage/chat wire
+  schema **v1** remains unchanged; additive chat contract minor **13**, count
+  convention versions and persisted evidence versions are separate contracts.
+- Chat requests without an output limit receive an operator-owned default of
+  **4,096**, configurable by `SANDHI_DEFAULT_MAX_OUTPUT_TOKENS`; a declared model
+  ceiling can narrow the default. Explicit caller limits remain explicit. Streams
+  default to **30 s setup / 90 s idle / 180 s body**, under a **240 s ceiling**;
+  configured route policies can override them. These are estimated admission and
+  lifetime controls, not universal physical token guarantees; constrained Codex
+  retains its codec's omitted wire maximum. Native Text
+  Completions retains its explicit `max_tokens=16` default; Embeddings is input-only.
+- Public Rust `serve*` entry points initialize/validate the same owner and supervise
+  recovery, active responses and bounded shutdown. Native-reference proof storage
+  initializes privately on the original ledger before serving; no second ledger
+  or registry setup is required. Operator-only app construction remains read-only,
+  unready and unable to generate. Provider FFI remains ledger-free.
+- Native-reference lookup/issuance jobs remain lifecycle-owned through actual
+  completion after caller cancellation. Transient SQLite contention uses one
+  original request budget, shortened by shutdown; frames cannot restart it.
+  Proof commits before native bytes are exposed, without replaying inference.
+  See the [correction evidence](docs/reviews/native-proof-work-2026-11-13.md).
 
 ### Added
 
-- A cohesive **Routing & cache guide** in the operator console and MkDocs:
-  request-path and cache-placement diagrams, fresh/read/write/output/reasoning
-  vocabulary, and the distinction between client wire counts, observed usage and
-  tracked settlement receipts. Overview task shortcuts use keyboard/history-aware
-  navigation. Console totals use **Observed units** and **Run usage tree** labels;
-  arithmetic and API field names are unchanged. Read share remains a reuse measure,
-  not a percentage currency saving. Cache efficiency and local ONNX egress policy
-  are presented together, with their distinct coverage and qualification limits.
-
-- Explicit `openai_terminal_chunk_usage` backend profile for compatible Chat
-  streams reporting totals on one terminal choice. Standard qualification stays
-  strict; both wire planes, persisted context, restart and route pins retain the
-  declared placement. See [ADR-0029](docs/adr/0029-explicit-terminal-chat-usage-profile.md).
-
-- Qualified tracked streaming from Chat, standard Responses and constrained Codex
-  backends to Chat, Messages, Responses and Gemini clients. Source evidence owns
-  paired settlement independently of typed delivery; translated finish events wait
-  for final usage, and Anthropic stop deltas work with SDK stream accumulators.
-  Projection state is bounded separately from token estimates. Messages/Gemini
-  source qualification follows their declared conventions; broader media/native
-  state lifecycle and live subscription acceptance remain open. See
-  [ADR-0028](docs/adr/0028-qualified-translated-stream-accounting.md).
-
-- Qualified tracked buffered Codex delivery through its constrained typed codec,
-  with one SSE response owner/attempt guard, EOF draining, original whole-call
-  deadlines and retained source usage after decoder failure. Raw subscription
-  forwarding remains disabled. Synthetic four-ingress qualification is separate
-  from live subscription acceptance. See [ADR-0027](docs/adr/0027-qualified-codex-buffered-accounting.md).
-- Qualified tracked transparent standard Responses streaming with the existing
-  bounded response owner and paired settlement. Progress remains partial; terminal
-  counters preserve disjoint cache categories and explicit reasoning zero. Missing,
-  contradictory or malformed evidence retains both liabilities without model replay.
-  Translated streams use the qualified source pipeline; broader lifecycle
-  acceptance remains separate. See
-  [ADR-0026](docs/adr/0026-qualified-responses-stream-accounting.md).
-- Qualified tracked buffered routing across Chat, Messages, Responses and Gemini
-  clients and standard backends. Protocol-specific validators preserve zero and
-  reject missing/malformed/inconsistent evidence; tracked routes preflight accounting
-  eligibility before pinning. Broader cache/state/subscription acceptance remains gated.
-  Gemini tool-use input and Anthropic reported thinking are accounted explicitly.
-  See [ADR-0025](docs/adr/0025-qualified-buffered-protocol-accounting.md).
-- Durable single-attempt identities and bounded transport evidence for new supported
-  tracked calls. Authorization, observation and settlement remain distinct; evidence
-  and qualified usage commit together. Missing evidence retains both budget liabilities,
-  and reusing an instrumented attempt refuses another send. Protocol eligibility is
-  unchanged. See [ADR-0024](docs/adr/0024-durable-physical-attempt-evidence.md).
-- Paired tracked budget admission/settlement on the original ledger. New supported
-  tracked calls reserve both scopes together; either denial leaves no rows.
-  Qualified final usage charges both atomically under one receipt. Unknown usage
-  stays held on both through expiry/restart, and receipt failures recover both
-  without inference replay. Accounting activation and older unpaired rows retain
-  their existing semantics until coordinated cutover. See [ADR-0023](docs/adr/0023-paired-budget-settlement.md).
-- Atomic durable execution-context records for existing tracked HTTP admissions:
-  selected route/backend/model, transport/cache fingerprints and the admitted
-  accounting policy survive restart. Terminal recording refuses weight changes;
-  old admissions remain context-free. Tracked protocol activation and durable
-  physical-attempt support are not expanded by this increment. See
-  [ADR-0022](docs/adr/0022-durable-execution-context.md).
-- Navigable operator-console workspaces for overview, backend/route inventory,
-  credentials, budgets, alerts, run exploration, bounded usage evidence, policy,
-  configuration and topology. Token-composition visuals preserve reporting
-  coverage; filters do not change totals. Diagnostics follows its own SSO permission.
-- Logical `route/<id>` models with conditional config/admin/CLI lifecycle,
-  priority/rendezvous selection and durable compatible session affinity. Alias
-  authority, actual-target policy, expiry and account fences apply before dispatch;
-  incompatible live pins refuse rather than silently switching/replaying.
-  [ADR-0021](docs/adr/0021-logical-routing-and-compatible-affinity.md) records
-  the candidate and remaining durable physical-dispatch accounting gates.
-- Chat contract minor 11 adds optional codec-owned native-input metadata. Compatible
-  re-encoding preserves ordered input, native state and cache boundaries while
-  retaining admitted model/limit authority. Classified incompatible state or
-  controls are refused; minor 13 adds explicit cache-policy compilation.
-- Chat contract minor 12 adds default-off native SSE attachments for Chat,
-  Messages, Responses and Gemini. Compatible typed proxy streams preserve opaque
-  state and SSE fields while canonical events remain the accounting authority.
-  Native events and Codex buffered aggregation are bounded; Python/TypeScript
-  facades and request/event schemas are updated.
-- Chat contract minor 13 adds portable `cache_intent` and the four-ingress
-  `sandhi_cache` directive. Backend/model capability declarations compile exact
-  cache controls before budget admission on both forwarding planes. Native
-  precedence, suppression, scoped OpenAI keys and durable observed credential
-  generations are supported; declarations do not imply live qualification.
-- Prominent MkDocs efficiency/egress navigation and a visual cache-routing guide
-  explain marker placement, disjoint tokens and cost interpretation alongside
-  local ONNX policy. Retained live Z.AI evidence includes 24 final protocol/mode
-  cells, 48 cache probes, the discovered streaming fix and earlier unsuccessful runs.
-- Explicit backend endpoint binding through the gateway's typed factory
-  (`BackendEndpoint` / `build_provider_handle_for_endpoint`), separating provider
-  labels from endpoint family/profile. Standard Responses and custom native-family
-  endpoints can be constructed directly. Codex bindings preserve lease and account fences.
-- Durable non-secret backend registry with config/admin/CLI lifecycle, conditional
-  revision updates, restart reconstruction and declared model scoping. Fixed
-  `backend/<id>` routes reference existing credentials; rotation rebuilds dependent
-  handles and revocation disables them. See the
-  [backend operator guide](docs/operator/backends.md). Logical
-  routing/affinity qualification and uniform durable accounting remain TD-0034 work
-  in progress.
+- **Protocol-neutral routing and explicit gateway peers:** Chat Completions,
+  Messages, Responses and Gemini clients select their wire dialect independently
+  of the authorized backend protocol/profile. Explicit `openai_terminal_chunk_usage`
+  and `anthropic_implicit_cache` profiles retain their declared conventions;
+  standard qualification stays strict. One response-boundary decision interprets
+  actual emitted counts. Caller headers cannot
+  grant Codex, credential, account or budget authority. Victor forwards cache intent
+  for one server compilation and omits obsolete gateway idempotency headers.
+- **One durable execution path:** new admissions freeze the selected backend,
+  model, cache plan, policy and paired scopes; one physical source attempt joins
+  qualified usage before one atomic paired receipt. Missing/invalid usage retains
+  both liabilities. Delivery or accounting failure never authorizes model replay.
+  Warn stays a soft-cap policy, with the same durable/storage requirements as Block.
+- **Immutable upstream budget authority:** backend records retain their stored
+  `upstream_budget_scope` independently of configured provider labels. Migration,
+  updates and restart preserve existing scope authority, caps, spend, holds and
+  compatible v1 binding/route/cache digests. Attempt evidence v2 adds bounded
+  diagnostic labels; those labels do not select charges or authorization.
+- **Same-owner native continuation proof:** source-issued supported IDs and opaque
+  state are recorded as bounded digests on the original ledger before delivery.
+  Matching owner/binding proof survives restart; foreign, expired, changed-binding
+  or unknown state refuses before inference. Resource IDs remain exclusive;
+  independently reissued self-contained opaque values need each owner's own
+  source issuance. Externally created resources have no implicit adoption path.
+- Qualified buffered and bounded streaming sources for Chat, Messages, standard
+  Responses, Gemini, constrained Codex, Cohere v2 and Ollama. Cohere uses actual
+  token counts separately from billed units; Ollama cached input is a reported
+  subset of its prompt total. Native OpenAI-compatible Text Completions and
+  Embeddings retain their endpoints under the same paired owner.
+- Explicit cache-intent and backend/model capability compilation: native marker
+  precedence, suppression, scoped OpenAI keys and credential-generation fencing.
+  Chat contract minors 11–13 add ordered native input, opt-in native SSE attachments
+  and portable cache intent without changing wire schema v1. Compatible native
+  state is preserved; unsupported translation refuses rather than dropping it.
+- Backend registry/config/admin/CLI lifecycle, fixed `backend/<id>` routes,
+  logical model aliases, priority/rendezvous selection and durable compatible
+  session affinity. Credential, account, revision and model fences prevent silent
+  rerouting or incompatible state reuse.
+- Navigable operator-console workspaces with execution-contract/readiness facts,
+  immutable budget scopes, bounded evidence lookup and disjoint token visuals.
+  The console and prominent MkDocs routing/cache guide explain the same mechanism
+  alongside local ONNX egress control. Observed units, source receipts and client
+  delivery remain distinct. Cache-read share is not a USD saving or billing claim.
+- Nonpublishing native-artifact CI on public GitHub-hosted runners, including
+  macOS ARM64 and Windows x86_64 Python 3.11–3.13 wheels and macOS ARM64 Node.
+  Exact host/tag/installed-extension checks and aggregate gating complement
+  existing Linux tests. Private and overflow runner routing is removed.
 
 ### Fixed
 
-- Gemini tool projection refuses malformed, duplicate-key or non-object arguments
-  in buffered and streamed output instead of inventing an empty/null object.
-  Final qualified accounting remains independent of delivery failure; buffered
-  projection errors suppress automatic retry. Responses tool calls preserve
-  explicit output-limit/filter reasons before normal tool-call completion.
+- Strict source EOF/terminal/count validation now applies to ordinary buffered
+  and streaming typed delivery as well as HTTP accounting. Missing, malformed,
+  contradictory or unavailable usage cannot become measured final zero.
+- Qualified source usage survives output-projection refusal. Compatible native
+  signatures, encrypted reasoning, ordered output and complete SSE frames are
+  preserved; portable output refuses meaningful unrepresented state. Known terminal
+  refusals remain nonretryable through explicit peers and Victor recovery paths.
+- Messages terminal usage can replace initial zero placeholders field by field.
+  Chat/Responses cache writes remain separate and are subtracted from inclusive
+  input once. Translated terminal usage preserves disjoint categories and reported
+  zero/absence; reasoning follows its recorded inclusion convention.
+- Gemini tool arguments reject malformed/duplicate-key/non-object values rather
+  than inventing objects; mixed tool-result/media turns retain their content.
+  Inline-image MIME aliases and standard/URL-safe base64 normalize consistently,
+  while native-compatible input keeps its original form.
+- Responses role-bearing input items, tool outputs and generation outcomes retain
+  their native meaning. Constrained Codex aggregation carries terminal-only content
+  and outcomes without replacing earlier portable content with sparse output.
+- All ingress protocols reject duplicate JSON keys before reservation/forwarding.
+  Credential/profile construction rejects unimplemented generic OAuth; use explicit
+  API-key or externally managed Bearer API transport. Gemini Bearer uses Bearer auth.
 
-- Public-repository CI now uses GitHub-hosted runners for all checks. Removed
-  private/overflow routing and its smoke workflow; policy tests cover runner
-  selections, release matrices and the ordinary read-only PR execution path.
-- Structured Chat file references now require compatible, established backend
-  affinity. Constrained Codex refuses unresolved resources before admission.
-  Non-text Responses tool outputs retain their native shape on Responses backends
-  and refuse cross-protocol translation until a faithful projection is supported.
-- Tracked accounting failures now send `x-should-retry: false`. OpenAI and
-  Anthropic SDKs otherwise retry a 502 with their default settings even when its
-  JSON body says not to retry. Default-retry SDK tests verify one model dispatch
-  for missing usage and receipt failure, plus accounting-only restart recovery.
-- All ingress protocols reject duplicate JSON keys before reservation or native
-  forwarding, avoiding differing model/content interpretations at the origin.
-- Private actual-credential binding fences compiled cache plans, version 2 scoped
-  keys and session affinity after unreported external credential changes are
-  reconstructed. Constrained Codex same-account token renewal retains its explicit
-  account/expiry fences.
-- Anthropic-compatible streams can supply input/cache counts in terminal usage
-  after zero placeholders at message start. Field-wise merging preserves those
-  measurements in translated clients, persisted usage and both budget legs.
-- Gemini mixed tool-result turns retain adjacent text/media and arbitrary result
-  objects. Responses ingress retains ordered inline image/file content.
-- Compatible buffered responses retain native signatures, encrypted reasoning
-  and output items when admission forces typed execution.
-- Codex buffered delivery retains the native terminal response, including encrypted
-  output items for subsequent compatible turns. Typed native streams handle
-  multiline SSE data, LF/CRLF/CR chunk boundaries and protocol termination without
-  waiting for HTTP EOF; native protocol error frames are preserved once.
-- Responses ingress preserves role-bearing message items that omit the optional
-  `type`, including translated Chat and Codex requests and streamed history.
-- OpenAI Chat and Responses usage preserves reported cache-write tokens as a
-  separate category, subtracting reads and writes from inclusive input once.
-  Translated usage includes nonzero writes; qualified Chat settlement rejects
-  malformed write counts and cache categories that exceed total input.
-- Translated OpenAI Chat streams publish completion after trailing usage at the
-  protocol terminator, so Responses and Anthropic terminal envelopes carry the
-  measured counts even when `finish_reason` arrives first. Completion does not
-  wait for HTTP EOF after `[DONE]`.
-- Provider construction rejects unimplemented generic OAuth profiles instead of
-  sending them as API keys. Use `api_key` for API keys or `bearer` for externally
-  managed bearer credentials. Gemini Bearer configuration now uses Bearer auth.
+### Verification and scope
+
+- The [integrated qualification record](docs/reviews/cohesive-router-qualification-2026-11-12.md)
+  retains exact binary/wheel hashes and failures followed by corrections: 1,289
+  workspace tests, 341 Python tests, 88 Node tests, 1,991 Victor consumer tests and
+  eight real framework/tool-loop cases. The earlier full SDK run's four obsolete
+  browser assertions are retained alongside the corrected five-journey pass;
+  they are not relabeled as a single all-green run.
+- Recorded live GLM qualification covers four client dialects × three advertised
+  endpoints × buffered/streaming, with repeated cache probes. Successful portable
+  Messages cells explicitly disable thinking; default-output refusals remain
+  negative fidelity evidence with source receipts. This is API-key Coding Plan
+  evidence, not live first-party Anthropic OAuth or Codex subscription acceptance.
+- Current Linux shutdown/TLS/public-serving/watchdog probes pass within unchanged
+  deadlines. Historical native Python TLS exits, shutdown timing and accounting
+  waits remain retained; passing follow-ups do not diagnose their causes, establish
+  a failure-rate bound or prove those occurrences fixed.
+- Release publication remains governed by the exact reviewed commit, successful
+  applicable public CI and [release safeguards](RELEASING.md). Local results or this
+  dated changelog do not establish a merged promotion, published artifact or
+  deployed upgrade. External cache/file/retrieval adoption, arbitrary provider
+  extensions and first-party Claude Pro/Max OAuth relay are outside this release.
 
 ## [0.16.2] — 2026-11-09
 
