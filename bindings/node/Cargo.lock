@@ -961,7 +961,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "sandhi-core"
-version = "0.17.1"
+version = "0.18.0"
 dependencies = [
  "regex",
  "schemars",
@@ -974,7 +974,7 @@ dependencies = [
 
 [[package]]
 name = "sandhi-node"
-version = "0.17.1"
+version = "0.18.0"
 dependencies = [
  "futures-util",
  "napi",
@@ -990,7 +990,7 @@ dependencies = [
 
 [[package]]
 name = "sandhi-providers"
-version = "0.17.1"
+version = "0.18.0"
 dependencies = [
  "async-stream",
  "async-trait",
