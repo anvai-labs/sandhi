@@ -531,10 +531,16 @@ impl OpenAiStreamUsageObserver {
             }
             return Ok(());
         }
-        if let Some(next) =
-            qualify_openai_stream_usage_for_profile(&event, self.openai_usage_profile)
-                .map_err(StreamObservationError::InvalidUsage)?
-        {
+        let next = qualify_openai_stream_usage_for_profile(&event, self.openai_usage_profile)
+            .map_err(StreamObservationError::InvalidUsage)?;
+        if self.usage.is_some() && next.is_none() {
+            // Request-total usage fences progress even before [DONE]. Keep the
+            // first measurement, but never qualify later unmeasured output.
+            return Err(StreamObservationError::InvalidUsage(
+                StreamUsageError::NonFinalUsage,
+            ));
+        }
+        if let Some(next) = next {
             match self.usage {
                 None => {
                     let mut canonical: UsageV2 = next.into();
@@ -545,6 +551,11 @@ impl OpenAiStreamUsageObserver {
                     self.usage = Some(next);
                 }
                 Some(first) if first == next => {
+                    if !empty_usage_repetition(&event) {
+                        return Err(StreamObservationError::InvalidUsage(
+                            StreamUsageError::NonFinalUsage,
+                        ));
+                    }
                     // A repeated identical total can add explicit optional zero
                     // presence; absence in the first frame must not erase it.
                     if let Some(canonical) = self.canonical_usage.as_mut() {
@@ -560,6 +571,33 @@ impl OpenAiStreamUsageObserver {
         }
         Ok(())
     }
+}
+
+// Only empty terminal-choice metadata can repeat already observed request totals.
+// This is an envelope fence, not a second usage parser or counter owner.
+fn empty_usage_repetition(event: &Value) -> bool {
+    event
+        .get("choices")
+        .and_then(Value::as_array)
+        .is_some_and(|choices| {
+            choices.iter().all(|choice| {
+                choice
+                    .get("delta")
+                    .and_then(Value::as_object)
+                    .is_some_and(|delta| {
+                        delta.iter().all(|(field, value)| match field.as_str() {
+                            "content" | "reasoning_content" | "reasoning" | "refusal" => {
+                                value.is_null() || value.as_str().is_some_and(str::is_empty)
+                            }
+                            "tool_calls" => {
+                                value.is_null() || value.as_array().is_some_and(Vec::is_empty)
+                            }
+                            "role" => value.is_null() || value.as_str() == Some("assistant"),
+                            _ => false,
+                        })
+                    })
+            })
+        })
 }
 
 #[cfg(test)]

@@ -5051,16 +5051,47 @@ async fn owned_stream_terminal_evidence_controls_settlement_and_http_completion(
     use sandhi_core::UsageCompleteness;
     use sandhi_store::ledger::evidence::RecoveryState;
     let measured = "data: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2}}\n\n";
-    for case in ["final", "missing", "conflict", "missing_done"] {
+    for (profile, case) in [
+        sandhi_core::usage::OpenAiStreamUsageProfile::Standard,
+        sandhi_core::usage::OpenAiStreamUsageProfile::TerminalChunk,
+    ]
+    .into_iter()
+    .flat_map(|profile| {
+        [
+            "final",
+            "identical",
+            "late_progress",
+            "duplicate_content",
+            "missing",
+            "conflict",
+            "missing_done",
+        ]
+        .map(|case| (profile, case))
+    }) {
+        let measured = if profile == sandhi_core::usage::OpenAiStreamUsageProfile::TerminalChunk {
+            measured.replace(
+                "\"choices\":[]",
+                "\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]",
+            )
+        } else {
+            measured.to_owned()
+        };
         let upstream = MockServer::start().await;
         let wire = match case {
             "final" => format!("{measured}data: [DONE]\n\n"),
+            "identical" => format!("{measured}{measured}data: [DONE]\n\n"),
+            "late_progress" => format!("{measured}data: {{\"object\":\"chat.completion.chunk\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"late\"}},\"finish_reason\":null}}]}}\n\ndata: [DONE]\n\n"),
+            "duplicate_content" => {
+                let mut later: serde_json::Value = serde_json::from_str(measured.trim().strip_prefix("data: ").unwrap()).unwrap();
+                later["choices"] = serde_json::json!([{"index":0,"delta":{"reasoning":"late"},"finish_reason":"stop"}]);
+                format!("{measured}data: {later}\n\ndata: [DONE]\n\n")
+            },
             "missing" => "data: [DONE]\n\n".into(),
             "conflict" => format!(
                 "{measured}{}data: [DONE]\n\n",
                 measured.replace(":10", ":11")
             ),
-            _ => measured.into(),
+            _ => measured.clone(),
         };
         Mock::given(method("POST"))
             .respond_with(
@@ -5082,6 +5113,20 @@ async fn owned_stream_terminal_evidence_controls_settlement_and_http_completion(
             std::time::Duration::from_secs(2),
             Some(serde_json::json!({"setup_ms":1000,"idle_ms":1000,"body_ms":2000})),
         );
+        state.providers.lock().unwrap().insert(
+            "up1".into(),
+            ProviderRuntime::new().openai_compat_with_stream_usage_profile(
+                "openai",
+                upstream.uri(),
+                "REAL-KEY",
+                Default::default(),
+                Some(0),
+                None,
+                None,
+                None,
+                profile,
+            ),
+        );
         let mut request = owned_body();
         request["stream"] = true.into();
         let response = build_app(state.clone())
@@ -5094,7 +5139,7 @@ async fn owned_stream_terminal_evidence_controls_settlement_and_http_completion(
             .unwrap()
             .to_owned();
         let result = axum::body::to_bytes(response.into_body(), usize::MAX).await;
-        if case == "final" {
+        if matches!(case, "final" | "identical") {
             assert_eq!(result.unwrap().as_ref(), wire.as_bytes());
         } else {
             assert!(result.is_err(), "unresolved {case} must not give clean EOF");
@@ -5118,7 +5163,7 @@ async fn owned_stream_terminal_evidence_controls_settlement_and_http_completion(
             .unwrap()
             .usage;
         assert_eq!(usage.upstream_request_id.as_deref(), Some("origin-stream"));
-        if case == "final" {
+        if matches!(case, "final" | "identical") {
             assert!(
                 matches!(entry.state, RecoveryState::Settled(ref receipt) if receipt.charged_tokens == 12)
             );
@@ -5166,8 +5211,19 @@ async fn owned_stream_terminal_evidence_controls_settlement_and_http_completion(
         assert_eq!(billable, observed_total, "{case}");
         assert_eq!(
             state.ledger.lock().unwrap().spent("group:platform"),
-            if case == "final" { 12 } else { 0 }
+            if matches!(case, "final" | "identical") {
+                12
+            } else {
+                0
+            }
         );
+
+        if !matches!(case, "final" | "identical") {
+            let held = state.ledger.lock().unwrap();
+            assert!(held.reserved("group:platform") > 0, "primary {case}");
+            assert!(held.reserved("upstream:openai") > 0, "upstream {case}");
+            assert_eq!(held.spent("upstream:openai"), 0);
+        }
 
         assert_eq!(
             events[0].upstream_request_id.as_deref(),
