@@ -75,13 +75,6 @@ InferFlux checkout as evidence for that pin. These are synthetic local origins;
 SDK qualification does not establish new live provider, GPU or subscription
 acceptance.
 
-Actual configured-credential scanning checked 552 indexed files and 3,191 locally
-reachable blobs for five credential values in 15 raw/common encoded forms, with
-zero matches. Gitleaks cleared all 16 branch commits. Provider credentials remain
-outside Git; this SDK qualification uses synthetic fixture credentials.
-
-Fresh `origin/develop` remained `4443ed8544404d1fdd944e596141ac615f3f23d9`.
-The published routing branch contained it already: zero commits behind and
-fifteen ahead before this SDK increment. No rebase or forced history rewrite was
-needed. Unfinished streaming-fidelity work remains isolated in its original
-worktree and is not included in this SDK refresh.
+The qualification used synthetic fixture credentials. Secret scanning and review
+were separate release gates; SDK compatibility does not establish live account,
+GPU, subscription or deployment acceptance.

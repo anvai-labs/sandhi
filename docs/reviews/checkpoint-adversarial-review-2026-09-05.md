@@ -28,7 +28,7 @@ migration guards. A clean verdict is bounded by this scope and the synthetic evi
 - `cargo clippy --workspace --all-targets --features sandhi-proxy/sentinelpass-ipc -- -D warnings`
 - `cargo test --workspace --features sandhi-proxy/sentinelpass-ipc`
 - `cargo llvm-cov --workspace --features sentinelpass-ipc --fail-under-lines 75 --ignore-filename-regex 'src/generated/' --summary-only`: **86.96%** lines; receipts **90.61%**.
-- `SANDHI_AGENTBROWSER_ROOT=/home/vsingh/code/agentbrowser python -m pytest tests/sdk-conformance/ -q -x`: **103 passed, 1 skipped**; missing local Google SDK is installed by CI.
+- `SANDHI_AGENTBROWSER_ROOT=/path/to/agentbrowser python -m pytest tests/sdk-conformance/ -q -x`: **103 passed, 1 skipped**; missing local Google SDK is installed by CI.
 - `python -m pytest tests/sdk-conformance/test_broker.py -q -x`: **27 passed**.
 - Rebuilt Python extension, `python -m pytest bindings/python/tests/ -q`: **37 passed**; binding fmt/clippy pass.
 - `python3 scripts/gen-binding-contract-facades.py --check` and `git diff --check`: pass.

@@ -46,8 +46,8 @@ usage event and a validated finish:
 | `/api/coding/paas/v4` Chat | `openai_terminal_chunk_usage` | 16 | 0 | 0 | 3 |
 | `/api/anthropic` Messages | `anthropic_implicit_cache` | 16 | 0 | 0 | 3 |
 
-The [sanitized artifact](artifacts/embedded-endpoint-profiles-2026-11-12.json)
-pins factory and wheel hashes. No credential, raw model response, header or error
+The [sanitized qualification summary](artifacts/embedded-endpoint-profiles-2026-11-12.json)
+summarizes the factory and binding checks. No credential, raw model response, header or error
 body was exported. Chat also reported two reasoning tokens; this export did not
 select the canonical inclusion flag, so it makes no derived billable-total claim.
 Missing Messages reasoning is kept absent. These small calls establish no cache

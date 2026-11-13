@@ -2,7 +2,6 @@
   "observed_at": "2026-11-12T06:03:58.209848+00:00",
   "model": "glm-5.3",
   "purpose": "Structural inspection only; content and signatures omitted",
-  "source_metadata_sha256": "bacfe441020b4d0f40adfdabb2036941ee2036f0bdfc48b79bbb0b6657e43d4c",
   "event_shapes": [
     {
       "fields": [
@@ -115,5 +114,10 @@
       "type": "message_stop",
       "occurrences": 1
     }
-  ]
+  ],
+  "publication": {
+    "form": "sanitized summary",
+    "redactions": "Private artifact locations and fingerprints, process identifiers and observed correlation values are omitted or aliased. Numerical results and useful public source/version references are retained.",
+    "original_records": "Unmodified operational records and original hashes are retained privately; this derivative is not a raw capture."
+  }
 }

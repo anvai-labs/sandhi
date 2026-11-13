@@ -43,7 +43,7 @@ diagnostics contain bounded static reasons, without SQL, reference values or sec
 
 ## Qualification
 
-[Artifact pins and report/log hashes](artifacts/native-proof-work-2026-11-13.json)
+[Sanitized qualification summary](artifacts/native-proof-work-2026-11-13.json)
 retain the base failure and corrected evidence. The complete corrected workspace
 passes **1,300 tests**, with zero failures and 13 separately qualified/explicitly
 ignored cases. The exact failing feature lane passes **717 proxy/store tests**.
@@ -55,14 +55,14 @@ deadline failure, the same budget across frames, dynamic shutdown shortening,
 canceled and queued workers, inert bodies, sealed late admission, and public
 serving refusing clean completion while actual proof work remains blocked.
 
-A new immutable gateway snapshot (`b43a641becc32535fcece302c94a0a8016bc68a1c5a9e14b950f3632810561fd`)
+The immutable gateway snapshot used for this qualification
 passes all **48 live GLM calls** across the 24 client/backend/delivery combinations.
 Chat/Responses use default thinking; Messages explicitly disables thinking for
 portable output. All SDK usage and original paired evidence match. Positive source
 cache-read observations appear on all three endpoints. These remain neutral unit
 observations, not guaranteed warm-cache behavior or dollar savings.
 
-This local result does not make the failed base CI green. The corrected exact
-commit needs its own public CI and protected promotion before the authorized
-0.17.0 tag and all-target publication. Earlier historical native-exit/timing
-causes remain explicitly unproven.
+Local qualification does not replace exact-source CI or artifact verification.
+The original failure and corrected result remain distinct historical observations;
+no unsupported cause is assigned to earlier native-exit or timing failures. Use the
+[release notes](../releases/v0.17.1.md) for publication and installation status.

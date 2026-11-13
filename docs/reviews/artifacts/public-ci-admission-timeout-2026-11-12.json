@@ -17,7 +17,7 @@
   "warning": {
     "phase": "admission",
     "reason": "wait_timeout",
-    "request_id": "req_1794483399643_449"
+    "request_id": "example-correlation-386"
   },
   "origin_call_count": null,
   "receipt_count": null,
@@ -27,7 +27,6 @@
     "Same failure shape as retained local admission timeout; root cause remains unproven.",
     "Passing SDK/dashboard, docs and earlier stress runs do not resolve the reliability gate."
   ],
-  "failed_log_sha256": "affef8d0eedab1526aeeb005809470722d1716c61cbe9228d64ba6f80d8baaa3",
   "public_runners_verified": true,
   "jobs": [
     {
@@ -142,5 +141,10 @@
       ],
       "conclusion": "failure"
     }
-  ]
+  ],
+  "publication": {
+    "form": "sanitized summary",
+    "redactions": "Private artifact locations and fingerprints, process identifiers and observed correlation values are omitted or aliased. Numerical results and useful public source/version references are retained.",
+    "original_records": "Unmodified operational records and original hashes are retained privately; this derivative is not a raw capture."
+  }
 }

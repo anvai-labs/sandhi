@@ -60,8 +60,8 @@ The raw local original remains under `target/`, SHA-256
 Command from the Sandhi root (the output directory must be private and disposable):
 
 ```sh
-SANDHI_AGENTBROWSER_ROOT=/home/vsingh/code/agentbrowser \
-SANDHI_DECISION_EVIDENCE_DIR=/home/vsingh/code/sandhi/target/m1-decision-evidence-2b4788b \
+SANDHI_AGENTBROWSER_ROOT=/path/to/agentbrowser \
+SANDHI_DECISION_EVIDENCE_DIR=./target/m1-decision-evidence \
   /tmp/sandhi-decision-venv.taSymF/bin/python -m pytest tests/sdk-conformance/ -q \
   --junitxml=target/m1-decision-evidence-2b4788b-junit.xml
 ```

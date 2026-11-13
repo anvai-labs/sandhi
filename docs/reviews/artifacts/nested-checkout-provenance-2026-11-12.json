@@ -28,20 +28,11 @@
         "path": ".inferflux-pinned/",
         "kind": "nested_git_repository",
         "head": "2714e1331e34060346743711957a4fb1821c7fff",
-        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "contents_inventoried": false
       },
       "source_parent": "3e3a3a72d99f4d0efbe3792ead38b4828c4c7190",
       "scope": "synthetic nested Git checkout plus existing real HTTP/TLS process fixture, unchanged6second/no-replay/retained-liability checks"
     }
-  },
-  "sha256": {
-    "public_sdk_failed_log": "c7c7c776336e67554463888a69da24aeb42d8bca2f8a9dace2a51b9d547c3aad",
-    "old_helper_red_log": "27932e042ac51426b705079c497d1fea5d445ff04ed7c1a9f67946663060642f",
-    "new_provenance_log": "c1b9970d9ba1306b6beaf0105d2da0b7d1bf8b0d24750646d0a8fcfe102621cf",
-    "nested_real_tls_fixture_log": "c972b257d505bb1ba3c12af07677ae6c33fd74cacb2197f641d9529df3f962dc",
-    "corrected_public_sdk_log": "186957677dc4aed31a72f306da6e5faba3d8a98cc732be5318192a6bd53143a2",
-    "corrected_public_allocations": "ab070403903bc9f7805d8b077e18ecd709e3d70c5592b8e314da157c2cbbd862"
   },
   "limits": [
     "The corrected complete public SDK run passed on397d537; the original failed run remains retained. Neither result qualifies subsequent source changes or clears separate reliability gates.",
@@ -174,5 +165,10 @@
       }
     ],
     "scope": "Exact corrected source; does not qualify later peer or identity/default migrations."
+  },
+  "publication": {
+    "form": "sanitized summary",
+    "redactions": "Private artifact locations and fingerprints, process identifiers and observed correlation values are omitted or aliased. Numerical results and useful public source/version references are retained.",
+    "original_records": "Unmodified operational records and original hashes are retained privately; this derivative is not a raw capture."
   }
 }

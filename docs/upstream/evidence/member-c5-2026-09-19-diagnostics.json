@@ -1,46 +1,31 @@
 {
   "schema_version": 1,
   "verified_at": "2026-09-19T04:29:52.800076+00:00",
-  "source_capture": "victor-member-capture-63ad80a3f502",
-  "replay_run": "member-joint-e7a3f553602c",
-  "manifest_sha256": "9257a1d1276eb3a8e6a76b499dcb9c9f4d4452e4e62f9523d5e175776933a73f",
-  "replay_script_sha256": "851bc2fc29914782aec42ed6916870209143180d35d94abbc428c539c4029186",
-  "local_replay_adapter_sha256": "09788dc718ab70719b84d1c03a4d5a06ec6da44d2bc9ffdd259b98f2f5fe3799",
+  "source_capture": "example-correlation-413",
+  "replay_run": "example-correlation-017",
   "preflight_limitation": "Supplied script stopped before any model calls on empty Sandhi static catalog; local adapter records empty catalog and relies on independently verified route plus ready origin",
   "sandhi_develop_at_start": "647d7d5df064b3b3c3e74ee8635521f82d3552cb",
   "runtime_before": {
     "inferflux": {
-      "pid": 554660,
       "source_checkout_sha": "aea7a24d035fd386ce24db4f8cc68710b4b11543",
       "source_tree": "161ed6218b52ed75cc093a9c5bee895a9e2f4557",
-      "executable": "/home/vsingh/code/inferflux-worktrees/fix-victor-codesign/build-rocm/inferfluxd",
-      "binary_sha256": "cff60d525a60d26574013696f012d27a63a1ad1c7cfa1cbde634bbec19ed499d",
       "provenance": "Verified preserved launch checkout and binary fingerprint; not embedded signed build attestation"
     },
     "sandhi": {
-      "pid": 1499867,
       "source_checkout_sha": "324090639998d39a1512899e3c15f2ab8c23aa1e",
       "source_tree": "c9c1541daad0dd0c3143a37d43421ce9f98c3975",
-      "executable": "/tmp/sandhi-bounded-usage-diagnostics/target/debug/sandhi-proxy",
-      "binary_sha256": "604155cecdc0b122c8fdc972f23926e8ac1465d1cc2b9c63f8798c43c25ff9e7",
       "provenance": "Verified preserved launch checkout and binary fingerprint; not embedded signed build attestation"
     }
   },
   "runtime_after": {
     "inferflux": {
-      "pid": 554660,
       "source_checkout_sha": "aea7a24d035fd386ce24db4f8cc68710b4b11543",
       "source_tree": "161ed6218b52ed75cc093a9c5bee895a9e2f4557",
-      "executable": "/home/vsingh/code/inferflux-worktrees/fix-victor-codesign/build-rocm/inferfluxd",
-      "binary_sha256": "cff60d525a60d26574013696f012d27a63a1ad1c7cfa1cbde634bbec19ed499d",
       "provenance": "Verified preserved launch checkout and binary fingerprint; not embedded signed build attestation"
     },
     "sandhi": {
-      "pid": 1499867,
       "source_checkout_sha": "324090639998d39a1512899e3c15f2ab8c23aa1e",
       "source_tree": "c9c1541daad0dd0c3143a37d43421ce9f98c3975",
-      "executable": "/tmp/sandhi-bounded-usage-diagnostics/target/debug/sandhi-proxy",
-      "binary_sha256": "604155cecdc0b122c8fdc972f23926e8ac1465d1cc2b9c63f8798c43c25ff9e7",
       "provenance": "Verified preserved launch checkout and binary fingerprint; not embedded signed build attestation"
     }
   },
@@ -51,10 +36,10 @@
   },
   "same_model_same_origin_verified": true,
   "origin_ready_before_after": true,
-  "wire_sha256": "559aace81f221036d14ba7474c2e55a9a6fa8515fda2d445603faef9a73d66e0",
+  "wire_sha256": "3e66bcfff1af8eaa487c6f5f3d46f0d2a1d4f0f628658093c4c7023317d8edd7",
   "session_mapping": {
-    "direct": "member-joint-e7a3f553602c-direct",
-    "gateway": "member-joint-e7a3f553602c-gateway"
+    "direct": "example-correlation-018",
+    "gateway": "example-correlation-024"
   },
   "calls": [
     {
@@ -73,9 +58,9 @@
         "occurred_at": "2026-09-19T04:29:35.265443015Z",
         "provider": "inferflux",
         "reasoning_included": true,
-        "request_id": "req_1789792172033_0",
-        "run_id": "member-joint-e7a3f553602c-gateway",
-        "session_id": "member-joint-e7a3f553602c-gateway",
+        "request_id": "example-correlation-025",
+        "run_id": "example-correlation-024",
+        "session_id": "example-correlation-024",
         "tokens_in": 1701,
         "tokens_out": 197
       },
@@ -98,9 +83,9 @@
         "occurred_at": "2026-09-19T04:29:40.381154166Z",
         "provider": "inferflux",
         "reasoning_included": true,
-        "request_id": "req_1789792177822_1",
-        "run_id": "member-joint-e7a3f553602c-gateway",
-        "session_id": "member-joint-e7a3f553602c-gateway",
+        "request_id": "example-correlation-026",
+        "run_id": "example-correlation-024",
+        "session_id": "example-correlation-024",
         "tokens_in": 1932,
         "tokens_out": 140
       },
@@ -123,9 +108,9 @@
         "occurred_at": "2026-09-19T04:29:44.132852914Z",
         "provider": "inferflux",
         "reasoning_included": true,
-        "request_id": "req_1789792181807_2",
-        "run_id": "member-joint-e7a3f553602c-gateway",
-        "session_id": "member-joint-e7a3f553602c-gateway",
+        "request_id": "example-correlation-027",
+        "run_id": "example-correlation-024",
+        "session_id": "example-correlation-024",
         "tokens_in": 2443,
         "tokens_out": 105
       },
@@ -148,9 +133,9 @@
         "occurred_at": "2026-09-19T04:29:48.501524171Z",
         "provider": "inferflux",
         "reasoning_included": true,
-        "request_id": "req_1789792187037_3",
-        "run_id": "member-joint-e7a3f553602c-gateway",
-        "session_id": "member-joint-e7a3f553602c-gateway",
+        "request_id": "example-correlation-028",
+        "run_id": "example-correlation-024",
+        "session_id": "example-correlation-024",
         "tokens_in": 3099,
         "tokens_out": 18
       },
@@ -173,9 +158,9 @@
         "occurred_at": "2026-09-19T04:29:52.655155477Z",
         "provider": "inferflux",
         "reasoning_included": true,
-        "request_id": "req_1789792190445_4",
-        "run_id": "member-joint-e7a3f553602c-gateway",
-        "session_id": "member-joint-e7a3f553602c-gateway",
+        "request_id": "example-correlation-029",
+        "run_id": "example-correlation-024",
+        "session_id": "example-correlation-024",
         "tokens_in": 4026,
         "tokens_out": 45
       },
@@ -200,5 +185,10 @@
     "Reporting consistency, not tokenizer accuracy, positive reuse or session-lease execution proof",
     "No SSE/cancellation, new-binary GPU or full mixed-team acceptance; C5 remains partially open"
   ],
-  "passed": true
+  "passed": true,
+  "publication": {
+    "form": "sanitized summary",
+    "redactions": "Private artifact locations and fingerprints, process identifiers and observed correlation values are omitted or aliased. Numerical results and useful public source/version references are retained.",
+    "original_records": "Unmodified operational records and original hashes are retained privately; this derivative is not a raw capture."
+  }
 }

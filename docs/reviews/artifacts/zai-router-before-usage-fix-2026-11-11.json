@@ -16,8 +16,6 @@
       "stream": false,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "The user wants a Python identity function named `identity`. An identity function returns its argument unchanged. They want only the code returned.\n\nThe simplest form:\n\n```python\ndef identity(x):\n    return x\n```\n\nShould I use type hints? The request is minimal, so keeping it simple is best. Return only the code as requested.",
       "usage": [
         {
           "completion_tokens": 82,
@@ -43,8 +41,6 @@
       "stream": true,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "The user wants a Python identity function named `identity` that returns its argument. They want only the code. Simple task.",
       "usage": [
         {
           "completion_tokens": 39,
@@ -70,8 +66,6 @@
       "stream": false,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "cache_creation_input_tokens": 0,
@@ -92,8 +86,6 @@
       "stream": true,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "The user wants a Python identity function named `identity`. An identity function returns its input unchanged. They want only the code.\n\nThe simplest version:\n\n```python\ndef identity(x):\n    return x\n```\n\nThat's the classic identity function. Return only the code, no explanation.",
       "usage": [
         {
           "input_tokens": 0,
@@ -119,8 +111,6 @@
       "stream": false,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "candidates_token_count": 14,
@@ -141,8 +131,6 @@
       "stream": true,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "candidates_token_count": 14,
@@ -163,8 +151,6 @@
       "stream": false,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 25,
@@ -189,8 +175,6 @@
       "stream": true,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 25,
@@ -215,14 +199,11 @@
       "stream": false,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "completion_tokens": 42,
           "prompt_tokens": 25,
           "total_tokens": 67,
-          "completion_tokens_details": {},
           "prompt_tokens_details": {
             "cached_tokens": 0
           }
@@ -240,14 +221,11 @@
       "stream": true,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "The user wants a Python identity function named `identity`. An identity function returns its input unchanged. They said \"Return only the code\" so I should just provide the code without explanation.",
       "usage": [
         {
           "completion_tokens": 51,
           "prompt_tokens": 0,
           "total_tokens": 51,
-          "completion_tokens_details": {},
           "prompt_tokens_details": {
             "cached_tokens": 0
           }
@@ -265,8 +243,6 @@
       "stream": false,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "The user wants a Python identity function named `identity`. An identity function returns its argument unchanged. They want only the code, so I should return just the code without explanation.",
       "usage": [
         {
           "cache_read_input_tokens": 0,
@@ -290,8 +266,6 @@
       "stream": true,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "The user wants a Python identity function named `identity`. An identity function returns its argument unchanged. They said \"Return only the code.\"",
       "usage": [
         {
           "input_tokens": 0,
@@ -319,8 +293,6 @@
       "stream": false,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "candidates_token_count": 95,
@@ -340,8 +312,6 @@
       "stream": true,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "candidates_token_count": 106,
@@ -361,8 +331,6 @@
       "stream": false,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 25,
@@ -387,8 +355,6 @@
       "stream": true,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 0,
@@ -413,8 +379,6 @@
       "stream": false,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "completion_tokens": 92,
@@ -440,8 +404,6 @@
       "stream": true,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "completion_tokens": 39,
@@ -467,8 +429,6 @@
       "stream": false,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "cache_creation_input_tokens": 0,
@@ -489,8 +449,6 @@
       "stream": true,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 0,
@@ -516,8 +474,6 @@
       "stream": false,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "candidates_token_count": 14,
@@ -538,8 +494,6 @@
       "stream": true,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "candidates_token_count": 14,
@@ -560,8 +514,6 @@
       "stream": false,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 25,
@@ -587,8 +539,6 @@
       "stream": true,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 25,
@@ -623,7 +573,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 68,
-      "request_id": "req_1794431973234_0",
+      "request_id": "example-correlation-059",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
       "tokens_in": 25,
@@ -642,7 +592,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 25,
-      "request_id": "req_1794431975464_1",
+      "request_id": "example-correlation-060",
       "time_to_first_token_ms": 1201,
       "time_to_first_token_source": "boundary",
       "tokens_in": 25,
@@ -661,7 +611,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 80,
-      "request_id": "req_1794431977102_2",
+      "request_id": "example-correlation-061",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
       "tokens_in": 25,
@@ -680,7 +630,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 57,
-      "request_id": "req_1794431979702_3",
+      "request_id": "example-correlation-062",
       "time_to_first_token_ms": 867,
       "time_to_first_token_source": "boundary",
       "tokens_in": 25,
@@ -699,7 +649,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 74,
-      "request_id": "req_1794431981443_4",
+      "request_id": "example-correlation-063",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
       "tokens_in": 25,
@@ -718,7 +668,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 26,
-      "request_id": "req_1794431983767_5",
+      "request_id": "example-correlation-064",
       "time_to_first_token_ms": 902,
       "time_to_first_token_source": "boundary",
       "tokens_in": 25,
@@ -737,7 +687,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 51,
-      "request_id": "req_1794431985215_6",
+      "request_id": "example-correlation-065",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
       "tokens_in": 25,
@@ -756,7 +706,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 25,
-      "request_id": "req_1794431987309_7",
+      "request_id": "example-correlation-066",
       "time_to_first_token_ms": 954,
       "time_to_first_token_source": "boundary",
       "tokens_in": 25,
@@ -775,7 +725,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794431989085_8",
+      "request_id": "example-correlation-067",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
       "tokens_in": 25,
@@ -794,7 +744,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794431990611_9",
+      "request_id": "example-correlation-068",
       "time_to_first_token_ms": 848,
       "time_to_first_token_source": "boundary",
       "tokens_in": 0,
@@ -813,7 +763,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794431992071_10",
+      "request_id": "example-correlation-069",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
       "tokens_in": 25,
@@ -832,7 +782,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794431996248_11",
+      "request_id": "example-correlation-070",
       "time_to_first_token_ms": 843,
       "time_to_first_token_source": "boundary",
       "tokens_in": 0,
@@ -851,7 +801,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794431997559_12",
+      "request_id": "example-correlation-071",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
       "tokens_in": 25,
@@ -870,7 +820,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794431999696_13",
+      "request_id": "example-correlation-072",
       "time_to_first_token_ms": 851,
       "time_to_first_token_source": "boundary",
       "tokens_in": 0,
@@ -889,7 +839,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794432002198_14",
+      "request_id": "example-correlation-073",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
       "tokens_in": 25,
@@ -908,7 +858,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794432004359_15",
+      "request_id": "example-correlation-074",
       "time_to_first_token_ms": 952,
       "time_to_first_token_source": "boundary",
       "tokens_in": 0,
@@ -927,7 +877,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 78,
-      "request_id": "req_1794432006252_16",
+      "request_id": "example-correlation-075",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
       "tokens_in": 25,
@@ -946,7 +896,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 25,
-      "request_id": "req_1794432008970_17",
+      "request_id": "example-correlation-076",
       "time_to_first_token_ms": 1940,
       "time_to_first_token_source": "boundary",
       "tokens_in": 25,
@@ -965,7 +915,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 114,
-      "request_id": "req_1794432010965_18",
+      "request_id": "example-correlation-077",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
       "tokens_in": 25,
@@ -984,7 +934,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 32,
-      "request_id": "req_1794432013319_19",
+      "request_id": "example-correlation-078",
       "time_to_first_token_ms": 726,
       "time_to_first_token_source": "boundary",
       "tokens_in": 25,
@@ -1003,7 +953,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 26,
-      "request_id": "req_1794432014670_20",
+      "request_id": "example-correlation-079",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
       "tokens_in": 25,
@@ -1022,7 +972,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 89,
-      "request_id": "req_1794432016483_21",
+      "request_id": "example-correlation-080",
       "time_to_first_token_ms": 796,
       "time_to_first_token_source": "boundary",
       "tokens_in": 25,
@@ -1041,7 +991,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 117,
-      "request_id": "req_1794432018418_22",
+      "request_id": "example-correlation-081",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
       "tokens_in": 25,
@@ -1060,7 +1010,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 79,
-      "request_id": "req_1794432020933_23",
+      "request_id": "example-correlation-082",
       "time_to_first_token_ms": 863,
       "time_to_first_token_source": "boundary",
       "tokens_in": 25,
@@ -1086,5 +1036,10 @@
       "cell-13: implausibly empty input measurement for the known synthetic prompt",
       "cell-15: implausibly empty input measurement for the known synthetic prompt"
     ]
+  },
+  "publication": {
+    "form": "sanitized summary",
+    "redactions": "Private artifact locations and fingerprints, process identifiers and observed correlation values are omitted or aliased. Numerical results and useful public source/version references are retained. Generated provider text and reasoning transcripts are omitted.",
+    "original_records": "Unmodified operational records and original hashes are retained privately; this derivative is not a raw capture."
   }
 }

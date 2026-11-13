@@ -5,14 +5,12 @@ Sandhi combines protocol translation, backend-specific cache controls and neutra
 usage accounting at the gateway, alongside [local egress policy](../operator/policy-evaluation.md)
 and [embedded ONNX evaluation](../operator/embedded-onnx.md).
 
-!!! info "Prepared source release; qualification remains endpoint-specific"
-    Sandhi **0.17.0** and Victor **0.29.0** are prepared, unpublished source versions.
-    Four client dialects and explicit backend profiles are implemented. Coordinated
-    gateway peering, immutable budget namespaces and mandatory durable HTTP
-    execution are current implementation candidates. Integrated acceptance,
-    packaging, broader cache lifecycle and retained reliability work remain
-    [release gates](../td/TD-0034-protocol-neutral-router-cache-accounting.md).
-    A passing docs build or a configured backend does not qualify a deployment.
+!!! info "Release and qualification scope"
+    Sandhi **0.17.1** is the published baseline. This guide also describes the
+    **0.18 source candidate**; Victor **0.29.0** remains a coordinated source
+    candidate. Use the [release notes](../releases/v0.17.1.md) when selecting an
+    installed version. A configured backend or successful docs build does not
+    establish deployment, cache lifecycle or subscription acceptance.
 
 ## One operator workflow
 
@@ -182,7 +180,7 @@ Dashboard **Observed units** and run totals are normalized usage observations.
 They are not currency amounts or committed charges. The Usage evidence API is a
 bounded logical-call observation view; it does not supply a complete physical
 attempt/receipt inventory. Use the [accounting contract](attempt-accounting-and-evidence.md)
-when evaluating settlement. The [gateway peer contract work](../td/TD-0034-protocol-neutral-router-cache-accounting.md#next-increments-identified-by-parallel-investigation)
+when evaluating settlement. The [gateway peer contract work](../td/TD-0034-protocol-neutral-router-cache-accounting.md#engineering-qualification)
 coordinates response conventions and a single server-side cache compiler; it does
 not turn metadata into credential authority.
 

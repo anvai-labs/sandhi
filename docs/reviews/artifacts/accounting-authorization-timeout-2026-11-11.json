@@ -2,9 +2,13 @@
   "scope": "synthetic workspace recurrence before publication",
   "commit": "84e04c3eb25f9d23ca4ceff42ab9df656428f83f",
   "command": "RUST_LOG=sandhi_proxy=warn cargo test --workspace",
-  "original_log_sha256": "004ad37a06b34fa2faa080edb533703c38de01d646d7bb7e391e43c0abb1cf92",
   "failed_request_header_captured": false,
-  "matching_transition_warning": "2026-11-12T03:47:52.027556Z WARN sandhi_proxy::settlement::buffered: tracked dispatch authorization unresolved request_id=req_1794455270013_191 reason=\"wait_timeout\"",
-  "failure": "---- owned_buffered_back_leg_never_races_its_primary_settle stdout ----\n\nthread 'owned_buffered_back_leg_never_races_its_primary_settle' (3174696) panicked at crates/sandhi-proxy/tests/proxy.rs:4568:13:\ncall 79: 502 Bad Gateway, {\"error\":{\"code\":\"invalid_request\",\"http_status\":502,\"message\":\"accounting unresolved; upstream may have completed; do not automatically retry\",\"retryable\":false}}, retained=1, events=Some(UsageEvent { schema_version: \"1\", request_id: \"req_1794455269957_190\", occurred_at: \"2026-11-12T03:47:49.984552637Z\", provider: \"openai\", model: \"gpt-4o-mini\", backend: External, virtual_key_id: Some(\"vk_demo\"), subject_id: Some(\"alice\"), group_id: Some(\"platform\"), route: Some(\"/v1/chat/completions\"), session_id: None, idempotency_key: None, run_id: None, step_id: None, parent_id: None, trace_context: None, tokens_in: 10, tokens_out: 2, cache_creation_tokens: 0, cache_read_tokens: 0, cache_read_observation: Some(CacheReadObservation { status: Absent, source: OriginUsage }), usage_completeness: Final, usage_basis: ProviderReported, attempts: 1, outcome: Some(\"success\"), upstream_request_id: None, gpu_seconds: None, duration_ms: Some(1), duration_source: Some(Boundary), time_to_first_token_ms: None, time_to_first_token_source: None, reasoning_tokens: None, reasoning_included: Some(true) })\n\n\nfailures:\n    owned_buffered_back_leg_never_races_its_primary_settle\n\ntest result: FAILED. 81 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.93s",
-  "interpretation_limits": "The test printed the last sink event, which can belong to the previous successful call. It does not establish usage or dispatch for the failed call. Request191 authorization wait_timeout is consistent with the next call but the failed response request-id header was not captured. Cause remains unproven; successful reruns do not resolve the gate."
+  "matching_transition_warning": "example-correlation-005",
+  "failure": "example-correlation-002",
+  "interpretation_limits": "The test printed the last sink event, which can belong to the previous successful call. It does not establish usage or dispatch for the failed call. Request191 authorization wait_timeout is consistent with the next call but the failed response request-id header was not captured. Cause remains unproven; successful reruns do not resolve the gate.",
+  "publication": {
+    "form": "sanitized summary",
+    "redactions": "Private artifact locations and fingerprints, process identifiers and observed correlation values are omitted or aliased. Numerical results and useful public source/version references are retained.",
+    "original_records": "Unmodified operational records and original hashes are retained privately; this derivative is not a raw capture."
+  }
 }

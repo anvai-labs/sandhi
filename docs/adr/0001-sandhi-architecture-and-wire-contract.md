@@ -4,11 +4,10 @@ Date: 2026-07-19
 
 ## Status
 
-Accepted (founding decision for this repo). Originates from **AnvaiOps ADR-0047**
-(authoritative open-core split + cross-repo homing), with sibling consumer decisions
-**victor FEP-0020 / ADR-018** and **ProximaDB ADR-067**. This ADR records the *internal*
-architecture of `sandhi` itself; ADR-0047 remains authoritative for the OSS↔commercial
-boundary.
+Accepted founding architecture decision for this repository. It defines Sandhi's
+Rust core, bindings, proxy and neutral usage contract. Pricing, billing and managed
+control-plane business policy remain downstream responsibilities; sibling consumers
+integrate against this public boundary.
 
 > **Amended 2026-07-22 by [ADR-0004](0004-two-plane-proxy-and-enforcement-boundary.md),
 > reconciled 2026-09-02.** The current four-crate layout, two-plane forwarding rule, and shipped
@@ -100,7 +99,7 @@ sandhi/
 
 ## References
 
-- AnvaiOps ADR-0047 (authoritative open-core split; D1–D10)
+- [Gateway product boundary](../product/gateway-vision-and-requirements.md)
 - victor FEP-0020 / ADR-018 (primary adopter + provider-transport migration)
 - ProximaDB ADR-067 (native-Rust consumer)
 - `schemas/usage-event.v1.schema.json` (the wire contract)

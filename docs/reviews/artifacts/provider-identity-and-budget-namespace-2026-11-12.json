@@ -2,130 +2,94 @@
   "evidence_kind": "configured_identity_and_immutable_budget_namespace",
   "status": "author validation complete; independent review and integrated gates required",
   "base": "f1c224e45a957e290c72f76989499b7dbb99cd3c plus staged explicit-peer patch and mechanical buffered declaration reorder",
-  "base_peer_patch_sha256": "ba7a1898eef161196ca8fef74572ead30dc24bbb840e5ffad33e412f7a8a7bea",
-  "isolated_source": "/tmp/sandhi-provider-identity",
   "changed_files_except_this_artifact": [
     {
-      "path": "crates/sandhi-providers/src/attempt.rs",
-      "sha256": "c8d49e3ac957516910495cef961e45fef12f90e8c619e626b76b031dc41ce995"
+      "path": "crates/sandhi-providers/src/attempt.rs"
     },
     {
-      "path": "crates/sandhi-providers/src/cache_policy.rs",
-      "sha256": "90b7442a0dcd74249be813805b6cf4df0f734bf73e9a0ae3c63dede03f466199"
+      "path": "crates/sandhi-providers/src/cache_policy.rs"
     },
     {
-      "path": "crates/sandhi-providers/src/factory.rs",
-      "sha256": "b5b765c8be08e8dd780cae5b6303ba2deb03e2f325b95cff48be37cf61bfcaf9"
+      "path": "crates/sandhi-providers/src/factory.rs"
     },
     {
-      "path": "crates/sandhi-providers/src/typed.rs",
-      "sha256": "0f776a5620408e48e3e41dedc50268ae8030afe6c88657fcaf19c502db676395"
+      "path": "crates/sandhi-providers/src/typed.rs"
     },
     {
-      "path": "crates/sandhi-providers/tests/provider_identity.rs",
-      "sha256": "b0fe0aae6e549f0c5a550953063e1cb0b377c83b772c64f60bd079daf9c6e105"
+      "path": "crates/sandhi-providers/tests/provider_identity.rs"
     },
     {
-      "path": "crates/sandhi-proxy/src/backend/registry.rs",
-      "sha256": "14ae42047176054bead6b77b7ef3c2f5e5257cc03a794171fde123c836b1ab6b"
+      "path": "crates/sandhi-proxy/src/backend/registry.rs"
     },
     {
-      "path": "crates/sandhi-proxy/src/lib.rs",
-      "sha256": "18b79bec021dc23a87019b703bd9c1e243105e364cde8ff9d8262d93b67c0e48"
+      "path": "crates/sandhi-proxy/src/lib.rs"
     },
     {
-      "path": "crates/sandhi-proxy/src/operator.rs",
-      "sha256": "edc7a3d4bb900c370668bbbb0e1793a51396da8e51815a4f2c2b9f30e0984af0"
+      "path": "crates/sandhi-proxy/src/operator.rs"
     },
     {
-      "path": "crates/sandhi-proxy/src/routing.rs",
-      "sha256": "dacd1f83a63423c3b62bf54808ed2a929a19e04352eb2a62dc84a407d1f346dc"
+      "path": "crates/sandhi-proxy/src/routing.rs"
     },
     {
-      "path": "crates/sandhi-proxy/src/settlement/attempts.rs",
-      "sha256": "a488cded1c0fdbddf8437ab1fb94aa9bfe37658d18d558343fb256877e602c3a"
+      "path": "crates/sandhi-proxy/src/settlement/attempts.rs"
     },
     {
-      "path": "crates/sandhi-proxy/src/settlement/context.rs",
-      "sha256": "a2c14cf1fb8b507138cabb1c5ae26d7399b31a848b96018f725d5f40e9b6f8dd"
+      "path": "crates/sandhi-proxy/src/settlement/context.rs"
     },
     {
-      "path": "crates/sandhi-proxy/tests/cache_policy.rs",
-      "sha256": "bd190142c8b0802b2f5bc5db361e66ae98793aa3f71d7f72778ea541edc3229f"
+      "path": "crates/sandhi-proxy/tests/cache_policy.rs"
     },
     {
-      "path": "crates/sandhi-proxy/tests/gateway_peer.rs",
-      "sha256": "3b4a3cb4c96f0380bc53fab81d63272c5a7f265f288510c8d70de557a38e0761"
+      "path": "crates/sandhi-proxy/tests/gateway_peer.rs"
     },
     {
-      "path": "crates/sandhi-proxy/tests/routing.rs",
-      "sha256": "3f2af9de25b6c16f1dae105313f1f87003d9cb1c072ab5e4ca5fe770fa2e487e"
+      "path": "crates/sandhi-proxy/tests/routing.rs"
     },
     {
-      "path": "crates/sandhi-store/src/backends.rs",
-      "sha256": "cc7ee4c307ff906b4120337914c40489cc6994f9d955833e6d15586e8817d49f"
+      "path": "crates/sandhi-store/src/backends.rs"
     },
     {
-      "path": "crates/sandhi-store/src/ledger/evidence/attempts.rs",
-      "sha256": "05752bc4687d0872a16883a344ba8e9b8e1d258757948e6159b322def3ab5069"
+      "path": "crates/sandhi-store/src/ledger/evidence/attempts.rs"
     },
     {
-      "path": "crates/sandhi-store/src/ledger/evidence/paired.rs",
-      "sha256": "65ef5cb6b52ee7b17a33f30dd08c84b5560ac5ab83cbc0f5140b6f876e167849"
+      "path": "crates/sandhi-store/src/ledger/evidence/paired.rs"
     },
     {
-      "path": "crates/sandhi-store/src/ledger/evidence.rs",
-      "sha256": "426f42fc68c8ba651860df109bafd0ab0e165bce41dccb050df9f70a95c809e5"
+      "path": "crates/sandhi-store/src/ledger/evidence.rs"
     },
     {
-      "path": "docs/adr/0042-provider-identity-and-budget-namespace.md",
-      "sha256": "08da4b3e8c2e3a3f15a13a8f5bbf8ac1047e13f2835b9c0563711b38a838b86f"
+      "path": "docs/adr/0042-provider-identity-and-budget-namespace.md"
     },
     {
-      "path": "docs/operator/backends.md",
-      "sha256": "90b1e0ae209220e05eaf079ad6c8ab191c729cce8ad5390317138d1a8d29de33"
+      "path": "docs/operator/backends.md"
     },
     {
-      "path": "docs/reviews/provider-identity-and-budget-namespace-2026-11-12.md",
-      "sha256": "838dc146658116a4143e183115dd98aa6b6ed8a9307f277110e461a8aecaeb9e"
+      "path": "docs/reviews/provider-identity-and-budget-namespace-2026-11-12.md"
     },
     {
-      "path": "mkdocs.yml",
-      "sha256": "94837dff03a0fe72ba8739801f88759b5175813c4a9b86c9f67baa181aa80552"
+      "path": "mkdocs.yml"
     },
     {
-      "path": "tests/sdk-conformance/test_dashboard.py",
-      "sha256": "5632d96f5e0213539d5bef512ab6e1e301cfde9d7544cad8fa7adda326e4bade"
+      "path": "tests/sdk-conformance/test_dashboard.py"
     },
     {
-      "path": "tests/sdk-conformance/test_recovery.py",
-      "sha256": "d10a0d42a8316b117b0e5a8cb994e645c1740fe30a93f87adda7aec378ceca08"
+      "path": "tests/sdk-conformance/test_recovery.py"
     }
   ],
   "logs": [
     {
-      "path": "/tmp/sandhi-provider-identity-core-final.log",
-      "sha256": "91b77476d4f952387b463ca2ca8ee5765cb951eea103e40f26401f1815320161",
       "claim": "576 passed, 3 ignored across 21 store/provider suites"
     },
     {
-      "path": "/tmp/sandhi-provider-identity-http-final.log",
-      "sha256": "0310d9946a186f563d4c6f610440869aeea607f1c6dd189f2d7d5ed7167d37cc",
       "claim": "42 passed across five proxy integration suites; includes 112 switching cells and eight old-only-cap refusals"
     },
     {
-      "path": "/tmp/sandhi-provider-identity-context-final.log",
-      "sha256": "5773c53c760ae72d40236a6c9d29518b977215b06fb2a85953131537d6953c05",
       "claim": "3 passed: namespace-context fence, legacy SQL pin/cache migration and estimator key preservation"
     },
     {
-      "path": "/tmp/sandhi-provider-identity-clippy-frozen.log",
-      "sha256": "20ceb575f1f36587778c65f7ae2192664ec7e06131b8b7fb9cd494371d746ad4",
       "claim": "default all-target warnings-denied on the three changed crates"
     },
     {
-      "path": "/tmp/sandhi-provider-identity-feature-clippy.log",
-      "sha256": "918309359f9b80f851add13f7f2e5979ecd9b9d123171cdc13994c7fbcabfec1",
       "claim": "proxy all-target ONNX/SentinelPass warnings-denied"
     }
   ],
@@ -137,5 +101,10 @@
     "Integrated SDK recovery/browser fixtures adapted and syntax checked but not rerun in this source copy.",
     "No full workspace or consumer SDK qualification claimed for this isolated increment.",
     "Namespace trust requires quiesced old writers; old readers reject new diagnostic evidence format."
-  ]
+  ],
+  "publication": {
+    "form": "sanitized summary",
+    "redactions": "Private artifact locations and fingerprints, process identifiers and observed correlation values are omitted or aliased. Numerical results and useful public source/version references are retained.",
+    "original_records": "Unmodified operational records and original hashes are retained privately; this derivative is not a raw capture."
+  }
 }

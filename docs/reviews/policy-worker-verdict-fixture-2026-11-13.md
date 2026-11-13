@@ -22,7 +22,7 @@ remain unchanged. No runtime implementation or retry behavior changes.
 The whole corrected target passes locally in both default and the failing
 OpenTelemetry lane: seven passed and one existing pinned-ML fixture ignored in
 each. The [artifact](artifacts/policy-worker-verdict-fixture-2026-11-13.json) pins
-patch, controlled evidence and integrated/public log hashes. Full new exact-tip
+the controlled results and public source context. Full new exact-tip
 public CI remains a required gate; the earlier failed run is retained.
 
 The same checkpoint aligns current operator, recovery, metering, subscription,

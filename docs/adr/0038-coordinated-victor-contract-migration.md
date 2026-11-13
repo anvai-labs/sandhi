@@ -1,8 +1,8 @@
 # ADR-0038: Coordinate Victor and Sandhi around one execution contract
 
 - Status: Accepted direction; implementation and qualification in progress.
-- Authority: User instruction on 2026-11-12: Victor is the only Sandhi client;
-  migrate both rather than maintain a legacy mode for compatibility.
+- Scope: coordinate the Victor consumer and Sandhi contract migration rather
+  than preserve a permissive compatibility mode.
 - Tracks: [TD-0034](../td/TD-0034-protocol-neutral-router-cache-accounting.md).
 
 ## Decision

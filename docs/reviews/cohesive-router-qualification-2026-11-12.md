@@ -10,10 +10,6 @@ and [ADR-0044](../adr/0044-native-reference-ownership.md).
 ## Source and validation boundary
 
 Reviewed checkpoint base: `6918368183b167c73ab74d7ffd1f78733ad8e6ef`.
-Candidate executable SHA256:
-`62a271b679f248c41de4d13ad4b2bfed5f447766ffb658b9b75b7ed98b0d7862`.
-Python wheel SHA256:
-`4e049eb7f876cd387c5c3343b88efd073e879d09adb9cb6cf3d962af5274c7bb`.
 The binary was frozen from Cargo-selected output before inference and browser tests.
 Later corrections below change test synchronization/expectations only. Exact final
 commit review and remote CI remain distinct gates.
@@ -45,7 +41,7 @@ correction weakens accounting or replaces a deadline with a sleep.
 
 ## Live GLM protocol and cache evidence
 
-[Sanitized summary and report hashes](artifacts/cohesive-router-qualification-2026-11-12.json)
+[Sanitized qualification summary](artifacts/cohesive-router-qualification-2026-11-12.json)
 retain both the initial failure run and the portable-output qualification.
 No credential, full prompt, output content, authorization header or refresh token
 is included in this artifact.

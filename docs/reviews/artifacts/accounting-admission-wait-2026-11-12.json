@@ -1,23 +1,17 @@
 {
   "evidence_kind": "local_unresolved_accounting_wait",
   "source_parent": "a74a8f14a326ba93d745887a22007d9b9080682f",
-  "working_diff_sha256": "9c3709f4be02b90d37217007c1c040c6fd5242154c51139fdfe341d828fa256d",
-  "new_source_sha256": {
-    "crates/sandhi-core/src/endpoint.rs": "e055ca69734f0bdaa240140580b68d8ae37110feed5ab60900127ddab913836e",
-    "crates/sandhi-providers/src/factory.rs": "fa763a65fde4ed94dc01f29c32f8b6bca5f76a87d9ac1f5be55a0eaec8464ce4"
-  },
   "command": "cargo test --workspace",
   "concurrent_work": "Candidate Python wheel build; separate Cargo target. No live provider requests.",
-  "log_sha256": "d51bc07e981dc1f01b853c2308c7b26dc2af8ebf37125f8bdb75b765ef479c14",
   "failure": {
     "test": "owned_buffered_back_leg_never_races_its_primary_settle",
-    "request_id": "req_1794503158593_254",
+    "request_id": "example-correlation-398",
     "call_ordinal": 128,
     "http_status": 502,
     "retryable": false,
     "retained_jobs": 1,
     "observed_total_upstream_calls": 127,
-    "last_printed_usage_request_id": "req_1794503158374_253"
+    "last_printed_usage_request_id": "example-correlation-397"
   },
   "wait_trace": {
     "transition": "admission",
@@ -45,5 +39,10 @@
     "No later completion, reservation or receipt database join is exported.",
     "The log contains separate controlled queued late-admission waits; those are not assigned to this request."
   ],
-  "disposition": "Unresolved reliability/merge gate. Preserve this new admission occurrence separately from the earlier terminal-settlement stall. No deadline increase, replay or inferred zero."
+  "disposition": "Unresolved reliability/merge gate. Preserve this new admission occurrence separately from the earlier terminal-settlement stall. No deadline increase, replay or inferred zero.",
+  "publication": {
+    "form": "sanitized summary",
+    "redactions": "Private artifact locations and fingerprints, process identifiers and observed correlation values are omitted or aliased. Numerical results and useful public source/version references are retained.",
+    "original_records": "Unmodified operational records and original hashes are retained privately; this derivative is not a raw capture."
+  }
 }

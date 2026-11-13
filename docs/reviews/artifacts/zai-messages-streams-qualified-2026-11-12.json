@@ -20,7 +20,6 @@
   "endpoint_profiles": {
     "messages": "anthropic_implicit_cache"
   },
-  "harness_sha256": "833893ef1ff5bac3b93417398d71f5b331af0fd332420d3f02596fbf918a2943",
   "cache_pairs": true,
   "cells": [
     {
@@ -30,14 +29,11 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "messages-chat-1-0",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "",
       "usage": [
         {
           "completion_tokens": 14,
           "prompt_tokens": 3781,
           "total_tokens": 3795,
-          "completion_tokens_details": {},
           "prompt_tokens_details": {
             "cached_tokens": 3776
           }
@@ -56,14 +52,11 @@
       "repeat": 1,
       "status": "ok",
       "step_id": "messages-chat-1-1",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "",
       "usage": [
         {
           "completion_tokens": 14,
           "prompt_tokens": 3781,
           "total_tokens": 3795,
-          "completion_tokens_details": {},
           "prompt_tokens_details": {
             "cached_tokens": 3776
           }
@@ -82,8 +75,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "messages-messages-1-0",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 0,
@@ -112,8 +103,6 @@
       "repeat": 1,
       "status": "ok",
       "step_id": "messages-messages-1-1",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 0,
@@ -142,8 +131,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "messages-gemini-1-0",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "",
       "usage": [
         {
           "cached_content_token_count": 3776,
@@ -165,8 +152,6 @@
       "repeat": 1,
       "status": "ok",
       "step_id": "messages-gemini-1-1",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "",
       "usage": [
         {
           "cached_content_token_count": 3776,
@@ -188,8 +173,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "messages-responses-1-0",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 3781,
@@ -215,8 +198,6 @@
       "repeat": 1,
       "status": "ok",
       "step_id": "messages-responses-1-1",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 3781,
@@ -236,7 +217,6 @@
       "usage_rows_observed": 8
     }
   ],
-  "gateway_binary_sha256": "c021d18db2f0dad2768265cf72bdfbc9a763ca2fc43987d45c20ea2e0feaee57",
   "usage_events": [
     {
       "backend": "external",
@@ -251,7 +231,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794464627154_0",
+      "request_id": "example-correlation-352",
       "step_id": "messages-chat-1-0",
       "time_to_first_token_ms": 1979,
       "time_to_first_token_source": "boundary",
@@ -271,7 +251,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794464629307_1",
+      "request_id": "example-correlation-353",
       "step_id": "messages-chat-1-1",
       "time_to_first_token_ms": 1307,
       "time_to_first_token_source": "boundary",
@@ -291,7 +271,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794464630686_2",
+      "request_id": "example-correlation-354",
       "step_id": "messages-messages-1-0",
       "time_to_first_token_ms": 2327,
       "time_to_first_token_source": "boundary",
@@ -311,7 +291,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794464633156_3",
+      "request_id": "example-correlation-355",
       "step_id": "messages-messages-1-1",
       "time_to_first_token_ms": 1237,
       "time_to_first_token_source": "boundary",
@@ -331,7 +311,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794464634543_4",
+      "request_id": "example-correlation-356",
       "step_id": "messages-gemini-1-0",
       "time_to_first_token_ms": 1216,
       "time_to_first_token_source": "boundary",
@@ -351,7 +331,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794464635915_5",
+      "request_id": "example-correlation-357",
       "step_id": "messages-gemini-1-1",
       "time_to_first_token_ms": 1156,
       "time_to_first_token_source": "boundary",
@@ -371,7 +351,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794464637263_6",
+      "request_id": "example-correlation-358",
       "step_id": "messages-responses-1-0",
       "time_to_first_token_ms": 1276,
       "time_to_first_token_source": "boundary",
@@ -391,7 +371,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794464638803_7",
+      "request_id": "example-correlation-359",
       "step_id": "messages-responses-1-1",
       "time_to_first_token_ms": 2462,
       "time_to_first_token_source": "boundary",
@@ -401,9 +381,7 @@
   ],
   "executions": [
     {
-      "request_id": "req_1794464627154_0",
-      "execution_id": "3d0218087770f84fd1242a613baf93045a2ab29ab0114cd55a6d1af568125eed",
-      "attempt_id": "7954a6ec162b93ecfa8d154b4bd0619c1f01a41cb57e24ad601f1a58e68bd9d6",
+      "request_id": "example-correlation-352",
       "authorized_at": 1794464627,
       "frozen_charge": 3795,
       "primary_scope": "group:zai-qualification",
@@ -414,7 +392,6 @@
       "upstream_actual": 3795,
       "upstream_settled": 1,
       "upstream_settled_at": 1794464629,
-      "receipt_id": "1786faca1e01d0d2bef801dca21fa20ff71323de01cf00c29136f3f9f86c2238",
       "charged_tokens": 3795,
       "receipt_settled_at": 1794464629,
       "context": {
@@ -452,7 +429,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "7954a6ec162b93ecfa8d154b4bd0619c1f01a41cb57e24ad601f1a58e68bd9d6",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794464627180,
         "terminal": {
@@ -486,9 +462,7 @@
       }
     },
     {
-      "request_id": "req_1794464629307_1",
-      "execution_id": "c55d16fd1e14bc9b620badbae6a4a2fa47fb3784113615311a1fd4e80de79e8f",
-      "attempt_id": "ce34a387bfee05188fa1b06f73f1e97b585fce44d3160830ab60be084698ba37",
+      "request_id": "example-correlation-353",
       "authorized_at": 1794464629,
       "frozen_charge": 3795,
       "primary_scope": "group:zai-qualification",
@@ -499,7 +473,6 @@
       "upstream_actual": 3795,
       "upstream_settled": 1,
       "upstream_settled_at": 1794464630,
-      "receipt_id": "34e2df2e1d31437ac11d963ab0dd99325814611842414fcba63cb7ab9b4dcbf8",
       "charged_tokens": 3795,
       "receipt_settled_at": 1794464630,
       "context": {
@@ -537,7 +510,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "ce34a387bfee05188fa1b06f73f1e97b585fce44d3160830ab60be084698ba37",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794464629331,
         "terminal": {
@@ -571,9 +543,7 @@
       }
     },
     {
-      "request_id": "req_1794464630686_2",
-      "execution_id": "242b44b052eb91b15d69ee1a9b817cf9fca00e15e06b4a5bbb6e18edc24137b3",
-      "attempt_id": "a6ce0caf6f869998c76e69fdad7c892693146e3a90b7e2664b332cfc612adfbc",
+      "request_id": "example-correlation-354",
       "authorized_at": 1794464630,
       "frozen_charge": 3795,
       "primary_scope": "group:zai-qualification",
@@ -584,7 +554,6 @@
       "upstream_actual": 3795,
       "upstream_settled": 1,
       "upstream_settled_at": 1794464633,
-      "receipt_id": "f01fc028697021b99c61738ff2a0eff76ab0f9495ab82cdbaf272716d06e3b4f",
       "charged_tokens": 3795,
       "receipt_settled_at": 1794464633,
       "context": {
@@ -622,7 +591,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "a6ce0caf6f869998c76e69fdad7c892693146e3a90b7e2664b332cfc612adfbc",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794464630695,
         "terminal": {
@@ -656,9 +624,7 @@
       }
     },
     {
-      "request_id": "req_1794464633156_3",
-      "execution_id": "f07fb4a9316fe1856ca2bf5256680f6b2e637549f34b324e649c3a62c9b9c9ac",
-      "attempt_id": "c81aa5dd81f045fb821cf6a7d10a154c31bad109a11b04a6c2023ce826012a9d",
+      "request_id": "example-correlation-355",
       "authorized_at": 1794464633,
       "frozen_charge": 3795,
       "primary_scope": "group:zai-qualification",
@@ -669,7 +635,6 @@
       "upstream_actual": 3795,
       "upstream_settled": 1,
       "upstream_settled_at": 1794464634,
-      "receipt_id": "3d933c5eeac7d80b40e80df68114432b9cabedca693a91b1e1e46ec69b1064dc",
       "charged_tokens": 3795,
       "receipt_settled_at": 1794464634,
       "context": {
@@ -707,7 +672,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "c81aa5dd81f045fb821cf6a7d10a154c31bad109a11b04a6c2023ce826012a9d",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794464633165,
         "terminal": {
@@ -741,9 +705,7 @@
       }
     },
     {
-      "request_id": "req_1794464634543_4",
-      "execution_id": "2d44a64d5e0d95c6adcf4d5e0d057e0566c153fe7a4da35e367c4ea9a857fc98",
-      "attempt_id": "1f66bd0aa0c64d5def53be24bc1217cf88b4482a8226fa6e863c73d2161d367a",
+      "request_id": "example-correlation-356",
       "authorized_at": 1794464634,
       "frozen_charge": 3795,
       "primary_scope": "group:zai-qualification",
@@ -754,7 +716,6 @@
       "upstream_actual": 3795,
       "upstream_settled": 1,
       "upstream_settled_at": 1794464635,
-      "receipt_id": "67b733e78a11cf74e3a0b7a5a749528b677ef7191bd7960044d215ba840476e5",
       "charged_tokens": 3795,
       "receipt_settled_at": 1794464635,
       "context": {
@@ -792,7 +753,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "1f66bd0aa0c64d5def53be24bc1217cf88b4482a8226fa6e863c73d2161d367a",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794464634566,
         "terminal": {
@@ -826,9 +786,7 @@
       }
     },
     {
-      "request_id": "req_1794464635915_5",
-      "execution_id": "436355789bb20acfe423730371890e4996b4ba47312e49f66246a9456ee0963e",
-      "attempt_id": "0e044972a4e94411cf78ece68183045806545678cd76bebd0be72d1d18a2d16f",
+      "request_id": "example-correlation-357",
       "authorized_at": 1794464635,
       "frozen_charge": 3795,
       "primary_scope": "group:zai-qualification",
@@ -839,7 +797,6 @@
       "upstream_actual": 3795,
       "upstream_settled": 1,
       "upstream_settled_at": 1794464637,
-      "receipt_id": "5e1ad0a2532a3ae4a7600029ff6434bf2726fe674eb69a77aa972efc75aae120",
       "charged_tokens": 3795,
       "receipt_settled_at": 1794464637,
       "context": {
@@ -877,7 +834,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "0e044972a4e94411cf78ece68183045806545678cd76bebd0be72d1d18a2d16f",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794464635938,
         "terminal": {
@@ -911,9 +867,7 @@
       }
     },
     {
-      "request_id": "req_1794464637263_6",
-      "execution_id": "9b8b0a0bd29eb41e0211b4c859e0f3e26fe12c3ca3a03aec648dd5cbdec280cc",
-      "attempt_id": "636933aef165d4258bccb22d03ffe311951311ffac0aab6e2db09e7370c03d64",
+      "request_id": "example-correlation-358",
       "authorized_at": 1794464637,
       "frozen_charge": 3795,
       "primary_scope": "group:zai-qualification",
@@ -924,7 +878,6 @@
       "upstream_actual": 3795,
       "upstream_settled": 1,
       "upstream_settled_at": 1794464638,
-      "receipt_id": "0f2b7b1e90162c5f50479ce957a08dc6894b1960de68eb2ae4ef6c8981d5efdf",
       "charged_tokens": 3795,
       "receipt_settled_at": 1794464638,
       "context": {
@@ -962,7 +915,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "636933aef165d4258bccb22d03ffe311951311ffac0aab6e2db09e7370c03d64",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794464637286,
         "terminal": {
@@ -996,9 +948,7 @@
       }
     },
     {
-      "request_id": "req_1794464638803_7",
-      "execution_id": "16ceb92766ea4000c1cd809fa81168013bae89ef09e46b03e6595bc1901424c5",
-      "attempt_id": "d6e25f7ef62188b99294fd91e32112ddd8dd3ca22687499503720bac9598d70a",
+      "request_id": "example-correlation-359",
       "authorized_at": 1794464638,
       "frozen_charge": 3795,
       "primary_scope": "group:zai-qualification",
@@ -1009,7 +959,6 @@
       "upstream_actual": 3795,
       "upstream_settled": 1,
       "upstream_settled_at": 1794464641,
-      "receipt_id": "7ba4477adf2a6509effac7128d50c359cf8880a099487a4c6e813f68a8b4f597",
       "charged_tokens": 3795,
       "receipt_settled_at": 1794464641,
       "context": {
@@ -1047,7 +996,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "d6e25f7ef62188b99294fd91e32112ddd8dd3ca22687499503720bac9598d70a",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794464638829,
         "terminal": {
@@ -1091,7 +1039,6 @@
     "budget_settlement_outbox": 8
   },
   "gateway_exit_code": 0,
-  "accounting_diagnostics": [],
   "finished_at": "2026-11-12T06:24:01.441333+00:00",
   "verification": {
     "cells": 8,
@@ -1103,7 +1050,11 @@
       "chat": 0,
       "messages": 8,
       "responses": 0
-    },
-    "errors": []
+    }
+  },
+  "publication": {
+    "form": "sanitized summary",
+    "redactions": "Private artifact locations and fingerprints, process identifiers and observed correlation values are omitted or aliased. Numerical results and useful public source/version references are retained. Generated provider text and reasoning transcripts are omitted.",
+    "original_records": "Unmodified operational records and original hashes are retained privately; this derivative is not a raw capture."
   }
 }

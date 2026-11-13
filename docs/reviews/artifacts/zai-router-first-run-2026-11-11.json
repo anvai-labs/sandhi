@@ -16,8 +16,6 @@
       "stream": false,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "The user wants a Python identity function named `identity`. An identity function returns its argument unchanged. They want only the code.",
       "usage": [
         {
           "completion_tokens": 39,
@@ -43,8 +41,6 @@
       "stream": true,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "The user wants a Python identity function named `identity`. An identity function returns its argument unchanged. They want only the code, no explanation.",
       "usage": [
         {
           "completion_tokens": 42,
@@ -70,8 +66,6 @@
       "stream": false,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "cache_creation_input_tokens": 0,
@@ -103,8 +97,6 @@
       "stream": false,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "candidates_token_count": 14,
@@ -125,8 +117,6 @@
       "stream": true,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "candidates_token_count": 14,
@@ -147,8 +137,6 @@
       "stream": false,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 25,
@@ -173,8 +161,6 @@
       "stream": true,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 25,
@@ -199,14 +185,11 @@
       "stream": false,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "completion_tokens": 126,
           "prompt_tokens": 25,
           "total_tokens": 151,
-          "completion_tokens_details": {},
           "prompt_tokens_details": {
             "cached_tokens": 0
           }
@@ -224,14 +207,11 @@
       "stream": true,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "The user wants a Python identity function named `identity`. An identity function returns its input unchanged. They want only the code.",
       "usage": [
         {
           "completion_tokens": 39,
           "prompt_tokens": 0,
           "total_tokens": 39,
-          "completion_tokens_details": {},
           "prompt_tokens_details": {
             "cached_tokens": 0
           }
@@ -249,8 +229,6 @@
       "stream": false,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "The user wants a Python identity function named `identity`. An identity function returns its argument unchanged. They asked to return only the code, so I should just output the code without explanation.\n\nThe simplest form:\n\n```python\ndef identity(x):\n    return x\n```\n\nThat's it. They said \"Return only the code\" so no explanation, no extra text. Just the code.",
       "usage": [
         {
           "cache_read_input_tokens": 0,
@@ -274,8 +252,6 @@
       "stream": true,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "The user wants a Python identity function named `identity`. An identity function returns its argument unchanged. They want only the code, no explanation.\n\nThe simplest form:\n\n```python\ndef identity(x):\n    return x\n```\n\nCould also use type hints or `*args`, but the simplest is best. Return only the code as requested.",
       "usage": [
         {
           "input_tokens": 0,
@@ -303,8 +279,6 @@
       "stream": false,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "candidates_token_count": 49,
@@ -324,8 +298,6 @@
       "stream": true,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "candidates_token_count": 101,
@@ -345,8 +317,6 @@
       "stream": false,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 25,
@@ -371,8 +341,6 @@
       "stream": true,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 0,
@@ -397,8 +365,6 @@
       "stream": false,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "completion_tokens": 39,
@@ -424,8 +390,6 @@
       "stream": true,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "completion_tokens": 39,
@@ -451,8 +415,6 @@
       "stream": false,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "cache_creation_input_tokens": 0,
@@ -484,8 +446,6 @@
       "stream": false,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "candidates_token_count": 14,
@@ -506,8 +466,6 @@
       "stream": true,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "candidates_token_count": 14,
@@ -528,8 +486,6 @@
       "stream": false,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 25,
@@ -555,8 +511,6 @@
       "stream": true,
       "repeat": 0,
       "status": "ok",
-      "text": "```python\ndef identity(x):\n    return x\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 25,
@@ -591,7 +545,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 25,
-      "request_id": "req_1794431892612_0",
+      "request_id": "example-correlation-035",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
       "tokens_in": 25,
@@ -610,7 +564,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 28,
-      "request_id": "req_1794431895530_1",
+      "request_id": "example-correlation-036",
       "time_to_first_token_ms": 1540,
       "time_to_first_token_source": "boundary",
       "tokens_in": 25,
@@ -629,7 +583,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 25,
-      "request_id": "req_1794431897580_2",
+      "request_id": "example-correlation-037",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
       "tokens_in": 25,
@@ -648,7 +602,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 26,
-      "request_id": "req_1794431899234_3",
+      "request_id": "example-correlation-038",
       "time_to_first_token_ms": 870,
       "time_to_first_token_source": "boundary",
       "tokens_in": 25,
@@ -667,7 +621,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 28,
-      "request_id": "req_1794431900600_4",
+      "request_id": "example-correlation-039",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
       "tokens_in": 25,
@@ -686,7 +640,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 29,
-      "request_id": "req_1794431902071_5",
+      "request_id": "example-correlation-040",
       "time_to_first_token_ms": 931,
       "time_to_first_token_source": "boundary",
       "tokens_in": 25,
@@ -705,7 +659,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 68,
-      "request_id": "req_1794431903949_6",
+      "request_id": "example-correlation-041",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
       "tokens_in": 25,
@@ -724,7 +678,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 24,
-      "request_id": "req_1794431905826_7",
+      "request_id": "example-correlation-042",
       "time_to_first_token_ms": 955,
       "time_to_first_token_source": "boundary",
       "tokens_in": 25,
@@ -743,7 +697,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794431907428_8",
+      "request_id": "example-correlation-043",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
       "tokens_in": 25,
@@ -762,7 +716,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794431910097_9",
+      "request_id": "example-correlation-044",
       "time_to_first_token_ms": 856,
       "time_to_first_token_source": "boundary",
       "tokens_in": 0,
@@ -781,7 +735,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794431911434_10",
+      "request_id": "example-correlation-045",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
       "tokens_in": 25,
@@ -800,7 +754,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794431913593_11",
+      "request_id": "example-correlation-046",
       "time_to_first_token_ms": 973,
       "time_to_first_token_source": "boundary",
       "tokens_in": 0,
@@ -819,7 +773,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794431915722_12",
+      "request_id": "example-correlation-047",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
       "tokens_in": 25,
@@ -838,7 +792,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794431917266_13",
+      "request_id": "example-correlation-048",
       "time_to_first_token_ms": 981,
       "time_to_first_token_source": "boundary",
       "tokens_in": 0,
@@ -857,7 +811,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794431919266_14",
+      "request_id": "example-correlation-049",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
       "tokens_in": 25,
@@ -876,7 +830,7 @@
       "provider": "anthropic",
       "reasoning_included": 1,
       "reasoning_tokens": null,
-      "request_id": "req_1794431921090_15",
+      "request_id": "example-correlation-050",
       "time_to_first_token_ms": 1193,
       "time_to_first_token_source": "boundary",
       "tokens_in": 0,
@@ -895,7 +849,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 25,
-      "request_id": "req_1794431922832_16",
+      "request_id": "example-correlation-051",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
       "tokens_in": 25,
@@ -914,7 +868,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 25,
-      "request_id": "req_1794431924575_17",
+      "request_id": "example-correlation-052",
       "time_to_first_token_ms": 1027,
       "time_to_first_token_source": "boundary",
       "tokens_in": 25,
@@ -933,7 +887,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 27,
-      "request_id": "req_1794431927009_18",
+      "request_id": "example-correlation-053",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
       "tokens_in": 25,
@@ -952,7 +906,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 32,
-      "request_id": "req_1794431928618_19",
+      "request_id": "example-correlation-054",
       "time_to_first_token_ms": 761,
       "time_to_first_token_source": "boundary",
       "tokens_in": 25,
@@ -971,7 +925,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 67,
-      "request_id": "req_1794431929965_20",
+      "request_id": "example-correlation-055",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
       "tokens_in": 25,
@@ -990,7 +944,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 116,
-      "request_id": "req_1794431931817_21",
+      "request_id": "example-correlation-056",
       "time_to_first_token_ms": 901,
       "time_to_first_token_source": "boundary",
       "tokens_in": 25,
@@ -1009,7 +963,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 25,
-      "request_id": "req_1794431934210_22",
+      "request_id": "example-correlation-057",
       "time_to_first_token_ms": null,
       "time_to_first_token_source": null,
       "tokens_in": 25,
@@ -1028,7 +982,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 93,
-      "request_id": "req_1794431935776_23",
+      "request_id": "example-correlation-058",
       "time_to_first_token_ms": 690,
       "time_to_first_token_source": "boundary",
       "tokens_in": 25,
@@ -1036,5 +990,10 @@
     }
   ],
   "gateway_exit_code": 0,
-  "finished_at": "2026-11-11T21:18:57.932937+00:00"
+  "finished_at": "2026-11-11T21:18:57.932937+00:00",
+  "publication": {
+    "form": "sanitized summary",
+    "redactions": "Private artifact locations and fingerprints, process identifiers and observed correlation values are omitted or aliased. Numerical results and useful public source/version references are retained. Generated provider text and reasoning transcripts are omitted.",
+    "original_records": "Unmodified operational records and original hashes are retained privately; this derivative is not a raw capture."
+  }
 }

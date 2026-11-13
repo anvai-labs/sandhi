@@ -20,7 +20,6 @@
     "chat": "openai_terminal_chunk_usage",
     "responses": "standard"
   },
-  "harness_sha256": "a57b21fb2ee431758f3392f6924cd03cd9b79d228b8d361a4ff9a5505c57a22f",
   "cache_pairs": true,
   "cells": [
     {
@@ -30,8 +29,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "chat-chat-1-0",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "The user wants a Python identity function named `identity`. Return only the code. The context is a synthetic reference module with many fixtures. Just write the identity function.",
       "usage": [
         {
           "completion_tokens": 47,
@@ -58,8 +55,6 @@
       "repeat": 1,
       "status": "ok",
       "step_id": "chat-chat-1-1",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "The user wants an identity function named `identity`. Just return the code.",
       "usage": [
         {
           "completion_tokens": 29,
@@ -86,8 +81,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "chat-messages-1-0",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "The user provides a synthetic reference module with fixture functions, then asks: \"Write a Python identity function named identity. Return only the code.\"\n\nSo just:\n\ndef identity(value):\n    return value\n\nReturn only the code.",
       "usage": [
         {
           "input_tokens": 0,
@@ -120,8 +113,6 @@
       "repeat": 1,
       "status": "ok",
       "step_id": "chat-messages-1-1",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "The user wants a Python identity function named `identity` that returns its value. The reference module is a bunch of identity fixtures. Just return the code.",
       "usage": [
         {
           "input_tokens": 0,
@@ -154,8 +145,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "chat-gemini-1-0",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "",
       "usage": [
         {
           "cached_content_token_count": 3776,
@@ -178,8 +167,6 @@
       "repeat": 1,
       "status": "ok",
       "step_id": "chat-gemini-1-1",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "",
       "usage": [
         {
           "cached_content_token_count": 3776,
@@ -202,8 +189,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "chat-responses-1-0",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 3781,
@@ -229,8 +214,6 @@
       "repeat": 1,
       "status": "ok",
       "step_id": "chat-responses-1-1",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 3781,
@@ -256,8 +239,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "responses-chat-1-0",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "",
       "usage": [
         {
           "completion_tokens": 43,
@@ -284,8 +265,6 @@
       "repeat": 1,
       "status": "ok",
       "step_id": "responses-chat-1-1",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "",
       "usage": [
         {
           "completion_tokens": 30,
@@ -312,8 +291,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "responses-messages-1-0",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 0,
@@ -346,8 +323,6 @@
       "repeat": 1,
       "status": "ok",
       "step_id": "responses-messages-1-1",
-      "text": "```python\ndef identity(value): return value\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 0,
@@ -380,8 +355,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "responses-gemini-1-0",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "",
       "usage": [
         {
           "cached_content_token_count": 3776,
@@ -404,8 +377,6 @@
       "repeat": 1,
       "status": "ok",
       "step_id": "responses-gemini-1-1",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "",
       "usage": [
         {
           "candidates_token_count": 14,
@@ -427,8 +398,6 @@
       "repeat": 0,
       "status": "ok",
       "step_id": "responses-responses-1-0",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 3781,
@@ -455,8 +424,6 @@
       "repeat": 1,
       "status": "ok",
       "step_id": "responses-responses-1-1",
-      "text": "```python\ndef identity(value):\n    return value\n```",
-      "reasoning": "",
       "usage": [
         {
           "input_tokens": 3781,
@@ -477,7 +444,6 @@
       "usage_rows_observed": 16
     }
   ],
-  "gateway_binary_sha256": "438d6ef7e44a05a4404bef26fda2e9f7537abfe1e76eb3c890bfc7082e01ed58",
   "usage_events": [
     {
       "backend": "external",
@@ -492,7 +458,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 33,
-      "request_id": "req_1794457802141_0",
+      "request_id": "example-correlation-318",
       "step_id": "chat-chat-1-0",
       "time_to_first_token_ms": 2261,
       "time_to_first_token_source": "boundary",
@@ -512,7 +478,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 15,
-      "request_id": "req_1794457804533_1",
+      "request_id": "example-correlation-319",
       "step_id": "chat-chat-1-1",
       "time_to_first_token_ms": 2194,
       "time_to_first_token_source": "boundary",
@@ -532,7 +498,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 44,
-      "request_id": "req_1794457807025_2",
+      "request_id": "example-correlation-320",
       "step_id": "chat-messages-1-0",
       "time_to_first_token_ms": 1888,
       "time_to_first_token_source": "boundary",
@@ -552,7 +518,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 31,
-      "request_id": "req_1794457809778_3",
+      "request_id": "example-correlation-321",
       "step_id": "chat-messages-1-1",
       "time_to_first_token_ms": 1193,
       "time_to_first_token_source": "boundary",
@@ -572,7 +538,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 33,
-      "request_id": "req_1794457811614_4",
+      "request_id": "example-correlation-322",
       "step_id": "chat-gemini-1-0",
       "time_to_first_token_ms": 12731,
       "time_to_first_token_source": "boundary",
@@ -592,7 +558,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 29,
-      "request_id": "req_1794457824519_5",
+      "request_id": "example-correlation-323",
       "step_id": "chat-gemini-1-1",
       "time_to_first_token_ms": 1938,
       "time_to_first_token_source": "boundary",
@@ -612,7 +578,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 45,
-      "request_id": "req_1794457826855_6",
+      "request_id": "example-correlation-324",
       "step_id": "chat-responses-1-0",
       "time_to_first_token_ms": 6709,
       "time_to_first_token_source": "boundary",
@@ -632,7 +598,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 18,
-      "request_id": "req_1794457834098_7",
+      "request_id": "example-correlation-325",
       "step_id": "chat-responses-1-1",
       "time_to_first_token_ms": 1034,
       "time_to_first_token_source": "boundary",
@@ -652,7 +618,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 29,
-      "request_id": "req_1794457835817_8",
+      "request_id": "example-correlation-326",
       "step_id": "responses-chat-1-0",
       "time_to_first_token_ms": 2709,
       "time_to_first_token_source": "boundary",
@@ -672,7 +638,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 16,
-      "request_id": "req_1794457838611_9",
+      "request_id": "example-correlation-327",
       "step_id": "responses-chat-1-1",
       "time_to_first_token_ms": 854,
       "time_to_first_token_source": "boundary",
@@ -692,7 +658,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 96,
-      "request_id": "req_1794457839885_10",
+      "request_id": "example-correlation-328",
       "step_id": "responses-messages-1-0",
       "time_to_first_token_ms": 893,
       "time_to_first_token_source": "boundary",
@@ -712,7 +678,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 38,
-      "request_id": "req_1794457842194_11",
+      "request_id": "example-correlation-329",
       "step_id": "responses-messages-1-1",
       "time_to_first_token_ms": 853,
       "time_to_first_token_source": "boundary",
@@ -732,7 +698,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 51,
-      "request_id": "req_1794457843770_12",
+      "request_id": "example-correlation-330",
       "step_id": "responses-gemini-1-0",
       "time_to_first_token_ms": 11014,
       "time_to_first_token_source": "boundary",
@@ -752,7 +718,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 33,
-      "request_id": "req_1794457855920_13",
+      "request_id": "example-correlation-331",
       "step_id": "responses-gemini-1-1",
       "time_to_first_token_ms": 1388,
       "time_to_first_token_source": "boundary",
@@ -772,7 +738,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 13,
-      "request_id": "req_1794457857955_14",
+      "request_id": "example-correlation-332",
       "step_id": "responses-responses-1-0",
       "time_to_first_token_ms": 1054,
       "time_to_first_token_source": "boundary",
@@ -792,7 +758,7 @@
       "provider": "zai",
       "reasoning_included": 1,
       "reasoning_tokens": 16,
-      "request_id": "req_1794457859554_15",
+      "request_id": "example-correlation-333",
       "step_id": "responses-responses-1-1",
       "time_to_first_token_ms": 1065,
       "time_to_first_token_source": "boundary",
@@ -802,9 +768,7 @@
   ],
   "executions": [
     {
-      "request_id": "req_1794457802141_0",
-      "execution_id": "d651f16909bb572ec6e9565e3852916dfd81a8f17c53a1949656a557c15a9ea9",
-      "attempt_id": "8703d542d791e857dc17c75f0847ac54d103c8b40ed22ee1c1cd57fa13d39858",
+      "request_id": "example-correlation-318",
       "authorized_at": 1794457802,
       "frozen_charge": 3828,
       "primary_scope": "group:zai-qualification",
@@ -815,7 +779,6 @@
       "upstream_actual": 3828,
       "upstream_settled": 1,
       "upstream_settled_at": 1794457804,
-      "receipt_id": "6870fdbeba59211d4dd63574bd8519e8b79e4586470e81fff12f3ba887d243e5",
       "charged_tokens": 3828,
       "receipt_settled_at": 1794457804,
       "context": {
@@ -853,7 +816,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "8703d542d791e857dc17c75f0847ac54d103c8b40ed22ee1c1cd57fa13d39858",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794457802150,
         "terminal": {
@@ -888,9 +850,7 @@
       }
     },
     {
-      "request_id": "req_1794457804533_1",
-      "execution_id": "6fa212352ca8be1f0a025bf7a22be3241e6f9461ab471f650a8512df9ced433d",
-      "attempt_id": "ef931540ec8d25d2e3f935a042efc9b4d8bc853c10ccb152f8d3eb5a7a427206",
+      "request_id": "example-correlation-319",
       "authorized_at": 1794457804,
       "frozen_charge": 3810,
       "primary_scope": "group:zai-qualification",
@@ -901,7 +861,6 @@
       "upstream_actual": 3810,
       "upstream_settled": 1,
       "upstream_settled_at": 1794457807,
-      "receipt_id": "129da88bc711e8d8fb27af67fa29b81b14149d8a8b1adf51f04d611f5879f772",
       "charged_tokens": 3810,
       "receipt_settled_at": 1794457807,
       "context": {
@@ -939,7 +898,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "ef931540ec8d25d2e3f935a042efc9b4d8bc853c10ccb152f8d3eb5a7a427206",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794457804541,
         "terminal": {
@@ -974,9 +932,7 @@
       }
     },
     {
-      "request_id": "req_1794457807025_2",
-      "execution_id": "0dd6396f52f629268b6cdb2579de21a88df5b1c47d0edbc89f36c4ee188c2305",
-      "attempt_id": "54cb94b33b8881217f8658a5077910249e2e0397cec035b5eefc8e3f5cd923f9",
+      "request_id": "example-correlation-320",
       "authorized_at": 1794457807,
       "frozen_charge": 3839,
       "primary_scope": "group:zai-qualification",
@@ -987,7 +943,6 @@
       "upstream_actual": 3839,
       "upstream_settled": 1,
       "upstream_settled_at": 1794457809,
-      "receipt_id": "f6a27c2385806490e72104a603b7aea8262a09fa7b5dfe48e4ecabab2bd03016",
       "charged_tokens": 3839,
       "receipt_settled_at": 1794457809,
       "context": {
@@ -1025,7 +980,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "54cb94b33b8881217f8658a5077910249e2e0397cec035b5eefc8e3f5cd923f9",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794457807048,
         "terminal": {
@@ -1060,9 +1014,7 @@
       }
     },
     {
-      "request_id": "req_1794457809778_3",
-      "execution_id": "43d75e4bdd43ac0225fd1d38916e0eba6e0692dbcab6431cff0f176c64ad8a3a",
-      "attempt_id": "8a67568226d1a87d5b37f8ceab4b9ec130efc37aeabbf0cf3747c6608cbfe561",
+      "request_id": "example-correlation-321",
       "authorized_at": 1794457809,
       "frozen_charge": 3826,
       "primary_scope": "group:zai-qualification",
@@ -1073,7 +1025,6 @@
       "upstream_actual": 3826,
       "upstream_settled": 1,
       "upstream_settled_at": 1794457811,
-      "receipt_id": "aaab7b49411b86d622ddadb559b54fc5352845ccad114f18730457b1bd2589b2",
       "charged_tokens": 3826,
       "receipt_settled_at": 1794457811,
       "context": {
@@ -1111,7 +1062,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "8a67568226d1a87d5b37f8ceab4b9ec130efc37aeabbf0cf3747c6608cbfe561",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794457809801,
         "terminal": {
@@ -1146,9 +1096,7 @@
       }
     },
     {
-      "request_id": "req_1794457811614_4",
-      "execution_id": "7f38945d3d5bccbd353ac98fd555a5d7cdbbc51dbbc86ad7bc478a85d47ada51",
-      "attempt_id": "b43c959481690b0fd73916d79ad562ab748333266e8fc2b53ebb8fc01f499621",
+      "request_id": "example-correlation-322",
       "authorized_at": 1794457811,
       "frozen_charge": 3828,
       "primary_scope": "group:zai-qualification",
@@ -1159,7 +1107,6 @@
       "upstream_actual": 3828,
       "upstream_settled": 1,
       "upstream_settled_at": 1794457824,
-      "receipt_id": "6420a56b2860ce020c6cdeec433682656b380038c65f3b445b35495ac2fd552d",
       "charged_tokens": 3828,
       "receipt_settled_at": 1794457824,
       "context": {
@@ -1197,7 +1144,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "b43c959481690b0fd73916d79ad562ab748333266e8fc2b53ebb8fc01f499621",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794457811637,
         "terminal": {
@@ -1232,9 +1178,7 @@
       }
     },
     {
-      "request_id": "req_1794457824519_5",
-      "execution_id": "825322c830e7ea8c00310a033903a51f7d66f687c76a21d8793f42bd26e846d6",
-      "attempt_id": "b38d86399724b4b40d3d22ee0a95bae5215123730e4d5e4c9e17090091df3867",
+      "request_id": "example-correlation-323",
       "authorized_at": 1794457824,
       "frozen_charge": 3824,
       "primary_scope": "group:zai-qualification",
@@ -1245,7 +1189,6 @@
       "upstream_actual": 3824,
       "upstream_settled": 1,
       "upstream_settled_at": 1794457826,
-      "receipt_id": "7604a192836484ba4d7ca87b464a850460194ce7a5587e2ccc150db49c0f71f4",
       "charged_tokens": 3824,
       "receipt_settled_at": 1794457826,
       "context": {
@@ -1283,7 +1226,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "b38d86399724b4b40d3d22ee0a95bae5215123730e4d5e4c9e17090091df3867",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794457824543,
         "terminal": {
@@ -1318,9 +1260,7 @@
       }
     },
     {
-      "request_id": "req_1794457826855_6",
-      "execution_id": "c8096eb52db4eedfa29b8920066583c0b41ef353c55664725f1c14773fe4f9ef",
-      "attempt_id": "53857d1b4cff5a2c903d0ff8f5fc306f77c8565183d6bded0d060108633ba4e4",
+      "request_id": "example-correlation-324",
       "authorized_at": 1794457826,
       "frozen_charge": 3840,
       "primary_scope": "group:zai-qualification",
@@ -1331,7 +1271,6 @@
       "upstream_actual": 3840,
       "upstream_settled": 1,
       "upstream_settled_at": 1794457834,
-      "receipt_id": "490356eabb16431360665010d74d213207ceed24a8663f236440394a01c9a7b7",
       "charged_tokens": 3840,
       "receipt_settled_at": 1794457834,
       "context": {
@@ -1369,7 +1308,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "53857d1b4cff5a2c903d0ff8f5fc306f77c8565183d6bded0d060108633ba4e4",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794457826878,
         "terminal": {
@@ -1404,9 +1342,7 @@
       }
     },
     {
-      "request_id": "req_1794457834098_7",
-      "execution_id": "2fa50066fbebea4b09c99759c8a0cd7d50449b73d29dc8b3c5c43f29b587018c",
-      "attempt_id": "f74c6dbf9f61b6b6372c5c144d74f62cfcde40dfb5b3dc682a71f57659840486",
+      "request_id": "example-correlation-325",
       "authorized_at": 1794457834,
       "frozen_charge": 3813,
       "primary_scope": "group:zai-qualification",
@@ -1417,7 +1353,6 @@
       "upstream_actual": 3813,
       "upstream_settled": 1,
       "upstream_settled_at": 1794457835,
-      "receipt_id": "f967e7239804b24963af695bfea6e9a0f3b682bade7c134329a819acf2efbf0a",
       "charged_tokens": 3813,
       "receipt_settled_at": 1794457835,
       "context": {
@@ -1455,7 +1390,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "f74c6dbf9f61b6b6372c5c144d74f62cfcde40dfb5b3dc682a71f57659840486",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794457834122,
         "terminal": {
@@ -1490,9 +1424,7 @@
       }
     },
     {
-      "request_id": "req_1794457835817_8",
-      "execution_id": "3245926ce3c668a6245a3e3597021d9c1a970fdd1477200114fe84b51435926f",
-      "attempt_id": "3eced8dad13b1c34a44aa5dbd409109c4096e91365242f7330e8e1c4a6d7ce9d",
+      "request_id": "example-correlation-326",
       "authorized_at": 1794457835,
       "frozen_charge": 3824,
       "primary_scope": "group:zai-qualification",
@@ -1503,7 +1435,6 @@
       "upstream_actual": 3824,
       "upstream_settled": 1,
       "upstream_settled_at": 1794457838,
-      "receipt_id": "3f2953cf86616c277c7a35e3c047d408ca5594bd9471198112f6b2ec01a6ab6c",
       "charged_tokens": 3824,
       "receipt_settled_at": 1794457838,
       "context": {
@@ -1541,7 +1472,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "3eced8dad13b1c34a44aa5dbd409109c4096e91365242f7330e8e1c4a6d7ce9d",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794457835851,
         "terminal": {
@@ -1576,9 +1506,7 @@
       }
     },
     {
-      "request_id": "req_1794457838611_9",
-      "execution_id": "b877504bf896470c69b3cc4116e5cef9030963c33eeba6798832cb8a2f55a26c",
-      "attempt_id": "9e50b359c6dfa4c8bca437c8b60d9d66c020e0e3e0a3c7e45f7cae03cc31c8ab",
+      "request_id": "example-correlation-327",
       "authorized_at": 1794457838,
       "frozen_charge": 3811,
       "primary_scope": "group:zai-qualification",
@@ -1589,7 +1517,6 @@
       "upstream_actual": 3811,
       "upstream_settled": 1,
       "upstream_settled_at": 1794457839,
-      "receipt_id": "adebc23959d1950bcde91ee6c0a522396f8d159fca5c7a1d10632e3373d985dc",
       "charged_tokens": 3811,
       "receipt_settled_at": 1794457839,
       "context": {
@@ -1627,7 +1554,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "9e50b359c6dfa4c8bca437c8b60d9d66c020e0e3e0a3c7e45f7cae03cc31c8ab",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794457838646,
         "terminal": {
@@ -1662,9 +1588,7 @@
       }
     },
     {
-      "request_id": "req_1794457839885_10",
-      "execution_id": "1937e7e92a9f77ad31d8edcbc31d6c4935e64e08efc87eec08e3b8efc21d4428",
-      "attempt_id": "68349e498b773e373a39ca86fd059d0e719e0b7724734a08a7ef384bbf9ad90c",
+      "request_id": "example-correlation-328",
       "authorized_at": 1794457839,
       "frozen_charge": 3891,
       "primary_scope": "group:zai-qualification",
@@ -1675,7 +1599,6 @@
       "upstream_actual": 3891,
       "upstream_settled": 1,
       "upstream_settled_at": 1794457842,
-      "receipt_id": "26506adb4f7b0b7c15e2ccfc3df4853059117a026b36c5f870cbc44f25af0cf5",
       "charged_tokens": 3891,
       "receipt_settled_at": 1794457842,
       "context": {
@@ -1713,7 +1636,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "68349e498b773e373a39ca86fd059d0e719e0b7724734a08a7ef384bbf9ad90c",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794457839922,
         "terminal": {
@@ -1748,9 +1670,7 @@
       }
     },
     {
-      "request_id": "req_1794457842194_11",
-      "execution_id": "450f2722e5d638f337ad49c85caf4c4b502dbc9cc0113234c647198cfb5d5128",
-      "attempt_id": "cddfb6523361771d8fc2754168c7f024b428a3ffe3766bfe69d6350d22b6a1a9",
+      "request_id": "example-correlation-329",
       "authorized_at": 1794457842,
       "frozen_charge": 3832,
       "primary_scope": "group:zai-qualification",
@@ -1761,7 +1681,6 @@
       "upstream_actual": 3832,
       "upstream_settled": 1,
       "upstream_settled_at": 1794457843,
-      "receipt_id": "f50789411546fc65f9e44d056be35edd46a6b02bbb4e74eb2e5efb3159b2cfd4",
       "charged_tokens": 3832,
       "receipt_settled_at": 1794457843,
       "context": {
@@ -1799,7 +1718,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "cddfb6523361771d8fc2754168c7f024b428a3ffe3766bfe69d6350d22b6a1a9",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794457842217,
         "terminal": {
@@ -1834,9 +1752,7 @@
       }
     },
     {
-      "request_id": "req_1794457843770_12",
-      "execution_id": "975320a427ea2d61bdcb39dbcfa81c209a59f63e0d9a6d808fabecef38156f7b",
-      "attempt_id": "db9aeaf536c4a8e8f1d6c81aa4b6ba3f6979827896c6e6eb20c19d2c343b5258",
+      "request_id": "example-correlation-330",
       "authorized_at": 1794457843,
       "frozen_charge": 3846,
       "primary_scope": "group:zai-qualification",
@@ -1847,7 +1763,6 @@
       "upstream_actual": 3846,
       "upstream_settled": 1,
       "upstream_settled_at": 1794457855,
-      "receipt_id": "9ab9441dfad8b242be620968ac07f18c55bb37d07daba86f5dd4516819e0ecb4",
       "charged_tokens": 3846,
       "receipt_settled_at": 1794457855,
       "context": {
@@ -1885,7 +1800,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "db9aeaf536c4a8e8f1d6c81aa4b6ba3f6979827896c6e6eb20c19d2c343b5258",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794457843793,
         "terminal": {
@@ -1920,9 +1834,7 @@
       }
     },
     {
-      "request_id": "req_1794457855920_13",
-      "execution_id": "bc6ae5c4520d528d86c935f190b1ab2f1f0e13447de12fc66d90974e630100f3",
-      "attempt_id": "d67f6f2f161a5bd8d04bf38db0418e92357158d0df6376f0a0ba36cd602d195f",
+      "request_id": "example-correlation-331",
       "authorized_at": 1794457855,
       "frozen_charge": 3828,
       "primary_scope": "group:zai-qualification",
@@ -1933,7 +1845,6 @@
       "upstream_actual": 3828,
       "upstream_settled": 1,
       "upstream_settled_at": 1794457857,
-      "receipt_id": "b86c9a62c4503ab3bb19401d3b50fbec26aa980e956c9ce86694bb28d9d95f02",
       "charged_tokens": 3828,
       "receipt_settled_at": 1794457857,
       "context": {
@@ -1971,7 +1882,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "d67f6f2f161a5bd8d04bf38db0418e92357158d0df6376f0a0ba36cd602d195f",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794457855952,
         "terminal": {
@@ -2006,9 +1916,7 @@
       }
     },
     {
-      "request_id": "req_1794457857955_14",
-      "execution_id": "36f9e6cf85a27792396521fe26aa2731d80941799cd4669761f8d05ce03d15ca",
-      "attempt_id": "0de96d00e4ff19b1610a91a20587aca2c74a420785fbe63746c5f1156e60a6ad",
+      "request_id": "example-correlation-332",
       "authorized_at": 1794457857,
       "frozen_charge": 3808,
       "primary_scope": "group:zai-qualification",
@@ -2019,7 +1927,6 @@
       "upstream_actual": 3808,
       "upstream_settled": 1,
       "upstream_settled_at": 1794457859,
-      "receipt_id": "0ba3a1a82c2981cbd38a6a1482c87057885117acbce4d7761da4d19bc4847cc8",
       "charged_tokens": 3808,
       "receipt_settled_at": 1794457859,
       "context": {
@@ -2057,7 +1964,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "0de96d00e4ff19b1610a91a20587aca2c74a420785fbe63746c5f1156e60a6ad",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794457857990,
         "terminal": {
@@ -2092,9 +1998,7 @@
       }
     },
     {
-      "request_id": "req_1794457859554_15",
-      "execution_id": "7c9fd7cece8ac0815ad60076e8f0d366ae8b2d8f85783b9aec87e35f5cf8717a",
-      "attempt_id": "f67945c1373c66086783cc50ca120b61f3b237356e557e01b9053ee1325f80c6",
+      "request_id": "example-correlation-333",
       "authorized_at": 1794457859,
       "frozen_charge": 3811,
       "primary_scope": "group:zai-qualification",
@@ -2105,7 +2009,6 @@
       "upstream_actual": 3811,
       "upstream_settled": 1,
       "upstream_settled_at": 1794457860,
-      "receipt_id": "ccb27a7c78847973b143e6e19b83cba7207c84b433b7fde016f99aa70522a43b",
       "charged_tokens": 3811,
       "receipt_settled_at": 1794457860,
       "context": {
@@ -2143,7 +2046,6 @@
       },
       "attempt": {
         "version": 1,
-        "attempt_id": "f67945c1373c66086783cc50ca120b61f3b237356e557e01b9053ee1325f80c6",
         "attempt_ordinal": 1,
         "dispatch_observed_at_ms": 1794457859583,
         "terminal": {
@@ -2188,7 +2090,6 @@
     "budget_settlement_outbox": 16
   },
   "gateway_exit_code": 0,
-  "accounting_diagnostics": [],
   "finished_at": "2026-11-12T04:31:01.059724+00:00",
   "verification": {
     "cells": 16,
@@ -2200,7 +2101,11 @@
       "chat": 8,
       "messages": 0,
       "responses": 7
-    },
-    "errors": []
+    }
+  },
+  "publication": {
+    "form": "sanitized summary",
+    "redactions": "Private artifact locations and fingerprints, process identifiers and observed correlation values are omitted or aliased. Numerical results and useful public source/version references are retained. Generated provider text and reasoning transcripts are omitted.",
+    "original_records": "Unmodified operational records and original hashes are retained privately; this derivative is not a raw capture."
   }
 }

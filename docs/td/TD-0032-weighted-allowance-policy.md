@@ -1,7 +1,7 @@
 # TD-0032: Weighted allowances over unchanged usage measurements
 
 **Status:** W01 merged in [#370](https://github.com/anvai-labs/sandhi/pull/370); W02–W05 pending. No live weighted enforcement.
-**Owner:** Victor/Sandhi co-design session, branch `feat/weighted-budget-policy`.
+**Ownership:** Sandhi measurement and allowance contracts; coordinated Victor consumption.
 **Baseline:** `origin/develop` at `c25f006` (2026-10-13).
 
 ## Customer outcome

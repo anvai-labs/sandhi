@@ -55,10 +55,9 @@ not git-source dependencies; see [TD-0023](docs/td/TD-0023-release-automation.md
    even if one registry or the GitHub release page is visible.
 6. Verify post-release evidence and back-sync main into develop through the protected PR flow.
 
-Read-only preflight on 2026-09-07 found main requiring strict `CI Success` and one approving
-review, but **not** linear history or administrator enforcement. Do not assume those stronger
-settings or weaken existing protection. Recheck actual settings before promotion. Prior specific
-authority to bypass an unavailable human approval does not authorize bypassing failed/pending CI.
+Recheck current branch protection and publishing permissions before promotion.
+A prior release or administrative operation does not authorize bypassing required
+reviews, failed checks or pending CI.
 
 ## Source authorization
 
@@ -125,50 +124,30 @@ establish credential validity or registry-side bindings.
 Protect `v*` tag creation and prohibit updates/deletions. Tag and branch deployment rules are
 distinct: allowing only branch `main` would block legitimate tag-triggered publishing.
 
-Do **not** revoke, delete or rotate `CARGO_REGISTRY_TOKEN` as part of this release: the owner
-explicitly confirmed it is retained and should be reused. Neither a new `CRATES_RELEASE_TOKEN`
-nor crates.io trusted-publisher bindings are required by the selected mechanism. Token contents
-must not appear in chat, logs or committed files. Metadata confirms presence, not validity/scope;
-an authentication failure must stop publication, not skip crates successfully.
+The configured crates upload step reads `CARGO_REGISTRY_TOKEN`. Configure and
+validate its intended registry permissions and expiry privately; a missing or
+rejected credential stops publication. PyPI and npm use the workflow's trusted
+publishing bindings rather than a substituted upload token.
 
-The repository-scoped credential remains potentially accessible to other same-repository
-workflows that request it. Supplying it only to this workflow's upload step and restricting the
-`crates-io` environment do **not** make the secret environment-scoped. This retained exposure
-is part of the owner's existing-token choice; do not claim it was eliminated. The retired manual
-publisher remains disabled. Public package presence cannot establish trusted-publisher bindings.
+A repository-scoped credential can be requested by other same-repository workflows.
+Exposing it only in this workflow's upload step does not make it environment-scoped.
+The retired manual publisher is not an alternative release entry point.
 
-### Owner confirmation for SG07
+### Registry configuration checklist
 
-Owner evidence received on 2026-09-07 confirms the reported trusted-publisher settings for
-the root `@anvailabs/sandhi` package, including direct `npm publish` permission. This does
-not yet confirm either platform package or the current PyPI settings. See the
-[SG07 evidence](docs/product/release-safeguards.md#owner-publisher-evidence-2026-09-07).
+- Verify the intended crates upload mechanism and its narrowly scoped credential.
+- Verify that the PyPI project and **each** npm package authorize the exact
+  repository, workflow filename and publisher environment. The npm binding must
+  permit the publication method used by this workflow.
+- Use the registry's actual configuration, not package presence or a previous
+  successful upload, as evidence of the current binding.
+- Keep credential values, recovery codes and private account details out of logs,
+  issues and committed files. Record a registry rejection as a failure; do not
+  silently omit its target or switch authentication mechanisms.
 
-Do not send token values, recovery codes or credentials in chat. Confirm only the following
-non-secret facts after checking the registry account settings:
-
-- **Received:** the owner states the existing crates token has not been revoked and should
-  be reused. GitHub read-back confirms the repository secret name `CARGO_REGISTRY_TOKEN`.
-  Its value, permissions and expiry were not read; actual authorization is checked by publication.
-- The PyPI project and **each** npm package authorize `anvai-labs/sandhi`, workflow filename
-  `release.yml`, and their exact environment (`pypi` or `npm`). npm must permit direct
-  `npm publish`, not only staged publication. Review the registry-side forms, not package presence:
-  [npm trusted publishers](https://docs.npmjs.com/trusted-publishers/) and
-  [PyPI publisher setup](https://docs.pypi.org/trusted-publishers/adding-a-publisher/).
-
-Record registry configuration evidence without reading token values. For v0.6.0, the owner
-authorized proceeding with the reported configuration and validating authorization through
-the actual all-target publication after reviewed promotion and green exact-main CI. Do not
-publish a throwaway version or reopen a settings-confirmation hold. A registry rejection is a
-failure to diagnose and address, not permission to silently omit that target or substitute a
-different authentication mechanism. Record successful execution separately from owner reports.
-
-The old manual `publish-crates.yml` is a fail-only stub and workflow ID `317193810` is now
-`disabled_manually` in GitHub. This does **not** revoke stored credentials or neutralize every
-historical workflow path: external environment/ref controls and credential rotation remain
-necessary. See GitHub's
-[environment restrictions](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)
-and [immutable action pinning guidance](https://docs.github.com/en/actions/reference/security/secure-use).
+See [npm trusted publishers](https://docs.npmjs.com/trusted-publishers/),
+[PyPI publisher setup](https://docs.pypi.org/trusted-publishers/adding-a-publisher/)
+and the [release safeguards](docs/product/release-safeguards.md#registry-configuration).
 
 ## Partial publication and verification
 

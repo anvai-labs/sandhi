@@ -77,13 +77,13 @@ python scripts/qualify_zai_router.py --live --backend messages \
   --output /tmp/zai-messages-streams.json
 ```
 
-| Report | SHA-256 | Producer binary SHA-256 |
-|---|---|---|
-| Default thinking, negative | `0c45b3ded95b9ae5b6a82ec6028b87f1a908925bbfdf768d4eac8d43b72e62db` | `189aac89230b76b36494e23e396760e678d9c6ef155bdc300f6e28b918a445b2` |
-| Initial explicit control, negative | `61aee91f547dd38c1492579e78cdb36d1d68c0246d226e11f28e530e95d766cc` | `ce65f3255971568dda9e91f409bdc40819e83d7bb9e1a82d74752bd6965ce84e` |
-| Corrected explicit control, qualified | `18237ba47758bdb3b6b7d74bb61108d0fd8e4d32d5b92666f906877bae756cfd` | `c021d18db2f0dad2768265cf72bdfbc9a763ca2fc43987d45c20ea2e0feaee57` |
+| Result | Sanitized qualification summary |
+| --- | --- |
+| Default thinking, negative | [Summary](artifacts/zai-messages-streams-default-thinking-2026-11-12.json) |
+| Initial explicit control, negative | [Summary](artifacts/zai-messages-streams-initial-control-2026-11-12.json) |
+| Corrected explicit control, qualified | [Summary](artifacts/zai-messages-streams-qualified-2026-11-12.json) |
 
-Each artifact also records the harness hash and SDK versions. Production source
+The summaries retain SDK versions and measured results; original operational records are retained privately. Production source
 changes after a report require their own scoped evidence; a matching model name
 does not qualify a different codec, deployment or subscription. See
 [ADR-0031](../adr/0031-qualified-messages-stream-ownership.md) for source ownership,
