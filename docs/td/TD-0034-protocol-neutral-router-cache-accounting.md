@@ -1,6 +1,6 @@
 # TD-0034: Protocol-neutral routing, cache control and execution accounting
 
-- **Status:** Active goal; integrated candidate qualification and review, 2026-11-12.
+- **Status:** Engineering acceptance complete; protected release verification active, 2026-11-13 UTC.
 - **Authority:** User requested goal mode, objectives, constraints and autonomous
   execution of the router/cache/accounting solution on 2026-11-11.
 - **Baseline:** [Inventory and first fixes](../reviews/router-cache-inventory-2026-11-11.md).
@@ -162,8 +162,9 @@ their historical validation remains evidence for those commits only.
 The [paired source checkpoint](../reviews/coordinated-victor-contract-2026-11-12.md)
 prepares Sandhi 0.17.0 and Victor 0.29.0, shares the four admitted typed streaming
 pipelines, and records review regressions and qualification limits. Buffered
-unification and the gateway accounting-default migration remain open; the version
-bump does not imply that either repository has been released or deployed.
+unification, mandatory original-store execution and immutable budget namespaces are
+implemented and qualified in the 0.17 candidate. The version bump does not imply
+publication or deployment; the protected integration/release gates below remain active.
 
 | Milestone | Status | Required result |
 | --- | --- | --- |
@@ -171,11 +172,11 @@ bump does not imply that either repository has been released or deployed.
 | M1: Initial content/accounting fixes | Implemented and source-validated | Responses shorthand, cache-write categorization/rendering, strict write qualification and stream completion ordering; 18-case matrix. |
 | M2a: Explicit endpoint binding | Implemented and source-validated | Typed protocol/profile selection and factory validation independent of provider slug; supported legacy defaults and Codex fences pinned by tests. See ADR-0016 and evidence below. |
 | M2b: Backend registry and operator lifecycle | Implemented and source-validated | Config/admin/CLI persistence, restart reconstruction, credential rotation/revocation, declared model scoping and backward-compatible fixed routes. ADR-0017; targeted Rust and real-process evidence below. |
-| M3: Conversation and cache semantics | In progress | ADR-0018 implements codec-owned ordered input and classified refusal; ADR-0019 adds native streaming and Codex retention. ADR-0020 implements declared cache compilation, scoped keys and observed credential generations. ADR-0034 validates portable buffered output while preserving compatible native state. Broader streaming content/tool/media fidelity remains required. |
-| M4: Authorized routing and affinity | In progress | ADR-0021 candidate implements logical aliases, actual codec/profile preflight, deterministic priority/rendezvous selection, immutable in-memory plans, scoped discovery and durable compatible session pins. Issuer provenance and broader authorization/lifecycle qualification remain required. |
-| M5: Uniform execution accounting | In progress | ADR-0022 freezes context; ADR-0023 adds paired budget ownership; ADR-0024 persists single-attempt transport evidence; ADR-0025 qualifies four buffered protocols; ADR-0026 qualifies transparent standard Responses streaming; ADR-0027 qualifies constrained buffered Codex aggregation; ADR-0028 connects four client dialects to qualified typed Chat/Responses/Codex streams; ADR-0031 connects Messages profiles; ADR-0032/0033 connect Gemini source qualification and EOF ownership with explicit native-state limits. The retained intermittent accounting-wait failure and broader accounting acceptance remain open. |
-| M6: End-to-end qualification | In progress | Z.AI live text/cache matrices and synthetic SDK/lifecycle evidence recorded below. Full agent-loop/interrupt/restart and subscription qualification remain required; unresolved cases clearly gated. |
-| M7: Operator console and visible efficiency semantics | Implemented and source-validated | Navigable workspaces, backend/route inventory, token-composition/coverage, attribution filtering and bounded usage diagnostics. AgentBrowser inspected a synthetic preview; affected browser/management/SSO and strict docs checks passed. This is a workspace candidate, not a deployed release. |
+| M3: Conversation and cache semantics | Qualified for the declared 0.17 scope | Ordered native/portable history, tools and bounded media are preserved or explicitly refused; one backend cache compiler and issuer-bound references are qualified through Rust, actual SDK/media and agent loops. External resource adoption and arbitrary extensions remain unsupported, not implicitly qualified. |
+| M4: Authorized routing and affinity | Qualified for the declared 0.17 scope | Authorized aliases, actual selected-wire preflight, immutable stored upstream allowance scopes, compatible durable pins, source-issued ownership and account-fenced renewal pass integration/restart/negative tests. Operator-declared account identity is not cryptographic attestation. |
+| M5: Uniform execution accounting | Current-candidate acceptance qualified | One mandatory durable paired owner records admitted attempts and qualified source evidence when available; unknown usage stays held through restart/expiry. Recovery/shutdown and proof waiters retain original bounds; actual workers remain owned through completion. Current reliability checks pass. Historical unexplained incidents remain retained without cause/fix attribution. |
+| M6: End-to-end qualification | Available-protocol source qualification complete; release delivery pending | Four-client/three-GLM-backend/two-mode live matrix passes with original paired evidence; real SDK/media/tool loops, interrupt/restart and public native platforms pass. Victor has a reviewed local 0.29 candidate against the 0.17 wheel. Published dependency, protected promotion, final registry verification and approved external subscription accounts are separate boundaries. |
+| M7: Operator console and visible efficiency semantics | Qualified on the current gateway | Eleven navigable workspaces, actual operator panels/readiness/draining, keyboard/mobile/auth boundaries and strict docs pass. AgentBrowser inspected the real local preview with synthetic fixtures. Neutral tokens/cache placement and ONNX coverage are prominent; no production deployment or dollar-saving guarantee is inferred. |
 
 No milestone is complete on a constructor-only test when its acceptance requires
 config, restart, request execution or persistence. Keep this table current after
@@ -2019,3 +2020,38 @@ metadata work. Corrected local workspace/feature/live checks pass; independent
 exact-commit review and new public CI remain required before protected promotion
 and all-target publication. The 0.17 changelog and upgrade checklist now explain
 the mandatory cutover. This does not assert publication or close historical causes.
+
+
+## 0.17 engineering acceptance and protected release checkpoint
+
+The independently reviewed candidate `1740008056bc88908fe911c22c36df2aa8715944`
+passed all 21 required [public PR CI jobs](https://github.com/anvai-labs/sandhi/actions/runs/43361667723)
+and merged through [PR #446](https://github.com/anvai-labs/sandhi/pull/446) as
+`b54d83014a826c4c00be5a9fc3756780ac747f6a`. The merge tree is exactly the reviewed
+`2669d15dcf943a86ba52fc8f1673786a583daa2e`. The required exact-develop
+[push CI](https://github.com/anvai-labs/sandhi/actions/runs/43364047768) passed:
+20 successful jobs and one expected PR-title skip, with SDK, Rust, native artifacts,
+release safeguards and aggregate actually executed successfully. Exact-develop
+[documentation CI](https://github.com/anvai-labs/sandhi/actions/runs/43364047785)
+also passed. Engineering acceptance is complete within the declared source scope;
+publication and the overall extended release goal remain pending below.
+
+Current evidence includes 1,300 Rust workspace passes, 717 SentinelPass proxy/store
+passes, 735 public SDK passes with three skips, 48 live GLM calls across 24
+client/backend/delivery combinations with SDK/source/paired receipts matching, and
+actual macOS/Windows/Linux ARM binding reports. The current native proof/lifecycle
+correction and semantic-only policy fixture correction retain their original failed
+runs and exact qualification boundaries in the linked reviews.
+
+Victor's `956bf2aafc0c6620f50f0c559a90a9c9d2478aec` has clean independent exact and
+cumulative review, 2,563 provider/configuration passes with five skips, eight actual
+Agent/tool-loop passes and 40,362 collected tests. Gateway validation precedes every
+upstream account/key/discovery path. The reviewed source remains local until the
+required `sandhi-gateway==0.17.0` package is published and installed/qualified.
+
+The owner authorized Sandhi 0.17 publication conditional on required verification.
+[RELEASING.md](../../RELEASING.md) still requires protected develop/main promotion,
+approving main review, exact-main successful canonical push CI, an immutable stable
+tag and complete verification of GitHub, PyPI, crates.io and npm artifacts. This
+engineering source checkpoint does not declare that release or the overall extended
+goal complete. No credential mutation, deployment or Victor publication is authorized.
